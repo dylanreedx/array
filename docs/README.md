@@ -1,0 +1,19 @@
+# continuum-revived Docs
+
+This folder is Phase 0 for `continuum-revived`: product reverse-engineering, architecture, storage design, UX rules, risk management, and phased implementation planning before app scaffolding.
+
+Read in order:
+
+1. `00-product-reverse-engineering.md` - what Maestri, Nyx, and Continuum teach us.
+2. `01-mvp-value-loop.md` - the fastest useful daily-driver loop.
+3. `02-architecture.md` - native macOS subsystem boundaries.
+4. `03-data-model-and-storage.md` - project-local storage and central registry.
+5. `04-terminal-ghostty-plan.md` - Ghostty integration strategy and hard gate.
+6. `05-canvas-and-ux.md` - Project Spaces, canvas behavior, groups, and UX rules.
+7. `06-browser-code-file-surfaces.md` - WKWebView, Neovim, editors, file tree, notes.
+8. `07-phased-build-plan.md` - implementation phases and exit criteria.
+9. `08-risk-register.md` - known risks and mitigations.
+10. `09-decisions.md` - append-only ADR-style decision log.
+
+Core decision: build a native macOS app with Ghostty-backed terminal tiles, WKWebView browser tiles, project-local state, and Project Spaces navigation. Agent-to-agent messaging waits until the core loop is reliable.
+

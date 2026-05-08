@@ -1,0 +1,44 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "mcp__conductor__complete_work",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".conductor/scripts/hooks/post-complete-work.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__conductor__complete_maestro_work",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".conductor/scripts/hooks/post-complete-work.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__conductor__end_work",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".conductor/scripts/hooks/post-end-work.sh"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".conductor/scripts/hooks/precompact-rotate.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
