@@ -3,5 +3,6 @@
 ThirdParty/
 .continuum-revived/
 .conductor/conductor.db
+.conductor/*.log
 .agents/
 .codex/
