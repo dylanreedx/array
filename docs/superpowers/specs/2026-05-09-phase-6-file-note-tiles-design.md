@@ -39,7 +39,7 @@ The following answers the ten open design questions from the analysis phase. Eac
 
 8. **Markdown preview engine.** Deferred entirely from Phase 6. The note tile is an editable `NSTextView` showing raw markdown text. The file tile is a read-only `NSTextView` showing raw file content. No `AttributedString`-based preview, no `WKWebView` renderer, no third-party markdown library in Phase 6.
 
-9. **File-contents lazy loading.** File tile content is loaded synchronously on the main thread at tile-install time for files under 1 MB (the cap is checked before reading). This is acceptable because the file is a single local path known at spawn time, not a directory scan. Background loading via `Task { ... }` is added only if the 1 MB cap creates perceptible lag during testing; the design does not require it.
+9. **File-contents lazy loading.** File tile content is loaded synchronously on the main thread at tile-install time when the file is under 1 MB AND on a local volume (the cap and volume check are evaluated before reading). For files on network volumes (FileManager `.volumeIsLocalKey == false`), or files over 1 MB, switch to background loading via `Task.detached { ... }` so a cold cache or slow drive does not block boot. The boot loop walks every tile; a single 100 ms read for one file is fine, but five cold file tiles compound to a noticeable hitch. The 1 MB cap and the local-volume check are cheap to evaluate; the async fallback is the only thing that adds code.
 
 10. **Cmd-K context awareness.** Deferred. The palette shows all spawn options regardless of canvas context in Phase 6. Context-aware filtering (e.g., hiding "New note" when no project root is set) is a Phase 7 polish item.
 
@@ -99,7 +99,7 @@ File tiles do not need a parallel `FileState` struct. The file path is stored di
       <sessionId>.json       -- existing TerminalSessionDescriptor (unchanged)
 ```
 
-The `notes/` directory is created on first note spawn. The `index.json` is written atomically via `AtomicWriter`. Individual `.md` files are written with `Data.write(to:options:.atomic)` directly -- they do not go through `AtomicWriter`'s backup machinery because the content is recoverable from the user's edits and backup overhead per keystroke is unacceptable.
+The `notes/` directory is created on first note spawn. The `index.json` is written atomically via `AtomicWriter`. Individual `.md` files are written with `Data.write(to:options:.atomic)` directly -- they do NOT go through `AtomicWriter`'s backup machinery for two reasons: (1) AtomicWriter creates a rotated backup on every write, and per-keystroke debounced flushes (~400 ms) would generate hundreds of backups per editing session; (2) `.md` content is the user's authored text and is "recoverable" only in the sense that the user wrote it — there is no schema migration concern that would justify keeping prior versions. The atomic-replace POSIX guarantee from `Data.write(...options:.atomic)` is sufficient: it prevents a partial write from leaving an unreadable file, which is the only durability concern that applies.
 
 ### `ProjectStoreLayout` extension
 
@@ -303,7 +303,7 @@ Note content changes are debounced separately from canvas geometry changes:
 - Timer interval: 400ms (versus 200ms for canvas and browser). Note text changes are typically bursts of keystrokes; 400ms avoids write storms while still persisting within a second of the user stopping typing.
 - `NoteTileNSView` calls `onTextChange?()` inside `textDidChange(_:)`, which triggers `AppDelegate.scheduleNoteSave()`.
 - `flushNoteSave()` calls `tileSpawner?.writeNoteSnapshot(noteId:tileId:text:)` for each active note tile. The spawner reads the current `NSTextView.string` from the view. The `AppDelegate` keeps a `noteViews: [UUID: NoteTileNSView]` dictionary keyed by `noteId` to support this lookup.
-- `windowWillClose` calls `flushNoteSave()` before the tile teardown path (no runtime to terminate for notes, so order relative to browser/terminal teardown does not matter).
+- `windowWillClose` calls `flushNoteSave()` immediately after `flushBrowserSave()` at the very top of the close path. It must run BEFORE `canvasView = nil` (the spawner reads `NSTextView.string` via `noteViews[noteId]`) and BEFORE the runtime-termination loop (AtomicWriter needs the main run loop alive). No runtime to terminate for notes, so its placement relative to terminal/browser teardown is otherwise unconstrained — but anchor it next to the other flush calls so the close-path order documented in ADR-0014/0015 stays in one block.
 - Canvas geometry changes (drag, resize) continue to fire `canvasDidChange` -> `scheduleCanvasSave()`. The 200ms canvas timer and the 400ms note timer are independent; they do not interfere.
 
 ### File tiles
@@ -332,15 +332,17 @@ The smoke test runs without an external filesystem, so note and file tiles must 
 
 ### Seeding
 
-In `runSmokeTest(window:runtime:)`, before the timed action blocks, write:
+In `applicationDidFinishLaunching(_:)`, between `let projectStore = ProjectStore(...)` (line ~60) and `try projectStore.tryLoadCanvas()` (line ~77) — i.e. AFTER the project root has been resolved but BEFORE the canvas loads — gate on `smokeTestEnabled` and write:
 
-1. A note `.md` file with fixed `noteId = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!` and content `"smoke-note-ok"` to `.continuum-revived/notes/00000000-0000-0000-0000-000000000001.md`.
-2. The `NoteState` index entry for this `noteId`, linked to a fixed `tileId = UUID(uuidString: "00000000-0000-0000-0000-000000000010")!`.
-3. A plain-text file `.continuum-revived/smoke-file.txt` with content `"smoke-file-ok"`.
-4. A `CanvasState` tile with `kind: .note`, the fixed `tileId`, and `TileMetadata(noteId: noteId)`.
-5. A `CanvasState` tile with `kind: .file`, a second fixed `tileId`, and `TileMetadata(filePath: smokeFileURL.path)`.
+1. A note `.md` file with fixed `noteId = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!` and content `"smoke-note-ok"` to `<projectRoot>/.continuum-revived/notes/00000000-0000-0000-0000-000000000001.md`.
+2. The `NoteState` index entry for this `noteId`, linked to a fixed `tileId = UUID(uuidString: "00000000-0000-0000-0000-000000000010")!`. Saved via `projectStore.saveNoteState(...)`.
+3. A plain-text file `<projectRoot>/.continuum-revived/smoke-file.txt` with content `"smoke-file-ok"`.
+4. A `CanvasState` tile with `kind: .note`, the fixed note `tileId`, and `TileMetadata(noteId: noteId)`.
+5. A `CanvasState` tile with `kind: .file`, a second fixed `tileId = UUID(uuidString: "00000000-0000-0000-0000-000000000011")!`, and `TileMetadata(filePath: smokeFileURL.path)`.
 
-These tiles are injected into `canvasState` before the boot loop runs, so the loop installs them via the normal `installInitialNoteTile` / `installInitialFileTile` paths.
+The tiles in (4) and (5) are appended to whatever `canvasState` the boot path is about to use (existing on-disk canvas, or `defaultCanvasState()` if none) BEFORE `CanvasNSView(canvasState:)` is constructed. The boot loop's `installInitialNoteTile` / `installInitialFileTile` paths then handle the seeded tiles like any other.
+
+Placement is critical: the seed must run BEFORE the canvas is loaded — running it inside `runSmokeTest` is too late, because by then the boot loop has already walked the canvas and the seeded tiles never get installed. P6.6 should add a private `seedSmokeTestTiles(in: projectStore, projectRoot:)` helper invoked only when `smokeTestEnabled == true`.
 
 ### Assertions (`noteOk`, `fileOk`)
 

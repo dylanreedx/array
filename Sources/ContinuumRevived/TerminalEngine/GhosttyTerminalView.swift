@@ -318,7 +318,10 @@ final class GhosttyTerminalView: NSView {
         // close_surface_cb path is only triggered by explicit requestClose
         // calls in this Ghostty build; natural shell exits (e.g. `exit`
         // typed at the prompt) are only observable via this polling API.
-        processExitPoller = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+        // The exit code is delivered via the action_cb's child_exited message
+        // (currently a no-op); until that's wired through, we stamp nil.
+        // TODO: route action_cb's GHOSTTY_ACTION_CHILD_EXITED to capture the code.
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, let surface = self.surface else { return }
                 if ghostty_surface_process_exited(surface) {
@@ -329,6 +332,11 @@ final class GhosttyTerminalView: NSView {
                 }
             }
         }
+        // .common mode keeps the timer firing during modal tracking, drag
+        // gestures, and menu sessions. Default scheduledTimer uses .default
+        // which would miss exits while the user holds a drag.
+        RunLoop.main.add(timer, forMode: .common)
+        processExitPoller = timer
     }
 
     private func closeSurface() {

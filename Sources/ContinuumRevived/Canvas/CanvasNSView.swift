@@ -47,6 +47,11 @@ final class CanvasNSView: NSView {
         }
     }
 
+    /// Returns the NSView currently registered for `tileId`, or nil. Intended
+    /// for tests / smoke-test assertions that need to inspect tile-view kind
+    /// (e.g. checking that a runtime-exit handler swapped to a placeholder).
+    /// Callers must NOT retain the returned reference — the canvas may swap
+    /// the underlying view at any time and a cached pointer will go stale.
     func tileView(for tileId: UUID) -> TileNSView? {
         tileViews[tileId]
     }

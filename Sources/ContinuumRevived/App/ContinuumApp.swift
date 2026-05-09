@@ -845,7 +845,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             var browserOk = false
             var midExitOk = false
             let browserTileCount = self.canvasView?.canvasState.tiles.filter { $0.kind == .browser }.count ?? 0
-            if self.browserRuntimes.count != browserTileCount {
+            // Cardinality is gating, not advisory: if browserRuntimes count drifts
+            // from the canvas's live .browser tile count, runtimes leaked or were
+            // dropped without canvas update — that's a regression worth failing on.
+            let browserCardinalityOk = self.browserRuntimes.count == browserTileCount
+            if !browserCardinalityOk {
                 fputs("Smoke cardinality: browserRuntimes.count=\(self.browserRuntimes.count) != browserTileCount=\(browserTileCount)\n", stderr)
             }
             do {
@@ -943,7 +947,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 fputs("Persistence check threw: \(error)\n", stderr)
             }
 
-            if textPathOk && keyPathOk && scrollOk && persistenceOk && canvasOk && multiTerminalOk && browserOk && midExitOk {
+            if textPathOk && keyPathOk && scrollOk && persistenceOk && canvasOk && multiTerminalOk && browserOk && midExitOk && browserCardinalityOk {
                 print("Ghostty smoke test passed (text + key + scroll + persistence + canvas + multiTerminal + browser + midExit, occurrences=\(occurrences))")
                 if ProcessInfo.processInfo.environment["CONTINUUM_DUMP_VISIBLE"] == "1" {
                     fputs("--- pre-scroll visible text ---\n", stderr)
@@ -955,7 +959,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self.smokeTestExitCode = 0
             } else {
                 fputs(
-                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) midExitOk=\(midExitOk) occurrences=\(occurrences)\n",
+                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) midExitOk=\(midExitOk) browserCardinalityOk=\(browserCardinalityOk) occurrences=\(occurrences)\n",
                     stderr
                 )
                 fputs("--- pre-scroll ---\n", stderr)
