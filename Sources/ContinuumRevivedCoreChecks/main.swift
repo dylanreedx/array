@@ -1,4 +1,5 @@
 import ContinuumRevivedCore
+import CoreGraphics
 import Foundation
 
 func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
@@ -6,6 +7,10 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
         fputs("FAIL: \(message)\n", stderr)
         Foundation.exit(1)
     }
+}
+
+func approximatelyEqual(_ a: CGPoint, _ b: CGPoint, tolerance: Double = 0.001) -> Bool {
+    abs(a.x - b.x) < tolerance && abs(a.y - b.y) < tolerance
 }
 
 do {
@@ -515,6 +520,190 @@ do {
         defaultDir.path.hasSuffix("/continuum-revived") || defaultDir.path.contains("continuum-revived/"),
         "Default registry directory ends with /continuum-revived, got \(defaultDir.path)"
     )
+}
+
+// MARK: - CanvasEngine: coordinate conversion
+
+do {
+    let identity = CanvasViewport(x: 0, y: 0, zoom: 1)
+    let world = CGPoint(x: 100, y: 200)
+    let screen = CanvasEngine.worldToScreen(world, viewport: identity)
+    expect(screen == world, "Identity viewport: world == screen, got \(screen)")
+    let backToWorld = CanvasEngine.screenToWorld(screen, viewport: identity)
+    expect(backToWorld == world, "screen→world is inverse of world→screen")
+}
+
+do {
+    let panned = CanvasViewport(x: 50, y: 30, zoom: 1)
+    let world = CGPoint(x: 100, y: 100)
+    let screen = CanvasEngine.worldToScreen(world, viewport: panned)
+    expect(screen == CGPoint(x: 50, y: 70), "Pan moves world points relative to screen, got \(screen)")
+}
+
+do {
+    let zoomed = CanvasViewport(x: 0, y: 0, zoom: 2)
+    let screen = CanvasEngine.worldToScreen(CGPoint(x: 100, y: 100), viewport: zoomed)
+    expect(screen == CGPoint(x: 200, y: 200), "Zoom scales screen size proportionally, got \(screen)")
+}
+
+// MARK: - CanvasEngine: cursor-anchored zoom keeps world point fixed
+
+do {
+    let initial = CanvasViewport(x: 0, y: 0, zoom: 1)
+    let cursor = CGPoint(x: 400, y: 300)
+    let worldBefore = CanvasEngine.screenToWorld(cursor, viewport: initial)
+
+    let zoomedIn = CanvasEngine.zoom(initial, by: 2.0, anchorScreen: cursor)
+    let worldAfter = CanvasEngine.screenToWorld(cursor, viewport: zoomedIn)
+    expect(zoomedIn.zoom == 2.0, "Zoom factor applied")
+    expect(approximatelyEqual(worldBefore, worldAfter), "Zoom preserves world point under cursor (1→2)")
+
+    let zoomedOut = CanvasEngine.zoom(zoomedIn, by: 0.25, anchorScreen: cursor)
+    let worldAgain = CanvasEngine.screenToWorld(cursor, viewport: zoomedOut)
+    expect(zoomedOut.zoom == 0.5, "Zoom factor compounds (2 * 0.25)")
+    expect(approximatelyEqual(worldBefore, worldAgain), "Zoom preserves world point through compound zooms")
+}
+
+// MARK: - CanvasEngine: zoom clamps to range
+
+do {
+    let v = CanvasViewport(x: 0, y: 0, zoom: 1)
+    let zoomedTooFar = CanvasEngine.zoom(v, by: 100, anchorScreen: .zero, range: 0.1 ... 4.0)
+    expect(zoomedTooFar.zoom == 4.0, "Zoom clamps at upper bound, got \(zoomedTooFar.zoom)")
+    let zoomedTooSmall = CanvasEngine.zoom(v, by: 0.001, anchorScreen: .zero, range: 0.1 ... 4.0)
+    expect(zoomedTooSmall.zoom == 0.1, "Zoom clamps at lower bound, got \(zoomedTooSmall.zoom)")
+}
+
+// MARK: - CanvasEngine: hit test respects z-order
+
+do {
+    let v = CanvasViewport(x: 0, y: 0, zoom: 1)
+    let lower = Tile(
+        id: UUID(),
+        kind: .terminal,
+        title: "lower",
+        frame: TileFrame(x: 0, y: 0, width: 200, height: 200),
+        zIndex: 1,
+        runtimeRef: nil,
+        metadata: TileMetadata()
+    )
+    let upper = Tile(
+        id: UUID(),
+        kind: .terminal,
+        title: "upper",
+        frame: TileFrame(x: 100, y: 100, width: 200, height: 200),
+        zIndex: 2,
+        runtimeRef: nil,
+        metadata: TileMetadata()
+    )
+
+    expect(CanvasEngine.hitTest(screenPoint: CGPoint(x: 50, y: 50), viewport: v, tiles: [lower, upper])?.id == lower.id, "Hit only-in-lower returns lower")
+    expect(CanvasEngine.hitTest(screenPoint: CGPoint(x: 250, y: 250), viewport: v, tiles: [lower, upper])?.id == upper.id, "Hit only-in-upper returns upper")
+    expect(CanvasEngine.hitTest(screenPoint: CGPoint(x: 150, y: 150), viewport: v, tiles: [lower, upper])?.id == upper.id, "Overlap returns higher zIndex")
+    expect(CanvasEngine.hitTest(screenPoint: CGPoint(x: 500, y: 500), viewport: v, tiles: [lower, upper]) == nil, "Outside all tiles returns nil")
+}
+
+// MARK: - CanvasEngine: drag updates frame in world space
+
+do {
+    let v = CanvasViewport(x: 0, y: 0, zoom: 2.0)
+    let tile = Tile(
+        id: UUID(),
+        kind: .terminal,
+        title: "t",
+        frame: TileFrame(x: 100, y: 100, width: 300, height: 200),
+        zIndex: 1,
+        runtimeRef: nil,
+        metadata: TileMetadata()
+    )
+    // Drag 40 screen pixels right at zoom=2 → 20 world units.
+    let dragged = CanvasEngine.tile(tile, draggedByScreenDelta: CGSize(width: 40, height: 0), viewport: v)
+    expect(dragged.frame.x == 120 && dragged.frame.y == 100, "Drag moves tile in world units, got \(dragged.frame)")
+    // Width/height are unchanged by drag.
+    expect(dragged.frame.width == 300 && dragged.frame.height == 200, "Drag preserves tile size")
+}
+
+// MARK: - CanvasEngine: resize clamps to minimum
+
+do {
+    let v = CanvasViewport(x: 0, y: 0, zoom: 1.0)
+    let tile = Tile(
+        id: UUID(),
+        kind: .terminal,
+        title: "t",
+        frame: TileFrame(x: 100, y: 100, width: 400, height: 300),
+        zIndex: 1,
+        runtimeRef: nil,
+        metadata: TileMetadata()
+    )
+
+    let bigger = CanvasEngine.tile(tile, resizedByScreenDelta: CGSize(width: 50, height: 30), edge: .bottomRight, viewport: v)
+    expect(bigger.frame.width == 450 && bigger.frame.height == 330, "Bottom-right drag enlarges, got \(bigger.frame)")
+    expect(bigger.frame.x == 100 && bigger.frame.y == 100, "Bottom-right drag does not move origin")
+
+    // Try to shrink way past the minimum; result should be exactly the minimum.
+    let min = CanvasEngine.minimumFrame(for: .terminal)
+    let shrunk = CanvasEngine.tile(tile, resizedByScreenDelta: CGSize(width: -10000, height: -10000), edge: .bottomRight, viewport: v)
+    expect(shrunk.frame.width == min.width && shrunk.frame.height == min.height, "Resize clamps to minimum (\(min) vs \(shrunk.frame))")
+
+    // Top-left edge moves origin AND adjusts size.
+    let topLeft = CanvasEngine.tile(tile, resizedByScreenDelta: CGSize(width: 20, height: 30), edge: .topLeft, viewport: v)
+    expect(topLeft.frame.x == 120 && topLeft.frame.y == 130, "Top-left drag moves origin, got \(topLeft.frame)")
+    expect(topLeft.frame.width == 380 && topLeft.frame.height == 270, "Top-left drag shrinks size, got \(topLeft.frame)")
+}
+
+// MARK: - CanvasEngine: bring-to-front + z-order renormalization
+
+do {
+    let a = Tile(id: UUID(), kind: .terminal, title: "a", frame: TileFrame(x: 0, y: 0, width: 100, height: 100), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+    let b = Tile(id: UUID(), kind: .terminal, title: "b", frame: TileFrame(x: 0, y: 0, width: 100, height: 100), zIndex: 5, runtimeRef: nil, metadata: TileMetadata())
+    let c = Tile(id: UUID(), kind: .terminal, title: "c", frame: TileFrame(x: 0, y: 0, width: 100, height: 100), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+
+    let promoted = CanvasEngine.bringToFront(tileId: a.id, in: [a, b, c])
+    let promotedA = promoted.first { $0.id == a.id }!
+    let promotedB = promoted.first { $0.id == b.id }!
+    expect(promotedA.zIndex > promotedB.zIndex, "bringToFront makes target highest, got \(promoted.map(\.zIndex))")
+
+    // Renormalize compresses to 0..n-1 keeping order.
+    let inflated = [a, b, c].map { Tile(id: $0.id, kind: $0.kind, title: $0.title, frame: $0.frame, zIndex: $0.zIndex * 1000, runtimeRef: nil, metadata: $0.metadata) }
+    let normalized = CanvasEngine.renormalizeZOrder(inflated)
+    let zs = normalized.map(\.zIndex).sorted()
+    expect(zs == [0, 1, 2], "Renormalize produces 0..n-1, got \(zs)")
+    // Order preserved
+    let originalOrder = inflated.sorted { $0.zIndex < $1.zIndex }.map(\.id)
+    let normalizedOrder = normalized.sorted { $0.zIndex < $1.zIndex }.map(\.id)
+    expect(originalOrder == normalizedOrder, "Renormalize preserves relative order")
+}
+
+// MARK: - CanvasEngine: group bounds + fit-to-bounds
+
+do {
+    let t1 = Tile(id: UUID(), kind: .terminal, title: "1", frame: TileFrame(x: 100, y: 100, width: 200, height: 200), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+    let t2 = Tile(id: UUID(), kind: .terminal, title: "2", frame: TileFrame(x: 400, y: 50, width: 100, height: 300), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+    let group = TileGroup(id: UUID(), title: "g", tileIds: [t1.id, t2.id], color: "blue", collapsed: false)
+
+    let bounds = CanvasEngine.groupBounds(group, in: [t1, t2])
+    expect(bounds == CGRect(x: 100, y: 50, width: 400, height: 300), "Group bounds = union of frames, got \(String(describing: bounds))")
+
+    // Fit a 400x300 world rect into a 800x600 viewport with 40 padding.
+    let viewport = CanvasEngine.fit(worldRect: CGRect(x: 100, y: 50, width: 400, height: 300), viewportSize: CGSize(width: 800, height: 600), padding: 40)
+    // zoom = min((800-80)/400, (600-80)/300) = min(1.8, 1.733...) = ~1.733
+    expect(abs(viewport.zoom - (520.0 / 300.0)) < 0.001, "Fit zoom matches the tighter axis, got \(viewport.zoom)")
+
+    // The worldRect, after applying the new viewport, should be visible inside the viewport bounds (with padding).
+    let topLeft = CanvasEngine.worldToScreen(CGPoint(x: 100, y: 50), viewport: viewport)
+    let bottomRight = CanvasEngine.worldToScreen(CGPoint(x: 500, y: 350), viewport: viewport)
+    expect(topLeft.x >= 0 && topLeft.y >= 0, "Fit places top-left inside viewport, got \(topLeft)")
+    expect(bottomRight.x <= 800 && bottomRight.y <= 600, "Fit places bottom-right inside viewport, got \(bottomRight)")
+}
+
+// MARK: - CanvasEngine: defaults per kind
+
+do {
+    let term = CanvasEngine.defaultFrame(for: .terminal)
+    expect(term.width == 900 && term.height == 620, "Terminal default 900x620, got \(term)")
+    let browser = CanvasEngine.defaultFrame(for: .browser)
+    expect(browser.width == 1000 && browser.height == 700, "Browser default 1000x700, got \(browser)")
 }
 
 print("ContinuumRevivedCoreChecks passed")
