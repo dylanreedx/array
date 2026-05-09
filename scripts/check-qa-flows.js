@@ -28,7 +28,8 @@ const markerChecks = new Map([
   ["qa/flows/cmdk-spam.sh", ["CONTINUUM_QA_FLOW=palette-open-close", "cliclick", "capture_step"]],
   ["qa/flows/drag-past-edge.sh", ["CONTINUUM_QA_FLOW=canvas-drag-resize", "cliclick", "drag"]],
   ["qa/flows/window-resize-stress.sh", ["set bounds", "320", "1920", "capture_step"]],
-  ["qa/flows/quit-during-load.sh", ["CONTINUUM_QA_FLOW=cmd-3-browser", "DiagnosticReports", "quit"]]
+  ["qa/flows/quit-during-load.sh", ["CONTINUUM_QA_FLOW=cmd-3-browser", "DiagnosticReports", "quit"]],
+  ["Sources/ContinuumRevived/App/ContinuumApp.swift", ["palette-leak-warmup", "QAPerf.residentMemoryBytes()", "palette-leak-cycle"]]
 ]);
 
 function fail(message) {

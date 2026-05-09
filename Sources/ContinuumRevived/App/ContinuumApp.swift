@@ -1523,26 +1523,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func runPaletteLeakCheckFlow(window: NSWindow) {
         let (qaCapture, capture) = makeQACapture(window: window)
         scheduleInitialCapture(capture)
-        let memoryBefore = QAPerf.residentMemoryBytes()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            for _ in 0..<25 {
-                self.openProfilePalette()
-                self.profilePalette?.close()
+            autoreleasepool {
+                for _ in 0..<25 {
+                    self.openProfilePalette()
+                    self.profilePalette?.close()
+                }
             }
-            capture("palette-leak-cycle", 0.4, "opened and closed Cmd-K 25 times")
+            capture("palette-leak-warmup", 0.4, "opened and closed Cmd-K 25 times before baseline")
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            let memoryAfter = QAPerf.residentMemoryBytes()
-            let delta = Int64(memoryAfter) - Int64(memoryBefore)
-            self.qaPerf?.recordValue(key: "palette-leak-delta", value: Double(delta), unit: "bytes")
-            capture("palette-leak-memory-sampled", 0.8, "delta \(delta) bytes")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+            let memoryBefore = QAPerf.residentMemoryBytes()
+            autoreleasepool {
+                for _ in 0..<25 {
+                    self.openProfilePalette()
+                    self.profilePalette?.close()
+                }
+            }
+            capture("palette-leak-cycle", 0.7, "opened and closed Cmd-K 25 times")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                let memoryAfter = QAPerf.residentMemoryBytes()
+                let delta = Int64(memoryAfter) - Int64(memoryBefore)
+                self.qaPerf?.recordValue(key: "palette-leak-delta", value: Double(delta), unit: "bytes")
+                capture("palette-leak-memory-sampled", 0.9, "delta \(delta) bytes")
+            }
         }
         finishQAFlow(
             window: window,
             qaCapture: qaCapture,
             capture: capture,
             step: "palette-leak-final-state",
-            tSec: 1.1,
+            tSec: 1.3,
             success: true
         )
     }
