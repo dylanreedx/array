@@ -33,6 +33,10 @@ final class TileSpawner {
     /// so the AppDelegate can schedule a debounced BrowserState save.
     var browserPersistenceHandler: (() -> Void)?
 
+    /// Called after every note text change so the AppDelegate can schedule a
+    /// debounced note body + index save.
+    var notePersistenceHandler: (() -> Void)?
+
     init(
         canvasView: CanvasNSView,
         ghostty: GhosttyRuntimeContext,
@@ -203,6 +207,11 @@ final class TileSpawner {
         return .restarted(runtime)
     }
 
+    enum NoteOutcome {
+        case spawned(noteId: UUID, tileId: UUID)
+        case failure(Error)
+    }
+
     enum BrowserOutcome {
         case spawned(WKWebViewBrowserRuntime)
         case invalidURL(String)
@@ -364,6 +373,104 @@ final class TileSpawner {
             title: runtime.title,
             storageGroupId: storageGroupId
         )
+    }
+
+    // MARK: - Note tiles
+
+    /// Spawns a new blank note tile. Creates the note body file and index entry,
+    /// installs the tile view, and persists the canvas state.
+    func spawnNote(title: String, at worldPoint: CGPoint? = nil) -> NoteOutcome {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        let noteId = UUID()
+        let tileId = UUID()
+        let frame = makePlacement(
+            worldPoint: worldPoint,
+            size: CanvasEngine.defaultFrame(for: .note),
+            in: canvasView
+        )
+        let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
+        let tile = Tile(
+            id: tileId,
+            kind: .note,
+            title: title,
+            frame: frame,
+            zIndex: nextZ,
+            runtimeRef: nil,
+            metadata: TileMetadata(noteId: noteId)
+        )
+        do {
+            try projectStore.saveNoteBody(id: noteId, text: "")
+            try upsertNoteTile(noteId: noteId, tileId: tileId, title: title)
+        } catch {
+            return .failure(error)
+        }
+        let view = NoteTileNSView(tile: tile, noteId: noteId, initialBody: "")
+        view.onTextChange = { [weak self] in self?.notePersistenceHandler?() }
+        canvasView.install(tileView: view, for: tile)
+        do {
+            try projectStore.saveCanvas(canvasView.canvasState)
+        } catch {
+            return .failure(error)
+        }
+        return .spawned(noteId: noteId, tileId: tileId)
+    }
+
+    /// Installs a note tile view for an existing `Tile` (e.g. when restoring
+    /// canvas state on boot). Generates a fresh noteId if the tile has none.
+    func installNoteTile(_ tile: Tile, in canvasView: CanvasNSView) {
+        let noteId: UUID
+        var activeTile = tile
+        if let existingNoteId = tile.metadata.noteId {
+            noteId = existingNoteId
+        } else {
+            noteId = UUID()
+            var patched = tile
+            patched.metadata = TileMetadata(
+                launchProfileId: tile.metadata.launchProfileId,
+                projectRelativeCwd: tile.metadata.projectRelativeCwd,
+                url: tile.metadata.url,
+                noteId: noteId,
+                filePath: tile.metadata.filePath
+            )
+            activeTile = patched
+            canvasView.updateTile(activeTile)
+            try? upsertNoteTile(noteId: noteId, tileId: tile.id, title: tile.title)
+            try? projectStore.saveCanvas(canvasView.canvasState)
+        }
+        let initialBody = projectStore.tryLoadNoteBody(id: noteId) ?? ""
+        let view = NoteTileNSView(tile: activeTile, noteId: noteId, initialBody: initialBody)
+        view.onTextChange = { [weak self] in self?.notePersistenceHandler?() }
+        canvasView.install(tileView: view, for: activeTile)
+    }
+
+    /// Writes the current text body and updates the note's `updatedAt` timestamp
+    /// in the index. Called by the AppDelegate's debounced flush.
+    func writeNoteSnapshot(noteId: UUID, tileId: UUID, text: String) {
+        try? projectStore.saveNoteBody(id: noteId, text: text)
+        guard var state = try? projectStore.loadNoteState(),
+              let idx = state.tiles.firstIndex(where: { $0.id == noteId })
+        else { return }
+        state.tiles[idx].updatedAt = Date()
+        try? projectStore.saveNoteState(state)
+    }
+
+    private func upsertNoteTile(noteId: UUID, tileId: UUID, title: String) throws {
+        var state = (try? projectStore.tryLoadNoteState()) ?? NoteState(tiles: [])
+        let now = Date()
+        if let idx = state.tiles.firstIndex(where: { $0.id == noteId }) {
+            state.tiles[idx].title = title
+            state.tiles[idx].updatedAt = now
+        } else {
+            state.tiles.append(NoteTile(
+                id: noteId,
+                tileId: tileId,
+                filename: "\(noteId.uuidString).md",
+                title: title,
+                createdAt: now,
+                updatedAt: now
+            ))
+        }
+        try projectStore.saveNoteState(state)
     }
 
     private func makePlacement(worldPoint: CGPoint?, size: CGSize, in canvasView: CanvasNSView) -> TileFrame {
