@@ -229,6 +229,129 @@ do {
     expect(recovered.name == "v3", "AtomicWriter recovers from corruption via newest backup, got \(recovered.name)")
 }
 
+// MARK: - ProjectStore
+
+do {
+    let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-store-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: scratch) }
+
+    let store = ProjectStore(projectRoot: scratch, retainedBackups: 2)
+
+    let project = Project(
+        name: "test-project",
+        rootPath: scratch.path,
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        defaultLaunchProfileId: "shell",
+        editorPreference: .auto,
+        settings: ProjectSettings(
+            restorePolicy: .restoreDescriptors,
+            browserStoragePolicy: .perProject,
+            terminalClosePolicy: .askWhenRunning
+        )
+    )
+    try store.saveProject(project)
+    let loadedProject = try store.loadProject()
+    expect(loadedProject == project, "ProjectStore.loadProject returns saved value")
+    expect(
+        FileManager.default.fileExists(atPath: store.layout.projectFile.path),
+        "project.json lands inside .continuum-revived/"
+    )
+    expect(
+        FileManager.default.fileExists(atPath: store.layout.stateRoot.appendingPathComponent("project.json").path),
+        "stateRoot equals projectRoot/.continuum-revived"
+    )
+
+    let canvas = CanvasState(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        tiles: [],
+        groups: [],
+        lastActiveTileId: nil
+    )
+    try store.saveCanvas(canvas)
+    let loadedCanvas = try store.loadCanvas()
+    expect(loadedCanvas == canvas, "ProjectStore.loadCanvas returns saved value")
+
+    let s1 = TerminalSessionDescriptor(
+        id: UUID(),
+        tileId: UUID(),
+        launchProfileId: "shell",
+        command: "/bin/zsh",
+        args: [],
+        cwd: scratch.path,
+        env: [:],
+        title: "Shell",
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        lastStartedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        lastExit: nil
+    )
+    let s2 = TerminalSessionDescriptor(
+        id: UUID(),
+        tileId: UUID(),
+        launchProfileId: "claude",
+        command: "claude",
+        args: [],
+        cwd: scratch.path,
+        env: [:],
+        title: "Claude",
+        createdAt: Date(timeIntervalSince1970: 1_700_000_500),
+        lastStartedAt: Date(timeIntervalSince1970: 1_700_000_500),
+        lastExit: nil
+    )
+    try store.saveSession(s1)
+    try store.saveSession(s2)
+    let sessions = try store.listSessions()
+    expect(sessions.count == 2, "listSessions returns saved sessions, got \(sessions.count)")
+    let sessionIds = Set(sessions.map(\.id))
+    expect(sessionIds == [s1.id, s2.id], "listSessions returns correct ids")
+
+    try store.deleteSession(id: s1.id)
+    let afterDelete = try store.listSessions()
+    expect(afterDelete.count == 1 && afterDelete.first?.id == s2.id, "deleteSession removes only the named session")
+
+    let browser = BrowserState(tiles: [
+        BrowserTile(
+            id: UUID(),
+            tileId: UUID(),
+            url: "http://localhost:3000",
+            title: "Local",
+            storageGroupId: "default",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+    ])
+    try store.saveBrowserState(browser)
+    let loadedBrowser = try store.loadBrowserState()
+    expect(loadedBrowser == browser, "BrowserState round trip")
+
+    // Resaving project should produce a backup under .continuum-revived/backups/
+    let updated = Project(
+        id: project.id,
+        name: "test-project",
+        rootPath: project.rootPath,
+        createdAt: project.createdAt,
+        updatedAt: Date(timeIntervalSince1970: 1_700_001_000),
+        defaultLaunchProfileId: project.defaultLaunchProfileId,
+        editorPreference: project.editorPreference,
+        settings: project.settings
+    )
+    try store.saveProject(updated)
+    let backupContents = try FileManager.default.contentsOfDirectory(atPath: store.layout.backupsDirectory.path)
+    let projectBackups = backupContents.filter { $0.hasPrefix("project.") }
+    expect(!projectBackups.isEmpty, "Resaving project leaves a backup in backups/, got \(backupContents)")
+
+    // loadProject when nothing is on disk returns nil via tryLoad.
+    try FileManager.default.removeItem(at: store.layout.projectFile)
+    // Wipe the backup too so recovery cannot kick in.
+    for name in projectBackups {
+        try? FileManager.default.removeItem(at: store.layout.backupsDirectory.appendingPathComponent(name))
+    }
+    let missing = try store.tryLoadProject()
+    expect(missing == nil, "tryLoadProject returns nil when no file or backup is present")
+}
+
 // MARK: - Registry round trip
 
 do {
