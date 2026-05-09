@@ -44,17 +44,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var hostView: TerminalHostView?
     private let smokeTestEnabled = ProcessInfo.processInfo.environment["CONTINUUM_SMOKE_TEST"] == "1"
     private var smokeTestExitCode: Int32?
+    private var projectStore: ProjectStore?
+    private var registryStore: RegistryStore?
+    private var activeProject: Project?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
-            let repoRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).path
-            let launchProfile = try ShellLaunchResolver().resolveShell(cwd: repoRoot)
+            let projectRoot = Self.resolveProjectRoot(smokeTest: smokeTestEnabled)
+            let appSupportDir = Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
+            let projectStore = ProjectStore(projectRoot: projectRoot)
+            let registryStore = RegistryStore(applicationSupportDirectory: appSupportDir)
+            self.projectStore = projectStore
+            self.registryStore = registryStore
+
+            let project = try Self.loadOrCreateProject(in: projectStore, projectRoot: projectRoot)
+            self.activeProject = project
+            try Self.recordProjectInRegistry(project: project, in: registryStore)
+
+            let launchProfile = try ShellLaunchResolver().resolveShell(cwd: projectRoot.path)
             let ghostty = try GhosttyRuntimeContext()
             let runtime = GhosttyTerminalRuntime(
                 title: launchProfile.title,
                 launchProfile: launchProfile,
                 ghostty: ghostty
             )
+
+            // Persist a restart descriptor for this terminal session before we
+            // bring up any UI. Surface failures don't yet need it, but Phase 2
+            // requires the descriptor to outlive the process.
+            let descriptor = TerminalSessionDescriptor(
+                id: runtime.id,
+                tileId: runtime.tileId,
+                launchProfileId: "shell",
+                command: launchProfile.command,
+                args: launchProfile.arguments,
+                cwd: launchProfile.cwd,
+                env: [:],
+                title: launchProfile.title,
+                createdAt: Date(),
+                lastStartedAt: Date(),
+                lastExit: nil
+            )
+            try projectStore.saveSession(descriptor)
 
             let hostView = TerminalHostView(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
             hostView.attach(runtime: runtime)
@@ -104,6 +135,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        // Mark the session as exited before we tear down the runtime. We don't
+        // know the exit code from this side (Ghostty owns the PTY), so record
+        // a clean close — the user closed the window.
+        if let runtime, let projectStore {
+            if var descriptor = try? projectStore.loadSession(id: runtime.id) {
+                descriptor.lastExit = TerminalLastExit(exitCode: nil, signal: nil, at: Date())
+                try? projectStore.saveSession(descriptor)
+            }
+        }
+
         // Free the surface before the app: ghostty_app_free walks the surface
         // registry during teardown and dereferences PAC-protected pointers; if a
         // surface is still alive at that point, deinit traps with EXC_BAD_ACCESS.
@@ -116,6 +157,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             Foundation.exit(exitCode)
         }
         NSApp.terminate(nil)
+    }
+
+    // MARK: - Persistence helpers
+
+    private static func resolveProjectRoot(smokeTest: Bool) -> URL {
+        if let override = ProcessInfo.processInfo.environment["CONTINUUM_PROJECT_ROOT"] {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        if smokeTest {
+            let temp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("continuum-smoke-project-\(UUID().uuidString)", isDirectory: true)
+            try? FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+            return temp
+        }
+        return URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+    }
+
+    private static func resolveAppSupportDir(smokeTest: Bool) -> URL? {
+        if let override = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        if smokeTest {
+            let temp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("continuum-smoke-appsupport-\(UUID().uuidString)", isDirectory: true)
+            try? FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+            return temp
+        }
+        return nil // Fall through to the canonical Application Support path.
+    }
+
+    private static func loadOrCreateProject(in store: ProjectStore, projectRoot: URL) throws -> Project {
+        if let existing = try store.tryLoadProject() {
+            return existing
+        }
+        let now = Date()
+        let project = Project(
+            name: projectRoot.lastPathComponent,
+            rootPath: projectRoot.path,
+            createdAt: now,
+            updatedAt: now,
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning
+            )
+        )
+        try store.saveProject(project)
+        return project
+    }
+
+    private static func recordProjectInRegistry(project: Project, in store: RegistryStore) throws {
+        var registry = try store.loadOrEmpty()
+        let now = Date()
+        if let idx = registry.projects.firstIndex(where: { $0.id == project.id }) {
+            registry.projects[idx].name = project.name
+            registry.projects[idx].rootPath = project.rootPath
+            registry.projects[idx].lastOpenedAt = now
+        } else {
+            registry.projects.append(ProjectEntry(
+                id: project.id,
+                name: project.name,
+                rootPath: project.rootPath,
+                workspaceId: nil,
+                lastOpenedAt: now,
+                pinned: false
+            ))
+        }
+        registry.lastActiveProjectId = project.id
+        try store.save(registry)
     }
 
     private func presentFatalError(_ error: Error) {
@@ -191,8 +303,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let keyPathOk = occurrences >= 4
             let scrollOk = preScrollText != visibleText
 
-            if textPathOk && keyPathOk && scrollOk {
-                print("Ghostty smoke test passed (text + key + scroll, occurrences=\(occurrences))")
+            // P2.6 — persistence must have landed by the time we get here.
+            let persistenceOk: Bool
+            do {
+                let project = try self.projectStore?.loadProject()
+                let sessions = try self.projectStore?.listSessions() ?? []
+                let registry = try self.registryStore?.loadOrEmpty()
+                persistenceOk =
+                    project != nil
+                    && sessions.contains(where: { $0.id == runtime.id })
+                    && (registry?.projects.contains(where: { $0.id == project?.id }) ?? false)
+                    && registry?.lastActiveProjectId == project?.id
+            } catch {
+                fputs("Persistence check threw: \(error)\n", stderr)
+                persistenceOk = false
+            }
+
+            if textPathOk && keyPathOk && scrollOk && persistenceOk {
+                print("Ghostty smoke test passed (text + key + scroll + persistence, occurrences=\(occurrences))")
                 if ProcessInfo.processInfo.environment["CONTINUUM_DUMP_VISIBLE"] == "1" {
                     fputs("--- pre-scroll visible text ---\n", stderr)
                     fputs(preScrollText, stderr)
@@ -203,7 +331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.smokeTestExitCode = 0
             } else {
                 fputs(
-                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) occurrences=\(occurrences)\n",
+                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) persistenceOk=\(persistenceOk) occurrences=\(occurrences)\n",
                     stderr
                 )
                 fputs("--- pre-scroll ---\n", stderr)

@@ -281,3 +281,42 @@ Consequences:
 - The TerminalEngine adapter boundary (`TerminalRuntime` protocol) holds — no escape hatches for callers to call Ghostty directly. App code still depends only on the protocol; canvas and persistence work can build against it without thinking about Ghostty.
 - The `CONTINUUM_SMOKE_TEST=1` harness is the durable regression test for terminal text + key + scroll + close paths. Keep it green on any wrapper-level change.
 - Future work that touches `GhosttyTerminalView`'s input handlers must also keep this test green or update its assertions deliberately.
+
+## ADR-0012: Phase 2 Persistence Foundations Landed
+
+Date: 2026-05-08
+
+Decision:
+
+Phase 2 deliverables from `docs/07-phased-build-plan.md` are complete enough to unblock Phase 3 (Canvas MVP). Domain models, atomic writes, project-local storage, central registry, and future-version safety are all in `ContinuumRevivedCore`, exercised by `ContinuumRevivedCoreChecks`, and now drive persistence in the spike app.
+
+What's in:
+
+- **Domain models** (`ContinuumRevivedCore`): `Project`, `CanvasState` (+ `Tile`, `RuntimeRef`, `TileMetadata`, `TileGroup`, `CanvasViewport`), `TerminalSessionDescriptor` (+ `TerminalLastExit`), `BrowserState` (+ `BrowserTile`), `Registry` (+ `WorkspaceEntry`, `ProjectEntry`, `RegistrySettings`). All are `Codable`/`Equatable`/`Sendable` and carry `schemaVersion`.
+- **AtomicWriter**: encode → round-trip-validate the bytes → backup-existing-to-`backups/` → atomic rename → prune backups beyond `retainedBackups`. `read(at:)` falls back to the newest valid backup if the canonical file is corrupt or missing; throws `noValidBackup` only after both paths fail.
+- **ProjectStore**: typed save/load/list/delete for `project.json`, `canvas.json`, `sessions/<id>.json`, `browser/tiles.json`, all backed by `AtomicWriter`. `tryLoad*` returns `nil` for clean first-run; `load*` throws `unknownFutureSchema` when the on-disk version exceeds what this build supports.
+- **RegistryStore**: same shape, anchored at `~/Library/Application Support/continuum-revived/registry.json` by default, with backups alongside. Tests inject an arbitrary directory so they don't pollute Application Support.
+- **Future-version gate**: both stores refuse to load a file with `schemaVersion > currentSchemaVersion` and leave the on-disk bytes untouched. Verified by a CoreChecks assertion.
+- **AppDelegate wiring**: at launch, the app resolves the project root (env override → smoke-test temp → cwd) and the Application Support dir (env override → smoke-test temp → default), opens `ProjectStore` and `RegistryStore`, loads or creates the project, refreshes the registry entry + `lastActiveProjectId`, and writes a `TerminalSessionDescriptor` for the spawned shell. `windowWillClose` updates the descriptor's `lastExit` before the surface tear-down ordering from ADR-0010 runs.
+- **Smoke test coverage**: `CONTINUUM_SMOKE_TEST=1` now also asserts the project file, session descriptor, and registry entry exist by the time the close path runs (`persistenceOk` gate). A two-pass shell test (`CONTINUUM_PROJECT_ROOT` + `CONTINUUM_APP_SUPPORT` pinned across runs) confirms the project ID is stable across launches and a second session is appended without overwriting the first — the relaunch behavior the Phase 2 exit criteria call for.
+- **Repo hygiene**: `.continuum-revived/` is in `.gitignore` so the spike doesn't pollute the working tree on a normal-mode launch.
+
+What's deferred (intentionally; Phase 3+ items, not Phase 2 blockers):
+
+- **Notes** (`notes/index.json` + `*.md`): post-MVP per the data-model doc.
+- **Migrations beyond v1**: there's nothing older than v1 to migrate from; the migration shell is "v1 == current, no-op." A typed `Migration` framework will land alongside the first real schema bump.
+- **Recovery UX**: `noValidBackup` is the error today; user-facing recovery UI (corrupt-file warning, "load empty canvas" choice) waits for the canvas/AppShell work in Phase 3.
+- **iCloud quirks**: atomic writes survive ordinary races, but file coordination, eviction handling, and "this folder is in iCloud Drive" warnings are deferred until we have UI that can surface them.
+- **Workspace switcher UI**: Phase 2's exit criteria call for "Basic project switcher" — the data is there (registry tracks workspaces and projects), but the switcher UI is part of Phase 7 polish per `docs/07-phased-build-plan.md`. The CLI/env-var path is enough to drive Phase 3.
+
+Verification (all green, three back-to-back runs):
+
+- `swift run ContinuumRevivedCoreChecks` — round trips for every model, AtomicWriter, ProjectStore, RegistryStore, and future-version refusal.
+- `CONTINUUM_SMOKE_TEST=1 .build/debug/continuum-revived` — exits 0 with `Ghostty smoke test passed (text + key + scroll + persistence, occurrences=5)` and zero entries in `~/Library/Logs/DiagnosticReports/`.
+- Two-pass relaunch (`CONTINUUM_PROJECT_ROOT` + `CONTINUUM_APP_SUPPORT` pinned): pass 1 creates `project.json` + `sessions/<id1>.json` + `registry.json`. Pass 2 loads the same `project.id`, updates `lastOpenedAt`, and appends `sessions/<id2>.json` — both sessions remain on disk, registry's `lastActiveProjectId` matches the persisted project id.
+
+Consequences:
+
+- **Phase 3 (Canvas MVP) is unblocked.** The canvas adapter can persist its state through `ProjectStore.saveCanvas` without redesigning storage.
+- The `CONTINUUM_SMOKE_TEST` integration harness is now also a regression test for persistence: any change that breaks atomic writes, backup ordering, or schema gating fails the same five-second run.
+- App code outside `TerminalEngine`/persistence still has no direct dependency on Ghostty or the filesystem layout — `TerminalRuntime`, `ProjectStore`, and `RegistryStore` keep the boundary that ADR-0011 promised.
