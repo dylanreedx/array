@@ -706,4 +706,175 @@ do {
     expect(browser.width == 1000 && browser.height == 700, "Browser default 1000x700, got \(browser)")
 }
 
+// MARK: - LaunchProfileRegistry: built-ins
+
+do {
+    let registry = LaunchProfileRegistry()
+    let ids = registry.all().map(\.id)
+    expect(ids == ["shell", "claude", "codex", "nvim", "custom"], "Registry returns 5 built-ins in stable order, got \(ids)")
+    expect(registry.spec(for: "shell")?.title == "Shell", "shell spec has title Shell")
+    expect(registry.spec(for: "claude")?.displayName == "Claude Code", "claude spec has displayName Claude Code")
+    expect(registry.spec(for: "nope") == nil, "Unknown id returns nil")
+}
+
+// MARK: - ToolDetector: pure which
+
+do {
+    let detector = ToolDetector { _ in false }
+    expect(detector.locate("claude", in: ["/usr/bin", "/opt/bin"]) == nil, "Detector returns nil when nothing matches")
+}
+
+do {
+    let target = "/opt/homebrew/bin/claude"
+    let detector = ToolDetector { path in path == target }
+    expect(detector.locate("claude", in: ["/usr/bin", "/opt/homebrew/bin", "/opt/bin"]) == target, "Detector returns first matching dir")
+}
+
+do {
+    let detector = ToolDetector { _ in true }
+    expect(detector.locate("nvim", in: []) == nil, "Empty path list returns nil")
+    expect(detector.locate("nvim", in: [""]) == nil, "Empty path segment is skipped")
+}
+
+do {
+    // Trailing slash on PATH dir should not produce a double slash candidate.
+    let detector = ToolDetector { path in path == "/opt/homebrew/bin/codex" }
+    expect(detector.locate("codex", in: ["/opt/homebrew/bin/"]) == "/opt/homebrew/bin/codex", "Trailing slash is normalized")
+    // Negative form: the unnormalized double-slash path must not match.
+    let strict = ToolDetector { path in path == "/opt/homebrew/bin//codex" }
+    expect(strict.locate("codex", in: ["/opt/homebrew/bin/"]) == nil, "Detector does not produce double-slash candidates")
+}
+
+// MARK: - LaunchProfileRegistry: resolve shell
+
+do {
+    let registry = LaunchProfileRegistry()
+    let shellSpec = registry.spec(for: "shell")!
+    let resolution = registry.resolve(
+        shellSpec,
+        in: "/tmp/x",
+        environment: ["SHELL": "/bin/zsh"],
+        detector: ToolDetector { _ in true }
+    )
+    if case let .found(profile) = resolution {
+        expect(profile.command == "/bin/zsh", "Shell resolves to $SHELL")
+        expect(profile.cwd == "/tmp/x", "Shell resolution preserves cwd")
+        expect(profile.title == "Shell", "Shell resolution uses spec title")
+        expect(profile.arguments == [], "Shell resolution carries no extra args")
+    } else {
+        expect(false, "Shell should resolve to .found, got \(resolution)")
+    }
+}
+
+// MARK: - LaunchProfileRegistry: resolve tool found
+
+do {
+    let registry = LaunchProfileRegistry()
+    let claude = registry.spec(for: "claude")!
+    let resolution = registry.resolve(
+        claude,
+        in: "/tmp/proj",
+        environment: ["PATH": "/usr/bin:/opt/homebrew/bin"],
+        detector: ToolDetector { path in path == "/opt/homebrew/bin/claude" }
+    )
+    if case let .found(profile) = resolution {
+        expect(profile.command == "/opt/homebrew/bin/claude", "Tool resolution uses detected path")
+        expect(profile.cwd == "/tmp/proj", "Tool resolution preserves cwd")
+        expect(profile.title == "Claude", "Tool resolution uses spec title")
+    } else {
+        expect(false, "Claude should resolve to .found when detector matches, got \(resolution)")
+    }
+}
+
+// MARK: - LaunchProfileRegistry: resolve tool missing
+
+do {
+    let registry = LaunchProfileRegistry()
+    let nvim = registry.spec(for: "nvim")!
+    let resolution = registry.resolve(
+        nvim,
+        in: "/tmp/proj",
+        environment: ["PATH": "/usr/bin"],
+        detector: ToolDetector { _ in false }
+    )
+    if case let .missing(executableName) = resolution {
+        expect(executableName == "nvim", "Missing nvim reports executable name")
+    } else {
+        expect(false, "nvim should resolve to .missing when detector returns nil, got \(resolution)")
+    }
+}
+
+// MARK: - LaunchProfileRegistry: nvim args carry through
+
+do {
+    let registry = LaunchProfileRegistry()
+    let nvim = registry.spec(for: "nvim")!
+    let resolution = registry.resolve(
+        nvim,
+        in: "/tmp/proj",
+        environment: ["PATH": "/opt/bin"],
+        detector: ToolDetector { path in path == "/opt/bin/nvim" }
+    )
+    if case let .found(profile) = resolution {
+        expect(profile.arguments == ["."], "nvim spec passes [\".\"] so the editor opens cwd")
+    } else {
+        expect(false, "nvim should resolve to .found when detector matches, got \(resolution)")
+    }
+}
+
+// MARK: - CanvasState: multi-terminal launchProfileId round trip
+
+do {
+    let shellTile = Tile(
+        id: UUID(uuidString: "AAAAAAAA-1111-1111-1111-111111111111")!,
+        kind: .terminal,
+        title: "Shell",
+        frame: TileFrame(x: 0, y: 0, width: 600, height: 400),
+        zIndex: 1,
+        runtimeRef: RuntimeRef(kind: .terminalSession, id: UUID(uuidString: "BBBBBBBB-1111-1111-1111-111111111111")!),
+        metadata: TileMetadata(launchProfileId: "shell", projectRelativeCwd: ".")
+    )
+    let claudeTile = Tile(
+        id: UUID(uuidString: "AAAAAAAA-2222-2222-2222-222222222222")!,
+        kind: .terminal,
+        title: "Claude",
+        frame: TileFrame(x: 700, y: 0, width: 600, height: 400),
+        zIndex: 2,
+        runtimeRef: RuntimeRef(kind: .terminalSession, id: UUID(uuidString: "BBBBBBBB-2222-2222-2222-222222222222")!),
+        metadata: TileMetadata(launchProfileId: "claude", projectRelativeCwd: ".")
+    )
+    let canvas = CanvasState(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1.0),
+        tiles: [shellTile, claudeTile],
+        groups: [],
+        lastActiveTileId: claudeTile.id
+    )
+    let data = try JSONCodec.makeEncoder().encode(canvas)
+    let decoded = try JSONCodec.makeDecoder().decode(CanvasState.self, from: data)
+    expect(decoded == canvas, "Multi-terminal canvas round trip")
+    let decodedShell = decoded.tiles.first { $0.id == shellTile.id }!
+    let decodedClaude = decoded.tiles.first { $0.id == claudeTile.id }!
+    expect(decodedShell.metadata.launchProfileId == "shell", "shell tile preserves launchProfileId")
+    expect(decodedClaude.metadata.launchProfileId == "claude", "claude tile preserves launchProfileId")
+    expect(decodedShell.id != decodedClaude.id, "tile ids stay distinct")
+}
+
+// MARK: - LaunchProfileRegistry: custom is .notConfigured
+
+do {
+    let registry = LaunchProfileRegistry()
+    let custom = registry.spec(for: "custom")!
+    let resolution = registry.resolve(
+        custom,
+        in: "/tmp/proj",
+        environment: [:],
+        detector: ToolDetector { _ in true }
+    )
+    if case let .notConfigured(profileId) = resolution {
+        expect(profileId == "custom", "Custom resolves to .notConfigured with its id")
+    } else {
+        expect(false, "Custom should resolve to .notConfigured, got \(resolution)")
+    }
+}
+
 print("ContinuumRevivedCoreChecks passed")
