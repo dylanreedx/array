@@ -370,3 +370,57 @@ Consequences:
 - **Phase 4 (Launch Profiles + daily terminal flow) is unblocked.** The canvas + tile-runtime adapter is ready to host more than one live terminal as soon as launch profiles can spawn them.
 - The smoke test now also serves as a regression test for the canvas: any change that breaks coordinate conversion, persistence-on-change, or the canvas-load fallback fails the same five-second integration run.
 - The `CanvasNSView` mouse-event routing is structural — title bar = drag, edge ring = resize, body = tile content. Phase 4 launching profiles must not break this contract; if a tile kind needs body-level click handling, do it inside the content view, not by overriding `TileNSView.mouseDown`.
+
+## ADR-0014: Phase 4 Launch Profiles + Daily Terminal Flow
+
+Date: 2026-05-08
+
+Decision:
+
+Phase 4 deliverables from `docs/07-phased-build-plan.md` are met. The spike now lets the user spawn multiple live terminal tiles from a registry of built-in launch profiles — shell, Claude Code, Codex, Neovim — via a Cmd-K command palette and Cmd-1..4 direct hotkeys, with tool detection driving missing-command UI and a Restart placeholder for tiles whose profile can't currently resolve. Phase 5 (live browser tiles) is unblocked.
+
+What's in:
+
+- **`LaunchProfileSpec` + `LaunchProfileRegistry` + `ToolDetector`** (Core, pure types, no AppKit / no NSWorkspace). Five built-in specs in stable id order — `shell`, `claude`, `codex`, `nvim`, `custom` — each with a `Kind` of `.shell`, `.tool(executableName:args:)`, or `.custom`. `LaunchProfileRegistry.resolve` returns `.found(LaunchProfile)`, `.missing(executableName:)`, or `.notConfigured(profileId:)`. `ToolDetector` is a `which`-style helper with an injected `fileExists` closure (`.live` uses `FileManager.default.isExecutableFile(atPath:)`); CoreChecks injects fakes. `shell` delegates to the existing `ShellLaunchResolver`; `custom` is a forward-compat slot that always resolves to `.notConfigured` (custom command editor is deferred).
+- **`TileSpawner`** (spike, AppKit-side, `@MainActor`). Single seam used by both the palette/hotkey path and the smoke test. `spawnTerminal(profileId:at:)` resolves the spec, builds a `Tile` with `TileMetadata.launchProfileId` set, creates a fresh `GhosttyTerminalRuntime`, installs a `TerminalTileNSView` via `CanvasNSView.install`, persists the descriptor + canvas, and returns either `.spawned(runtime)`, `.missingCommand(executable:)`, `.notConfigured(profileId:)`, `.unknownProfile(id:)`, or `.failure(Error)`. `restartTerminalTile(tileId:)` re-resolves the existing tile's profile and replaces its placeholder view with a fresh runtime, reusing tile id / frame / z-index. `spawnBrowserDefault` spawns a descriptor-only browser tile (no profile concept yet). Includes a `cascadeStep`-based placement helper so freshly spawned tiles don't stack on viewport-center.
+- **`LaunchProfilePalette`** (spike). NSPanel + NSSearchField + NSTableView; rows render `displayName — resolved/path` for `.found`, dimmed `displayName — name not found` for `.missing`, and `displayName — id not configured` for `.notConfigured`. Up/down/Enter/Esc handled via `NSSearchFieldDelegate.control(_:textView:doCommandBy:)`. Enter on a `.missing`/`.notConfigured` row beeps and stays open (per docs/04 failure mode "do not create a half-running process").
+- **App-level NSEvent local monitor** for hotkeys: Cmd-K opens the palette unfiltered, Cmd-1 spawns claude, Cmd-2 spawns shell, Cmd-3 spawns the default browser tile, Cmd-4 spawns nvim. Modifiers checked strictly (`mods == [.command]`) to avoid swallowing Ghostty's own command-key shortcuts. Local monitor consumes by returning nil so the responder chain doesn't see the event.
+- **Boot path refactor (`AppDelegate.applicationDidFinishLaunching`)**: replaced the single-OG-terminal special case with a generic loop that walks every tile in `canvasState.tiles` and routes terminal tiles through `TileSpawner.restartTerminalTile`. Tiles whose profile resolves to `.found` get a live `TerminalTileNSView`; everything else gets a `TerminalRestartTileNSView` placeholder. Browser/note/file tiles still get `DescriptorTileNSView`. The "Restart" button on the placeholder calls back to the spawner; the restartable flag distinguishes "tool not found on $PATH (user might install it)" from "profile is missing entirely / not configured (no point retrying yet)".
+- **`TerminalRestartTileNSView`**. Tile subclass with a centered status label + Restart button. `onRestart: (() -> Void)?` is nil for non-restartable error states (button stays but is disabled). Title bar / resize ring / mouseDown contract from ADR-0013 preserved — the action button lives inside the content view, so AppKit hit-testing finds it before `TileNSView.mouseDown` runs.
+- **`CanvasNSView.install` fix**: replacing a tile (placeholder → live, or live → placeholder on future runtime-exit support) now removes the previous NSView before adding the new one. Without the fix, the prior view stayed on top and intercepted hits.
+- **Multi-runtime shutdown**: `AppDelegate.runtimes: [GhosttyTerminalRuntime]` replaces the single `runtime?` ivar. `windowWillClose` iterates and terminates every surface before `ghostty.shutdown()` so ADR-0010's order-of-free invariant still holds with N surfaces. `applicationDidBecomeActive` focuses the last appended runtime; `applicationDidResignActive` blurs all of them. Hotkey monitor is removed before shutdown.
+- **Persistence**: `TerminalSessionDescriptor.launchProfileId` now sources from `tile.metadata.launchProfileId` instead of the hardcoded `"shell"` literal at boot. The default seed tile's metadata sets the seed value once; the spawner sets it per spawn; rehydration reads it back.
+
+Verification:
+
+- `swift build` — clean.
+- `swift run ContinuumRevivedCoreChecks` — green, with new blocks for `LaunchProfileRegistry` built-in order, `ToolDetector` PATH walking (match / no match / empty segment skip / trailing-slash normalization), shell + tool + missing + notConfigured + nvim-args resolution paths, and a multi-terminal `CanvasState` round trip with two distinct `launchProfileId` values.
+- `CONTINUUM_SMOKE_TEST=1 .build/debug/continuum-revived` — exits 0 with `Ghostty smoke test passed (text + key + scroll + persistence + canvas + multiTerminal, occurrences=5)`. The harness now spawns a second terminal at t≈2.5s through `TileSpawner.spawnTerminal(profileId: "shell")` and asserts: both the OG and spawned descriptor land in `sessions/`, both carry a non-empty `launchProfileId`, their tile ids are distinct, the spawned tile is on disk in `canvas.json`, and the canvas has ≥ 4 tiles (3 seeded + 1 spawned). Multi-terminal close path runs cleanly — both surfaces freed before `ghostty_app_free` (no diagnostic reports).
+- Two-pass relaunch (`CONTINUUM_PROJECT_ROOT` + `CONTINUUM_APP_SUPPORT` pinned): pass 1 ends with 4 tiles on disk (shell + browser + note + spawned shell). Pass 2 reloads, auto-restarts the two existing terminal tiles via the boot loop (preserving their tile ids exactly), spawns a third at t≈2.5s, ends with 5 tiles. Tile ids stable across passes; smoke test passes both runs.
+
+Phase 4 exit criteria (from `docs/07-phased-build-plan.md`):
+
+| Criterion | Status |
+|---|---|
+| User can run Claude, Codex, shell, Neovim if installed | ✓ Cmd-1/2/4 + palette spawn; tool detection per-spec |
+| Missing tools are clear, not broken | ✓ Palette inline `not found` row; hotkey path shows NSAlert with install hint; Restart placeholder for boot-time misses |
+| Layout and descriptors restore | ✓ Boot loop walks every terminal tile in canvas; `TerminalSessionDescriptor.launchProfileId` round-trips; tile ids stable |
+| Restart works for exited sessions | ✓ `TerminalRestartTileNSView` + `TileSpawner.restartTerminalTile`; placeholder appears whenever resolve fails |
+
+What's deferred (intentionally; Phase 5+ items, not Phase 4 blockers):
+
+- **Custom-command editor UI**. The `custom` profile spec exists for forward compat but always resolves to `.notConfigured`; there is no settings file or editor to back it. Comes with the deferred "basic settings for profile overrides" line in `docs/07`.
+- **Settings file for profile overrides**. Needs its own store, schema, and ADR. Phase 4's registry is hardcoded.
+- **Stale session pruning**. `sessions/*.json` accumulate across runs because `windowWillClose` sets `lastExit` on every live runtime and the boot loop creates fresh descriptors rather than reusing them. Functional but unbounded; Phase 5 should prune `lastExit != nil` descriptors at boot or compact on a timer. The smoke test scopes its multi-terminal assertions to live-runtime descriptors so this growth doesn't false-fail it.
+- **In-process runtime-exit detection**. If a shell exits while the app is still running we don't currently swap the live `TerminalTileNSView` for a `TerminalRestartTileNSView`. The placeholder + Restart wiring is in place; only the runtime-exit observer is missing. Add when shell-quits-mid-session UX matters.
+- **Drag-from-palette placement** (palette spawns at viewport center). Right-click placement on the canvas is in the Phase 7 deferred list per `docs/05-canvas-and-ux.md`.
+- **Browser as a "profile"**. Cmd-3 spawns a plain browser-kind descriptor tile via `TileSpawner.spawnBrowserDefault`; live `WKWebView` browser tiles arrive in Phase 5.
+- **Per-runtime focus state on app activate**. `applicationDidBecomeActive` focuses `runtimes.last`; honoring `lastActiveTileId` to reactivate the user's pre-resign focus is a follow-up.
+- All the Phase 7 items called out in `docs/05`: Focus Mode, Minimap, multi-select / group UI, magnetic snap, accessibility deep-dive — none of these belong to Phase 4.
+
+Consequences:
+
+- **Phase 5 (live browser tiles) is unblocked.** The tile spawn / canvas install / persistence pattern in `TileSpawner` is the template a `BrowserTileSpawner` (or extension) will follow; `TileMetadata.url` is already the right slot for browser state.
+- **The hotkey contract is now load-bearing.** Cmd-K, Cmd-1..4 are wired at the app level; any future window-level menu items must coexist with the local NSEvent monitor. If a future feature needs a chord like Cmd-Shift-K, gate the existing handler on `mods == [.command]` (already done) so modified variants pass through to the responder chain.
+- **Boot is no longer special-cased for "the OG terminal"**. Every terminal tile in the canvas takes the same code path. The pattern composes with future tile kinds — add a case to the boot switch and a spawner method, and the rest follows.
+- **The smoke test is now also a regression test for `TileSpawner` and the multi-runtime close path.** Any change that breaks profile resolution, descriptor persistence, multi-surface shutdown ordering, or canvas round-trip with multiple terminal tiles fails the same five-second run.
