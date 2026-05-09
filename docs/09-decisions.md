@@ -424,3 +424,57 @@ Consequences:
 - **The hotkey contract is now load-bearing.** Cmd-K, Cmd-1..4 are wired at the app level; any future window-level menu items must coexist with the local NSEvent monitor. If a future feature needs a chord like Cmd-Shift-K, gate the existing handler on `mods == [.command]` (already done) so modified variants pass through to the responder chain.
 - **Boot is no longer special-cased for "the OG terminal"**. Every terminal tile in the canvas takes the same code path. The pattern composes with future tile kinds — add a case to the boot switch and a spawner method, and the rest follows.
 - **The smoke test is now also a regression test for `TileSpawner` and the multi-runtime close path.** Any change that breaks profile resolution, descriptor persistence, multi-surface shutdown ordering, or canvas round-trip with multiple terminal tiles fails the same five-second run.
+
+## ADR-0015: Phase 5 Live Browser Tiles (WKWebView)
+
+Date: 2026-05-08
+
+Decision:
+
+Phase 5 deliverables from `docs/07-phased-build-plan.md:218–257` are met. The descriptor-only browser tile from Phase 4 is replaced with a live `WKWebView` runtime: URL bar, back / forward / reload, loading + error states, URL/title persistence, per-project `WKWebsiteDataStore` isolation, and focus integration that does not trap app shortcuts. Phase 6 (file/note tiles) is unblocked.
+
+What's in:
+
+- **`BrowserState.storageGroupIdentifier(for:)`** (Core, pure). Resolves `.perProject` to `project.id.uuidString` (stable across relaunches and unique per project) and `.shared` to the sentinel `BrowserState.sharedStorageGroupId = "shared"`. The app side reads this string back when constructing `WKWebsiteDataStore(forIdentifier:)` (UUID branch) or `.default()` (sentinel branch). Pure function — no I/O, no AppKit, no WebKit. CoreChecks asserts determinism, distinctness across projects, and `.shared` invariance.
+- **`BrowserEngine`** (`Sources/ContinuumRevived/BrowserEngine/`). Three files mirroring `TerminalEngine/`:
+  - `BrowserRuntime.swift`: `@MainActor protocol BrowserRuntime: AnyObject` with `id`, `tileId`, `url`, `title`, `loadingState`, plus `attach(to:)`, `detach()`, `loadURL(_:)`, `goBack()`, `goForward()`, `reload()`, `stop()`, `focus()`, `blur()`, `terminate(policy:)`. `BrowserHostView` is the analog of `TerminalHostView`. `BrowserLoadingState`: `.idle | .loading(progress:) | .failed(message:)`.
+  - `BrowserEngineContext.swift`: one per app. Owns `[String: WKWebsiteDataStore]` keyed by storage group id, lazily initialized via the helper above. Constructs `WKWebView`s via `makeWebView(storageGroupId:)` with `preferences.isFraudulentWebsiteWarningEnabled = false` for localhost dev. Drops the cache table in `shutdown()`. `WKProcessPool` is intentionally not set — deprecated since macOS 12; WebKit shares its render-process pool internally.
+  - `WKWebViewBrowserRuntime.swift`: concrete `BrowserRuntime`. `NSObject` subclass conforming to `WKNavigationDelegate` and `WKUIDelegate`. KVO observers on `WKWebView.title`, `WKWebView.url`, `WKWebView.estimatedProgress`, `WKWebView.isLoading`. KVO closures don't read main-isolated properties directly; they hop through `Task { @MainActor in ... }` and read `self.webView` so Swift 6 strict concurrency is happy. `terminate(.force)` strictly orders: `webView.stopLoading()` → invalidate observers → nil delegates → `removeFromSuperview()`. Inverting risks WebKit firing into a half-torn-down runtime.
+- **`BrowserTileNSView`** (Sources/ContinuumRevived/Canvas/). Tile-kind chrome below the existing 24pt title bar: nav row (`NSButton` × 3 + `NSTextField` URL bar + indeterminate `NSProgressIndicator`) atop `BrowserHostView`. URL field commits on Return (loadURL), reverts on Esc (using the same `control(_:textView:doCommandBy:)` pattern as `LaunchProfilePalette`). Loading/error states drive the spinner + a thin red banner. Subscribes to `runtime.onStateChange` to refresh; chains an `onAfterRefresh` callback so the spawner can hook the debounced persistence flush.
+- **`BrowserRestartTileNSView`**: copy of `TerminalRestartTileNSView` with browser-tinted chrome. Used when boot-time browser construction fails (invalid URL on disk, store init throws).
+- **`TileSpawner` extensions**: `spawnBrowser(url:at:)` returning `BrowserOutcome` (`.spawned(WKWebViewBrowserRuntime)` / `.invalidURL` / `.failure`); `restartBrowserTile(tileId:)` returning `BrowserRestartOutcome` (`.restarted` / `.invalidURL` / `.tileNotFound` / `.failure`); `writeBrowserTileSnapshot(for:)` for the AppDelegate's debounced flush. `upsertBrowserTile` keyed by `tileId` so multiple browser tiles per project don't clobber each other in `BrowserState.tiles`. `browserPersistenceHandler` ivar is set once by AppDelegate.
+- **AppDelegate wiring**: `browserEngine: BrowserEngineContext?` and `browserRuntimes: [WKWebViewBrowserRuntime]` ivars. Boot loop's tile switch routes `.browser` through `restartBrowserTile`; success appends to `browserRuntimes`, failure installs `BrowserRestartTileNSView`. Cmd-3 dispatches the new `spawnBrowser(url: nil, at: nil)`. `scheduleBrowserSave()` + `flushBrowserSave()` mirror the canvas debounce pattern. `windowWillClose` close order: flush canvas + browser saves → mark terminal session exits → remove hotkey monitor + close palette → **terminate browser runtimes first** → terminate terminal runtimes (preserving ADR-0010's free-before-`ghostty_app_free` invariant) → `ghostty.shutdown()` → `browserEngine.shutdown()`. Browsers tear down before terminals because WKWebView's process pool is independent of GhosttyKit's; inverting risks WebKit KVO callbacks firing into a half-torn-down app.
+
+Verification:
+
+- `swift build` — clean.
+- `swift run ContinuumRevivedCoreChecks` — green, with new blocks for `storageGroupIdentifier(for:)` determinism, distinctness, `.shared` invariance, and non-collision with any perProject id.
+- `CONTINUUM_SMOKE_TEST=1 .build/debug/continuum-revived` — exits 0 with `Ghostty smoke test passed (text + key + scroll + persistence + canvas + multiTerminal + browser, occurrences=5)`. The smoke test now spawns a live `WKWebView` at t≈3.6s using a deterministic `data:text/html,<html><title>continuum-browser-ok</title>...</html>` URL (offline-safe), and the t=5.0s assertion block adds `browserOk`: BrowserState contains a tile with the data URL, the title KVO + persistence path captured `"continuum-browser-ok"`, the canvas tracks it as a `.browser` tile with `runtimeRef.kind == .browserTile`, and the storage group id matches the helper's deterministic output for the project's policy.
+- Two-pass relaunch (`CONTINUUM_PROJECT_ROOT` + `CONTINUUM_APP_SUPPORT` pinned): pass 1 ends with 2 browser tiles on disk (the seeded + the smoke-spawn). Pass 2 reloads, re-instantiates both via the boot loop (preserving their tile ids exactly), spawns a third at t≈3.6s, ends with 3 browser tiles. Tile ids stable across passes; smoke passes both runs. `~/Library/Logs/DiagnosticReports/` shows no new entries — confirms multi-runtime shutdown ordering holds with both Ghostty and WebKit surfaces alive.
+
+Phase 5 exit criteria (from `docs/07-phased-build-plan.md`):
+
+| Criterion | Status |
+|---|---|
+| Browser tile shows local dev server | ✓ Cmd-3 spawns localhost:3000; URL bar accepts manual navigation |
+| Browser tile arrangeable on canvas | ✓ Phase 3 plumbing intact; new chrome doesn't break drag/resize (button + URL field hit-test before TileNSView.mouseDown) |
+| URL restores on relaunch | ✓ Boot loop walks every `.browser` tile through `restartBrowserTile`; `BrowserState.tiles` round-trips through `ProjectStore.saveBrowserState` |
+| Browser does not trap app shortcuts | ✓ The local `NSEvent.addLocalMonitorForEvents` consumes Cmd-K/1-4 above the WKWebView responder chain; `mods == [.command]` strict check stays untouched |
+
+What's deferred (intentionally; Phase 6+ items, not Phase 5 blockers):
+
+- **Phase 4 polish** (still): stale session pruning + in-process runtime-exit detection. Same backlog as ADR-0014; not bundled into Phase 5.
+- **Downloads UI / certificate prompts / find-in-page / devtools / back-forward gestures**: not in Phase 5 deliverables.
+- **Automation + element picker**: explicitly deferred per `docs/06-browser-code-file-surfaces.md` and `docs/07`.
+- **Multi-tab inside a browser tile**: Phase 5 is one URL per tile.
+- **Custom URL scheme handlers**: not needed; localhost is ATS-exempt by default.
+- **Programmatic Cmd-K-while-browser-focused smoke assertion**: verified manually only. The hotkey monitor consumes events before the responder chain so this should hold; add a programmatic check if it ever regresses.
+- **In-process runtime-exit detection for browsers** (analog of the deferred terminal item). WKWebView's process can crash; we do not yet swap a live tile for a `BrowserRestartTileNSView` mid-session. The placeholder + restart wiring is in place; only the `WKNavigationDelegate.webViewWebContentProcessDidTerminate` observer is missing.
+- **Per-runtime focus on app activate**: still focuses `runtimes.last`; honoring `canvasState.lastActiveTileId` (terminal-or-browser) to reactivate the user's pre-resign focus is a follow-up. Browsers focus on click via WebKit's normal hit-testing, so this is mostly a polish gap.
+
+Consequences:
+
+- **Phase 6 (file/note tiles) is unblocked.** The pattern is now: an engine context (one per app) + a runtime protocol + a concrete runtime + a tile NSView + a restart placeholder + spawner methods + a boot-loop switch case + a debounced persistence path. Phase 6 follows the same recipe.
+- **WebKit is now a load-bearing dependency.** Anyone touching the browser path must respect: KVO observers via `webView.observe`, navigation delegate methods on `nonisolated` plus `Task { @MainActor in }` hops, strict teardown order in `terminate(policy:)`, and the close-path invariant that browsers tear down before terminals + ghostty.shutdown.
+- **Per-project storage isolation is real.** `WKWebsiteDataStore(forIdentifier:)` keys off `project.id.uuidString` for `.perProject`, so logging into a site in one project does not leak cookies/session to another project. Switching to `.shared` falls back to the default store.
+- **`BrowserState.tiles` is upserted by `tileId`**, not appended, so the smoke test's t≈3.6s spawn (which adds a fresh tile) coexists with the seeded browser tile (which is restored on each boot) without duplication.
