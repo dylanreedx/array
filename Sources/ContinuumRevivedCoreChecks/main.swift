@@ -918,4 +918,68 @@ do {
     }
 }
 
+// MARK: - pruneExitedSessions
+
+do {
+    let scratchRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: scratchRoot, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: scratchRoot) }
+
+    let store = ProjectStore(projectRoot: scratchRoot, retainedBackups: 1)
+
+    let alive = TerminalSessionDescriptor(
+        id: UUID(),
+        tileId: UUID(),
+        launchProfileId: "shell",
+        command: "/bin/zsh",
+        args: [],
+        cwd: scratchRoot.path,
+        env: [:],
+        title: "Alive",
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        lastStartedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        lastExit: nil
+    )
+    let exitedClean = TerminalSessionDescriptor(
+        id: UUID(),
+        tileId: UUID(),
+        launchProfileId: "shell",
+        command: "/bin/zsh",
+        args: [],
+        cwd: scratchRoot.path,
+        env: [:],
+        title: "ExitedClean",
+        createdAt: Date(timeIntervalSince1970: 1_700_000_100),
+        lastStartedAt: Date(timeIntervalSince1970: 1_700_000_100),
+        lastExit: TerminalLastExit(exitCode: 0, signal: nil, at: Date(timeIntervalSince1970: 1_700_000_200))
+    )
+    let exitedSignal = TerminalSessionDescriptor(
+        id: UUID(),
+        tileId: UUID(),
+        launchProfileId: "shell",
+        command: "/bin/zsh",
+        args: [],
+        cwd: scratchRoot.path,
+        env: [:],
+        title: "ExitedSignal",
+        createdAt: Date(timeIntervalSince1970: 1_700_000_300),
+        lastStartedAt: Date(timeIntervalSince1970: 1_700_000_300),
+        lastExit: TerminalLastExit(exitCode: nil, signal: 9, at: Date(timeIntervalSince1970: 1_700_000_400))
+    )
+
+    try store.saveSession(alive)
+    try store.saveSession(exitedClean)
+    try store.saveSession(exitedSignal)
+
+    pruneExitedSessions(in: store)
+
+    let surviving = try store.listSessions()
+    expect(surviving.count == 1, "pruneExitedSessions leaves only the alive session, got \(surviving.count)")
+    expect(surviving.first?.id == alive.id, "surviving session is the one with lastExit == nil")
+    let survivingIds = Set(surviving.map(\.id))
+    expect(!survivingIds.contains(exitedClean.id), "exitedClean descriptor was pruned")
+    expect(!survivingIds.contains(exitedSignal.id), "exitedSignal descriptor was pruned")
+}
+
 print("ContinuumRevivedCoreChecks passed")

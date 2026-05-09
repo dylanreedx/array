@@ -64,6 +64,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.projectStore = projectStore
             self.registryStore = registryStore
 
+            pruneExitedSessions(in: projectStore)
+
             let project = try Self.loadOrCreateProject(in: projectStore, projectRoot: projectRoot)
             self.activeProject = project
             try Self.recordProjectInRegistry(project: project, in: registryStore)
@@ -777,11 +779,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     .frame.x != 40
                 canvasOk = tileCount >= 4 && (viewportMoved || terminalTileMoved)
 
-                // Scope the multi-terminal assertions to the LIVE runtimes from
-                // this launch. Stale descriptors from prior launches accumulate
-                // in sessions/ until pruning lands (deferred); checking
-                // `sessions.count == liveRuntimeCount` would false-fail on a
-                // second run against the same project root.
                 let primary = sessions.first(where: { $0.id == runtime.id })
                 let secondary = secondaryRuntimeId.flatMap { id in sessions.first(where: { $0.id == id }) }
                 let bothLiveHaveProfile = !(primary?.launchProfileId.isEmpty ?? true)
@@ -792,8 +789,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 let secondaryOnCanvas = secondaryTileId.map { id in
                     canvasOnDisk?.tiles.contains(where: { $0.id == id && $0.kind == .terminal }) ?? false
                 } ?? false
+                let liveRuntimeIds = Set(self.runtimes.map { $0.id })
+                let noOrphanSessions = sessions.allSatisfy { session in
+                    liveRuntimeIds.contains(session.id)
+                }
                 multiTerminalOk =
-                    primary != nil
+                    noOrphanSessions
+                    && primary != nil
                     && secondary != nil
                     && bothLiveHaveProfile
                     && distinctLiveTileIds

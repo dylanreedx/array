@@ -411,7 +411,7 @@ What's deferred (intentionally; Phase 5+ items, not Phase 4 blockers):
 
 - **Custom-command editor UI**. The `custom` profile spec exists for forward compat but always resolves to `.notConfigured`; there is no settings file or editor to back it. Comes with the deferred "basic settings for profile overrides" line in `docs/07`.
 - **Settings file for profile overrides**. Needs its own store, schema, and ADR. Phase 4's registry is hardcoded.
-- **Stale session pruning**. `sessions/*.json` accumulate across runs because `windowWillClose` sets `lastExit` on every live runtime and the boot loop creates fresh descriptors rather than reusing them. Functional but unbounded; Phase 5 should prune `lastExit != nil` descriptors at boot or compact on a timer. The smoke test scopes its multi-terminal assertions to live-runtime descriptors so this growth doesn't false-fail it.
+- **Stale session pruning**. Landed in ADR-0016; no longer deferred.
 - **In-process runtime-exit detection**. If a shell exits while the app is still running we don't currently swap the live `TerminalTileNSView` for a `TerminalRestartTileNSView`. The placeholder + Restart wiring is in place; only the runtime-exit observer is missing. Add when shell-quits-mid-session UX matters.
 - **Drag-from-palette placement** (palette spawns at viewport center). Right-click placement on the canvas is in the Phase 7 deferred list per `docs/05-canvas-and-ux.md`.
 - **Browser as a "profile"**. Cmd-3 spawns a plain browser-kind descriptor tile via `TileSpawner.spawnBrowserDefault`; live `WKWebView` browser tiles arrive in Phase 5.
@@ -463,7 +463,7 @@ Phase 5 exit criteria (from `docs/07-phased-build-plan.md`):
 
 What's deferred (intentionally; Phase 6+ items, not Phase 5 blockers):
 
-- **Phase 4 polish** (still): stale session pruning + in-process runtime-exit detection. Same backlog as ADR-0014; not bundled into Phase 5.
+- **Phase 4 polish** (still): in-process runtime-exit detection. Stale session pruning landed in ADR-0016; only the mid-session runtime-exit observer remains.
 - **Downloads UI / certificate prompts / find-in-page / devtools / back-forward gestures**: not in Phase 5 deliverables.
 - **Automation + element picker**: explicitly deferred per `docs/06-browser-code-file-surfaces.md` and `docs/07`.
 - **Multi-tab inside a browser tile**: Phase 5 is one URL per tile.
@@ -478,3 +478,32 @@ Consequences:
 - **WebKit is now a load-bearing dependency.** Anyone touching the browser path must respect: KVO observers via `webView.observe`, navigation delegate methods on `nonisolated` plus `Task { @MainActor in }` hops, strict teardown order in `terminate(policy:)`, and the close-path invariant that browsers tear down before terminals + ghostty.shutdown.
 - **Per-project storage isolation is real.** `WKWebsiteDataStore(forIdentifier:)` keys off `project.id.uuidString` for `.perProject`, so logging into a site in one project does not leak cookies/session to another project. Switching to `.shared` falls back to the default store.
 - **`BrowserState.tiles` is upserted by `tileId`**, not appended, so the smoke test's t≈3.6s spawn (which adds a fresh tile) coexists with the seeded browser tile (which is restored on each boot) without duplication.
+
+## ADR-0016: Boot-time Session Pruning
+
+Date: 2026-05-09
+
+Decision:
+
+At app boot, immediately after `ProjectStore` is initialized and before the tile-loop runs, call `pruneExitedSessions(in:)` to delete all `TerminalSessionDescriptor` files whose `lastExit` field is non-nil.
+
+Rationale:
+
+`windowWillClose` stamps `lastExit` on every live session descriptor when the user closes the window. On the next boot the tile loop creates fresh descriptors for the new runtimes rather than reusing the old ones, so the `sessions/` directory accumulates one file per terminal per run. The predicate `lastExit != nil` is exact: a descriptor is exited if and only if the close path recorded an exit. Alive descriptors (spawned this launch, not yet closed) always have `lastExit == nil`.
+
+Pruning before the tile loop means the live descriptors created by the current boot are never visible to the pruner, so there is no race between "prune" and "spawn". Pruning after `windowWillClose` would require knowing which descriptors belong to the session being closed, adding coupling; pruning on a timer adds latency and complexity with no benefit.
+
+Call-site placement: `applicationDidFinishLaunching`, immediately after `self.projectStore = projectStore` and before `Self.loadOrCreateProject(...)`. This is the earliest safe moment: the store is initialized, no tiles have been spawned yet, and the window is not yet on screen.
+
+Best-effort semantics: `pruneExitedSessions(in:)` does not throw. If `listSessions()` fails (e.g., permissions, corrupt directory), it writes a one-line warning to stderr and returns. If `deleteSession(id:)` fails for a single file, it writes a warning and continues. Partial pruning on error is acceptable; the directory remains bounded by the number of sessions that successfully close.
+
+Manual two-pass verification protocol:
+1. Run `CONTINUUM_SMOKE_TEST=1 CONTINUUM_PROJECT_ROOT=/tmp/smoke-root CONTINUUM_APP_SUPPORT=/tmp/smoke-as .build/debug/continuum-revived` (pass 1). Confirm it exits 0 and capture the UUIDs in `sessions/`.
+2. Run the same command again (pass 2). Confirm it exits 0, and that the pass-1 UUIDs no longer appear in `sessions/` (zero overlap). Pass-2 may write more session files than pass 1 because canvas persistence carries previously-spawned smoke tiles forward; the regression we are guarding against is unbounded growth, not a literal count.
+
+Consequences:
+
+- `sessions/` is now bounded to at most one file per terminal tile that was alive when the window last closed (typically 1-3 for normal use).
+- The smoke test's `multiTerminalOk` block now asserts `noOrphanSessions`: every session on disk corresponds to a live runtime from this launch. This catches the regression where pruning fails to remove stale descriptors and lets them survive into the next launch as orphans.
+- The explanatory comment in the smoke test that scoped multi-terminal assertions to "live runtimes from this launch" to avoid false-failures from accumulated stale files has been removed.
+- In-process runtime-exit detection (the remaining deferred item from ADR-0014) still does not set `lastExit` mid-session. When it lands, the same predicate will work: a descriptor whose runtime exits mid-session will get `lastExit` set, and the next boot will prune it.
