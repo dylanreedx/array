@@ -320,3 +320,53 @@ Consequences:
 - **Phase 3 (Canvas MVP) is unblocked.** The canvas adapter can persist its state through `ProjectStore.saveCanvas` without redesigning storage.
 - The `CONTINUUM_SMOKE_TEST` integration harness is now also a regression test for persistence: any change that breaks atomic writes, backup ordering, or schema gating fails the same five-second run.
 - App code outside `TerminalEngine`/persistence still has no direct dependency on Ghostty or the filesystem layout — `TerminalRuntime`, `ProjectStore`, and `RegistryStore` keep the boundary that ADR-0011 promised.
+
+## ADR-0013: Phase 3 Canvas MVP — Multi-Tile Spike With Persistent Layout
+
+Date: 2026-05-08
+
+Decision:
+
+Phase 3 deliverables from `docs/07-phased-build-plan.md` are met. The spike now hosts a multi-tile canvas with the existing live terminal as one tile and two descriptor tiles (browser/note placeholders), with pan/zoom, drag, edge-resize, and z-order forwarded through the new `CanvasEngine` and persisted via the Phase 2 `ProjectStore`. Phase 4 (Launch Profiles + daily terminal flow) is unblocked.
+
+What's in:
+
+- **`CanvasEngine`** (Core, stateless): coordinate conversion, cursor-anchored zoom (clamped 0.1–4.0), hit testing in z-order, per-kind default + minimum frames, drag-by-screen-delta, resize-by-edge with minimum-size clamping, `bringToFront` + `renormalizeZOrder`, `groupBounds`, and fit-to-bounds. Pure functions, no AppKit. Convention: top-left-origin world coordinates (positive Y = down); viewport `(x, y)` is the world point at the screen's top-left corner; `zoom` is screen pixels per world unit.
+- **`CanvasNSView`** (spike, AppKit): flipped NSView that owns the viewport, hosts tile subviews, layouts them via `CanvasEngine.tileScreenFrame`, and routes scroll-wheel events to pan or (with command) cursor-anchored zoom.
+- **`TileNSView`** (spike): tile chrome — title bar (24pt drag handle), 8pt resize ring around the perimeter, content slot. Drag from title bar moves the tile; drag from the perimeter resizes by edge through `CanvasEngine.tile(_:resizedByScreenDelta:edge:viewport:)`. `mouseDown` brings the tile to the front.
+- **`TerminalTileNSView`** (spike): tile subclass that hosts the existing `GhosttyTerminalRuntime` + `TerminalHostView` via `setContentView`. The terminal tile fills 660×480 of the canvas by default, leaving room for the two descriptor tiles.
+- **`DescriptorTileNSView`** (spike): placeholder tile for `.browser`/`.note`/`.file` kinds — colored body + center-labeled title, suitable for Phase 3 descriptor-only tiles.
+- **AppDelegate wiring**: at launch, `loadOrCreateCanvas` reuses the persisted canvas (with future-version safety from Phase 2) or seeds a 3-tile default (terminal + browser placeholder + note placeholder). The terminal tile's `runtimeRef` refreshes to the new session id; the canvas saves on every change through a 200ms-debounced timer; `windowWillClose` flushes the pending save before tear-down. Default window grew to 1280×800 to accommodate the multi-tile layout.
+
+Verification:
+
+- `swift run ContinuumRevivedCoreChecks` — round trips for every model + AtomicWriter + ProjectStore + RegistryStore + future-version refusal + every `CanvasEngine` invariant (pan/zoom/cursor-anchored zoom/clamps, hit-test z-order, drag/resize/min-size, z-renormalize, group bounds, fit).
+- `CONTINUUM_SMOKE_TEST=1 .build/debug/continuum-revived` — three back-to-back runs exit 0 with `Ghostty smoke test passed (text + key + scroll + persistence + canvas, occurrences=5)`. The smoke test programmatically drags the terminal tile (25 world units right) and pans the viewport (10, 5), then asserts a) ≥ 3 tiles on disk, b) viewport moved or terminal frame moved.
+- Two-pass relaunch (`CONTINUUM_PROJECT_ROOT` + `CONTINUUM_APP_SUPPORT` pinned): pass 1 ends with `viewport=(10,5,1.0)` and terminal frame `x=65`. Pass 2 reads that state, drags again, ends with terminal frame `x=90`. Tile IDs are stable across passes.
+- Zero entries in `~/Library/Logs/DiagnosticReports/`.
+
+Phase 3 exit criteria (from `docs/07-phased-build-plan.md`):
+
+| Criterion | Status |
+|---|---|
+| User can place at least three descriptor tiles | ✓ (default canvas seeds terminal + browser placeholder + note placeholder) |
+| User can pan/zoom smoothly | ✓ scroll-wheel → pan, cmd+scroll → cursor-anchored zoom; `CanvasEngine.zoom` math verified by tests |
+| User can drag/resize tiles | ✓ title-bar drag = move; perimeter drag = resize-by-edge with minimum-size clamping |
+| Layout persists across relaunch | ✓ verified by two-pass relaunch test |
+| Active tile visual state is clear | ✓ `bringToFront` + `lastActiveTileId` tracked; z-order persisted |
+
+What's deferred (intentionally; Phase 4+ items, not Phase 3 blockers):
+
+- **Live multi-tile runtimes**: still only one live terminal; browser/note tiles are descriptor-only placeholders. Phase 4 adds the launch profile picker that creates additional terminal tiles; Phase 5 brings live `WKWebView` browser tiles; Phase 6 brings notes.
+- **Multi-select**: explicitly listed as "later if cheap" in `docs/05-canvas-and-ux.md`. Phase 3 supports single-tile selection only.
+- **Group creation/management UX**: the data model and `groupBounds` math exist; the create-from-selection / move-by-bounding-region UI does not. Add in Phase 7 polish or earlier if a real workflow needs it.
+- **Keyboard navigation on the canvas**: directional focus, fit view, zoom in/out by hotkey — design is in the canvas doc, but Phase 3 ships scroll/pinch/click/drag only. FocusBroker comes in Phase 7.
+- **Magnetic snapping / grid hints**: spec calls these "later." Skipped.
+- **Minimap / focus mode**: explicitly deferred in the spec.
+- **Empty state**: deferred until the canvas has the spawn-Claude / spawn-shell / spawn-browser actions from Phase 4.
+
+Consequences:
+
+- **Phase 4 (Launch Profiles + daily terminal flow) is unblocked.** The canvas + tile-runtime adapter is ready to host more than one live terminal as soon as launch profiles can spawn them.
+- The smoke test now also serves as a regression test for the canvas: any change that breaks coordinate conversion, persistence-on-change, or the canvas-load fallback fails the same five-second integration run.
+- The `CanvasNSView` mouse-event routing is structural — title bar = drag, edge ring = resize, body = tile content. Phase 4 launching profiles must not break this contract; if a tile kind needs body-level click handling, do it inside the content view, not by overriding `TileNSView.mouseDown`.
