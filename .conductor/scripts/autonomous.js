@@ -763,6 +763,7 @@ function buildClaudeCommand(project, opts = {}) {
   const cmdArgs = [
     '-p', `/conductor-resume ${project}`,
     '--output-format', 'stream-json',
+    '--verbose',
     '--dangerously-skip-permissions',
     '--permission-mode', 'bypassPermissions',
     '--append-system-prompt', buildSystemPrompt(),
@@ -1160,7 +1161,18 @@ function postSessionVerify({ workspacePath, headBefore, project, sessionFacts })
   // Per-ticket print-fix records use the QA Atlas verifier. Toolkit and
   // orchestration tasks can legitimately write different record formats,
   // so they are gated by commit substance + Conductor linkage instead.
-  if (ticketId && isQaTicketId(ticketId)) {
+  // Projects that don't ship scripts/qa-atlas.js (i.e. don't use the QA
+  // Atlas record protocol) skip both gates entirely — otherwise any
+  // commit message containing an XX-NNNN-shaped string would HALT here
+  // because the verifier script doesn't exist.
+  const qaAtlasScript = path.join(workspacePath, 'scripts', 'qa-atlas.js');
+  const projectUsesQaAtlas = fs.existsSync(qaAtlasScript);
+
+  if (ticketId && isQaTicketId(ticketId) && !projectUsesQaAtlas) {
+    log('autonomous', `Post-session verify SKIP: scripts/qa-atlas.js not present in ${workspacePath} (ticket=${ticketId})`);
+  }
+
+  if (ticketId && isQaTicketId(ticketId) && projectUsesQaAtlas) {
     try {
       execSync(`node scripts/qa-atlas.js --verify ${ticketId}`, {
         cwd: workspacePath,
@@ -1179,7 +1191,7 @@ function postSessionVerify({ workspacePath, headBefore, project, sessionFacts })
     }
   }
 
-  if (ticketId && isQaTicketId(ticketId)) {
+  if (ticketId && isQaTicketId(ticketId) && projectUsesQaAtlas) {
     const amendResult = amendVerifiedRecordIfNeeded(workspacePath, ticketId);
     if (amendResult.error) {
       return { ok: false, reason: amendResult.error, sha: headAfter, ticketId };
