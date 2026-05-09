@@ -2,3 +2,6 @@
 .build/
 ThirdParty/
 .continuum-revived/
+.conductor/conductor.db
+.agents/
+.codex/
