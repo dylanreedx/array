@@ -693,3 +693,31 @@ Consequences:
 - Note bodies are inspectable project files rather than opaque app database rows, which keeps the MVP simple and agent-readable.
 - The close path is now state-first and runtime-second: save canvas, browser, and note state before tearing down browser, terminal, GhosttyKit, and WebKit resources.
 - The file tree remains a deliberate scope reduction from the Phase 6 plan. The shipped file tile covers the highest-value reference use case while avoiding a synchronous directory scan in the AppKit event loop.
+
+## ADR-0019: Phase QA Loop Architecture
+
+Date: 2026-05-09
+
+Decision:
+
+Phase QA uses a layered loop. Layer A is the in-process smoke and capture path selected by `CONTINUUM_QA_FLOW`, `CONTINUUM_QA_CAPTURE`, and optional `CONTINUUM_QA_PERF`. Layer B is the external driver suite under `qa/flows/`, which launches the app, uses OS automation for clicks, drags, resizing, and quits, and writes top-level run manifests. Findings are filed into Conductor through `qa/file-finding.sh` so product defects become ordinary pending bugfix tasks with severity, expected behavior, observed behavior, screenshot path, flow, step, and fingerprint metadata.
+
+Verification:
+
+- `qa/setup.sh` verifies the local driver commands and reminds the operator that Accessibility permission is required for external flows.
+- `swift build` remains the build gate before any QA pass.
+- `node scripts/check-qa-flows.js` remains the structural gate for flow scripts, expectation files, reviewer instructions, ignored run output, and the finding wrapper.
+- Each initial pass should run all named Layer A flows, run each Layer B flow where the host display allows it, run `swift run ContinuumRevivedPerfChecks`, inspect generated manifests and PNGs, and file only concrete product findings.
+- Per-ticket evidence records remain verified by `node scripts/qa-atlas.js --verify <ticket-id>` before the task commit.
+
+Initial pass result:
+
+- The 2026-05-09 initial pass ran all named Layer A flows successfully under `qa-runs/initial-pass-20260509T214326Z/`.
+- The same pass attempted all four Layer B flows, but the host `screencapture` command failed before the first external event PNG, so those top-level runs were treated as environment-blocked rather than product failures.
+- The QA.6 perf pass reported one concrete regression: `palette-leak-delta` measured 40566784 bytes against the 5242880 byte baseline, and the issue was filed as a pending `[qa-finding][major]` Conductor bugfix with fingerprint `b26118e71426e710032a38fd2d3da3df5c653037f111e8dd8c069dfab5b5eb74`.
+
+Deferred:
+
+- External flows need a runner with working macOS screenshot capture and Accessibility control before their OS-level PNG reviews can be considered complete.
+- Calibrated visual scoring remains a per-ticket atlas concern; the Phase QA loop records review notes and evidence, but it does not auto-accept screenshots without human or reviewer inspection.
+- Perf baseline changes remain manual. The harness may file regressions, but it must not rewrite `qa/perf-baseline.json` during a pass.
