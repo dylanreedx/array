@@ -635,3 +635,61 @@ Phase 6 is done when all of the following are concurrently observable in the wor
 
 - `NSTextView` with a large file (near the 1 MB cap) may be slow to render or scroll. If observed during testing, lower the cap or switch to lazy rendering.
 - Fixed smoke-seed UUIDs are safe as long as the smoke temp directory is isolated (it is by default). If `CONTINUUM_PROJECT_ROOT` is pointed at a real project with `CONTINUUM_SMOKE_TEST=1`, the seed will write into that project's `.continuum-revived/notes/` directory. This is an unusual operation and is documented in the smoke test header comment.
+
+## ADR-0018: Phase 6 Closed (Live Note + File Tiles)
+
+Date: 2026-05-09
+
+Decision:
+
+Phase 6 is closed. ADR-0017 remains the design draft; this ADR records the implemented shape after the note and file tile work landed. The product now has live note tiles, read-only file tiles, Cmd-K spawn entries, boot-loop restore for both tile kinds, deterministic smoke coverage, and a close path that drains note edits before any runtime teardown.
+
+What's in:
+
+- **`NoteTileNSView`**. A tile-local editable `NSTextView` inside an `NSScrollView`, using 13pt monospaced text, raw plain text, disabled rich text and text substitutions, and an `onTextChange` callback for the app-level note save debounce.
+- **`FileTileNSView`**. A tile-local read-only selectable `NSTextView` inside an `NSScrollView`, using the same 13pt monospaced text treatment as notes. It loads text files at install time, shows inline placeholder messages for missing paths or unavailable content, and keeps file content out of Continuum-owned state.
+- **`ProjectStore` note persistence**. Notes are project-scoped files under `.continuum-revived/notes/`. `ProjectStoreLayout` owns `notesDirectory`, `notesIndexFile`, and `noteFile(id:)`; `ProjectStore` owns `saveNoteState`, `loadNoteState`, `tryLoadNoteState`, `saveNoteBody`, `loadNoteBody`, and `tryLoadNoteBody`. The note index uses `AtomicWriter`, while individual `.md` bodies use atomic file writes without backup rotation.
+- **`TileSpawner` note and file seams**. `spawnNote` creates a fresh note id, empty body file, note index entry, canvas tile, and `NoteTileNSView`. `installNoteTile` restores existing canvas notes and backfills a missing `noteId` only when restoring legacy note descriptors. `writeNoteSnapshot` persists the current text and updates the note index timestamp. `spawnFile` and `installFileTile` install read-only file views keyed by `TileMetadata.filePath`.
+- **Boot-loop restore**. `AppDelegate.applicationDidFinishLaunching` now routes `.note` and `.file` canvas tiles through `installInitialNoteTile` and `installInitialFileTile`, so every persisted tile kind has a concrete restore path instead of falling back to descriptor-only placeholders.
+- **Cmd-K spawn path**. `LaunchProfilePalette` includes "New Note" and "Open File..." rows after terminal/browser launch rows. Phase 6 keeps note and file creation palette-only; no Cmd-5 or Cmd-6 hotkeys were added.
+- **Smoke seam**. The smoke path seeds the deterministic note body, note index row, and smoke file before the boot-loop tile iteration runs. The smoke gate then proves the boot loop installed real note and file tile views by checking the note view, note index, canvas metadata, and file view body.
+- **Multi-runtime close path**. `windowWillClose` first flushes canvas, browser, and note saves. Only after those flushes does it mark terminal descriptors exited, remove hotkey/palette UI, terminate browser runtimes, terminate terminal runtimes, shut down GhosttyKit, shut down the browser engine, and clear note view references. This ordering keeps authored note text in memory long enough to reach disk while preserving the earlier browser-before-terminal teardown rule.
+
+Verification:
+
+- `./scripts/prepare-ghosttykit.sh` completes before build and smoke gates.
+- `swift build` completes cleanly.
+- `swift run ContinuumRevivedCoreChecks` is green, including note state, note body, metadata, and canvas round-trip checks.
+- `CONTINUUM_SMOKE_TEST=1 .build/debug/continuum-revived` exits 0 and reports the note and file gates alongside the earlier terminal, browser, canvas, persistence, and mid-exit gates.
+- Two-pass relaunch with pinned `CONTINUUM_PROJECT_ROOT` and `CONTINUUM_APP_SUPPORT` exits 0 on both passes and rehydrates the smoke note and file descriptors through the boot loop.
+- `~/Library/Logs/DiagnosticReports/` has no new Continuum crash reports after the verification run.
+
+Phase 6 exit criteria:
+
+| Criterion | Status |
+|---|---|
+| User can create a markdown note on canvas | Met through Cmd-K "New Note" and `TileSpawner.spawnNote` |
+| File/note state restores | Met through boot-loop `.note` and `.file` installer arms |
+| Note text persists across relaunch | Met through note body files plus close-path `flushNoteSave()` |
+| File tile shows plaintext content | Met through `FileTileNSView` and Cmd-K "Open File..." |
+| Binary or unavailable files fail without crashing | Met through `FileTileNSView` placeholder messages |
+| Smoke harness covers note and file restore | Met through deterministic `noteOk` and `fileOk` gates |
+| No new diagnostic reports | Verified during the closeout gate |
+
+What's deferred:
+
+- **Syntax highlighting**. File tiles render raw plain text only.
+- **Format-aware rendering**. Markdown preview, rich text, images, PDFs, and binary-aware viewers are not part of Phase 6.
+- **File watching and reload-on-focus**. File tile content is loaded at install time; external changes require relaunch or respawn.
+- **Multi-tab notes**. Each note tile owns one `.md` body; tabbed or stacked note surfaces are deferred.
+- **Search**. In-note search, file search, and cross-tile search are deferred.
+- **Attachments and linked assets**. Phase 6 does not model embedded files, pasted images, backlinks, or external note references.
+- **File tree tile**. The single-file viewer is the Phase 6 closeout surface. Async directory scanning, ignore lists, git status badges, and tree filtering remain follow-up work.
+- **Security-scoped bookmarks**. Raw file paths remain acceptable for the unsandboxed app. Sandboxed distribution needs bookmark storage before file tiles can cross app launches.
+
+Consequences:
+
+- The canvas now has four concrete tile kinds: terminal, browser, note, and file. Future tile kinds should follow the same pattern: pure Core metadata, a boot-loop switch arm, a spawner/install seam, a tile NSView, and an explicit persistence path.
+- Note bodies are inspectable project files rather than opaque app database rows, which keeps the MVP simple and agent-readable.
+- The close path is now state-first and runtime-second: save canvas, browser, and note state before tearing down browser, terminal, GhosttyKit, and WebKit resources.
+- The file tree remains a deliberate scope reduction from the Phase 6 plan. The shipped file tile covers the highest-value reference use case while avoiding a synchronous directory scan in the AppKit event loop.
