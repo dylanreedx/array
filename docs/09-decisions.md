@@ -721,3 +721,44 @@ Deferred:
 - External flows need a runner with working macOS screenshot capture and Accessibility control before their OS-level PNG reviews can be considered complete.
 - Calibrated visual scoring remains a per-ticket atlas concern; the Phase QA loop records review notes and evidence, but it does not auto-accept screenshots without human or reviewer inspection.
 - Perf baseline changes remain manual. The harness may file regressions, but it must not rewrite `qa/perf-baseline.json` during a pass.
+
+## ADR-0020: Phase QA Computer Use Deferral
+
+Date: 2026-05-09
+
+Decision:
+
+Phase QA does not integrate official Anthropic Computer Use yet. The current loop keeps using Layer A in-process capture, Layer B shell-driven macOS flows, and image-capable review because those layers already cover the QA audit goals without adding a beta API dependency to the autonomous runner.
+
+Rationale:
+
+- Layer A proves deterministic app states from inside the Swift process, including flow selection, capture output, and optional perf output.
+- Layer B already exercises the macOS behaviors that Layer A cannot model, using `osascript`, `screencapture`, and `cliclick` to drive clicks, drags, resizing, quitting, and external screenshots.
+- The review path already supports PNG inspection through atlas records and reviewer notes, so official Computer Use would duplicate the screenshot and input loop before a concrete coverage gap exists.
+- Anthropic Computer Use remains useful as a later automation layer, but adopting it now would couple QA scheduling, tool execution, screenshot capture, and API credentials before Phase QA has evidence that local shell tooling is insufficient.
+
+Deferred option A: local computer-use-like MCP server:
+
+- Build a small local MCP server that wraps `osascript`, `screencapture`, and `cliclick` behind explicit actions such as screenshot, click, type, drag, key, resize, and quit.
+- Keep the current CLI runner and QA scripts as the source of truth, with the MCP server acting as an interactive adapter for agents that need computer-use-style primitives.
+- Expected effort is medium because it needs action schemas, permission checks, screenshot return payloads, run manifests, and parity tests against `qa/flows/`.
+- Main risks are macOS privacy failures, duplicate coordinate conventions, and confusing failures when the MCP adapter and shell scripts disagree about runner state.
+
+Deferred option B: Anthropic Messages API with Computer Use:
+
+- Switch autonomous spawn from local CLI sessions to an Anthropic Messages API agent loop that declares the official `computer_20250124` tool and the `computer-use-2025-01-24` beta flag.
+- Move screenshot capture, mouse movement, keyboard input, tool-result routing, and iteration limits into the runner that executes Claude tool requests.
+- Expected effort is high because this changes orchestration, credential handling, trace capture, retry behavior, cost controls, and failure reporting.
+- Main risks are beta API churn, sensitive-screen exposure, higher operational cost, and losing the current direct shell observability unless run logs are rebuilt around tool calls.
+
+Revisit trigger:
+
+- Revisit Computer Use only after Layer A and Layer B audits prove a specific coverage gap that cannot be closed with the existing shell tools and image-capable review.
+- Valid triggers include repeated external-flow blockers caused by local tool limitations rather than host permissions, a QA requirement for adaptive visual navigation across unknown windows, or a reviewer finding that requires model-driven interaction beyond scripted flows.
+- Invalid triggers include general interest in API parity, speculative future browser automation, or replacing `qa/flows/` before those flows fail to cover a real product risk.
+
+Consequences:
+
+- Phase QA remains reproducible from local commands and repo-owned scripts.
+- Future Computer Use work has two scoped paths instead of an open-ended integration request.
+- The team can compare any later Computer Use proposal against concrete Layer A and Layer B gaps before accepting new runner complexity.
