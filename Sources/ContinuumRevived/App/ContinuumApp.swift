@@ -108,8 +108,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.tileSpawner = spawner
 
             let palette = LaunchProfilePalette()
-            palette.onSelect = { [weak self] profileId in
+            palette.onSelectProfile = { [weak self] profileId in
                 self?.spawnTerminalFromProfile(profileId)
+            }
+            palette.onSelectAction = { [weak self] action in
+                self?.performPaletteAction(action)
             }
             self.profilePalette = palette
 
@@ -454,6 +457,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             fputs("TileSpawner.spawnBrowser invalid URL: \(url)\n", stderr)
         case let .failure(error):
             fputs("TileSpawner.spawnBrowser failed: \(error)\n", stderr)
+        }
+    }
+
+    private func performPaletteAction(_ action: LaunchPaletteAction) {
+        switch action {
+        case .newNote:
+            spawnNoteFromPalette()
+        case .openFile:
+            openFileFromPalette()
+        }
+    }
+
+    private func spawnNoteFromPalette() {
+        guard let spawner = tileSpawner else { return }
+        switch spawner.spawnNote(title: "New Note") {
+        case .spawned:
+            break
+        case let .failure(error):
+            fputs("TileSpawner.spawnNote failed: \(error)\n", stderr)
+        }
+    }
+
+    private func openFileFromPalette() {
+        guard let spawner = tileSpawner,
+              let project = activeProject else { return }
+        let projectRoot = URL(fileURLWithPath: project.rootPath, isDirectory: true)
+        let panel = NSOpenPanel()
+        panel.title = "Open File"
+        panel.directoryURL = projectRoot
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+
+        guard panel.runModal() == .OK,
+              let selectedURL = panel.url else { return }
+        guard LaunchPaletteModel.isFileURL(selectedURL, insideProjectRoot: projectRoot) else {
+            NSSound.beep()
+            return
+        }
+
+        switch spawner.spawnFile(path: selectedURL.standardizedFileURL.path, title: selectedURL.lastPathComponent) {
+        case .spawned:
+            break
+        case .invalidPath:
+            fputs("TileSpawner.spawnFile rejected empty file path\n", stderr)
+        case let .failure(error):
+            fputs("TileSpawner.spawnFile failed: \(error)\n", stderr)
         }
     }
 

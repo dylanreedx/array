@@ -30,6 +30,10 @@ let package = Package(
         .executableTarget(
             name: "ContinuumRevivedCoreChecks",
             dependencies: ["ContinuumRevivedCore"]
+        ),
+        .executableTarget(
+            name: "ContinuumRevivedPaletteChecks",
+            dependencies: ["ContinuumRevivedCore"]
         )
     ]
 )
