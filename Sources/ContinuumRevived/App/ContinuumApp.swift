@@ -462,6 +462,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let app = try? ghostty?.app {
             ghostty_app_set_focus(app, true)
         }
+        if let targetId = canvasView?.canvasState.lastActiveTileId {
+            if let m = runtimes.first(where: { $0.tileId == targetId }) {
+                m.focus(); return
+            }
+            if let m = browserRuntimes.first(where: { $0.tileId == targetId }) {
+                m.focus(); return
+            }
+        }
         runtimes.last?.focus()
     }
 
