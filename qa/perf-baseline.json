@@ -1,0 +1,24 @@
+{
+  "metrics": {
+    "drag-latency-p95": {
+      "comparison": "lessThanOrEqual",
+      "limit": 8,
+      "unit": "ms"
+    },
+    "launch-time": {
+      "comparison": "lessThanOrEqual",
+      "limit": 2500,
+      "unit": "ms"
+    },
+    "memory-at-10-tiles": {
+      "comparison": "lessThanOrEqual",
+      "limit": 524288000,
+      "unit": "bytes"
+    },
+    "palette-leak-delta": {
+      "comparison": "lessThanOrEqual",
+      "limit": 5242880,
+      "unit": "bytes"
+    }
+  }
+}

@@ -55,6 +55,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var activeProject: Project?
     private var tileSpawner: TileSpawner?
     private var profilePalette: LaunchProfilePalette?
+    private var qaPerf: QAPerf?
+    private var launchStartTime: CFTimeInterval?
     private var hotkeyMonitor: Any?
     private static let smokeNoteId = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
     private static let smokeNoteTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000010")!
@@ -63,6 +65,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private static let smokeFileBody = "smoke-file-ok"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        launchStartTime = QAPerf.timestamp()
+        qaPerf = QAPerf()
         do {
             let projectRoot = Self.resolveProjectRoot(smokeTest: smokeTestEnabled)
             let appSupportDir = Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
@@ -859,6 +863,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case canvasZoomPanEdge = "canvas-zoom-pan-edge"
         case emptyCanvas = "empty-canvas"
         case restartPlaceholderClick = "restart-placeholder-click"
+        case terminalStress10 = "terminal-stress-10"
+        case paletteLeakCheck = "palette-leak-check"
     }
 
     private func runSmokeTest(window: NSWindow, runtime: GhosttyTerminalRuntime) {
@@ -897,6 +903,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             runEmptyCanvasFlow(window: window)
         case .restartPlaceholderClick:
             runRestartPlaceholderClickFlow(window: window)
+        case .terminalStress10:
+            runTerminalStress10Flow(window: window)
+        case .paletteLeakCheck:
+            runPaletteLeakCheckFlow(window: window)
         }
     }
 
@@ -914,6 +924,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         // 1.0s — exercise the IME/text path (ghostty_surface_text)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            self.recordLaunchTime()
             runtime.sendInput(Data("echo ghostty-ok\n".utf8))
             capture("echo-text", tSec: 1.0)
         }
@@ -1238,6 +1249,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
             capture("final-state", tSec: 6.0)
             qaCapture?.writeManifest()
+            self.qaPerf?.writeReport()
 
             // Exercise the production close path: any crash on shutdown surfaces
             // here rather than being hidden behind the manual-teardown shortcut.
@@ -1259,6 +1271,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return (qaCapture, capture)
     }
 
+    private func recordLaunchTime() {
+        guard let launchStartTime else { return }
+        let elapsedMs = (QAPerf.timestamp() - launchStartTime) * 1000
+        qaPerf?.recordValue(key: "launch-time", value: elapsedMs, unit: "ms")
+        self.launchStartTime = nil
+    }
+
     private func finishQAFlow(
         window: NSWindow,
         qaCapture: QACapture?,
@@ -1269,8 +1288,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         notes: String? = nil
     ) {
         DispatchQueue.main.asyncAfter(deadline: .now() + tSec) {
+            self.recordLaunchTime()
             capture(step, tSec, notes)
             qaCapture?.writeManifest()
+            self.qaPerf?.writeReport()
             self.smokeTestExitCode = success ? 0 : 2
             window.performClose(nil)
         }
@@ -1438,11 +1459,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 capture("canvas-drag-resize-skipped", 0.4, "terminal tile unavailable")
                 return
             }
-            let moved = CanvasEngine.tile(
-                terminalTile,
-                draggedByScreenDelta: CGSize(width: 80, height: 30),
-                viewport: canvasView.viewport
-            )
+            var latencies: [Double] = []
+            var moved = terminalTile
+            for index in 0..<200 {
+                let started = QAPerf.timestamp()
+                moved = CanvasEngine.tile(
+                    moved,
+                    draggedByScreenDelta: CGSize(width: index.isMultiple(of: 2) ? 1 : -1, height: 0),
+                    viewport: canvasView.viewport
+                )
+                canvasView.updateTile(moved)
+                latencies.append((QAPerf.timestamp() - started) * 1000)
+            }
             let resized = CanvasEngine.tile(
                 moved,
                 resizedByScreenDelta: CGSize(width: 100, height: 60),
@@ -1450,7 +1478,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 viewport: canvasView.viewport
             )
             canvasView.updateTile(resized)
-            capture("canvas-drag-resize-applied", 0.4, nil)
+            self.qaPerf?.recordSamples(key: "drag-latency-p95", samples: latencies, unit: "ms")
+            capture("canvas-drag-resize-applied", 0.4, "measured 200 updateTile calls")
         }
         finishQAFlow(
             window: window,
@@ -1458,6 +1487,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             capture: capture,
             step: "canvas-drag-resize-final-state",
             tSec: 1.0,
+            success: true
+        )
+    }
+
+    private func runTerminalStress10Flow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        let memoryBefore = QAPerf.residentMemoryBytes()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            var spawned = 0
+            for _ in 0..<10 {
+                if self.spawnTerminalForQA(profileId: "shell").hasPrefix("spawned profile") {
+                    spawned += 1
+                }
+            }
+            capture("terminal-stress-spawned", 0.4, "spawned \(spawned) shell tiles")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+            let memoryAfter = QAPerf.residentMemoryBytes()
+            let delta = Int64(memoryAfter) - Int64(memoryBefore)
+            self.qaPerf?.recordValue(key: "memory-at-10-tiles", value: Double(delta), unit: "bytes")
+            capture("terminal-stress-memory-sampled", 1.4, "delta \(delta) bytes")
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "terminal-stress-final-state",
+            tSec: 1.8,
+            success: true
+        )
+    }
+
+    private func runPaletteLeakCheckFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        let memoryBefore = QAPerf.residentMemoryBytes()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            for _ in 0..<25 {
+                self.openProfilePalette()
+                self.profilePalette?.close()
+            }
+            capture("palette-leak-cycle", 0.4, "opened and closed Cmd-K 25 times")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            let memoryAfter = QAPerf.residentMemoryBytes()
+            let delta = Int64(memoryAfter) - Int64(memoryBefore)
+            self.qaPerf?.recordValue(key: "palette-leak-delta", value: Double(delta), unit: "bytes")
+            capture("palette-leak-memory-sampled", 0.8, "delta \(delta) bytes")
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "palette-leak-final-state",
+            tSec: 1.1,
             success: true
         )
     }
