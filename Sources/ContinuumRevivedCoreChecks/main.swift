@@ -175,6 +175,60 @@ do {
     expect(decoded == browser, "BrowserState round trip")
 }
 
+// MARK: - AtomicWriter
+
+do {
+    let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-checks-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: scratch) }
+
+    let url = scratch.appendingPathComponent("project.json")
+    let backupsDir = scratch.appendingPathComponent("backups")
+    let writer = AtomicWriter(backupsDirectory: backupsDir, retainedBackups: 2)
+
+    func makeProject(name: String) -> Project {
+        Project(
+            name: name,
+            rootPath: scratch.path,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning
+            )
+        )
+    }
+
+    // First write: no backup possible, just establishes the file.
+    try writer.write(makeProject(name: "v1"), to: url)
+    expect(FileManager.default.fileExists(atPath: url.path), "AtomicWriter creates target file")
+    let v1Read: Project = try writer.read(at: url)
+    expect(v1Read.name == "v1", "AtomicWriter reads what it just wrote")
+
+    // Second write: previous content backed up.
+    try writer.write(makeProject(name: "v2"), to: url)
+    let v2Read: Project = try writer.read(at: url)
+    expect(v2Read.name == "v2", "AtomicWriter advances to v2")
+    let backupsAfter2 = (try FileManager.default.contentsOfDirectory(atPath: backupsDir.path)).filter { $0.hasPrefix("project.") }
+    expect(backupsAfter2.count == 1, "After 2 writes there is 1 backup, got \(backupsAfter2)")
+
+    // Third and fourth writes: backup count capped at retainedBackups (2).
+    try writer.write(makeProject(name: "v3"), to: url)
+    try writer.write(makeProject(name: "v4"), to: url)
+    let backupsAfter4 = (try FileManager.default.contentsOfDirectory(atPath: backupsDir.path)).filter { $0.hasPrefix("project.") }
+    expect(backupsAfter4.count == 2, "Backup retention caps at 2, got \(backupsAfter4)")
+
+    // Corrupt the main file; reader must fall back to the most recent backup.
+    try Data("not json".utf8).write(to: url)
+    let recovered: Project = try writer.read(at: url)
+    // Most recent backup contains v3 (the value before v4 overwrote it).
+    expect(recovered.name == "v3", "AtomicWriter recovers from corruption via newest backup, got \(recovered.name)")
+}
+
 // MARK: - Registry round trip
 
 do {
