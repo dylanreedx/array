@@ -212,6 +212,12 @@ final class TileSpawner {
         case failure(Error)
     }
 
+    enum FileOutcome {
+        case spawned(tileId: UUID)
+        case invalidPath
+        case failure(Error)
+    }
+
     enum BrowserOutcome {
         case spawned(WKWebViewBrowserRuntime)
         case invalidURL(String)
@@ -471,6 +477,46 @@ final class TileSpawner {
             ))
         }
         try projectStore.saveNoteState(state)
+    }
+
+    // MARK: - File tiles
+
+    /// Spawns a read-only file preview tile and persists the canvas state.
+    func spawnFile(path: String, title: String? = nil, at worldPoint: CGPoint? = nil) -> FileOutcome {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty else { return .invalidPath }
+
+        let frame = makePlacement(
+            worldPoint: worldPoint,
+            size: CanvasEngine.defaultFrame(for: .file),
+            in: canvasView
+        )
+        let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
+        let tile = Tile(
+            id: UUID(),
+            kind: .file,
+            title: title ?? URL(fileURLWithPath: trimmedPath).lastPathComponent,
+            frame: frame,
+            zIndex: nextZ,
+            runtimeRef: nil,
+            metadata: TileMetadata(filePath: trimmedPath)
+        )
+        let view = FileTileNSView(tile: tile)
+        canvasView.install(tileView: view, for: tile)
+
+        do {
+            try projectStore.saveCanvas(canvasView.canvasState)
+        } catch {
+            return .failure(error)
+        }
+        return .spawned(tileId: tile.id)
+    }
+
+    /// Installs a file tile view for an existing `Tile` during canvas restore.
+    func installFileTile(_ tile: Tile, in canvasView: CanvasNSView) {
+        let view = FileTileNSView(tile: tile)
+        canvasView.install(tileView: view, for: tile)
     }
 
     private func makePlacement(worldPoint: CGPoint?, size: CGSize, in canvasView: CanvasNSView) -> TileFrame {

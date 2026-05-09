@@ -180,6 +180,57 @@ do {
     expect(decoded == browser, "BrowserState round trip")
 }
 
+// MARK: - FilePreview
+
+do {
+    let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-file-preview-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: scratch) }
+
+    let textFile = scratch.appendingPathComponent("hello.txt")
+    try Data("hello file tile".utf8).write(to: textFile)
+    let textPreview = FilePreview.load(path: textFile.path)
+    expect(textPreview == .text("hello file tile"), "FilePreview loads UTF-8 text")
+
+    let missingPreview = FilePreview.load(path: scratch.appendingPathComponent("missing.txt").path)
+    expect(missingPreview == .unavailable("File not found"), "FilePreview reports missing files")
+
+    let directoryPreview = FilePreview.load(path: scratch.path)
+    expect(directoryPreview == .unavailable("File not found"), "FilePreview rejects directories")
+
+    let devNullPreview = FilePreview.load(path: "/dev/null")
+    expect(devNullPreview == .unavailable("File not found"), "FilePreview rejects non-regular files")
+
+    let unreadableFile = scratch.appendingPathComponent("unreadable.txt")
+    try Data("hidden".utf8).write(to: unreadableFile)
+    try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: unreadableFile.path)
+    let unreadablePreview = FilePreview.load(path: unreadableFile.path)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: unreadableFile.path)
+    expect(unreadablePreview == .unavailable("File not found"), "FilePreview reports unreadable files")
+
+    let utf8BOMFile = scratch.appendingPathComponent("utf8-bom.txt")
+    try Data([0xEF, 0xBB, 0xBF, 0x68, 0x69]).write(to: utf8BOMFile)
+    let utf8BOMPreview = FilePreview.load(path: utf8BOMFile.path)
+    expect(utf8BOMPreview == .text("hi"), "FilePreview accepts UTF-8 BOM files")
+
+    let binaryFile = scratch.appendingPathComponent("binary.bin")
+    try Data([0x41, 0x00, 0x42]).write(to: binaryFile)
+    let binaryPreview = FilePreview.load(path: binaryFile.path)
+    expect(binaryPreview == .unavailable("Binary file -- open in preferred editor"), "FilePreview rejects null-byte binary files")
+
+    let utf16File = scratch.appendingPathComponent("utf16.txt")
+    try Data([0xFF, 0xFE, 0x41, 0x00]).write(to: utf16File)
+    let utf16Preview = FilePreview.load(path: utf16File.path)
+    expect(utf16Preview == .unavailable("Binary file -- open in preferred editor"), "FilePreview rejects non-UTF-8 BOM files")
+
+    let largeFile = scratch.appendingPathComponent("large.txt")
+    let largeBytes = Data(repeating: 0x61, count: FilePreview.maxReadBytes + 1)
+    try largeBytes.write(to: largeFile)
+    let largePreview = FilePreview.load(path: largeFile.path)
+    expect(largePreview == .unavailable("File too large to preview (> 1 MB)"), "FilePreview rejects oversized files")
+}
+
 // MARK: - AtomicWriter
 
 do {
