@@ -45,6 +45,12 @@ qa-runs/<flow>-<timestamp>/
 
 The top-level `manifest.json` records external driver steps. The optional `capture/manifest.json` comes from the app-side Layer A capture path when the flow launches the app with `CONTINUUM_QA_CAPTURE`.
 
+## Reviewing A Run
+
+Use `qa/reviewer-prompt.md` as the reviewer contract. It requires reviewers to read `manifest.json`, inspect every event PNG, compare the run against `docs/05-canvas-and-ux.md` and `qa/expectations/<flow>.md`, and file defects with `qa/file-finding.sh`.
+
+`qa/file-finding.sh` writes normal pending Conductor bugfix tasks with `[qa-finding][severity]` descriptions. The wrapper computes a fingerprint from severity, summary, flow, and step, then skips filing when a pending task already contains that fingerprint.
+
 ## Flows
 
 - `qa/flows/cmdk-spam.sh`: opens and closes Cmd-K repeatedly with `cliclick` and captures the final palette state.
