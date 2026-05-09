@@ -159,6 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func installInitialTerminalTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
         switch spawner.restartTerminalTile(tileId: tile.id) {
         case let .restarted(runtime):
+            wireRuntimeExitHandler(runtime)
             runtimes.append(runtime)
         case let .missingCommand(executable):
             installRestartPlaceholder(
@@ -216,10 +217,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasView.install(tileView: view, for: tile)
     }
 
+    private func wireRuntimeExitHandler(_ runtime: GhosttyTerminalRuntime) {
+        runtime.onRuntimeExited = { [weak self] runtimeId, exitCode in
+            self?.handleRuntimeExited(runtimeId: runtimeId, exitCode: exitCode)
+        }
+    }
+
+    private func handleRuntimeExited(runtimeId: TerminalSessionID, exitCode: Int32?) {
+        // Late .exited after windowWillClose teardown -- already handled there.
+        guard let runtime = runtimes.first(where: { $0.id == runtimeId }) else { return }
+        let tileId = runtime.tileId
+
+        if let projectStore, var descriptor = try? projectStore.loadSession(id: runtimeId) {
+            descriptor.lastExit = TerminalLastExit(exitCode: exitCode, signal: nil, at: Date())
+            try? projectStore.saveSession(descriptor)
+        }
+
+        runtimes.removeAll { $0.id == runtimeId }
+        runtime.terminate(policy: .force)
+
+        guard let canvasView,
+              let tile = canvasView.canvasState.tiles.first(where: { $0.id == tileId })
+        else { return }
+
+        let statusText: String
+        if let exitCode {
+            statusText = "Shell exited (code \(exitCode))"
+        } else {
+            statusText = "Shell exited"
+        }
+        installRestartPlaceholder(for: tile, statusText: statusText, restartable: true, in: canvasView)
+    }
+
     private func restartTile(tileId: UUID) {
         guard let spawner = tileSpawner, let canvasView else { return }
         switch spawner.restartTerminalTile(tileId: tileId) {
         case let .restarted(runtime):
+            wireRuntimeExitHandler(runtime)
             runtimes.append(runtime)
         case let .missingCommand(executable):
             if let tile = canvasView.canvasState.tiles.first(where: { $0.id == tileId }) {
@@ -349,6 +383,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let spawner = tileSpawner else { return }
         switch spawner.spawnTerminal(profileId: profileId) {
         case let .spawned(runtime):
+            wireRuntimeExitHandler(runtime)
             runtimes.append(runtime)
         case let .missingCommand(executable):
             presentMissingCommand(executable: executable, profileId: profileId)
@@ -647,6 +682,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let spawner = self.tileSpawner else { return }
             switch spawner.spawnTerminal(profileId: "shell") {
             case let .spawned(secondary):
+                self.wireRuntimeExitHandler(secondary)
                 self.runtimes.append(secondary)
                 secondaryRuntimeId = secondary.id
                 secondaryTileId = secondary.tileId
@@ -670,6 +706,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             runtime.dispatchKeyDown(keyCode: 0x24, characters: "\r")
         }
 
+        // 3.0s — P5.x: send `exit` to the secondary so we can observe the
+        // mid-session runtime-exit detection swap the live tile for a
+        // Restart placeholder.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            if let id = secondaryRuntimeId,
+               let secondary = self.runtimes.first(where: { $0.id == id }) {
+                secondary.sendInput(Data("exit\n".utf8))
+            }
+        }
         // 3.5s — window resize must still complete without crashing.
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
             window.setContentSize(NSSize(width: 860, height: 540))
@@ -726,8 +771,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         }
 
-        // 5.0s — verify and close through the production close path.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+        // 6.0s — verify and close through the production close path.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
             let visibleText = runtime.visibleText()
             let occurrences = visibleText.components(separatedBy: "ghostty-ok").count - 1
             let textPathOk = occurrences >= 1
@@ -756,6 +801,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             var canvasOk = false
             var multiTerminalOk = false
             var browserOk = false
+            var midExitOk = false
             do {
                 let project = try self.projectStore?.loadProject()
                 let sessions = try self.projectStore?.listSessions() ?? []
@@ -791,7 +837,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 } ?? false
                 let liveRuntimeIds = Set(self.runtimes.map { $0.id })
                 let noOrphanSessions = sessions.allSatisfy { session in
-                    liveRuntimeIds.contains(session.id)
+                    session.lastExit != nil || liveRuntimeIds.contains(session.id)
                 }
                 multiTerminalOk =
                     noOrphanSessions
@@ -800,6 +846,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     && bothLiveHaveProfile
                     && distinctLiveTileIds
                     && secondaryOnCanvas
+
+                // P5.x: assert the mid-session exit handler swapped the secondary's
+                // live tile for a TerminalRestartTileNSView and stamped lastExit
+                // on its descriptor. The runtime must no longer be live.
+                if let id = secondaryRuntimeId, let tileId = secondaryTileId {
+                    let runtimeRemoved = !self.runtimes.contains(where: { $0.id == id })
+                    let placeholderInstalled = self.canvasView?.tileView(for: tileId) is TerminalRestartTileNSView
+                    let descriptorStamped = sessions.first(where: { $0.id == id })?.lastExit != nil
+                    midExitOk = runtimeRemoved && placeholderInstalled && descriptorStamped
+                    if !midExitOk {
+                        fputs(
+                            "Mid-exit check: runtimeRemoved=\(runtimeRemoved) placeholderInstalled=\(placeholderInstalled) descriptorStamped=\(descriptorStamped)\n",
+                            stderr
+                        )
+                    }
+                }
 
                 // P5.6: assert the spawned WKWebView browser landed on disk
                 // with the data: URL, the title KVO + persistence path captured
@@ -835,8 +897,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 fputs("Persistence check threw: \(error)\n", stderr)
             }
 
-            if textPathOk && keyPathOk && scrollOk && persistenceOk && canvasOk && multiTerminalOk && browserOk {
-                print("Ghostty smoke test passed (text + key + scroll + persistence + canvas + multiTerminal + browser, occurrences=\(occurrences))")
+            if textPathOk && keyPathOk && scrollOk && persistenceOk && canvasOk && multiTerminalOk && browserOk && midExitOk {
+                print("Ghostty smoke test passed (text + key + scroll + persistence + canvas + multiTerminal + browser + midExit, occurrences=\(occurrences))")
                 if ProcessInfo.processInfo.environment["CONTINUUM_DUMP_VISIBLE"] == "1" {
                     fputs("--- pre-scroll visible text ---\n", stderr)
                     fputs(preScrollText, stderr)
@@ -847,7 +909,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self.smokeTestExitCode = 0
             } else {
                 fputs(
-                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) occurrences=\(occurrences)\n",
+                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) midExitOk=\(midExitOk) occurrences=\(occurrences)\n",
                     stderr
                 )
                 fputs("--- pre-scroll ---\n", stderr)

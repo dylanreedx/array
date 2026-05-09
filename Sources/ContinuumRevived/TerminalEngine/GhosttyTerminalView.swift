@@ -8,6 +8,7 @@ final class GhosttyTerminalView: NSView {
     private let launchProfile: LaunchProfile
     private let statusChanged: (TerminalStatus) -> Void
     private(set) var surface: ghostty_surface_t?
+    private var processExitPoller: Timer?
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -309,9 +310,30 @@ final class GhosttyTerminalView: NSView {
 
         statusChanged(.running)
         updateSurfaceSize()
+        startProcessExitPoller()
+    }
+
+    private func startProcessExitPoller() {
+        // Poll ghostty_surface_process_exited at 250ms intervals. The
+        // close_surface_cb path is only triggered by explicit requestClose
+        // calls in this Ghostty build; natural shell exits (e.g. `exit`
+        // typed at the prompt) are only observable via this polling API.
+        processExitPoller = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let surface = self.surface else { return }
+                if ghostty_surface_process_exited(surface) {
+                    self.processExitPoller?.invalidate()
+                    self.processExitPoller = nil
+                    self.statusChanged(.exited(exitCode: nil))
+                    self.closeSurface()
+                }
+            }
+        }
     }
 
     private func closeSurface() {
+        processExitPoller?.invalidate()
+        processExitPoller = nil
         guard let surface else { return }
         self.surface = nil
         ghostty_surface_free(surface)

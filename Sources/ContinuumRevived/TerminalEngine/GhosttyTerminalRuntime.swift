@@ -14,6 +14,11 @@ final class GhosttyTerminalRuntime: TerminalRuntime {
     private var state = TerminalRuntimeState()
     private weak var hostView: TerminalHostView?
     private var terminalView: GhosttyTerminalView?
+    private var didNotifyExit = false
+
+    /// Invoked when the underlying shell exits while the runtime is attached.
+    /// Fires at most once per runtime instance. Always called on MainActor.
+    var onRuntimeExited: ((TerminalSessionID, Int32?) -> Void)?
 
     var status: TerminalStatus { state.status }
 
@@ -46,6 +51,10 @@ final class GhosttyTerminalRuntime: TerminalRuntime {
                 self.state.markRunning()
             case .exited(let exitCode):
                 self.state.markExited(exitCode: exitCode)
+                if !self.didNotifyExit {
+                    self.didNotifyExit = true
+                    self.onRuntimeExited?(self.id, exitCode)
+                }
             case .error(let message):
                 self.state.markError(message)
             }

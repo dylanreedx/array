@@ -47,6 +47,10 @@ final class CanvasNSView: NSView {
         }
     }
 
+    func tileView(for tileId: UUID) -> TileNSView? {
+        tileViews[tileId]
+    }
+
     func updateTile(_ tile: Tile) {
         guard let idx = canvasState.tiles.firstIndex(where: { $0.id == tile.id }) else { return }
         canvasState.tiles[idx] = tile
