@@ -982,4 +982,236 @@ do {
     expect(!survivingIds.contains(exitedSignal.id), "exitedSignal descriptor was pruned")
 }
 
+// MARK: - NoteState round trip
+
+do {
+    let noteId = UUID(uuidString: "CCCCCCCC-1111-1111-1111-111111111111")!
+    let tileId = UUID(uuidString: "CCCCCCCC-2222-2222-2222-222222222222")!
+    let tile = NoteTile(
+        id: noteId,
+        tileId: tileId,
+        filename: "\(noteId.uuidString).md",
+        title: "My Note",
+        createdAt: Date(timeIntervalSinceReferenceDate: 700_000_000),
+        updatedAt: Date(timeIntervalSinceReferenceDate: 700_000_500)
+    )
+    let state = NoteState(tiles: [tile])
+    let data = try JSONCodec.makeEncoder().encode(state)
+    let decoded = try JSONCodec.makeDecoder().decode(NoteState.self, from: data)
+    expect(decoded == state, "NoteState round trip")
+    expect(decoded.schemaVersion == NoteState.currentSchemaVersion, "NoteState schema version == 1")
+    expect(NoteState.currentSchemaVersion == 1, "NoteState.currentSchemaVersion is 1")
+    let json = String(data: data, encoding: .utf8) ?? ""
+    expect(json.contains("\"schemaVersion\":1"), "NoteState encodes schemaVersion as 1")
+    expect(json.contains("\"filename\":"), "NoteState encodes filename field")
+}
+
+// MARK: - NoteTile round trip
+
+do {
+    let noteId = UUID(uuidString: "DDDDDDDD-1111-1111-1111-111111111111")!
+    let tileId = UUID(uuidString: "DDDDDDDD-2222-2222-2222-222222222222")!
+    let tile = NoteTile(
+        id: noteId,
+        tileId: tileId,
+        filename: "\(noteId.uuidString).md",
+        title: "Round Trip Note",
+        createdAt: Date(timeIntervalSinceReferenceDate: 700_000_000),
+        updatedAt: Date(timeIntervalSinceReferenceDate: 700_000_500)
+    )
+    let state = NoteState(tiles: [tile])
+    let data = try JSONCodec.makeEncoder().encode(state)
+    let decoded = try JSONCodec.makeDecoder().decode(NoteState.self, from: data)
+    let decodedTile = decoded.tiles.first!
+    expect(decodedTile.filename == "\(noteId.uuidString).md", "NoteTile filename round trips correctly")
+    expect(decodedTile.createdAt == Date(timeIntervalSinceReferenceDate: 700_000_000), "NoteTile createdAt survives round trip")
+    expect(decodedTile.updatedAt == Date(timeIntervalSinceReferenceDate: 700_000_500), "NoteTile updatedAt survives round trip")
+}
+
+// MARK: - TileMetadata noteId + filePath
+
+do {
+    let someUUID = UUID(uuidString: "EEEEEEEE-1111-1111-1111-111111111111")!
+
+    // Sub-case A: noteId only
+    let metaA = TileMetadata(noteId: someUUID)
+    let dataA = try JSONCodec.makeEncoder().encode(metaA)
+    let jsonA = String(data: dataA, encoding: .utf8) ?? ""
+    expect(jsonA.contains("noteId"), "TileMetadata with noteId encodes noteId")
+    expect(!jsonA.contains("filePath"), "TileMetadata with noteId only omits filePath")
+
+    // Sub-case B: filePath only
+    let metaB = TileMetadata(filePath: "/tmp/foo.swift")
+    let dataB = try JSONCodec.makeEncoder().encode(metaB)
+    let jsonB = String(data: dataB, encoding: .utf8) ?? ""
+    expect(jsonB.contains("filePath"), "TileMetadata with filePath encodes filePath")
+    expect(!jsonB.contains("noteId"), "TileMetadata with filePath only omits noteId")
+
+    // Sub-case C: both noteId and filePath
+    let metaC = TileMetadata(noteId: someUUID, filePath: "/tmp/bar.md")
+    let dataC = try JSONCodec.makeEncoder().encode(metaC)
+    let jsonC = String(data: dataC, encoding: .utf8) ?? ""
+    expect(jsonC.contains("noteId"), "TileMetadata with both fields encodes noteId")
+    expect(jsonC.contains("filePath"), "TileMetadata with both fields encodes filePath")
+    let decodedC = try JSONCodec.makeDecoder().decode(TileMetadata.self, from: dataC)
+    expect(decodedC == metaC, "TileMetadata with both fields round trips correctly")
+
+    // Sub-case D: no params
+    let metaD = TileMetadata()
+    let dataD = try JSONCodec.makeEncoder().encode(metaD)
+    let jsonD = String(data: dataD, encoding: .utf8) ?? ""
+    expect(!jsonD.contains("noteId"), "TileMetadata() omits noteId")
+    expect(!jsonD.contains("filePath"), "TileMetadata() omits filePath")
+    expect(!jsonD.contains("\"url\""), "TileMetadata() omits url (existing check)")
+}
+
+// MARK: - CanvasState heterogeneous multi-tile round trip
+
+do {
+    let termTileId = UUID(uuidString: "FFFFFFFF-1111-1111-1111-111111111111")!
+    let browserTileId = UUID(uuidString: "FFFFFFFF-2222-2222-2222-222222222222")!
+    let noteTileId = UUID(uuidString: "FFFFFFFF-3333-3333-3333-333333333333")!
+    let fileTileId = UUID(uuidString: "FFFFFFFF-4444-4444-4444-444444444444")!
+    let noteId = UUID(uuidString: "FFFFFFFF-5555-5555-5555-555555555555")!
+
+    let termTile = Tile(
+        id: termTileId,
+        kind: .terminal,
+        title: "Terminal",
+        frame: TileFrame(x: 0, y: 0, width: 600, height: 400),
+        zIndex: 1,
+        runtimeRef: nil,
+        metadata: TileMetadata(launchProfileId: "shell", projectRelativeCwd: ".")
+    )
+    let browserTile = Tile(
+        id: browserTileId,
+        kind: .browser,
+        title: "Browser",
+        frame: TileFrame(x: 700, y: 0, width: 600, height: 400),
+        zIndex: 2,
+        runtimeRef: nil,
+        metadata: TileMetadata(url: "http://localhost:3000")
+    )
+    let noteTile = Tile(
+        id: noteTileId,
+        kind: .note,
+        title: "Note",
+        frame: TileFrame(x: 0, y: 500, width: 400, height: 300),
+        zIndex: 3,
+        runtimeRef: nil,
+        metadata: TileMetadata(noteId: noteId)
+    )
+    let fileTile = Tile(
+        id: fileTileId,
+        kind: .file,
+        title: "File",
+        frame: TileFrame(x: 500, y: 500, width: 400, height: 300),
+        zIndex: 4,
+        runtimeRef: nil,
+        metadata: TileMetadata(filePath: "/tmp/readme.md")
+    )
+
+    let canvas = CanvasState(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1.0),
+        tiles: [termTile, browserTile, noteTile, fileTile],
+        groups: [],
+        lastActiveTileId: nil
+    )
+    let data = try JSONCodec.makeEncoder().encode(canvas)
+    let decoded = try JSONCodec.makeDecoder().decode(CanvasState.self, from: data)
+    expect(decoded.tiles.count == 4, "Heterogeneous canvas has 4 tiles, got \(decoded.tiles.count)")
+    expect(decoded == canvas, "Heterogeneous multi-tile canvas round trips correctly")
+
+    let decodedNote = decoded.tiles.first { $0.id == noteTileId }!
+    let decodedFile = decoded.tiles.first { $0.id == fileTileId }!
+    let decodedTerm = decoded.tiles.first { $0.id == termTileId }!
+
+    expect(decodedNote.metadata.noteId != nil, "Decoded note tile has noteId set")
+    expect(decodedNote.metadata.filePath == nil, "Decoded note tile has filePath nil")
+    expect(decodedFile.metadata.filePath != nil, "Decoded file tile has filePath set")
+    expect(decodedFile.metadata.noteId == nil, "Decoded file tile has noteId nil")
+    expect(decodedTerm.metadata.noteId == nil, "Decoded terminal tile has noteId nil")
+    expect(decodedTerm.metadata.filePath == nil, "Decoded terminal tile has filePath nil")
+}
+
+// MARK: - ProjectStore note save/load round trip
+
+do {
+    let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-notes-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: scratch) }
+
+    let store = ProjectStore(projectRoot: scratch, retainedBackups: 2)
+
+    // tryLoadNoteState before any save → nil
+    let initial = try store.tryLoadNoteState()
+    expect(initial == nil, "tryLoadNoteState returns nil before any save")
+
+    // Save and reload NoteState
+    let noteId = UUID()
+    let tileId = UUID()
+    let tile = NoteTile(
+        id: noteId,
+        tileId: tileId,
+        filename: "\(noteId.uuidString).md",
+        title: "My First Note",
+        createdAt: Date(timeIntervalSinceReferenceDate: 700_000_000),
+        updatedAt: Date(timeIntervalSinceReferenceDate: 700_000_500)
+    )
+    let noteState = NoteState(tiles: [tile])
+    try store.saveNoteState(noteState)
+    let loaded = try store.loadNoteState()
+    expect(loaded == noteState, "loadNoteState returns saved NoteState")
+    expect(
+        FileManager.default.fileExists(atPath: store.layout.notesIndexFile.path),
+        "notesIndexFile exists after save"
+    )
+
+    // Save and load body
+    try store.saveNoteBody(id: noteId, text: "hello world")
+    let body = try store.loadNoteBody(id: noteId)
+    expect(body == "hello world", "loadNoteBody returns saved text")
+
+    // noteFile path has correct suffix
+    expect(
+        store.layout.noteFile(id: noteId).path.hasSuffix("\(noteId.uuidString).md"),
+        "noteFile(id:) path ends with <uuid>.md"
+    )
+
+    // tryLoadNoteBody for non-existent id → nil (no throw)
+    let missing = store.tryLoadNoteBody(id: UUID())
+    expect(missing == nil, "tryLoadNoteBody returns nil for non-existent note")
+
+    // Update body
+    try store.saveNoteBody(id: noteId, text: "updated text")
+    let updated = try store.loadNoteBody(id: noteId)
+    expect(updated == "updated text", "loadNoteBody returns updated text after resave")
+}
+
+// MARK: - NoteState future-version refusal
+
+do {
+    let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-notes-future-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: scratch) }
+
+    let store = ProjectStore(projectRoot: scratch, retainedBackups: 1)
+
+    let futureNoteState = NoteState(
+        schemaVersion: NoteState.currentSchemaVersion + 99,
+        tiles: []
+    )
+    try store.saveNoteState(futureNoteState)
+
+    do {
+        _ = try store.loadNoteState()
+        expect(false, "Future NoteState schema version should refuse load")
+    } catch let ProjectStoreError.unknownFutureSchema(_, version, supported) {
+        expect(version > supported, "Unknown future NoteState schema reports version > supported")
+    } catch {
+        expect(false, "Future NoteState schema should throw unknownFutureSchema, threw \(error)")
+    }
+}
+
 print("ContinuumRevivedCoreChecks passed")

@@ -36,6 +36,18 @@ public struct ProjectStoreLayout: Sendable {
         browserDirectory.appendingPathComponent("tiles.json", isDirectory: false)
     }
 
+    public var notesDirectory: URL {
+        stateRoot.appendingPathComponent("notes", isDirectory: true)
+    }
+
+    public var notesIndexFile: URL {
+        notesDirectory.appendingPathComponent("index.json", isDirectory: false)
+    }
+
+    public func noteFile(id: UUID) -> URL {
+        notesDirectory.appendingPathComponent("\(id.uuidString).md", isDirectory: false)
+    }
+
     public var backupsDirectory: URL {
         stateRoot.appendingPathComponent("backups", isDirectory: true)
     }
@@ -157,6 +169,59 @@ public struct ProjectStore: Sendable {
     public func tryLoadBrowserState() throws -> BrowserState? {
         do { return try loadBrowserState() }
         catch AtomicWriterError.noValidBackup { return nil }
+    }
+
+    // MARK: - Notes
+
+    public func saveNoteState(_ state: NoteState) throws {
+        try FileManager.default.createDirectory(
+            at: layout.notesDirectory,
+            withIntermediateDirectories: true,
+            attributes: nil)
+        try writer.write(state, to: layout.notesIndexFile)
+    }
+
+    public func loadNoteState() throws -> NoteState {
+        let state: NoteState = try writer.read(at: layout.notesIndexFile)
+        try checkSchema(
+            state.schemaVersion,
+            supported: NoteState.currentSchemaVersion,
+            at: layout.notesIndexFile)
+        return state
+    }
+
+    public func tryLoadNoteState() throws -> NoteState? {
+        do {
+            return try loadNoteState()
+        } catch AtomicWriterError.noValidBackup {
+            return nil
+        }
+    }
+
+    public func saveNoteBody(id: UUID, text: String) throws {
+        try FileManager.default.createDirectory(
+            at: layout.notesDirectory,
+            withIntermediateDirectories: true,
+            attributes: nil)
+        guard let data = text.data(using: .utf8) else {
+            throw CocoaError(.fileWriteInapplicableStringEncoding)
+        }
+        try data.write(to: layout.noteFile(id: id), options: .atomic)
+    }
+
+    public func loadNoteBody(id: UUID) throws -> String {
+        let data = try Data(contentsOf: layout.noteFile(id: id))
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw CocoaError(.fileReadInapplicableStringEncoding)
+        }
+        return text
+    }
+
+    public func tryLoadNoteBody(id: UUID) -> String? {
+        guard let data = try? Data(contentsOf: layout.noteFile(id: id)) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
     }
 
     // MARK: - Schema gate
