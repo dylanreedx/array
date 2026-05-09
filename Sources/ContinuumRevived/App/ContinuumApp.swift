@@ -40,9 +40,12 @@ enum ContinuumApp {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, CanvasNSViewDelegate {
     private var window: NSWindow?
     private var ghostty: GhosttyRuntimeContext?
+    private var browserEngine: BrowserEngineContext?
     private var runtimes: [GhosttyTerminalRuntime] = []
+    private var browserRuntimes: [WKWebViewBrowserRuntime] = []
     private var canvasView: CanvasNSView?
     private var saveTimer: Timer?
+    private var browserSaveTimer: Timer?
     private let smokeTestEnabled = ProcessInfo.processInfo.environment["CONTINUUM_SMOKE_TEST"] == "1"
     private var smokeTestExitCode: Int32?
     private var projectStore: ProjectStore?
@@ -66,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try Self.recordProjectInRegistry(project: project, in: registryStore)
 
             let ghostty = try GhosttyRuntimeContext()
+            let browserEngine = BrowserEngineContext()
 
             var canvasState: CanvasState
             if let existing = try projectStore.tryLoadCanvas() {
@@ -81,14 +85,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             canvasView.delegate = self
 
             self.ghostty = ghostty
+            self.browserEngine = browserEngine
             self.canvasView = canvasView
 
             let spawner = TileSpawner(
                 canvasView: canvasView,
                 ghostty: ghostty,
+                browserEngine: browserEngine,
                 projectStore: projectStore,
                 project: project
             )
+            spawner.browserPersistenceHandler = { [weak self] in
+                self?.scheduleBrowserSave()
+            }
             self.tileSpawner = spawner
 
             let palette = LaunchProfilePalette()
@@ -108,7 +117,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 switch tile.kind {
                 case .terminal:
                     installInitialTerminalTile(tile, in: canvasView, via: spawner)
-                case .browser, .note, .file:
+                case .browser:
+                    installInitialBrowserTile(tile, in: canvasView, via: spawner)
+                case .note, .file:
                     let view = DescriptorTileNSView(tile: tile)
                     canvasView.install(tileView: view, for: tile)
                 }
@@ -229,6 +240,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    private func installInitialBrowserTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
+        switch spawner.restartBrowserTile(tileId: tile.id) {
+        case let .restarted(runtime):
+            browserRuntimes.append(runtime)
+        case let .invalidURL(url):
+            installBrowserRestartPlaceholder(
+                for: tile,
+                statusText: "Invalid URL: \(url)",
+                restartable: false,
+                in: canvasView
+            )
+        case .tileNotFound:
+            installBrowserRestartPlaceholder(
+                for: tile,
+                statusText: "Tile not found in canvas state",
+                restartable: false,
+                in: canvasView
+            )
+        case let .failure(error):
+            fputs("Boot browser install failed: \(error)\n", stderr)
+            installBrowserRestartPlaceholder(
+                for: tile,
+                statusText: "Failed to start browser",
+                restartable: true,
+                in: canvasView
+            )
+        }
+    }
+
+    private func installBrowserRestartPlaceholder(
+        for tile: Tile,
+        statusText: String,
+        restartable: Bool,
+        in canvasView: CanvasNSView
+    ) {
+        let onRestart: (() -> Void)?
+        if restartable {
+            let tileId = tile.id
+            onRestart = { [weak self] in self?.restartBrowserTile(tileId: tileId) }
+        } else {
+            onRestart = nil
+        }
+        let view = BrowserRestartTileNSView(tile: tile, statusText: statusText, onRestart: onRestart)
+        canvasView.install(tileView: view, for: tile)
+    }
+
+    private func restartBrowserTile(tileId: UUID) {
+        guard let spawner = tileSpawner else { return }
+        switch spawner.restartBrowserTile(tileId: tileId) {
+        case let .restarted(runtime):
+            browserRuntimes.append(runtime)
+        case let .invalidURL(url):
+            fputs("Browser restart: invalid URL '\(url)'\n", stderr)
+        case .tileNotFound:
+            fputs("Browser restart: tile \(tileId) no longer exists\n", stderr)
+        case let .failure(error):
+            fputs("Browser restart failed: \(error)\n", stderr)
+        }
+    }
+
     // MARK: - Hotkeys + spawning
 
     private func installHotkeyMonitor() {
@@ -290,8 +361,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func spawnBrowserDefault() {
         guard let spawner = tileSpawner else { return }
-        if case let .failure(error) = spawner.spawnBrowserDefault() {
-            fputs("TileSpawner.spawnBrowserDefault failed: \(error)\n", stderr)
+        switch spawner.spawnBrowser() {
+        case let .spawned(runtime):
+            browserRuntimes.append(runtime)
+        case let .invalidURL(url):
+            fputs("TileSpawner.spawnBrowser invalid URL: \(url)\n", stderr)
+        case let .failure(error):
+            fputs("TileSpawner.spawnBrowser failed: \(error)\n", stderr)
         }
     }
 
@@ -329,13 +405,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func windowWillClose(_ notification: Notification) {
-        // Flush any pending canvas save so the close-leg observation catches
-        // the most recent in-memory state.
+        // Flush any pending saves so the close-leg observation catches the
+        // most recent in-memory state.
         flushCanvasSave()
+        flushBrowserSave()
 
-        // Mark each session as exited before we tear down its runtime. We don't
-        // know the exit code from this side (Ghostty owns the PTY), so record
-        // a clean close — the user closed the window.
+        // Mark each terminal session as exited before we tear down its runtime.
+        // We don't know the exit code from this side (Ghostty owns the PTY), so
+        // record a clean close — the user closed the window.
         if let projectStore {
             let now = Date()
             for runtime in runtimes {
@@ -353,9 +430,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         profilePalette?.close()
         profilePalette = nil
 
-        // Free every surface before the app: ghostty_app_free walks the surface
-        // registry during teardown and dereferences PAC-protected pointers; if a
-        // surface is still alive at that point, deinit traps with EXC_BAD_ACCESS.
+        // Browsers tear down first: WKWebView's process pool teardown is
+        // independent of GhosttyKit's. Inverting the order risks WebKit KVO
+        // callbacks firing into a half-torn-down app.
+        for runtime in browserRuntimes {
+            runtime.terminate(policy: .force)
+        }
+        browserRuntimes.removeAll()
+
+        // Free every Ghostty surface before ghostty_app_free, per ADR-0010.
+        // ghostty_app_free walks the surface registry and dereferences
+        // PAC-protected pointers; if a surface is still alive at that point,
+        // deinit traps with EXC_BAD_ACCESS.
         for runtime in runtimes {
             runtime.terminate(policy: .force)
         }
@@ -364,6 +450,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         tileSpawner = nil
         ghostty?.shutdown()
         ghostty = nil
+        browserEngine?.shutdown()
+        browserEngine = nil
         if let exitCode = smokeTestExitCode {
             Foundation.exit(exitCode)
         }
@@ -379,6 +467,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         saveTimer?.invalidate()
         saveTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in
             Task { @MainActor in self?.flushCanvasSave() }
+        }
+    }
+
+    private func scheduleBrowserSave() {
+        // Browser url/title changes coalesce identically to canvas drags.
+        browserSaveTimer?.invalidate()
+        browserSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.flushBrowserSave() }
+        }
+    }
+
+    private func flushBrowserSave() {
+        browserSaveTimer?.invalidate()
+        browserSaveTimer = nil
+        guard let spawner = tileSpawner else { return }
+        for runtime in browserRuntimes {
+            spawner.writeBrowserTileSnapshot(for: runtime)
         }
     }
 
@@ -568,6 +673,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             window.setContentSize(NSSize(width: 860, height: 540))
         }
 
+        // 3.6s — P5.6: spawn a live WKWebView browser tile via a deterministic
+        // data: URL so the smoke test stays offline-safe. The KVO + persistence
+        // path writes the URL/title into BrowserState.
+        var browserRuntimeId: UUID?
+        var browserTileId: UUID?
+        let browserDataURL = "data:text/html;charset=utf-8,<html><head><title>continuum-browser-ok</title></head><body>ok</body></html>"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.6) {
+            guard let spawner = self.tileSpawner else { return }
+            switch spawner.spawnBrowser(url: browserDataURL) {
+            case let .spawned(runtime):
+                self.browserRuntimes.append(runtime)
+                browserRuntimeId = runtime.id
+                browserTileId = runtime.tileId
+            case let .invalidURL(url):
+                fputs("Smoke browser spawn invalid URL: \(url)\n", stderr)
+            case let .failure(error):
+                fputs("Smoke browser spawn failure: \(error)\n", stderr)
+            }
+        }
+
         // 4.0s — capture pre-scroll viewport, scroll up via the C scroll API,
         // then assert the viewport content changed. Proves Ghostty's scroll
         // engine is actually being driven from our wrapper.
@@ -628,6 +753,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             var persistenceOk = false
             var canvasOk = false
             var multiTerminalOk = false
+            var browserOk = false
             do {
                 let project = try self.projectStore?.loadProject()
                 let sessions = try self.projectStore?.listSessions() ?? []
@@ -641,6 +767,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 // The canvas state was force-saved by canvasDidChange's
                 // debounced timer; flush manually so this check is exact.
                 self.flushCanvasSave()
+                self.flushBrowserSave()
                 let canvasOnDisk = try self.projectStore?.loadCanvas()
                 let tileCount = canvasOnDisk?.tiles.count ?? 0
                 let viewportMoved = (canvasOnDisk?.viewport.x ?? 0) != 0
@@ -671,12 +798,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     && bothLiveHaveProfile
                     && distinctLiveTileIds
                     && secondaryOnCanvas
+
+                // P5.6: assert the spawned WKWebView browser landed on disk
+                // with the data: URL, the title KVO + persistence path captured
+                // "continuum-browser-ok", the canvas tracks it as a .browser
+                // tile with .browserTile runtimeRef, and the storageGroupId
+                // matches the helper's deterministic output.
+                if let project, let tileId = browserTileId {
+                    let browserState = try self.projectStore?.tryLoadBrowserState()
+                    let browserEntry = browserState?.tiles.first(where: { $0.tileId == tileId })
+                    let canvasTile = canvasOnDisk?.tiles.first(where: { $0.id == tileId })
+                    let expectedStorageId = BrowserState.storageGroupIdentifier(for: project)
+                    let urlMatches = browserEntry?.url.hasPrefix("data:text/html") ?? false
+                    let titleMatches = browserEntry?.title == "continuum-browser-ok"
+                    let kindMatches = canvasTile?.kind == .browser
+                    let runtimeRefMatches = canvasTile?.runtimeRef?.kind == .browserTile
+                    let storageIdMatches = browserEntry?.storageGroupId == expectedStorageId
+                    let runtimeIdPresent = browserRuntimeId != nil
+                    browserOk =
+                        urlMatches
+                        && titleMatches
+                        && kindMatches
+                        && runtimeRefMatches
+                        && storageIdMatches
+                        && runtimeIdPresent
+                    if !browserOk {
+                        fputs(
+                            "Browser check details: urlMatches=\(urlMatches) titleMatches=\(titleMatches) kindMatches=\(kindMatches) runtimeRefMatches=\(runtimeRefMatches) storageIdMatches=\(storageIdMatches) runtimeIdPresent=\(runtimeIdPresent) entry=\(String(describing: browserEntry))\n",
+                            stderr
+                        )
+                    }
+                }
             } catch {
                 fputs("Persistence check threw: \(error)\n", stderr)
             }
 
-            if textPathOk && keyPathOk && scrollOk && persistenceOk && canvasOk && multiTerminalOk {
-                print("Ghostty smoke test passed (text + key + scroll + persistence + canvas + multiTerminal, occurrences=\(occurrences))")
+            if textPathOk && keyPathOk && scrollOk && persistenceOk && canvasOk && multiTerminalOk && browserOk {
+                print("Ghostty smoke test passed (text + key + scroll + persistence + canvas + multiTerminal + browser, occurrences=\(occurrences))")
                 if ProcessInfo.processInfo.environment["CONTINUUM_DUMP_VISIBLE"] == "1" {
                     fputs("--- pre-scroll visible text ---\n", stderr)
                     fputs(preScrollText, stderr)
@@ -687,7 +845,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self.smokeTestExitCode = 0
             } else {
                 fputs(
-                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) occurrences=\(occurrences)\n",
+                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) occurrences=\(occurrences)\n",
                     stderr
                 )
                 fputs("--- pre-scroll ---\n", stderr)

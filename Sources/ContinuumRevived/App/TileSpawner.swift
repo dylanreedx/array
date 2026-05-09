@@ -23,14 +23,20 @@ final class TileSpawner {
 
     weak var canvasView: CanvasNSView?
     private let ghostty: GhosttyRuntimeContext
+    private let browserEngine: BrowserEngineContext
     private let projectStore: ProjectStore
     private let project: Project
     private let registry: LaunchProfileRegistry
     private let detector: ToolDetector
 
+    /// Called after every browser-tile state change (URL, title, loading, error)
+    /// so the AppDelegate can schedule a debounced BrowserState save.
+    var browserPersistenceHandler: (() -> Void)?
+
     init(
         canvasView: CanvasNSView,
         ghostty: GhosttyRuntimeContext,
+        browserEngine: BrowserEngineContext,
         projectStore: ProjectStore,
         project: Project,
         registry: LaunchProfileRegistry = LaunchProfileRegistry(),
@@ -38,6 +44,7 @@ final class TileSpawner {
     ) {
         self.canvasView = canvasView
         self.ghostty = ghostty
+        self.browserEngine = browserEngine
         self.projectStore = projectStore
         self.project = project
         self.registry = registry
@@ -196,32 +203,167 @@ final class TileSpawner {
         return .restarted(runtime)
     }
 
-    @discardableResult
-    func spawnBrowserDefault(at worldPoint: CGPoint? = nil) -> Result<Tile, Error> {
+    enum BrowserOutcome {
+        case spawned(WKWebViewBrowserRuntime)
+        case invalidURL(String)
+        case failure(Error)
+    }
+
+    enum BrowserRestartOutcome {
+        case restarted(WKWebViewBrowserRuntime)
+        case invalidURL(String)
+        case tileNotFound
+        case failure(Error)
+    }
+
+    private static let defaultBrowserURL = "http://localhost:3000"
+
+    /// Spawns a live `WKWebView` browser tile. Defaults to localhost:3000 if
+    /// `url` is nil. Persists a BrowserTile entry into BrowserState alongside
+    /// the canvas state. Returns the runtime so the caller can track it for
+    /// shutdown.
+    func spawnBrowser(url: String? = nil, at worldPoint: CGPoint? = nil) -> BrowserOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        let urlString = url ?? Self.defaultBrowserURL
+        guard URL(string: urlString) != nil else {
+            return .invalidURL(urlString)
+        }
+
         let frame = makePlacement(
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .browser),
             in: canvasView
         )
         let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
-        let tile = Tile(
+        var tile = Tile(
             id: UUID(),
             kind: .browser,
-            title: "Local browser",
+            title: "Browser",
             frame: frame,
             zIndex: nextZ,
             runtimeRef: nil,
-            metadata: TileMetadata(url: "http://localhost:3000")
+            metadata: TileMetadata(url: urlString)
         )
-        let view = DescriptorTileNSView(tile: tile)
+
+        let storageGroupId = BrowserState.storageGroupIdentifier(for: project)
+        let webView = browserEngine.makeWebView(storageGroupId: storageGroupId)
+        let runtime = WKWebViewBrowserRuntime(
+            id: UUID(),
+            tileId: tile.id,
+            webView: webView,
+            initialURL: urlString
+        )
+        tile.runtimeRef = RuntimeRef(kind: .browserTile, id: runtime.id)
+
+        let view = BrowserTileNSView(tile: tile, runtime: runtime)
+        view.onAfterRefresh = { [weak self] in self?.browserPersistenceHandler?() }
         canvasView.install(tileView: view, for: tile)
+
         do {
+            try upsertBrowserTile(
+                runtimeId: runtime.id,
+                tileId: tile.id,
+                url: urlString,
+                title: "",
+                storageGroupId: storageGroupId
+            )
             try projectStore.saveCanvas(canvasView.canvasState)
         } catch {
             return .failure(error)
         }
-        return .success(tile)
+
+        runtime.loadURL(urlString)
+        return .spawned(runtime)
+    }
+
+    /// Re-resolve an existing browser tile's URL and replace its view with a
+    /// fresh runtime. Reuses tile id, frame, and z-index.
+    func restartBrowserTile(tileId: UUID) -> BrowserRestartOutcome {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        guard let existing = canvasView.canvasState.tiles.first(where: { $0.id == tileId }) else {
+            return .tileNotFound
+        }
+        let urlString = existing.metadata.url ?? Self.defaultBrowserURL
+        guard URL(string: urlString) != nil else {
+            return .invalidURL(urlString)
+        }
+
+        let storageGroupId = BrowserState.storageGroupIdentifier(for: project)
+        let webView = browserEngine.makeWebView(storageGroupId: storageGroupId)
+        let runtime = WKWebViewBrowserRuntime(
+            id: UUID(),
+            tileId: existing.id,
+            webView: webView,
+            initialURL: urlString
+        )
+        var tile = existing
+        tile.runtimeRef = RuntimeRef(kind: .browserTile, id: runtime.id)
+
+        let view = BrowserTileNSView(tile: tile, runtime: runtime)
+        view.onAfterRefresh = { [weak self] in self?.browserPersistenceHandler?() }
+        canvasView.install(tileView: view, for: tile)
+
+        do {
+            try upsertBrowserTile(
+                runtimeId: runtime.id,
+                tileId: tile.id,
+                url: urlString,
+                title: tile.title,
+                storageGroupId: storageGroupId
+            )
+            try projectStore.saveCanvas(canvasView.canvasState)
+        } catch {
+            return .failure(error)
+        }
+
+        runtime.loadURL(urlString)
+        return .restarted(runtime)
+    }
+
+    /// Upserts a BrowserTile entry into BrowserState by tileId so multiple
+    /// browser tiles in the same project don't clobber each other.
+    private func upsertBrowserTile(
+        runtimeId: UUID,
+        tileId: UUID,
+        url: String,
+        title: String,
+        storageGroupId: String
+    ) throws {
+        var state = (try? projectStore.tryLoadBrowserState()) ?? BrowserState(tiles: [])
+        let now = Date()
+        if let idx = state.tiles.firstIndex(where: { $0.tileId == tileId }) {
+            state.tiles[idx].url = url
+            state.tiles[idx].title = title
+            state.tiles[idx].storageGroupId = storageGroupId
+            state.tiles[idx].updatedAt = now
+        } else {
+            state.tiles.append(BrowserTile(
+                id: runtimeId,
+                tileId: tileId,
+                url: url,
+                title: title,
+                storageGroupId: storageGroupId,
+                createdAt: now,
+                updatedAt: now
+            ))
+        }
+        try projectStore.saveBrowserState(state)
+    }
+
+    /// Persist the current url/title for a runtime's tile. Called by the
+    /// AppDelegate's debounced flush in response to runtime state changes.
+    func writeBrowserTileSnapshot(for runtime: WKWebViewBrowserRuntime) {
+        guard let canvasView,
+              let tile = canvasView.canvasState.tiles.first(where: { $0.id == runtime.tileId })
+        else { return }
+        let storageGroupId = BrowserState.storageGroupIdentifier(for: project)
+        try? upsertBrowserTile(
+            runtimeId: runtime.id,
+            tileId: tile.id,
+            url: runtime.url,
+            title: runtime.title,
+            storageGroupId: storageGroupId
+        )
     }
 
     private func makePlacement(worldPoint: CGPoint?, size: CGSize, in canvasView: CanvasNSView) -> TileFrame {
