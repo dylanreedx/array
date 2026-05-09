@@ -30,6 +30,12 @@ final class CanvasNSView: NSView {
     // MARK: - Tile management
 
     func install(tileView: TileNSView, for tile: Tile) {
+        // Replacing an existing tile (e.g. restart placeholder → live terminal)
+        // must remove the old NSView; otherwise the prior view stays on top
+        // of the new one and intercepts hits.
+        if let existing = tileViews[tile.id] {
+            existing.removeFromSuperview()
+        }
         tileViews[tile.id] = tileView
         tileView.canvas = self
         addSubview(tileView)
