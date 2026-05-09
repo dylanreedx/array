@@ -39,3 +39,23 @@ public struct BrowserTile: Codable, Equatable, Sendable {
         self.updatedAt = updatedAt
     }
 }
+
+extension BrowserState {
+    /// Sentinel storage group id used by `BrowserStoragePolicy.shared`. The app
+    /// layer maps this to `WKWebsiteDataStore.default()`; any other value is
+    /// expected to parse as a UUID and feed `WKWebsiteDataStore(forIdentifier:)`.
+    public static let sharedStorageGroupId: String = "shared"
+
+    /// Resolves the storage group identifier for a project's browser-tile storage
+    /// policy. `.perProject` returns the project's UUID string (stable across
+    /// relaunches and unique per project). `.shared` returns the sentinel
+    /// `sharedStorageGroupId`. Pure function — no I/O, no AppKit, no WebKit.
+    public static func storageGroupIdentifier(for project: Project) -> String {
+        switch project.settings.browserStoragePolicy {
+        case .perProject:
+            return project.id.uuidString
+        case .shared:
+            return sharedStorageGroupId
+        }
+    }
+}

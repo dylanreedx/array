@@ -859,6 +859,47 @@ do {
     expect(decodedShell.id != decodedClaude.id, "tile ids stay distinct")
 }
 
+// MARK: - BrowserState.storageGroupIdentifier
+
+do {
+    func project(id: UUID, policy: BrowserStoragePolicy) -> Project {
+        Project(
+            id: id,
+            name: "scratch",
+            rootPath: "/tmp/scratch",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: policy,
+                terminalClosePolicy: .askWhenRunning
+            )
+        )
+    }
+
+    let aId = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+    let bId = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+
+    // Determinism: same project resolves to the same identifier across calls.
+    let perA = BrowserState.storageGroupIdentifier(for: project(id: aId, policy: .perProject))
+    let perAAgain = BrowserState.storageGroupIdentifier(for: project(id: aId, policy: .perProject))
+    expect(perA == perAAgain, "storageGroupIdentifier is deterministic per project")
+    expect(perA == aId.uuidString, "perProject storageGroupId == project.id.uuidString, got \(perA)")
+
+    // Distinctness: two projects with different ids resolve to different ids.
+    let perB = BrowserState.storageGroupIdentifier(for: project(id: bId, policy: .perProject))
+    expect(perA != perB, "different projects produce different perProject storageGroupIds")
+
+    // Shared invariance: every shared project resolves to the same sentinel.
+    let sharedA = BrowserState.storageGroupIdentifier(for: project(id: aId, policy: .shared))
+    let sharedB = BrowserState.storageGroupIdentifier(for: project(id: bId, policy: .shared))
+    expect(sharedA == BrowserState.sharedStorageGroupId, "shared policy returns sharedStorageGroupId")
+    expect(sharedA == sharedB, "shared storage id is identical across projects")
+    expect(sharedA != perA, "shared sentinel does not collide with any perProject id")
+}
+
 // MARK: - LaunchProfileRegistry: custom is .notConfigured
 
 do {
