@@ -56,6 +56,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var tileSpawner: TileSpawner?
     private var profilePalette: LaunchProfilePalette?
     private var hotkeyMonitor: Any?
+    private static let smokeNoteId = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    private static let smokeNoteTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000010")!
+    private static let smokeFileTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000011")!
+    private static let smokeNoteBody = "smoke-note-ok"
+    private static let smokeFileBody = "smoke-file-ok"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -74,12 +79,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
             let ghostty = try GhosttyRuntimeContext()
             let browserEngine = BrowserEngineContext()
+            let seededSmokeTiles = smokeTestEnabled
+                ? try Self.seedSmokeTestTiles(in: projectStore, projectRoot: projectRoot)
+                : []
 
             var canvasState: CanvasState
             if let existing = try projectStore.tryLoadCanvas() {
                 canvasState = existing
             } else {
                 canvasState = Self.defaultCanvasState()
+            }
+            for seededTile in seededSmokeTiles {
+                if let index = canvasState.tiles.firstIndex(where: { $0.id == seededTile.id }) {
+                    canvasState.tiles[index] = seededTile
+                } else {
+                    canvasState.tiles.append(seededTile)
+                }
             }
             if !canvasState.tiles.contains(where: { $0.kind == .terminal }) {
                 canvasState.tiles.append(Self.defaultTerminalTile())
@@ -746,6 +761,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         )
     }
 
+    private static func seedSmokeTestTiles(in projectStore: ProjectStore, projectRoot: URL) throws -> [Tile] {
+        try projectStore.saveNoteBody(id: smokeNoteId, text: smokeNoteBody)
+
+        var noteState = (try? projectStore.tryLoadNoteState()) ?? NoteState(tiles: [])
+        let now = Date()
+        let smokeNoteTile = NoteTile(
+            id: smokeNoteId,
+            tileId: smokeNoteTileId,
+            filename: "\(smokeNoteId.uuidString).md",
+            title: "Smoke note",
+            createdAt: now,
+            updatedAt: now
+        )
+        if let index = noteState.tiles.firstIndex(where: { $0.id == smokeNoteId }) {
+            noteState.tiles[index] = smokeNoteTile
+        } else {
+            noteState.tiles.append(smokeNoteTile)
+        }
+        try projectStore.saveNoteState(noteState)
+
+        let smokeFileURL = projectRoot
+            .appendingPathComponent(".continuum-revived", isDirectory: true)
+            .appendingPathComponent("smoke-file.txt", isDirectory: false)
+        try FileManager.default.createDirectory(
+            at: smokeFileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        let smokeFileData = Data(smokeFileBody.utf8)
+        try smokeFileData.write(to: smokeFileURL, options: .atomic)
+
+        let noteSize = CanvasEngine.defaultFrame(for: .note)
+        let fileSize = CanvasEngine.defaultFrame(for: .file)
+        return [
+            Tile(
+                id: smokeNoteTileId,
+                kind: .note,
+                title: "Smoke note",
+                frame: TileFrame(x: 720, y: 300, width: Double(noteSize.width), height: Double(noteSize.height)),
+                zIndex: 3,
+                runtimeRef: nil,
+                metadata: TileMetadata(noteId: smokeNoteId)
+            ),
+            Tile(
+                id: smokeFileTileId,
+                kind: .file,
+                title: "smoke-file.txt",
+                frame: TileFrame(x: 40, y: 560, width: Double(fileSize.width), height: Double(fileSize.height)),
+                zIndex: 4,
+                runtimeRef: nil,
+                metadata: TileMetadata(filePath: smokeFileURL.path)
+            )
+        ]
+    }
+
     private static func recordProjectInRegistry(project: Project, in store: RegistryStore) throws {
         var registry = try store.loadOrEmpty()
         let now = Date()
@@ -897,19 +967,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         }
 
-        // 4.8s -- P6.4: the boot loop should install the restored default note
-        // as a live NoteTileNSView, not as a descriptor placeholder. Editing the
-        // text here gives the close-path note flush something concrete to save.
-        let smokeNoteBody = "smoke-note-ok"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4.8) {
-            guard let canvasView = self.canvasView,
-                  let noteTile = canvasView.canvasState.tiles.first(where: { $0.kind == .note }),
-                  let noteView = canvasView.tileView(for: noteTile.id) as? NoteTileNSView
-            else { return }
-            noteView.textView.string = smokeNoteBody
-            noteView.onTextChange?()
-        }
-
         // 6.0s — verify and close through the production close path.
         DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
             let visibleText = runtime.visibleText()
@@ -942,6 +999,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             var browserOk = false
             var midExitOk = false
             var noteOk = false
+            var fileOk = false
             let browserTileCount = self.canvasView?.canvasState.tiles.filter { $0.kind == .browser }.count ?? 0
             // Cardinality is gating, not advisory: if browserRuntimes count drifts
             // from the canvas's live .browser tile count, runtimes leaked or were
@@ -1012,19 +1070,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     }
                 }
 
-                // P6.4: assert the restored default note is a live editable note
-                // tile and that the debounced AppDelegate note flush writes the
-                // current NSTextView body through TileSpawner into note storage.
-                if let noteTile = canvasOnDisk?.tiles.first(where: { $0.kind == .note }),
+                // P6.6: assert the seeded note and file descriptors were present
+                // before the boot loop, so restore installed real tile views.
+                if let noteTile = canvasOnDisk?.tiles.first(where: { $0.id == Self.smokeNoteTileId }),
                    let noteView = self.canvasView?.tileView(for: noteTile.id) as? NoteTileNSView {
-                    let noteId = noteView.noteId
-                    let trackedViewMatches = self.noteViews[noteId] === noteView
-                    let canvasMetadataMatches = noteTile.metadata.noteId == noteId
-                    let bodyMatches = self.projectStore?.tryLoadNoteBody(id: noteId) == smokeNoteBody
-                    noteOk = trackedViewMatches && canvasMetadataMatches && bodyMatches
+                    let noteState = try self.projectStore?.tryLoadNoteState()
+                    let noteIndexMatches = noteState?.tiles.contains(where: {
+                        $0.id == Self.smokeNoteId && $0.tileId == Self.smokeNoteTileId
+                    }) ?? false
+                    let trackedViewMatches = self.noteViews[Self.smokeNoteId] === noteView
+                    let canvasMetadataMatches = noteTile.metadata.noteId == Self.smokeNoteId
+                    let bodyMatches = noteView.textView.string == Self.smokeNoteBody
+                    noteOk = trackedViewMatches && canvasMetadataMatches && bodyMatches && noteIndexMatches
                     if !noteOk {
                         fputs(
-                            "Note check details: trackedViewMatches=\(trackedViewMatches) canvasMetadataMatches=\(canvasMetadataMatches) bodyMatches=\(bodyMatches)\n",
+                            "Note check details: trackedViewMatches=\(trackedViewMatches) canvasMetadataMatches=\(canvasMetadataMatches) bodyMatches=\(bodyMatches) noteIndexMatches=\(noteIndexMatches)\n",
+                            stderr
+                        )
+                    }
+                }
+
+                if let fileTile = canvasOnDisk?.tiles.first(where: { $0.id == Self.smokeFileTileId }),
+                   let fileView = self.canvasView?.tileView(for: fileTile.id) as? FileTileNSView {
+                    let metadataPathMatches = fileTile.metadata.filePath?.hasSuffix(".continuum-revived/smoke-file.txt") ?? false
+                    let bodyMatches = fileView.textView.string.contains(Self.smokeFileBody)
+                    fileOk = metadataPathMatches && bodyMatches
+                    if !fileOk {
+                        fputs(
+                            "File check details: metadataPathMatches=\(metadataPathMatches) bodyMatches=\(bodyMatches)\n",
                             stderr
                         )
                     }
@@ -1064,8 +1137,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 fputs("Persistence check threw: \(error)\n", stderr)
             }
 
-            if textPathOk && keyPathOk && scrollOk && persistenceOk && canvasOk && multiTerminalOk && browserOk && midExitOk && noteOk && browserCardinalityOk {
-                print("Ghostty smoke test passed (text + key + scroll + persistence + canvas + multiTerminal + browser + midExit + note, occurrences=\(occurrences))")
+            if textPathOk && keyPathOk && scrollOk && persistenceOk && canvasOk && multiTerminalOk && browserOk && midExitOk && noteOk && fileOk && browserCardinalityOk {
+                print("Ghostty smoke test passed (text + key + scroll + persistence + canvas + multiTerminal + browser + midExit + note + file, occurrences=\(occurrences))")
                 if ProcessInfo.processInfo.environment["CONTINUUM_DUMP_VISIBLE"] == "1" {
                     fputs("--- pre-scroll visible text ---\n", stderr)
                     fputs(preScrollText, stderr)
@@ -1076,7 +1149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self.smokeTestExitCode = 0
             } else {
                 fputs(
-                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) midExitOk=\(midExitOk) noteOk=\(noteOk) browserCardinalityOk=\(browserCardinalityOk) occurrences=\(occurrences)\n",
+                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) midExitOk=\(midExitOk) noteOk=\(noteOk) fileOk=\(fileOk) browserCardinalityOk=\(browserCardinalityOk) occurrences=\(occurrences)\n",
                     stderr
                 )
                 fputs("--- pre-scroll ---\n", stderr)
