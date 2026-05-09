@@ -847,9 +847,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func runSmokeTest(window: NSWindow, runtime: GhosttyTerminalRuntime) {
+        let qaCapture = QACapture()
+        func capture(_ step: String, tSec: Double, notes: String? = nil) {
+            qaCapture?.capture(
+                step: step,
+                tSec: tSec,
+                window: window,
+                canvasState: self.canvasView?.canvasState,
+                notes: notes
+            )
+        }
+
         // 1.0s — exercise the IME/text path (ghostty_surface_text)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             runtime.sendInput(Data("echo ghostty-ok\n".utf8))
+            capture("echo-text", tSec: 1.0)
         }
 
         // 2.0s — exercise the key path: up-arrow recalls the previous command.
@@ -861,11 +873,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 characters: "\u{F700}",
                 charactersIgnoringModifiers: "\u{F700}"
             )
+            capture("up-arrow", tSec: 2.0)
         }
 
         // 2.4s — Enter to execute the recalled command.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
             runtime.dispatchKeyDown(keyCode: 0x24, characters: "\r")
+            capture("enter-recall", tSec: 2.4)
         }
 
         // 2.5s — P4.5: spawn a second terminal via the TileSpawner seam. This
@@ -899,6 +913,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) {
             runtime.sendInput(Data("seq 1 60".utf8))
             runtime.dispatchKeyDown(keyCode: 0x24, characters: "\r")
+            capture("seq-scroll", tSec: 2.8)
         }
 
         // 3.0s — P5.x: send `exit` to the secondary so we can observe the
@@ -909,10 +924,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                let secondary = self.runtimes.first(where: { $0.id == id }) {
                 secondary.sendInput(Data("exit\n".utf8))
             }
+            capture("mid-exit-trigger", tSec: 3.0)
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.3) {
+            capture("post-exit-swap", tSec: 3.3)
+        }
+
         // 3.5s — window resize must still complete without crashing.
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
             window.setContentSize(NSSize(width: 860, height: 540))
+            capture("resize", tSec: 3.5)
         }
 
         // 3.6s — P5.6: spawn a live WKWebView browser tile via a deterministic
@@ -942,6 +963,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         var preScrollText = ""
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
             preScrollText = runtime.visibleText()
+            capture("pre-scroll", tSec: 4.0)
             runtime.scrollDirectly(deltaY: 400)
         }
 
@@ -965,6 +987,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 )
                 canvasView.updateTile(moved)
             }
+            capture("pan-and-drag", tSec: 4.4)
         }
 
         // 6.0s — verify and close through the production close path.
@@ -1158,6 +1181,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 fputs(visibleText, stderr)
                 self.smokeTestExitCode = 2
             }
+
+            capture("final-state", tSec: 6.0)
+            qaCapture?.writeManifest()
 
             // Exercise the production close path: any crash on shutdown surfaces
             // here rather than being hidden behind the manual-teardown shortcut.
