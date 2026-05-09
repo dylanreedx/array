@@ -40,7 +40,7 @@ enum ContinuumApp {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, CanvasNSViewDelegate {
     private var window: NSWindow?
     private var ghostty: GhosttyRuntimeContext?
-    private var runtime: GhosttyTerminalRuntime?
+    private var runtimes: [GhosttyTerminalRuntime] = []
     private var canvasView: CanvasNSView?
     private var saveTimer: Timer?
     private let smokeTestEnabled = ProcessInfo.processInfo.environment["CONTINUUM_SMOKE_TEST"] == "1"
@@ -48,6 +48,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var projectStore: ProjectStore?
     private var registryStore: RegistryStore?
     private var activeProject: Project?
+    private var tileSpawner: TileSpawner?
+    private var profilePalette: LaunchProfilePalette?
+    private var hotkeyMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -62,58 +65,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.activeProject = project
             try Self.recordProjectInRegistry(project: project, in: registryStore)
 
-            let launchProfile = try ShellLaunchResolver().resolveShell(cwd: projectRoot.path)
             let ghostty = try GhosttyRuntimeContext()
 
-            // Phase 3: load or create the canvas. Always have at least one
-            // terminal tile so the spike has something to host.
             var canvasState: CanvasState
             if let existing = try projectStore.tryLoadCanvas() {
                 canvasState = existing
             } else {
-                canvasState = Self.defaultCanvasState(title: launchProfile.title)
+                canvasState = Self.defaultCanvasState()
             }
             if !canvasState.tiles.contains(where: { $0.kind == .terminal }) {
-                // The on-disk canvas was somehow valid but had no terminal —
-                // append a default one rather than fail.
-                canvasState.tiles.append(Self.defaultTerminalTile(title: launchProfile.title))
+                canvasState.tiles.append(Self.defaultTerminalTile())
             }
-            let terminalTileIndex = canvasState.tiles.firstIndex(where: { $0.kind == .terminal })!
-            var terminalTile = canvasState.tiles[terminalTileIndex]
-
-            // The session descriptor is fresh per launch; refresh the tile's
-            // runtimeRef to point at the new session id.
-            let runtime = GhosttyTerminalRuntime(
-                id: UUID(),
-                tileId: terminalTile.id,
-                title: launchProfile.title,
-                launchProfile: launchProfile,
-                ghostty: ghostty
-            )
-            terminalTile.runtimeRef = RuntimeRef(kind: .terminalSession, id: runtime.id)
-            canvasState.tiles[terminalTileIndex] = terminalTile
-
-            try projectStore.saveSession(TerminalSessionDescriptor(
-                id: runtime.id,
-                tileId: runtime.tileId,
-                launchProfileId: "shell",
-                command: launchProfile.command,
-                args: launchProfile.arguments,
-                cwd: launchProfile.cwd,
-                env: [:],
-                title: launchProfile.title,
-                createdAt: Date(),
-                lastStartedAt: Date(),
-                lastExit: nil
-            ))
 
             let canvasView = CanvasNSView(canvasState: canvasState)
             canvasView.delegate = self
+
+            self.ghostty = ghostty
+            self.canvasView = canvasView
+
+            let spawner = TileSpawner(
+                canvasView: canvasView,
+                ghostty: ghostty,
+                projectStore: projectStore,
+                project: project
+            )
+            self.tileSpawner = spawner
+
+            let palette = LaunchProfilePalette()
+            palette.onSelect = { [weak self] profileId in
+                self?.spawnTerminalFromProfile(profileId)
+            }
+            self.profilePalette = palette
+
+            installHotkeyMonitor()
+
+            // Walk every tile in the canvas, spawn a runtime for each terminal
+            // tile (or install a Restart placeholder if the profile fails to
+            // resolve), and install descriptor placeholders for non-terminal
+            // tiles. The spawner persists each session descriptor; saveCanvas
+            // happens once at the end.
             for tile in canvasState.tiles {
-                if tile.id == terminalTile.id {
-                    let view = TerminalTileNSView(tile: tile, runtime: runtime)
-                    canvasView.install(tileView: view, for: tile)
-                } else {
+                switch tile.kind {
+                case .terminal:
+                    installInitialTerminalTile(tile, in: canvasView, via: spawner)
+                case .browser, .note, .file:
                     let view = DescriptorTileNSView(tile: tile)
                     canvasView.install(tileView: view, for: tile)
                 }
@@ -133,37 +128,204 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             window.delegate = self
             window.makeKeyAndOrderFront(nil)
             window.makeFirstResponder(canvasView)
-
-            self.ghostty = ghostty
-            self.runtime = runtime
-            self.canvasView = canvasView
             self.window = window
 
-            // Activate after the runtime is wired up: NSApp.activate can fire
+            // Activate after runtimes are wired up: NSApp.activate can fire
             // applicationDidBecomeActive synchronously, and the focus path needs
             // a non-nil ghostty to forward set_focus into the surface.
             NSApp.activate(ignoringOtherApps: true)
 
-            if smokeTestEnabled {
-                runSmokeTest(window: window, runtime: runtime)
+            if smokeTestEnabled, let primary = runtimes.first {
+                runSmokeTest(window: window, runtime: primary)
             }
         } catch {
             presentFatalError(error)
         }
     }
 
+    private func installInitialTerminalTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
+        switch spawner.restartTerminalTile(tileId: tile.id) {
+        case let .restarted(runtime):
+            runtimes.append(runtime)
+        case let .missingCommand(executable):
+            installRestartPlaceholder(
+                for: tile,
+                statusText: "\(executable) not found on $PATH",
+                restartable: true,
+                in: canvasView
+            )
+        case let .notConfigured(profileId):
+            installRestartPlaceholder(
+                for: tile,
+                statusText: "Profile '\(profileId)' is not configured",
+                restartable: false,
+                in: canvasView
+            )
+        case let .unknownProfile(id):
+            installRestartPlaceholder(
+                for: tile,
+                statusText: "Profile '\(id)' is missing",
+                restartable: false,
+                in: canvasView
+            )
+        case .tileNotFound:
+            installRestartPlaceholder(
+                for: tile,
+                statusText: "Tile not found in canvas state",
+                restartable: false,
+                in: canvasView
+            )
+        case let .failure(error):
+            fputs("Boot terminal install failed: \(error)\n", stderr)
+            installRestartPlaceholder(
+                for: tile,
+                statusText: "Failed to start terminal",
+                restartable: true,
+                in: canvasView
+            )
+        }
+    }
+
+    private func installRestartPlaceholder(
+        for tile: Tile,
+        statusText: String,
+        restartable: Bool,
+        in canvasView: CanvasNSView
+    ) {
+        let onRestart: (() -> Void)?
+        if restartable {
+            let tileId = tile.id
+            onRestart = { [weak self] in self?.restartTile(tileId: tileId) }
+        } else {
+            onRestart = nil
+        }
+        let view = TerminalRestartTileNSView(tile: tile, statusText: statusText, onRestart: onRestart)
+        canvasView.install(tileView: view, for: tile)
+    }
+
+    private func restartTile(tileId: UUID) {
+        guard let spawner = tileSpawner, let canvasView else { return }
+        switch spawner.restartTerminalTile(tileId: tileId) {
+        case let .restarted(runtime):
+            runtimes.append(runtime)
+        case let .missingCommand(executable):
+            if let tile = canvasView.canvasState.tiles.first(where: { $0.id == tileId }) {
+                installRestartPlaceholder(
+                    for: tile,
+                    statusText: "\(executable) not found on $PATH",
+                    restartable: true,
+                    in: canvasView
+                )
+            }
+            presentMissingCommand(executable: executable, profileId: "")
+        case let .notConfigured(profileId):
+            presentMissingCommand(executable: profileId, profileId: profileId, kind: .notConfigured)
+        case let .unknownProfile(id):
+            fputs("Restart: unknown profile '\(id)'\n", stderr)
+        case .tileNotFound:
+            fputs("Restart: tile \(tileId) no longer exists\n", stderr)
+        case let .failure(error):
+            fputs("Restart failed: \(error)\n", stderr)
+        }
+    }
+
+    // MARK: - Hotkeys + spawning
+
+    private func installHotkeyMonitor() {
+        let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            return self.handleHotkey(event) ? nil : event
+        }
+        self.hotkeyMonitor = monitor
+    }
+
+    private func handleHotkey(_ event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let onlyCommand: NSEvent.ModifierFlags = [.command]
+        guard mods == onlyCommand else { return false }
+        guard let chars = event.charactersIgnoringModifiers else { return false }
+        switch chars {
+        case "k":
+            openProfilePalette()
+            return true
+        case "1":
+            spawnTerminalFromProfile("claude")
+            return true
+        case "2":
+            spawnTerminalFromProfile("shell")
+            return true
+        case "3":
+            spawnBrowserDefault()
+            return true
+        case "4":
+            spawnTerminalFromProfile("nvim")
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func openProfilePalette() {
+        guard let palette = profilePalette,
+              let spawner = tileSpawner,
+              let host = window else { return }
+        palette.show(near: host, profiles: spawner.annotatedProfiles())
+    }
+
+    private func spawnTerminalFromProfile(_ profileId: String) {
+        guard let spawner = tileSpawner else { return }
+        switch spawner.spawnTerminal(profileId: profileId) {
+        case let .spawned(runtime):
+            runtimes.append(runtime)
+        case let .missingCommand(executable):
+            presentMissingCommand(executable: executable, profileId: profileId)
+        case let .notConfigured(id):
+            presentMissingCommand(executable: id, profileId: id, kind: .notConfigured)
+        case let .unknownProfile(id):
+            fputs("Unknown profile id: \(id)\n", stderr)
+        case let .failure(error):
+            fputs("TileSpawner.spawnTerminal failed: \(error)\n", stderr)
+        }
+    }
+
+    private func spawnBrowserDefault() {
+        guard let spawner = tileSpawner else { return }
+        if case let .failure(error) = spawner.spawnBrowserDefault() {
+            fputs("TileSpawner.spawnBrowserDefault failed: \(error)\n", stderr)
+        }
+    }
+
+    private enum MissingKind { case notFound, notConfigured }
+
+    private func presentMissingCommand(executable: String, profileId: String, kind: MissingKind = .notFound) {
+        let alert = NSAlert()
+        switch kind {
+        case .notFound:
+            alert.messageText = "\(executable) is not installed"
+            alert.informativeText = "Couldn't find \(executable) on your $PATH. Install the CLI or pick a different profile from Cmd-K."
+        case .notConfigured:
+            alert.messageText = "Profile '\(profileId)' is not configured"
+            alert.informativeText = "Custom profiles aren't editable yet — pick a built-in profile from Cmd-K."
+        }
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
     func applicationDidBecomeActive(_ notification: Notification) {
         if let app = try? ghostty?.app {
             ghostty_app_set_focus(app, true)
         }
-        runtime?.focus()
+        runtimes.last?.focus()
     }
 
     func applicationDidResignActive(_ notification: Notification) {
         if let app = try? ghostty?.app {
             ghostty_app_set_focus(app, false)
         }
-        runtime?.blur()
+        for runtime in runtimes {
+            runtime.blur()
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -171,22 +333,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // the most recent in-memory state.
         flushCanvasSave()
 
-        // Mark the session as exited before we tear down the runtime. We don't
+        // Mark each session as exited before we tear down its runtime. We don't
         // know the exit code from this side (Ghostty owns the PTY), so record
         // a clean close — the user closed the window.
-        if let runtime, let projectStore {
-            if var descriptor = try? projectStore.loadSession(id: runtime.id) {
-                descriptor.lastExit = TerminalLastExit(exitCode: nil, signal: nil, at: Date())
-                try? projectStore.saveSession(descriptor)
+        if let projectStore {
+            let now = Date()
+            for runtime in runtimes {
+                if var descriptor = try? projectStore.loadSession(id: runtime.id) {
+                    descriptor.lastExit = TerminalLastExit(exitCode: nil, signal: nil, at: now)
+                    try? projectStore.saveSession(descriptor)
+                }
             }
         }
 
-        // Free the surface before the app: ghostty_app_free walks the surface
+        if let monitor = hotkeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            hotkeyMonitor = nil
+        }
+        profilePalette?.close()
+        profilePalette = nil
+
+        // Free every surface before the app: ghostty_app_free walks the surface
         // registry during teardown and dereferences PAC-protected pointers; if a
         // surface is still alive at that point, deinit traps with EXC_BAD_ACCESS.
-        runtime?.terminate(policy: .force)
+        for runtime in runtimes {
+            runtime.terminate(policy: .force)
+        }
         canvasView = nil
-        runtime = nil
+        runtimes.removeAll()
+        tileSpawner = nil
         ghostty?.shutdown()
         ghostty = nil
         if let exitCode = smokeTestExitCode {
@@ -264,8 +439,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return project
     }
 
-    private static func defaultCanvasState(title: String) -> CanvasState {
-        let terminalTile = defaultTerminalTile(title: title)
+    private static func defaultCanvasState() -> CanvasState {
+        let terminalTile = defaultTerminalTile()
         let browserTile = Tile(
             id: UUID(),
             kind: .browser,
@@ -292,11 +467,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         )
     }
 
-    private static func defaultTerminalTile(title: String) -> Tile {
+    private static func defaultTerminalTile() -> Tile {
         Tile(
             id: UUID(),
             kind: .terminal,
-            title: title,
+            title: "Shell",
             frame: TileFrame(x: 40, y: 40, width: 660, height: 480),
             zIndex: 2,
             runtimeRef: nil,
@@ -354,6 +529,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // 2.4s — Enter to execute the recalled command.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
             runtime.dispatchKeyDown(keyCode: 0x24, characters: "\r")
+        }
+
+        // 2.5s — P4.5: spawn a second terminal via the TileSpawner seam. This
+        // proves multi-terminal shutdown works (each surface freed before
+        // ghostty_app_free) and that descriptors persist with their profile id.
+        var secondaryRuntimeId: UUID?
+        var secondaryTileId: UUID?
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            guard let spawner = self.tileSpawner else { return }
+            switch spawner.spawnTerminal(profileId: "shell") {
+            case let .spawned(secondary):
+                self.runtimes.append(secondary)
+                secondaryRuntimeId = secondary.id
+                secondaryTileId = secondary.tileId
+            case let .missingCommand(executable):
+                fputs("Smoke spawn missing command: \(executable)\n", stderr)
+            case let .notConfigured(profileId):
+                fputs("Smoke spawn notConfigured: \(profileId)\n", stderr)
+            case let .unknownProfile(id):
+                fputs("Smoke spawn unknownProfile: \(id)\n", stderr)
+            case let .failure(error):
+                fputs("Smoke spawn failure: \(error)\n", stderr)
+            }
         }
 
         // 2.8s — fill scrollback with enough output to push earlier lines off
@@ -423,8 +621,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // P2.6 — persistence must have landed by the time we get here.
             // P3.4 — also assert the canvas has ≥ 3 tiles, the drag landed,
             // and the viewport advanced from its initial position.
+            // P4.5 — assert the spawned secondary terminal landed in
+            // sessions/*.json with its launchProfileId, that both sessions
+            // have non-nil profile ids and distinct tile ids, and that the
+            // canvas now contains ≥ 4 tiles (3 seeded + 1 spawned).
             var persistenceOk = false
             var canvasOk = false
+            var multiTerminalOk = false
             do {
                 let project = try self.projectStore?.loadProject()
                 let sessions = try self.projectStore?.listSessions() ?? []
@@ -445,13 +648,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 let terminalTileMoved = canvasOnDisk?.tiles
                     .first(where: { $0.kind == .terminal })?
                     .frame.x != 40
-                canvasOk = tileCount >= 3 && (viewportMoved || terminalTileMoved)
+                canvasOk = tileCount >= 4 && (viewportMoved || terminalTileMoved)
+
+                // Scope the multi-terminal assertions to the LIVE runtimes from
+                // this launch. Stale descriptors from prior launches accumulate
+                // in sessions/ until pruning lands (deferred); checking
+                // `sessions.count == liveRuntimeCount` would false-fail on a
+                // second run against the same project root.
+                let primary = sessions.first(where: { $0.id == runtime.id })
+                let secondary = secondaryRuntimeId.flatMap { id in sessions.first(where: { $0.id == id }) }
+                let bothLiveHaveProfile = !(primary?.launchProfileId.isEmpty ?? true)
+                    && !(secondary?.launchProfileId.isEmpty ?? true)
+                let distinctLiveTileIds = primary != nil
+                    && secondary != nil
+                    && primary?.tileId != secondary?.tileId
+                let secondaryOnCanvas = secondaryTileId.map { id in
+                    canvasOnDisk?.tiles.contains(where: { $0.id == id && $0.kind == .terminal }) ?? false
+                } ?? false
+                multiTerminalOk =
+                    primary != nil
+                    && secondary != nil
+                    && bothLiveHaveProfile
+                    && distinctLiveTileIds
+                    && secondaryOnCanvas
             } catch {
                 fputs("Persistence check threw: \(error)\n", stderr)
             }
 
-            if textPathOk && keyPathOk && scrollOk && persistenceOk && canvasOk {
-                print("Ghostty smoke test passed (text + key + scroll + persistence + canvas, occurrences=\(occurrences))")
+            if textPathOk && keyPathOk && scrollOk && persistenceOk && canvasOk && multiTerminalOk {
+                print("Ghostty smoke test passed (text + key + scroll + persistence + canvas + multiTerminal, occurrences=\(occurrences))")
                 if ProcessInfo.processInfo.environment["CONTINUUM_DUMP_VISIBLE"] == "1" {
                     fputs("--- pre-scroll visible text ---\n", stderr)
                     fputs(preScrollText, stderr)
@@ -462,7 +687,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self.smokeTestExitCode = 0
             } else {
                 fputs(
-                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) occurrences=\(occurrences)\n",
+                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) occurrences=\(occurrences)\n",
                     stderr
                 )
                 fputs("--- pre-scroll ---\n", stderr)
