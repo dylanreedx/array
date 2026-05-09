@@ -43,10 +43,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var runtime: GhosttyTerminalRuntime?
     private var hostView: TerminalHostView?
     private let smokeTestEnabled = ProcessInfo.processInfo.environment["CONTINUUM_SMOKE_TEST"] == "1"
+    private var smokeTestExitCode: Int32?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.activate(ignoringOtherApps: true)
-
         do {
             let repoRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).path
             let launchProfile = try ShellLaunchResolver().resolveShell(cwd: repoRoot)
@@ -77,6 +76,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self.hostView = hostView
             self.window = window
 
+            // Activate after the runtime is wired up: NSApp.activate can fire
+            // applicationDidBecomeActive synchronously, and the focus path needs
+            // a non-nil ghostty to forward set_focus into the surface.
+            NSApp.activate(ignoringOtherApps: true)
+
             if smokeTestEnabled {
                 runSmokeTest(window: window, runtime: runtime)
             }
@@ -100,11 +104,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
-        runtime?.terminate(policy: .requestClose)
+        // Free the surface before the app: ghostty_app_free walks the surface
+        // registry during teardown and dereferences PAC-protected pointers; if a
+        // surface is still alive at that point, deinit traps with EXC_BAD_ACCESS.
+        runtime?.terminate(policy: .force)
         hostView?.detachRuntime()
         runtime = nil
         ghostty?.shutdown()
         ghostty = nil
+        if let exitCode = smokeTestExitCode {
+            Foundation.exit(exitCode)
+        }
         NSApp.terminate(nil)
     }
 
@@ -129,18 +139,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
             let visibleText = runtime.visibleText()
             let passed = visibleText.contains("ghostty-ok")
-            runtime.terminate(policy: .requestClose)
-            self.hostView?.detachRuntime()
-            self.ghostty?.shutdown()
-
             if passed {
                 print("Ghostty smoke test passed")
-                Foundation.exit(0)
+                self.smokeTestExitCode = 0
             } else {
                 fputs("Ghostty smoke test failed: visible text did not contain ghostty-ok\n", stderr)
                 fputs(visibleText, stderr)
-                Foundation.exit(2)
+                self.smokeTestExitCode = 2
             }
+            // Exercise the production close path: any crash on shutdown surfaces
+            // here rather than being hidden behind the manual-teardown shortcut.
+            window.performClose(nil)
         }
     }
 }

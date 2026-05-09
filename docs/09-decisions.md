@@ -178,3 +178,58 @@ Consequences:
 - Do not switch to SwiftTerm.
 - Do not start Phase 2 or broader UI work yet.
 - Next deliberate options are: build a real `.app` bundle target with the Ghostty resource layout, port the minimum of Ghostty's AppKit `SurfaceView` wrapper instead of the thin direct C view, or patch/build a narrower Ghostty embedding wrapper designed for third-party hosts.
+
+## ADR-0010: Phase 1 Smoke-Test Crash Resolved; Crash Gate Passed, Hard Gate Partially Passed
+
+Date: 2026-05-08
+
+Decision:
+
+The Phase 1 smoke-test crash documented in ADR-0009 is resolved. The crash gate is passed; the hard gate is passed for items 1-5; item 6 (mouse selection/scrolling) remains pending behind a separate, scoped next step. Continue with the SwiftPM/AppKit thin-wrapper approach. Do not pivot to a `.app` bundle, do not vendor `SurfaceView_AppKit.swift`, and do not switch to SwiftTerm.
+
+Evidence:
+
+- A real backtrace was captured under LLDB. The crash was `EXC_BAD_ACCESS` (KERN_INVALID_ADDRESS at `0x5c7caff601ed1530` — a tagged/PAC-mangled freed pointer) in `apprt.embedded.Surface.deinit`, called from `App.destroy` (i.e. `ghostty_app_free`), called from the smoke test's t+3 close handler. Fault thread frames matched: `Surface.deinit ← App.destroy ← _dispatch_client_callout ← _dispatch_main_queue_drain`.
+- The crash report was written to `~/Library/Logs/DiagnosticReports/continuum-revived-2026-05-08-173656.ips`. This contradicted the assumption that no crash artifacts were being produced.
+- Root cause matched finding **F3** in the plan: `runSmokeTest` and `windowWillClose` both invoked `ghostty_surface_request_close` (asynchronous) and immediately called `ghostty_app_free`. Ghostty's `App.destroy` walks the surface registry and dereferences PAC-protected pointers; with a surface still live, this dereferences memory the Zig runtime considered torn down, faulting on the auth check.
+- The hypothesis from F2 (first `set_size` running at logical/unscaled pixels) was retired by the same trace: every `set_size` in the LLDB output reported correct backing pixels (`137x30`/`1800x1200`, `131x27`/`1720x1080`).
+- The `/usr/bin/login` log line in earlier traces was confirmed normal: Ghostty's macOS shell-spawn path wraps the user shell with `/usr/bin/login` for proper PAM/session setup. It is not a fallback for a missing `command`. The dangling-`withCString`-pointer hypothesis was also retired.
+
+Fixes applied (commit pending):
+
+- `windowWillClose` and `runSmokeTest` use `runtime.terminate(policy: .force)` so `ghostty_surface_free` runs synchronously before `ghostty_app_free` (`Sources/ContinuumRevived/App/ContinuumApp.swift`). One-line change at each call site.
+- `runSmokeTest` now closes via `window.performClose(nil)` and reports its result through a stored `smokeTestExitCode`, so the smoke test exercises the production `windowWillClose` path rather than a parallel manual teardown. `windowWillClose` reads that code and exits with it when set; otherwise it falls through to `NSApp.terminate(nil)` for normal user-driven close (`Sources/ContinuumRevived/App/ContinuumApp.swift`).
+- `NSApp.activate(ignoringOtherApps:)` was moved to the end of `applicationDidFinishLaunching` so the synchronous `applicationDidBecomeActive` re-entrancy fires after the runtime is wired up — the first `ghostty_app_set_focus(true)` is no longer silently dropped (finding F7).
+
+Verification:
+
+- `./scripts/prepare-ghosttykit.sh` — passes.
+- `swift build` — passes.
+- `swift run ContinuumRevivedCoreChecks` — passes.
+- `CONTINUUM_SMOKE_TEST=1 .build/debug/continuum-revived` — exits 0 with `Ghostty smoke test passed` across three back-to-back runs. The smoke test now closes via `window.performClose(nil)` so the close path is the one a normal user hits.
+- `~/Library/Logs/DiagnosticReports/continuum-revived-*.ips` — no entries written by the new build.
+
+Hard-gate status (per `docs/04-terminal-ghostty-plan.md`):
+
+| # | Requirement | Status |
+|---|---|---|
+| 1 | Swift/AppKit host can create a Ghostty-backed terminal surface | ✓ |
+| 2 | Local shell can spawn under PTY | ✓ (zsh via `/usr/bin/login`, with Ghostty shell integration auto-injected) |
+| 3 | Output renders | ✓ (smoke test reads `ghostty-ok` via `ghostty_surface_read_text`) |
+| 4 | Keyboard input reaches the PTY | ✓ for ASCII text via `ghostty_surface_text`; full coverage (special keys, modifiers, IME) requires F4 |
+| 5 | Resize updates rows/columns and rendering | ✓ (137x30 → 131x27 on `setContentSize`) |
+| 6 | Mouse selection/scrolling works | ✗ — pending F5 |
+| 7 | Surface can be destroyed without crashing or orphaning resources | ✓ (smoke test now exits cleanly through `windowWillClose`, no crash artifacts) |
+
+Remaining for hard gate:
+
+- **F4** — make `GhosttyTerminalView` an `NSTextInputClient` and forward key events through `ghostty_surface_key`; reserve `ghostty_surface_text` for IME-committed text. Required for hard-gate item 4 and to pass the spirit of "input reaches the PTY" beyond ASCII.
+- **F5** — implement `updateTrackingAreas` and forward mouse/scroll events through `ghostty_surface_mouse_button` / `ghostty_surface_mouse_pos` / `ghostty_surface_scroll`. Required for hard-gate item 6.
+
+Both of these are scoped as a single follow-up unit, mirroring the relevant subset of `SurfaceView_AppKit.swift`. Phase 2 work remains gated until F4 and F5 land.
+
+Consequences:
+
+- Phase 1 spike continues; do not pivot.
+- Future ADR (TBD) will close the hard gate or document a new blocker after F4/F5.
+- The `CONTINUUM_SMOKE_TEST=1` integration test is the durable regression harness for the close path; keep it running on any wrapper-level change.
