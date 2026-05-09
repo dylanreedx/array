@@ -390,4 +390,131 @@ do {
     expect(decoded == registry, "Registry round trip")
 }
 
+// MARK: - Future-version safety
+
+do {
+    let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-future-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: scratch) }
+
+    let store = ProjectStore(projectRoot: scratch, retainedBackups: 1)
+
+    let futureProject = Project(
+        schemaVersion: Project.currentSchemaVersion + 99,
+        name: "future",
+        rootPath: scratch.path,
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        defaultLaunchProfileId: "shell",
+        editorPreference: .auto,
+        settings: ProjectSettings(
+            restorePolicy: .restoreDescriptors,
+            browserStoragePolicy: .perProject,
+            terminalClosePolicy: .askWhenRunning
+        )
+    )
+    try store.saveProject(futureProject)
+
+    // Loading must refuse: we'd silently downgrade unknown fields otherwise.
+    do {
+        _ = try store.loadProject()
+        expect(false, "Future schema version should refuse load")
+    } catch let ProjectStoreError.unknownFutureSchema(_, version, supported) {
+        expect(version > supported, "Unknown future schema reports version > supported")
+    } catch {
+        expect(false, "Future schema should throw unknownFutureSchema, threw \(error)")
+    }
+
+    // The on-disk file is untouched by the failed load — important for the
+    // "do not overwrite without user confirmation" policy.
+    let raw = try Data(contentsOf: store.layout.projectFile)
+    let json = String(data: raw, encoding: .utf8) ?? ""
+    let normalized = json.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "\n", with: "")
+    expect(normalized.contains("\"schemaVersion\":\(Project.currentSchemaVersion + 99)"), "Future-version file remains intact on disk")
+
+    // Same gate for the registry.
+    let registryScratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-registry-future-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: registryScratch) }
+    let registryStore = RegistryStore(applicationSupportDirectory: registryScratch, retainedBackups: 1)
+    let futureRegistry = Registry(
+        schemaVersion: Registry.currentSchemaVersion + 99,
+        lastActiveWorkspaceId: nil,
+        lastActiveProjectId: nil,
+        workspaces: [],
+        projects: [],
+        settings: RegistrySettings(
+            preferredEditor: .auto,
+            zoomModifier: .command,
+            openLastProjectOnLaunch: true
+        )
+    )
+    try registryStore.save(futureRegistry)
+    do {
+        _ = try registryStore.load()
+        expect(false, "Future registry schema should refuse load")
+    } catch RegistryStoreError.unknownFutureSchema {
+        // Expected.
+    } catch {
+        expect(false, "Future registry schema should throw unknownFutureSchema, threw \(error)")
+    }
+}
+
+// MARK: - RegistryStore
+
+do {
+    let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-registry-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: scratch) }
+
+    let store = RegistryStore(applicationSupportDirectory: scratch, retainedBackups: 2)
+
+    // Empty state when nothing is on disk.
+    let initial = try store.loadOrEmpty()
+    expect(initial.workspaces.isEmpty, "RegistryStore.loadOrEmpty starts empty")
+    expect(initial.projects.isEmpty, "RegistryStore.loadOrEmpty has no projects initially")
+
+    // Round-trip a populated registry.
+    let workspaceId = UUID()
+    let projectId = UUID()
+    let registry = Registry(
+        lastActiveWorkspaceId: workspaceId,
+        lastActiveProjectId: projectId,
+        workspaces: [
+            WorkspaceEntry(
+                id: workspaceId,
+                name: "Personal",
+                projectIds: [projectId],
+                createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+                updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+            )
+        ],
+        projects: [
+            ProjectEntry(
+                id: projectId,
+                name: "continuum-revived",
+                rootPath: "/tmp/continuum-revived",
+                workspaceId: workspaceId,
+                lastOpenedAt: Date(timeIntervalSince1970: 1_700_000_500),
+                pinned: true
+            )
+        ],
+        settings: RegistrySettings(
+            preferredEditor: .auto,
+            zoomModifier: .command,
+            openLastProjectOnLaunch: true
+        )
+    )
+    try store.save(registry)
+    let reloaded = try store.load()
+    expect(reloaded == registry, "RegistryStore round trip")
+
+    // The default Application Support path should at least include the app name.
+    let defaultDir = RegistryStore.defaultApplicationSupportDirectory()
+    expect(
+        defaultDir.path.hasSuffix("/continuum-revived") || defaultDir.path.contains("continuum-revived/"),
+        "Default registry directory ends with /continuum-revived, got \(defaultDir.path)"
+    )
+}
+
 print("ContinuumRevivedCoreChecks passed")
