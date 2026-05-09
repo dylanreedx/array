@@ -846,7 +846,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         NSApp.terminate(nil)
     }
 
+    private enum QASmokeFlow: String {
+        case defaultSmoke = "default-smoke"
+        case paletteOpenClose = "palette-open-close"
+        case cmd1Claude = "cmd-1-claude"
+        case cmd2Shell = "cmd-2-shell"
+        case cmd3Browser = "cmd-3-browser"
+        case cmd4Nvim = "cmd-4-nvim"
+        case terminalMidExit = "terminal-mid-exit"
+        case browserLoadError = "browser-load-error"
+        case canvasDragResize = "canvas-drag-resize"
+        case canvasZoomPanEdge = "canvas-zoom-pan-edge"
+        case emptyCanvas = "empty-canvas"
+        case restartPlaceholderClick = "restart-placeholder-click"
+    }
+
     private func runSmokeTest(window: NSWindow, runtime: GhosttyTerminalRuntime) {
+        let rawFlow = ProcessInfo.processInfo.environment["CONTINUUM_QA_FLOW"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let flowName = rawFlow.flatMap { $0.isEmpty ? nil : $0 } ?? QASmokeFlow.defaultSmoke.rawValue
+        guard let flow = QASmokeFlow(rawValue: flowName) else {
+            fputs("Unknown CONTINUUM_QA_FLOW: \(flowName)\n", stderr)
+            smokeTestExitCode = 2
+            window.performClose(nil)
+            return
+        }
+
+        switch flow {
+        case .defaultSmoke:
+            runDefaultSmokeTest(window: window, runtime: runtime)
+        case .paletteOpenClose:
+            runPaletteOpenCloseFlow(window: window)
+        case .cmd1Claude:
+            runCommandProfileFlow(window: window, profileId: "claude", label: "cmd-1-claude")
+        case .cmd2Shell:
+            runCommandProfileFlow(window: window, profileId: "shell", label: "cmd-2-shell")
+        case .cmd3Browser:
+            runBrowserSpawnFlow(window: window)
+        case .cmd4Nvim:
+            runCommandProfileFlow(window: window, profileId: "nvim", label: "cmd-4-nvim")
+        case .terminalMidExit:
+            runTerminalMidExitFlow(window: window)
+        case .browserLoadError:
+            runBrowserLoadErrorFlow(window: window)
+        case .canvasDragResize:
+            runCanvasDragResizeFlow(window: window)
+        case .canvasZoomPanEdge:
+            runCanvasZoomPanEdgeFlow(window: window)
+        case .emptyCanvas:
+            runEmptyCanvasFlow(window: window)
+        case .restartPlaceholderClick:
+            runRestartPlaceholderClickFlow(window: window)
+        }
+    }
+
+    private func runDefaultSmokeTest(window: NSWindow, runtime: GhosttyTerminalRuntime) {
         let qaCapture = QACapture()
         func capture(_ step: String, tSec: Double, notes: String? = nil) {
             qaCapture?.capture(
@@ -1189,5 +1243,320 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // here rather than being hidden behind the manual-teardown shortcut.
             window.performClose(nil)
         }
+    }
+
+    private func makeQACapture(window: NSWindow) -> (QACapture?, (String, Double, String?) -> Void) {
+        let qaCapture = QACapture()
+        let capture: (String, Double, String?) -> Void = { [weak self] step, tSec, notes in
+            qaCapture?.capture(
+                step: step,
+                tSec: tSec,
+                window: window,
+                canvasState: self?.canvasView?.canvasState,
+                notes: notes
+            )
+        }
+        return (qaCapture, capture)
+    }
+
+    private func finishQAFlow(
+        window: NSWindow,
+        qaCapture: QACapture?,
+        capture: @escaping (String, Double, String?) -> Void,
+        step: String,
+        tSec: Double,
+        success: Bool,
+        notes: String? = nil
+    ) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + tSec) {
+            capture(step, tSec, notes)
+            qaCapture?.writeManifest()
+            self.smokeTestExitCode = success ? 0 : 2
+            window.performClose(nil)
+        }
+    }
+
+    private func scheduleInitialCapture(_ capture: @escaping (String, Double, String?) -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            capture("initial-canvas", 0.2, nil)
+        }
+    }
+
+    private func runPaletteOpenCloseFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            self.openProfilePalette()
+            capture("palette-open", 0.4, nil)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            self.profilePalette?.close()
+            capture("palette-closed", 0.8, nil)
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "final-state",
+            tSec: 1.1,
+            success: true
+        )
+    }
+
+    private func runCommandProfileFlow(window: NSWindow, profileId: String, label: String) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            let notes = self.spawnTerminalForQA(profileId: profileId)
+            capture("\(label)-requested", 0.4, notes)
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "\(label)-final-state",
+            tSec: 1.2,
+            success: true
+        )
+    }
+
+    private func spawnTerminalForQA(profileId: String) -> String {
+        guard let spawner = tileSpawner else { return "tile spawner unavailable" }
+        switch spawner.spawnTerminal(profileId: profileId) {
+        case let .spawned(runtime):
+            wireRuntimeExitHandler(runtime)
+            runtimes.append(runtime)
+            return "spawned profile \(profileId)"
+        case let .missingCommand(executable):
+            return "missing command \(executable) for profile \(profileId)"
+        case let .notConfigured(id):
+            return "profile \(id) not configured"
+        case let .unknownProfile(id):
+            return "unknown profile \(id)"
+        case let .failure(error):
+            return "spawn failed: \(error)"
+        }
+    }
+
+    private func runBrowserSpawnFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            let notes = self.spawnBrowserForQA(url: "data:text/html;charset=utf-8,<html><head><title>qa-browser</title></head><body>browser ok</body></html>")
+            capture("cmd-3-browser-requested", 0.4, notes)
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "cmd-3-browser-final-state",
+            tSec: 1.4,
+            success: true
+        )
+    }
+
+    private func runBrowserLoadErrorFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            let notes = self.spawnBrowserForQA(url: "http://127.0.0.1:9/continuum-qa-load-error")
+            capture("browser-load-error-requested", 0.4, notes)
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "browser-load-error-final-state",
+            tSec: 1.8,
+            success: true
+        )
+    }
+
+    private func spawnBrowserForQA(url: String) -> String {
+        guard let spawner = tileSpawner else { return "tile spawner unavailable" }
+        switch spawner.spawnBrowser(url: url) {
+        case let .spawned(runtime):
+            wireContentProcessTerminationHandler(runtime)
+            browserRuntimes.append(runtime)
+            return "spawned browser \(runtime.id)"
+        case let .invalidURL(url):
+            return "invalid URL \(url)"
+        case let .failure(error):
+            return "browser spawn failed: \(error)"
+        }
+    }
+
+    private func runTerminalMidExitFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        var runtimeId: UUID?
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard let spawner = self.tileSpawner else {
+                capture("terminal-spawn-skipped", 0.4, "tile spawner unavailable")
+                return
+            }
+            switch spawner.spawnTerminal(profileId: "shell") {
+            case let .spawned(runtime):
+                self.wireRuntimeExitHandler(runtime)
+                self.runtimes.append(runtime)
+                runtimeId = runtime.id
+                capture("terminal-spawned", 0.4, "spawned shell runtime")
+            case let .missingCommand(executable):
+                capture("terminal-spawn-skipped", 0.4, "missing command \(executable)")
+            case let .notConfigured(id):
+                capture("terminal-spawn-skipped", 0.4, "profile \(id) not configured")
+            case let .unknownProfile(id):
+                capture("terminal-spawn-skipped", 0.4, "unknown profile \(id)")
+            case let .failure(error):
+                capture("terminal-spawn-skipped", 0.4, "spawn failed: \(error)")
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            if let id = runtimeId,
+               let runtime = self.runtimes.first(where: { $0.id == id }) {
+                runtime.sendInput(Data("exit\n".utf8))
+            }
+            capture("terminal-exit-requested", 0.8, nil)
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "terminal-placeholder-visible",
+            tSec: 1.4,
+            success: true
+        )
+    }
+
+    private func runCanvasDragResizeFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard let canvasView = self.canvasView,
+                  let terminalTile = canvasView.canvasState.tiles.first(where: { $0.kind == .terminal })
+            else {
+                capture("canvas-drag-resize-skipped", 0.4, "terminal tile unavailable")
+                return
+            }
+            let moved = CanvasEngine.tile(
+                terminalTile,
+                draggedByScreenDelta: CGSize(width: 80, height: 30),
+                viewport: canvasView.viewport
+            )
+            let resized = CanvasEngine.tile(
+                moved,
+                resizedByScreenDelta: CGSize(width: 100, height: 60),
+                edge: .bottomRight,
+                viewport: canvasView.viewport
+            )
+            canvasView.updateTile(resized)
+            capture("canvas-drag-resize-applied", 0.4, nil)
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "canvas-drag-resize-final-state",
+            tSec: 1.0,
+            success: true
+        )
+    }
+
+    private func runCanvasZoomPanEdgeFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard let canvasView = self.canvasView else {
+                capture("canvas-zoom-pan-skipped", 0.4, "canvas unavailable")
+                return
+            }
+            let anchor = CGPoint(x: canvasView.bounds.maxX - 8, y: canvasView.bounds.maxY - 8)
+            var viewport = CanvasEngine.zoom(canvasView.viewport, by: 1.4, anchorScreen: anchor)
+            viewport.x += 160
+            viewport.y += 120
+            canvasView.setViewport(viewport)
+            capture("canvas-zoom-pan-edge-applied", 0.4, nil)
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "canvas-zoom-pan-edge-final-state",
+            tSec: 1.0,
+            success: true
+        )
+    }
+
+    private func runEmptyCanvasFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard let canvasView = self.canvasView else {
+                capture("empty-canvas-skipped", 0.4, "canvas unavailable")
+                return
+            }
+            canvasView.setViewport(CanvasViewport(x: 10_000, y: 10_000, zoom: 1))
+            capture("empty-canvas-visible", 0.4, nil)
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "empty-canvas-final-state",
+            tSec: 1.0,
+            success: true
+        )
+    }
+
+    private func runRestartPlaceholderClickFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        var tileId: UUID?
+        var runtimeId: UUID?
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard let spawner = self.tileSpawner else {
+                capture("restart-spawn-skipped", 0.4, "tile spawner unavailable")
+                return
+            }
+            switch spawner.spawnTerminal(profileId: "shell") {
+            case let .spawned(runtime):
+                self.wireRuntimeExitHandler(runtime)
+                self.runtimes.append(runtime)
+                runtimeId = runtime.id
+                tileId = runtime.tileId
+                capture("restart-terminal-spawned", 0.4, nil)
+            case let .missingCommand(executable):
+                capture("restart-spawn-skipped", 0.4, "missing command \(executable)")
+            case let .notConfigured(id):
+                capture("restart-spawn-skipped", 0.4, "profile \(id) not configured")
+            case let .unknownProfile(id):
+                capture("restart-spawn-skipped", 0.4, "unknown profile \(id)")
+            case let .failure(error):
+                capture("restart-spawn-skipped", 0.4, "spawn failed: \(error)")
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            if let id = runtimeId,
+               let runtime = self.runtimes.first(where: { $0.id == id }) {
+                runtime.sendInput(Data("exit\n".utf8))
+            }
+            capture("restart-placeholder-requested", 0.8, nil)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) {
+            if let tileId {
+                self.restartTile(tileId: tileId)
+                capture("restart-placeholder-clicked", 1.3, nil)
+            } else {
+                capture("restart-placeholder-click-skipped", 1.3, "tile id unavailable")
+            }
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "restart-placeholder-final-state",
+            tSec: 1.8,
+            success: true
+        )
     }
 }
