@@ -223,6 +223,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    private func wireContentProcessTerminationHandler(_ runtime: WKWebViewBrowserRuntime) {
+        runtime.onContentProcessTerminated = { [weak self] runtimeId in
+            self?.handleBrowserContentProcessTerminated(runtimeId: runtimeId)
+        }
+    }
+
+    private func handleBrowserContentProcessTerminated(runtimeId: BrowserRuntimeID) {
+        guard let runtime = browserRuntimes.first(where: { $0.id == runtimeId }) else { return }
+        let tileId = runtime.tileId
+
+        tileSpawner?.writeBrowserTileSnapshot(for: runtime)
+
+        browserRuntimes.removeAll { $0.id == runtimeId }
+        runtime.terminate(policy: .force)
+
+        guard let canvasView,
+              let tile = canvasView.canvasState.tiles.first(where: { $0.id == tileId })
+        else {
+            fputs("Browser content-process terminated: tile \(tileId) not found in canvas\n", stderr)
+            return
+        }
+
+        installBrowserRestartPlaceholder(
+            for: tile,
+            statusText: "Web content process terminated",
+            restartable: true,
+            in: canvasView
+        )
+    }
+
     private func handleRuntimeExited(runtimeId: TerminalSessionID, exitCode: Int32?) {
         // Late .exited after windowWillClose teardown -- already handled there.
         guard let runtime = runtimes.first(where: { $0.id == runtimeId }) else { return }
@@ -279,6 +309,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func installInitialBrowserTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
         switch spawner.restartBrowserTile(tileId: tile.id) {
         case let .restarted(runtime):
+            wireContentProcessTerminationHandler(runtime)
             browserRuntimes.append(runtime)
         case let .invalidURL(url):
             installBrowserRestartPlaceholder(
@@ -326,6 +357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let spawner = tileSpawner else { return }
         switch spawner.restartBrowserTile(tileId: tileId) {
         case let .restarted(runtime):
+            wireContentProcessTerminationHandler(runtime)
             browserRuntimes.append(runtime)
         case let .invalidURL(url):
             fputs("Browser restart: invalid URL '\(url)'\n", stderr)
@@ -400,6 +432,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let spawner = tileSpawner else { return }
         switch spawner.spawnBrowser() {
         case let .spawned(runtime):
+            wireContentProcessTerminationHandler(runtime)
             browserRuntimes.append(runtime)
         case let .invalidURL(url):
             fputs("TileSpawner.spawnBrowser invalid URL: \(url)\n", stderr)
@@ -730,6 +763,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let spawner = self.tileSpawner else { return }
             switch spawner.spawnBrowser(url: browserDataURL) {
             case let .spawned(runtime):
+                self.wireContentProcessTerminationHandler(runtime)
                 self.browserRuntimes.append(runtime)
                 browserRuntimeId = runtime.id
                 browserTileId = runtime.tileId
@@ -802,6 +836,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             var multiTerminalOk = false
             var browserOk = false
             var midExitOk = false
+            let browserTileCount = self.canvasView?.canvasState.tiles.filter { $0.kind == .browser }.count ?? 0
+            if self.browserRuntimes.count != browserTileCount {
+                fputs("Smoke cardinality: browserRuntimes.count=\(self.browserRuntimes.count) != browserTileCount=\(browserTileCount)\n", stderr)
+            }
             do {
                 let project = try self.projectStore?.loadProject()
                 let sessions = try self.projectStore?.listSessions() ?? []

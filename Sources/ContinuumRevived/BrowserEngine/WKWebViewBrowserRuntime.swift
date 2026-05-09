@@ -14,6 +14,12 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
 
     var onStateChange: (() -> Void)?
 
+    /// Invoked when the WKWebView content process terminates unexpectedly.
+    /// Fires at most once per runtime instance. Always called on MainActor.
+    var onContentProcessTerminated: ((BrowserRuntimeID) -> Void)?
+
+    private var didNotifyContentProcessTerminated = false
+
     let webView: WKWebView
     private weak var hostView: BrowserHostView?
     private var observers: [NSKeyValueObservation] = []
@@ -155,6 +161,16 @@ extension WKWebViewBrowserRuntime: WKNavigationDelegate {
         Task { @MainActor in
             self.loadingState = .failed(message: message)
             self.onStateChange?()
+        }
+    }
+
+    nonisolated func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        Task { @MainActor in
+            guard !self.didNotifyContentProcessTerminated else { return }
+            self.didNotifyContentProcessTerminated = true
+            self.loadingState = .failed(message: "Web content process terminated")
+            self.onStateChange?()
+            self.onContentProcessTerminated?(self.id)
         }
     }
 }
