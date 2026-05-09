@@ -97,6 +97,29 @@ final class GhosttyTerminalRuntime: TerminalRuntime {
     func visibleText() -> String {
         terminalView?.visibleText() ?? ""
     }
+
+    func dispatchKeyDown(
+        keyCode: UInt16,
+        characters: String,
+        charactersIgnoringModifiers: String? = nil,
+        modifierFlags: NSEvent.ModifierFlags = []
+    ) {
+        guard let terminalView, let window = terminalView.window else { return }
+        let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: modifierFlags,
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: charactersIgnoringModifiers ?? characters,
+            isARepeat: false,
+            keyCode: keyCode
+        )
+        guard let event else { return }
+        terminalView.keyDown(with: event)
+    }
 }
 
 final class GhosttyRuntimeContext {

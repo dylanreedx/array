@@ -128,25 +128,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func runSmokeTest(window: NSWindow, runtime: GhosttyTerminalRuntime) {
+        // 1.0s — exercise the IME/text path (ghostty_surface_text)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             runtime.sendInput(Data("echo ghostty-ok\n".utf8))
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+        // 2.0s — exercise the key path: up-arrow recalls the previous command.
+        // Without ghostty_surface_key, the PUA codepoint goes nowhere useful and
+        // the shell does not recall the history entry.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            runtime.dispatchKeyDown(
+                keyCode: 0x7E,
+                characters: "\u{F700}",
+                charactersIgnoringModifiers: "\u{F700}"
+            )
+        }
+
+        // 2.4s — Enter to execute the recalled command.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
+            runtime.dispatchKeyDown(keyCode: 0x24, characters: "\r")
+        }
+
+        // 3.0s — window resize must still complete without crashing.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
             window.setContentSize(NSSize(width: 860, height: 540))
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+        // 4.0s — verify and close through the production close path.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
             let visibleText = runtime.visibleText()
-            let passed = visibleText.contains("ghostty-ok")
-            if passed {
-                print("Ghostty smoke test passed")
+            let occurrences = visibleText.components(separatedBy: "ghostty-ok").count - 1
+            let textPathOk = occurrences >= 1
+            // The initial echo produces 3 occurrences (shell echoes typed input
+            // before its prompt is ready, so the typed line shows twice plus the
+            // echo output). A successful key path adds at least one more
+            // occurrence from the recalled `echo ghostty-ok` execution. Without
+            // ghostty_surface_key, the PUA up-arrow codepoint goes nowhere, the
+            // recall does not happen, and we cap at 3.
+            let keyPathOk = occurrences >= 4
+
+            if textPathOk && keyPathOk {
+                print("Ghostty smoke test passed (text + key path, occurrences=\(occurrences))")
+                if ProcessInfo.processInfo.environment["CONTINUUM_DUMP_VISIBLE"] == "1" {
+                    fputs("--- visible text ---\n", stderr)
+                    fputs(visibleText, stderr)
+                    fputs("\n--- end ---\n", stderr)
+                }
                 self.smokeTestExitCode = 0
             } else {
-                fputs("Ghostty smoke test failed: visible text did not contain ghostty-ok\n", stderr)
+                fputs(
+                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) occurrences=\(occurrences)\n",
+                    stderr
+                )
                 fputs(visibleText, stderr)
                 self.smokeTestExitCode = 2
             }
+
             // Exercise the production close path: any crash on shutdown surfaces
             // here rather than being hidden behind the manual-teardown shortcut.
             window.performClose(nil)
