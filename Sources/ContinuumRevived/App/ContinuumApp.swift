@@ -43,9 +43,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var browserEngine: BrowserEngineContext?
     private var runtimes: [GhosttyTerminalRuntime] = []
     private var browserRuntimes: [WKWebViewBrowserRuntime] = []
+    private var noteViews: [UUID: NoteTileNSView] = [:]
     private var canvasView: CanvasNSView?
     private var saveTimer: Timer?
     private var browserSaveTimer: Timer?
+    private var noteSaveTimer: Timer?
     private let smokeTestEnabled = ProcessInfo.processInfo.environment["CONTINUUM_SMOKE_TEST"] == "1"
     private var smokeTestExitCode: Int32?
     private var projectStore: ProjectStore?
@@ -100,6 +102,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawner.browserPersistenceHandler = { [weak self] in
                 self?.scheduleBrowserSave()
             }
+            spawner.notePersistenceHandler = { [weak self] in
+                self?.scheduleNoteSave()
+            }
             self.tileSpawner = spawner
 
             let palette = LaunchProfilePalette()
@@ -121,9 +126,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     installInitialTerminalTile(tile, in: canvasView, via: spawner)
                 case .browser:
                     installInitialBrowserTile(tile, in: canvasView, via: spawner)
-                case .note, .file:
-                    let view = DescriptorTileNSView(tile: tile)
-                    canvasView.install(tileView: view, for: tile)
+                case .note:
+                    installInitialNoteTile(tile, in: canvasView, via: spawner)
+                case .file:
+                    installInitialFileTile(tile, in: canvasView, via: spawner)
                 }
             }
 
@@ -368,6 +374,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    private func installInitialNoteTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
+        spawner.installNoteTile(tile, in: canvasView)
+        let view = canvasView.tileView(for: tile.id) as! NoteTileNSView
+        noteViews[view.noteId] = view
+    }
+
+    private func installInitialFileTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
+        spawner.installFileTile(tile, in: canvasView)
+    }
+
     // MARK: - Hotkeys + spawning
 
     private func installHotkeyMonitor() {
@@ -487,6 +503,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // most recent in-memory state.
         flushCanvasSave()
         flushBrowserSave()
+        flushNoteSave()
 
         // Mark each terminal session as exited before we tear down its runtime.
         // We don't know the exit code from this side (Ghostty owns the PTY), so
@@ -525,6 +542,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         canvasView = nil
         runtimes.removeAll()
+        noteViews.removeAll()
         tileSpawner = nil
         ghostty?.shutdown()
         ghostty = nil
@@ -562,6 +580,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let spawner = tileSpawner else { return }
         for runtime in browserRuntimes {
             spawner.writeBrowserTileSnapshot(for: runtime)
+        }
+    }
+
+    private func scheduleNoteSave() {
+        noteSaveTimer?.invalidate()
+        noteSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.flushNoteSave() }
+        }
+    }
+
+    private func flushNoteSave() {
+        noteSaveTimer?.invalidate()
+        noteSaveTimer = nil
+        guard let spawner = tileSpawner else { return }
+        for view in noteViews.values {
+            spawner.writeNoteSnapshot(noteId: view.noteId, tileId: view.tile.id, text: view.textView.string)
         }
     }
 
@@ -813,6 +847,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         }
 
+        // 4.8s -- P6.4: the boot loop should install the restored default note
+        // as a live NoteTileNSView, not as a descriptor placeholder. Editing the
+        // text here gives the close-path note flush something concrete to save.
+        let smokeNoteBody = "smoke-note-ok"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.8) {
+            guard let canvasView = self.canvasView,
+                  let noteTile = canvasView.canvasState.tiles.first(where: { $0.kind == .note }),
+                  let noteView = canvasView.tileView(for: noteTile.id) as? NoteTileNSView
+            else { return }
+            noteView.textView.string = smokeNoteBody
+            noteView.onTextChange?()
+        }
+
         // 6.0s — verify and close through the production close path.
         DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) {
             let visibleText = runtime.visibleText()
@@ -844,6 +891,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             var multiTerminalOk = false
             var browserOk = false
             var midExitOk = false
+            var noteOk = false
             let browserTileCount = self.canvasView?.canvasState.tiles.filter { $0.kind == .browser }.count ?? 0
             // Cardinality is gating, not advisory: if browserRuntimes count drifts
             // from the canvas's live .browser tile count, runtimes leaked or were
@@ -866,6 +914,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 // debounced timer; flush manually so this check is exact.
                 self.flushCanvasSave()
                 self.flushBrowserSave()
+                self.flushNoteSave()
                 let canvasOnDisk = try self.projectStore?.loadCanvas()
                 let tileCount = canvasOnDisk?.tiles.count ?? 0
                 let viewportMoved = (canvasOnDisk?.viewport.x ?? 0) != 0
@@ -913,6 +962,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     }
                 }
 
+                // P6.4: assert the restored default note is a live editable note
+                // tile and that the debounced AppDelegate note flush writes the
+                // current NSTextView body through TileSpawner into note storage.
+                if let noteTile = canvasOnDisk?.tiles.first(where: { $0.kind == .note }),
+                   let noteView = self.canvasView?.tileView(for: noteTile.id) as? NoteTileNSView {
+                    let noteId = noteView.noteId
+                    let trackedViewMatches = self.noteViews[noteId] === noteView
+                    let canvasMetadataMatches = noteTile.metadata.noteId == noteId
+                    let bodyMatches = self.projectStore?.tryLoadNoteBody(id: noteId) == smokeNoteBody
+                    noteOk = trackedViewMatches && canvasMetadataMatches && bodyMatches
+                    if !noteOk {
+                        fputs(
+                            "Note check details: trackedViewMatches=\(trackedViewMatches) canvasMetadataMatches=\(canvasMetadataMatches) bodyMatches=\(bodyMatches)\n",
+                            stderr
+                        )
+                    }
+                }
+
                 // P5.6: assert the spawned WKWebView browser landed on disk
                 // with the data: URL, the title KVO + persistence path captured
                 // "continuum-browser-ok", the canvas tracks it as a .browser
@@ -947,8 +1014,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 fputs("Persistence check threw: \(error)\n", stderr)
             }
 
-            if textPathOk && keyPathOk && scrollOk && persistenceOk && canvasOk && multiTerminalOk && browserOk && midExitOk && browserCardinalityOk {
-                print("Ghostty smoke test passed (text + key + scroll + persistence + canvas + multiTerminal + browser + midExit, occurrences=\(occurrences))")
+            if textPathOk && keyPathOk && scrollOk && persistenceOk && canvasOk && multiTerminalOk && browserOk && midExitOk && noteOk && browserCardinalityOk {
+                print("Ghostty smoke test passed (text + key + scroll + persistence + canvas + multiTerminal + browser + midExit + note, occurrences=\(occurrences))")
                 if ProcessInfo.processInfo.environment["CONTINUUM_DUMP_VISIBLE"] == "1" {
                     fputs("--- pre-scroll visible text ---\n", stderr)
                     fputs(preScrollText, stderr)
@@ -959,7 +1026,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self.smokeTestExitCode = 0
             } else {
                 fputs(
-                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) midExitOk=\(midExitOk) browserCardinalityOk=\(browserCardinalityOk) occurrences=\(occurrences)\n",
+                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) midExitOk=\(midExitOk) noteOk=\(noteOk) browserCardinalityOk=\(browserCardinalityOk) occurrences=\(occurrences)\n",
                     stderr
                 )
                 fputs("--- pre-scroll ---\n", stderr)

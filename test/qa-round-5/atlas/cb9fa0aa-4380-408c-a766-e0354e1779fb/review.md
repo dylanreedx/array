@@ -1,0 +1,1 @@
+Visual review N/A: this task wires boot-loop restore and note persistence through the AppKit smoke test, while calibrated screenshot capture remains deferred to the seeded note/file smoke fixture task.
