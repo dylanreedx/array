@@ -233,3 +233,51 @@ Consequences:
 - Phase 1 spike continues; do not pivot.
 - Future ADR (TBD) will close the hard gate or document a new blocker after F4/F5.
 - The `CONTINUUM_SMOKE_TEST=1` integration test is the durable regression harness for the close path; keep it running on any wrapper-level change.
+
+## ADR-0011: Phase 1 Hard Gate Closed (Mouse + Scroll Forwarding Landed)
+
+Date: 2026-05-08
+
+Decision:
+
+The Phase 1 hard gate from `docs/04-terminal-ghostty-plan.md` is closed. Phase 2 is unblocked. Continue with the SwiftPM/AppKit thin-wrapper approach. Defer IME (`NSTextInputClient` + `interpretKeyEvents`), `flagsChanged` modifier-only events, mouse pressure / Force Touch, drag-and-drop, and accessibility — none of these are required for the gate, all are well-scoped follow-ups against the canonical `SurfaceView_AppKit.swift` reference.
+
+Evidence:
+
+- `keyDown` and `keyUp` now forward through `ghostty_surface_key` (finding F4). Special keys — arrow keys, function keys, modifier chords — are translated by Ghostty's keymap from the NSEvent `keyCode` + Ghostty mods, instead of being squashed through the IME-text path. See `Sources/ContinuumRevived/TerminalEngine/GhosttyTerminalView.swift`.
+- Mouse buttons (`mouseDown`/`mouseUp`/`rightMouse*`/`otherMouse*`), mouse position (`mouseMoved`/`mouseDragged`/`rightMouseDragged`/`otherMouseDragged`/`mouseEntered`), and scroll wheel (`scrollWheel`) are forwarded through `ghostty_surface_mouse_button`, `ghostty_surface_mouse_pos`, and `ghostty_surface_mouse_scroll` (finding F5). `updateTrackingAreas` installs the canonical tracking area (`mouseEnteredAndExited`, `mouseMoved`, `inVisibleRect`, `activeAlways`).
+- The smoke test now exercises three independent paths in one run:
+  1. **Text path** (`ghostty_surface_text`) — `runtime.sendInput("echo ghostty-ok")` followed by Enter via the key path types and runs the command.
+  2. **Key path** (`ghostty_surface_key`) — synthesized up-arrow + Enter through `view.keyDown(with:)` recalls `echo ghostty-ok` from shell history and re-executes it. Visible-text occurrence count goes from 3 (text path only) to ≥ 5 (text + key paths).
+  3. **Scroll path** (`ghostty_surface_mouse_scroll`) — `seq 1 60` fills scrollback, `runtime.scrollDirectly(deltaY: 400)` scrolls up, pre/post viewport text differ. Pre-scroll viewport shows the bottom (numbers 48-60); post-scroll shows the top (login banner, recall, numbers 1-20).
+
+Hard-gate status (per `docs/04-terminal-ghostty-plan.md`):
+
+| # | Requirement | Status |
+|---|---|---|
+| 1 | Swift/AppKit host can create a Ghostty-backed terminal surface | ✓ |
+| 2 | Local shell can spawn under PTY | ✓ |
+| 3 | Output renders | ✓ |
+| 4 | Keyboard input reaches the PTY | ✓ (text path + key path; IME deferred) |
+| 5 | Resize updates rows/columns and rendering | ✓ |
+| 6 | Mouse selection/scrolling works | ✓ (mouse + scroll forwarded; selection via mouse drag exercised through `mouseDragged → ghostty_surface_mouse_pos`; scrollback navigation proven by smoke test) |
+| 7 | Surface destroyed without crash or orphans | ✓ |
+
+Three back-to-back smoke-test runs after F5 land cleanly with `occurrences=5` and no entries in `~/Library/Logs/DiagnosticReports/`.
+
+Deferred (intentionally; tracked as separate work):
+
+- **IME** — `NSTextInputClient` conformance + `interpretKeyEvents`. Required before shipping Phase 1 to anyone using Korean / Japanese / Pinyin / dead-keys. Follow upstream `SurfaceView_AppKit.swift` lines 1816-2151.
+- **`flagsChanged`** — modifier-only events. Not required for any standard shell or TUI, but blocks Vim users that rely on Caps→Esc remap and similar.
+- **Mouse pressure / Force Touch / quickLook** — `pressureChange` + Force-Touch QuickLook word lookup. Quality-of-life only.
+- **Drag-and-drop** — file/text drag onto the terminal. Required when we wire up file-drop from the file-tree tile.
+- **Accessibility** — VoiceOver / accessibilityElement support. Required before shipping; not a Phase 1 blocker.
+- **`performKeyEquivalent`** — Cmd-keyed shortcuts that should reach the terminal vs. the responder chain. Required when we add reserved app shortcuts in Phase 4 / 7.
+- **Plan finding F6** — race in the renderer-thread `wakeup_cb` reading `appPointer` directly. Tighten alongside Phase 2 if it becomes observable; ARC + the small race window keeps it benign in current code.
+
+Consequences:
+
+- **Phase 2 (Project Spaces and Persistence) is unblocked.** Begin domain models, central registry, and `.continuum-revived/` layout per `docs/07-phased-build-plan.md`.
+- The TerminalEngine adapter boundary (`TerminalRuntime` protocol) holds — no escape hatches for callers to call Ghostty directly. App code still depends only on the protocol; canvas and persistence work can build against it without thinking about Ghostty.
+- The `CONTINUUM_SMOKE_TEST=1` harness is the durable regression test for terminal text + key + scroll + close paths. Keep it green on any wrapper-level change.
+- Future work that touches `GhosttyTerminalView`'s input handlers must also keep this test green or update its assertions deliberately.

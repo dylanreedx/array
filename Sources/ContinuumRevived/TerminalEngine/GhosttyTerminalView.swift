@@ -114,9 +114,99 @@ final class GhosttyTerminalView: NSView {
         return characters
     }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .mouseMoved, .inVisibleRect, .activeAlways],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         setGhosttyFocus(true)
+        forwardMouseButton(event: event, state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_LEFT)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        forwardMouseButton(event: event, state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_LEFT)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        forwardMouseButton(event: event, state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_RIGHT)
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        forwardMouseButton(event: event, state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_RIGHT)
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        forwardMouseButton(event: event, state: GHOSTTY_MOUSE_PRESS, button: GHOSTTY_MOUSE_MIDDLE)
+    }
+
+    override func otherMouseUp(with event: NSEvent) {
+        forwardMouseButton(event: event, state: GHOSTTY_MOUSE_RELEASE, button: GHOSTTY_MOUSE_MIDDLE)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        forwardMousePos(event: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        forwardMousePos(event: event)
+    }
+
+    override func rightMouseDragged(with event: NSEvent) {
+        forwardMousePos(event: event)
+    }
+
+    override func otherMouseDragged(with event: NSEvent) {
+        forwardMousePos(event: event)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        forwardMousePos(event: event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let surface else { return }
+        var x = event.scrollingDeltaX
+        var y = event.scrollingDeltaY
+        // Match upstream's 2x speedup for precision deltas; it "feels right."
+        if event.hasPreciseScrollingDeltas {
+            x *= 2
+            y *= 2
+        }
+        ghostty_surface_mouse_scroll(surface, x, y, 0)
+    }
+
+    private func forwardMouseButton(
+        event: NSEvent,
+        state: ghostty_input_mouse_state_e,
+        button: ghostty_input_mouse_button_e
+    ) {
+        guard let surface else { return }
+        _ = ghostty_surface_mouse_button(surface, state, button, Self.ghosttyMods(event.modifierFlags))
+    }
+
+    private func forwardMousePos(event: NSEvent) {
+        guard let surface else { return }
+        let pos = convert(event.locationInWindow, from: nil)
+        // NSView origin is bottom-left; Ghostty expects top-left.
+        ghostty_surface_mouse_pos(
+            surface,
+            pos.x,
+            frame.height - pos.y,
+            Self.ghosttyMods(event.modifierFlags)
+        )
+    }
+
+    func scrollDirectly(deltaX: Double, deltaY: Double) {
+        guard let surface else { return }
+        ghostty_surface_mouse_scroll(surface, deltaX, deltaY, 0)
     }
 
     func sendText(_ text: String) {

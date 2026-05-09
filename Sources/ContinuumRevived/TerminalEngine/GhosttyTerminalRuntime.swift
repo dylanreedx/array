@@ -98,6 +98,10 @@ final class GhosttyTerminalRuntime: TerminalRuntime {
         terminalView?.visibleText() ?? ""
     }
 
+    func scrollDirectly(deltaX: Double = 0, deltaY: Double) {
+        terminalView?.scrollDirectly(deltaX: deltaX, deltaY: deltaY)
+    }
+
     func dispatchKeyDown(
         keyCode: UInt16,
         characters: String,

@@ -149,13 +149,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             runtime.dispatchKeyDown(keyCode: 0x24, characters: "\r")
         }
 
-        // 3.0s — window resize must still complete without crashing.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+        // 2.8s — fill scrollback with enough output to push earlier lines off
+        // the visible viewport, so a scroll-up has something to reveal. Send
+        // the command body via the text path then Enter via the key path
+        // (mirrors how a user types a command and presses Return).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) {
+            runtime.sendInput(Data("seq 1 60".utf8))
+            runtime.dispatchKeyDown(keyCode: 0x24, characters: "\r")
+        }
+
+        // 3.5s — window resize must still complete without crashing.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
             window.setContentSize(NSSize(width: 860, height: 540))
         }
 
-        // 4.0s — verify and close through the production close path.
+        // 4.0s — capture pre-scroll viewport, scroll up via the C scroll API,
+        // then assert the viewport content changed. Proves Ghostty's scroll
+        // engine is actually being driven from our wrapper.
+        var preScrollText = ""
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+            preScrollText = runtime.visibleText()
+            runtime.scrollDirectly(deltaY: 400)
+        }
+
+        // 5.0s — verify and close through the production close path.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
             let visibleText = runtime.visibleText()
             let occurrences = visibleText.components(separatedBy: "ghostty-ok").count - 1
             let textPathOk = occurrences >= 1
@@ -165,21 +183,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // occurrence from the recalled `echo ghostty-ok` execution. Without
             // ghostty_surface_key, the PUA up-arrow codepoint goes nowhere, the
             // recall does not happen, and we cap at 3.
+            //
+            // Note: by t=5.0 the smoke test has scrolled up, so the viewport
+            // shows older content rather than the most-recent prompts. The
+            // initial echo + recall lines should still appear in the scrolled
+            // viewport (if scroll moved up enough), so we keep the >= 4 floor.
             let keyPathOk = occurrences >= 4
+            let scrollOk = preScrollText != visibleText
 
-            if textPathOk && keyPathOk {
-                print("Ghostty smoke test passed (text + key path, occurrences=\(occurrences))")
+            if textPathOk && keyPathOk && scrollOk {
+                print("Ghostty smoke test passed (text + key + scroll, occurrences=\(occurrences))")
                 if ProcessInfo.processInfo.environment["CONTINUUM_DUMP_VISIBLE"] == "1" {
-                    fputs("--- visible text ---\n", stderr)
+                    fputs("--- pre-scroll visible text ---\n", stderr)
+                    fputs(preScrollText, stderr)
+                    fputs("\n--- post-scroll visible text ---\n", stderr)
                     fputs(visibleText, stderr)
                     fputs("\n--- end ---\n", stderr)
                 }
                 self.smokeTestExitCode = 0
             } else {
                 fputs(
-                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) occurrences=\(occurrences)\n",
+                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) occurrences=\(occurrences)\n",
                     stderr
                 )
+                fputs("--- pre-scroll ---\n", stderr)
+                fputs(preScrollText, stderr)
+                fputs("\n--- post-scroll ---\n", stderr)
                 fputs(visibleText, stderr)
                 self.smokeTestExitCode = 2
             }
