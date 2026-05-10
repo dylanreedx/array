@@ -30,6 +30,7 @@ let package = Package(
                 "Canvas/CanvasNSView.swift",
                 "Canvas/DescriptorTileNSView.swift",
                 "Canvas/FileTileNSView.swift",
+                "Canvas/FileTreeTileNSView.swift",
                 "Canvas/NoteTileNSView.swift",
                 "Canvas/TerminalRestartTileNSView.swift",
                 "Canvas/TerminalTileNSView.swift",
@@ -37,7 +38,8 @@ let package = Package(
             ],
             sources: [
                 "Canvas/FileTreeScanner.swift",
-                "Canvas/FileTreeViewModel.swift"
+                "Canvas/FileTreeViewModel.swift",
+                "Canvas/FileTreeOutlineModel.swift"
             ]
         ),
         .executableTarget(
@@ -49,7 +51,8 @@ let package = Package(
             ],
             exclude: [
                 "Canvas/FileTreeScanner.swift",
-                "Canvas/FileTreeViewModel.swift"
+                "Canvas/FileTreeViewModel.swift",
+                "Canvas/FileTreeOutlineModel.swift"
             ],
             linkerSettings: [
                 .linkedFramework("Carbon"),

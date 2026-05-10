@@ -1,5 +1,6 @@
 import AppKit
 import ContinuumRevivedCore
+import ContinuumRevivedFileTree
 import Foundation
 
 @MainActor
@@ -517,6 +518,92 @@ final class TileSpawner {
     func installFileTile(_ tile: Tile, in canvasView: CanvasNSView) {
         let view = FileTileNSView(tile: tile)
         canvasView.install(tileView: view, for: tile)
+    }
+
+    // MARK: - File tree tiles
+
+    func installFileTreeTile(_ tile: Tile, in canvasView: CanvasNSView) {
+        let fileTreeTile = existingFileTreeTile(for: tile.id) ?? FileTreeTile(
+            tileId: tile.id,
+            rootPath: project.rootPath,
+            expandedPaths: [],
+            selectedPath: nil,
+            searchQuery: "",
+            ignoredNames: Array(FileTreeScanner.defaultIgnoredNames).sorted(),
+            gitBadges: .off
+        )
+        try? upsertFileTreeTile(fileTreeTile)
+
+        let view = FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile)
+        view.onPersist = { [weak self] updated in
+            try? self?.upsertFileTreeTile(updated)
+        }
+        view.onSpawnFile = { [weak self] path in
+            _ = self?.spawnFile(path: path, title: URL(fileURLWithPath: path).lastPathComponent)
+        }
+        view.onOpenFile = { [weak self] path in
+            self?.openFileInPreferredEditor(path: path)
+        }
+        canvasView.install(tileView: view, for: tile)
+    }
+
+    func openFileInPreferredEditor(path: String) {
+        if launchPreferredEditor(path: path) {
+            return
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: false))
+    }
+
+    private func existingFileTreeTile(for tileId: UUID) -> FileTreeTile? {
+        guard let state = try? projectStore.tryLoadFileTreeState() else {
+            return nil
+        }
+        return state.tiles.first { $0.tileId == tileId }
+    }
+
+    private func upsertFileTreeTile(_ fileTreeTile: FileTreeTile) throws {
+        var state = (try? projectStore.tryLoadFileTreeState()) ?? FileTreeState(tiles: [])
+        if let index = state.tiles.firstIndex(where: { $0.tileId == fileTreeTile.tileId }) {
+            state.tiles[index] = fileTreeTile
+        } else {
+            state.tiles.append(fileTreeTile)
+        }
+        try projectStore.saveFileTreeState(state)
+    }
+
+    private func launchPreferredEditor(path: String) -> Bool {
+        guard let spec = registry.spec(for: "nvim") else {
+            return false
+        }
+        let resolution = registry.resolve(
+            spec,
+            in: project.rootPath,
+            environment: ProcessInfo.processInfo.environment,
+            detector: detector
+        )
+        guard case let .found(profile) = resolution else {
+            return false
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: profile.command, isDirectory: false)
+        process.currentDirectoryURL = URL(fileURLWithPath: profile.cwd, isDirectory: true)
+        process.arguments = editorArguments(from: profile.arguments, path: path)
+        do {
+            try process.run()
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func editorArguments(from arguments: [String], path: String) -> [String] {
+        if let index = arguments.firstIndex(of: ".") {
+            var patched = arguments
+            patched[index] = path
+            return patched
+        }
+        return arguments + [path]
     }
 
     private func makePlacement(worldPoint: CGPoint?, size: CGSize, in canvasView: CanvasNSView) -> TileFrame {

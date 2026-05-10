@@ -54,6 +54,17 @@ expect(!paths.contains(".git/config"), "scanner should not descend into ignored 
 expect(finalSnapshot.nodes.first(where: { $0.relativePath == ".git" })?.isIgnored == true, "ignored directory node should be marked ignored")
 expect(finalSnapshot.nodes.first(where: { $0.relativePath == "Sources/App.swift" })?.gitStatus == nil, "scanner should leave git status unset")
 
+let unfilteredOutline = FileTreeOutlineModel(snapshot: finalSnapshot, query: "")
+expect(unfilteredOutline.rootItems.contains(where: { $0.node.relativePath == "Sources" }), "outline should include root directories without a query")
+
+let filteredOutline = FileTreeOutlineModel(snapshot: finalSnapshot, query: "App.swift")
+let filteredRootPaths = Set(filteredOutline.rootItems.map(\.node.relativePath))
+expect(filteredRootPaths.contains("Sources"), "outline filter should keep ancestors for matched descendants")
+expect(filteredOutline.children(of: filteredOutline.rootItems.first { $0.node.relativePath == "Sources" }).contains(where: {
+    $0.node.relativePath == "Sources/App.swift"
+}), "outline filter should keep matched descendant file")
+expect(!filteredRootPaths.contains("linked-dir-target"), "outline filter should hide unrelated directories")
+
 let batchedRecorder = SnapshotRecorder()
 try await FileTreeScanner(batchSize: 2).scan(root: scratch, ignoreList: FileTreeScanner.defaultIgnoredNames) { snapshot in
     Task { await batchedRecorder.append(snapshot) }
@@ -72,6 +83,21 @@ await MainActor.run {
 try await observed.waitForSnapshot(timeoutNanoseconds: 2_000_000_000)
 let latest = await MainActor.run { viewModel.latestSnapshot }
 expect(latest != nil, "view model should apply scanner snapshots on the main actor")
+
+let errorViewModel = await MainActor.run { FileTreeViewModel(scanner: scanner) }
+let errorRecorder = ErrorRecorder()
+await MainActor.run {
+    errorViewModel.onError = { error in
+        Task { await errorRecorder.append(error) }
+    }
+    errorViewModel.start(
+        rootPath: scratch.appendingPathComponent("missing", isDirectory: true).path,
+        ignoreList: FileTreeScanner.defaultIgnoredNames
+    )
+}
+try await errorRecorder.waitForError(timeoutNanoseconds: 2_000_000_000)
+let recordedError = await MainActor.run { errorViewModel.lastError }
+expect(recordedError != nil, "view model should expose scanner errors for UI state")
 
 await MainActor.run {
     viewModel.start(rootPath: scratch.appendingPathComponent("Sources", isDirectory: true).path, ignoreList: [])
@@ -109,5 +135,23 @@ actor SnapshotRecorder {
 
     func lastSnapshot() -> FileTreeSnapshot? {
         snapshots.last
+    }
+}
+
+actor ErrorRecorder {
+    private var errors: [Error] = []
+
+    func append(_ error: Error) {
+        errors.append(error)
+    }
+
+    func waitForError(timeoutNanoseconds: UInt64) async throws {
+        let deadline = ContinuousClock.now + .nanoseconds(Int(timeoutNanoseconds))
+        while errors.isEmpty {
+            if ContinuousClock.now >= deadline {
+                throw CheckError("timed out waiting for view model error")
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
     }
 }

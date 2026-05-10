@@ -161,7 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 case .file:
                     installInitialFileTile(tile, in: canvasView, via: spawner)
                 case .fileTree:
-                    installInitialFileTreeTile(tile, in: canvasView)
+                    installInitialFileTreeTile(tile, in: canvasView, via: spawner)
                 }
             }
 
@@ -416,8 +416,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         spawner.installFileTile(tile, in: canvasView)
     }
 
-    private func installInitialFileTreeTile(_ tile: Tile, in canvasView: CanvasNSView) {
-        canvasView.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+    private func installInitialFileTreeTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
+        spawner.installFileTreeTile(tile, in: canvasView)
     }
 
     // MARK: - Hotkeys + spawning
@@ -1276,14 +1276,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                             && $0.rootPath == project?.rootPath
                             && $0.gitBadges == .off
                     }) ?? false
-                    let placeholderInstalled = self.canvasView?.tileView(for: fileTreeTile.id) is DescriptorTileNSView
+                    let fileTreeInstalled = self.canvasView?.tileView(for: fileTreeTile.id) is FileTreeTileNSView
                     fileTreeOk = fileTreeTile.kind == .fileTree
                         && fileTreeTile.runtimeRef == nil
                         && stateMatches
-                        && placeholderInstalled
+                        && fileTreeInstalled
                     if !fileTreeOk {
                         fputs(
-                            "File tree check details: kind=\(fileTreeTile.kind) runtimeRef=\(String(describing: fileTreeTile.runtimeRef)) stateMatches=\(stateMatches) placeholderInstalled=\(placeholderInstalled)\n",
+                            "File tree check details: kind=\(fileTreeTile.kind) runtimeRef=\(String(describing: fileTreeTile.runtimeRef)) stateMatches=\(stateMatches) fileTreeInstalled=\(fileTreeInstalled)\n",
                             stderr
                         )
                     }

@@ -5,7 +5,9 @@ public final class FileTreeViewModel {
     public private(set) var currentTask: Task<Void, Never>?
     public private(set) var scanGeneration = 0
     public private(set) var latestSnapshot: FileTreeSnapshot?
+    public private(set) var lastError: Error?
     public var onSnapshotChange: ((FileTreeSnapshot) -> Void)?
+    public var onError: ((Error) -> Void)?
 
     private let scanner: FileTreeScanner
 
@@ -20,6 +22,8 @@ public final class FileTreeViewModel {
     public func start(rootPath: String, ignoreList: Set<String>) {
         currentTask?.cancel()
         scanGeneration += 1
+        latestSnapshot = nil
+        lastError = nil
         let generation = scanGeneration
         let scanner = scanner
         let root = URL(fileURLWithPath: rootPath, isDirectory: true)
@@ -33,6 +37,9 @@ public final class FileTreeViewModel {
                 }
             } catch is CancellationError {
             } catch {
+                await MainActor.run { [weak self] in
+                    self?.apply(error, generation: generation)
+                }
             }
         }
     }
@@ -49,6 +56,16 @@ public final class FileTreeViewModel {
         }
 
         latestSnapshot = snapshot
+        lastError = nil
         onSnapshotChange?(snapshot)
+    }
+
+    private func apply(_ error: Error, generation: Int) {
+        guard generation == scanGeneration else {
+            return
+        }
+
+        lastError = error
+        onError?(error)
     }
 }

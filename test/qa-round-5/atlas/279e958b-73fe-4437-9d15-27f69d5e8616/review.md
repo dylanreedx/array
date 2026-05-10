@@ -1,0 +1,1 @@
+Visual review N/A: headless verification covered the file-tree outline adapter, persisted boot installation, and app build. The placeholder atlas paths document that no calibrated pixel review was run for this AppKit-only wiring pass.
