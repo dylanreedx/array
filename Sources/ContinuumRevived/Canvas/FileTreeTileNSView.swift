@@ -25,6 +25,7 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
     var onPersist: ((FileTreeTile) -> Void)?
     var onSpawnFile: ((String) -> Void)?
     var onOpenFile: ((String) -> Void)?
+    var currentFileTreeTile: FileTreeTile { fileTreeTile }
 
     init(tile: Tile, fileTreeTile: FileTreeTile, viewModel: FileTreeViewModel = FileTreeViewModel()) {
         self.fileTreeTile = fileTreeTile

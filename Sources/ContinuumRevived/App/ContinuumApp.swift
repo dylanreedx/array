@@ -44,10 +44,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var runtimes: [GhosttyTerminalRuntime] = []
     private var browserRuntimes: [WKWebViewBrowserRuntime] = []
     private var noteViews: [UUID: NoteTileNSView] = [:]
+    private var fileTreeViews: [UUID: FileTreeTileNSView] = [:]
     private var canvasView: CanvasNSView?
     private var saveTimer: Timer?
     private var browserSaveTimer: Timer?
     private var noteSaveTimer: Timer?
+    private var fileTreeSaveTimer: Timer?
     private let smokeTestEnabled = ProcessInfo.processInfo.environment["CONTINUUM_SMOKE_TEST"] == "1"
     private var smokeTestExitCode: Int32?
     private var projectStore: ProjectStore?
@@ -126,6 +128,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             spawner.notePersistenceHandler = { [weak self] in
                 self?.scheduleNoteSave()
+            }
+            spawner.fileTreePersistenceHandler = { [weak self] in
+                self?.scheduleFileTreeSave()
             }
             self.tileSpawner = spawner
             canvasView.configureEmptyStateActions(CanvasEmptyStateActions(
@@ -417,7 +422,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func installInitialFileTreeTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
-        spawner.installFileTreeTile(tile, in: canvasView)
+        switch spawner.restartFileTreeTile(tileId: tile.id) {
+        case .restarted:
+            if let view = canvasView.tileView(for: tile.id) as? FileTreeTileNSView {
+                fileTreeViews[tile.id] = view
+            }
+        case .tileNotFound:
+            fputs("Boot file-tree install failed: tile \(tile.id) not found in canvas\n", stderr)
+        case let .failure(error):
+            fputs("Boot file-tree install failed: \(error)\n", stderr)
+        }
     }
 
     // MARK: - Hotkeys + spawning
@@ -606,6 +620,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         flushCanvasSave()
         flushBrowserSave()
         flushNoteSave()
+        flushFileTreeSave()
 
         // Mark each terminal session as exited before we tear down its runtime.
         // We don't know the exit code from this side (Ghostty owns the PTY), so
@@ -645,6 +660,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasView = nil
         runtimes.removeAll()
         noteViews.removeAll()
+        fileTreeViews.removeAll()
         tileSpawner = nil
         ghostty?.shutdown()
         ghostty = nil
@@ -698,6 +714,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let spawner = tileSpawner else { return }
         for view in noteViews.values {
             spawner.writeNoteSnapshot(noteId: view.noteId, tileId: view.tile.id, text: view.textView.string)
+        }
+    }
+
+    private func scheduleFileTreeSave() {
+        fileTreeSaveTimer?.invalidate()
+        fileTreeSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.flushFileTreeSave() }
+        }
+    }
+
+    private func flushFileTreeSave() {
+        fileTreeSaveTimer?.invalidate()
+        fileTreeSaveTimer = nil
+        guard let spawner = tileSpawner else { return }
+        for view in fileTreeViews.values {
+            spawner.writeFileTreeTileSnapshot(for: view)
         }
     }
 
@@ -1189,6 +1221,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self.flushCanvasSave()
                 self.flushBrowserSave()
                 self.flushNoteSave()
+                self.flushFileTreeSave()
                 let canvasOnDisk = try self.projectStore?.loadCanvas()
                 let tileCount = canvasOnDisk?.tiles.count ?? 0
                 let viewportMoved = (canvasOnDisk?.viewport.x ?? 0) != 0
@@ -1277,13 +1310,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                             && $0.gitBadges == .off
                     }) ?? false
                     let fileTreeInstalled = self.canvasView?.tileView(for: fileTreeTile.id) is FileTreeTileNSView
+                    let fileTreeTracked = self.fileTreeViews[Self.smokeFileTreeTileId] != nil
                     fileTreeOk = fileTreeTile.kind == .fileTree
                         && fileTreeTile.runtimeRef == nil
                         && stateMatches
                         && fileTreeInstalled
+                        && fileTreeTracked
                     if !fileTreeOk {
                         fputs(
-                            "File tree check details: kind=\(fileTreeTile.kind) runtimeRef=\(String(describing: fileTreeTile.runtimeRef)) stateMatches=\(stateMatches) fileTreeInstalled=\(fileTreeInstalled)\n",
+                            "File tree check details: kind=\(fileTreeTile.kind) runtimeRef=\(String(describing: fileTreeTile.runtimeRef)) stateMatches=\(stateMatches) fileTreeInstalled=\(fileTreeInstalled) fileTreeTracked=\(fileTreeTracked)\n",
                             stderr
                         )
                     }

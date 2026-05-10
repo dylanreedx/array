@@ -38,6 +38,10 @@ final class TileSpawner {
     /// debounced note body + index save.
     var notePersistenceHandler: (() -> Void)?
 
+    /// Called after file-tree expansion, selection, or search changes so the
+    /// AppDelegate can schedule a debounced FileTreeState save.
+    var fileTreePersistenceHandler: (() -> Void)?
+
     init(
         canvasView: CanvasNSView,
         ghostty: GhosttyRuntimeContext,
@@ -216,6 +220,18 @@ final class TileSpawner {
     enum FileOutcome {
         case spawned(tileId: UUID)
         case invalidPath
+        case failure(Error)
+    }
+
+    enum FileTreeOutcome {
+        case spawned(FileTreeViewModel)
+        case invalidPath
+        case failure(Error)
+    }
+
+    enum FileTreeRestartOutcome {
+        case restarted(FileTreeViewModel)
+        case tileNotFound
         case failure(Error)
     }
 
@@ -522,21 +538,77 @@ final class TileSpawner {
 
     // MARK: - File tree tiles
 
-    func installFileTreeTile(_ tile: Tile, in canvasView: CanvasNSView) {
-        let fileTreeTile = existingFileTreeTile(for: tile.id) ?? FileTreeTile(
-            tileId: tile.id,
-            rootPath: project.rootPath,
-            expandedPaths: [],
-            selectedPath: nil,
-            searchQuery: "",
-            ignoredNames: Array(FileTreeScanner.defaultIgnoredNames).sorted(),
-            gitBadges: .off
-        )
-        try? upsertFileTreeTile(fileTreeTile)
+    func spawnFileTree(rootPath: String, at worldPoint: CGPoint? = nil) -> FileTreeOutcome {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        let trimmedRootPath = rootPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedRootPath.isEmpty else { return .invalidPath }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: trimmedRootPath, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return .invalidPath
+        }
 
-        let view = FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile)
-        view.onPersist = { [weak self] updated in
-            try? self?.upsertFileTreeTile(updated)
+        let frame = makePlacement(
+            worldPoint: worldPoint,
+            size: CanvasEngine.defaultFrame(for: .fileTree),
+            in: canvasView
+        )
+        let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
+        let tile = Tile(
+            id: UUID(),
+            kind: .fileTree,
+            title: URL(fileURLWithPath: trimmedRootPath, isDirectory: true).lastPathComponent,
+            frame: frame,
+            zIndex: nextZ,
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+        let fileTreeTile = defaultFileTreeTile(tileId: tile.id, rootPath: trimmedRootPath)
+        do {
+            try upsertFileTreeTile(fileTreeTile)
+        } catch {
+            return .failure(error)
+        }
+
+        let viewModel = installFileTreeView(tile, fileTreeTile: fileTreeTile, in: canvasView)
+        do {
+            try projectStore.saveCanvas(canvasView.canvasState)
+        } catch {
+            return .failure(error)
+        }
+        return .spawned(viewModel)
+    }
+
+    func restartFileTreeTile(tileId: UUID) -> FileTreeRestartOutcome {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        guard let existing = canvasView.canvasState.tiles.first(where: { $0.id == tileId }) else {
+            return .tileNotFound
+        }
+        let fileTreeTile = existingFileTreeTile(for: existing.id)
+            ?? defaultFileTreeTile(tileId: existing.id, rootPath: project.rootPath)
+        do {
+            try upsertFileTreeTile(fileTreeTile)
+            try projectStore.saveCanvas(canvasView.canvasState)
+        } catch {
+            return .failure(error)
+        }
+        let viewModel = installFileTreeView(existing, fileTreeTile: fileTreeTile, in: canvasView)
+        return .restarted(viewModel)
+    }
+
+    func writeFileTreeTileSnapshot(for view: FileTreeTileNSView) {
+        try? upsertFileTreeTile(view.currentFileTreeTile)
+    }
+
+    private func installFileTreeView(
+        _ tile: Tile,
+        fileTreeTile: FileTreeTile,
+        in canvasView: CanvasNSView
+    ) -> FileTreeViewModel {
+        let viewModel = FileTreeViewModel()
+        let view = FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile, viewModel: viewModel)
+        view.onPersist = { [weak self] _ in
+            self?.fileTreePersistenceHandler?()
         }
         view.onSpawnFile = { [weak self] path in
             _ = self?.spawnFile(path: path, title: URL(fileURLWithPath: path).lastPathComponent)
@@ -545,6 +617,19 @@ final class TileSpawner {
             self?.openFileInPreferredEditor(path: path)
         }
         canvasView.install(tileView: view, for: tile)
+        return viewModel
+    }
+
+    private func defaultFileTreeTile(tileId: UUID, rootPath: String) -> FileTreeTile {
+        FileTreeTile(
+            tileId: tileId,
+            rootPath: rootPath,
+            expandedPaths: [],
+            selectedPath: nil,
+            searchQuery: "",
+            ignoredNames: Array(FileTreeScanner.defaultIgnoredNames).sorted(),
+            gitBadges: .off
+        )
     }
 
     func openFileInPreferredEditor(path: String) {
