@@ -12,6 +12,9 @@ final class CanvasNSView: NSView {
 
     private(set) var canvasState: CanvasState
     private var tileViews: [UUID: TileNSView] = [:]
+    private var emptyStateView: CanvasEmptyStateNSView?
+    private var emptyStateActions: CanvasEmptyStateActions?
+    private(set) var emptyStateInstalled = false
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -21,6 +24,7 @@ final class CanvasNSView: NSView {
         super.init(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.withAlphaComponent(0.92).cgColor
+        updateEmptyStateVisibility()
     }
 
     required init?(coder: NSCoder) {
@@ -45,6 +49,12 @@ final class CanvasNSView: NSView {
         } else {
             canvasState.tiles.append(tile)
         }
+        updateEmptyStateVisibility()
+    }
+
+    func configureEmptyStateActions(_ actions: CanvasEmptyStateActions) {
+        emptyStateActions = actions
+        emptyStateView?.actions = actions
     }
 
     /// Returns the NSView currently registered for `tileId`, or nil. Intended
@@ -90,6 +100,7 @@ final class CanvasNSView: NSView {
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         layoutAllTiles()
+        layoutEmptyState()
     }
 
     private func layoutAllTiles() {
@@ -103,6 +114,33 @@ final class CanvasNSView: NSView {
         let rect = CanvasEngine.tileScreenFrame(tile.frame, viewport: canvasState.viewport)
         view.frame = rect
         view.tile = tile
+    }
+
+    private func updateEmptyStateVisibility() {
+        if canvasState.tiles.isEmpty {
+            installEmptyStateIfNeeded()
+        } else {
+            uninstallEmptyStateIfNeeded()
+        }
+    }
+
+    private func installEmptyStateIfNeeded() {
+        guard emptyStateView == nil else { return }
+        let view = CanvasEmptyStateNSView(actions: emptyStateActions)
+        emptyStateView = view
+        addSubview(view, positioned: .above, relativeTo: nil)
+        emptyStateInstalled = true
+        layoutEmptyState()
+    }
+
+    private func uninstallEmptyStateIfNeeded() {
+        emptyStateView?.removeFromSuperview()
+        emptyStateView = nil
+        emptyStateInstalled = false
+    }
+
+    private func layoutEmptyState() {
+        emptyStateView?.frame = bounds
     }
 
     // MARK: - Pan / zoom gestures

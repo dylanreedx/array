@@ -83,7 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
             let ghostty = try GhosttyRuntimeContext()
             let browserEngine = BrowserEngineContext()
-            let seededSmokeTiles = smokeTestEnabled
+            let seededSmokeTiles = smokeTestEnabled && Self.requestedQAFlow() != .emptyCanvas
                 ? try Self.seedSmokeTestTiles(in: projectStore, projectRoot: projectRoot)
                 : []
 
@@ -100,7 +100,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     canvasState.tiles.append(seededTile)
                 }
             }
-            if !canvasState.tiles.contains(where: { $0.kind == .terminal }) {
+            if smokeTestEnabled,
+               Self.requestedQAFlow() != .emptyCanvas,
+               !canvasState.tiles.contains(where: { $0.kind == .terminal }) {
                 canvasState.tiles.append(Self.defaultTerminalTile())
             }
 
@@ -125,6 +127,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self?.scheduleNoteSave()
             }
             self.tileSpawner = spawner
+            canvasView.configureEmptyStateActions(CanvasEmptyStateActions(
+                spawnClaude: { [weak self] in
+                    self?.spawnTerminalFromProfile("claude")
+                },
+                spawnShell: { [weak self] in
+                    self?.spawnTerminalFromProfile("shell")
+                },
+                spawnBrowser: { [weak self] in
+                    self?.spawnBrowserDefault()
+                },
+                openInEditor: { [weak self] in
+                    self?.openProjectInEditor()
+                }
+            ))
 
             installHotkeyMonitor()
 
@@ -167,8 +183,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // a non-nil ghostty to forward set_focus into the surface.
             NSApp.activate(ignoringOtherApps: true)
 
-            if smokeTestEnabled, let primary = runtimes.first {
-                runSmokeTest(window: window, runtime: primary)
+            if smokeTestEnabled {
+                runSmokeTest(window: window, runtime: runtimes.first)
             }
         } catch {
             presentFatalError(error)
@@ -485,6 +501,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    private func openProjectInEditor() {
+        spawnTerminalFromProfile("nvim")
+    }
+
     private func performPaletteAction(_ action: LaunchPaletteAction) {
         switch action {
         case .newNote:
@@ -732,30 +752,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private static func defaultCanvasState() -> CanvasState {
-        let terminalTile = defaultTerminalTile()
-        let browserTile = Tile(
-            id: UUID(),
-            kind: .browser,
-            title: "Local browser",
-            frame: TileFrame(x: 720, y: 40, width: 460, height: 240),
-            zIndex: 1,
-            runtimeRef: nil,
-            metadata: TileMetadata(url: "http://localhost:3000")
-        )
-        let noteTile = Tile(
-            id: UUID(),
-            kind: .note,
-            title: "Notes",
-            frame: TileFrame(x: 720, y: 300, width: 460, height: 240),
-            zIndex: 0,
-            runtimeRef: nil,
-            metadata: TileMetadata()
-        )
         return CanvasState(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-            tiles: [terminalTile, browserTile, noteTile],
+            tiles: [],
             groups: [],
-            lastActiveTileId: terminalTile.id
+            lastActiveTileId: nil
         )
     }
 
@@ -873,11 +874,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case paletteLeakCheck = "palette-leak-check"
     }
 
-    private func runSmokeTest(window: NSWindow, runtime: GhosttyTerminalRuntime) {
+    private static func requestedQAFlow() -> QASmokeFlow? {
         let rawFlow = ProcessInfo.processInfo.environment["CONTINUUM_QA_FLOW"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let flowName = rawFlow.flatMap { $0.isEmpty ? nil : $0 } ?? QASmokeFlow.defaultSmoke.rawValue
-        guard let flow = QASmokeFlow(rawValue: flowName) else {
+        return QASmokeFlow(rawValue: flowName)
+    }
+
+    private func runSmokeTest(window: NSWindow, runtime: GhosttyTerminalRuntime?) {
+        guard let flow = Self.requestedQAFlow() else {
+            let rawFlow = ProcessInfo.processInfo.environment["CONTINUUM_QA_FLOW"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let flowName = rawFlow.flatMap { $0.isEmpty ? nil : $0 } ?? QASmokeFlow.defaultSmoke.rawValue
             fputs("Unknown CONTINUUM_QA_FLOW: \(flowName)\n", stderr)
             smokeTestExitCode = 2
             window.performClose(nil)
@@ -886,6 +894,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         switch flow {
         case .defaultSmoke:
+            guard let runtime else {
+                fputs("Default smoke requires an initial terminal runtime\n", stderr)
+                smokeTestExitCode = 2
+                window.performClose(nil)
+                return
+            }
             runDefaultSmokeTest(window: window, runtime: runtime)
         case .paletteOpenClose:
             runPaletteOpenCloseFlow(window: window)
@@ -1610,22 +1624,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func runEmptyCanvasFlow(window: NSWindow) {
         let (qaCapture, capture) = makeQACapture(window: window)
         scheduleInitialCapture(capture)
+        var emptyStateWasInstalled = false
+        var emptyStateWasRemoved = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             guard let canvasView = self.canvasView else {
                 capture("empty-canvas-skipped", 0.4, "canvas unavailable")
                 return
             }
-            canvasView.setViewport(CanvasViewport(x: 10_000, y: 10_000, zoom: 1))
-            capture("empty-canvas-visible", 0.4, nil)
+            emptyStateWasInstalled = canvasView.canvasState.tiles.isEmpty && canvasView.emptyStateInstalled
+            capture(
+                "empty-canvas-visible",
+                0.4,
+                "tiles \(canvasView.canvasState.tiles.count), empty state \(canvasView.emptyStateInstalled)"
+            )
         }
-        finishQAFlow(
-            window: window,
-            qaCapture: qaCapture,
-            capture: capture,
-            step: "empty-canvas-final-state",
-            tSec: 1.0,
-            success: true
-        )
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            let notes = self.spawnTerminalForQA(profileId: "shell")
+            emptyStateWasRemoved = self.canvasView?.canvasState.tiles.isEmpty == false
+                && self.canvasView?.emptyStateInstalled == false
+            capture("empty-canvas-spawned-shell", 0.6, notes)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            self.recordLaunchTime()
+            capture("empty-canvas-final-state", 1.0, nil)
+            qaCapture?.writeManifest()
+            self.qaPerf?.writeReport()
+            self.smokeTestExitCode = emptyStateWasInstalled && emptyStateWasRemoved ? 0 : 2
+            window.performClose(nil)
+        }
     }
 
     private func runRestartPlaceholderClickFlow(window: NSWindow) {
