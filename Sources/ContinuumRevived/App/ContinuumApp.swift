@@ -126,15 +126,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             self.tileSpawner = spawner
 
-            let palette = LaunchProfilePalette()
-            palette.onSelectProfile = { [weak self] profileId in
-                self?.spawnTerminalFromProfile(profileId)
-            }
-            palette.onSelectAction = { [weak self] action in
-                self?.performPaletteAction(action)
-            }
-            self.profilePalette = palette
-
             installHotkeyMonitor()
 
             // Walk every tile in the canvas, spawn a runtime for each terminal
@@ -443,10 +434,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func openProfilePalette() {
-        guard let palette = profilePalette,
-              let spawner = tileSpawner,
+        guard let spawner = tileSpawner,
               let host = window else { return }
+        let palette = profilePalette ?? makeProfilePalette()
+        profilePalette = palette
         palette.show(near: host, profiles: spawner.annotatedProfiles())
+    }
+
+    private func makeProfilePalette() -> LaunchProfilePalette {
+        let palette = LaunchProfilePalette()
+        palette.onSelectProfile = { [weak self] profileId in
+            self?.spawnTerminalFromProfile(profileId)
+        }
+        palette.onSelectAction = { [weak self] action in
+            self?.performPaletteAction(action)
+        }
+        palette.onClose = { [weak self] in
+            self?.profilePalette = nil
+        }
+        return palette
     }
 
     private func spawnTerminalFromProfile(_ profileId: String) {
@@ -1524,15 +1530,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let (qaCapture, capture) = makeQACapture(window: window)
         scheduleInitialCapture(capture)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            autoreleasepool {
-                for _ in 0..<25 {
-                    self.openProfilePalette()
-                    self.profilePalette?.close()
-                }
-            }
-            capture("palette-leak-warmup", 0.4, "opened and closed Cmd-K 25 times before baseline")
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
             let memoryBefore = QAPerf.residentMemoryBytes()
             autoreleasepool {
                 for _ in 0..<25 {
@@ -1540,12 +1537,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     self.profilePalette?.close()
                 }
             }
-            capture("palette-leak-cycle", 0.7, "opened and closed Cmd-K 25 times")
+            capture("palette-leak-cycle", 0.4, "opened and closed Cmd-K 25 times")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                 let memoryAfter = QAPerf.residentMemoryBytes()
                 let delta = Int64(memoryAfter) - Int64(memoryBefore)
                 self.qaPerf?.recordValue(key: "palette-leak-delta", value: Double(delta), unit: "bytes")
-                capture("palette-leak-memory-sampled", 0.9, "delta \(delta) bytes")
+                capture("palette-leak-memory-sampled", 0.6, "delta \(delta) bytes")
             }
         }
         finishQAFlow(

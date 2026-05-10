@@ -3,13 +3,14 @@ import ContinuumRevivedCore
 import Foundation
 
 @MainActor
-final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
+final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     var onSelectProfile: ((String) -> Void)?
     var onSelectAction: ((LaunchPaletteAction) -> Void)?
+    var onClose: (() -> Void)?
 
-    private var panel: NSPanel?
+    private var paletteView: NSView?
     private var tableView: NSTableView?
-    private var searchField: NSSearchField?
+    private var searchField: NSTextField?
 
     private var rows: [LaunchPaletteRow] = []
     private var filtered: [LaunchPaletteRow] = []
@@ -17,45 +18,51 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile]) {
         self.rows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)))
         self.filtered = rows
-        let panel = ensurePanel()
+        let hostView = host.contentView!
+        let paletteView = ensurePaletteView()
+        paletteView.removeFromSuperview()
+        hostView.addSubview(paletteView)
         searchField?.stringValue = ""
         tableView?.reloadData()
 
-        let frame = panel.frame
-        let hostFrame = host.frame
-        let x = hostFrame.midX - frame.width / 2
-        let y = hostFrame.midY - frame.height / 2
-        panel.setFrameOrigin(NSPoint(x: x, y: y))
-        panel.makeKeyAndOrderFront(nil)
+        let size = NSSize(width: 480, height: 320)
+        let hostBounds = hostView.bounds
+        let x = hostBounds.midX - size.width / 2
+        let y = hostBounds.midY - size.height / 2
+        paletteView.frame = NSRect(origin: NSPoint(x: x, y: y), size: size)
         if !filtered.isEmpty {
             tableView?.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         }
-        panel.makeFirstResponder(searchField)
+        host.makeFirstResponder(searchField)
     }
 
     func close() {
-        panel?.close()
+        searchField?.delegate = nil
+        tableView?.dataSource = nil
+        tableView?.delegate = nil
+        tableView?.target = nil
+        paletteView?.removeFromSuperview()
+
+        self.paletteView = nil
+        self.tableView = nil
+        self.searchField = nil
+        rows.removeAll()
+        filtered.removeAll()
+
+        onClose?()
     }
 
-    var isVisible: Bool { panel?.isVisible ?? false }
+    var isVisible: Bool { paletteView?.superview != nil }
 
-    private func ensurePanel() -> NSPanel {
-        if let panel { return panel }
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
-            styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        panel.title = "Open Tile"
-        panel.isFloatingPanel = true
-        panel.hidesOnDeactivate = true
-        panel.titlebarAppearsTransparent = true
+    private func ensurePaletteView() -> NSView {
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
+        content.wantsLayer = true
+        content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        content.layer?.borderColor = NSColor.separatorColor.cgColor
+        content.layer?.borderWidth = 1
+        content.layer?.cornerRadius = 8
 
-        let content = NSView()
-        content.translatesAutoresizingMaskIntoConstraints = false
-
-        let search = NSSearchField()
+        let search = NSTextField()
         search.delegate = self
         search.translatesAutoresizingMaskIntoConstraints = false
         search.placeholderString = "Search profiles…"
@@ -94,22 +101,10 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -8)
         ])
 
-        panel.contentView = content
-        // Pin contentView's autoresizing constraints
-        content.translatesAutoresizingMaskIntoConstraints = false
-        if let parent = content.superview {
-            NSLayoutConstraint.activate([
-                content.leadingAnchor.constraint(equalTo: parent.leadingAnchor),
-                content.trailingAnchor.constraint(equalTo: parent.trailingAnchor),
-                content.topAnchor.constraint(equalTo: parent.topAnchor),
-                content.bottomAnchor.constraint(equalTo: parent.bottomAnchor)
-            ])
-        }
-
-        self.panel = panel
+        self.paletteView = content
         self.tableView = table
         self.searchField = search
-        return panel
+        return content
     }
 
     private static func profileRow(for item: TileSpawner.AnnotatedProfile) -> LaunchPaletteProfileRow {
@@ -167,7 +162,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     // MARK: - NSTextFieldDelegate
 
     func controlTextDidChange(_ obj: Notification) {
-        guard let field = obj.object as? NSSearchField else { return }
+        guard let field = obj.object as? NSTextField else { return }
         filtered = LaunchPaletteModel.filterRows(rows, query: field.stringValue)
         tableView?.reloadData()
         if !filtered.isEmpty {

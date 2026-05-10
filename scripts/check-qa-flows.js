@@ -29,7 +29,8 @@ const markerChecks = new Map([
   ["qa/flows/drag-past-edge.sh", ["CONTINUUM_QA_FLOW=canvas-drag-resize", "cliclick", "drag"]],
   ["qa/flows/window-resize-stress.sh", ["set bounds", "320", "1920", "capture_step"]],
   ["qa/flows/quit-during-load.sh", ["CONTINUUM_QA_FLOW=cmd-3-browser", "DiagnosticReports", "quit"]],
-  ["Sources/ContinuumRevived/App/ContinuumApp.swift", ["palette-leak-warmup", "QAPerf.residentMemoryBytes()", "palette-leak-cycle"]]
+  ["Sources/ContinuumRevived/App/ContinuumApp.swift", ["palette.onClose", "QAPerf.residentMemoryBytes()", "palette-leak-cycle"]],
+  ["Sources/ContinuumRevived/App/LaunchProfilePalette.swift", ["let search = NSTextField()", "func close()", "searchField?.delegate = nil", "tableView?.dataSource = nil", "paletteView?.removeFromSuperview()"]]
 ]);
 
 function fail(message) {
@@ -65,6 +66,11 @@ for (const [relativePath, markers] of markerChecks.entries()) {
       fail(`${relativePath} is missing marker: ${marker}`);
     }
   }
+}
+
+const appSource = readRelative("Sources/ContinuumRevived/App/ContinuumApp.swift");
+if (appSource.includes("palette-leak-warmup")) {
+  fail("Sources/ContinuumRevived/App/ContinuumApp.swift must not warm the palette before leak sampling");
 }
 
 const gitignore = readRelative(".gitignore");
