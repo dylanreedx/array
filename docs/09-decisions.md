@@ -762,3 +762,38 @@ Consequences:
 - Phase QA remains reproducible from local commands and repo-owned scripts.
 - Future Computer Use work has two scoped paths instead of an open-ended integration request.
 - The team can compare any later Computer Use proposal against concrete Layer A and Layer B gaps before accepting new runner complexity.
+
+## ADR-0021: Lift Palette Filtering Into Core For AppKit-Free Testing
+
+Date: 2026-05-10
+
+Decision:
+
+The Cmd-K palette row model and filtering rules live in `ContinuumRevivedCore` so they can be exercised by executable checks without loading AppKit. `LaunchProfilePalette` stays responsible for AppKit view wiring, focus, keyboard commands, row rendering, and callback dispatch.
+
+What's in:
+
+- **`LaunchPaletteModel`** (Core, pure). `makeRows(profiles:)` converts already-adapted profile rows into stable palette rows and appends the built-in `New Note` and `Open File...` actions. `filterRows(_:query:)` trims and lowercases the query, preserves row order, matches profile display names and ids, and matches action names plus action tokens. `isFileURL(_:insideProjectRoot:)` checks standardized path components so file-opening rules can reject sibling-prefix paths without using AppKit.
+- **`LaunchPaletteAction`, `LaunchPaletteProfileRow`, and `LaunchPaletteRow`** (Core, pure). These types carry action identity, display names, profile detail text, and selectability without importing UI frameworks or runtime objects.
+- **`LaunchProfilePalette` as AppKit adapter**. The app-side palette maps `TileSpawner.AnnotatedProfile` values into `LaunchPaletteProfileRow`, builds the `NSView` / `NSTableView` / `NSSearchField` surface, owns focus and keyboard behavior, renders text colors, beeps on unselectable profile rows, and dispatches profile or action callbacks.
+- **`ContinuumRevivedPaletteChecks` against Core**. The executable check target depends on `ContinuumRevivedCore`, not the app target, so palette row construction, action filtering, profile filtering, selectability, and project-root file containment stay testable without AppKit.
+
+Verification:
+
+- `scripts/prepare-ghosttykit.sh` - prepared local GhosttyKit artifacts.
+- `swift build` - clean.
+- `swift run ContinuumRevivedCoreChecks` - green.
+- `swift run ContinuumRevivedPaletteChecks` - green, covering the Core palette model paths above.
+- `CONTINUUM_SMOKE_TEST=1 .build/debug/continuum-revived` - green for the app-level palette wiring and smoke path.
+
+What's deferred:
+
+- Fuzzy ranking is not part of this lift. The current model performs deterministic filtering while preserving the row order built by `makeRows(profiles:)`.
+- The AppKit palette UI remains hand-built. This ADR does not introduce a reusable command-palette framework or alternate renderer.
+- Custom command editing remains deferred with the launch-profile settings work. The Core action list only covers the note and file actions introduced for the current palette.
+
+Consequences:
+
+- Palette filtering changes now belong in Core first, with matching executable-check coverage in `ContinuumRevivedPaletteChecks`.
+- AppKit code should keep adapting domain state into Core row DTOs instead of reintroducing filtering logic in the table delegate.
+- The Core purity invariant remains load-bearing: palette model code must not import AppKit, SwiftUI, WebKit, GhosttyKit, or NSWorkspace.
