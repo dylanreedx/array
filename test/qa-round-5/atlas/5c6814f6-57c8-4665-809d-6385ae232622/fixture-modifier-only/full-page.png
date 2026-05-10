@@ -1,0 +1,1 @@
+Placeholder visual artifact for the modifier-only flagsChanged smoke seam. Visual comparison is N/A because the gate verifies the live AppKit and Ghostty key path without a visible layout delta.

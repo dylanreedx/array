@@ -133,6 +133,27 @@ final class GhosttyTerminalRuntime: TerminalRuntime {
         guard let event else { return }
         terminalView.keyDown(with: event)
     }
+
+    func dispatchModifierFlagsChanged(
+        keyCode: UInt16,
+        modifierFlags: NSEvent.ModifierFlags
+    ) {
+        guard let terminalView, let window = terminalView.window else { return }
+        let event = NSEvent.keyEvent(
+            with: .flagsChanged,
+            location: .zero,
+            modifierFlags: modifierFlags,
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: keyCode
+        )
+        guard let event else { return }
+        terminalView.flagsChanged(with: event)
+    }
 }
 
 final class GhosttyRuntimeContext {

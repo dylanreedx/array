@@ -9,6 +9,7 @@ final class GhosttyTerminalView: NSView {
     private let statusChanged: (TerminalStatus) -> Void
     private(set) var surface: ghostty_surface_t?
     private var processExitPoller: Timer?
+    private var previousModifierFlags: NSEvent.ModifierFlags = []
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -56,6 +57,23 @@ final class GhosttyTerminalView: NSView {
         sendKey(event: event, action: GHOSTTY_ACTION_RELEASE)
     }
 
+    override func flagsChanged(with event: NSEvent) {
+        let relevantPrevious = previousModifierFlags.intersection(Self.modifierOnlyFlags)
+        let relevantCurrent = event.modifierFlags.intersection(Self.modifierOnlyFlags)
+        defer { previousModifierFlags = relevantCurrent }
+
+        guard Self.modifierGhosttyMod(forKeyCode: event.keyCode) != nil else { return }
+        if relevantPrevious == relevantCurrent { return }
+
+        let action: ghostty_input_action_e
+        if relevantCurrent.isStrictSuperset(of: relevantPrevious) {
+            action = GHOSTTY_ACTION_PRESS
+        } else {
+            action = GHOSTTY_ACTION_RELEASE
+        }
+        sendKey(event: event, action: action)
+    }
+
     private func sendKey(event: NSEvent, action: ghostty_input_action_e) {
         guard let surface else { return }
 
@@ -77,7 +95,8 @@ final class GhosttyTerminalView: NSView {
         // Set text only for non-control, non-PUA characters. Ghostty does its
         // own control-character encoding from `mods`, and PUA function-key
         // codepoints (arrows, F-keys) must be conveyed via `keycode` only.
-        if let text = Self.ghosttyText(for: event),
+        if (event.type == .keyDown || event.type == .keyUp),
+           let text = Self.ghosttyText(for: event),
            !text.isEmpty,
            let leadingByte = text.utf8.first,
            leadingByte >= 0x20 {
@@ -98,6 +117,31 @@ final class GhosttyTerminalView: NSView {
         if flags.contains(.command) { mods |= GHOSTTY_MODS_SUPER.rawValue }
         if flags.contains(.capsLock) { mods |= GHOSTTY_MODS_CAPS.rawValue }
         return ghostty_input_mods_e(mods)
+    }
+
+    private static let modifierOnlyFlags: NSEvent.ModifierFlags = [
+        .shift,
+        .control,
+        .option,
+        .command,
+        .capsLock
+    ]
+
+    private static func modifierGhosttyMod(forKeyCode keyCode: UInt16) -> ghostty_input_mods_e? {
+        switch keyCode {
+        case 0x39:
+            GHOSTTY_MODS_CAPS
+        case 0x38, 0x3C:
+            GHOSTTY_MODS_SHIFT
+        case 0x3B, 0x3E:
+            GHOSTTY_MODS_CTRL
+        case 0x3A, 0x3D:
+            GHOSTTY_MODS_ALT
+        case 0x37, 0x36:
+            GHOSTTY_MODS_SUPER
+        default:
+            nil
+        }
     }
 
     private static func ghosttyText(for event: NSEvent) -> String? {

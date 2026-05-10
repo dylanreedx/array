@@ -1032,7 +1032,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // then assert the viewport content changed. Proves Ghostty's scroll
         // engine is actually being driven from our wrapper.
         var preScrollText = ""
+        var modifierOnlyOk = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x38, modifierFlags: [.shift])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x38, modifierFlags: [.shift])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x38, modifierFlags: [])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x3B, modifierFlags: [.control])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x3B, modifierFlags: [])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x3A, modifierFlags: [.option])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x3A, modifierFlags: [])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x37, modifierFlags: [.command])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x37, modifierFlags: [])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x39, modifierFlags: [.capsLock])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x39, modifierFlags: [])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0xFF, modifierFlags: [])
+            modifierOnlyOk = runtime.status == .running
             preScrollText = runtime.visibleText()
             capture("pre-scroll", tSec: 4.0)
             runtime.scrollDirectly(deltaY: 400)
@@ -1231,8 +1245,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 fputs("Persistence check threw: \(error)\n", stderr)
             }
 
-            if textPathOk && keyPathOk && scrollOk && persistenceOk && canvasOk && multiTerminalOk && browserOk && midExitOk && noteOk && fileOk && browserCardinalityOk {
-                print("Ghostty smoke test passed (text + key + scroll + persistence + canvas + multiTerminal + browser + midExit + note + file, occurrences=\(occurrences))")
+            if textPathOk && keyPathOk && scrollOk && modifierOnlyOk && persistenceOk && canvasOk && multiTerminalOk && browserOk && midExitOk && noteOk && fileOk && browserCardinalityOk {
+                print("Ghostty smoke test passed (text + key + scroll + modifier + persistence + canvas + multiTerminal + browser + midExit + note + file, occurrences=\(occurrences))")
                 if ProcessInfo.processInfo.environment["CONTINUUM_DUMP_VISIBLE"] == "1" {
                     fputs("--- pre-scroll visible text ---\n", stderr)
                     fputs(preScrollText, stderr)
@@ -1243,7 +1257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self.smokeTestExitCode = 0
             } else {
                 fputs(
-                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) midExitOk=\(midExitOk) noteOk=\(noteOk) fileOk=\(fileOk) browserCardinalityOk=\(browserCardinalityOk) occurrences=\(occurrences)\n",
+                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) modifierOnlyOk=\(modifierOnlyOk) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) midExitOk=\(midExitOk) noteOk=\(noteOk) fileOk=\(fileOk) browserCardinalityOk=\(browserCardinalityOk) occurrences=\(occurrences)\n",
                     stderr
                 )
                 fputs("--- pre-scroll ---\n", stderr)
