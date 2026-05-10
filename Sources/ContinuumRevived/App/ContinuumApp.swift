@@ -857,18 +857,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let smokeFileData = Data(smokeFileBody.utf8)
         try smokeFileData.write(to: smokeFileURL, options: .atomic)
 
+        let smokeTreeRoot = projectRoot
+            .appendingPathComponent(".continuum-revived", isDirectory: true)
+            .appendingPathComponent("smoke-tree", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: smokeTreeRoot.appendingPathComponent("b", isDirectory: true),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try Data("a\n".utf8).write(to: smokeTreeRoot.appendingPathComponent("a.txt"), options: .atomic)
+        try Data("c\n".utf8).write(to: smokeTreeRoot.appendingPathComponent("b/c.txt"), options: .atomic)
+        try FileManager.default.createDirectory(
+            at: smokeTreeRoot.appendingPathComponent(".git", isDirectory: true),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try Data("ref: refs/heads/main\n".utf8)
+            .write(to: smokeTreeRoot.appendingPathComponent(".git/HEAD"), options: .atomic)
+
         let noteSize = CanvasEngine.defaultFrame(for: .note)
         let fileSize = CanvasEngine.defaultFrame(for: .file)
         let fileTreeSize = CanvasEngine.defaultFrame(for: .fileTree)
         let fileTreeState = FileTreeState(tiles: [
             FileTreeTile(
                 tileId: smokeFileTreeTileId,
-                rootPath: projectRoot.path,
-                expandedPaths: [".continuum-revived"],
-                selectedPath: ".continuum-revived/smoke-file.txt",
-                searchQuery: "smoke",
+                rootPath: smokeTreeRoot.path,
+                expandedPaths: ["b"],
+                selectedPath: "a.txt",
+                searchQuery: "",
                 ignoredNames: [".git", "node_modules", ".build"],
-                gitBadges: .off
+                gitBadges: .cheap
             )
         ])
         try projectStore.saveFileTreeState(fileTreeState)
@@ -1321,19 +1339,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     let fileTreeState = try self.projectStore?.tryLoadFileTreeState()
                     let stateMatches = fileTreeState?.tiles.contains(where: {
                         $0.tileId == Self.smokeFileTreeTileId
-                            && $0.rootPath == project?.rootPath
-                            && $0.gitBadges == .off
+                            && $0.rootPath.hasSuffix(".continuum-revived/smoke-tree")
+                            && $0.gitBadges == .cheap
                     }) ?? false
-                    let fileTreeInstalled = self.canvasView?.tileView(for: fileTreeTile.id) is FileTreeTileNSView
-                    let fileTreeTracked = self.fileTreeViews[Self.smokeFileTreeTileId] != nil
+                    let fileTreeView = self.canvasView?.tileView(for: fileTreeTile.id) as? FileTreeTileNSView
+                    let fileTreeInstalled = fileTreeView != nil
+                    let fileTreeTracked = self.fileTreeViews[Self.smokeFileTreeTileId] === fileTreeView
+                    let snapshotPaths = Set(fileTreeView?.currentSnapshot?.nodes.map(\.relativePath) ?? [])
+                    let fileTreeLeavesVisible = snapshotPaths.contains("a.txt")
+                        && snapshotPaths.contains("b/c.txt")
+                    let gitFiltered = !snapshotPaths.contains(".git/HEAD")
                     fileTreeOk = fileTreeTile.kind == .fileTree
                         && fileTreeTile.runtimeRef == nil
                         && stateMatches
                         && fileTreeInstalled
                         && fileTreeTracked
+                        && fileTreeLeavesVisible
+                        && gitFiltered
                     if !fileTreeOk {
                         fputs(
-                            "File tree check details: kind=\(fileTreeTile.kind) runtimeRef=\(String(describing: fileTreeTile.runtimeRef)) stateMatches=\(stateMatches) fileTreeInstalled=\(fileTreeInstalled) fileTreeTracked=\(fileTreeTracked)\n",
+                            "File tree check details: kind=\(fileTreeTile.kind) runtimeRef=\(String(describing: fileTreeTile.runtimeRef)) stateMatches=\(stateMatches) fileTreeInstalled=\(fileTreeInstalled) fileTreeTracked=\(fileTreeTracked) fileTreeLeavesVisible=\(fileTreeLeavesVisible) gitFiltered=\(gitFiltered)\n",
                             stderr
                         )
                     }

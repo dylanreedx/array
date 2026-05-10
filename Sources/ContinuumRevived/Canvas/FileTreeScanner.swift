@@ -33,6 +33,7 @@ public struct FileTreeScanner: Sendable {
     public func scan(
         root: URL,
         ignoreList: Set<String>,
+        gitStatuses: [String: FileTreeGitStatus]? = nil,
         cancellation: Task<Void, Never>? = nil,
         onSnapshot: @Sendable (FileTreeSnapshot) -> Void
     ) async throws {
@@ -60,14 +61,15 @@ public struct FileTreeScanner: Sendable {
                 let shouldDescend = isDirectory && !isSymbolicLink && !isIgnored
                 let childCount = shouldDescend ? try childVisibleCount(at: child, ignoreList: ignoreList) : 0
 
+                let relativePath = relativePath(for: child, root: root)
                 nodes.append(
                     FileTreeNode(
-                        relativePath: relativePath(for: child, root: root),
+                        relativePath: relativePath,
                         displayName: name,
                         isDirectory: isDirectory,
                         childCount: childCount,
                         isIgnored: isIgnored,
-                        gitStatus: nil
+                        gitStatus: gitStatuses?[relativePath]
                     )
                 )
 

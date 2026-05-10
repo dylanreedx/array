@@ -1,4 +1,5 @@
 import Foundation
+import ContinuumRevivedCore
 
 @MainActor
 public final class FileTreeViewModel {
@@ -10,22 +11,34 @@ public final class FileTreeViewModel {
     public var onError: ((Error) -> Void)?
 
     private let scanner: FileTreeScanner
+    private let gitStatusProvider: @Sendable (URL) -> [String: FileTreeGitStatus]
 
-    public init(scanner: FileTreeScanner = FileTreeScanner()) {
+    public init(
+        scanner: FileTreeScanner = FileTreeScanner(),
+        gitStatusProvider: @escaping @Sendable (URL) -> [String: FileTreeGitStatus] = {
+            FileTreeGitStatusProbe().statuses(root: $0)
+        }
+    ) {
         self.scanner = scanner
+        self.gitStatusProvider = gitStatusProvider
     }
 
     deinit {
         currentTask?.cancel()
     }
 
-    public func start(rootPath: String, ignoreList: Set<String>) {
+    public func start(
+        rootPath: String,
+        ignoreList: Set<String>,
+        gitBadgeMode: FileTreeGitBadgeMode = .off
+    ) {
         currentTask?.cancel()
         scanGeneration += 1
         latestSnapshot = nil
         lastError = nil
         let generation = scanGeneration
         let scanner = scanner
+        let gitStatusProvider = gitStatusProvider
         let root = URL(fileURLWithPath: rootPath, isDirectory: true)
 
         currentTask = Task.detached(priority: .utility) {
@@ -33,6 +46,12 @@ public final class FileTreeViewModel {
                 try await scanner.scan(root: root, ignoreList: ignoreList, cancellation: nil) { snapshot in
                     Task { @MainActor [weak self] in
                         self?.apply(snapshot, generation: generation)
+                    }
+                }
+                if gitBadgeMode == .cheap {
+                    let statuses = gitStatusProvider(root)
+                    await MainActor.run { [weak self] in
+                        self?.applyGitStatuses(statuses, generation: generation)
                     }
                 }
             } catch is CancellationError {
@@ -67,5 +86,21 @@ public final class FileTreeViewModel {
 
         lastError = error
         onError?(error)
+    }
+
+    private func applyGitStatuses(_ statuses: [String: FileTreeGitStatus], generation: Int) {
+        guard generation == scanGeneration,
+              !statuses.isEmpty,
+              var snapshot = latestSnapshot else {
+            return
+        }
+
+        snapshot.nodes = snapshot.nodes.map { node in
+            var node = node
+            node.gitStatus = statuses[node.relativePath]
+            return node
+        }
+        latestSnapshot = snapshot
+        onSnapshotChange?(snapshot)
     }
 }

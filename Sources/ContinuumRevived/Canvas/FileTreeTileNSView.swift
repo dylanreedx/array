@@ -26,6 +26,7 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
     var onSpawnFile: ((String) -> Void)?
     var onOpenFile: ((String) -> Void)?
     var currentFileTreeTile: FileTreeTile { fileTreeTile }
+    var currentSnapshot: FileTreeSnapshot? { latestSnapshot }
 
     init(tile: Tile, fileTreeTile: FileTreeTile, viewModel: FileTreeViewModel = FileTreeViewModel()) {
         self.fileTreeTile = fileTreeTile
@@ -37,7 +38,8 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         showLoading()
         viewModel.start(
             rootPath: fileTreeTile.rootPath,
-            ignoreList: Set(fileTreeTile.ignoredNames)
+            ignoreList: Set(fileTreeTile.ignoredNames),
+            gitBadgeMode: fileTreeTile.gitBadges
         )
     }
 
@@ -72,6 +74,11 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         view.textField?.textColor = item.node.isIgnored
             ? NSColor.secondaryLabelColor
             : NSColor(white: 0.88, alpha: 1.0)
+        if let badge = view.viewWithTag(1) as? NSTextField {
+            badge.stringValue = badgeTitle(for: item.node)
+            badge.textColor = badgeColor(for: item.node.gitStatus)
+            badge.isHidden = item.node.isDirectory || item.node.gitStatus == nil
+        }
         return view
     }
 
@@ -363,6 +370,46 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         return prefix + item.node.displayName
     }
 
+    private func badgeTitle(for node: FileTreeNode) -> String {
+        guard let gitStatus = node.gitStatus else {
+            return ""
+        }
+        switch gitStatus {
+        case .modified:
+            return "M"
+        case .added:
+            return "A"
+        case .deleted:
+            return "D"
+        case .renamed:
+            return "R"
+        case .untracked:
+            return "?"
+        case .conflicted:
+            return "!"
+        }
+    }
+
+    private func badgeColor(for gitStatus: FileTreeGitStatus?) -> NSColor {
+        guard let gitStatus else {
+            return .clear
+        }
+        switch gitStatus {
+        case .modified:
+            return NSColor(calibratedRed: 0.95, green: 0.68, blue: 0.28, alpha: 1.0)
+        case .added:
+            return NSColor(calibratedRed: 0.32, green: 0.78, blue: 0.45, alpha: 1.0)
+        case .deleted:
+            return NSColor(calibratedRed: 0.90, green: 0.34, blue: 0.34, alpha: 1.0)
+        case .renamed:
+            return NSColor(calibratedRed: 0.36, green: 0.62, blue: 0.96, alpha: 1.0)
+        case .untracked:
+            return NSColor.secondaryLabelColor
+        case .conflicted:
+            return NSColor(calibratedRed: 0.72, green: 0.44, blue: 0.95, alpha: 1.0)
+        }
+    }
+
     private func makeCellView() -> NSTableCellView {
         let cell = NSTableCellView()
         cell.identifier = Self.rowIdentifier
@@ -370,12 +417,23 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         text.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         text.lineBreakMode = .byTruncatingTail
         text.translatesAutoresizingMaskIntoConstraints = false
+        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let badge = NSTextField(labelWithString: "")
+        badge.tag = 1
+        badge.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold)
+        badge.alignment = .center
+        badge.translatesAutoresizingMaskIntoConstraints = false
+        badge.setContentCompressionResistancePriority(.required, for: .horizontal)
         cell.addSubview(text)
+        cell.addSubview(badge)
         cell.textField = text
         NSLayoutConstraint.activate([
             text.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
-            text.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
-            text.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+            text.trailingAnchor.constraint(lessThanOrEqualTo: badge.leadingAnchor, constant: -6),
+            text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            badge.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+            badge.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            badge.widthAnchor.constraint(equalToConstant: 14)
         ])
         return cell
     }

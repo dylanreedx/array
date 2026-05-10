@@ -37,6 +37,16 @@ try FileManager.default.createSymbolicLink(
     withDestinationURL: scratch.appendingPathComponent("Sources/App.swift")
 )
 
+let porcelain = " M Sources/App.swift\u{0}A  Sources/New.swift\u{0}D  Sources/Old.swift\u{0}R  Sources/Renamed.swift\u{0}Sources/Original.swift\u{0}?? Sources/Loose.swift\u{0}UU Sources/Conflict.swift\u{0}"
+let parsedStatuses = FileTreeGitStatusProbe.parsePorcelain(Data(porcelain.utf8))
+expect(parsedStatuses["Sources/App.swift"] == .modified, "git parser should map modified files")
+expect(parsedStatuses["Sources/New.swift"] == .added, "git parser should map added files")
+expect(parsedStatuses["Sources/Old.swift"] == .deleted, "git parser should map deleted files")
+expect(parsedStatuses["Sources/Renamed.swift"] == .renamed, "git parser should map renamed destination files")
+expect(parsedStatuses["Sources/Loose.swift"] == .untracked, "git parser should map untracked files")
+expect(parsedStatuses["Sources/Conflict.swift"] == .conflicted, "git parser should map conflicted files")
+expect(FileTreeGitStatusProbe.parsePorcelain(Data([0x4d])).isEmpty, "git parser should hide badges for malformed output")
+
 let scanner = FileTreeScanner()
 let scannerRecorder = SnapshotRecorder()
 try await scanner.scan(root: scratch, ignoreList: FileTreeScanner.defaultIgnoredNames) { snapshot in
@@ -53,6 +63,21 @@ expect(paths.contains("linked-dir"), "scanner should include symlinked directori
 expect(!paths.contains(".git/config"), "scanner should not descend into ignored directories")
 expect(finalSnapshot.nodes.first(where: { $0.relativePath == ".git" })?.isIgnored == true, "ignored directory node should be marked ignored")
 expect(finalSnapshot.nodes.first(where: { $0.relativePath == "Sources/App.swift" })?.gitStatus == nil, "scanner should leave git status unset")
+
+let statusScannerRecorder = SnapshotRecorder()
+try await scanner.scan(
+    root: scratch,
+    ignoreList: FileTreeScanner.defaultIgnoredNames,
+    gitStatuses: ["Sources/App.swift": .modified]
+) { snapshot in
+    Task { await statusScannerRecorder.append(snapshot) }
+}
+try await statusScannerRecorder.waitForSnapshot(timeoutNanoseconds: 2_000_000_000)
+let statusSnapshot = try await statusScannerRecorder.lastSnapshot() ?? { throw CheckError("scanner produced no status snapshot") }()
+expect(
+    statusSnapshot.nodes.first(where: { $0.relativePath == "Sources/App.swift" })?.gitStatus == .modified,
+    "scanner should attach supplied git statuses by relative path"
+)
 
 let unfilteredOutline = FileTreeOutlineModel(snapshot: finalSnapshot, query: "")
 expect(unfilteredOutline.rootItems.contains(where: { $0.node.relativePath == "Sources" }), "outline should include root directories without a query")
@@ -99,6 +124,51 @@ try await errorRecorder.waitForError(timeoutNanoseconds: 2_000_000_000)
 let recordedError = await MainActor.run { errorViewModel.lastError }
 expect(recordedError != nil, "view model should expose scanner errors for UI state")
 
+let gitRoot = scratch.appendingPathComponent("git-root", isDirectory: true)
+try makeDirectory(gitRoot)
+try makeDirectory(gitRoot.appendingPathComponent("Sources", isDirectory: true))
+try makeFile(gitRoot.appendingPathComponent("Sources/App.swift"))
+
+let gitViewModel = await MainActor.run {
+    FileTreeViewModel(scanner: scanner) { _ in
+        ["Sources/App.swift": .modified]
+    }
+}
+let gitObserved = SnapshotRecorder()
+await MainActor.run {
+    gitViewModel.onSnapshotChange = { snapshot in
+        Task { await gitObserved.append(snapshot) }
+    }
+    gitViewModel.start(
+        rootPath: gitRoot.path,
+        ignoreList: FileTreeScanner.defaultIgnoredNames,
+        gitBadgeMode: .cheap
+    )
+}
+try await gitObserved.waitForGitStatus(
+    path: "Sources/App.swift",
+    status: nil,
+    timeoutNanoseconds: 2_000_000_000
+)
+try await gitObserved.waitForGitStatus(
+    path: "Sources/App.swift",
+    status: .modified,
+    timeoutNanoseconds: 5_000_000_000
+)
+
+try makeDirectory(gitRoot.appendingPathComponent(".git", isDirectory: true))
+try makeFile(gitRoot.appendingPathComponent(".git/HEAD"), contents: "ref: refs/heads/main\n")
+try runGit(["init", "-q"], in: gitRoot)
+try runGit(["config", "user.email", "checks@example.invalid"], in: gitRoot)
+try runGit(["config", "user.name", "Continuum Checks"], in: gitRoot)
+try runGit(["add", "Sources/App.swift"], in: gitRoot)
+try runGit(["commit", "-q", "-m", "seed"], in: gitRoot)
+try makeFile(gitRoot.appendingPathComponent("Sources/App.swift"), contents: "changed\n")
+let directStatuses = FileTreeGitStatusProbe().statuses(root: gitRoot)
+expect(directStatuses["Sources/App.swift"] == .modified, "git probe should return modified file status")
+let nonGitStatuses = FileTreeGitStatusProbe().statuses(root: scratch.appendingPathComponent("not-a-repo", isDirectory: true))
+expect(nonGitStatuses.isEmpty, "git probe should hide badges when git status fails")
+
 await MainActor.run {
     viewModel.start(rootPath: scratch.appendingPathComponent("Sources", isDirectory: true).path, ignoreList: [])
     viewModel.cancel()
@@ -136,6 +206,24 @@ actor SnapshotRecorder {
     func lastSnapshot() -> FileTreeSnapshot? {
         snapshots.last
     }
+
+    func waitForGitStatus(
+        path: String,
+        status: FileTreeGitStatus?,
+        timeoutNanoseconds: UInt64
+    ) async throws {
+        let deadline = ContinuousClock.now + .nanoseconds(Int(timeoutNanoseconds))
+        while !snapshots.contains(where: { snapshot in
+            snapshot.nodes.contains { node in
+                node.relativePath == path && node.gitStatus == status
+            }
+        }) {
+            if ContinuousClock.now >= deadline {
+                throw CheckError("timed out waiting for matching view model snapshot")
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
 }
 
 actor ErrorRecorder {
@@ -153,5 +241,18 @@ actor ErrorRecorder {
             }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
+    }
+}
+
+func runGit(_ arguments: [String], in directory: URL) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["git", "-C", directory.path] + arguments
+    process.standardOutput = Pipe()
+    process.standardError = Pipe()
+    try process.run()
+    process.waitUntilExit()
+    if process.terminationStatus != 0 {
+        throw CheckError("git \(arguments.joined(separator: " ")) failed")
     }
 }

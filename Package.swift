@@ -37,6 +37,7 @@ let package = Package(
                 "Canvas/TileNSView.swift"
             ],
             sources: [
+                "Canvas/FileTreeGitStatusProbe.swift",
                 "Canvas/FileTreeScanner.swift",
                 "Canvas/FileTreeViewModel.swift",
                 "Canvas/FileTreeOutlineModel.swift"
@@ -50,6 +51,7 @@ let package = Package(
                 "GhosttyKit"
             ],
             exclude: [
+                "Canvas/FileTreeGitStatusProbe.swift",
                 "Canvas/FileTreeScanner.swift",
                 "Canvas/FileTreeViewModel.swift",
                 "Canvas/FileTreeOutlineModel.swift"
