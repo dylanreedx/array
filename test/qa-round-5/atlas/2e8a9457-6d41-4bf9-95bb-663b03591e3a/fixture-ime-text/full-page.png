@@ -1,0 +1,1 @@
+Placeholder visual artifact for the IME NSTextInputClient smoke seam. Visual comparison is N/A because the gate verifies committed multi-byte text, marked text clearing, and the live AppKit-to-Ghostty input path without a visible layout delta.

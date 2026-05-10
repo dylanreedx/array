@@ -99,6 +99,18 @@ final class GhosttyTerminalRuntime: TerminalRuntime {
         terminalView?.sendText(text)
     }
 
+    @discardableResult
+    func dispatchInsertedText(_ text: String) -> Bool {
+        guard let terminalView else { return false }
+        terminalView.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+        return !terminalView.hasMarkedText()
+    }
+
+    @discardableResult
+    func dispatchMarkedText(_ text: String) -> Bool {
+        terminalView?.setMarkedTextForSmoke(text) ?? false
+    }
+
     func terminate(policy: TerminationPolicy) {
         terminalView?.requestClose(force: policy == .force)
     }

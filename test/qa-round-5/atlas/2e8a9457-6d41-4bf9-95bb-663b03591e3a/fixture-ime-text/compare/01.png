@@ -1,0 +1,1 @@
+Placeholder comparison artifact for the IME NSTextInputClient smoke seam. The smoke gate verifies synthesized committed multi-byte text and composing-text cleanup while the terminal remains running.

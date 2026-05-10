@@ -928,10 +928,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             )
         }
 
-        // 1.0s — exercise the IME/text path (ghostty_surface_text)
+        // 1.0s - exercise the committed IME text path.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             self.recordLaunchTime()
-            runtime.sendInput(Data("echo ghostty-ok\n".utf8))
+            runtime.dispatchInsertedText("echo ghostty-ok")
+            runtime.dispatchKeyDown(keyCode: 0x24, characters: "\r")
             capture("echo-text", tSec: 1.0)
         }
 
@@ -977,12 +978,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         }
 
-        // 2.8s — fill scrollback with enough output to push earlier lines off
+        // 2.8s - fill scrollback with enough output to push earlier lines off
         // the visible viewport, so a scroll-up has something to reveal. Send
         // the command body via the text path then Enter via the key path
         // (mirrors how a user types a command and presses Return).
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) {
-            runtime.sendInput(Data("seq 1 60".utf8))
+            runtime.dispatchInsertedText("seq 1 60")
             runtime.dispatchKeyDown(keyCode: 0x24, characters: "\r")
             capture("seq-scroll", tSec: 2.8)
         }
@@ -993,7 +994,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
             if let id = secondaryRuntimeId,
                let secondary = self.runtimes.first(where: { $0.id == id }) {
-                secondary.sendInput(Data("exit\n".utf8))
+                secondary.dispatchInsertedText("exit")
+                secondary.dispatchKeyDown(keyCode: 0x24, characters: "\r")
             }
             capture("mid-exit-trigger", tSec: 3.0)
         }
@@ -1033,6 +1035,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // engine is actually being driven from our wrapper.
         var preScrollText = ""
         var modifierOnlyOk = false
+        var imeInsertedTextSeen = false
+        var markedTextCleared = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
             runtime.dispatchModifierFlagsChanged(keyCode: 0x38, modifierFlags: [.shift])
             runtime.dispatchModifierFlagsChanged(keyCode: 0x38, modifierFlags: [.shift])
@@ -1047,8 +1051,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             runtime.dispatchModifierFlagsChanged(keyCode: 0x39, modifierFlags: [])
             runtime.dispatchModifierFlagsChanged(keyCode: 0xFF, modifierFlags: [])
             modifierOnlyOk = runtime.status == .running
-            preScrollText = runtime.visibleText()
+            runtime.dispatchInsertedText("printf 'ime-é-ok\\n'")
+            runtime.dispatchKeyDown(keyCode: 0x24, characters: "\r")
+            runtime.dispatchMarkedText("ime-compose")
+            markedTextCleared = runtime.dispatchInsertedText(" ")
             capture("pre-scroll", tSec: 4.0)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.2) {
+            preScrollText = runtime.visibleText()
+            imeInsertedTextSeen = preScrollText.contains("ime-é-ok")
+            capture("ime-inserted-text", tSec: 5.2)
             runtime.scrollDirectly(deltaY: 400)
         }
 
@@ -1245,8 +1258,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 fputs("Persistence check threw: \(error)\n", stderr)
             }
 
-            if textPathOk && keyPathOk && scrollOk && modifierOnlyOk && persistenceOk && canvasOk && multiTerminalOk && browserOk && midExitOk && noteOk && fileOk && browserCardinalityOk {
-                print("Ghostty smoke test passed (text + key + scroll + modifier + persistence + canvas + multiTerminal + browser + midExit + note + file, occurrences=\(occurrences))")
+            if textPathOk && keyPathOk && scrollOk && modifierOnlyOk && imeInsertedTextSeen && markedTextCleared && persistenceOk && canvasOk && multiTerminalOk && browserOk && midExitOk && noteOk && fileOk && browserCardinalityOk {
+                print("Ghostty smoke test passed (text + key + scroll + modifier + ime + persistence + canvas + multiTerminal + browser + midExit + note + file, occurrences=\(occurrences))")
                 if ProcessInfo.processInfo.environment["CONTINUUM_DUMP_VISIBLE"] == "1" {
                     fputs("--- pre-scroll visible text ---\n", stderr)
                     fputs(preScrollText, stderr)
@@ -1257,7 +1270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self.smokeTestExitCode = 0
             } else {
                 fputs(
-                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) modifierOnlyOk=\(modifierOnlyOk) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) midExitOk=\(midExitOk) noteOk=\(noteOk) fileOk=\(fileOk) browserCardinalityOk=\(browserCardinalityOk) occurrences=\(occurrences)\n",
+                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) modifierOnlyOk=\(modifierOnlyOk) imeInsertedTextSeen=\(imeInsertedTextSeen) markedTextCleared=\(markedTextCleared) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) midExitOk=\(midExitOk) noteOk=\(noteOk) fileOk=\(fileOk) browserCardinalityOk=\(browserCardinalityOk) occurrences=\(occurrences)\n",
                     stderr
                 )
                 fputs("--- pre-scroll ---\n", stderr)
