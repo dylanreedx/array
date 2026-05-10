@@ -532,6 +532,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawnNoteFromPalette()
         case .openFile:
             openFileFromPalette()
+        case .openFileTree:
+            spawnFileTreeFromPalette()
         }
     }
 
@@ -570,6 +572,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             fputs("TileSpawner.spawnFile rejected empty file path\n", stderr)
         case let .failure(error):
             fputs("TileSpawner.spawnFile failed: \(error)\n", stderr)
+        }
+    }
+
+    private func spawnFileTreeFromPalette() {
+        guard let spawner = tileSpawner,
+              let project = activeProject else { return }
+        switch spawner.spawnFileTree(rootPath: project.rootPath) {
+        case .spawned:
+            break
+        case .invalidPath:
+            fputs("TileSpawner.spawnFileTree rejected project root: \(project.rootPath)\n", stderr)
+        case let .failure(error):
+            fputs("TileSpawner.spawnFileTree failed: \(error)\n", stderr)
         }
     }
 

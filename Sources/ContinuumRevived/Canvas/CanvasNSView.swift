@@ -9,6 +9,7 @@ import Foundation
 @MainActor
 final class CanvasNSView: NSView {
     weak var delegate: CanvasNSViewDelegate?
+    var onFileURLDrop: ((String, CGPoint) -> Void)?
 
     private(set) var canvasState: CanvasState
     private var tileViews: [UUID: TileNSView] = [:]
@@ -24,6 +25,7 @@ final class CanvasNSView: NSView {
         super.init(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.withAlphaComponent(0.92).cgColor
+        registerForDraggedTypes([.fileURL])
         updateEmptyStateVisibility()
     }
 
@@ -174,6 +176,29 @@ final class CanvasNSView: NSView {
         canvasState.lastActiveTileId = nil
         delegate?.canvasDidChange(self)
         window?.makeFirstResponder(self)
+    }
+
+    // MARK: - File drops
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        draggedFileURL(from: sender) == nil ? [] : .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let url = draggedFileURL(from: sender) else {
+            return false
+        }
+        let screenPoint = convert(sender.draggingLocation, from: nil)
+        let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: canvasState.viewport)
+        onFileURLDrop?(url.path, worldPoint)
+        return true
+    }
+
+    private func draggedFileURL(from sender: NSDraggingInfo) -> URL? {
+        guard let raw = sender.draggingPasteboard.string(forType: .fileURL) else {
+            return nil
+        }
+        return URL(string: raw)
     }
 }
 

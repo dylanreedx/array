@@ -83,6 +83,27 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         persist()
     }
 
+    func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> NSPasteboardWriting? {
+        guard let item = item as? FileTreeOutlineItem,
+              !item.node.isDirectory else {
+            return nil
+        }
+        let pasteboardItem = NSPasteboardItem()
+        pasteboardItem.setString(
+            URL(fileURLWithPath: absolutePath(for: item.node.relativePath)).absoluteString,
+            forType: .fileURL
+        )
+        return pasteboardItem
+    }
+
+    func outlineView(
+        _ outlineView: NSOutlineView,
+        draggingSession session: NSDraggingSession,
+        sourceOperationMaskFor context: NSDraggingContext
+    ) -> NSDragOperation {
+        .copy
+    }
+
     func outlineViewItemDidExpand(_ notification: Notification) {
         guard let item = notification.userInfo?["NSObject"] as? FileTreeOutlineItem else {
             return
@@ -158,6 +179,8 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         outlineView.target = self
         outlineView.doubleAction = #selector(activateSelectedRow(_:))
         outlineView.onReturn = { [weak self] in self?.activateSelectedRow(nil) }
+        outlineView.registerForDraggedTypes([.fileURL])
+        outlineView.setDraggingSourceOperationMask(.copy, forLocal: false)
 
         let menu = NSMenu()
         menu.addItem(NSMenuItem(

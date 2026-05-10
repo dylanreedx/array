@@ -32,8 +32,9 @@ func main() {
             "Shell",
             "Claude Code",
             "New Note",
-            "Open File..."
-        ], "palette appends note and file actions after profiles")
+            "Open File...",
+            "Open File Tree..."
+        ], "palette appends note, file, and file-tree actions after profiles")
     }
 
     do {
@@ -43,7 +44,10 @@ func main() {
         ])
         expect(LaunchPaletteModel.filterRows(rows, query: "note").map(\.displayName) == ["New Note"], "note query matches New Note")
         expect(LaunchPaletteModel.filterRows(rows, query: "new").map(\.displayName) == ["New Note"], "new query matches New Note")
-        expect(LaunchPaletteModel.filterRows(rows, query: "open file").map(\.displayName) == ["Open File..."], "open file query matches Open File")
+        expect(LaunchPaletteModel.filterRows(rows, query: "open file").map(\.displayName) == ["Open File...", "Open File Tree..."], "open file query matches file actions")
+        expect(LaunchPaletteModel.filterRows(rows, query: "tree").map(\.displayName) == ["Open File Tree..."], "tree query matches Open File Tree")
+        expect(LaunchPaletteModel.filterRows(rows, query: "file tree").map(\.displayName) == ["Open File Tree..."], "file tree query matches Open File Tree")
+        expect(LaunchPaletteModel.filterRows(rows, query: "open file tree").map(\.displayName) == ["Open File Tree..."], "open file tree query matches Open File Tree")
         expect(LaunchPaletteModel.filterRows(rows, query: "claude").map(\.displayName) == ["Claude Code"], "profile query still matches profile")
     }
 
@@ -56,6 +60,7 @@ func main() {
         expect(!rows[1].isSelectable, "not-configured profile rows are not selectable")
         expect(rows[2].isSelectable, "New Note action row is selectable")
         expect(rows[3].isSelectable, "Open File action row is selectable")
+        expect(rows[4].isSelectable, "Open File Tree action row is selectable")
     }
 
     do {

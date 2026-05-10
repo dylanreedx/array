@@ -58,6 +58,9 @@ final class TileSpawner {
         self.project = project
         self.registry = registry
         self.detector = detector
+        canvasView.onFileURLDrop = { [weak self] path, worldPoint in
+            _ = self?.spawnFile(path: path, at: worldPoint)
+        }
     }
 
     func annotatedProfiles() -> [AnnotatedProfile] {
