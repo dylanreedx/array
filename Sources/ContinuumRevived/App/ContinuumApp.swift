@@ -61,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private static let smokeNoteId = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
     private static let smokeNoteTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000010")!
     private static let smokeFileTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000011")!
+    private static let smokeFileTreeTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000012")!
     private static let smokeNoteBody = "smoke-note-ok"
     private static let smokeFileBody = "smoke-file-ok"
 
@@ -159,6 +160,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     installInitialNoteTile(tile, in: canvasView, via: spawner)
                 case .file:
                     installInitialFileTile(tile, in: canvasView, via: spawner)
+                case .fileTree:
+                    installInitialFileTreeTile(tile, in: canvasView)
                 }
             }
 
@@ -411,6 +414,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func installInitialFileTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
         spawner.installFileTile(tile, in: canvasView)
+    }
+
+    private func installInitialFileTreeTile(_ tile: Tile, in canvasView: CanvasNSView) {
+        canvasView.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
     }
 
     // MARK: - Hotkeys + spawning
@@ -805,6 +812,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let noteSize = CanvasEngine.defaultFrame(for: .note)
         let fileSize = CanvasEngine.defaultFrame(for: .file)
+        let fileTreeSize = CanvasEngine.defaultFrame(for: .fileTree)
+        let fileTreeState = FileTreeState(tiles: [
+            FileTreeTile(
+                tileId: smokeFileTreeTileId,
+                rootPath: projectRoot.path,
+                expandedPaths: [".continuum-revived"],
+                selectedPath: ".continuum-revived/smoke-file.txt",
+                searchQuery: "smoke",
+                ignoredNames: [".git", "node_modules", ".build"],
+                gitBadges: .off
+            )
+        ])
+        try projectStore.saveFileTreeState(fileTreeState)
+
         return [
             Tile(
                 id: smokeNoteTileId,
@@ -823,6 +844,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 zIndex: 4,
                 runtimeRef: nil,
                 metadata: TileMetadata(filePath: smokeFileURL.path)
+            ),
+            Tile(
+                id: smokeFileTreeTileId,
+                kind: .fileTree,
+                title: "Smoke files",
+                frame: TileFrame(x: 380, y: 560, width: Double(fileTreeSize.width), height: Double(fileTreeSize.height)),
+                zIndex: 5,
+                runtimeRef: nil,
+                metadata: TileMetadata()
             )
         ]
     }
@@ -1135,6 +1165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             var midExitOk = false
             var noteOk = false
             var fileOk = false
+            var fileTreeOk = false
             let browserTileCount = self.canvasView?.canvasState.tiles.filter { $0.kind == .browser }.count ?? 0
             // Cardinality is gating, not advisory: if browserRuntimes count drifts
             // from the canvas's live .browser tile count, runtimes leaked or were
@@ -1238,6 +1269,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     }
                 }
 
+                if let fileTreeTile = canvasOnDisk?.tiles.first(where: { $0.id == Self.smokeFileTreeTileId }) {
+                    let fileTreeState = try self.projectStore?.tryLoadFileTreeState()
+                    let stateMatches = fileTreeState?.tiles.contains(where: {
+                        $0.tileId == Self.smokeFileTreeTileId
+                            && $0.rootPath == project?.rootPath
+                            && $0.gitBadges == .off
+                    }) ?? false
+                    let placeholderInstalled = self.canvasView?.tileView(for: fileTreeTile.id) is DescriptorTileNSView
+                    fileTreeOk = fileTreeTile.kind == .fileTree
+                        && fileTreeTile.runtimeRef == nil
+                        && stateMatches
+                        && placeholderInstalled
+                    if !fileTreeOk {
+                        fputs(
+                            "File tree check details: kind=\(fileTreeTile.kind) runtimeRef=\(String(describing: fileTreeTile.runtimeRef)) stateMatches=\(stateMatches) placeholderInstalled=\(placeholderInstalled)\n",
+                            stderr
+                        )
+                    }
+                }
+
                 // P5.6: assert the spawned WKWebView browser landed on disk
                 // with the data: URL, the title KVO + persistence path captured
                 // "continuum-browser-ok", the canvas tracks it as a .browser
@@ -1272,8 +1323,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 fputs("Persistence check threw: \(error)\n", stderr)
             }
 
-            if textPathOk && keyPathOk && scrollOk && modifierOnlyOk && imeInsertedTextSeen && markedTextCleared && persistenceOk && canvasOk && multiTerminalOk && browserOk && midExitOk && noteOk && fileOk && browserCardinalityOk {
-                print("Ghostty smoke test passed (text + key + scroll + modifier + ime + persistence + canvas + multiTerminal + browser + midExit + note + file, occurrences=\(occurrences))")
+            if textPathOk && keyPathOk && scrollOk && modifierOnlyOk && imeInsertedTextSeen && markedTextCleared && persistenceOk && canvasOk && multiTerminalOk && browserOk && midExitOk && noteOk && fileOk && fileTreeOk && browserCardinalityOk {
+                print("Ghostty smoke test passed (text + key + scroll + modifier + ime + persistence + canvas + multiTerminal + browser + midExit + note + file + fileTree, occurrences=\(occurrences))")
                 if ProcessInfo.processInfo.environment["CONTINUUM_DUMP_VISIBLE"] == "1" {
                     fputs("--- pre-scroll visible text ---\n", stderr)
                     fputs(preScrollText, stderr)
@@ -1284,7 +1335,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self.smokeTestExitCode = 0
             } else {
                 fputs(
-                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) modifierOnlyOk=\(modifierOnlyOk) imeInsertedTextSeen=\(imeInsertedTextSeen) markedTextCleared=\(markedTextCleared) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) midExitOk=\(midExitOk) noteOk=\(noteOk) fileOk=\(fileOk) browserCardinalityOk=\(browserCardinalityOk) occurrences=\(occurrences)\n",
+                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) modifierOnlyOk=\(modifierOnlyOk) imeInsertedTextSeen=\(imeInsertedTextSeen) markedTextCleared=\(markedTextCleared) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) midExitOk=\(midExitOk) noteOk=\(noteOk) fileOk=\(fileOk) fileTreeOk=\(fileTreeOk) browserCardinalityOk=\(browserCardinalityOk) occurrences=\(occurrences)\n",
                     stderr
                 )
                 fputs("--- pre-scroll ---\n", stderr)

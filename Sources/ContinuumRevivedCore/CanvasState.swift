@@ -69,6 +69,7 @@ public enum TileKind: String, Codable, Equatable, Sendable {
     case browser
     case note
     case file
+    case fileTree
 }
 
 public struct TileFrame: Codable, Equatable, Sendable {

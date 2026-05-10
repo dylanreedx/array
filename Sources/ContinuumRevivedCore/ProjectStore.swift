@@ -36,6 +36,14 @@ public struct ProjectStoreLayout: Sendable {
         browserDirectory.appendingPathComponent("tiles.json", isDirectory: false)
     }
 
+    public var fileTreeDirectory: URL {
+        stateRoot.appendingPathComponent("file-tree", isDirectory: true)
+    }
+
+    public var fileTreeIndexFile: URL {
+        fileTreeDirectory.appendingPathComponent("index.json", isDirectory: false)
+    }
+
     public var notesDirectory: URL {
         stateRoot.appendingPathComponent("notes", isDirectory: true)
     }
@@ -168,6 +176,23 @@ public struct ProjectStore: Sendable {
 
     public func tryLoadBrowserState() throws -> BrowserState? {
         do { return try loadBrowserState() }
+        catch AtomicWriterError.noValidBackup { return nil }
+    }
+
+    // MARK: - File Tree
+
+    public func saveFileTreeState(_ state: FileTreeState) throws {
+        try writer.write(state, to: layout.fileTreeIndexFile)
+    }
+
+    public func loadFileTreeState() throws -> FileTreeState {
+        let state: FileTreeState = try writer.read(at: layout.fileTreeIndexFile)
+        try checkSchema(state.schemaVersion, supported: FileTreeState.currentSchemaVersion, at: layout.fileTreeIndexFile)
+        return state
+    }
+
+    public func tryLoadFileTreeState() throws -> FileTreeState? {
+        do { return try loadFileTreeState() }
         catch AtomicWriterError.noValidBackup { return nil }
     }
 

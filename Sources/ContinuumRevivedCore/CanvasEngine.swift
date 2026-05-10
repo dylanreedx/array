@@ -85,6 +85,7 @@ public enum CanvasEngine {
         case .browser:  return CGSize(width: 1000, height: 700)
         case .note:     return CGSize(width: 600, height: 400)
         case .file:     return CGSize(width: 320, height: 500)
+        case .fileTree: return CGSize(width: 360, height: 520)
         }
     }
 
@@ -94,6 +95,7 @@ public enum CanvasEngine {
         case .browser:  return CGSize(width: 320, height: 220)
         case .note:     return CGSize(width: 240, height: 160)
         case .file:     return CGSize(width: 200, height: 200)
+        case .fileTree: return CGSize(width: 220, height: 240)
         }
     }
 
