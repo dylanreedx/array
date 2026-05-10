@@ -27,6 +27,8 @@ let package = Package(
                 .linkedLibrary("stdc++")
             ]
         ),
+        // Executable checks are the regression suite for this package; do not
+        // add empty test targets just to make swift test discover suite names.
         .executableTarget(
             name: "ContinuumRevivedCoreChecks",
             dependencies: ["ContinuumRevivedCore"]
