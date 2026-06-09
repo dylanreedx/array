@@ -8,6 +8,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "continuum-revived", targets: ["ContinuumRevived"]),
+        .executable(name: "ContinuumRevivedPaletteChecks", targets: ["ContinuumRevivedPaletteChecks"]),
         .library(name: "ContinuumRevivedCore", targets: ["ContinuumRevivedCore"])
     ],
     targets: [
@@ -30,6 +31,9 @@ let package = Package(
         .executableTarget(
             name: "ContinuumRevivedCoreChecks",
             dependencies: ["ContinuumRevivedCore"]
+        ),
+        .executableTarget(
+            name: "ContinuumRevivedPaletteChecks"
         )
     ]
 )

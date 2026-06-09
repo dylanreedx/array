@@ -6,7 +6,9 @@ import Foundation
 final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     var onSelect: ((String) -> Void)?
 
-    private var panel: NSPanel?
+    static let rootAccessibilityIdentifier = "ContinuumLaunchProfilePaletteRoot"
+
+    private var paletteView: NSView?
     private var tableView: NSTableView?
     private var searchField: NSSearchField?
 
@@ -16,43 +18,75 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile]) {
         self.profiles = profiles
         self.filtered = profiles
-        let panel = ensurePanel()
+        guard let hostView = host.contentView else { return }
+        let paletteView = ensurePaletteView()
+        if paletteView.superview !== hostView {
+            paletteView.removeFromSuperview()
+            hostView.addSubview(paletteView)
+        }
         searchField?.stringValue = ""
         tableView?.reloadData()
 
-        let frame = panel.frame
-        let hostFrame = host.frame
-        let x = hostFrame.midX - frame.width / 2
-        let y = hostFrame.midY - frame.height / 2
-        panel.setFrameOrigin(NSPoint(x: x, y: y))
-        panel.makeKeyAndOrderFront(nil)
+        let size = NSSize(width: 480, height: 320)
+        let hostBounds = hostView.bounds
+        let x = hostBounds.midX - size.width / 2
+        let y = hostBounds.midY - size.height / 2
+        paletteView.frame = NSRect(origin: NSPoint(x: x, y: y), size: size)
         if !filtered.isEmpty {
             tableView?.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         }
-        panel.makeFirstResponder(searchField)
+        host.makeFirstResponder(searchField)
     }
 
     func close() {
-        panel?.close()
+        paletteView?.removeFromSuperview()
     }
 
-    var isVisible: Bool { panel?.isVisible ?? false }
+    var isVisible: Bool { paletteView?.superview != nil }
 
-    private func ensurePanel() -> NSPanel {
-        if let panel { return panel }
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
-            styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        panel.title = "Open Tile"
-        panel.isFloatingPanel = true
-        panel.hidesOnDeactivate = true
-        panel.titlebarAppearsTransparent = true
+    static func paletteRootCount(in hostView: NSView) -> Int {
+        hostView.subviews.filter { $0.accessibilityIdentifier() == rootAccessibilityIdentifier }.count
+    }
 
-        let content = NSView()
-        content.translatesAutoresizingMaskIntoConstraints = false
+    static func runDuplicateRootSelfCheck() throws {
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
+        let hostView = NSView(frame: host.contentRect(forFrameRect: host.frame))
+        host.contentView = hostView
+        let palette = LaunchProfilePalette()
+        let profiles: [TileSpawner.AnnotatedProfile] = []
+        for _ in 0..<5 {
+            palette.show(near: host, profiles: profiles)
+            guard paletteRootCount(in: hostView) == 1 else {
+                throw PaletteSelfCheckError.unexpectedRootCount(paletteRootCount(in: hostView), expected: 1)
+            }
+        }
+        palette.close()
+        guard paletteRootCount(in: hostView) == 0 else {
+            throw PaletteSelfCheckError.unexpectedRootCount(paletteRootCount(in: hostView), expected: 0)
+        }
+    }
+
+    enum PaletteSelfCheckError: Error, CustomStringConvertible {
+        case unexpectedRootCount(Int, expected: Int)
+
+        var description: String {
+            switch self {
+            case let .unexpectedRootCount(actual, expected):
+                return "expected palette root count \(expected), got \(actual)"
+            }
+        }
+    }
+
+    private func ensurePaletteView() -> NSView {
+        if let paletteView { return paletteView }
+
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
+        content.setAccessibilityIdentifier(Self.rootAccessibilityIdentifier)
+        content.wantsLayer = true
+        content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        content.layer?.borderColor = NSColor.separatorColor.cgColor
+        content.layer?.borderWidth = 1
+        content.layer?.cornerRadius = 8
 
         let search = NSSearchField()
         search.delegate = self
@@ -93,22 +127,10 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -8)
         ])
 
-        panel.contentView = content
-        // Pin contentView's autoresizing constraints
-        content.translatesAutoresizingMaskIntoConstraints = false
-        if let parent = content.superview {
-            NSLayoutConstraint.activate([
-                content.leadingAnchor.constraint(equalTo: parent.leadingAnchor),
-                content.trailingAnchor.constraint(equalTo: parent.trailingAnchor),
-                content.topAnchor.constraint(equalTo: parent.topAnchor),
-                content.bottomAnchor.constraint(equalTo: parent.bottomAnchor)
-            ])
-        }
-
-        self.panel = panel
+        self.paletteView = content
         self.tableView = table
         self.searchField = search
-        return panel
+        return content
     }
 
     // MARK: - NSTableViewDataSource

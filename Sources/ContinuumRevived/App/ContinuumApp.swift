@@ -10,6 +10,18 @@ enum ContinuumApp {
 
     @MainActor
     static func main() {
+        if CommandLine.arguments.contains("--palette-duplicate-root-check") {
+            do {
+                _ = NSApplication.shared
+                try LaunchProfilePalette.runDuplicateRootSelfCheck()
+                print("ContinuumRevivedPaletteChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         let executablePath = CommandLine.arguments.first ?? "continuum-revived"
         let ghosttyInitStatus = executablePath.withCString { executablePointer in
             var argv: [UnsafeMutablePointer<CChar>?] = [
