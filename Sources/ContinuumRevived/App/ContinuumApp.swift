@@ -34,6 +34,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--zindex-relaunch-hit-test-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try CanvasNSView.runZIndexRelaunchHitTestSelfCheck()
+                print("ContinuumRevivedZIndexRelaunchHitTestChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         let executablePath = CommandLine.arguments.first ?? "continuum-revived"
         let ghosttyInitStatus = executablePath.withCString { executablePointer in
             var argv: [UnsafeMutablePointer<CChar>?] = [
