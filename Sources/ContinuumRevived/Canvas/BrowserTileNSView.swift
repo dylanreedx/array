@@ -1,6 +1,7 @@
 import AppKit
 import ContinuumRevivedCore
 import Foundation
+import WebKit
 
 /// Tile view that hosts a live `WKWebView` runtime. Composes a nav row
 /// (back / forward / reload + URL bar + spinner) above a `BrowserHostView`.
@@ -142,6 +143,86 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
     @objc private func handleForward(_ sender: Any?) { runtime.goForward() }
     @objc private func handleReload(_ sender: Any?) { runtime.reload() }
 
+    private func focusBrowserContent() {
+        runtime.focus()
+    }
+
+    var browserContentHasFocusForQA: Bool {
+        runtime.isSemanticContentResponder(window?.firstResponder)
+    }
+
+    @discardableResult
+    func performURLFieldCommandForQA(_ commandSelector: Selector) -> Bool {
+        window?.makeFirstResponder(urlField)
+        return control(urlField, textView: NSTextView(), doCommandBy: commandSelector)
+    }
+
+    static func runURLFocusSelfCheck() throws {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let dataPage = "data:text/html,<html><body><input id='qa' autofocus value='ready'></body></html>"
+        let tileId = TileID()
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let runtime = WKWebViewBrowserRuntime(tileId: tileId, webView: webView, initialURL: dataPage)
+        let tile = Tile(
+            id: tileId,
+            kind: .browser,
+            title: "Browser",
+            frame: TileFrame(x: 0, y: 0, width: 640, height: 420),
+            zIndex: 0,
+            runtimeRef: nil,
+            metadata: TileMetadata(url: runtime.url)
+        )
+        let browserTile = BrowserTileNSView(tile: tile, runtime: runtime)
+        browserTile.frame = NSRect(x: 0, y: 0, width: 640, height: 420)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = browserTile
+        window.makeKeyAndOrderFront(nil)
+        defer {
+            runtime.terminate(policy: .requestClose)
+            window.close()
+        }
+
+        browserTile.urlField.stringValue = dataPage
+        try expect(
+            browserTile.performURLFieldCommandForQA(#selector(NSResponder.insertNewline(_:))),
+            "Return command should be handled"
+        )
+        try expect(runtime.url == dataPage, "Return should load typed data: URL through real WKWebView runtime")
+        try expect(runtime.isSemanticContentResponder(window.firstResponder), "Return should leave real WKWebView content focused")
+        try expect(window.firstResponder !== browserTile.hostView, "Return must not focus plain BrowserHostView")
+        try expect(webView === window.firstResponder || runtime.isSemanticContentResponder(window.firstResponder), "Return first responder must be WKWebView or descendant")
+
+        browserTile.urlField.stringValue = "https://example.test/dirty"
+        try expect(
+            browserTile.performURLFieldCommandForQA(#selector(NSResponder.cancelOperation(_:))),
+            "Escape command should be handled"
+        )
+        try expect(browserTile.urlField.stringValue == runtime.url, "Escape should restore runtime URL")
+        try expect(runtime.isSemanticContentResponder(window.firstResponder), "Escape should leave real WKWebView content focused")
+        try expect(window.firstResponder !== browserTile.hostView, "Escape must not focus plain BrowserHostView")
+        try expect(webView === window.firstResponder || runtime.isSemanticContentResponder(window.firstResponder), "Escape first responder must be WKWebView or descendant")
+    }
+
     // MARK: - NSTextFieldDelegate
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -151,11 +232,11 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
             if !next.isEmpty {
                 runtime.loadURL(next)
             }
-            window?.makeFirstResponder(hostView)
+            focusBrowserContent()
             return true
         case #selector(NSResponder.cancelOperation(_:)):
             urlField.stringValue = runtime.url
-            window?.makeFirstResponder(hostView)
+            focusBrowserContent()
             return true
         default:
             return false

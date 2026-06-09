@@ -29,6 +29,7 @@ protocol BrowserRuntime: AnyObject {
     func stop()
     func focus()
     func blur()
+    func isSemanticContentResponder(_ responder: NSResponder?) -> Bool
     func terminate(policy: TerminationPolicy)
 }
 

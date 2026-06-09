@@ -125,6 +125,18 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         // explicit blur API. This is intentionally a no-op.
     }
 
+    func isSemanticContentResponder(_ responder: NSResponder?) -> Bool {
+        guard let responder else { return false }
+        if responder === webView { return true }
+        guard let responderView = responder as? NSView else { return false }
+        var view: NSView? = responderView
+        while let current = view {
+            if current === webView { return true }
+            view = current.superview
+        }
+        return false
+    }
+
     func terminate(policy: TerminationPolicy) {
         // Order matters: stop loads, drop observers, drop delegates, remove view.
         // Inverting the order risks KVO/delegate callbacks firing into a
