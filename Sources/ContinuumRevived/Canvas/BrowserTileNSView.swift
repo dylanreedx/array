@@ -142,6 +142,21 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
     @objc private func handleForward(_ sender: Any?) { runtime.goForward() }
     @objc private func handleReload(_ sender: Any?) { runtime.reload() }
 
+    private func focusBrowserContent() {
+        runtime.focus()
+    }
+
+    var browserContentHasFocusForQA: Bool {
+        runtime.isSemanticContentResponder(window?.firstResponder)
+    }
+
+    @discardableResult
+    func performURLFieldCommandForQA(_ commandSelector: Selector) -> Bool {
+        window?.makeFirstResponder(urlField)
+        guard let editor = urlField.currentEditor() as? NSTextView else { return false }
+        return control(urlField, textView: editor, doCommandBy: commandSelector)
+    }
+
     // MARK: - NSTextFieldDelegate
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -151,11 +166,11 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
             if !next.isEmpty {
                 runtime.loadURL(next)
             }
-            window?.makeFirstResponder(hostView)
+            focusBrowserContent()
             return true
         case #selector(NSResponder.cancelOperation(_:)):
             urlField.stringValue = runtime.url
-            window?.makeFirstResponder(hostView)
+            focusBrowserContent()
             return true
         default:
             return false

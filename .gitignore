@@ -1,5 +1,8 @@
 .DS_Store
 .build/
+.pi/agent-runs/
+.pi/cache/
+.pi/tmp/
 ThirdParty/
 .continuum-revived/
 .conductor/conductor.db

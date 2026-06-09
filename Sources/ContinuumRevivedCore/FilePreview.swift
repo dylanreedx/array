@@ -7,6 +7,12 @@ public enum FilePreview: Equatable, Sendable {
     case unavailable(String)
 
     public static func load(path: String) -> FilePreview {
+        load(path: path) { url in
+            try Data(contentsOf: url)
+        }
+    }
+
+    package static func load(path: String, readData: (URL) throws -> Data) -> FilePreview {
         let url = URL(fileURLWithPath: path)
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), !isDirectory.boolValue else {
@@ -18,13 +24,13 @@ public enum FilePreview: Equatable, Sendable {
             return .unavailable("File not found")
         }
 
-        if let byteCount = ((try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? NSNumber)?.intValue,
-           byteCount > maxReadBytes {
+        if let byteCount = ((try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? NSNumber)?.int64Value,
+           byteCount > Int64(maxReadBytes) {
             return .unavailable("File too large to preview (> 1 MB)")
         }
 
         do {
-            let data = try Data(contentsOf: url)
+            let data = try readData(url)
             guard data.count <= maxReadBytes else {
                 return .unavailable("File too large to preview (> 1 MB)")
             }

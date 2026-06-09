@@ -15,6 +15,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private var rows: [LaunchPaletteRow] = []
     private var filtered: [LaunchPaletteRow] = []
 
+    static let rootAccessibilityIdentifier = "ContinuumLaunchProfilePaletteRoot"
+
     func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile]) {
         self.rows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)))
         self.filtered = rows
@@ -54,8 +56,17 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
 
     var isVisible: Bool { paletteView?.superview != nil }
 
+    static func paletteRootCount(in hostView: NSView) -> Int {
+        hostView.subviews.filter { $0.accessibilityIdentifier() == rootAccessibilityIdentifier }.count
+    }
+
     private func ensurePaletteView() -> NSView {
+        if let paletteView {
+            return paletteView
+        }
+
         let content = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
+        content.setAccessibilityIdentifier(Self.rootAccessibilityIdentifier)
         content.wantsLayer = true
         content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         content.layer?.borderColor = NSColor.separatorColor.cgColor

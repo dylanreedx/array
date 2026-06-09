@@ -292,6 +292,19 @@ do {
     try largeBytes.write(to: largeFile)
     let largePreview = FilePreview.load(path: largeFile.path)
     expect(largePreview == .unavailable("File too large to preview (> 1 MB)"), "FilePreview rejects oversized files")
+
+    let sparseHugeFile = scratch.appendingPathComponent("sparse-3gb.txt")
+    FileManager.default.createFile(atPath: sparseHugeFile.path, contents: nil)
+    let sparseHandle = try FileHandle(forWritingTo: sparseHugeFile)
+    try sparseHandle.truncate(atOffset: 3 * 1_024 * 1_024 * 1_024)
+    try sparseHandle.close()
+    var attemptedHugeRead = false
+    let sparseHugePreview = FilePreview.load(path: sparseHugeFile.path) { _ in
+        attemptedHugeRead = true
+        return Data()
+    }
+    expect(sparseHugePreview == .unavailable("File too large to preview (> 1 MB)"), "FilePreview rejects sparse >2GB files using 64-bit size")
+    expect(!attemptedHugeRead, "FilePreview returns too-large for sparse >2GB files before attempting Data read")
 }
 
 // MARK: - AtomicWriter

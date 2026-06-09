@@ -29,7 +29,15 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         tv.isAutomaticSpellingCorrectionEnabled = false
         tv.textContainerInset = NSSize(width: 8, height: 8)
         tv.string = initialBody
-        tv.translatesAutoresizingMaskIntoConstraints = false
+        // NSClipView drives the document view's frame via autoresizing — mixing
+        // in constraints leaves the text view at zero height (invisible body).
+        tv.minSize = NSSize(width: 0, height: 0)
+        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        tv.isVerticallyResizable = true
+        tv.isHorizontallyResizable = false
+        tv.autoresizingMask = [.width]
+        tv.textContainer?.widthTracksTextView = true
+        tv.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
 
         let sv = NSScrollView()
         sv.hasVerticalScroller = true
@@ -44,7 +52,6 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         super.init(tile: tile)
 
         setContentView(sv)
-        tv.widthAnchor.constraint(equalTo: sv.contentView.widthAnchor).isActive = true
         tv.delegate = self
     }
 

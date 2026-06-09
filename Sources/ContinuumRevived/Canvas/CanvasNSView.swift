@@ -10,12 +10,19 @@ import Foundation
 final class CanvasNSView: NSView {
     weak var delegate: CanvasNSViewDelegate?
     var onFileURLDrop: ((String, CGPoint) -> Void)?
+    /// Single-point hook for the app's tile-delete orchestrator. The canvas
+    /// wires every installed tile's `onClose` to call this, so the app sets
+    /// this once at startup rather than at every TileSpawner install site.
+    var onTileCloseRequested: ((UUID) -> Void)?
 
     private(set) var canvasState: CanvasState
     private var tileViews: [UUID: TileNSView] = [:]
     private var emptyStateView: CanvasEmptyStateNSView?
     private var emptyStateActions: CanvasEmptyStateActions?
     private(set) var emptyStateInstalled = false
+
+    private var spaceHeld = false
+    private var spaceDragLastWindowPoint: CGPoint = .zero
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -44,6 +51,10 @@ final class CanvasNSView: NSView {
         }
         tileViews[tile.id] = tileView
         tileView.canvas = self
+        let tileId = tile.id
+        tileView.onClose = { [weak self] in
+            self?.onTileCloseRequested?(tileId)
+        }
         addSubview(tileView)
         layoutTile(tile)
         if let idx = canvasState.tiles.firstIndex(where: { $0.id == tile.id }) {
@@ -68,10 +79,48 @@ final class CanvasNSView: NSView {
         tileViews[tileId]
     }
 
+    /// Returns the topmost tile id under `pointInCanvas` (canvas-local coords),
+    /// or nil if the point is on the canvas background. Used by the
+    /// window-level focus monitor to bring tiles forward on body clicks even
+    /// when the click is consumed by content children.
+    func tileId(at pointInCanvas: NSPoint) -> UUID? {
+        // canvasState.tiles is z-ordered front-last; iterate in reverse so the
+        // topmost hit wins.
+        for tile in canvasState.tiles.reversed() {
+            guard let view = tileViews[tile.id] else { continue }
+            if view.frame.contains(pointInCanvas) {
+                return tile.id
+            }
+        }
+        return nil
+    }
+
+    /// Remove a tile from the canvas: drops the NSView, the dictionary entry,
+    /// and the model-side tile. Per-runtime cleanup (terminate PTY, kill
+    /// WKWebView, flush note save, purge descriptor) is the caller's
+    /// responsibility — `removeTile` is the canvas-side teardown only.
+    func removeTile(id: UUID) {
+        if let view = tileViews[id] {
+            view.removeFromSuperview()
+            tileViews.removeValue(forKey: id)
+        }
+        canvasState.tiles.removeAll { $0.id == id }
+        if canvasState.lastActiveTileId == id {
+            canvasState.lastActiveTileId = nil
+        }
+        updateEmptyStateVisibility()
+        delegate?.canvasDidChange(self)
+    }
+
     func updateTile(_ tile: Tile) {
         guard let idx = canvasState.tiles.firstIndex(where: { $0.id == tile.id }) else { return }
         canvasState.tiles[idx] = tile
         layoutTile(tile)
+        delegate?.canvasDidChange(self)
+    }
+
+    func markActive(tileId: UUID) {
+        canvasState.lastActiveTileId = tileId
         delegate?.canvasDidChange(self)
     }
 
@@ -171,11 +220,79 @@ final class CanvasNSView: NSView {
         }
     }
 
+    /// Trackpad pinch entry point. The window-level magnify monitor in
+    /// ContinuumApp routes here so pinches over a tile body still zoom the
+    /// canvas (the tile content has no zoom of its own to compete with).
+    func handlePinch(_ event: NSEvent) {
+        let cursor = convert(event.locationInWindow, from: nil)
+        let factor = 1.0 + Double(event.magnification)
+        guard factor > 0 else { return }
+        let next = CanvasEngine.zoom(canvasState.viewport, by: factor, anchorScreen: cursor)
+        setViewport(next)
+    }
+
     override func mouseDown(with event: NSEvent) {
+        if spaceHeld {
+            // Space + drag pan: openHand → closedHand on press; pop on
+            // mouseUp. Cursor stack restores cleanly even if the cursor
+            // rect logic of subviews fights for control.
+            NSCursor.closedHand.push()
+            spaceDragLastWindowPoint = event.locationInWindow
+            return
+        }
         // Click on canvas background — deselect.
         canvasState.lastActiveTileId = nil
         delegate?.canvasDidChange(self)
         window?.makeFirstResponder(self)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if spaceHeld {
+            let dx = event.locationInWindow.x - spaceDragLastWindowPoint.x
+            let dy = event.locationInWindow.y - spaceDragLastWindowPoint.y
+            spaceDragLastWindowPoint = event.locationInWindow
+            var v = canvasState.viewport
+            // Window y goes up, canvas y is flipped (down). Drag-down on the
+            // trackpad/mouse should move the viewport down (revealing tiles
+            // higher up), matching the trackpad scroll math in scrollWheel.
+            v.x -= Double(dx) / v.zoom
+            v.y += Double(dy) / v.zoom
+            setViewport(v)
+            return
+        }
+        super.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if spaceHeld {
+            NSCursor.pop()
+            return
+        }
+        super.mouseUp(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        // Space (keyCode 49) starts hand-pan mode while held. We only see
+        // this event when the canvas itself is first responder, so a Space
+        // typed inside a note/terminal/url-bar still inserts a literal
+        // space — no global hijack.
+        if event.keyCode == 49 {
+            if !spaceHeld {
+                spaceHeld = true
+                NSCursor.openHand.push()
+            }
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    override func keyUp(with event: NSEvent) {
+        if event.keyCode == 49, spaceHeld {
+            spaceHeld = false
+            NSCursor.pop()
+            return
+        }
+        super.keyUp(with: event)
     }
 
     // MARK: - File drops
