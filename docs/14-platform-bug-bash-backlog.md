@@ -1,6 +1,6 @@
 # Platform Bug-Bash Backlog
 
-Status: captured from overnight/follow-up platform-breaker agents. This copy is being carried on `integration/phase-6-reintegration`; file-tree bugs remain migration-dependent until the file-tree slice lands. A newer stash copy will be reconciled in slice 5.
+Status: captured from overnight/follow-up platform-breaker agents. This copy is carried on `integration/phase-6-reintegration`. The file-tree feature and QA harness have landed, so the file-tree bugs (9-12, 20) and BUG-010 are now actionable; BUG-007 (close button) unblocks once the stash tile-chrome slice lands.
 
 Canonical source artifact: `.pi/agent-runs/triage-lead-20260606T122818Z-956421/final.md`
 
