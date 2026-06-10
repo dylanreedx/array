@@ -55,4 +55,130 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     func textDidChange(_ notification: Notification) { onTextChange?() }
+
+    static func runNoteClickFocusSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        func makeMouse(_ type: NSEvent.EventType, at windowPoint: NSPoint, in window: NSWindow) throws -> NSEvent {
+            guard let event = NSEvent.mouseEvent(
+                with: type,
+                location: windowPoint,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 1,
+                clickCount: 1,
+                pressure: type == .leftMouseUp ? 0 : 1
+            ) else {
+                throw CheckError.failed("could not create mouse event \(type)")
+            }
+            return event
+        }
+
+        func dispatchClick(at windowPoint: NSPoint, in window: NSWindow) throws {
+            let down = try makeMouse(.leftMouseDown, at: windowPoint, in: window)
+            let up = try makeMouse(.leftMouseUp, at: windowPoint, in: window)
+            // NSTextView may enter AppKit mouse tracking during mouseDown and
+            // wait for the matching mouseUp. Queue the mouseUp before sending
+            // mouseDown so the production event path is exercised without a
+            // self-check deadlock.
+            NSApplication.shared.postEvent(up, atStart: false)
+            window.sendEvent(down)
+        }
+
+        func dispatchKey(_ characters: String, in window: NSWindow) throws {
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                characters: characters,
+                charactersIgnoringModifiers: characters,
+                isARepeat: false,
+                keyCode: 0
+            ) else {
+                throw CheckError.failed("could not create key event")
+            }
+            window.sendEvent(event)
+        }
+
+        let noteId = UUID(uuidString: "00000000-0000-0000-0000-000000000501")!
+        let tileId = UUID(uuidString: "00000000-0000-0000-0000-000000000502")!
+        let tile = Tile(
+            id: tileId,
+            kind: .note,
+            title: "NOTE_CLICK_FOCUS",
+            frame: TileFrame(x: 80, y: 80, width: 360, height: 240),
+            zIndex: 1,
+            runtimeRef: nil,
+            metadata: TileMetadata(noteId: noteId)
+        )
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile], groups: [], lastActiveTileId: nil))
+        canvas.frame = NSRect(x: 0, y: 0, width: 640, height: 480)
+
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+
+        let noteView = NoteTileNSView(tile: tile, noteId: noteId, initialBody: "")
+        canvas.install(tileView: noteView, for: tile)
+
+        window.contentView?.layoutSubtreeIfNeeded()
+        canvas.layoutSubtreeIfNeeded()
+        noteView.layoutSubtreeIfNeeded()
+        noteView.scrollView.layoutSubtreeIfNeeded()
+        noteView.textView.layoutSubtreeIfNeeded()
+
+        let textLocalPoint = NSPoint(x: max(12, noteView.textView.bounds.midX), y: max(12, noteView.textView.bounds.midY))
+        let windowPoint = noteView.textView.convert(textLocalPoint, to: nil)
+        let canvasPoint = canvas.convert(windowPoint, from: nil)
+        let hitView = window.contentView?.hitTest(canvasPoint)
+
+        try dispatchClick(at: windowPoint, in: window)
+
+        let firstResponderDescription = String(describing: window.firstResponder)
+        let textViewHasFocus = window.firstResponder === noteView.textView
+        let fieldEditorHasFocus = (window.firstResponder as? NSTextView)?.delegate === noteView.textView.delegate
+        try expect(textViewHasFocus || fieldEditorHasFocus, "note body click should focus text view; firstResponder=\(firstResponderDescription), hitView=\(String(describing: hitView))")
+
+        let sentinel = "x"
+        try dispatchKey(sentinel, in: window)
+        try expect(noteView.textView.string.contains(sentinel), "keyDown should edit note text; got \(noteView.textView.string.debugDescription)")
+
+        let manifest: [String: Any] = [
+            "check": "note-click-focus",
+            "tileId": tileId.uuidString,
+            "noteId": noteId.uuidString,
+            "windowPoint": ["x": windowPoint.x, "y": windowPoint.y],
+            "canvasPoint": ["x": canvasPoint.x, "y": canvasPoint.y],
+            "hitView": String(describing: hitView),
+            "firstResponder": firstResponderDescription,
+            "text": noteView.textView.string
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("note-click-focus", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
 }
