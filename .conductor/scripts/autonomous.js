@@ -38,6 +38,7 @@ const rawArgs = process.argv.slice(2);
 let projectName = null;
 let maxBudget = null;
 let maxIterations = null;
+let maxEmptySessions = 2;
 let provider = process.env.CONDUCTOR_AUTONOMOUS_PROVIDER || DEFAULT_PROVIDER;
 let model = process.env.CONDUCTOR_AUTONOMOUS_MODEL || null;
 
@@ -47,6 +48,9 @@ for (const arg of rawArgs) {
   } else if (arg.startsWith('--max-iterations=')) {
     const n = parseInt(arg.split('=')[1], 10);
     if (Number.isFinite(n) && n > 0) maxIterations = n;
+  } else if (arg.startsWith('--max-empty-sessions=')) {
+    const n = parseInt(arg.split('=')[1], 10);
+    if (Number.isFinite(n) && n >= 0) maxEmptySessions = n;
   } else if (arg === '--once') {
     maxIterations = 1;
   } else if (arg.startsWith('--provider=')) {
@@ -87,8 +91,15 @@ function sleepSync(ms) {
 }
 
 function extractTicketId(text) {
-  const m = /\b([A-Z]{2,4}(?:-[A-Z]?\d+[a-z]?){1,3})\b/.exec(String(text || ''));
-  return m ? m[1] : null;
+  const technicalPrefixes = new Set(['UTF', 'SHA', 'MD', 'HTTP', 'JSON']);
+  const matches = String(text || '').matchAll(/\b([A-Z]{2,4}(?:-[A-Z]?\d+[a-z]?){1,3})\b/g);
+  for (const match of matches) {
+    const prefix = match[1].split('-')[0];
+    if (!technicalPrefixes.has(prefix)) {
+      return match[1];
+    }
+  }
+  return null;
 }
 
 function isQaTicketId(value) {
@@ -1166,10 +1177,11 @@ function postSessionVerify({ workspacePath, headBefore, project, sessionFacts })
   // commit message containing an XX-NNNN-shaped string would HALT here
   // because the verifier script doesn't exist.
   const qaAtlasScript = path.join(workspacePath, 'scripts', 'qa-atlas.js');
-  const projectUsesQaAtlas = fs.existsSync(qaAtlasScript);
+  const qaAtlasRecord = ticketId ? path.join(workspacePath, `test/qa-round-5/records/${ticketId}.md`) : null;
+  const projectUsesQaAtlas = fs.existsSync(qaAtlasScript) && qaAtlasRecord && fs.existsSync(qaAtlasRecord);
 
   if (ticketId && isQaTicketId(ticketId) && !projectUsesQaAtlas) {
-    log('autonomous', `Post-session verify SKIP: scripts/qa-atlas.js not present in ${workspacePath} (ticket=${ticketId})`);
+    log('autonomous', `Post-session verify SKIP: no QA Atlas record for ticket=${ticketId}`);
   }
 
   if (ticketId && isQaTicketId(ticketId) && projectUsesQaAtlas) {
@@ -1231,11 +1243,16 @@ async function main() {
   }
 
   let iteration = 0;
+  let consecutiveEmptySessions = 0;
 
   while (true) {
     iteration++;
     if (maxIterations && iteration > maxIterations) {
       log('autonomous', `Reached --max-iterations=${maxIterations}. Exiting.`);
+      break;
+    }
+    if (maxEmptySessions > 0 && consecutiveEmptySessions >= maxEmptySessions) {
+      log('autonomous', `Reached ${consecutiveEmptySessions} consecutive sessions with no new commit (queue likely exhausted). Exiting.`);
       break;
     }
 
@@ -1294,8 +1311,12 @@ async function main() {
       }
       if (v.ok && v.ticketId) {
         log('autonomous', `Post-session verify PASS: ticket=${v.ticketId} sha=${v.sha.slice(0, 7)}`);
+        consecutiveEmptySessions = 0;
       } else if (v.ok && v.reason === 'no-commit') {
-        log('autonomous', `Post-session verify SKIP: no new commit this session`);
+        consecutiveEmptySessions++;
+        log('autonomous', `Post-session verify SKIP: no new commit this session (consecutive=${consecutiveEmptySessions}/${maxEmptySessions || '∞'})`);
+      } else if (v.ok) {
+        consecutiveEmptySessions = 0;
       }
     }
 

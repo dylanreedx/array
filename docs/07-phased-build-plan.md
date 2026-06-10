@@ -271,10 +271,6 @@ Deliverables:
 - Notes stored as `.md`.
 - Dropped external note references if practical.
 
-Scope note, 2026-06-10:
-
-ADR-0017 reduced the first Phase 6 implementation to notes plus read-only file tiles. The file-tree tile remained a Phase 6 follow-on and is being reintegrated separately on `integration/phase-6-reintegration`.
-
 Implementation notes:
 
 - File scanning must be backgrounded.
@@ -316,6 +312,18 @@ Deliverables:
 - Empty states.
 - Performance tuning.
 - Visual polish.
+- Distribution bundle slim-down.
+
+Distribution notes:
+
+Not a priority for daily-driver readiness; revisit before the first signed/notarized release.
+
+- Drop the iOS slices (`ios-arm64`, `ios-arm64-simulator`) from `GhosttyKit.xcframework`. The product is macOS-only per ADR-0001, so the iOS device + simulator binaries are dead weight in the bundle.
+- Ship Apple Silicon only. Drop the `x86_64` half of the `macos-arm64_x86_64` slice from the framework and build the app with `ARCHS=arm64`. Roughly halves the framework after the iOS slices are gone.
+- Build in release with whole-module optimization and stripped Swift symbols (`swift build -c release`, `-Xswiftc -gnone` or post-build `strip`). Debug builds are ~19 MB on their own.
+- Compress the distributed artifact: notarized `.dmg` or `.zip`. Measure final download size after slice trimming and stripping, not before.
+- Realistic target: ~15–25 MB final download for a macOS arm64 build, vs ~40–80 MB for an unoptimized debug `.app` with all xcframework slices.
+- Out of scope here: universal-binary distribution (only revisit if Intel-Mac demand appears), App Store sandboxing (separate work — file-tile paths would need security-scoped bookmarks per ADR-0017's deferred list).
 
 Tests:
 

@@ -510,7 +510,7 @@ Consequences:
 
 ## ADR-0017: Phase 6 -- Plain-Text Notes and Read-Only File Viewer Tiles
 
-**Status:** Accepted / Implemented
+**Status:** Proposed
 **Date:** 2026-05-09
 
 ---
@@ -635,3 +635,165 @@ Phase 6 is done when all of the following are concurrently observable in the wor
 
 - `NSTextView` with a large file (near the 1 MB cap) may be slow to render or scroll. If observed during testing, lower the cap or switch to lazy rendering.
 - Fixed smoke-seed UUIDs are safe as long as the smoke temp directory is isolated (it is by default). If `CONTINUUM_PROJECT_ROOT` is pointed at a real project with `CONTINUUM_SMOKE_TEST=1`, the seed will write into that project's `.continuum-revived/notes/` directory. This is an unusual operation and is documented in the smoke test header comment.
+
+## ADR-0018: Phase 6 Closed (Live Note + File Tiles)
+
+Date: 2026-05-09
+
+Decision:
+
+Phase 6 is closed. ADR-0017 remains the design draft; this ADR records the implemented shape after the note and file tile work landed. The product now has live note tiles, read-only file tiles, Cmd-K spawn entries, boot-loop restore for both tile kinds, deterministic smoke coverage, and a close path that drains note edits before any runtime teardown.
+
+What's in:
+
+- **`NoteTileNSView`**. A tile-local editable `NSTextView` inside an `NSScrollView`, using 13pt monospaced text, raw plain text, disabled rich text and text substitutions, and an `onTextChange` callback for the app-level note save debounce.
+- **`FileTileNSView`**. A tile-local read-only selectable `NSTextView` inside an `NSScrollView`, using the same 13pt monospaced text treatment as notes. It loads text files at install time, shows inline placeholder messages for missing paths or unavailable content, and keeps file content out of Continuum-owned state.
+- **`ProjectStore` note persistence**. Notes are project-scoped files under `.continuum-revived/notes/`. `ProjectStoreLayout` owns `notesDirectory`, `notesIndexFile`, and `noteFile(id:)`; `ProjectStore` owns `saveNoteState`, `loadNoteState`, `tryLoadNoteState`, `saveNoteBody`, `loadNoteBody`, and `tryLoadNoteBody`. The note index uses `AtomicWriter`, while individual `.md` bodies use atomic file writes without backup rotation.
+- **`TileSpawner` note and file seams**. `spawnNote` creates a fresh note id, empty body file, note index entry, canvas tile, and `NoteTileNSView`. `installNoteTile` restores existing canvas notes and backfills a missing `noteId` only when restoring legacy note descriptors. `writeNoteSnapshot` persists the current text and updates the note index timestamp. `spawnFile` and `installFileTile` install read-only file views keyed by `TileMetadata.filePath`.
+- **Boot-loop restore**. `AppDelegate.applicationDidFinishLaunching` now routes `.note` and `.file` canvas tiles through `installInitialNoteTile` and `installInitialFileTile`, so every persisted tile kind has a concrete restore path instead of falling back to descriptor-only placeholders.
+- **Cmd-K spawn path**. `LaunchProfilePalette` includes "New Note" and "Open File..." rows after terminal/browser launch rows. Phase 6 keeps note and file creation palette-only; no Cmd-5 or Cmd-6 hotkeys were added.
+- **Smoke seam**. The smoke path seeds the deterministic note body, note index row, and smoke file before the boot-loop tile iteration runs. The smoke gate then proves the boot loop installed real note and file tile views by checking the note view, note index, canvas metadata, and file view body.
+- **Multi-runtime close path**. `windowWillClose` first flushes canvas, browser, and note saves. Only after those flushes does it mark terminal descriptors exited, remove hotkey/palette UI, terminate browser runtimes, terminate terminal runtimes, shut down GhosttyKit, shut down the browser engine, and clear note view references. This ordering keeps authored note text in memory long enough to reach disk while preserving the earlier browser-before-terminal teardown rule.
+
+Verification:
+
+- `./scripts/prepare-ghosttykit.sh` completes before build and smoke gates.
+- `swift build` completes cleanly.
+- `swift run ContinuumRevivedCoreChecks` is green, including note state, note body, metadata, and canvas round-trip checks.
+- `CONTINUUM_SMOKE_TEST=1 .build/debug/continuum-revived` exits 0 and reports the note and file gates alongside the earlier terminal, browser, canvas, persistence, and mid-exit gates.
+- Two-pass relaunch with pinned `CONTINUUM_PROJECT_ROOT` and `CONTINUUM_APP_SUPPORT` exits 0 on both passes and rehydrates the smoke note and file descriptors through the boot loop.
+- `~/Library/Logs/DiagnosticReports/` has no new Continuum crash reports after the verification run.
+
+Phase 6 exit criteria:
+
+| Criterion | Status |
+|---|---|
+| User can create a markdown note on canvas | Met through Cmd-K "New Note" and `TileSpawner.spawnNote` |
+| File/note state restores | Met through boot-loop `.note` and `.file` installer arms |
+| Note text persists across relaunch | Met through note body files plus close-path `flushNoteSave()` |
+| File tile shows plaintext content | Met through `FileTileNSView` and Cmd-K "Open File..." |
+| Binary or unavailable files fail without crashing | Met through `FileTileNSView` placeholder messages |
+| Smoke harness covers note and file restore | Met through deterministic `noteOk` and `fileOk` gates |
+| No new diagnostic reports | Verified during the closeout gate |
+
+What's deferred:
+
+- **Syntax highlighting**. File tiles render raw plain text only.
+- **Format-aware rendering**. Markdown preview, rich text, images, PDFs, and binary-aware viewers are not part of Phase 6.
+- **File watching and reload-on-focus**. File tile content is loaded at install time; external changes require relaunch or respawn.
+- **Multi-tab notes**. Each note tile owns one `.md` body; tabbed or stacked note surfaces are deferred.
+- **Search**. In-note search, file search, and cross-tile search are deferred.
+- **Attachments and linked assets**. Phase 6 does not model embedded files, pasted images, backlinks, or external note references.
+- **File tree tile**. The single-file viewer is the Phase 6 closeout surface. Async directory scanning, ignore lists, git status badges, and tree filtering remain follow-up work.
+- **Security-scoped bookmarks**. Raw file paths remain acceptable for the unsandboxed app. Sandboxed distribution needs bookmark storage before file tiles can cross app launches.
+
+Consequences:
+
+- The canvas now has four concrete tile kinds: terminal, browser, note, and file. Future tile kinds should follow the same pattern: pure Core metadata, a boot-loop switch arm, a spawner/install seam, a tile NSView, and an explicit persistence path.
+- Note bodies are inspectable project files rather than opaque app database rows, which keeps the MVP simple and agent-readable.
+- The close path is now state-first and runtime-second: save canvas, browser, and note state before tearing down browser, terminal, GhosttyKit, and WebKit resources.
+- The file tree remains a deliberate scope reduction from the Phase 6 plan. The shipped file tile covers the highest-value reference use case while avoiding a synchronous directory scan in the AppKit event loop.
+
+## ADR-0019: Phase QA Loop Architecture
+
+Date: 2026-05-09
+
+Decision:
+
+Phase QA uses a layered loop. Layer A is the in-process smoke and capture path selected by `CONTINUUM_QA_FLOW`, `CONTINUUM_QA_CAPTURE`, and optional `CONTINUUM_QA_PERF`. Layer B is the external driver suite under `qa/flows/`, which launches the app, uses OS automation for clicks, drags, resizing, and quits, and writes top-level run manifests. Findings are filed into Conductor through `qa/file-finding.sh` so product defects become ordinary pending bugfix tasks with severity, expected behavior, observed behavior, screenshot path, flow, step, and fingerprint metadata.
+
+Verification:
+
+- `qa/setup.sh` verifies the local driver commands and reminds the operator that Accessibility permission is required for external flows.
+- `swift build` remains the build gate before any QA pass.
+- `node scripts/check-qa-flows.js` remains the structural gate for flow scripts, expectation files, reviewer instructions, ignored run output, and the finding wrapper.
+- Each initial pass should run all named Layer A flows, run each Layer B flow where the host display allows it, run `swift run ContinuumRevivedPerfChecks`, inspect generated manifests and PNGs, and file only concrete product findings.
+- Per-ticket evidence records remain verified by `node scripts/qa-atlas.js --verify <ticket-id>` before the task commit.
+
+Initial pass result:
+
+- The 2026-05-09 initial pass ran all named Layer A flows successfully under `qa-runs/initial-pass-20260509T214326Z/`.
+- The same pass attempted all four Layer B flows, but the host `screencapture` command failed before the first external event PNG, so those top-level runs were treated as environment-blocked rather than product failures.
+- The QA.6 perf pass reported one concrete regression: `palette-leak-delta` measured 40566784 bytes against the 5242880 byte baseline, and the issue was filed as a pending `[qa-finding][major]` Conductor bugfix with fingerprint `b26118e71426e710032a38fd2d3da3df5c653037f111e8dd8c069dfab5b5eb74`.
+
+Deferred:
+
+- External flows need a runner with working macOS screenshot capture and Accessibility control before their OS-level PNG reviews can be considered complete.
+- Calibrated visual scoring remains a per-ticket atlas concern; the Phase QA loop records review notes and evidence, but it does not auto-accept screenshots without human or reviewer inspection.
+- Perf baseline changes remain manual. The harness may file regressions, but it must not rewrite `qa/perf-baseline.json` during a pass.
+
+## ADR-0020: Phase QA Computer Use Deferral
+
+Date: 2026-05-09
+
+Decision:
+
+Phase QA does not integrate official Anthropic Computer Use yet. The current loop keeps using Layer A in-process capture, Layer B shell-driven macOS flows, and image-capable review because those layers already cover the QA audit goals without adding a beta API dependency to the autonomous runner.
+
+Rationale:
+
+- Layer A proves deterministic app states from inside the Swift process, including flow selection, capture output, and optional perf output.
+- Layer B already exercises the macOS behaviors that Layer A cannot model, using `osascript`, `screencapture`, and `cliclick` to drive clicks, drags, resizing, quitting, and external screenshots.
+- The review path already supports PNG inspection through atlas records and reviewer notes, so official Computer Use would duplicate the screenshot and input loop before a concrete coverage gap exists.
+- Anthropic Computer Use remains useful as a later automation layer, but adopting it now would couple QA scheduling, tool execution, screenshot capture, and API credentials before Phase QA has evidence that local shell tooling is insufficient.
+
+Deferred option A: local computer-use-like MCP server:
+
+- Build a small local MCP server that wraps `osascript`, `screencapture`, and `cliclick` behind explicit actions such as screenshot, click, type, drag, key, resize, and quit.
+- Keep the current CLI runner and QA scripts as the source of truth, with the MCP server acting as an interactive adapter for agents that need computer-use-style primitives.
+- Expected effort is medium because it needs action schemas, permission checks, screenshot return payloads, run manifests, and parity tests against `qa/flows/`.
+- Main risks are macOS privacy failures, duplicate coordinate conventions, and confusing failures when the MCP adapter and shell scripts disagree about runner state.
+
+Deferred option B: Anthropic Messages API with Computer Use:
+
+- Switch autonomous spawn from local CLI sessions to an Anthropic Messages API agent loop that declares the official `computer_20250124` tool and the `computer-use-2025-01-24` beta flag.
+- Move screenshot capture, mouse movement, keyboard input, tool-result routing, and iteration limits into the runner that executes Claude tool requests.
+- Expected effort is high because this changes orchestration, credential handling, trace capture, retry behavior, cost controls, and failure reporting.
+- Main risks are beta API churn, sensitive-screen exposure, higher operational cost, and losing the current direct shell observability unless run logs are rebuilt around tool calls.
+
+Revisit trigger:
+
+- Revisit Computer Use only after Layer A and Layer B audits prove a specific coverage gap that cannot be closed with the existing shell tools and image-capable review.
+- Valid triggers include repeated external-flow blockers caused by local tool limitations rather than host permissions, a QA requirement for adaptive visual navigation across unknown windows, or a reviewer finding that requires model-driven interaction beyond scripted flows.
+- Invalid triggers include general interest in API parity, speculative future browser automation, or replacing `qa/flows/` before those flows fail to cover a real product risk.
+
+Consequences:
+
+- Phase QA remains reproducible from local commands and repo-owned scripts.
+- Future Computer Use work has two scoped paths instead of an open-ended integration request.
+- The team can compare any later Computer Use proposal against concrete Layer A and Layer B gaps before accepting new runner complexity.
+
+## ADR-0021: Lift Palette Filtering Into Core For AppKit-Free Testing
+
+Date: 2026-05-10
+
+Decision:
+
+The Cmd-K palette row model and filtering rules live in `ContinuumRevivedCore` so they can be exercised by executable checks without loading AppKit. `LaunchProfilePalette` stays responsible for AppKit view wiring, focus, keyboard commands, row rendering, and callback dispatch.
+
+What's in:
+
+- **`LaunchPaletteModel`** (Core, pure). `makeRows(profiles:)` converts already-adapted profile rows into stable palette rows and appends the built-in `New Note` and `Open File...` actions. `filterRows(_:query:)` trims and lowercases the query, preserves row order, matches profile display names and ids, and matches action names plus action tokens. `isFileURL(_:insideProjectRoot:)` checks standardized path components so file-opening rules can reject sibling-prefix paths without using AppKit.
+- **`LaunchPaletteAction`, `LaunchPaletteProfileRow`, and `LaunchPaletteRow`** (Core, pure). These types carry action identity, display names, profile detail text, and selectability without importing UI frameworks or runtime objects.
+- **`LaunchProfilePalette` as AppKit adapter**. The app-side palette maps `TileSpawner.AnnotatedProfile` values into `LaunchPaletteProfileRow`, builds the `NSView` / `NSTableView` / `NSSearchField` surface, owns focus and keyboard behavior, renders text colors, beeps on unselectable profile rows, and dispatches profile or action callbacks.
+- **`ContinuumRevivedPaletteChecks` against Core**. The executable check target depends on `ContinuumRevivedCore`, not the app target, so palette row construction, action filtering, profile filtering, selectability, and project-root file containment stay testable without AppKit.
+
+Verification:
+
+- `scripts/prepare-ghosttykit.sh` - prepared local GhosttyKit artifacts.
+- `swift build` - clean.
+- `swift run ContinuumRevivedCoreChecks` - green.
+- `swift run ContinuumRevivedPaletteChecks` - green, covering the Core palette model paths above.
+- `CONTINUUM_SMOKE_TEST=1 .build/debug/continuum-revived` - green for the app-level palette wiring and smoke path.
+
+What's deferred:
+
+- Fuzzy ranking is not part of this lift. The current model performs deterministic filtering while preserving the row order built by `makeRows(profiles:)`.
+- The AppKit palette UI remains hand-built. This ADR does not introduce a reusable command-palette framework or alternate renderer.
+- Custom command editing remains deferred with the launch-profile settings work. The Core action list only covers the note and file actions introduced for the current palette.
+
+Consequences:
+
+- Palette filtering changes now belong in Core first, with matching executable-check coverage in `ContinuumRevivedPaletteChecks`.
+- AppKit code should keep adapting domain state into Core row DTOs instead of reintroducing filtering logic in the table delegate.
+- The Core purity invariant remains load-bearing: palette model code must not import AppKit, SwiftUI, WebKit, GhosttyKit, or NSWorkspace.
