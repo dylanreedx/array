@@ -166,6 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var activeProject: Project?
     private var tileSpawner: TileSpawner?
     private var profilePalette: LaunchProfilePalette?
+    private let focusBroker = FocusBroker()
     private var qaPerf: QAPerf?
     private var launchStartTime: CFTimeInterval?
     private var hotkeyMonitor: Any?
@@ -746,24 +747,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return true
         }
 
-        guard let chars = event.charactersIgnoringModifiers else { return false }
-        switch chars {
-        case "k":
+        guard let shortcut = focusBroker.reservedShortcut(for: event) else { return false }
+        if let activeSurface = focusBroker.activeSurface,
+           focusBroker.shouldSurfaceReceive(shortcut, surface: activeSurface) {
+            return false
+        }
+
+        switch shortcut {
+        case .palette:
             openProfilePalette()
             return true
-        case "1":
+        case .spawnProfile(1):
             spawnTerminalFromProfile("claude")
             return true
-        case "2":
+        case .spawnProfile(2):
             spawnTerminalFromProfile("shell")
             return true
-        case "3":
+        case .spawnProfile(3):
             spawnBrowserDefault()
             return true
-        case "4":
+        case .spawnProfile(4):
             spawnTerminalFromProfile("nvim")
             return true
-        default:
+        case .spawnProfile:
             return false
         }
     }
