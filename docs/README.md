@@ -17,3 +17,14 @@ Read in order:
 
 Core decision: build a native macOS app with Ghostty-backed terminal tiles, WKWebView browser tiles, project-local state, and Project Spaces navigation. Agent-to-agent messaging waits until the core loop is reliable.
 
+## Working docs (post-Phase-6)
+
+For implementing agents picking up current work, start here instead:
+
+- `15-repo-audit-2026-06-10.md` - repo/branch rules and the verification matrix every change must keep green.
+- `16-daily-driver-backlog.md` - **the ranked ticket list (DD-NNN)**; source of truth for what to work on.
+- `17-focus-input-routing-plan.md` - implementation plan: focus broker, palette key capture, click-to-focus, spawn focus.
+- `18-project-lifecycle-plan.md` - implementation plan: project root resolution, single-instance lock, project switcher, .app bundle.
+- `19-launch-spawn-experience-plan.md` - implementation plan: delete-confirm default, palette browser/URL actions, spawn placement, empty state.
+- `10`-`14` - QA harness, agent platform plan, UX backlog, observability loop, platform bug backlog (cross-referenced from 16).
+
