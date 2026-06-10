@@ -2012,7 +2012,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let html = """
         <html><body><input id='qa' autofocus><script>
         window.qaKeys = [];
-        document.addEventListener('keydown', function(e) { window.qaKeys.push(e.key); });
+        document.addEventListener('keydown', function(e) {
+          if (e.key && e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) { window.qaKeys.push(e.key); }
+        });
         window.onload = function() { document.getElementById('qa').focus(); };
         </script></body></html>
         """
@@ -2055,31 +2057,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
             guard let runtime else {
-                notes.append("runtime unavailable for JS evaluation")
+                finish(success: false, "runtime unavailable for JS evaluation; notes=\(notes)")
                 return
             }
+
+            let group = DispatchGroup()
+            group.enter()
             runtime.webView.evaluateJavaScript("document.getElementById('qa').value") { result, error in
                 if let error { notes.append("value JS error: \(error)") }
                 webValue = result as? String
+                group.leave()
             }
+            group.enter()
             runtime.webView.evaluateJavaScript("window.qaKeys.join('')") { result, error in
                 if let error { notes.append("keys JS error: \(error)") }
                 webKeys = result as? String
+                group.leave()
             }
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
-            let paletteText = self.profilePalette?.searchTextForQA
-            let selected = self.profilePalette?.selectedDisplayNameForQA
-            let contentFocused = browserTile?.browserContentHasFocusForQA == true
-            let success = paletteText == "note"
-                && selected == LaunchPaletteAction.newNote.displayName
-                && contentFocused
-                && webValue == ""
-                && webKeys == ""
-                && notes.isEmpty
-            let message = "paletteText=\(String(describing: paletteText)) selected=\(String(describing: selected)) contentFocused=\(contentFocused) webValue=\(String(describing: webValue)) webKeys=\(String(describing: webKeys)) notes=\(notes)"
-            finish(success: success, message)
+            group.notify(queue: .main) {
+                let paletteText = self.profilePalette?.searchTextForQA
+                let selected = self.profilePalette?.selectedDisplayNameForQA
+                let contentFocused = browserTile?.browserContentHasFocusForQA == true
+                let success = paletteText == "note"
+                    && selected == LaunchPaletteAction.newNote.displayName
+                    && contentFocused
+                    && webValue == ""
+                    && webKeys == ""
+                    && notes.isEmpty
+                let message = "paletteText=\(String(describing: paletteText)) selected=\(String(describing: selected)) contentFocused=\(contentFocused) webValue=\(String(describing: webValue)) webKeys=\(String(describing: webKeys)) notes=\(notes)"
+                finish(success: success, message)
+            }
         }
     }
 
