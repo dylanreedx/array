@@ -193,7 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     installInitialTerminalTile(tile, in: canvasView, via: spawner)
                 case .browser:
                     installInitialBrowserTile(tile, in: canvasView, via: spawner)
-                case .note, .file:
+                case .note, .file, .fileTree:
                     let view = DescriptorTileNSView(tile: tile)
                     canvasView.install(tileView: view, for: tile)
                 }

@@ -36,6 +36,7 @@ final class DescriptorTileNSView: TileNSView {
         case .browser:  return NSColor(red: 0.13, green: 0.17, blue: 0.20, alpha: 1)
         case .note:     return NSColor(red: 0.18, green: 0.16, blue: 0.10, alpha: 1)
         case .file:     return NSColor(red: 0.12, green: 0.18, blue: 0.13, alpha: 1)
+        case .fileTree: return NSColor(red: 0.15, green: 0.13, blue: 0.20, alpha: 1)
         }
     }
 }

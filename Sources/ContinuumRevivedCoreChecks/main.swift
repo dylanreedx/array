@@ -1004,4 +1004,158 @@ do {
     expect(!survivingIds.contains(exitedSignal.id), "exitedSignal descriptor was pruned")
 }
 
+// MARK: - Phase 6 core note/file/file-tree models
+
+do {
+    let noteId = UUID(uuidString: "CCCCCCCC-1111-1111-1111-111111111111")!
+    let noteTileId = UUID(uuidString: "CCCCCCCC-2222-2222-2222-222222222222")!
+    let noteTile = NoteTile(
+        id: noteId,
+        tileId: noteTileId,
+        filename: "\(noteId.uuidString).md",
+        title: "My Note",
+        createdAt: Date(timeIntervalSinceReferenceDate: 700_000_000),
+        updatedAt: Date(timeIntervalSinceReferenceDate: 700_000_500)
+    )
+    let noteState = NoteState(tiles: [noteTile])
+    let noteData = try JSONCodec.makeEncoder().encode(noteState)
+    let decodedNoteState = try JSONCodec.makeDecoder().decode(NoteState.self, from: noteData)
+    expect(decodedNoteState == noteState, "NoteState round trip")
+    expect(decodedNoteState.schemaVersion == NoteState.currentSchemaVersion, "NoteState schema version preserved")
+
+    let fileTreeTileId = UUID(uuidString: "7A7A7A7A-1111-1111-1111-111111111111")!
+    let fileTreeTile = FileTreeTile(
+        tileId: fileTreeTileId,
+        rootPath: "/tmp/continuum-revived",
+        expandedPaths: ["Sources", "Sources/ContinuumRevivedCore"],
+        selectedPath: "Sources/ContinuumRevivedCore/ProjectStore.swift",
+        searchQuery: "Store",
+        ignoredNames: [".git", "node_modules", ".build"],
+        gitBadges: .cheap
+    )
+    let fileTreeState = FileTreeState(tiles: [fileTreeTile])
+    let fileTreeData = try JSONCodec.makeEncoder().encode(fileTreeState)
+    let decodedFileTreeState = try JSONCodec.makeDecoder().decode(FileTreeState.self, from: fileTreeData)
+    expect(decodedFileTreeState == fileTreeState, "FileTreeState round trip")
+    expect(decodedFileTreeState.schemaVersion == FileTreeState.currentSchemaVersion, "FileTreeState schema version preserved")
+
+    let node = FileTreeNode(
+        relativePath: "Sources/ContinuumRevivedCore/FileTreeState.swift",
+        displayName: "FileTreeState.swift",
+        isDirectory: false,
+        childCount: 0,
+        isIgnored: false,
+        gitStatus: .added
+    )
+    let nodeData = try JSONCodec.makeEncoder().encode(node)
+    let decodedNode = try JSONCodec.makeDecoder().decode(FileTreeNode.self, from: nodeData)
+    expect(decodedNode == node, "FileTreeNode round trip")
+
+    let metadata = TileMetadata(noteId: noteId, filePath: "Sources/ContinuumRevivedCore/ProjectStore.swift")
+    let metadataData = try JSONCodec.makeEncoder().encode(metadata)
+    let metadataJSON = String(data: metadataData, encoding: .utf8) ?? ""
+    expect(metadataJSON.contains("noteId"), "TileMetadata encodes noteId")
+    expect(metadataJSON.contains("filePath"), "TileMetadata encodes filePath")
+    let decodedMetadata = try JSONCodec.makeDecoder().decode(TileMetadata.self, from: metadataData)
+    expect(decodedMetadata == metadata, "TileMetadata note/file fields round trip")
+
+    let canvas = CanvasState(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        tiles: [
+            Tile(id: noteTileId, kind: .note, title: "Note", frame: TileFrame(x: 0, y: 0, width: 400, height: 300), zIndex: 1, runtimeRef: RuntimeRef(kind: .note, id: noteId), metadata: TileMetadata(noteId: noteId)),
+            Tile(id: UUID(uuidString: "CCCCCCCC-3333-3333-3333-333333333333")!, kind: .file, title: "ProjectStore.swift", frame: TileFrame(x: 420, y: 0, width: 400, height: 300), zIndex: 2, runtimeRef: RuntimeRef(kind: .file, id: UUID()), metadata: TileMetadata(filePath: "Sources/ContinuumRevivedCore/ProjectStore.swift")),
+            Tile(id: fileTreeTileId, kind: .fileTree, title: "Files", frame: TileFrame(x: 840, y: 0, width: 360, height: 520), zIndex: 3, runtimeRef: nil, metadata: TileMetadata())
+        ],
+        groups: [],
+        lastActiveTileId: fileTreeTileId
+    )
+    let canvasData = try JSONCodec.makeEncoder().encode(canvas)
+    let decodedCanvas = try JSONCodec.makeDecoder().decode(CanvasState.self, from: canvasData)
+    expect(decodedCanvas == canvas, "CanvasState note/file/fileTree tiles round trip")
+    expect(decodedCanvas.tiles.map(\.kind).contains(.fileTree), "CanvasState preserves fileTree tile kind")
+
+    let fileTreeDefault = CanvasEngine.defaultFrame(for: .fileTree)
+    expect(fileTreeDefault.width == 360 && fileTreeDefault.height == 520, "FileTree default frame is 360x520")
+    let fileTreeMinimum = CanvasEngine.minimumFrame(for: .fileTree)
+    expect(fileTreeMinimum.width == 220 && fileTreeMinimum.height == 240, "FileTree minimum frame is 220x240")
+}
+
+// MARK: - Phase 6 ProjectStore persistence
+
+do {
+    let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-phase6-core-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: scratch) }
+
+    let store = ProjectStore(projectRoot: scratch, retainedBackups: 2)
+    let initialNoteState = try store.tryLoadNoteState()
+    let initialFileTreeState = try store.tryLoadFileTreeState()
+    expect(initialNoteState == nil, "tryLoadNoteState returns nil before save")
+    expect(initialFileTreeState == nil, "tryLoadFileTreeState returns nil before save")
+
+    let noteId = UUID()
+    let noteTile = NoteTile(
+        id: noteId,
+        tileId: UUID(),
+        filename: "\(noteId.uuidString).md",
+        title: "Stored Note",
+        createdAt: Date(timeIntervalSinceReferenceDate: 700_000_000),
+        updatedAt: Date(timeIntervalSinceReferenceDate: 700_000_500)
+    )
+    let noteState = NoteState(tiles: [noteTile])
+    try store.saveNoteState(noteState)
+    let loadedNoteState = try store.loadNoteState()
+    expect(loadedNoteState == noteState, "ProjectStore NoteState round trip")
+    try store.saveNoteBody(id: noteId, text: "hello world")
+    let loadedNoteBody = try store.loadNoteBody(id: noteId)
+    expect(loadedNoteBody == "hello world", "ProjectStore note body round trip")
+    expect(store.tryLoadNoteBody(id: UUID()) == nil, "tryLoadNoteBody returns nil for missing note")
+
+    let fileTreeState = FileTreeState(tiles: [
+        FileTreeTile(
+            tileId: UUID(),
+            rootPath: scratch.path,
+            expandedPaths: ["Sources"],
+            selectedPath: "Sources/main.swift",
+            searchQuery: "main",
+            ignoredNames: [".git", ".build"],
+            gitBadges: .cheap
+        )
+    ])
+    try store.saveFileTreeState(fileTreeState)
+    let loadedFileTreeState = try store.loadFileTreeState()
+    expect(loadedFileTreeState == fileTreeState, "ProjectStore FileTreeState round trip")
+    expect(FileManager.default.fileExists(atPath: store.layout.fileTreeIndexFile.path), "fileTreeIndexFile exists after save")
+}
+
+// MARK: - Phase 6 future-version refusal
+
+do {
+    let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-phase6-future-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: scratch) }
+    let store = ProjectStore(projectRoot: scratch, retainedBackups: 1)
+
+    try store.saveNoteState(NoteState(schemaVersion: NoteState.currentSchemaVersion + 99, tiles: []))
+    do {
+        _ = try store.loadNoteState()
+        expect(false, "Future NoteState schema version should refuse load")
+    } catch let ProjectStoreError.unknownFutureSchema(_, version, supported) {
+        expect(version > supported, "Future NoteState schema reports version > supported")
+    } catch {
+        expect(false, "Future NoteState schema should throw unknownFutureSchema, threw \(error)")
+    }
+
+    try store.saveFileTreeState(FileTreeState(schemaVersion: FileTreeState.currentSchemaVersion + 99, tiles: []))
+    do {
+        _ = try store.loadFileTreeState()
+        expect(false, "Future FileTreeState schema version should refuse load")
+    } catch let ProjectStoreError.unknownFutureSchema(_, version, supported) {
+        expect(version > supported, "Future FileTreeState schema reports version > supported")
+    } catch {
+        expect(false, "Future FileTreeState schema should throw unknownFutureSchema, threw \(error)")
+    }
+}
+
 print("ContinuumRevivedCoreChecks passed")
