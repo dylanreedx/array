@@ -1,6 +1,6 @@
 # Platform Bug-Bash Backlog
 
-Status: captured from overnight/follow-up platform-breaker agents. This repo is currently on `feat/phase-6-core-data-model` with a dirty worktree; do **not** implement more here until branch strategy is decided.
+Status: captured from overnight/follow-up platform-breaker agents. This copy is being carried on `integration/phase-6-reintegration`; file-tree bugs remain migration-dependent until the file-tree slice lands. A newer stash copy will be reconciled in slice 5.
 
 Canonical source artifact: `.pi/agent-runs/triage-lead-20260606T122818Z-956421/final.md`
 

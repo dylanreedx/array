@@ -6,3 +6,7 @@ ThirdParty/
 .conductor/*.log
 .agents/
 .codex/
+.pi/agent-runs/
+.pi/cache/
+.pi/tmp/
+qa-runs/

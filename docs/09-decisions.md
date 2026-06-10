@@ -510,7 +510,7 @@ Consequences:
 
 ## ADR-0017: Phase 6 -- Plain-Text Notes and Read-Only File Viewer Tiles
 
-**Status:** Proposed
+**Status:** Accepted / Implemented
 **Date:** 2026-05-09
 
 ---

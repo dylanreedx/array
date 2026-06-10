@@ -271,6 +271,10 @@ Deliverables:
 - Notes stored as `.md`.
 - Dropped external note references if practical.
 
+Scope note, 2026-06-10:
+
+ADR-0017 reduced the first Phase 6 implementation to notes plus read-only file tiles. The file-tree tile remained a Phase 6 follow-on and is being reintegrated separately on `integration/phase-6-reintegration`.
+
 Implementation notes:
 
 - File scanning must be backgrounded.
