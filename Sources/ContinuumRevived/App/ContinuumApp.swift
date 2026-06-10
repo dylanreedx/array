@@ -315,7 +315,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // a non-nil ghostty to forward set_focus into the surface.
             NSApp.activate(ignoringOtherApps: true)
 
-            if smokeTestEnabled {
+            if CommandLine.arguments.contains("--palette-captures-keys-over-browser-check") {
+                runPaletteCapturesKeysOverBrowserCheck(window: window)
+            } else if smokeTestEnabled {
                 runSmokeTest(window: window, runtime: runtimes.first)
             }
         } catch {
@@ -724,6 +726,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func handleHotkey(_ event: NSEvent) -> Bool {
+        if profilePalette?.handleKeyEvent(event) == true {
+            return true
+        }
+
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let onlyCommand: NSEvent.ModifierFlags = [.command]
         guard mods == onlyCommand else { return false }
@@ -1955,6 +1961,120 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             tSec: 1.8,
             success: true
         )
+    }
+
+    private func runPaletteCapturesKeysOverBrowserCheck(window: NSWindow) {
+        var runtime: WKWebViewBrowserRuntime?
+        var browserTile: BrowserTileNSView?
+        var webValue: String?
+        var webKeys: String?
+        var notes: [String] = []
+
+        func finish(success: Bool, _ message: String) {
+            if success {
+                print("ContinuumRevivedPaletteKeyCaptureOverBrowserChecks passed")
+            } else {
+                fputs("FAIL: \(message)\n", stderr)
+            }
+            smokeTestExitCode = success ? 0 : 1
+            window.performClose(nil)
+        }
+
+        func makeKeyEvent(_ character: String, keyCode: UInt16, modifiers: NSEvent.ModifierFlags = []) -> NSEvent? {
+            NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: modifiers,
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                characters: character,
+                charactersIgnoringModifiers: character.lowercased(),
+                isARepeat: false,
+                keyCode: keyCode
+            )
+        }
+
+        func send(_ character: String, keyCode: UInt16, modifiers: NSEvent.ModifierFlags = []) {
+            guard let event = makeKeyEvent(character, keyCode: keyCode, modifiers: modifiers) else {
+                notes.append("could not create key event for \(character)")
+                return
+            }
+            NSApplication.shared.sendEvent(event)
+        }
+
+        let html = """
+        <html><body><input id='qa' autofocus><script>
+        window.qaKeys = [];
+        document.addEventListener('keydown', function(e) { window.qaKeys.push(e.key); });
+        window.onload = function() { document.getElementById('qa').focus(); };
+        </script></body></html>
+        """
+        let encoded = html.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? html
+        let url = "data:text/html;charset=utf-8,\(encoded)"
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            guard let spawner = self.tileSpawner else {
+                notes.append("tile spawner unavailable")
+                return
+            }
+            switch spawner.spawnBrowser(url: url) {
+            case let .spawned(spawned):
+                self.wireContentProcessTerminationHandler(spawned)
+                self.browserRuntimes.append(spawned)
+                runtime = spawned
+                browserTile = self.canvasView?.tileView(for: spawned.tileId) as? BrowserTileNSView
+            case let .invalidURL(invalid):
+                notes.append("invalid URL \(invalid)")
+            case let .failure(error):
+                notes.append("spawn failed: \(error)")
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+            guard let runtime, let browserTile else {
+                notes.append("browser runtime/tile unavailable")
+                return
+            }
+            self.canvasView?.bringToFront(tileId: runtime.tileId)
+            browserTile.layoutSubtreeIfNeeded()
+            runtime.focus()
+            send("K", keyCode: 40, modifiers: .command)
+            runtime.focus()
+            send("n", keyCode: 45)
+            send("o", keyCode: 31)
+            send("t", keyCode: 17)
+            send("e", keyCode: 14)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+            guard let runtime else {
+                notes.append("runtime unavailable for JS evaluation")
+                return
+            }
+            runtime.webView.evaluateJavaScript("document.getElementById('qa').value") { result, error in
+                if let error { notes.append("value JS error: \(error)") }
+                webValue = result as? String
+            }
+            runtime.webView.evaluateJavaScript("window.qaKeys.join('')") { result, error in
+                if let error { notes.append("keys JS error: \(error)") }
+                webKeys = result as? String
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+            let paletteText = self.profilePalette?.searchTextForQA
+            let selected = self.profilePalette?.selectedDisplayNameForQA
+            let contentFocused = browserTile?.browserContentHasFocusForQA == true
+            let success = paletteText == "note"
+                && selected == LaunchPaletteAction.newNote.displayName
+                && contentFocused
+                && webValue == ""
+                && webKeys == ""
+                && notes.isEmpty
+            let message = "paletteText=\(String(describing: paletteText)) selected=\(String(describing: selected)) contentFocused=\(contentFocused) webValue=\(String(describing: webValue)) webKeys=\(String(describing: webKeys)) notes=\(notes)"
+            finish(success: success, message)
+        }
     }
 
     private func runBrowserURLFocusFlow(window: NSWindow) {
