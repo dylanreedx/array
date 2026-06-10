@@ -443,22 +443,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let canvasView else { return }
         guard let tile = canvasView.canvasState.tiles.first(where: { $0.id == id }) else { return }
 
+        fputs("deleteTile entry kind=\(tile.kind.rawValue) id=\(id.uuidString)\n", stderr)
+        var deleteOutcome = "deleted"
+        defer {
+            fputs("deleteTile exit kind=\(tile.kind.rawValue) id=\(id.uuidString) outcome=\(deleteOutcome)\n", stderr)
+        }
+
         let policy = DeleteConfirmPolicy.current
         if policy.requiresConfirmation(for: tile.kind) {
+            let configuration = policy.alertConfiguration(for: tile.kind)
             let alert = NSAlert()
-            alert.messageText = "Delete this \(tile.kind.rawValue) tile?"
-            switch tile.kind {
-            case .terminal:
-                alert.informativeText = "The running session will be terminated."
-            case .browser:
-                alert.informativeText = "The browser process and any unsaved page state will be lost."
-            default:
-                alert.informativeText = "This action cannot be undone."
-            }
+            alert.messageText = configuration.message
+            alert.informativeText = configuration.informative
             alert.alertStyle = .warning
-            alert.addButton(withTitle: "Delete")
-            alert.addButton(withTitle: "Cancel")
-            if alert.runModal() != .alertFirstButtonReturn {
+            let cancel = alert.addButton(withTitle: configuration.buttonTitles[0])
+            let delete = alert.addButton(withTitle: configuration.buttonTitles[1])
+            delete.hasDestructiveAction = true
+            delete.keyEquivalent = configuration.destructiveKeyEquivalent
+            cancel.keyEquivalent = configuration.cancelKeyEquivalent
+            if alert.runModal() != .alertSecondButtonReturn {
+                deleteOutcome = "skipped"
                 return
             }
         }
