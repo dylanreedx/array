@@ -2,6 +2,7 @@ import AppKit
 import ContinuumRevivedCore
 import Foundation
 import GhosttyKit
+import WebKit
 
 @main
 enum ContinuumApp {
@@ -156,12 +157,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var qaPerf: QAPerf?
     private var launchStartTime: CFTimeInterval?
     private var hotkeyMonitor: Any?
+    private var tileFocusMonitor: Any?
+    private var canvasScrollMonitor: Any?
+    private var canvasMagnifyMonitor: Any?
     private static let smokeNoteId = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
     private static let smokeNoteTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000010")!
     private static let smokeFileTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000011")!
     private static let smokeFileTreeTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000012")!
     private static let smokeNoteBody = "smoke-note-ok"
     private static let smokeFileBody = "smoke-file-ok"
+    private static let smokeFileLongBody: String = {
+        let longLine = "let unwrappedSourceLine = \"" + String(repeating: "0123456789", count: 36) + "\""
+        let lines = (1...90).map { idx in
+            "\(String(format: "%03d", idx)) \(idx == 1 ? smokeFileBody : "smoke-file-line") \(longLine)"
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         launchStartTime = QAPerf.timestamp()
@@ -207,6 +218,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
             let canvasView = CanvasNSView(canvasState: canvasState)
             canvasView.delegate = self
+            canvasView.onTileCloseRequested = { [weak self] tileId in
+                self?.deleteTile(id: tileId)
+            }
 
             self.ghostty = ghostty
             self.browserEngine = browserEngine
@@ -245,6 +259,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ))
 
             installHotkeyMonitor()
+            installTileFocusMonitor()
+            installCanvasGestureMonitors()
 
             // Walk every tile in the canvas, spawn a runtime for each terminal
             // tile (or install a Restart placeholder if the profile fails to
@@ -418,6 +434,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         installRestartPlaceholder(for: tile, statusText: statusText, restartable: true, in: canvasView)
     }
 
+    /// Tile-delete orchestrator. Per-kind cleanup mirrors the
+    /// `handleRuntimeExited` shape but with kill+forget semantics: descriptors
+    /// and snapshots are purged so the boot loop won't resurrect the tile next
+    /// launch. Confirmation policy is read from `DeleteConfirmPolicy.current`
+    /// which honors the `continuum.deleteConfirmPolicy` UserDefaults key.
+    func deleteTile(id: UUID) {
+        guard let canvasView else { return }
+        guard let tile = canvasView.canvasState.tiles.first(where: { $0.id == id }) else { return }
+
+        let policy = DeleteConfirmPolicy.current
+        if policy.requiresConfirmation(for: tile.kind) {
+            let alert = NSAlert()
+            alert.messageText = "Delete this \(tile.kind.rawValue) tile?"
+            switch tile.kind {
+            case .terminal:
+                alert.informativeText = "The running session will be terminated."
+            case .browser:
+                alert.informativeText = "The browser process and any unsaved page state will be lost."
+            default:
+                alert.informativeText = "This action cannot be undone."
+            }
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Delete")
+            alert.addButton(withTitle: "Cancel")
+            if alert.runModal() != .alertFirstButtonReturn {
+                return
+            }
+        }
+
+        switch tile.kind {
+        case .terminal:
+            if let runtime = runtimes.first(where: { $0.tileId == id }) {
+                if let projectStore, var descriptor = try? projectStore.loadSession(id: runtime.id) {
+                    descriptor.lastExit = TerminalLastExit(exitCode: nil, signal: nil, at: Date())
+                    try? projectStore.saveSession(descriptor)
+                }
+                runtimes.removeAll { $0.id == runtime.id }
+                runtime.terminate(policy: .force)
+                try? projectStore?.deleteSession(id: runtime.id)
+            }
+        case .browser:
+            if let runtime = browserRuntimes.first(where: { $0.tileId == id }) {
+                browserRuntimes.removeAll { $0.id == runtime.id }
+                runtime.terminate(policy: .force)
+            }
+            // Drop the persisted browser tile snapshot so the boot loop won't
+            // try to resurrect this tile from BrowserState on next launch.
+            if let projectStore,
+               var browserState = try? projectStore.tryLoadBrowserState() {
+                browserState.tiles.removeAll { $0.tileId == id }
+                try? projectStore.saveBrowserState(browserState)
+            }
+        case .note:
+            if let noteId = tile.metadata.noteId {
+                noteViews.removeValue(forKey: noteId)
+                if let projectStore {
+                    if var noteState = try? projectStore.tryLoadNoteState() {
+                        noteState.tiles.removeAll { $0.id == noteId || $0.tileId == id }
+                        try? projectStore.saveNoteState(noteState)
+                    }
+                    let noteFile = projectStore.layout.noteFile(id: noteId)
+                    try? FileManager.default.removeItem(at: noteFile)
+                }
+            }
+        case .file:
+            // No on-disk descriptor to purge — file tiles only carry metadata.
+            break
+        case .fileTree:
+            fileTreeViews.removeValue(forKey: id)
+            if let projectStore,
+               var fileTreeState = try? projectStore.tryLoadFileTreeState() {
+                fileTreeState.tiles.removeAll { $0.tileId == id }
+                try? projectStore.saveFileTreeState(fileTreeState)
+            }
+        }
+
+        canvasView.removeTile(id: id)
+        flushCanvasSave()
+    }
+
     private func restartTile(tileId: UUID) {
         guard let spawner = tileSpawner, let canvasView else { return }
         switch spawner.restartTerminalTile(tileId: tileId) {
@@ -541,10 +637,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         self.hotkeyMonitor = monitor
     }
 
+    /// Body clicks (terminal surface, NSTextView, WKWebView, file tree row…)
+    /// are consumed by the content child before TileNSView.mouseDown can fire,
+    /// so the existing in-tile bring-to-front never runs for them. A
+    /// non-consuming local monitor lets us bring the tile forward without
+    /// taking the event away from its real target.
+    ///
+    /// We listen on `.leftMouseUp` rather than `.leftMouseDown`: bringToFront
+    /// removes the target view from its superview and re-adds it (to push it
+    /// to the top of the subview array). Doing that during pre-dispatch on
+    /// .leftMouseDown cancels AppKit's mouse-tracking continuation — the
+    /// subsequent mouseDragged events never reach the tile. mouseUp fires
+    /// after any drag has already completed, so reordering is safe and the
+    /// "click → tile pops forward" delay is imperceptible.
+    private func installTileFocusMonitor() {
+        let monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+            guard let self, let canvas = self.canvasView else { return event }
+            guard let window = canvas.window, event.window === window else { return event }
+            let pointInCanvas = canvas.convert(event.locationInWindow, from: nil)
+            if let tileId = canvas.tileId(at: pointInCanvas) {
+                canvas.bringToFront(tileId: tileId)
+            }
+            return event
+        }
+        self.tileFocusMonitor = monitor
+    }
+
+    /// Trackpad gestures (two-finger scroll, pinch) get consumed by tile
+    /// content (NSScrollView in notes/file tree, Ghostty surface, WKWebView)
+    /// before they can reach the canvas. Window-level monitors filter for the
+    /// trackpad case and route background events to the canvas. Events over an
+    /// NSScrollView/NSTextView, WKWebView/browser host, or Ghostty terminal host
+    /// are passed through so tile content keeps native trackpad scrolling.
+    private func installCanvasGestureMonitors() {
+        let scrollMon = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self, let canvas = self.canvasView else { return event }
+            guard let window = canvas.window, event.window === window else { return event }
+            guard event.hasPreciseScrollingDeltas else { return event }
+            if self.eventTargetsScrollableTileContent(event, in: window) {
+                return event
+            }
+            canvas.scrollWheel(with: event)
+            return nil
+        }
+        self.canvasScrollMonitor = scrollMon
+
+        let magnifyMon = NSEvent.addLocalMonitorForEvents(matching: .magnify) { [weak self] event in
+            guard let self, let canvas = self.canvasView else { return event }
+            guard let window = canvas.window, event.window === window else { return event }
+            canvas.handlePinch(event)
+            return nil
+        }
+        self.canvasMagnifyMonitor = magnifyMon
+    }
+
+    private func eventTargetsScrollableTileContent(_ event: NSEvent, in window: NSWindow) -> Bool {
+        pointTargetsScrollableTileContent(event.locationInWindow, in: window)
+    }
+
+    private func pointTargetsScrollableTileContent(_ locationInWindow: NSPoint, in window: NSWindow) -> Bool {
+        guard let contentView = window.contentView else { return false }
+        let pointInContent = contentView.convert(locationInWindow, from: nil)
+        guard let hitView = contentView.hitTest(pointInContent) else { return false }
+        return hitView.hasAncestor(ofType: NSScrollView.self)
+            || hitView.hasAncestor(ofType: NSTextView.self)
+            || hitView.hasAncestor(ofType: WKWebView.self)
+            || hitView.hasAncestor(ofType: BrowserHostView.self)
+            || hitView.hasAncestor(ofType: GhosttyTerminalView.self)
+            || hitView.hasAncestor(ofType: TerminalHostView.self)
+    }
+
     private func handleHotkey(_ event: NSEvent) -> Bool {
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let onlyCommand: NSEvent.ModifierFlags = [.command]
         guard mods == onlyCommand else { return false }
+
+        // Cmd-Backspace (key code 51): delete the active tile. Only fires when
+        // the canvas itself is first responder so a Cmd-Backspace inside an
+        // NSTextView, terminal, or WKWebView form field still gets its native
+        // semantics. The × close button covers the case where the user is
+        // focused inside a tile's content.
+        if event.keyCode == 51 {
+            guard window?.firstResponder === canvasView else { return false }
+            guard let id = canvasView?.canvasState.lastActiveTileId else { return false }
+            deleteTile(id: id)
+            return true
+        }
+
         guard let chars = event.charactersIgnoringModifiers else { return false }
         switch chars {
         case "k":
@@ -755,6 +934,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             NSEvent.removeMonitor(monitor)
             hotkeyMonitor = nil
         }
+        if let monitor = tileFocusMonitor {
+            NSEvent.removeMonitor(monitor)
+            tileFocusMonitor = nil
+        }
+        if let monitor = canvasScrollMonitor {
+            NSEvent.removeMonitor(monitor)
+            canvasScrollMonitor = nil
+        }
+        if let monitor = canvasMagnifyMonitor {
+            NSEvent.removeMonitor(monitor)
+            canvasMagnifyMonitor = nil
+        }
         profilePalette?.close()
         profilePalette = nil
 
@@ -955,7 +1146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             withIntermediateDirectories: true,
             attributes: nil
         )
-        let smokeFileData = Data(smokeFileBody.utf8)
+        let smokeFileData = Data(smokeFileLongBody.utf8)
         try smokeFileData.write(to: smokeFileURL, options: .atomic)
 
         let smokeTreeRoot = projectRoot
@@ -1006,7 +1197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 id: smokeFileTileId,
                 kind: .file,
                 title: "smoke-file.txt",
-                frame: TileFrame(x: 40, y: 560, width: Double(fileSize.width), height: Double(fileSize.height)),
+                frame: TileFrame(x: 360, y: 40, width: Double(fileSize.width), height: Double(fileSize.height)),
                 zIndex: 4,
                 runtimeRef: nil,
                 metadata: TileMetadata(filePath: smokeFileURL.path)
@@ -1062,6 +1253,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case cmd4Nvim = "cmd-4-nvim"
         case terminalMidExit = "terminal-mid-exit"
         case browserLoadError = "browser-load-error"
+        case browserURLFocus = "browser-url-focus"
         case canvasDragResize = "canvas-drag-resize"
         case canvasZoomPanEdge = "canvas-zoom-pan-edge"
         case emptyCanvas = "empty-canvas"
@@ -1111,6 +1303,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             runTerminalMidExitFlow(window: window)
         case .browserLoadError:
             runBrowserLoadErrorFlow(window: window)
+        case .browserURLFocus:
+            runBrowserURLFocusFlow(window: window)
         case .canvasDragResize:
             runCanvasDragResizeFlow(window: window)
         case .canvasZoomPanEdge:
@@ -1135,6 +1329,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 window: window,
                 canvasState: self.canvasView?.canvasState,
                 notes: notes
+            )
+        }
+        func preciseScrollPassThroughVisiblePoint(of view: NSView) -> Bool {
+            guard let contentView = window.contentView else { return false }
+            let viewWindowRect = view.convert(view.bounds, to: nil)
+            let contentWindowRect = contentView.convert(contentView.bounds, to: nil)
+            let visibleWindowRect = viewWindowRect.intersection(contentWindowRect)
+            guard !visibleWindowRect.isNull, visibleWindowRect.width > 1, visibleWindowRect.height > 1 else { return false }
+            return self.pointTargetsScrollableTileContent(
+                NSPoint(x: visibleWindowRect.midX, y: visibleWindowRect.midY),
+                in: window
             )
         }
 
@@ -1328,10 +1533,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             var canvasOk = false
             var multiTerminalOk = false
             var browserOk = false
+            var browserPreciseScrollPassThrough = false
+            var terminalPreciseScrollPassThrough = false
             var midExitOk = false
             var noteOk = false
             var fileOk = false
             var fileTreeOk = false
+            var deleteOk = false
             let browserTileCount = self.canvasView?.canvasState.tiles.filter { $0.kind == .browser }.count ?? 0
             // Cardinality is gating, not advisory: if browserRuntimes count drifts
             // from the canvas's live .browser tile count, runtimes leaked or were
@@ -1414,10 +1622,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     let trackedViewMatches = self.noteViews[Self.smokeNoteId] === noteView
                     let canvasMetadataMatches = noteTile.metadata.noteId == Self.smokeNoteId
                     let bodyMatches = noteView.textView.string == Self.smokeNoteBody
-                    noteOk = trackedViewMatches && canvasMetadataMatches && bodyMatches && noteIndexMatches
+                    // Guards against the regression where the text view ended up
+                    // zero-height because constraint setup orphaned the document
+                    // view inside its NSClipView. Frame and laid-out glyph rect
+                    // must both be non-zero or the body is invisible.
+                    let tv = noteView.textView
+                    let frameSized = tv.frame.height > 0 && tv.frame.width > 0
+                    var layoutSized = false
+                    if let lm = tv.layoutManager, let tc = tv.textContainer {
+                        lm.ensureLayout(for: tc)
+                        let used = lm.usedRect(for: tc)
+                        layoutSized = used.width > 0 && used.height > 0
+                    }
+                    noteOk = trackedViewMatches && canvasMetadataMatches && bodyMatches && noteIndexMatches && frameSized && layoutSized
                     if !noteOk {
                         fputs(
-                            "Note check details: trackedViewMatches=\(trackedViewMatches) canvasMetadataMatches=\(canvasMetadataMatches) bodyMatches=\(bodyMatches) noteIndexMatches=\(noteIndexMatches)\n",
+                            "Note check details: trackedViewMatches=\(trackedViewMatches) canvasMetadataMatches=\(canvasMetadataMatches) bodyMatches=\(bodyMatches) noteIndexMatches=\(noteIndexMatches) frameSized=\(frameSized) layoutSized=\(layoutSized) tvFrame=\(tv.frame)\n",
                             stderr
                         )
                     }
@@ -1425,15 +1645,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
                 if let fileTile = canvasOnDisk?.tiles.first(where: { $0.id == Self.smokeFileTileId }),
                    let fileView = self.canvasView?.tileView(for: fileTile.id) as? FileTileNSView {
+                    self.canvasView?.bringToFront(tileId: fileTile.id)
+                    fileView.layoutSubtreeIfNeeded()
                     let metadataPathMatches = fileTile.metadata.filePath?.hasSuffix(".continuum-revived/smoke-file.txt") ?? false
                     let bodyMatches = fileView.textView.string.contains(Self.smokeFileBody)
-                    fileOk = metadataPathMatches && bodyMatches
-                    if !fileOk {
-                        fputs(
-                            "File check details: metadataPathMatches=\(metadataPathMatches) bodyMatches=\(bodyMatches)\n",
-                            stderr
+                    let lineCountMatches = fileView.textView.string.components(separatedBy: "\n").count >= 90
+                    let evidence = fileView.textVisibilityEvidence(containing: Self.smokeFileBody)
+                    let visibleLayout = evidence.visibleLayoutOK
+                    let longFileBehavior = evidence.longFileBehaviorOK
+                    let filePreciseScrollPassThrough = self.window.map {
+                        self.pointTargetsScrollableTileContent(
+                            NSPoint(x: evidence.textVisibleWindowRect.midX, y: evidence.textVisibleWindowRect.midY),
+                            in: $0
                         )
-                    }
+                    } ?? false
+                    fileOk = metadataPathMatches && bodyMatches && lineCountMatches && visibleLayout && longFileBehavior && filePreciseScrollPassThrough
+                    fputs(
+                        "File check details: metadataPathMatches=\(metadataPathMatches) bodyMatches=\(bodyMatches) lineCountMatches=\(lineCountMatches) visibleLayout=\(visibleLayout) longFileBehavior=\(longFileBehavior) filePreciseScrollPassThrough=\(filePreciseScrollPassThrough) evidence={\(evidence)}\n",
+                        stderr
+                    )
                 }
 
                 if let fileTreeTile = canvasOnDisk?.tiles.first(where: { $0.id == Self.smokeFileTreeTileId }) {
@@ -1488,19 +1718,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                         && runtimeRefMatches
                         && storageIdMatches
                         && runtimeIdPresent
-                    if !browserOk {
+                    if let runtimeId = browserRuntimeId,
+                       let browserRuntime = self.browserRuntimes.first(where: { $0.id == runtimeId }) {
+                        self.canvasView?.bringToFront(tileId: browserRuntime.tileId)
+                        self.canvasView?.layoutSubtreeIfNeeded()
+                        browserRuntime.webView.layoutSubtreeIfNeeded()
+                        if let browserTileView = self.canvasView?.tileView(for: browserRuntime.tileId) as? BrowserTileNSView {
+                            browserPreciseScrollPassThrough = preciseScrollPassThroughVisiblePoint(of: browserTileView.hostView)
+                                || preciseScrollPassThroughVisiblePoint(of: browserRuntime.webView)
+                        } else {
+                            browserPreciseScrollPassThrough = preciseScrollPassThroughVisiblePoint(of: browserRuntime.webView)
+                        }
+                    }
+                    if !browserOk || !browserPreciseScrollPassThrough {
                         fputs(
-                            "Browser check details: urlMatches=\(urlMatches) titleMatches=\(titleMatches) kindMatches=\(kindMatches) runtimeRefMatches=\(runtimeRefMatches) storageIdMatches=\(storageIdMatches) runtimeIdPresent=\(runtimeIdPresent) entry=\(String(describing: browserEntry))\n",
+                            "Browser check details: urlMatches=\(urlMatches) titleMatches=\(titleMatches) kindMatches=\(kindMatches) runtimeRefMatches=\(runtimeRefMatches) storageIdMatches=\(storageIdMatches) runtimeIdPresent=\(runtimeIdPresent) browserPreciseScrollPassThrough=\(browserPreciseScrollPassThrough) entry=\(String(describing: browserEntry))\n",
                             stderr
                         )
                     }
+                }
+
+                if let terminalView = self.canvasView?.tileView(for: runtime.tileId) as? TerminalTileNSView {
+                    terminalPreciseScrollPassThrough = preciseScrollPassThroughVisiblePoint(of: terminalView.hostView)
+                }
+                if !terminalPreciseScrollPassThrough {
+                    fputs("Terminal precise scroll check: terminalPreciseScrollPassThrough=\(terminalPreciseScrollPassThrough)\n", stderr)
+                }
+
+                // Exercise the per-tile delete path. The seeded `.file` tile is
+                // the safest target: no runtime to terminate, no descriptor to
+                // purge, and the default `.runtimes` confirm policy never
+                // prompts for `.file` kind (so no NSAlert blocks the smoke).
+                let preDeleteCanvasCount = self.canvasView?.canvasState.tiles.count ?? 0
+                self.deleteTile(id: Self.smokeFileTileId)
+                self.flushCanvasSave()
+                let postDeleteCanvas = try self.projectStore?.loadCanvas()
+                let tileGoneFromCanvasView = self.canvasView?.tileView(for: Self.smokeFileTileId) == nil
+                let tileGoneFromCanvasState =
+                    !(self.canvasView?.canvasState.tiles.contains(where: { $0.id == Self.smokeFileTileId }) ?? true)
+                let tileGoneOnDisk = !((postDeleteCanvas?.tiles.contains { $0.id == Self.smokeFileTileId }) ?? true)
+                let postDeleteCanvasCount = self.canvasView?.canvasState.tiles.count ?? -1
+                let canvasCountDropped = postDeleteCanvasCount == preDeleteCanvasCount - 1
+                deleteOk = tileGoneFromCanvasView
+                    && tileGoneFromCanvasState
+                    && tileGoneOnDisk
+                    && canvasCountDropped
+                if !deleteOk {
+                    fputs(
+                        "Delete check details: tileGoneFromCanvasView=\(tileGoneFromCanvasView) tileGoneFromCanvasState=\(tileGoneFromCanvasState) tileGoneOnDisk=\(tileGoneOnDisk) canvasCountDropped=\(canvasCountDropped) (pre=\(preDeleteCanvasCount), post=\(postDeleteCanvasCount))\n",
+                        stderr
+                    )
                 }
             } catch {
                 fputs("Persistence check threw: \(error)\n", stderr)
             }
 
-            if textPathOk && keyPathOk && scrollOk && modifierOnlyOk && imeInsertedTextSeen && markedTextCleared && persistenceOk && canvasOk && multiTerminalOk && browserOk && midExitOk && noteOk && fileOk && fileTreeOk && browserCardinalityOk {
-                print("Ghostty smoke test passed (text + key + scroll + modifier + ime + persistence + canvas + multiTerminal + browser + midExit + note + file + fileTree, occurrences=\(occurrences))")
+            if textPathOk && keyPathOk && scrollOk && modifierOnlyOk && imeInsertedTextSeen && markedTextCleared && persistenceOk && canvasOk && multiTerminalOk && browserOk && browserPreciseScrollPassThrough && terminalPreciseScrollPassThrough && midExitOk && noteOk && fileOk && fileTreeOk && browserCardinalityOk && deleteOk {
+                print("Ghostty smoke test passed (text + key + scroll + modifier + ime + persistence + canvas + multiTerminal + browser + preciseScrollPassThrough + midExit + note + file + fileTree + delete, occurrences=\(occurrences))")
                 if ProcessInfo.processInfo.environment["CONTINUUM_DUMP_VISIBLE"] == "1" {
                     fputs("--- pre-scroll visible text ---\n", stderr)
                     fputs(preScrollText, stderr)
@@ -1511,7 +1785,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self.smokeTestExitCode = 0
             } else {
                 fputs(
-                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) modifierOnlyOk=\(modifierOnlyOk) imeInsertedTextSeen=\(imeInsertedTextSeen) markedTextCleared=\(markedTextCleared) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) midExitOk=\(midExitOk) noteOk=\(noteOk) fileOk=\(fileOk) fileTreeOk=\(fileTreeOk) browserCardinalityOk=\(browserCardinalityOk) occurrences=\(occurrences)\n",
+                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) modifierOnlyOk=\(modifierOnlyOk) imeInsertedTextSeen=\(imeInsertedTextSeen) markedTextCleared=\(markedTextCleared) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) browserPreciseScrollPassThrough=\(browserPreciseScrollPassThrough) terminalPreciseScrollPassThrough=\(terminalPreciseScrollPassThrough) midExitOk=\(midExitOk) noteOk=\(noteOk) fileOk=\(fileOk) fileTreeOk=\(fileTreeOk) browserCardinalityOk=\(browserCardinalityOk) deleteOk=\(deleteOk) occurrences=\(occurrences)\n",
                     stderr
                 )
                 fputs("--- pre-scroll ---\n", stderr)
@@ -1667,6 +1941,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         )
     }
 
+    private func runBrowserURLFocusFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        var tileId: UUID?
+        var returnCommandHandled = false
+        var returnFocusedContent = false
+        var escapeCommandHandled = false
+        var escapeFocusedContent = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard let spawner = self.tileSpawner else {
+                capture("browser-url-focus-spawn-skipped", 0.4, "tile spawner unavailable")
+                return
+            }
+            switch spawner.spawnBrowser(url: "data:text/html;charset=utf-8,<html><head><title>qa-browser-url-focus</title></head><body>browser url focus</body></html>") {
+            case let .spawned(runtime):
+                self.wireContentProcessTerminationHandler(runtime)
+                self.browserRuntimes.append(runtime)
+                tileId = runtime.tileId
+                capture("browser-url-focus-spawned", 0.4, "spawned browser \(runtime.id)")
+            case let .invalidURL(url):
+                capture("browser-url-focus-spawn-skipped", 0.4, "invalid URL \(url)")
+            case let .failure(error):
+                capture("browser-url-focus-spawn-skipped", 0.4, "browser spawn failed: \(error)")
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+            guard let tileId,
+                  let browserTile = self.canvasView?.tileView(for: tileId) as? BrowserTileNSView
+            else {
+                capture("browser-url-focus-return-skipped", 0.9, "browser tile unavailable")
+                return
+            }
+            self.canvasView?.bringToFront(tileId: tileId)
+            browserTile.layoutSubtreeIfNeeded()
+            returnCommandHandled = browserTile.performURLFieldCommandForQA(#selector(NSResponder.insertNewline(_:)))
+            returnFocusedContent = browserTile.browserContentHasFocusForQA
+            capture(
+                "browser-url-focus-return",
+                0.9,
+                "handled=\(returnCommandHandled) contentFocused=\(returnFocusedContent) responder=\(String(describing: window.firstResponder))"
+            )
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            guard let tileId,
+                  let browserTile = self.canvasView?.tileView(for: tileId) as? BrowserTileNSView
+            else {
+                capture("browser-url-focus-escape-skipped", 1.2, "browser tile unavailable")
+                return
+            }
+            escapeCommandHandled = browserTile.performURLFieldCommandForQA(#selector(NSResponder.cancelOperation(_:)))
+            escapeFocusedContent = browserTile.browserContentHasFocusForQA
+            capture(
+                "browser-url-focus-escape",
+                1.2,
+                "handled=\(escapeCommandHandled) contentFocused=\(escapeFocusedContent) responder=\(String(describing: window.firstResponder))"
+            )
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            let success = returnCommandHandled && returnFocusedContent && escapeCommandHandled && escapeFocusedContent
+            self.recordLaunchTime()
+            capture(
+                "browser-url-focus-final-state",
+                1.5,
+                "success=\(success) returnHandled=\(returnCommandHandled) returnContentFocused=\(returnFocusedContent) escapeHandled=\(escapeCommandHandled) escapeContentFocused=\(escapeFocusedContent)"
+            )
+            qaCapture?.writeManifest()
+            self.qaPerf?.writeReport()
+            self.smokeTestExitCode = success ? 0 : 2
+            window.performClose(nil)
+        }
+    }
+
     private func spawnBrowserForQA(url: String) -> String {
         guard let spawner = tileSpawner else { return "tile spawner unavailable" }
         switch spawner.spawnBrowser(url: url) {
@@ -1797,15 +2143,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func runPaletteLeakCheckFlow(window: NSWindow) {
         let (qaCapture, capture) = makeQACapture(window: window)
         scheduleInitialCapture(capture)
+        var repeatedVisibleOpenOK = false
+        var closeCleanupOK = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard let hostView = window.contentView else {
+                capture("palette-leak-skipped", 0.4, "window content view unavailable")
+                return
+            }
             let memoryBefore = QAPerf.residentMemoryBytes()
+            // palette-leak-cycle: repeatedly open while already visible to
+            // prove show() reuses the same root view instead of orphaning
+            // duplicate palette subviews.
             autoreleasepool {
                 for _ in 0..<25 {
                     self.openProfilePalette()
-                    self.profilePalette?.close()
                 }
             }
-            capture("palette-leak-cycle", 0.4, "opened and closed Cmd-K 25 times")
+            let visibleRootCount = LaunchProfilePalette.paletteRootCount(in: hostView)
+            let visibleSubviewCount = self.profilePalette?.isVisible == true
+                ? self.profilePaletteRootSubviewCount(in: hostView)
+                : -1
+            repeatedVisibleOpenOK = visibleRootCount == 1 && visibleSubviewCount == 2
+            capture(
+                "palette-repeated-visible-open",
+                0.4,
+                "opened Cmd-K 25 times while visible; roots \(visibleRootCount), rootSubviews \(visibleSubviewCount)"
+            )
+            self.profilePalette?.close()
+            let closedRootCount = LaunchProfilePalette.paletteRootCount(in: hostView)
+            closeCleanupOK = closedRootCount == 0 && self.profilePalette == nil
+            capture("palette-close-cleanup", 0.5, "roots after close \(closedRootCount)")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                 let memoryAfter = QAPerf.residentMemoryBytes()
                 let delta = Int64(memoryAfter) - Int64(memoryBefore)
@@ -1813,14 +2180,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 capture("palette-leak-memory-sampled", 0.6, "delta \(delta) bytes")
             }
         }
-        finishQAFlow(
-            window: window,
-            qaCapture: qaCapture,
-            capture: capture,
-            step: "palette-leak-final-state",
-            tSec: 1.3,
-            success: true
-        )
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) {
+            self.recordLaunchTime()
+            capture("palette-leak-final-state", 1.3, nil)
+            qaCapture?.writeManifest()
+            self.qaPerf?.writeReport()
+            self.smokeTestExitCode = repeatedVisibleOpenOK && closeCleanupOK ? 0 : 2
+            window.performClose(nil)
+        }
+    }
+
+    private func profilePaletteRootSubviewCount(in hostView: NSView) -> Int {
+        hostView.subviews
+            .first { $0.accessibilityIdentifier() == LaunchProfilePalette.rootAccessibilityIdentifier }?
+            .subviews.count ?? 0
     }
 
     private func runCanvasZoomPanEdgeFlow(window: NSWindow) {
@@ -1931,5 +2304,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             tSec: 1.8,
             success: true
         )
+    }
+}
+
+private extension NSView {
+    func hasAncestor<T: NSView>(ofType type: T.Type) -> Bool {
+        var view: NSView? = self
+        while let current = view {
+            if current is T { return true }
+            view = current.superview
+        }
+        return false
     }
 }

@@ -216,7 +216,8 @@ do {
     let largeFile = scratch.appendingPathComponent("large.txt")
     let largeBytes = Data(repeating: 0x61, count: FilePreview.maxReadBytes + 1)
     try largeBytes.write(to: largeFile)
-    expect(FilePreview.load(path: largeFile.path) == .unavailable("File too large to preview (> 1 MB)"), "FilePreview rejects oversized files")
+    let largePreview = FilePreview.load(path: largeFile.path)
+    expect(largePreview == .unavailable("File too large to preview (> 1 MB)"), "FilePreview rejects oversized files")
 
     let sparseHugeFile = scratch.appendingPathComponent("sparse-3gb.txt")
     FileManager.default.createFile(atPath: sparseHugeFile.path, contents: nil)
