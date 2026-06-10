@@ -6,6 +6,7 @@ import WebKit
 @MainActor
 final class BrowserEngineContext {
     private var dataStores: [String: WKWebsiteDataStore] = [:]
+    private(set) var webViewCreationCountForQA = 0
 
     init() {}
 
@@ -34,6 +35,7 @@ final class BrowserEngineContext {
     /// is a no-op), so we don't need to supply one. The data store enforces
     /// per-project isolation.
     func makeWebView(storageGroupId: String) -> WKWebView {
+        webViewCreationCountForQA += 1
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = dataStore(for: storageGroupId)
         configuration.preferences.isFraudulentWebsiteWarningEnabled = false

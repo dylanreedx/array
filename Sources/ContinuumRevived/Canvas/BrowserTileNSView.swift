@@ -151,6 +151,8 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
         runtime.isSemanticContentResponder(window?.firstResponder)
     }
 
+    var chromeURLStringForQA: String { urlField.stringValue }
+
     @discardableResult
     func performURLFieldCommandForQA(_ commandSelector: Selector) -> Bool {
         window?.makeFirstResponder(urlField)
