@@ -38,6 +38,19 @@ do {
     expect(state.status == .error(message: "spawn failed"), "state should mark errors")
 }
 
+// MARK: - Focus model
+
+do {
+    expect(ReservedShortcut.classify(keyCode: 40, modifiers: .command) == .palette, "Cmd-K should classify as palette shortcut")
+    expect(ReservedShortcut.classify(keyCode: 18, modifiers: .command) == .spawnProfile(1), "Cmd-1 should classify as spawn profile 1")
+    expect(ReservedShortcut.classify(keyCode: 19, modifiers: .command) == .spawnProfile(2), "Cmd-2 should classify as spawn profile 2")
+    expect(ReservedShortcut.classify(keyCode: 20, modifiers: .command) == .spawnProfile(3), "Cmd-3 should classify as spawn profile 3")
+    expect(ReservedShortcut.classify(keyCode: 21, modifiers: .command) == .spawnProfile(4), "Cmd-4 should classify as spawn profile 4")
+    expect(ReservedShortcut.classify(keyCode: 40, modifiers: [.command, .shift]) == nil, "Cmd-Shift-K should not classify as a reserved shortcut")
+    expect(ReservedShortcut.classify(keyCode: 40, modifiers: []) == nil, "plain K should not classify as a reserved shortcut")
+    expect(ReservedShortcut.classify(keyCode: 53, modifiers: []) == nil, "plain Escape should not classify as a reserved shortcut")
+}
+
 // MARK: - Delete confirmation policy
 
 do {
