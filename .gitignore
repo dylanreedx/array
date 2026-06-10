@@ -10,3 +10,4 @@ ThirdParty/
 .pi/cache/
 .pi/tmp/
 qa-runs/
+.swiftpm/
