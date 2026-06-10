@@ -65,8 +65,21 @@ final class CanvasNSView: NSView {
     }
 
     func bringToFront(tileId: UUID) {
-        canvasState.tiles = CanvasEngine.bringToFront(tileId: tileId, in: canvasState.tiles)
+        let previousActiveTileId = canvasState.lastActiveTileId
+        guard let target = canvasState.tiles.first(where: { $0.id == tileId }) else { return }
+        let alreadyFrontmost = canvasState.tiles.allSatisfy { tile in
+            tile.id == tileId || target.zIndex > tile.zIndex
+        }
+
         canvasState.lastActiveTileId = tileId
+        if alreadyFrontmost {
+            if previousActiveTileId != tileId {
+                delegate?.canvasDidChange(self)
+            }
+            return
+        }
+
+        canvasState.tiles = CanvasEngine.bringToFront(tileId: tileId, in: canvasState.tiles)
         for tile in canvasState.tiles {
             tileViews[tile.id]?.tile = tile
         }
@@ -89,17 +102,28 @@ final class CanvasNSView: NSView {
     var viewport: CanvasViewport { canvasState.viewport }
 
     private func reorderTileSubviewsByZIndex() {
-        let modelOrder = Dictionary(uniqueKeysWithValues: canvasState.tiles.enumerated().map { ($0.element.id, $0.offset) })
-        let orderedViews = tileViews.values.sorted { lhs, rhs in
-            let lhsZ = lhs.tile.zIndex
-            let rhsZ = rhs.tile.zIndex
-            if lhsZ != rhsZ { return lhsZ < rhsZ }
-            return (modelOrder[lhs.tile.id] ?? Int.max) < (modelOrder[rhs.tile.id] ?? Int.max)
+        let ordering = NSMutableDictionary()
+        for (index, tile) in canvasState.tiles.enumerated() {
+            ordering[tile.id.uuidString] = [tile.zIndex, index]
         }
-        for view in orderedViews {
-            view.removeFromSuperview()
-            addSubview(view)
-        }
+        sortSubviews({ lhs, rhs, context in
+            guard
+                let ordering = context.map({ Unmanaged<NSMutableDictionary>.fromOpaque($0).takeUnretainedValue() }),
+                let lhs = lhs as? TileNSView,
+                let rhs = rhs as? TileNSView,
+                let lhsInfo = ordering[lhs.tile.id.uuidString] as? [Int],
+                let rhsInfo = ordering[rhs.tile.id.uuidString] as? [Int]
+            else {
+                return .orderedSame
+            }
+            let lhsZ = lhsInfo[0]
+            let rhsZ = rhsInfo[0]
+            if lhsZ != rhsZ { return lhsZ < rhsZ ? .orderedAscending : .orderedDescending }
+            let lhsOrder = lhsInfo[1]
+            let rhsOrder = rhsInfo[1]
+            if lhsOrder == rhsOrder { return .orderedSame }
+            return lhsOrder < rhsOrder ? .orderedAscending : .orderedDescending
+        }, context: Unmanaged.passUnretained(ordering).toOpaque())
     }
 
     // MARK: - Layout
@@ -216,6 +240,206 @@ final class CanvasNSView: NSView {
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("zindex-relaunch", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runBringToFrontFocusSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        final class SemanticTypingProbeView: NSView {
+            let owner: String
+            var typed = ""
+            var mouseDownCount = 0
+            var mouseUpCount = 0
+            var stealFocusWhenAttached = false
+
+            init(owner: String) {
+                self.owner = owner
+                super.init(frame: .zero)
+            }
+
+            required init?(coder: NSCoder) {
+                fatalError("init(coder:) is not supported")
+            }
+
+            override var acceptsFirstResponder: Bool { true }
+
+            override func viewDidMoveToWindow() {
+                super.viewDidMoveToWindow()
+                if stealFocusWhenAttached, let window {
+                    window.makeFirstResponder(self)
+                }
+            }
+
+            override func mouseDown(with event: NSEvent) {
+                mouseDownCount += 1
+                window?.makeFirstResponder(self)
+            }
+
+            override func mouseUp(with event: NSEvent) {
+                mouseUpCount += 1
+            }
+
+            override func keyDown(with event: NSEvent) {
+                typed += event.charactersIgnoringModifiers ?? ""
+            }
+        }
+
+        final class ProbeTileNSView: TileNSView {
+            let probe: SemanticTypingProbeView
+
+            init(tile: Tile, owner: String) {
+                self.probe = SemanticTypingProbeView(owner: owner)
+                super.init(tile: tile)
+                setContentView(probe)
+            }
+
+            required init?(coder: NSCoder) {
+                fatalError("init(coder:) is not supported")
+            }
+        }
+
+        func owner(of responder: NSResponder?) -> String {
+            (responder as? SemanticTypingProbeView)?.owner ?? String(describing: responder)
+        }
+
+        func dispatchMouse(_ type: NSEvent.EventType, at windowPoint: NSPoint, in window: NSWindow) throws {
+            guard let event = NSEvent.mouseEvent(
+                with: type,
+                location: windowPoint,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 1,
+                clickCount: 1,
+                pressure: type == .leftMouseUp ? 0 : 1
+            ) else {
+                throw CheckError.failed("could not create mouse event \(type)")
+            }
+            window.sendEvent(event)
+        }
+
+        func dispatchKey(_ characters: String, in window: NSWindow) throws {
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                characters: characters,
+                charactersIgnoringModifiers: characters,
+                isARepeat: false,
+                keyCode: 0
+            ) else {
+                throw CheckError.failed("could not create key event")
+            }
+            window.sendEvent(event)
+        }
+
+        let lowerId = UUID(uuidString: "00000000-0000-0000-0000-000000000401")!
+        let upperId = UUID(uuidString: "00000000-0000-0000-0000-000000000402")!
+        let lowerFrame = TileFrame(x: 80, y: 80, width: 320, height: 220)
+        let upperFrame = TileFrame(x: 140, y: 80, width: 320, height: 220)
+        let lower = Tile(id: lowerId, kind: .note, title: "LOWER_PROBE", frame: lowerFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let upper = Tile(id: upperId, kind: .note, title: "UPPER_STEALS_ON_REATTACH", frame: upperFrame, zIndex: 10, runtimeRef: nil, metadata: TileMetadata())
+        let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: viewport, tiles: [lower, upper], groups: [], lastActiveTileId: nil))
+        canvas.frame = NSRect(x: 0, y: 0, width: 640, height: 480)
+
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+
+        let lowerView = ProbeTileNSView(tile: lower, owner: "lower")
+        let upperView = ProbeTileNSView(tile: upper, owner: "upper")
+        canvas.install(tileView: lowerView, for: lower)
+        canvas.install(tileView: upperView, for: upper)
+        upperView.probe.stealFocusWhenAttached = true
+
+        window.contentView?.layoutSubtreeIfNeeded()
+        canvas.layoutSubtreeIfNeeded()
+        lowerView.layoutSubtreeIfNeeded()
+        upperView.layoutSubtreeIfNeeded()
+
+        let overlappedHitPoint = CGPoint(x: 180, y: 120)
+        let lowerFocusWindowPoint = lowerView.convert(NSPoint(x: 20, y: TileNSView.titleBarHeight + 20), to: nil)
+        try dispatchMouse(.leftMouseDown, at: lowerFocusWindowPoint, in: window)
+        try dispatchMouse(.leftMouseUp, at: lowerFocusWindowPoint, in: window)
+
+        let beforeVisualOrder = canvas.subviews.compactMap { ($0 as? TileNSView)?.tile.id }
+        let semanticHitBefore = canvas.tileId(at: overlappedHitPoint)
+        try expect(beforeVisualOrder.last == upperId, "precondition: upper tile should start visually top")
+        try expect(semanticHitBefore == upperId, "precondition: upper tile should start semantic top at overlap")
+        try expect(lowerView.probe.mouseDownCount == 1 && lowerView.probe.mouseUpCount == 1, "precondition: lower focus click should route through AppKit mouse dispatch")
+        try expect(window.firstResponder === lowerView.probe, "precondition: lower probe should be first responder before bring-to-front")
+
+        let beforeResponderOwner = owner(of: window.firstResponder)
+        let beforeZ = Dictionary(uniqueKeysWithValues: canvas.canvasState.tiles.map { ($0.id.uuidString, $0.zIndex) })
+
+        // Operation under test: production bring-to-front only. Do not call any
+        // runtime/probe focus repair after this point; that would mask BUG-004.
+        canvas.bringToFront(tileId: lowerId)
+
+        let afterVisualOrder = canvas.subviews.compactMap { ($0 as? TileNSView)?.tile.id }
+        let afterZ = Dictionary(uniqueKeysWithValues: canvas.canvasState.tiles.map { ($0.id.uuidString, $0.zIndex) })
+        let afterResponderOwner = owner(of: window.firstResponder)
+        let semanticHitAfter = canvas.tileId(at: overlappedHitPoint)
+        let sentinel = "b"
+        try dispatchKey(sentinel, in: window)
+
+        try expect(canvas.canvasState.tiles.first(where: { $0.id == lowerId })?.zIndex == (canvas.canvasState.tiles.map(\.zIndex).max() ?? -1), "lower tile should have max zIndex after bring-to-front")
+        try expect(afterVisualOrder.last == lowerId, "lower tile should be top AppKit subview after bring-to-front")
+        try expect(semanticHitAfter == lowerId, "lower tile should be semantic hit-test top after bring-to-front")
+        try expect(window.firstResponder === lowerView.probe, "first responder should remain lower semantic responder; got \(String(describing: window.firstResponder))")
+        try expect(lowerView.probe.typed == sentinel, "typed sentinel should route to lower probe through window.sendEvent; got \(lowerView.probe.typed)")
+        try expect(upperView.probe.typed.isEmpty, "upper probe should not receive sentinel; got \(upperView.probe.typed)")
+
+        let manifest: [String: Any] = [
+            "check": "bring-to-front-focus",
+            "lowerTileId": lowerId.uuidString,
+            "upperTileId": upperId.uuidString,
+            "zIndicesBefore": beforeZ,
+            "zIndicesAfter": afterZ,
+            "visualSubviewOrderBefore": beforeVisualOrder.map { $0.uuidString },
+            "visualSubviewOrderAfter": afterVisualOrder.map { $0.uuidString },
+            "overlappedHitPoint": ["x": overlappedHitPoint.x, "y": overlappedHitPoint.y],
+            "semanticHitBefore": semanticHitBefore?.uuidString as Any,
+            "semanticHitAfter": semanticHitAfter?.uuidString as Any,
+            "firstResponderOwnerBefore": beforeResponderOwner,
+            "firstResponderOwnerAfter": afterResponderOwner,
+            "preBringToFrontFocusMouseDispatch": [
+                "windowPoint": ["x": lowerFocusWindowPoint.x, "y": lowerFocusWindowPoint.y],
+                "lowerMouseDownCount": lowerView.probe.mouseDownCount,
+                "lowerMouseUpCount": lowerView.probe.mouseUpCount
+            ],
+            "keyDispatch": "window.sendEvent(keyDown)",
+            "sentinel": sentinel,
+            "lowerTyped": lowerView.probe.typed,
+            "upperTyped": upperView.probe.typed
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("bring-to-front-focus", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
