@@ -153,9 +153,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var activeProject: Project?
     private var tileSpawner: TileSpawner?
     private var profilePalette: LaunchProfilePalette?
+    private var qaPerf: QAPerf?
+    private var launchStartTime: CFTimeInterval?
     private var hotkeyMonitor: Any?
+    private static let smokeNoteId = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    private static let smokeNoteTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000010")!
+    private static let smokeFileTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000011")!
+    private static let smokeFileTreeTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000012")!
+    private static let smokeNoteBody = "smoke-note-ok"
+    private static let smokeFileBody = "smoke-file-ok"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        launchStartTime = QAPerf.timestamp()
+        qaPerf = QAPerf()
         do {
             let projectRoot = Self.resolveProjectRoot(smokeTest: smokeTestEnabled)
             let appSupportDir = Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
@@ -172,6 +182,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
             let ghostty = try GhosttyRuntimeContext()
             let browserEngine = BrowserEngineContext()
+            let seededSmokeTiles = smokeTestEnabled && Self.requestedQAFlow() != .emptyCanvas
+                ? try Self.seedSmokeTestTiles(in: projectStore, projectRoot: projectRoot)
+                : []
 
             var canvasState: CanvasState
             if let existing = try projectStore.tryLoadCanvas() {
@@ -179,7 +192,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             } else {
                 canvasState = Self.defaultCanvasState()
             }
-            if !canvasState.tiles.contains(where: { $0.kind == .terminal }) {
+            for seededTile in seededSmokeTiles {
+                if let index = canvasState.tiles.firstIndex(where: { $0.id == seededTile.id }) {
+                    canvasState.tiles[index] = seededTile
+                } else {
+                    canvasState.tiles.append(seededTile)
+                }
+            }
+            if smokeTestEnabled,
+               Self.requestedQAFlow() != .emptyCanvas,
+               !canvasState.tiles.contains(where: { $0.kind == .terminal }) {
                 canvasState.tiles.append(Self.defaultTerminalTile())
             }
 
@@ -207,15 +229,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self?.scheduleFileTreeSave()
             }
             self.tileSpawner = spawner
-
-            let palette = LaunchProfilePalette()
-            palette.onSelectProfile = { [weak self] profileId in
-                self?.spawnTerminalFromProfile(profileId)
-            }
-            palette.onSelectAction = { [weak self] action in
-                self?.performPaletteAction(action)
-            }
-            self.profilePalette = palette
+            canvasView.configureEmptyStateActions(CanvasEmptyStateActions(
+                spawnClaude: { [weak self] in
+                    self?.spawnTerminalFromProfile("claude")
+                },
+                spawnShell: { [weak self] in
+                    self?.spawnTerminalFromProfile("shell")
+                },
+                spawnBrowser: { [weak self] in
+                    self?.spawnBrowserDefault()
+                },
+                openInEditor: { [weak self] in
+                    self?.openProjectInEditor()
+                }
+            ))
 
             installHotkeyMonitor()
 
@@ -260,8 +287,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // a non-nil ghostty to forward set_focus into the surface.
             NSApp.activate(ignoringOtherApps: true)
 
-            if smokeTestEnabled, let primary = runtimes.first {
-                runSmokeTest(window: window, runtime: primary)
+            if smokeTestEnabled {
+                runSmokeTest(window: window, runtime: runtimes.first)
             }
         } catch {
             presentFatalError(error)
@@ -541,10 +568,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func openProfilePalette() {
-        guard let palette = profilePalette,
-              let spawner = tileSpawner,
+        guard let spawner = tileSpawner,
               let host = window else { return }
+        let palette = profilePalette ?? makeProfilePalette()
+        profilePalette = palette
         palette.show(near: host, profiles: spawner.annotatedProfiles())
+    }
+
+    private func makeProfilePalette() -> LaunchProfilePalette {
+        let palette = LaunchProfilePalette()
+        palette.onSelectProfile = { [weak self] profileId in
+            self?.spawnTerminalFromProfile(profileId)
+        }
+        palette.onSelectAction = { [weak self] action in
+            self?.performPaletteAction(action)
+        }
+        palette.onClose = { [weak self] in
+            self?.profilePalette = nil
+        }
+        return palette
     }
 
     private func spawnTerminalFromProfile(_ profileId: String) {
@@ -575,6 +617,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case let .failure(error):
             fputs("TileSpawner.spawnBrowser failed: \(error)\n", stderr)
         }
+    }
+
+    private func openProjectInEditor() {
+        spawnTerminalFromProfile("nvim")
     }
 
     private func performPaletteAction(_ action: LaunchPaletteAction) {
@@ -861,30 +907,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private static func defaultCanvasState() -> CanvasState {
-        let terminalTile = defaultTerminalTile()
-        let browserTile = Tile(
-            id: UUID(),
-            kind: .browser,
-            title: "Local browser",
-            frame: TileFrame(x: 720, y: 40, width: 460, height: 240),
-            zIndex: 1,
-            runtimeRef: nil,
-            metadata: TileMetadata(url: "http://localhost:3000")
-        )
-        let noteTile = Tile(
-            id: UUID(),
-            kind: .note,
-            title: "Notes",
-            frame: TileFrame(x: 720, y: 300, width: 460, height: 240),
-            zIndex: 0,
-            runtimeRef: nil,
-            metadata: TileMetadata()
-        )
-        return CanvasState(
+        CanvasState(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-            tiles: [terminalTile, browserTile, noteTile],
+            tiles: [],
             groups: [],
-            lastActiveTileId: terminalTile.id
+            lastActiveTileId: nil
         )
     }
 
@@ -898,6 +925,102 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: "shell", projectRelativeCwd: ".")
         )
+    }
+
+    private static func seedSmokeTestTiles(in projectStore: ProjectStore, projectRoot: URL) throws -> [Tile] {
+        try projectStore.saveNoteBody(id: smokeNoteId, text: smokeNoteBody)
+
+        var noteState = (try? projectStore.tryLoadNoteState()) ?? NoteState(tiles: [])
+        let now = Date()
+        let smokeNoteTile = NoteTile(
+            id: smokeNoteId,
+            tileId: smokeNoteTileId,
+            filename: "\(smokeNoteId.uuidString).md",
+            title: "Smoke note",
+            createdAt: now,
+            updatedAt: now
+        )
+        if let index = noteState.tiles.firstIndex(where: { $0.id == smokeNoteId }) {
+            noteState.tiles[index] = smokeNoteTile
+        } else {
+            noteState.tiles.append(smokeNoteTile)
+        }
+        try projectStore.saveNoteState(noteState)
+
+        let smokeFileURL = projectRoot
+            .appendingPathComponent(".continuum-revived", isDirectory: true)
+            .appendingPathComponent("smoke-file.txt", isDirectory: false)
+        try FileManager.default.createDirectory(
+            at: smokeFileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        let smokeFileData = Data(smokeFileBody.utf8)
+        try smokeFileData.write(to: smokeFileURL, options: .atomic)
+
+        let smokeTreeRoot = projectRoot
+            .appendingPathComponent(".continuum-revived", isDirectory: true)
+            .appendingPathComponent("smoke-tree", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: smokeTreeRoot.appendingPathComponent("b", isDirectory: true),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try Data("a\n".utf8).write(to: smokeTreeRoot.appendingPathComponent("a.txt"), options: .atomic)
+        try Data("c\n".utf8).write(to: smokeTreeRoot.appendingPathComponent("b/c.txt"), options: .atomic)
+        try FileManager.default.createDirectory(
+            at: smokeTreeRoot.appendingPathComponent(".git", isDirectory: true),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try Data("ref: refs/heads/main\n".utf8)
+            .write(to: smokeTreeRoot.appendingPathComponent(".git/HEAD"), options: .atomic)
+
+        let noteSize = CanvasEngine.defaultFrame(for: .note)
+        let fileSize = CanvasEngine.defaultFrame(for: .file)
+        let fileTreeSize = CanvasEngine.defaultFrame(for: .fileTree)
+        let fileTreeState = FileTreeState(tiles: [
+            FileTreeTile(
+                tileId: smokeFileTreeTileId,
+                rootPath: smokeTreeRoot.path,
+                expandedPaths: ["b"],
+                selectedPath: "a.txt",
+                searchQuery: "",
+                ignoredNames: [".git", "node_modules", ".build"],
+                gitBadges: .cheap
+            )
+        ])
+        try projectStore.saveFileTreeState(fileTreeState)
+
+        return [
+            Tile(
+                id: smokeNoteTileId,
+                kind: .note,
+                title: "Smoke note",
+                frame: TileFrame(x: 720, y: 300, width: Double(noteSize.width), height: Double(noteSize.height)),
+                zIndex: 3,
+                runtimeRef: nil,
+                metadata: TileMetadata(noteId: smokeNoteId)
+            ),
+            Tile(
+                id: smokeFileTileId,
+                kind: .file,
+                title: "smoke-file.txt",
+                frame: TileFrame(x: 40, y: 560, width: Double(fileSize.width), height: Double(fileSize.height)),
+                zIndex: 4,
+                runtimeRef: nil,
+                metadata: TileMetadata(filePath: smokeFileURL.path)
+            ),
+            Tile(
+                id: smokeFileTreeTileId,
+                kind: .fileTree,
+                title: "Smoke files",
+                frame: TileFrame(x: 380, y: 560, width: Double(fileTreeSize.width), height: Double(fileTreeSize.height)),
+                zIndex: 5,
+                runtimeRef: nil,
+                metadata: TileMetadata()
+            )
+        ]
     }
 
     private static func recordProjectInRegistry(project: Project, in store: RegistryStore) throws {
@@ -930,10 +1053,97 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         NSApp.terminate(nil)
     }
 
-    private func runSmokeTest(window: NSWindow, runtime: GhosttyTerminalRuntime) {
-        // 1.0s — exercise the IME/text path (ghostty_surface_text)
+    private enum QASmokeFlow: String {
+        case defaultSmoke = "default-smoke"
+        case paletteOpenClose = "palette-open-close"
+        case cmd1Claude = "cmd-1-claude"
+        case cmd2Shell = "cmd-2-shell"
+        case cmd3Browser = "cmd-3-browser"
+        case cmd4Nvim = "cmd-4-nvim"
+        case terminalMidExit = "terminal-mid-exit"
+        case browserLoadError = "browser-load-error"
+        case canvasDragResize = "canvas-drag-resize"
+        case canvasZoomPanEdge = "canvas-zoom-pan-edge"
+        case emptyCanvas = "empty-canvas"
+        case restartPlaceholderClick = "restart-placeholder-click"
+        case terminalStress10 = "terminal-stress-10"
+        case paletteLeakCheck = "palette-leak-check"
+    }
+
+    private static func requestedQAFlow() -> QASmokeFlow? {
+        let rawFlow = ProcessInfo.processInfo.environment["CONTINUUM_QA_FLOW"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let flowName = rawFlow.flatMap { $0.isEmpty ? nil : $0 } ?? QASmokeFlow.defaultSmoke.rawValue
+        return QASmokeFlow(rawValue: flowName)
+    }
+
+    private func runSmokeTest(window: NSWindow, runtime: GhosttyTerminalRuntime?) {
+        guard let flow = Self.requestedQAFlow() else {
+            let rawFlow = ProcessInfo.processInfo.environment["CONTINUUM_QA_FLOW"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let flowName = rawFlow.flatMap { $0.isEmpty ? nil : $0 } ?? QASmokeFlow.defaultSmoke.rawValue
+            fputs("Unknown CONTINUUM_QA_FLOW: \(flowName)\n", stderr)
+            smokeTestExitCode = 2
+            window.performClose(nil)
+            return
+        }
+
+        switch flow {
+        case .defaultSmoke:
+            guard let runtime else {
+                fputs("Default smoke requires an initial terminal runtime\n", stderr)
+                smokeTestExitCode = 2
+                window.performClose(nil)
+                return
+            }
+            runDefaultSmokeTest(window: window, runtime: runtime)
+        case .paletteOpenClose:
+            runPaletteOpenCloseFlow(window: window)
+        case .cmd1Claude:
+            runCommandProfileFlow(window: window, profileId: "claude", label: "cmd-1-claude")
+        case .cmd2Shell:
+            runCommandProfileFlow(window: window, profileId: "shell", label: "cmd-2-shell")
+        case .cmd3Browser:
+            runBrowserSpawnFlow(window: window)
+        case .cmd4Nvim:
+            runCommandProfileFlow(window: window, profileId: "nvim", label: "cmd-4-nvim")
+        case .terminalMidExit:
+            runTerminalMidExitFlow(window: window)
+        case .browserLoadError:
+            runBrowserLoadErrorFlow(window: window)
+        case .canvasDragResize:
+            runCanvasDragResizeFlow(window: window)
+        case .canvasZoomPanEdge:
+            runCanvasZoomPanEdgeFlow(window: window)
+        case .emptyCanvas:
+            runEmptyCanvasFlow(window: window)
+        case .restartPlaceholderClick:
+            runRestartPlaceholderClickFlow(window: window)
+        case .terminalStress10:
+            runTerminalStress10Flow(window: window)
+        case .paletteLeakCheck:
+            runPaletteLeakCheckFlow(window: window)
+        }
+    }
+
+    private func runDefaultSmokeTest(window: NSWindow, runtime: GhosttyTerminalRuntime) {
+        let qaCapture = QACapture()
+        func capture(_ step: String, tSec: Double, notes: String? = nil) {
+            qaCapture?.capture(
+                step: step,
+                tSec: tSec,
+                window: window,
+                canvasState: self.canvasView?.canvasState,
+                notes: notes
+            )
+        }
+
+        // 1.0s - exercise the committed IME text path.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            runtime.sendInput(Data("echo ghostty-ok\n".utf8))
+            self.recordLaunchTime()
+            runtime.dispatchInsertedText("echo ghostty-ok")
+            runtime.dispatchKeyDown(keyCode: 0x24, characters: "\r")
+            capture("echo-text", tSec: 1.0)
         }
 
         // 2.0s — exercise the key path: up-arrow recalls the previous command.
@@ -945,11 +1155,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 characters: "\u{F700}",
                 charactersIgnoringModifiers: "\u{F700}"
             )
+            capture("up-arrow", tSec: 2.0)
         }
 
         // 2.4s — Enter to execute the recalled command.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
             runtime.dispatchKeyDown(keyCode: 0x24, characters: "\r")
+            capture("enter-recall", tSec: 2.4)
         }
 
         // 2.5s — P4.5: spawn a second terminal via the TileSpawner seam. This
@@ -976,13 +1188,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         }
 
-        // 2.8s — fill scrollback with enough output to push earlier lines off
+        // 2.8s - fill scrollback with enough output to push earlier lines off
         // the visible viewport, so a scroll-up has something to reveal. Send
         // the command body via the text path then Enter via the key path
         // (mirrors how a user types a command and presses Return).
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) {
-            runtime.sendInput(Data("seq 1 60".utf8))
+            runtime.dispatchInsertedText("seq 1 60")
             runtime.dispatchKeyDown(keyCode: 0x24, characters: "\r")
+            capture("seq-scroll", tSec: 2.8)
         }
 
         // 3.0s — P5.x: send `exit` to the secondary so we can observe the
@@ -991,12 +1204,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
             if let id = secondaryRuntimeId,
                let secondary = self.runtimes.first(where: { $0.id == id }) {
-                secondary.sendInput(Data("exit\n".utf8))
+                secondary.dispatchInsertedText("exit")
+                secondary.dispatchKeyDown(keyCode: 0x24, characters: "\r")
             }
+            capture("mid-exit-trigger", tSec: 3.0)
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.3) {
+            capture("post-exit-swap", tSec: 3.3)
+        }
+
         // 3.5s — window resize must still complete without crashing.
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
             window.setContentSize(NSSize(width: 860, height: 540))
+            capture("resize", tSec: 3.5)
         }
 
         // 3.6s — P5.6: spawn a live WKWebView browser tile via a deterministic
@@ -1024,8 +1244,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // then assert the viewport content changed. Proves Ghostty's scroll
         // engine is actually being driven from our wrapper.
         var preScrollText = ""
+        var modifierOnlyOk = false
+        var imeInsertedTextSeen = false
+        var markedTextCleared = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x38, modifierFlags: [.shift])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x38, modifierFlags: [.shift])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x38, modifierFlags: [])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x3B, modifierFlags: [.control])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x3B, modifierFlags: [])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x3A, modifierFlags: [.option])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x3A, modifierFlags: [])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x37, modifierFlags: [.command])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x37, modifierFlags: [])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x39, modifierFlags: [.capsLock])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0x39, modifierFlags: [])
+            runtime.dispatchModifierFlagsChanged(keyCode: 0xFF, modifierFlags: [])
+            modifierOnlyOk = runtime.status == .running
+            runtime.dispatchInsertedText("printf 'ime-é-ok\\n'")
+            runtime.dispatchKeyDown(keyCode: 0x24, characters: "\r")
+            runtime.dispatchMarkedText("ime-compose")
+            markedTextCleared = runtime.dispatchInsertedText(" ")
+            capture("pre-scroll", tSec: 4.0)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.2) {
             preScrollText = runtime.visibleText()
+            imeInsertedTextSeen = preScrollText.contains("ime-é-ok")
+            capture("ime-inserted-text", tSec: 5.2)
             runtime.scrollDirectly(deltaY: 400)
         }
 
@@ -1049,6 +1295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 )
                 canvasView.updateTile(moved)
             }
+            capture("pan-and-drag", tSec: 4.4)
         }
 
         // 6.0s — verify and close through the production close path.
@@ -1082,6 +1329,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             var multiTerminalOk = false
             var browserOk = false
             var midExitOk = false
+            var noteOk = false
+            var fileOk = false
+            var fileTreeOk = false
             let browserTileCount = self.canvasView?.canvasState.tiles.filter { $0.kind == .browser }.count ?? 0
             // Cardinality is gating, not advisory: if browserRuntimes count drifts
             // from the canvas's live .browser tile count, runtimes leaked or were
@@ -1104,6 +1354,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 // debounced timer; flush manually so this check is exact.
                 self.flushCanvasSave()
                 self.flushBrowserSave()
+                self.flushNoteSave()
+                self.flushFileTreeSave()
                 let canvasOnDisk = try self.projectStore?.loadCanvas()
                 let tileCount = canvasOnDisk?.tiles.count ?? 0
                 let viewportMoved = (canvasOnDisk?.viewport.x ?? 0) != 0
@@ -1151,6 +1403,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     }
                 }
 
+                // P6.6: assert the seeded note and file descriptors were present
+                // before the boot loop, so restore installed real tile views.
+                if let noteTile = canvasOnDisk?.tiles.first(where: { $0.id == Self.smokeNoteTileId }),
+                   let noteView = self.canvasView?.tileView(for: noteTile.id) as? NoteTileNSView {
+                    let noteState = try self.projectStore?.tryLoadNoteState()
+                    let noteIndexMatches = noteState?.tiles.contains(where: {
+                        $0.id == Self.smokeNoteId && $0.tileId == Self.smokeNoteTileId
+                    }) ?? false
+                    let trackedViewMatches = self.noteViews[Self.smokeNoteId] === noteView
+                    let canvasMetadataMatches = noteTile.metadata.noteId == Self.smokeNoteId
+                    let bodyMatches = noteView.textView.string == Self.smokeNoteBody
+                    noteOk = trackedViewMatches && canvasMetadataMatches && bodyMatches && noteIndexMatches
+                    if !noteOk {
+                        fputs(
+                            "Note check details: trackedViewMatches=\(trackedViewMatches) canvasMetadataMatches=\(canvasMetadataMatches) bodyMatches=\(bodyMatches) noteIndexMatches=\(noteIndexMatches)\n",
+                            stderr
+                        )
+                    }
+                }
+
+                if let fileTile = canvasOnDisk?.tiles.first(where: { $0.id == Self.smokeFileTileId }),
+                   let fileView = self.canvasView?.tileView(for: fileTile.id) as? FileTileNSView {
+                    let metadataPathMatches = fileTile.metadata.filePath?.hasSuffix(".continuum-revived/smoke-file.txt") ?? false
+                    let bodyMatches = fileView.textView.string.contains(Self.smokeFileBody)
+                    fileOk = metadataPathMatches && bodyMatches
+                    if !fileOk {
+                        fputs(
+                            "File check details: metadataPathMatches=\(metadataPathMatches) bodyMatches=\(bodyMatches)\n",
+                            stderr
+                        )
+                    }
+                }
+
+                if let fileTreeTile = canvasOnDisk?.tiles.first(where: { $0.id == Self.smokeFileTreeTileId }) {
+                    let fileTreeState = try self.projectStore?.tryLoadFileTreeState()
+                    let stateMatches = fileTreeState?.tiles.contains(where: {
+                        $0.tileId == Self.smokeFileTreeTileId
+                            && $0.rootPath.hasSuffix(".continuum-revived/smoke-tree")
+                            && $0.gitBadges == .cheap
+                    }) ?? false
+                    let fileTreeView = self.canvasView?.tileView(for: fileTreeTile.id) as? FileTreeTileNSView
+                    let fileTreeInstalled = fileTreeView != nil
+                    let fileTreeTracked = self.fileTreeViews[Self.smokeFileTreeTileId] === fileTreeView
+                    let snapshotPaths = Set(fileTreeView?.currentSnapshot?.nodes.map(\.relativePath) ?? [])
+                    let fileTreeLeavesVisible = snapshotPaths.contains("a.txt")
+                        && snapshotPaths.contains("b/c.txt")
+                    let gitFiltered = !snapshotPaths.contains(".git/HEAD")
+                    fileTreeOk = fileTreeTile.kind == .fileTree
+                        && fileTreeTile.runtimeRef == nil
+                        && stateMatches
+                        && fileTreeInstalled
+                        && fileTreeTracked
+                        && fileTreeLeavesVisible
+                        && gitFiltered
+                    if !fileTreeOk {
+                        fputs(
+                            "File tree check details: kind=\(fileTreeTile.kind) runtimeRef=\(String(describing: fileTreeTile.runtimeRef)) stateMatches=\(stateMatches) fileTreeInstalled=\(fileTreeInstalled) fileTreeTracked=\(fileTreeTracked) fileTreeLeavesVisible=\(fileTreeLeavesVisible) gitFiltered=\(gitFiltered)\n",
+                            stderr
+                        )
+                    }
+                }
+
                 // P5.6: assert the spawned WKWebView browser landed on disk
                 // with the data: URL, the title KVO + persistence path captured
                 // "continuum-browser-ok", the canvas tracks it as a .browser
@@ -1185,8 +1499,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 fputs("Persistence check threw: \(error)\n", stderr)
             }
 
-            if textPathOk && keyPathOk && scrollOk && persistenceOk && canvasOk && multiTerminalOk && browserOk && midExitOk && browserCardinalityOk {
-                print("Ghostty smoke test passed (text + key + scroll + persistence + canvas + multiTerminal + browser + midExit, occurrences=\(occurrences))")
+            if textPathOk && keyPathOk && scrollOk && modifierOnlyOk && imeInsertedTextSeen && markedTextCleared && persistenceOk && canvasOk && multiTerminalOk && browserOk && midExitOk && noteOk && fileOk && fileTreeOk && browserCardinalityOk {
+                print("Ghostty smoke test passed (text + key + scroll + modifier + ime + persistence + canvas + multiTerminal + browser + midExit + note + file + fileTree, occurrences=\(occurrences))")
                 if ProcessInfo.processInfo.environment["CONTINUUM_DUMP_VISIBLE"] == "1" {
                     fputs("--- pre-scroll visible text ---\n", stderr)
                     fputs(preScrollText, stderr)
@@ -1197,7 +1511,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self.smokeTestExitCode = 0
             } else {
                 fputs(
-                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) midExitOk=\(midExitOk) browserCardinalityOk=\(browserCardinalityOk) occurrences=\(occurrences)\n",
+                    "Ghostty smoke test failed: textPathOk=\(textPathOk) keyPathOk=\(keyPathOk) scrollOk=\(scrollOk) modifierOnlyOk=\(modifierOnlyOk) imeInsertedTextSeen=\(imeInsertedTextSeen) markedTextCleared=\(markedTextCleared) persistenceOk=\(persistenceOk) canvasOk=\(canvasOk) multiTerminalOk=\(multiTerminalOk) browserOk=\(browserOk) midExitOk=\(midExitOk) noteOk=\(noteOk) fileOk=\(fileOk) fileTreeOk=\(fileTreeOk) browserCardinalityOk=\(browserCardinalityOk) occurrences=\(occurrences)\n",
                     stderr
                 )
                 fputs("--- pre-scroll ---\n", stderr)
@@ -1207,9 +1521,415 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self.smokeTestExitCode = 2
             }
 
+            capture("final-state", tSec: 6.0)
+            qaCapture?.writeManifest()
+            self.qaPerf?.writeReport()
+
             // Exercise the production close path: any crash on shutdown surfaces
             // here rather than being hidden behind the manual-teardown shortcut.
             window.performClose(nil)
         }
+    }
+
+    private func makeQACapture(window: NSWindow) -> (QACapture?, (String, Double, String?) -> Void) {
+        let qaCapture = QACapture()
+        let capture: (String, Double, String?) -> Void = { [weak self] step, tSec, notes in
+            qaCapture?.capture(
+                step: step,
+                tSec: tSec,
+                window: window,
+                canvasState: self?.canvasView?.canvasState,
+                notes: notes
+            )
+        }
+        return (qaCapture, capture)
+    }
+
+    private func recordLaunchTime() {
+        guard let launchStartTime else { return }
+        let elapsedMs = (QAPerf.timestamp() - launchStartTime) * 1000
+        qaPerf?.recordValue(key: "launch-time", value: elapsedMs, unit: "ms")
+        self.launchStartTime = nil
+    }
+
+    private func finishQAFlow(
+        window: NSWindow,
+        qaCapture: QACapture?,
+        capture: @escaping (String, Double, String?) -> Void,
+        step: String,
+        tSec: Double,
+        success: Bool,
+        notes: String? = nil
+    ) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + tSec) {
+            self.recordLaunchTime()
+            capture(step, tSec, notes)
+            qaCapture?.writeManifest()
+            self.qaPerf?.writeReport()
+            self.smokeTestExitCode = success ? 0 : 2
+            window.performClose(nil)
+        }
+    }
+
+    private func scheduleInitialCapture(_ capture: @escaping (String, Double, String?) -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            capture("initial-canvas", 0.2, nil)
+        }
+    }
+
+    private func runPaletteOpenCloseFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            self.openProfilePalette()
+            capture("palette-open", 0.4, nil)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            self.profilePalette?.close()
+            capture("palette-closed", 0.8, nil)
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "final-state",
+            tSec: 1.1,
+            success: true
+        )
+    }
+
+    private func runCommandProfileFlow(window: NSWindow, profileId: String, label: String) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            let notes = self.spawnTerminalForQA(profileId: profileId)
+            capture("\(label)-requested", 0.4, notes)
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "\(label)-final-state",
+            tSec: 1.2,
+            success: true
+        )
+    }
+
+    private func spawnTerminalForQA(profileId: String) -> String {
+        guard let spawner = tileSpawner else { return "tile spawner unavailable" }
+        switch spawner.spawnTerminal(profileId: profileId) {
+        case let .spawned(runtime):
+            wireRuntimeExitHandler(runtime)
+            runtimes.append(runtime)
+            return "spawned profile \(profileId)"
+        case let .missingCommand(executable):
+            return "missing command \(executable) for profile \(profileId)"
+        case let .notConfigured(id):
+            return "profile \(id) not configured"
+        case let .unknownProfile(id):
+            return "unknown profile \(id)"
+        case let .failure(error):
+            return "spawn failed: \(error)"
+        }
+    }
+
+    private func runBrowserSpawnFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            let notes = self.spawnBrowserForQA(url: "data:text/html;charset=utf-8,<html><head><title>qa-browser</title></head><body>browser ok</body></html>")
+            capture("cmd-3-browser-requested", 0.4, notes)
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "cmd-3-browser-final-state",
+            tSec: 1.4,
+            success: true
+        )
+    }
+
+    private func runBrowserLoadErrorFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            let notes = self.spawnBrowserForQA(url: "http://127.0.0.1:9/continuum-qa-load-error")
+            capture("browser-load-error-requested", 0.4, notes)
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "browser-load-error-final-state",
+            tSec: 1.8,
+            success: true
+        )
+    }
+
+    private func spawnBrowserForQA(url: String) -> String {
+        guard let spawner = tileSpawner else { return "tile spawner unavailable" }
+        switch spawner.spawnBrowser(url: url) {
+        case let .spawned(runtime):
+            wireContentProcessTerminationHandler(runtime)
+            browserRuntimes.append(runtime)
+            return "spawned browser \(runtime.id)"
+        case let .invalidURL(url):
+            return "invalid URL \(url)"
+        case let .failure(error):
+            return "browser spawn failed: \(error)"
+        }
+    }
+
+    private func runTerminalMidExitFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        var runtimeId: UUID?
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard let spawner = self.tileSpawner else {
+                capture("terminal-spawn-skipped", 0.4, "tile spawner unavailable")
+                return
+            }
+            switch spawner.spawnTerminal(profileId: "shell") {
+            case let .spawned(runtime):
+                self.wireRuntimeExitHandler(runtime)
+                self.runtimes.append(runtime)
+                runtimeId = runtime.id
+                capture("terminal-spawned", 0.4, "spawned shell runtime")
+            case let .missingCommand(executable):
+                capture("terminal-spawn-skipped", 0.4, "missing command \(executable)")
+            case let .notConfigured(id):
+                capture("terminal-spawn-skipped", 0.4, "profile \(id) not configured")
+            case let .unknownProfile(id):
+                capture("terminal-spawn-skipped", 0.4, "unknown profile \(id)")
+            case let .failure(error):
+                capture("terminal-spawn-skipped", 0.4, "spawn failed: \(error)")
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            if let id = runtimeId,
+               let runtime = self.runtimes.first(where: { $0.id == id }) {
+                runtime.sendInput(Data("exit\n".utf8))
+            }
+            capture("terminal-exit-requested", 0.8, nil)
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "terminal-placeholder-visible",
+            tSec: 1.4,
+            success: true
+        )
+    }
+
+    private func runCanvasDragResizeFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard let canvasView = self.canvasView,
+                  let terminalTile = canvasView.canvasState.tiles.first(where: { $0.kind == .terminal })
+            else {
+                capture("canvas-drag-resize-skipped", 0.4, "terminal tile unavailable")
+                return
+            }
+            var latencies: [Double] = []
+            var moved = terminalTile
+            for index in 0..<200 {
+                let started = QAPerf.timestamp()
+                moved = CanvasEngine.tile(
+                    moved,
+                    draggedByScreenDelta: CGSize(width: index.isMultiple(of: 2) ? 1 : -1, height: 0),
+                    viewport: canvasView.viewport
+                )
+                canvasView.updateTile(moved)
+                latencies.append((QAPerf.timestamp() - started) * 1000)
+            }
+            let resized = CanvasEngine.tile(
+                moved,
+                resizedByScreenDelta: CGSize(width: 100, height: 60),
+                edge: .bottomRight,
+                viewport: canvasView.viewport
+            )
+            canvasView.updateTile(resized)
+            self.qaPerf?.recordSamples(key: "drag-latency-p95", samples: latencies, unit: "ms")
+            capture("canvas-drag-resize-applied", 0.4, "measured 200 updateTile calls")
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "canvas-drag-resize-final-state",
+            tSec: 1.0,
+            success: true
+        )
+    }
+
+    private func runTerminalStress10Flow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        let memoryBefore = QAPerf.residentMemoryBytes()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            var spawned = 0
+            for _ in 0..<10 {
+                if self.spawnTerminalForQA(profileId: "shell").hasPrefix("spawned profile") {
+                    spawned += 1
+                }
+            }
+            capture("terminal-stress-spawned", 0.4, "spawned \(spawned) shell tiles")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+            let memoryAfter = QAPerf.residentMemoryBytes()
+            let delta = Int64(memoryAfter) - Int64(memoryBefore)
+            self.qaPerf?.recordValue(key: "memory-at-10-tiles", value: Double(delta), unit: "bytes")
+            capture("terminal-stress-memory-sampled", 1.4, "delta \(delta) bytes")
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "terminal-stress-final-state",
+            tSec: 1.8,
+            success: true
+        )
+    }
+
+    private func runPaletteLeakCheckFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            let memoryBefore = QAPerf.residentMemoryBytes()
+            autoreleasepool {
+                for _ in 0..<25 {
+                    self.openProfilePalette()
+                    self.profilePalette?.close()
+                }
+            }
+            capture("palette-leak-cycle", 0.4, "opened and closed Cmd-K 25 times")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                let memoryAfter = QAPerf.residentMemoryBytes()
+                let delta = Int64(memoryAfter) - Int64(memoryBefore)
+                self.qaPerf?.recordValue(key: "palette-leak-delta", value: Double(delta), unit: "bytes")
+                capture("palette-leak-memory-sampled", 0.6, "delta \(delta) bytes")
+            }
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "palette-leak-final-state",
+            tSec: 1.3,
+            success: true
+        )
+    }
+
+    private func runCanvasZoomPanEdgeFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard let canvasView = self.canvasView else {
+                capture("canvas-zoom-pan-skipped", 0.4, "canvas unavailable")
+                return
+            }
+            let anchor = CGPoint(x: canvasView.bounds.maxX - 8, y: canvasView.bounds.maxY - 8)
+            var viewport = CanvasEngine.zoom(canvasView.viewport, by: 1.4, anchorScreen: anchor)
+            viewport.x += 160
+            viewport.y += 120
+            canvasView.setViewport(viewport)
+            capture("canvas-zoom-pan-edge-applied", 0.4, nil)
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "canvas-zoom-pan-edge-final-state",
+            tSec: 1.0,
+            success: true
+        )
+    }
+
+    private func runEmptyCanvasFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        var emptyStateWasInstalled = false
+        var emptyStateWasRemoved = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard let canvasView = self.canvasView else {
+                capture("empty-canvas-skipped", 0.4, "canvas unavailable")
+                return
+            }
+            emptyStateWasInstalled = canvasView.canvasState.tiles.isEmpty && canvasView.emptyStateInstalled
+            capture(
+                "empty-canvas-visible",
+                0.4,
+                "tiles \(canvasView.canvasState.tiles.count), empty state \(canvasView.emptyStateInstalled)"
+            )
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            let notes = self.spawnTerminalForQA(profileId: "shell")
+            emptyStateWasRemoved = self.canvasView?.canvasState.tiles.isEmpty == false
+                && self.canvasView?.emptyStateInstalled == false
+            capture("empty-canvas-spawned-shell", 0.6, notes)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            self.recordLaunchTime()
+            capture("empty-canvas-final-state", 1.0, nil)
+            qaCapture?.writeManifest()
+            self.qaPerf?.writeReport()
+            self.smokeTestExitCode = emptyStateWasInstalled && emptyStateWasRemoved ? 0 : 2
+            window.performClose(nil)
+        }
+    }
+
+    private func runRestartPlaceholderClickFlow(window: NSWindow) {
+        let (qaCapture, capture) = makeQACapture(window: window)
+        scheduleInitialCapture(capture)
+        var tileId: UUID?
+        var runtimeId: UUID?
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard let spawner = self.tileSpawner else {
+                capture("restart-spawn-skipped", 0.4, "tile spawner unavailable")
+                return
+            }
+            switch spawner.spawnTerminal(profileId: "shell") {
+            case let .spawned(runtime):
+                self.wireRuntimeExitHandler(runtime)
+                self.runtimes.append(runtime)
+                runtimeId = runtime.id
+                tileId = runtime.tileId
+                capture("restart-terminal-spawned", 0.4, nil)
+            case let .missingCommand(executable):
+                capture("restart-spawn-skipped", 0.4, "missing command \(executable)")
+            case let .notConfigured(id):
+                capture("restart-spawn-skipped", 0.4, "profile \(id) not configured")
+            case let .unknownProfile(id):
+                capture("restart-spawn-skipped", 0.4, "unknown profile \(id)")
+            case let .failure(error):
+                capture("restart-spawn-skipped", 0.4, "spawn failed: \(error)")
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            if let id = runtimeId,
+               let runtime = self.runtimes.first(where: { $0.id == id }) {
+                runtime.sendInput(Data("exit\n".utf8))
+            }
+            capture("restart-placeholder-requested", 0.8, nil)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) {
+            if let tileId {
+                self.restartTile(tileId: tileId)
+                capture("restart-placeholder-clicked", 1.3, nil)
+            } else {
+                capture("restart-placeholder-click-skipped", 1.3, "tile id unavailable")
+            }
+        }
+        finishQAFlow(
+            window: window,
+            qaCapture: qaCapture,
+            capture: capture,
+            step: "restart-placeholder-final-state",
+            tSec: 1.8,
+            success: true
+        )
     }
 }

@@ -99,6 +99,18 @@ final class GhosttyTerminalRuntime: TerminalRuntime {
         terminalView?.sendText(text)
     }
 
+    @discardableResult
+    func dispatchInsertedText(_ text: String) -> Bool {
+        guard let terminalView else { return false }
+        terminalView.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+        return !terminalView.hasMarkedText()
+    }
+
+    @discardableResult
+    func dispatchMarkedText(_ text: String) -> Bool {
+        terminalView?.setMarkedTextForSmoke(text) ?? false
+    }
+
     func terminate(policy: TerminationPolicy) {
         terminalView?.requestClose(force: policy == .force)
     }
@@ -132,6 +144,27 @@ final class GhosttyTerminalRuntime: TerminalRuntime {
         )
         guard let event else { return }
         terminalView.keyDown(with: event)
+    }
+
+    func dispatchModifierFlagsChanged(
+        keyCode: UInt16,
+        modifierFlags: NSEvent.ModifierFlags
+    ) {
+        guard let terminalView, let window = terminalView.window else { return }
+        let event = NSEvent.keyEvent(
+            with: .flagsChanged,
+            location: .zero,
+            modifierFlags: modifierFlags,
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: keyCode
+        )
+        guard let event else { return }
+        terminalView.flagsChanged(with: event)
     }
 }
 

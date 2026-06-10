@@ -9,6 +9,9 @@ final class GhosttyTerminalView: NSView {
     private let statusChanged: (TerminalStatus) -> Void
     private(set) var surface: ghostty_surface_t?
     private var processExitPoller: Timer?
+    private var previousModifierFlags: NSEvent.ModifierFlags = []
+    private var markedText = NSMutableAttributedString()
+    private var keyTextAccumulator: [String]?
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -49,14 +52,55 @@ final class GhosttyTerminalView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
-        sendKey(event: event, action: event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS)
+        let action = event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS
+        keyTextAccumulator = []
+        defer { keyTextAccumulator = nil }
+
+        let markedTextBefore = hasMarkedText()
+        interpretKeyEvents([event])
+        syncPreedit(clearIfNeeded: markedTextBefore)
+
+        if let textList = keyTextAccumulator, !textList.isEmpty {
+            for text in textList {
+                sendKey(event: event, action: action, text: text)
+            }
+        } else {
+            sendKey(
+                event: event,
+                action: action,
+                text: Self.ghosttyText(for: event),
+                composing: hasMarkedText() || markedTextBefore
+            )
+        }
     }
 
     override func keyUp(with event: NSEvent) {
         sendKey(event: event, action: GHOSTTY_ACTION_RELEASE)
     }
 
-    private func sendKey(event: NSEvent, action: ghostty_input_action_e) {
+    override func flagsChanged(with event: NSEvent) {
+        let relevantPrevious = previousModifierFlags.intersection(Self.modifierOnlyFlags)
+        let relevantCurrent = event.modifierFlags.intersection(Self.modifierOnlyFlags)
+        defer { previousModifierFlags = relevantCurrent }
+
+        guard Self.modifierGhosttyMod(forKeyCode: event.keyCode) != nil else { return }
+        if relevantPrevious == relevantCurrent { return }
+
+        let action: ghostty_input_action_e
+        if relevantCurrent.isStrictSuperset(of: relevantPrevious) {
+            action = GHOSTTY_ACTION_PRESS
+        } else {
+            action = GHOSTTY_ACTION_RELEASE
+        }
+        sendKey(event: event, action: action)
+    }
+
+    private func sendKey(
+        event: NSEvent,
+        action: ghostty_input_action_e,
+        text explicitText: String? = nil,
+        composing: Bool = false
+    ) {
         guard let surface else { return }
 
         var keyEv = ghostty_input_key_s()
@@ -66,7 +110,7 @@ final class GhosttyTerminalView: NSView {
         // Heuristic from upstream: control and command never contribute to text
         // translation; everything else does.
         keyEv.consumed_mods = Self.ghosttyMods(event.modifierFlags.subtracting([.control, .command]))
-        keyEv.composing = false
+        keyEv.composing = composing
         keyEv.unshifted_codepoint = 0
         if event.type == .keyDown || event.type == .keyUp,
            let chars = event.characters(byApplyingModifiers: []),
@@ -77,7 +121,8 @@ final class GhosttyTerminalView: NSView {
         // Set text only for non-control, non-PUA characters. Ghostty does its
         // own control-character encoding from `mods`, and PUA function-key
         // codepoints (arrows, F-keys) must be conveyed via `keycode` only.
-        if let text = Self.ghosttyText(for: event),
+        if (event.type == .keyDown || event.type == .keyUp),
+           let text = explicitText,
            !text.isEmpty,
            let leadingByte = text.utf8.first,
            leadingByte >= 0x20 {
@@ -98,6 +143,31 @@ final class GhosttyTerminalView: NSView {
         if flags.contains(.command) { mods |= GHOSTTY_MODS_SUPER.rawValue }
         if flags.contains(.capsLock) { mods |= GHOSTTY_MODS_CAPS.rawValue }
         return ghostty_input_mods_e(mods)
+    }
+
+    private static let modifierOnlyFlags: NSEvent.ModifierFlags = [
+        .shift,
+        .control,
+        .option,
+        .command,
+        .capsLock
+    ]
+
+    private static func modifierGhosttyMod(forKeyCode keyCode: UInt16) -> ghostty_input_mods_e? {
+        switch keyCode {
+        case 0x39:
+            GHOSTTY_MODS_CAPS
+        case 0x38, 0x3C:
+            GHOSTTY_MODS_SHIFT
+        case 0x3B, 0x3E:
+            GHOSTTY_MODS_CTRL
+        case 0x3A, 0x3D:
+            GHOSTTY_MODS_ALT
+        case 0x37, 0x36:
+            GHOSTTY_MODS_SUPER
+        default:
+            nil
+        }
     }
 
     private static func ghosttyText(for event: NSEvent) -> String? {
@@ -211,10 +281,20 @@ final class GhosttyTerminalView: NSView {
     }
 
     func sendText(_ text: String) {
+        insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+    }
+
+    private func insertCommittedText(_ text: String) {
         guard let surface else { return }
         text.withCString { pointer in
             ghostty_surface_text(surface, pointer, UInt(text.utf8.count))
         }
+    }
+
+    @discardableResult
+    func setMarkedTextForSmoke(_ text: String) -> Bool {
+        setMarkedText(text, selectedRange: NSRange(location: text.utf16.count, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        return hasMarkedText()
     }
 
     func setGhosttyFocus(_ focused: Bool) {
@@ -268,6 +348,18 @@ final class GhosttyTerminalView: NSView {
         }
         defer { ghostty_surface_free_text(surface, &text) }
         return String(cString: text.text)
+    }
+
+    private func syncPreedit(clearIfNeeded: Bool = true) {
+        guard let surface else { return }
+        if markedText.length > 0 {
+            let text = markedText.string
+            text.withCString { pointer in
+                ghostty_surface_preedit(surface, pointer, UInt(text.utf8.count))
+            }
+        } else if clearIfNeeded {
+            ghostty_surface_preedit(surface, nil, 0)
+        }
     }
 
     static func handleGhosttyClose(userdata: UnsafeMutableRawPointer?, processAlive: Bool) {
@@ -351,5 +443,108 @@ final class GhosttyTerminalView: NSView {
         guard let surface else { return }
         let size = ghostty_surface_size(surface)
         Swift.print("Ghostty size: \(size.columns)x\(size.rows), \(size.width_px)x\(size.height_px) px")
+    }
+}
+
+extension GhosttyTerminalView: @preconcurrency NSTextInputClient {
+    func hasMarkedText() -> Bool {
+        markedText.length > 0
+    }
+
+    func markedRange() -> NSRange {
+        guard markedText.length > 0 else { return NSRange(location: NSNotFound, length: 0) }
+        return NSRange(location: 0, length: markedText.length)
+    }
+
+    func selectedRange() -> NSRange {
+        guard let surface else { return NSRange(location: NSNotFound, length: 0) }
+        var text = ghostty_text_s()
+        guard ghostty_surface_read_selection(surface, &text) else {
+            return NSRange(location: NSNotFound, length: 0)
+        }
+        defer { ghostty_surface_free_text(surface, &text) }
+        return NSRange(location: Int(text.offset_start), length: Int(text.offset_len))
+    }
+
+    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        switch string {
+        case let attributed as NSAttributedString:
+            markedText = NSMutableAttributedString(attributedString: attributed)
+        case let plain as String:
+            markedText = NSMutableAttributedString(string: plain)
+        default:
+            return
+        }
+
+        if keyTextAccumulator == nil {
+            syncPreedit()
+        }
+    }
+
+    func unmarkText() {
+        guard markedText.length > 0 else { return }
+        markedText.mutableString.setString("")
+        syncPreedit()
+    }
+
+    func validAttributesForMarkedText() -> [NSAttributedString.Key] {
+        []
+    }
+
+    func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
+        guard range.length > 0, let surface else { return nil }
+        var text = ghostty_text_s()
+        guard ghostty_surface_read_selection(surface, &text) else { return nil }
+        defer { ghostty_surface_free_text(surface, &text) }
+        return NSAttributedString(string: String(cString: text.text))
+    }
+
+    func characterIndex(for point: NSPoint) -> Int {
+        0
+    }
+
+    func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        guard let surface else {
+            return window?.convertToScreen(convert(bounds, to: nil)) ?? bounds
+        }
+
+        var x = 0.0
+        var y = 0.0
+        var width = 0.0
+        var height = 0.0
+        ghostty_surface_ime_point(surface, &x, &y, &width, &height)
+
+        let viewRect = NSRect(
+            x: x,
+            y: bounds.height - y,
+            width: width,
+            height: max(height, 1)
+        )
+        let windowRect = convert(viewRect, to: nil)
+        return window?.convertToScreen(windowRect) ?? windowRect
+    }
+
+    func insertText(_ string: Any, replacementRange: NSRange) {
+        let text: String
+        switch string {
+        case let attributed as NSAttributedString:
+            text = attributed.string
+        case let plain as String:
+            text = plain
+        default:
+            return
+        }
+
+        unmarkText()
+        if var accumulator = keyTextAccumulator {
+            accumulator.append(text)
+            keyTextAccumulator = accumulator
+            return
+        }
+
+        insertCommittedText(text)
+    }
+
+    override func doCommand(by selector: Selector) {
     }
 }

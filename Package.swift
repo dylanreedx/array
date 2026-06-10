@@ -27,6 +27,7 @@ let package = Package(
                 "TerminalEngine",
                 "Canvas/BrowserRestartTileNSView.swift",
                 "Canvas/BrowserTileNSView.swift",
+                "Canvas/CanvasEmptyStateNSView.swift",
                 "Canvas/CanvasNSView.swift",
                 "Canvas/DescriptorTileNSView.swift",
                 "Canvas/FileTileNSView.swift",
@@ -67,6 +68,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "ContinuumRevivedPaletteChecks",
+            dependencies: ["ContinuumRevivedCore"]
+        ),
+        .executableTarget(
+            name: "ContinuumRevivedPerfChecks",
             dependencies: ["ContinuumRevivedCore"]
         ),
         .executableTarget(

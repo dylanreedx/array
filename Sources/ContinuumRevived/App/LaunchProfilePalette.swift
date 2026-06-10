@@ -3,15 +3,16 @@ import ContinuumRevivedCore
 import Foundation
 
 @MainActor
-final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
+final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     var onSelectProfile: ((String) -> Void)?
     var onSelectAction: ((LaunchPaletteAction) -> Void)?
+    var onClose: (() -> Void)?
 
     static let rootAccessibilityIdentifier = "ContinuumLaunchProfilePaletteRoot"
 
     private var paletteView: NSView?
     private var tableView: NSTableView?
-    private var searchField: NSSearchField?
+    private var searchField: NSTextField?
 
     private var rows: [LaunchPaletteRow] = []
     private var filtered: [LaunchPaletteRow] = []
@@ -53,6 +54,10 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         let window = previousFirstResponderWindow ?? paletteView?.window
         let currentWasPaletteResponder = isPaletteResponder(window?.firstResponder)
         let shouldRestore = restoreFocus && shouldRestorePreviousFirstResponder(in: window)
+        searchField?.delegate = nil
+        tableView?.dataSource = nil
+        tableView?.delegate = nil
+        tableView?.target = nil
         paletteView?.removeFromSuperview()
         if shouldRestore,
            let window,
@@ -64,6 +69,12 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         }
         previousFirstResponder = nil
         previousFirstResponderWindow = nil
+        paletteView = nil
+        tableView = nil
+        searchField = nil
+        rows.removeAll()
+        filtered.removeAll()
+        onClose?()
     }
 
     var isVisible: Bool { paletteView?.superview != nil }
@@ -293,7 +304,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         content.layer?.borderWidth = 1
         content.layer?.cornerRadius = 8
 
-        let search = NSSearchField()
+        let search = NSTextField()
         search.delegate = self
         search.translatesAutoresizingMaskIntoConstraints = false
         search.placeholderString = "Search profiles…"
@@ -459,7 +470,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     // MARK: - NSTextFieldDelegate
 
     func controlTextDidChange(_ obj: Notification) {
-        guard let field = obj.object as? NSSearchField else { return }
+        guard let field = obj.object as? NSTextField else { return }
         filtered = LaunchPaletteModel.filterRows(rows, query: field.stringValue)
         tableView?.reloadData()
         if !filtered.isEmpty {
