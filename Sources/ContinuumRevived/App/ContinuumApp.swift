@@ -22,6 +22,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--palette-first-responder-restore-check") {
+            do {
+                _ = NSApplication.shared
+                try LaunchProfilePalette.runFirstResponderRestoreSelfCheck()
+                print("ContinuumRevivedPaletteFirstResponderRestoreChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-url-focus-check") {
             do {
                 _ = NSApplication.shared

@@ -38,10 +38,15 @@ guard binPath.status == 0 else {
 let appPath = URL(fileURLWithPath: binPath.output.trimmingCharacters(in: .whitespacesAndNewlines))
     .appendingPathComponent("continuum-revived")
 
-let process = Process()
-process.executableURL = appPath
-process.arguments = ["--palette-duplicate-root-check"]
-try process.run()
-process.waitUntilExit()
+for flag in ["--palette-duplicate-root-check", "--palette-first-responder-restore-check"] {
+    let process = Process()
+    process.executableURL = appPath
+    process.arguments = [flag]
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+        Foundation.exit(process.terminationStatus)
+    }
+}
 
-Foundation.exit(process.terminationStatus)
+Foundation.exit(0)
