@@ -45,10 +45,13 @@ let rows = LaunchPaletteModel.makeRows(profiles: [
     profile(id: "shell", displayName: "Shell"),
     profile(id: "claude", displayName: "Claude Code")
 ])
-expect(rows.map(\.displayName) == ["Shell", "Claude Code", "New Note", "Open File..."], "palette appends note/file actions after profiles")
+expect(rows.map(\.displayName) == ["Shell", "Claude Code", "New Note", "Open File...", "Open File Tree..."], "palette appends note/file/file-tree actions after profiles")
 expect(LaunchPaletteModel.filterRows(rows, query: "note").map(\.displayName) == ["New Note"], "note query matches New Note")
 expect(LaunchPaletteModel.filterRows(rows, query: "new").map(\.displayName) == ["New Note"], "new query matches New Note")
-expect(LaunchPaletteModel.filterRows(rows, query: "open file").map(\.displayName) == ["Open File..."], "open file query matches Open File")
+expect(LaunchPaletteModel.filterRows(rows, query: "open file").map(\.displayName) == ["Open File...", "Open File Tree..."], "open file query matches file actions")
+expect(LaunchPaletteModel.filterRows(rows, query: "tree").map(\.displayName) == ["Open File Tree..."], "tree query matches Open File Tree")
+expect(LaunchPaletteModel.filterRows(rows, query: "file tree").map(\.displayName) == ["Open File Tree..."], "file tree query matches Open File Tree")
+expect(LaunchPaletteModel.filterRows(rows, query: "open file tree").map(\.displayName) == ["Open File Tree..."], "open file tree query matches Open File Tree")
 expect(LaunchPaletteModel.filterRows(rows, query: "claude").map(\.displayName) == ["Claude Code"], "profile query still matches profiles")
 
 let missingRows = LaunchPaletteModel.makeRows(profiles: [
@@ -59,6 +62,7 @@ expect(!missingRows[0].isSelectable, "missing profile rows are not selectable")
 expect(!missingRows[1].isSelectable, "not-configured profile rows are not selectable")
 expect(missingRows[2].isSelectable, "New Note action row is selectable")
 expect(missingRows[3].isSelectable, "Open File action row is selectable")
+expect(missingRows[4].isSelectable, "Open File Tree action row is selectable")
 
 let root = URL(fileURLWithPath: "/tmp/continuum/project")
 expect(LaunchPaletteModel.isFileURL(root.appendingPathComponent("README.md"), insideProjectRoot: root), "root child file is accepted")

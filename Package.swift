@@ -17,11 +17,44 @@ let package = Package(
             path: "ThirdParty/GhosttyKit.xcframework"
         ),
         .target(name: "ContinuumRevivedCore"),
+        .target(
+            name: "ContinuumRevivedFileTree",
+            dependencies: ["ContinuumRevivedCore"],
+            path: "Sources/ContinuumRevived",
+            exclude: [
+                "App",
+                "BrowserEngine",
+                "TerminalEngine",
+                "Canvas/BrowserRestartTileNSView.swift",
+                "Canvas/BrowserTileNSView.swift",
+                "Canvas/CanvasNSView.swift",
+                "Canvas/DescriptorTileNSView.swift",
+                "Canvas/FileTileNSView.swift",
+                "Canvas/FileTreeTileNSView.swift",
+                "Canvas/NoteTileNSView.swift",
+                "Canvas/TerminalRestartTileNSView.swift",
+                "Canvas/TerminalTileNSView.swift",
+                "Canvas/TileNSView.swift"
+            ],
+            sources: [
+                "Canvas/FileTreeGitStatusProbe.swift",
+                "Canvas/FileTreeScanner.swift",
+                "Canvas/FileTreeViewModel.swift",
+                "Canvas/FileTreeOutlineModel.swift"
+            ]
+        ),
         .executableTarget(
             name: "ContinuumRevived",
             dependencies: [
+                "ContinuumRevivedFileTree",
                 "ContinuumRevivedCore",
                 "GhosttyKit"
+            ],
+            exclude: [
+                "Canvas/FileTreeGitStatusProbe.swift",
+                "Canvas/FileTreeScanner.swift",
+                "Canvas/FileTreeViewModel.swift",
+                "Canvas/FileTreeOutlineModel.swift"
             ],
             linkerSettings: [
                 .linkedFramework("Carbon"),
@@ -35,6 +68,13 @@ let package = Package(
         .executableTarget(
             name: "ContinuumRevivedPaletteChecks",
             dependencies: ["ContinuumRevivedCore"]
+        ),
+        .executableTarget(
+            name: "ContinuumRevivedFileTreeChecks",
+            dependencies: [
+                "ContinuumRevivedFileTree",
+                "ContinuumRevivedCore"
+            ]
         )
     ]
 )

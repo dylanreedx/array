@@ -94,6 +94,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--file-tree-boot-persistence-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try TileSpawner.runFileTreeBootPersistenceSelfCheck()
+                print("ContinuumRevivedFileTreeBootPersistenceChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         let executablePath = CommandLine.arguments.first ?? "continuum-revived"
         let ghosttyInitStatus = executablePath.withCString { executablePointer in
             var argv: [UnsafeMutablePointer<CChar>?] = [
@@ -128,10 +140,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var runtimes: [GhosttyTerminalRuntime] = []
     private var browserRuntimes: [WKWebViewBrowserRuntime] = []
     private var noteViews: [UUID: NoteTileNSView] = [:]
+    private var fileTreeViews: [UUID: FileTreeTileNSView] = [:]
     private var canvasView: CanvasNSView?
     private var saveTimer: Timer?
     private var browserSaveTimer: Timer?
     private var noteSaveTimer: Timer?
+    private var fileTreeSaveTimer: Timer?
     private let smokeTestEnabled = ProcessInfo.processInfo.environment["CONTINUUM_SMOKE_TEST"] == "1"
     private var smokeTestExitCode: Int32?
     private var projectStore: ProjectStore?
@@ -189,6 +203,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawner.notePersistenceHandler = { [weak self] in
                 self?.scheduleNoteSave()
             }
+            spawner.fileTreePersistenceHandler = { [weak self] in
+                self?.scheduleFileTreeSave()
+            }
             self.tileSpawner = spawner
 
             let palette = LaunchProfilePalette()
@@ -218,8 +235,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 case .file:
                     installInitialFileTile(tile, in: canvasView, via: spawner)
                 case .fileTree:
-                    let view = DescriptorTileNSView(tile: tile)
-                    canvasView.install(tileView: view, for: tile)
+                    installInitialFileTreeTile(tile, in: canvasView, via: spawner)
                 }
             }
 
@@ -475,6 +491,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         spawner.installFileTile(tile, in: canvasView)
     }
 
+    private func installInitialFileTreeTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
+        switch spawner.restartFileTreeTile(tileId: tile.id) {
+        case .restarted:
+            if let view = canvasView.tileView(for: tile.id) as? FileTreeTileNSView {
+                fileTreeViews[tile.id] = view
+            }
+        case .tileNotFound:
+            fputs("Boot file-tree install failed: tile \(tile.id) not found in canvas\n", stderr)
+        case let .failure(error):
+            fputs("Boot file-tree install failed: \(error)\n", stderr)
+        }
+    }
+
     // MARK: - Hotkeys + spawning
 
     private func installHotkeyMonitor() {
@@ -554,6 +583,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawnNoteFromPalette()
         case .openFile:
             openFileFromPalette()
+        case .openFileTree:
+            spawnFileTreeFromPalette()
         }
     }
 
@@ -594,6 +625,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             fputs("TileSpawner.spawnFile rejected empty file path\n", stderr)
         case let .failure(error):
             fputs("TileSpawner.spawnFile failed: \(error)\n", stderr)
+        }
+    }
+
+    private func spawnFileTreeFromPalette() {
+        guard let spawner = tileSpawner,
+              let project = activeProject else { return }
+        switch spawner.spawnFileTree(rootPath: project.rootPath) {
+        case let .spawned(tileId, _):
+            if let view = canvasView?.tileView(for: tileId) as? FileTreeTileNSView {
+                fileTreeViews[tileId] = view
+            }
+        case .invalidPath:
+            fputs("TileSpawner.spawnFileTree rejected project root: \(project.rootPath)\n", stderr)
+        case let .failure(error):
+            fputs("TileSpawner.spawnFileTree failed: \(error)\n", stderr)
         }
     }
 
@@ -644,6 +690,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         flushCanvasSave()
         flushBrowserSave()
         flushNoteSave()
+        flushFileTreeSave()
 
         // Mark each terminal session as exited before we tear down its runtime.
         // We don't know the exit code from this side (Ghostty owns the PTY), so
@@ -683,6 +730,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasView = nil
         runtimes.removeAll()
         noteViews.removeAll()
+        fileTreeViews.removeAll()
         tileSpawner = nil
         ghostty?.shutdown()
         ghostty = nil
@@ -736,6 +784,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let spawner = tileSpawner else { return }
         for view in noteViews.values {
             spawner.writeNoteSnapshot(noteId: view.noteId, tileId: view.tile.id, text: view.textView.string)
+        }
+    }
+
+    private func scheduleFileTreeSave() {
+        fileTreeSaveTimer?.invalidate()
+        fileTreeSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.flushFileTreeSave() }
+        }
+    }
+
+    private func flushFileTreeSave() {
+        fileTreeSaveTimer?.invalidate()
+        fileTreeSaveTimer = nil
+        guard let spawner = tileSpawner else { return }
+        for view in fileTreeViews.values {
+            spawner.writeFileTreeTileSnapshot(for: view)
         }
     }
 

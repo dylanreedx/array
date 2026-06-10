@@ -1,6 +1,6 @@
 import Foundation
 
-public struct FileTreeState: Codable, Equatable, Sendable {
+public struct FileTreeState: Codable, Hashable, Sendable {
     public static let currentSchemaVersion = 1
 
     public let schemaVersion: Int
@@ -12,7 +12,7 @@ public struct FileTreeState: Codable, Equatable, Sendable {
     }
 }
 
-public struct FileTreeTile: Codable, Equatable, Sendable {
+public struct FileTreeTile: Codable, Hashable, Sendable {
     public var tileId: UUID
     public var rootPath: String
     public var expandedPaths: [String]
@@ -40,7 +40,7 @@ public struct FileTreeTile: Codable, Equatable, Sendable {
     }
 }
 
-public struct FileTreeNode: Codable, Equatable, Sendable {
+public struct FileTreeNode: Codable, Hashable, Sendable {
     public var relativePath: String
     public var displayName: String
     public var isDirectory: Bool
@@ -65,12 +65,12 @@ public struct FileTreeNode: Codable, Equatable, Sendable {
     }
 }
 
-public enum FileTreeGitBadgeMode: String, Codable, Equatable, Sendable {
+public enum FileTreeGitBadgeMode: String, Codable, Hashable, Sendable {
     case off
     case cheap
 }
 
-public enum FileTreeGitStatus: String, Codable, Equatable, Sendable {
+public enum FileTreeGitStatus: String, Codable, Hashable, Sendable {
     case untracked
     case modified
     case added

@@ -1,5 +1,6 @@
 import AppKit
 import ContinuumRevivedCore
+import ContinuumRevivedFileTree
 import Foundation
 
 @MainActor
@@ -37,6 +38,10 @@ final class TileSpawner {
     /// debounced note body + index save.
     var notePersistenceHandler: (() -> Void)?
 
+    /// Called after file-tree expansion, selection, or search changes so the
+    /// AppDelegate can schedule a debounced FileTreeState save.
+    var fileTreePersistenceHandler: (() -> Void)?
+
     init(
         canvasView: CanvasNSView,
         ghostty: GhosttyRuntimeContext?,
@@ -53,6 +58,9 @@ final class TileSpawner {
         self.project = project
         self.registry = registry
         self.detector = detector
+        canvasView.onFileURLDrop = { [weak self] path, worldPoint in
+            _ = self?.spawnFile(path: path, at: worldPoint)
+        }
     }
 
     func annotatedProfiles() -> [AnnotatedProfile] {
@@ -217,6 +225,18 @@ final class TileSpawner {
     enum FileOutcome {
         case spawned(tileId: UUID)
         case invalidPath
+        case failure(Error)
+    }
+
+    enum FileTreeOutcome {
+        case spawned(tileId: UUID, viewModel: FileTreeViewModel)
+        case invalidPath
+        case failure(Error)
+    }
+
+    enum FileTreeRestartOutcome {
+        case restarted(FileTreeViewModel)
+        case tileNotFound
         case failure(Error)
     }
 
@@ -981,6 +1001,306 @@ final class TileSpawner {
         try expect(fileView.textView.string == "file tile ok", "FileTileNSView should load UTF-8 preview text")
 
         return artifact
+    }
+
+    // MARK: - File tree tiles
+
+    func spawnFileTree(rootPath: String, at worldPoint: CGPoint? = nil) -> FileTreeOutcome {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        let trimmedRootPath = rootPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedRootPath.isEmpty else { return .invalidPath }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: trimmedRootPath, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return .invalidPath
+        }
+
+        let frame = makePlacement(
+            worldPoint: worldPoint,
+            size: CanvasEngine.defaultFrame(for: .fileTree),
+            in: canvasView
+        )
+        let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
+        let tile = Tile(
+            id: UUID(),
+            kind: .fileTree,
+            title: URL(fileURLWithPath: trimmedRootPath, isDirectory: true).lastPathComponent,
+            frame: frame,
+            zIndex: nextZ,
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+        let fileTreeTile = defaultFileTreeTile(tileId: tile.id, rootPath: trimmedRootPath)
+        do {
+            try upsertFileTreeTile(fileTreeTile)
+        } catch {
+            return .failure(error)
+        }
+
+        let viewModel = installFileTreeView(tile, fileTreeTile: fileTreeTile, in: canvasView)
+        do {
+            try projectStore.saveCanvas(canvasView.canvasState)
+        } catch {
+            return .failure(error)
+        }
+        return .spawned(tileId: tile.id, viewModel: viewModel)
+    }
+
+    func restartFileTreeTile(tileId: UUID) -> FileTreeRestartOutcome {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        guard let existing = canvasView.canvasState.tiles.first(where: { $0.id == tileId }) else {
+            return .tileNotFound
+        }
+        let fileTreeTile = existingFileTreeTile(for: existing.id)
+            ?? defaultFileTreeTile(tileId: existing.id, rootPath: project.rootPath)
+        do {
+            try upsertFileTreeTile(fileTreeTile)
+            try projectStore.saveCanvas(canvasView.canvasState)
+        } catch {
+            return .failure(error)
+        }
+        let viewModel = installFileTreeView(existing, fileTreeTile: fileTreeTile, in: canvasView)
+        return .restarted(viewModel)
+    }
+
+    func writeFileTreeTileSnapshot(for view: FileTreeTileNSView) {
+        try? upsertFileTreeTile(view.currentFileTreeTile)
+    }
+
+    private func installFileTreeView(
+        _ tile: Tile,
+        fileTreeTile: FileTreeTile,
+        in canvasView: CanvasNSView
+    ) -> FileTreeViewModel {
+        let viewModel = FileTreeViewModel()
+        let view = FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile, viewModel: viewModel)
+        view.onPersist = { [weak self] _ in
+            self?.fileTreePersistenceHandler?()
+        }
+        view.onSpawnFile = { [weak self] path in
+            _ = self?.spawnFile(path: path, title: URL(fileURLWithPath: path).lastPathComponent)
+        }
+        view.onOpenFile = { [weak self] path in
+            self?.openFileInPreferredEditor(path: path)
+        }
+        canvasView.install(tileView: view, for: tile)
+        return viewModel
+    }
+
+    private func defaultFileTreeTile(tileId: UUID, rootPath: String) -> FileTreeTile {
+        FileTreeTile(
+            tileId: tileId,
+            rootPath: rootPath,
+            expandedPaths: [],
+            selectedPath: nil,
+            searchQuery: "",
+            ignoredNames: Array(FileTreeScanner.defaultIgnoredNames).sorted(),
+            gitBadges: .off
+        )
+    }
+
+    func openFileInPreferredEditor(path: String) {
+        if launchPreferredEditor(path: path) {
+            return
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: false))
+    }
+
+    private func existingFileTreeTile(for tileId: UUID) -> FileTreeTile? {
+        guard let state = try? projectStore.tryLoadFileTreeState() else {
+            return nil
+        }
+        return state.tiles.first { $0.tileId == tileId }
+    }
+
+    private func upsertFileTreeTile(_ fileTreeTile: FileTreeTile) throws {
+        var state = (try? projectStore.tryLoadFileTreeState()) ?? FileTreeState(tiles: [])
+        if let index = state.tiles.firstIndex(where: { $0.tileId == fileTreeTile.tileId }) {
+            state.tiles[index] = fileTreeTile
+        } else {
+            state.tiles.append(fileTreeTile)
+        }
+        try projectStore.saveFileTreeState(state)
+    }
+
+    static func runFileTreeBootPersistenceSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-file-tree-boot-persistence-\(UUID().uuidString)", isDirectory: true)
+        let projectRoot = tempRoot.appendingPathComponent("project", isDirectory: true)
+        try fileManager.createDirectory(at: projectRoot.appendingPathComponent("Sources/Deep", isDirectory: true), withIntermediateDirectories: true)
+        try Data("needle\n".utf8).write(to: projectRoot.appendingPathComponent("Sources/Deep/Needle.swift"), options: .atomic)
+
+        let now = Date()
+        let project = Project(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000F02")!,
+            name: "file-tree-boot-persistence-check",
+            rootPath: projectRoot.path,
+            createdAt: now,
+            updatedAt: now,
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning
+            )
+        )
+        let store = ProjectStore(projectRoot: projectRoot)
+        try store.saveProject(project)
+
+        let tileId = UUID(uuidString: "00000000-0000-0000-0000-000000000F03")!
+        let tile = Tile(
+            id: tileId,
+            kind: .fileTree,
+            title: "project",
+            frame: TileFrame(x: 20, y: 20, width: 420, height: 360),
+            zIndex: 7,
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+        try store.saveCanvas(CanvasState(
+            viewport: CanvasViewport(x: 13, y: 21, zoom: 1.25),
+            tiles: [tile],
+            groups: [],
+            lastActiveTileId: tileId
+        ))
+        try store.saveFileTreeState(FileTreeState(tiles: [FileTreeTile(
+            tileId: tileId,
+            rootPath: projectRoot.path,
+            expandedPaths: ["Sources"],
+            selectedPath: "Sources/Deep/Needle.swift",
+            searchQuery: "Needle.swift",
+            ignoredNames: [".git", "node_modules"],
+            gitBadges: .off
+        )]))
+
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+
+        let firstCanvas = CanvasNSView(canvasState: try store.loadCanvas())
+        let firstSpawner = TileSpawner(
+            canvasView: firstCanvas,
+            ghostty: nil,
+            browserEngine: browserEngine,
+            projectStore: store,
+            project: project
+        )
+        switch firstSpawner.restartFileTreeTile(tileId: tileId) {
+        case .restarted:
+            break
+        case .tileNotFound:
+            throw CheckError.failed("first boot did not find file-tree tile")
+        case let .failure(error):
+            throw CheckError.failed("first boot failed: \(error)")
+        }
+        guard let firstView = firstCanvas.tileView(for: tileId) as? FileTreeTileNSView else {
+            throw CheckError.failed("first boot did not install FileTreeTileNSView")
+        }
+        firstView.currentFileTreeTile.expandedPaths.forEach { _ in }
+        firstSpawner.writeFileTreeTileSnapshot(for: firstView)
+        try store.saveCanvas(firstCanvas.canvasState)
+
+        let secondCanvas = CanvasNSView(canvasState: try store.loadCanvas())
+        let secondSpawner = TileSpawner(
+            canvasView: secondCanvas,
+            ghostty: nil,
+            browserEngine: browserEngine,
+            projectStore: store,
+            project: project
+        )
+        switch secondSpawner.restartFileTreeTile(tileId: tileId) {
+        case .restarted:
+            break
+        case .tileNotFound:
+            throw CheckError.failed("relaunch did not find file-tree tile")
+        case let .failure(error):
+            throw CheckError.failed("relaunch failed: \(error)")
+        }
+        guard let secondView = secondCanvas.tileView(for: tileId) as? FileTreeTileNSView else {
+            throw CheckError.failed("relaunch did not install FileTreeTileNSView")
+        }
+        let persisted = try store.loadFileTreeState().tiles.first { $0.tileId == tileId }
+        try expect(secondCanvas.canvasState.tiles.first?.kind == .fileTree, "relaunch canvas should retain file-tree tile kind")
+        try expect(secondCanvas.canvasState.tiles.first?.runtimeRef == nil, "file-tree tile should not gain a runtimeRef")
+        try expect(persisted?.rootPath == projectRoot.path, "file-tree state should retain root path")
+        try expect(persisted?.expandedPaths == ["Sources"], "file-tree state should retain expanded paths")
+        try expect(persisted?.selectedPath == "Sources/Deep/Needle.swift", "file-tree state should retain selected path")
+        try expect(persisted?.searchQuery == "Needle.swift", "file-tree state should retain search query")
+        try expect(secondView.currentFileTreeTile == persisted, "relaunch view should use persisted file-tree tile state")
+
+        let searchManifest = try FileTreeTileNSView.runSearchVisibilitySelfCheck()
+        let manifest: [String: Any] = [
+            "check": "file-tree-boot-persistence",
+            "tempProjectRoot": projectRoot.path,
+            "tileId": tileId.uuidString,
+            "firstBootInstalled": true,
+            "relaunchInstalled": true,
+            "persistedRootPath": persisted?.rootPath as Any,
+            "persistedExpandedPaths": persisted?.expandedPaths ?? [],
+            "persistedSelectedPath": persisted?.selectedPath as Any,
+            "persistedSearchQuery": persisted?.searchQuery as Any,
+            "searchVisibility": searchManifest
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("file-tree-boot-persistence", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    private func launchPreferredEditor(path: String) -> Bool {
+        guard let spec = registry.spec(for: "nvim") else {
+            return false
+        }
+        let resolution = registry.resolve(
+            spec,
+            in: project.rootPath,
+            environment: ProcessInfo.processInfo.environment,
+            detector: detector
+        )
+        guard case let .found(profile) = resolution else {
+            return false
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: profile.command, isDirectory: false)
+        process.currentDirectoryURL = URL(fileURLWithPath: profile.cwd, isDirectory: true)
+        process.arguments = editorArguments(from: profile.arguments, path: path)
+        do {
+            try process.run()
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func editorArguments(from arguments: [String], path: String) -> [String] {
+        if let index = arguments.firstIndex(of: ".") {
+            var patched = arguments
+            patched[index] = path
+            return patched
+        }
+        return arguments + [path]
     }
 
     private func makePlacement(worldPoint: CGPoint?, size: CGSize, in canvasView: CanvasNSView) -> TileFrame {

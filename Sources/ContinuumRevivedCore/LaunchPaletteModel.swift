@@ -3,18 +3,27 @@ import Foundation
 public enum LaunchPaletteAction: String, Equatable, Sendable {
     case newNote
     case openFile
+    case openFileTree
 
     public var displayName: String {
         switch self {
-        case .newNote: return "New Note"
-        case .openFile: return "Open File..."
+        case .newNote:
+            return "New Note"
+        case .openFile:
+            return "Open File..."
+        case .openFileTree:
+            return "Open File Tree..."
         }
     }
 
     fileprivate var filterTokens: [String] {
         switch self {
-        case .newNote: return ["new", "note"]
-        case .openFile: return ["open", "file"]
+        case .newNote:
+            return ["new", "note"]
+        case .openFile:
+            return ["open", "file"]
+        case .openFileTree:
+            return ["open", "file", "tree"]
         }
     }
 }
@@ -58,8 +67,14 @@ public enum LaunchPaletteRow: Equatable, Sendable {
             return profile.displayName.lowercased().contains(query)
                 || profile.id.lowercased().contains(query)
         case let .action(action):
-            return action.displayName.lowercased().contains(query)
-                || action.filterTokens.contains { token in query.contains(token) || token.contains(query) }
+            let displayName = action.displayName.lowercased()
+            if displayName.contains(query) {
+                return true
+            }
+            let queryTokens = query.split(separator: " ").map(String.init)
+            return queryTokens.allSatisfy { queryToken in
+                action.filterTokens.contains { token in queryToken.contains(token) || token.contains(queryToken) }
+            }
         }
     }
 }
@@ -68,7 +83,8 @@ public enum LaunchPaletteModel {
     public static func makeRows(profiles: [LaunchPaletteProfileRow]) -> [LaunchPaletteRow] {
         profiles.map(LaunchPaletteRow.profile) + [
             .action(.newNote),
-            .action(.openFile)
+            .action(.openFile),
+            .action(.openFileTree)
         ]
     }
 
