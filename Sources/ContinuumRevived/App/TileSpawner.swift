@@ -33,6 +33,10 @@ final class TileSpawner {
     /// so the AppDelegate can schedule a debounced BrowserState save.
     var browserPersistenceHandler: (() -> Void)?
 
+    /// Called after every note text change so the AppDelegate can schedule a
+    /// debounced note body + index save.
+    var notePersistenceHandler: (() -> Void)?
+
     init(
         canvasView: CanvasNSView,
         ghostty: GhosttyRuntimeContext?,
@@ -205,6 +209,17 @@ final class TileSpawner {
         return .restarted(runtime)
     }
 
+    enum NoteOutcome {
+        case spawned(noteId: UUID, tileId: UUID)
+        case failure(Error)
+    }
+
+    enum FileOutcome {
+        case spawned(tileId: UUID)
+        case invalidPath
+        case failure(Error)
+    }
+
     enum BrowserOutcome {
         case spawned(WKWebViewBrowserRuntime)
         case invalidURL(String)
@@ -339,6 +354,141 @@ final class TileSpawner {
 
         runtime.loadURL(urlString)
         return .restarted(runtime)
+    }
+
+    // MARK: - Note tiles
+
+    /// Spawns a new blank note tile. Creates the note body file and index entry,
+    /// installs the tile view, and persists the canvas state.
+    func spawnNote(title: String, at worldPoint: CGPoint? = nil) -> NoteOutcome {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        let noteId = UUID()
+        let tileId = UUID()
+        let frame = makePlacement(
+            worldPoint: worldPoint,
+            size: CanvasEngine.defaultFrame(for: .note),
+            in: canvasView
+        )
+        let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
+        let tile = Tile(
+            id: tileId,
+            kind: .note,
+            title: title,
+            frame: frame,
+            zIndex: nextZ,
+            runtimeRef: nil,
+            metadata: TileMetadata(noteId: noteId)
+        )
+        do {
+            try projectStore.saveNoteBody(id: noteId, text: "")
+            try upsertNoteTile(noteId: noteId, tileId: tileId, title: title)
+        } catch {
+            return .failure(error)
+        }
+        let view = NoteTileNSView(tile: tile, noteId: noteId, initialBody: "")
+        view.onTextChange = { [weak self] in self?.notePersistenceHandler?() }
+        canvasView.install(tileView: view, for: tile)
+        do {
+            try projectStore.saveCanvas(canvasView.canvasState)
+        } catch {
+            return .failure(error)
+        }
+        return .spawned(noteId: noteId, tileId: tileId)
+    }
+
+    /// Installs a note tile view for an existing `Tile` (e.g. canvas restore).
+    /// If old canvas data lacks a note id, a note id is generated and persisted.
+    func installNoteTile(_ tile: Tile, in canvasView: CanvasNSView) {
+        let noteId: UUID
+        var activeTile = tile
+        if let existingNoteId = tile.metadata.noteId {
+            noteId = existingNoteId
+        } else {
+            noteId = UUID()
+            activeTile.metadata = TileMetadata(
+                launchProfileId: tile.metadata.launchProfileId,
+                projectRelativeCwd: tile.metadata.projectRelativeCwd,
+                url: tile.metadata.url,
+                noteId: noteId,
+                filePath: tile.metadata.filePath
+            )
+            canvasView.updateTile(activeTile)
+            try? upsertNoteTile(noteId: noteId, tileId: tile.id, title: tile.title)
+            try? projectStore.saveCanvas(canvasView.canvasState)
+        }
+        let initialBody = projectStore.tryLoadNoteBody(id: noteId) ?? ""
+        let view = NoteTileNSView(tile: activeTile, noteId: noteId, initialBody: initialBody)
+        view.onTextChange = { [weak self] in self?.notePersistenceHandler?() }
+        canvasView.install(tileView: view, for: activeTile)
+    }
+
+    /// Writes the current text body and updates the note's `updatedAt` timestamp.
+    func writeNoteSnapshot(noteId: UUID, tileId: UUID, text: String) {
+        try? projectStore.saveNoteBody(id: noteId, text: text)
+        guard var state = try? projectStore.loadNoteState(),
+              let idx = state.tiles.firstIndex(where: { $0.id == noteId && $0.tileId == tileId })
+        else { return }
+        state.tiles[idx].updatedAt = Date()
+        try? projectStore.saveNoteState(state)
+    }
+
+    private func upsertNoteTile(noteId: UUID, tileId: UUID, title: String) throws {
+        var state = (try? projectStore.tryLoadNoteState()) ?? NoteState(tiles: [])
+        let now = Date()
+        if let idx = state.tiles.firstIndex(where: { $0.id == noteId }) {
+            state.tiles[idx].title = title
+            state.tiles[idx].updatedAt = now
+        } else {
+            state.tiles.append(NoteTile(
+                id: noteId,
+                tileId: tileId,
+                filename: "\(noteId.uuidString).md",
+                title: title,
+                createdAt: now,
+                updatedAt: now
+            ))
+        }
+        try projectStore.saveNoteState(state)
+    }
+
+    // MARK: - File tiles
+
+    /// Spawns a read-only file preview tile and persists the canvas state.
+    func spawnFile(path: String, title: String? = nil, at worldPoint: CGPoint? = nil) -> FileOutcome {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty else { return .invalidPath }
+
+        let frame = makePlacement(
+            worldPoint: worldPoint,
+            size: CanvasEngine.defaultFrame(for: .file),
+            in: canvasView
+        )
+        let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
+        let tile = Tile(
+            id: UUID(),
+            kind: .file,
+            title: title ?? URL(fileURLWithPath: trimmedPath).lastPathComponent,
+            frame: frame,
+            zIndex: nextZ,
+            runtimeRef: nil,
+            metadata: TileMetadata(filePath: trimmedPath)
+        )
+        let view = FileTileNSView(tile: tile)
+        canvasView.install(tileView: view, for: tile)
+
+        do {
+            try projectStore.saveCanvas(canvasView.canvasState)
+        } catch {
+            return .failure(error)
+        }
+        return .spawned(tileId: tile.id)
+    }
+
+    /// Installs a file tile view for an existing `Tile` during canvas restore.
+    func installFileTile(_ tile: Tile, in canvasView: CanvasNSView) {
+        let view = FileTileNSView(tile: tile)
+        canvasView.install(tileView: view, for: tile)
     }
 
     /// Upserts a BrowserTile entry into BrowserState by tileId so multiple
@@ -704,6 +854,131 @@ final class TileSpawner {
         try expect(corruptSpawnBrowserStateUnchanged, "spawnBrowser must leave corrupt BrowserState byte-for-byte unchanged")
         try expect(!corruptSpawnBrowserStateTextAfter.contains(canvasURL), "spawnBrowser must not overwrite corrupt BrowserState with requested URL")
         try expect(corruptSpawnInstalledNoTileOrRuntime, "spawnBrowser corrupt preflight failure must install no canvas tile, NSView, WKWebView, or runtime")
+
+        return artifact
+    }
+
+    static func runNoteFileTileSpawnSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-note-file-spawn-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        let sampleFile = tempRoot.appendingPathComponent("sample.txt")
+        try Data("file tile ok".utf8).write(to: sampleFile)
+
+        let now = Date()
+        let project = Project(
+            id: UUID(uuidString: "00000000-0000-0000-0000-0000000008FF")!,
+            name: "note-file-spawn-check",
+            rootPath: tempRoot.path,
+            createdAt: now,
+            updatedAt: now,
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning
+            )
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [],
+            groups: [],
+            lastActiveTileId: nil
+        ))
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+        let spawner = TileSpawner(
+            canvasView: canvas,
+            ghostty: nil,
+            browserEngine: browserEngine,
+            projectStore: store,
+            project: project
+        )
+
+        let noteId: UUID
+        let noteTileId: UUID
+        switch spawner.spawnNote(title: "QA Note") {
+        case let .spawned(createdNoteId, createdTileId):
+            noteId = createdNoteId
+            noteTileId = createdTileId
+        case let .failure(error):
+            throw CheckError.failed("spawnNote failed: \(error)")
+        }
+        guard let noteView = canvas.tileView(for: noteTileId) as? NoteTileNSView else {
+            throw CheckError.failed("spawnNote did not install NoteTileNSView")
+        }
+        noteView.textView.string = "note body ok"
+        spawner.writeNoteSnapshot(noteId: noteId, tileId: noteTileId, text: noteView.textView.string)
+
+        let fileTileId: UUID
+        switch spawner.spawnFile(path: sampleFile.path, title: nil) {
+        case let .spawned(createdTileId):
+            fileTileId = createdTileId
+        case .invalidPath:
+            throw CheckError.failed("spawnFile rejected valid path")
+        case let .failure(error):
+            throw CheckError.failed("spawnFile failed: \(error)")
+        }
+        guard let fileView = canvas.tileView(for: fileTileId) as? FileTileNSView else {
+            throw CheckError.failed("spawnFile did not install FileTileNSView")
+        }
+
+        let canvasOnDisk = try store.loadCanvas()
+        let noteState = try store.loadNoteState()
+        let noteBody = store.tryLoadNoteBody(id: noteId)
+        let noteTile = canvasOnDisk.tiles.first(where: { $0.id == noteTileId })
+        let fileTile = canvasOnDisk.tiles.first(where: { $0.id == fileTileId })
+        let noteIndex = noteState.tiles.first(where: { $0.id == noteId })
+
+        let manifest: [String: Any] = [
+            "check": "note-file-tile-spawn",
+            "tempProjectRoot": tempRoot.path,
+            "noteId": noteId.uuidString,
+            "noteTileId": noteTileId.uuidString,
+            "fileTileId": fileTileId.uuidString,
+            "noteViewInstalled": true,
+            "fileViewInstalled": true,
+            "fileViewText": fileView.textView.string,
+            "noteBody": noteBody as Any,
+            "canvasTileKinds": canvasOnDisk.tiles.map { $0.kind.rawValue }
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("note-file-tile-spawn", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+
+        try expect(noteView.noteId == noteId, "NoteTileNSView should expose spawned noteId")
+        try expect(noteTile?.kind == .note, "canvas should persist note tile")
+        try expect(noteTile?.metadata.noteId == noteId, "canvas note metadata should persist noteId")
+        try expect(noteIndex?.tileId == noteTileId, "note index should point at spawned tile")
+        try expect(noteBody == "note body ok", "writeNoteSnapshot should persist note body")
+        try expect(fileTile?.kind == .file, "canvas should persist file tile")
+        try expect(fileTile?.metadata.filePath == sampleFile.path, "file tile metadata should persist selected path")
+        try expect(fileView.textView.string == "file tile ok", "FileTileNSView should load UTF-8 preview text")
 
         return artifact
     }

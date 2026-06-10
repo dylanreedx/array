@@ -82,6 +82,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--note-file-tile-spawn-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try TileSpawner.runNoteFileTileSpawnSelfCheck()
+                print("ContinuumRevivedNoteFileTileSpawnChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         let executablePath = CommandLine.arguments.first ?? "continuum-revived"
         let ghosttyInitStatus = executablePath.withCString { executablePointer in
             var argv: [UnsafeMutablePointer<CChar>?] = [
@@ -115,9 +127,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var browserEngine: BrowserEngineContext?
     private var runtimes: [GhosttyTerminalRuntime] = []
     private var browserRuntimes: [WKWebViewBrowserRuntime] = []
+    private var noteViews: [UUID: NoteTileNSView] = [:]
     private var canvasView: CanvasNSView?
     private var saveTimer: Timer?
     private var browserSaveTimer: Timer?
+    private var noteSaveTimer: Timer?
     private let smokeTestEnabled = ProcessInfo.processInfo.environment["CONTINUUM_SMOKE_TEST"] == "1"
     private var smokeTestExitCode: Int32?
     private var projectStore: ProjectStore?
@@ -172,11 +186,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawner.browserPersistenceHandler = { [weak self] in
                 self?.scheduleBrowserSave()
             }
+            spawner.notePersistenceHandler = { [weak self] in
+                self?.scheduleNoteSave()
+            }
             self.tileSpawner = spawner
 
             let palette = LaunchProfilePalette()
-            palette.onSelect = { [weak self] profileId in
+            palette.onSelectProfile = { [weak self] profileId in
                 self?.spawnTerminalFromProfile(profileId)
+            }
+            palette.onSelectAction = { [weak self] action in
+                self?.performPaletteAction(action)
             }
             self.profilePalette = palette
 
@@ -193,7 +213,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     installInitialTerminalTile(tile, in: canvasView, via: spawner)
                 case .browser:
                     installInitialBrowserTile(tile, in: canvasView, via: spawner)
-                case .note, .file, .fileTree:
+                case .note:
+                    installInitialNoteTile(tile, in: canvasView, via: spawner)
+                case .file:
+                    installInitialFileTile(tile, in: canvasView, via: spawner)
+                case .fileTree:
                     let view = DescriptorTileNSView(tile: tile)
                     canvasView.install(tileView: view, for: tile)
                 }
@@ -440,6 +464,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    private func installInitialNoteTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
+        spawner.installNoteTile(tile, in: canvasView)
+        if let view = canvasView.tileView(for: tile.id) as? NoteTileNSView {
+            noteViews[view.noteId] = view
+        }
+    }
+
+    private func installInitialFileTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
+        spawner.installFileTile(tile, in: canvasView)
+    }
+
     // MARK: - Hotkeys + spawning
 
     private func installHotkeyMonitor() {
@@ -513,6 +548,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    private func performPaletteAction(_ action: LaunchPaletteAction) {
+        switch action {
+        case .newNote:
+            spawnNoteFromPalette()
+        case .openFile:
+            openFileFromPalette()
+        }
+    }
+
+    private func spawnNoteFromPalette() {
+        guard let spawner = tileSpawner else { return }
+        switch spawner.spawnNote(title: "New Note") {
+        case let .spawned(noteId, tileId):
+            if let view = canvasView?.tileView(for: tileId) as? NoteTileNSView {
+                noteViews[noteId] = view
+            }
+        case let .failure(error):
+            fputs("TileSpawner.spawnNote failed: \(error)\n", stderr)
+        }
+    }
+
+    private func openFileFromPalette() {
+        guard let spawner = tileSpawner,
+              let project = activeProject else { return }
+        let projectRoot = URL(fileURLWithPath: project.rootPath, isDirectory: true)
+        let panel = NSOpenPanel()
+        panel.title = "Open File"
+        panel.directoryURL = projectRoot
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+
+        guard panel.runModal() == .OK,
+              let selectedURL = panel.url else { return }
+        guard LaunchPaletteModel.isFileURL(selectedURL, insideProjectRoot: projectRoot) else {
+            NSSound.beep()
+            return
+        }
+
+        switch spawner.spawnFile(path: selectedURL.standardizedFileURL.path, title: selectedURL.lastPathComponent) {
+        case .spawned:
+            break
+        case .invalidPath:
+            fputs("TileSpawner.spawnFile rejected empty file path\n", stderr)
+        case let .failure(error):
+            fputs("TileSpawner.spawnFile failed: \(error)\n", stderr)
+        }
+    }
+
     private enum MissingKind { case notFound, notConfigured }
 
     private func presentMissingCommand(executable: String, profileId: String, kind: MissingKind = .notFound) {
@@ -559,6 +643,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // most recent in-memory state.
         flushCanvasSave()
         flushBrowserSave()
+        flushNoteSave()
 
         // Mark each terminal session as exited before we tear down its runtime.
         // We don't know the exit code from this side (Ghostty owns the PTY), so
@@ -597,6 +682,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         canvasView = nil
         runtimes.removeAll()
+        noteViews.removeAll()
         tileSpawner = nil
         ghostty?.shutdown()
         ghostty = nil
@@ -634,6 +720,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let spawner = tileSpawner else { return }
         for runtime in browserRuntimes {
             spawner.writeBrowserTileSnapshot(for: runtime)
+        }
+    }
+
+    private func scheduleNoteSave() {
+        noteSaveTimer?.invalidate()
+        noteSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.flushNoteSave() }
+        }
+    }
+
+    private func flushNoteSave() {
+        noteSaveTimer?.invalidate()
+        noteSaveTimer = nil
+        guard let spawner = tileSpawner else { return }
+        for view in noteViews.values {
+            spawner.writeNoteSnapshot(noteId: view.noteId, tileId: view.tile.id, text: view.textView.string)
         }
     }
 

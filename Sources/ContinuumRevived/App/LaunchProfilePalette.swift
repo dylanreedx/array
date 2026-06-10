@@ -4,7 +4,8 @@ import Foundation
 
 @MainActor
 final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
-    var onSelect: ((String) -> Void)?
+    var onSelectProfile: ((String) -> Void)?
+    var onSelectAction: ((LaunchPaletteAction) -> Void)?
 
     static let rootAccessibilityIdentifier = "ContinuumLaunchProfilePaletteRoot"
 
@@ -12,14 +13,14 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private var tableView: NSTableView?
     private var searchField: NSSearchField?
 
-    private var profiles: [TileSpawner.AnnotatedProfile] = []
-    private var filtered: [TileSpawner.AnnotatedProfile] = []
+    private var rows: [LaunchPaletteRow] = []
+    private var filtered: [LaunchPaletteRow] = []
     private weak var previousFirstResponder: NSResponder?
     private weak var previousFirstResponderWindow: NSWindow?
 
     func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile]) {
-        self.profiles = profiles
-        self.filtered = profiles
+        self.rows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)))
+        self.filtered = rows
         guard let hostView = host.contentView else { return }
         let wasVisible = isVisible
         let paletteView = ensurePaletteView()
@@ -143,7 +144,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
 
         let selectionFocusTarget = SemanticTypingProbeView(frame: NSRect(x: 300, y: 20, width: 120, height: 40))
         hostView.addSubview(selectionFocusTarget)
-        palette.onSelect = { _ in
+        palette.onSelectProfile = { _ in
             host.makeFirstResponder(selectionFocusTarget)
         }
         try runSelectionDoesNotStealNewFocusScenario(
@@ -154,7 +155,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             palette: palette,
             profiles: foundProfiles
         )
-        palette.onSelect = nil
+        palette.onSelectProfile = nil
 
         // Stale/removed responder safety: closing must not attempt to restore a
         // view that has been detached while the palette is open.
@@ -403,6 +404,28 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         return false
     }
 
+    private static func profileRow(for item: TileSpawner.AnnotatedProfile) -> LaunchPaletteProfileRow {
+        let detail: String
+        let isSelectable: Bool
+        switch item.resolution {
+        case let .found(profile):
+            detail = profile.command
+            isSelectable = true
+        case let .missing(executable):
+            detail = "\(executable) not found"
+            isSelectable = false
+        case let .notConfigured(profileId):
+            detail = "\(profileId) not configured"
+            isSelectable = false
+        }
+        return LaunchPaletteProfileRow(
+            id: item.spec.id,
+            displayName: item.spec.displayName,
+            detail: detail,
+            isSelectable: isSelectable
+        )
+    }
+
     // MARK: - NSTableViewDataSource
 
     func numberOfRows(in tableView: NSTableView) -> Int { filtered.count }
@@ -422,16 +445,13 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             text.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
         ])
         let item = filtered[row]
-        switch item.resolution {
-        case let .found(profile):
-            text.stringValue = "\(item.spec.displayName) — \(profile.command)"
+        switch item {
+        case let .profile(profile):
+            text.stringValue = "\(profile.displayName) — \(profile.detail)"
+            text.textColor = profile.isSelectable ? .labelColor : .secondaryLabelColor
+        case let .action(action):
+            text.stringValue = action.displayName
             text.textColor = .labelColor
-        case let .missing(executable):
-            text.stringValue = "\(item.spec.displayName) — \(executable) not found"
-            text.textColor = .secondaryLabelColor
-        case let .notConfigured(profileId):
-            text.stringValue = "\(item.spec.displayName) — \(profileId) not configured"
-            text.textColor = .secondaryLabelColor
         }
         return cell
     }
@@ -440,14 +460,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
 
     func controlTextDidChange(_ obj: Notification) {
         guard let field = obj.object as? NSSearchField else { return }
-        let q = field.stringValue.lowercased()
-        if q.isEmpty {
-            filtered = profiles
-        } else {
-            filtered = profiles.filter { item in
-                item.spec.displayName.lowercased().contains(q) || item.spec.id.contains(q)
-            }
-        }
+        filtered = LaunchPaletteModel.filterRows(rows, query: field.stringValue)
         tableView?.reloadData()
         if !filtered.isEmpty {
             tableView?.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
@@ -481,13 +494,17 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         guard let table = tableView else { return }
         let row = table.selectedRow
         guard row >= 0, row < filtered.count else { return }
-        let item = filtered[row]
-        switch item.resolution {
-        case .found:
-            onSelect?(item.spec.id)
+        switch filtered[row] {
+        case let .profile(profile):
+            guard profile.isSelectable else {
+                NSSound.beep()
+                return
+            }
+            onSelectProfile?(profile.id)
             close(restoreFocus: true)
-        case .missing, .notConfigured:
-            NSSound.beep()
+        case let .action(action):
+            close(restoreFocus: true)
+            onSelectAction?(action)
         }
     }
 

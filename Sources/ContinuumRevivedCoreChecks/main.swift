@@ -188,6 +188,36 @@ do {
     try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: scratch) }
 
+    let textFile = scratch.appendingPathComponent("hello.txt")
+    try Data("hello file tile".utf8).write(to: textFile)
+    expect(FilePreview.load(path: textFile.path) == .text("hello file tile"), "FilePreview loads UTF-8 text")
+
+    let missingPreview = FilePreview.load(path: scratch.appendingPathComponent("missing.txt").path)
+    expect(missingPreview == .unavailable("File not found"), "FilePreview reports missing files")
+
+    let directoryPreview = FilePreview.load(path: scratch.path)
+    expect(directoryPreview == .unavailable("File not found"), "FilePreview rejects directories")
+
+    let devNullPreview = FilePreview.load(path: "/dev/null")
+    expect(devNullPreview == .unavailable("File not found"), "FilePreview rejects non-regular files")
+
+    let utf8BOMFile = scratch.appendingPathComponent("utf8-bom.txt")
+    try Data([0xEF, 0xBB, 0xBF, 0x68, 0x69]).write(to: utf8BOMFile)
+    expect(FilePreview.load(path: utf8BOMFile.path) == .text("hi"), "FilePreview accepts UTF-8 BOM files")
+
+    let binaryFile = scratch.appendingPathComponent("binary.bin")
+    try Data([0x41, 0x00, 0x42]).write(to: binaryFile)
+    expect(FilePreview.load(path: binaryFile.path) == .unavailable("Binary file -- open in preferred editor"), "FilePreview rejects null-byte binary files")
+
+    let utf16File = scratch.appendingPathComponent("utf16.txt")
+    try Data([0xFF, 0xFE, 0x41, 0x00]).write(to: utf16File)
+    expect(FilePreview.load(path: utf16File.path) == .unavailable("Binary file -- open in preferred editor"), "FilePreview rejects non-UTF-8 BOM files")
+
+    let largeFile = scratch.appendingPathComponent("large.txt")
+    let largeBytes = Data(repeating: 0x61, count: FilePreview.maxReadBytes + 1)
+    try largeBytes.write(to: largeFile)
+    expect(FilePreview.load(path: largeFile.path) == .unavailable("File too large to preview (> 1 MB)"), "FilePreview rejects oversized files")
+
     let sparseHugeFile = scratch.appendingPathComponent("sparse-3gb.txt")
     FileManager.default.createFile(atPath: sparseHugeFile.path, contents: nil)
     let sparseHandle = try FileHandle(forWritingTo: sparseHugeFile)
