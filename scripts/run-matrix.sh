@@ -33,6 +33,7 @@ run_app_check() {
 run swift build
 run swift run ContinuumRevivedCoreChecks
 run swift run ContinuumRevivedPaletteChecks
+run swift run ContinuumRevivedFileTreeChecks
 run_app_check .build/debug/continuum-revived --palette-duplicate-root-check
 run_app_check .build/debug/continuum-revived --palette-first-responder-restore-check
 run_app_check .build/debug/continuum-revived --browser-url-focus-check
@@ -44,6 +45,7 @@ run_app_check .build/debug/continuum-revived --note-click-focus-check
 run_app_check .build/debug/continuum-revived --browser-restore-state-check
 run_app_check .build/debug/continuum-revived --note-file-tile-spawn-check
 run_app_check .build/debug/continuum-revived --file-tree-boot-persistence-check
+run_app_check .build/debug/continuum-revived --file-tree-hardening-check
 run_app_check .build/debug/continuum-revived --viewport-sanitize-check
 run git diff --check
 

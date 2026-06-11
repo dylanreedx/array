@@ -17,6 +17,7 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
 
     private let rootStack = NSStackView()
     private let searchField = NSSearchField()
+    private let truncationBanner = NSTextField(labelWithString: "")
     private let scrollView = NSScrollView()
     private let outlineView = FileTreeOutlineView()
     private let stateContainer = NSView()
@@ -26,8 +27,13 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
     var onPersist: ((FileTreeTile) -> Void)?
     var onSpawnFile: ((String) -> Void)?
     var onOpenFile: ((String) -> Void)?
-    var currentFileTreeTile: FileTreeTile { fileTreeTile }
+    var currentFileTreeTile: FileTreeTile {
+        flushPendingSearchForDehydrate()
+        return fileTreeTile
+    }
     var currentSnapshot: FileTreeSnapshot? { latestSnapshot }
+    private(set) var isRecoverableError = false
+    private(set) var recoverableErrorMessage: String?
 
     init(tile: Tile, fileTreeTile: FileTreeTile, viewModel: FileTreeViewModel = FileTreeViewModel()) {
         self.fileTreeTile = fileTreeTile
@@ -42,6 +48,17 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
             ignoreList: Set(fileTreeTile.ignoredNames),
             gitBadgeMode: fileTreeTile.gitBadges
         )
+    }
+
+    init(tile: Tile, fileTreeTile: FileTreeTile, recoverableErrorMessage: String) {
+        self.fileTreeTile = fileTreeTile
+        self.viewModel = FileTreeViewModel()
+        self.isRecoverableError = true
+        self.recoverableErrorMessage = recoverableErrorMessage
+        super.init(tile: tile)
+        buildContent()
+        applySearchText(fileTreeTile.searchQuery)
+        showRecoverableError(recoverableErrorMessage)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -179,6 +196,16 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         searchField.delegate = self
         searchField.translatesAutoresizingMaskIntoConstraints = false
 
+        truncationBanner.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        truncationBanner.textColor = NSColor(calibratedRed: 0.96, green: 0.80, blue: 0.45, alpha: 1.0)
+        truncationBanner.backgroundColor = NSColor(white: 0.16, alpha: 1.0)
+        truncationBanner.drawsBackground = true
+        truncationBanner.isBezeled = false
+        truncationBanner.isEditable = false
+        truncationBanner.maximumNumberOfLines = 2
+        truncationBanner.lineBreakMode = .byWordWrapping
+        truncationBanner.isHidden = true
+
         let column = NSTableColumn(identifier: Self.outlineColumnIdentifier)
         column.title = "Files"
         outlineView.addTableColumn(column)
@@ -236,6 +263,7 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         ])
 
         rootStack.addArrangedSubview(searchField)
+        rootStack.addArrangedSubview(truncationBanner)
         rootStack.addArrangedSubview(scrollView)
         setContentView(rootStack)
     }
@@ -253,7 +281,22 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         searchField.stringValue = query
     }
 
+    func flushPendingSearchForDehydrate() {
+        searchDebounce?.invalidate()
+        searchDebounce = nil
+        let liveQuery = searchField.stringValue
+        guard fileTreeTile.searchQuery != liveQuery else {
+            return
+        }
+        fileTreeTile.searchQuery = liveQuery
+        if let latestSnapshot {
+            apply(latestSnapshot)
+        }
+    }
+
     private func commitSearch() {
+        searchDebounce?.invalidate()
+        searchDebounce = nil
         fileTreeTile.searchQuery = searchField.stringValue
         persist()
         if let latestSnapshot {
@@ -271,7 +314,10 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         suppressExpansionPersistence = false
         restoreSelection()
 
-        if outlineModel.rootItems.isEmpty {
+        if snapshot.isTruncated {
+            showTruncatedStatus(snapshot)
+            showOutline()
+        } else if outlineModel.rootItems.isEmpty {
             showEmpty()
         } else {
             showOutline()
@@ -335,21 +381,42 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
     }
 
     private func showLoading() {
+        hideTruncatedStatus()
         stateLabel.stringValue = "Scanning..."
         spinner.startAnimation(nil)
         showStateView()
     }
 
     private func showEmpty() {
+        hideTruncatedStatus()
         stateLabel.stringValue = "No files in \(URL(fileURLWithPath: fileTreeTile.rootPath).lastPathComponent)"
         spinner.stopAnimation(nil)
         showStateView()
     }
 
     private func showError(_ error: Error) {
+        hideTruncatedStatus()
         stateLabel.stringValue = "Could not read directory: \(error.localizedDescription)"
         spinner.stopAnimation(nil)
         showStateView()
+    }
+
+    private func showRecoverableError(_ message: String) {
+        hideTruncatedStatus()
+        stateLabel.stringValue = message
+        spinner.stopAnimation(nil)
+        showStateView()
+    }
+
+    private func showTruncatedStatus(_ snapshot: FileTreeSnapshot) {
+        let limit = snapshot.nodeLimit ?? snapshot.nodes.count
+        truncationBanner.stringValue = "Showing first \(snapshot.nodes.count) items. Scan truncated at \(limit) items."
+        truncationBanner.isHidden = false
+    }
+
+    private func hideTruncatedStatus() {
+        truncationBanner.stringValue = ""
+        truncationBanner.isHidden = true
     }
 
     private func showOutline() {
@@ -362,11 +429,10 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
     }
 
     private func replaceBody(with view: NSView) {
-        if rootStack.arrangedSubviews.count == 2, rootStack.arrangedSubviews[1] === view {
+        if rootStack.arrangedSubviews.last === view {
             return
         }
-        if rootStack.arrangedSubviews.count == 2 {
-            let oldView = rootStack.arrangedSubviews[1]
+        if let oldView = rootStack.arrangedSubviews.last, oldView !== searchField, oldView !== truncationBanner {
             rootStack.removeArrangedSubview(oldView)
             oldView.removeFromSuperview()
         }
@@ -473,6 +539,136 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         onPersist?(fileTreeTile)
     }
 
+    static func runTruncatedOutlineSelfCheck() throws -> [String: Any] {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("continuum-file-tree-truncated-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let tileId = UUID(uuidString: "00000000-0000-0000-0000-000000001122")!
+        let tile = Tile(
+            id: tileId,
+            kind: .fileTree,
+            title: "Files",
+            frame: TileFrame(x: 0, y: 0, width: 420, height: 360),
+            zIndex: 1,
+            runtimeRef: nil,
+            metadata: TileMetadata(filePath: root.path)
+        )
+        let fileTreeTile = FileTreeTile(
+            tileId: tileId,
+            rootPath: root.path,
+            expandedPaths: ["Sources"],
+            selectedPath: nil,
+            searchQuery: "",
+            ignoredNames: [],
+            gitBadges: .off
+        )
+        let view = FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile, viewModel: FileTreeViewModel())
+        let snapshot = FileTreeSnapshot(root: root, nodes: [
+            FileTreeNode(relativePath: "Sources", displayName: "Sources", isDirectory: true, childCount: 1, isIgnored: false, gitStatus: nil),
+            FileTreeNode(relativePath: "Sources/App.swift", displayName: "App.swift", isDirectory: false, childCount: 0, isIgnored: false, gitStatus: nil)
+        ], isTruncated: true, nodeLimit: 2)
+        view.apply(snapshot)
+        let visiblePaths = (0..<view.outlineView.numberOfRows).compactMap { row in
+            (view.outlineView.item(atRow: row) as? FileTreeOutlineItem)?.node.relativePath
+        }
+
+        try expect(view.truncationBanner.isHidden == false, "truncated banner should be visible")
+        try expect(view.rootStack.arrangedSubviews.last === view.scrollView, "truncated state should keep outline visible")
+        try expect(visiblePaths.contains("Sources"), "truncated outline should show capped root row")
+        try expect(visiblePaths.contains("Sources/App.swift"), "truncated outline should show capped child row")
+
+        return [
+            "check": "file-tree-truncated-outline",
+            "bannerVisible": !view.truncationBanner.isHidden,
+            "bannerText": view.truncationBanner.stringValue,
+            "bodyIsOutline": view.rootStack.arrangedSubviews.last === view.scrollView,
+            "visiblePaths": visiblePaths
+        ]
+    }
+
+    static func runDebounceFlushSelfCheck() throws -> [String: Any] {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("continuum-file-tree-debounce-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let tileId = UUID(uuidString: "00000000-0000-0000-0000-000000001120")!
+        let tile = Tile(
+            id: tileId,
+            kind: .fileTree,
+            title: "Files",
+            frame: TileFrame(x: 0, y: 0, width: 420, height: 360),
+            zIndex: 1,
+            runtimeRef: nil,
+            metadata: TileMetadata(filePath: root.path)
+        )
+        let fileTreeTile = FileTreeTile(
+            tileId: tileId,
+            rootPath: root.path,
+            expandedPaths: [],
+            selectedPath: nil,
+            searchQuery: "",
+            ignoredNames: [],
+            gitBadges: .off
+        )
+        let view = FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile, viewModel: FileTreeViewModel())
+        let typedQuery = "CON120-needle-\(UUID().uuidString)"
+        let start = ContinuousClock.now
+        view.searchField.stringValue = typedQuery
+        view.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: view.searchField))
+        let dehydrated = view.currentFileTreeTile
+        let store = ProjectStore(projectRoot: root)
+        try store.saveFileTreeState(FileTreeState(tiles: [dehydrated]))
+        let reloaded = try store.loadFileTreeState().tiles.first { $0.tileId == tileId }
+        let elapsed = start.duration(to: ContinuousClock.now)
+        let elapsedMs = Double(elapsed.components.seconds) * 1000.0 + Double(elapsed.components.attoseconds) / 1_000_000_000_000_000.0
+
+        try expect(elapsedMs < 200.0, "dehydrate should run before debounce interval")
+        try expect(dehydrated.searchQuery == typedQuery, "dehydrate should flush live search text")
+        try expect(reloaded?.searchQuery == typedQuery, "dehydrated search text should persist to and reload from sidecar")
+        try expect(view.searchDebounce == nil, "dehydrate should invalidate pending debounce timer")
+
+        return [
+            "check": "file-tree-debounce-flush",
+            "debounceMs": 200,
+            "elapsedBeforeFlushMs": elapsedMs,
+            "typedQuery": typedQuery,
+            "persistedQuery": dehydrated.searchQuery,
+            "reloadedQuery": reloaded?.searchQuery ?? "",
+            "timerInvalidated": true
+        ]
+    }
+
     static func runSearchVisibilitySelfCheck() throws -> [String: Any] {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)
@@ -569,6 +765,7 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         table.append(row("empty-collapsed", view: collapsedView, persisted: collapsedRecorder.expandedPaths))
 
         collapsedView.fileTreeTile.searchQuery = "Needle.swift"
+        collapsedView.applySearchText("Needle.swift")
         collapsedView.apply(snapshot)
         let searchCollapsedPaths = visiblePaths(in: collapsedView)
         try expect(searchCollapsedPaths.contains("Sources"), "search should keep matching file's root ancestor visible")
@@ -581,6 +778,7 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         table.append(row("search-collapsed", view: collapsedView, persisted: collapsedRecorder.expandedPaths))
 
         collapsedView.fileTreeTile.searchQuery = ""
+        collapsedView.applySearchText("")
         collapsedView.apply(snapshot)
         try expect(visiblePaths(in: collapsedView) == ["Sources", "Docs"], "clearing search should restore collapsed root-only visibility")
         try expect(collapsedView.currentFileTreeTile.expandedPaths.isEmpty, "clearing search should keep collapsed expandedPaths empty")
@@ -594,6 +792,7 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         table.append(row("empty-persisted-expanded", view: expandedView, persisted: expandedRecorder.expandedPaths))
 
         expandedView.fileTreeTile.searchQuery = "needle.swift"
+        expandedView.applySearchText("needle.swift")
         expandedView.apply(snapshot)
         let searchExpandedPaths = visiblePaths(in: expandedView)
         try expect(searchExpandedPaths.contains("Sources/Deep/Needle.swift"), "case-insensitive search should show matched descendant file")
@@ -603,6 +802,7 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         table.append(row("search-preserves-persisted", view: expandedView, persisted: expandedRecorder.expandedPaths))
 
         expandedView.fileTreeTile.searchQuery = ""
+        expandedView.applySearchText("")
         expandedView.apply(snapshot)
         try expect(visiblePaths(in: expandedView) == ["Sources", "Sources/Deep", "Docs"], "clearing search should restore persisted expansion visibility")
         try expect(!isExpanded("Sources/Deep", in: expandedView), "clearing search should collapse search-expanded intermediate ancestor")

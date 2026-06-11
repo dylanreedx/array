@@ -1028,7 +1028,7 @@ final class TileSpawner {
             frame: frame,
             zIndex: nextZ,
             runtimeRef: nil,
-            metadata: TileMetadata()
+            metadata: TileMetadata(filePath: URL(fileURLWithPath: trimmedRootPath, isDirectory: true).standardizedFileURL.path)
         )
         let fileTreeTile = defaultFileTreeTile(tileId: tile.id, rootPath: trimmedRootPath)
         do {
@@ -1048,22 +1048,32 @@ final class TileSpawner {
 
     func restartFileTreeTile(tileId: UUID) -> FileTreeRestartOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
-        guard let existing = canvasView.canvasState.tiles.first(where: { $0.id == tileId }) else {
+        guard var existing = canvasView.canvasState.tiles.first(where: { $0.id == tileId }) else {
             return .tileNotFound
         }
-        let fileTreeTile = existingFileTreeTile(for: existing.id)
-            ?? defaultFileTreeTile(tileId: existing.id, rootPath: project.rootPath)
-        do {
-            try upsertFileTreeTile(fileTreeTile)
-            try projectStore.saveCanvas(canvasView.canvasState)
-        } catch {
-            return .failure(error)
+
+        switch validatedFileTreeTile(for: existing) {
+        case let .valid(fileTreeTile, backfilledDescriptorRoot):
+            if let backfilledDescriptorRoot {
+                existing.metadata.filePath = backfilledDescriptorRoot
+                canvasView.updateTile(existing)
+            }
+            do {
+                try upsertFileTreeTile(fileTreeTile)
+                try projectStore.saveCanvas(canvasView.canvasState)
+            } catch {
+                return .failure(error)
+            }
+            let viewModel = installFileTreeView(existing, fileTreeTile: fileTreeTile, in: canvasView)
+            return .restarted(viewModel)
+        case let .recoverableError(fileTreeTile, message):
+            let viewModel = installFileTreeErrorView(existing, fileTreeTile: fileTreeTile, message: message, in: canvasView)
+            return .restarted(viewModel)
         }
-        let viewModel = installFileTreeView(existing, fileTreeTile: fileTreeTile, in: canvasView)
-        return .restarted(viewModel)
     }
 
     func writeFileTreeTileSnapshot(for view: FileTreeTileNSView) {
+        guard !view.isRecoverableError else { return }
         try? upsertFileTreeTile(view.currentFileTreeTile)
     }
 
@@ -1087,6 +1097,18 @@ final class TileSpawner {
         return viewModel
     }
 
+    private func installFileTreeErrorView(
+        _ tile: Tile,
+        fileTreeTile: FileTreeTile,
+        message: String,
+        in canvasView: CanvasNSView
+    ) -> FileTreeViewModel {
+        let viewModel = FileTreeViewModel()
+        let view = FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile, recoverableErrorMessage: message)
+        canvasView.install(tileView: view, for: tile)
+        return viewModel
+    }
+
     private func defaultFileTreeTile(tileId: UUID, rootPath: String) -> FileTreeTile {
         FileTreeTile(
             tileId: tileId,
@@ -1104,6 +1126,65 @@ final class TileSpawner {
             return
         }
         NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: false))
+    }
+
+    private enum FileTreeValidationOutcome {
+        case valid(FileTreeTile, backfilledDescriptorRoot: String?)
+        case recoverableError(FileTreeTile, message: String)
+    }
+
+    private func validatedFileTreeTile(for tile: Tile) -> FileTreeValidationOutcome {
+        let descriptorRoot = tile.metadata.filePath.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL.path }
+        do {
+            guard let state = try projectStore.tryLoadFileTreeState() else {
+                let kind = FileManager.default.fileExists(atPath: projectStore.layout.fileTreeIndexFile.path)
+                    ? "corrupt"
+                    : "missing"
+                return .recoverableError(
+                    defaultFileTreeTile(tileId: tile.id, rootPath: descriptorRoot ?? project.rootPath),
+                    message: fileTreeValidationMessage(kind: kind, expectedRoot: descriptorRoot)
+                )
+            }
+            guard let fileTreeTile = state.tiles.first(where: { $0.tileId == tile.id }) else {
+                return .recoverableError(
+                    defaultFileTreeTile(tileId: tile.id, rootPath: descriptorRoot ?? project.rootPath),
+                    message: fileTreeValidationMessage(kind: "missing tile entry", expectedRoot: descriptorRoot)
+                )
+            }
+            let sidecarRoot = URL(fileURLWithPath: fileTreeTile.rootPath, isDirectory: true).standardizedFileURL.path
+            if let descriptorRoot, sidecarRoot != descriptorRoot {
+                return .recoverableError(
+                    defaultFileTreeTile(tileId: tile.id, rootPath: descriptorRoot),
+                    message: fileTreeValidationMessage(kind: "root mismatch", expectedRoot: descriptorRoot, actualRoot: sidecarRoot)
+                )
+            }
+            return .valid(fileTreeTile, backfilledDescriptorRoot: descriptorRoot == nil ? sidecarRoot : nil)
+        } catch {
+            return .recoverableError(
+                defaultFileTreeTile(tileId: tile.id, rootPath: descriptorRoot ?? project.rootPath),
+                message: fileTreeValidationMessage(kind: "corrupt", expectedRoot: descriptorRoot, detail: error.localizedDescription)
+            )
+        }
+    }
+
+    private func fileTreeValidationMessage(
+        kind: String,
+        expectedRoot: String?,
+        actualRoot: String? = nil,
+        detail: String? = nil
+    ) -> String {
+        var message = "File tree state \(kind)."
+        if let expectedRoot {
+            message += " Expected root: \(expectedRoot)."
+        }
+        if let actualRoot {
+            message += " Sidecar root: \(actualRoot)."
+        }
+        if let detail {
+            message += " \(detail)"
+        }
+        message += " This is recoverable: remove/recreate the file-tree tile or repair .continuum-revived/file-tree/index.json."
+        return message
     }
 
     private func existingFileTreeTile(for tileId: UUID) -> FileTreeTile? {
@@ -1244,6 +1325,7 @@ final class TileSpawner {
         try expect(secondView.currentFileTreeTile == persisted, "relaunch view should use persisted file-tree tile state")
 
         let searchManifest = try FileTreeTileNSView.runSearchVisibilitySelfCheck()
+        let debounceManifest = try FileTreeTileNSView.runDebounceFlushSelfCheck()
         let manifest: [String: Any] = [
             "check": "file-tree-boot-persistence",
             "tempProjectRoot": projectRoot.path,
@@ -1254,13 +1336,169 @@ final class TileSpawner {
             "persistedExpandedPaths": persisted?.expandedPaths ?? [],
             "persistedSelectedPath": persisted?.selectedPath as Any,
             "persistedSearchQuery": persisted?.searchQuery as Any,
-            "searchVisibility": searchManifest
+            "searchVisibility": searchManifest,
+            "debounceFlush": debounceManifest
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("file-tree-boot-persistence", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runFileTreeHardeningSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-file-tree-hardening-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let now = Date()
+        let tileId = UUID(uuidString: "00000000-0000-0000-0000-000000001121")!
+        let descriptorRoot = tempRoot.appendingPathComponent("descriptor-root", isDirectory: true)
+        let wrongRoot = tempRoot.appendingPathComponent("wrong-root", isDirectory: true)
+        try fileManager.createDirectory(at: descriptorRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: wrongRoot, withIntermediateDirectories: true)
+
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+
+        func makeProjectStore(named name: String) throws -> (Project, ProjectStore, CanvasNSView, TileSpawner) {
+            let projectRoot = tempRoot.appendingPathComponent(name, isDirectory: true)
+            try fileManager.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+            let project = Project(
+                id: UUID(),
+                name: name,
+                rootPath: projectRoot.path,
+                createdAt: now,
+                updatedAt: now,
+                defaultLaunchProfileId: "shell",
+                editorPreference: .auto,
+                settings: ProjectSettings(
+                    restorePolicy: .restoreDescriptors,
+                    browserStoragePolicy: .perProject,
+                    terminalClosePolicy: .askWhenRunning
+                )
+            )
+            let store = ProjectStore(projectRoot: projectRoot)
+            try store.saveProject(project)
+            let tile = Tile(
+                id: tileId,
+                kind: .fileTree,
+                title: "descriptor-root",
+                frame: TileFrame(x: 20, y: 20, width: 420, height: 360),
+                zIndex: 1,
+                runtimeRef: nil,
+                metadata: TileMetadata(filePath: descriptorRoot.path)
+            )
+            try store.saveCanvas(CanvasState(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                tiles: [tile],
+                groups: [],
+                lastActiveTileId: tileId
+            ))
+            let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+            let spawner = TileSpawner(
+                canvasView: canvas,
+                ghostty: nil,
+                browserEngine: browserEngine,
+                projectStore: store,
+                project: project
+            )
+            return (project, store, canvas, spawner)
+        }
+
+        func runScenario(_ name: String, seed: (ProjectStore) throws -> Void) throws -> [String: Any] {
+            let (project, store, canvas, spawner) = try makeProjectStore(named: name)
+            try seed(store)
+            let sidecarBefore = try? Data(contentsOf: store.layout.fileTreeIndexFile)
+            switch spawner.restartFileTreeTile(tileId: tileId) {
+            case .restarted:
+                break
+            case .tileNotFound:
+                throw CheckError.failed("\(name): tile not found")
+            case let .failure(error):
+                throw CheckError.failed("\(name): restart failed: \(error)")
+            }
+            guard let view = canvas.tileView(for: tileId) as? FileTreeTileNSView else {
+                throw CheckError.failed("\(name): did not install file-tree view")
+            }
+            spawner.writeFileTreeTileSnapshot(for: view)
+            let sidecarAfter = try? Data(contentsOf: store.layout.fileTreeIndexFile)
+            let persisted = try? store.tryLoadFileTreeState()?.tiles.first(where: { $0.tileId == tileId })
+            let didFallbackToProjectRoot = persisted?.rootPath == project.rootPath
+            let didStartScannerForWrongRoot = view.currentSnapshot?.root.path == wrongRoot.path || view.currentSnapshot?.root.path == project.rootPath
+            try expect(view.isRecoverableError, "\(name): should install recoverable error tile")
+            try expect(view.currentSnapshot == nil, "\(name): should not scan while sidecar is invalid")
+            try expect(!didFallbackToProjectRoot, "\(name): should not fall back to project root")
+            try expect(!didStartScannerForWrongRoot, "\(name): should not start scanner for wrong root")
+            if let sidecarBefore {
+                try expect(sidecarAfter == sidecarBefore, "\(name): should not overwrite invalid sidecar")
+            } else {
+                try expect(sidecarAfter == nil, "\(name): should not create sidecar from missing invalid state")
+            }
+            return [
+                "scenario": name,
+                "errorKind": view.recoverableErrorMessage ?? "",
+                "didInstallRecoverableTile": view.isRecoverableError,
+                "didFallbackToProjectRoot": didFallbackToProjectRoot,
+                "didStartScannerForWrongRoot": didStartScannerForWrongRoot,
+                "sidecarUnchanged": sidecarAfter == sidecarBefore
+            ]
+        }
+
+        let scenarios: [[String: Any]] = try [
+            runScenario("missing-sidecar") { _ in },
+            runScenario("corrupt-sidecar") { store in
+                try fileManager.createDirectory(at: store.layout.fileTreeDirectory, withIntermediateDirectories: true)
+                try Data("{ not-json".utf8).write(to: store.layout.fileTreeIndexFile, options: .atomic)
+            },
+            runScenario("missing-tile-entry") { store in
+                try store.saveFileTreeState(FileTreeState(tiles: []))
+            },
+            runScenario("mismatched-root") { store in
+                try store.saveFileTreeState(FileTreeState(tiles: [FileTreeTile(
+                    tileId: tileId,
+                    rootPath: wrongRoot.path,
+                    expandedPaths: [],
+                    selectedPath: nil,
+                    searchQuery: "",
+                    ignoredNames: [],
+                    gitBadges: .off
+                )]))
+            }
+        ]
+
+        let manifest: [String: Any] = [
+            "check": "file-tree-hardening",
+            "debounceFlush": try FileTreeTileNSView.runDebounceFlushSelfCheck(),
+            "truncatedOutline": try FileTreeTileNSView.runTruncatedOutlineSelfCheck(),
+            "sidecarValidation": scenarios
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("file-tree-hardening", isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

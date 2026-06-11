@@ -4,10 +4,14 @@ import Foundation
 public struct FileTreeSnapshot: Equatable, Sendable {
     public var root: URL
     public var nodes: [FileTreeNode]
+    public var isTruncated: Bool
+    public var nodeLimit: Int?
 
-    public init(root: URL, nodes: [FileTreeNode]) {
+    public init(root: URL, nodes: [FileTreeNode], isTruncated: Bool = false, nodeLimit: Int? = nil) {
         self.root = root
         self.nodes = nodes
+        self.isTruncated = isTruncated
+        self.nodeLimit = nodeLimit
     }
 }
 
@@ -24,10 +28,14 @@ public struct FileTreeScanner: Sendable {
         ".cache"
     ]
 
-    private let batchSize: Int
+    public static let defaultNodeLimit = 50_000
 
-    public init(batchSize: Int = 32) {
-        self.batchSize = batchSize
+    private let batchSize: Int
+    private let nodeLimit: Int
+
+    public init(batchSize: Int = 512, nodeLimit: Int = FileTreeScanner.defaultNodeLimit) {
+        self.batchSize = max(1, batchSize)
+        self.nodeLimit = max(1, nodeLimit)
     }
 
     public func scan(
@@ -39,20 +47,30 @@ public struct FileTreeScanner: Sendable {
     ) async throws {
         let root = root.standardizedFileURL
         var queue: [URL] = [root]
+        var queueIndex = 0
         var nodes: [FileTreeNode] = []
+        nodes.reserveCapacity(min(nodeLimit, batchSize * 4))
         var processedSinceSnapshot = 0
+        var isTruncated = false
 
-        while !queue.isEmpty {
+        while queueIndex < queue.count {
             if processedSinceSnapshot >= batchSize {
                 try checkCancellation(cancellation)
-                onSnapshot(FileTreeSnapshot(root: root, nodes: nodes))
+                onSnapshot(FileTreeSnapshot(root: root, nodes: nodes, isTruncated: false, nodeLimit: nodeLimit))
                 processedSinceSnapshot = 0
             }
 
-            let directory = queue.removeFirst()
+            let directory = queue[queueIndex]
+            queueIndex += 1
             let children = try directoryChildren(at: directory)
 
             for child in children {
+                if nodes.count >= nodeLimit {
+                    isTruncated = true
+                    queue.removeAll(keepingCapacity: false)
+                    break
+                }
+
                 let values = try child.resourceValues(forKeys: FileTreeScanner.resourceKeys)
                 let name = values.name ?? child.lastPathComponent
                 let isIgnored = ignoreList.contains(name)
@@ -82,7 +100,7 @@ public struct FileTreeScanner: Sendable {
         }
 
         try checkCancellation(cancellation)
-        onSnapshot(FileTreeSnapshot(root: root, nodes: nodes))
+        onSnapshot(FileTreeSnapshot(root: root, nodes: nodes, isTruncated: isTruncated, nodeLimit: nodeLimit))
     }
 
     private func directoryChildren(at url: URL) throws -> [URL] {

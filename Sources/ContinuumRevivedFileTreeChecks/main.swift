@@ -99,6 +99,46 @@ try await FileTreeScanner(batchSize: 2).scan(root: scratch, ignoreList: FileTree
 }
 try await batchedRecorder.waitForSnapshotCount(2, timeoutNanoseconds: 2_000_000_000)
 
+let largeRoot = scratch.appendingPathComponent("large-50k", isDirectory: true)
+try makeDirectory(largeRoot)
+let syntheticDirectories = 250
+let syntheticFilesPerDirectory = 200
+for directoryIndex in 0..<syntheticDirectories {
+    let directory = largeRoot.appendingPathComponent(String(format: "dir-%03d", directoryIndex), isDirectory: true)
+    try makeDirectory(directory)
+    for fileIndex in 0..<syntheticFilesPerDirectory {
+        try makeFile(directory.appendingPathComponent(String(format: "file-%03d.txt", fileIndex)))
+    }
+}
+let generatedVisibleNodes = syntheticDirectories + (syntheticDirectories * syntheticFilesPerDirectory)
+let cap = 10_000
+let largeRecorder = SnapshotRecorder()
+let largeStart = ContinuousClock.now
+try await FileTreeScanner(batchSize: 5_000, nodeLimit: cap).scan(root: largeRoot, ignoreList: FileTreeScanner.defaultIgnoredNames) { snapshot in
+    Task { await largeRecorder.append(snapshot) }
+}
+try await largeRecorder.waitForSnapshot(timeoutNanoseconds: 10_000_000_000)
+let largeElapsed = largeStart.duration(to: ContinuousClock.now)
+let largeElapsedMs = Double(largeElapsed.components.seconds) * 1000.0 + Double(largeElapsed.components.attoseconds) / 1_000_000_000_000_000.0
+let largeFinal = try await largeRecorder.lastSnapshot() ?? { throw CheckError("large scanner produced no snapshot") }()
+let largeSnapshotCount = await largeRecorder.snapshotCount()
+let largeTable: [String: Any] = [
+    "generatedVisibleNodes": generatedVisibleNodes,
+    "nodeBudget": cap,
+    "emittedNodes": largeFinal.nodes.count,
+    "snapshotCount": largeSnapshotCount,
+    "capHit": largeFinal.isTruncated,
+    "nodeLimit": largeFinal.nodeLimit ?? -1,
+    "elapsedMs": Int(largeElapsedMs.rounded())
+]
+print("FileTreeChecks largeScanCap table: \(largeTable)")
+expect(generatedVisibleNodes >= 50_000, "large scanner fixture should synthesize at least 50k visible nodes")
+expect(largeFinal.nodes.count == cap, "large scanner should stop exactly at configured cap")
+expect(largeFinal.isTruncated, "large scanner should report truncation honestly")
+expect(largeFinal.nodeLimit == cap, "large scanner should include node limit in final snapshot")
+expect(largeSnapshotCount <= 4, "large scanner should bound snapshot count for capped scan")
+expect(largeElapsedMs < 10_000, "large capped scanner should finish under 10s")
+
 let viewModel = await MainActor.run { FileTreeViewModel(scanner: scanner) }
 let observed = SnapshotRecorder()
 await MainActor.run {
@@ -210,6 +250,10 @@ actor SnapshotRecorder {
 
     func lastSnapshot() -> FileTreeSnapshot? {
         snapshots.last
+    }
+
+    func snapshotCount() -> Int {
+        snapshots.count
     }
 
     func waitForGitStatus(
