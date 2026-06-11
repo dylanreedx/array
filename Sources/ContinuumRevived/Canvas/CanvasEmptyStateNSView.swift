@@ -11,15 +11,22 @@ struct CanvasEmptyStateActions {
 @MainActor
 final class CanvasEmptyStateNSView: NSView {
     var actions: CanvasEmptyStateActions?
+    var projectPath: String? {
+        didSet { projectPathLabel.stringValue = projectPath ?? "" }
+    }
 
     private let stack = NSStackView()
+    private let projectPathLabel = NSTextField(labelWithString: "")
 
-    init(actions: CanvasEmptyStateActions?) {
+    init(actions: CanvasEmptyStateActions?, projectPath: String? = nil) {
         self.actions = actions
+        self.projectPath = projectPath
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = true
         wantsLayer = false
+        setAccessibilityIdentifier("ContinuumEmptyState")
         setupStack()
+        projectPathLabel.stringValue = projectPath ?? ""
     }
 
     required init?(coder: NSCoder) {
@@ -52,14 +59,92 @@ final class CanvasEmptyStateNSView: NSView {
     private func setupStack() {
         stack.orientation = .vertical
         stack.alignment = .centerX
-        stack.spacing = 8
+        stack.spacing = 24
         stack.translatesAutoresizingMaskIntoConstraints = true
         addSubview(stack)
 
-        stack.addArrangedSubview(makeButton(title: "Spawn Claude", action: #selector(spawnClaude)))
-        stack.addArrangedSubview(makeButton(title: "Spawn Shell", action: #selector(spawnShell)))
-        stack.addArrangedSubview(makeButton(title: "Spawn Browser", action: #selector(spawnBrowser)))
-        stack.addArrangedSubview(makeButton(title: "Open in Editor", action: #selector(openInEditor)))
+        stack.addArrangedSubview(makeIdentityGroup())
+        stack.addArrangedSubview(makePaletteHint())
+        stack.addArrangedSubview(makeActionGroup())
+        stack.addArrangedSubview(makeFooter())
+    }
+
+    private func makeIdentityGroup() -> NSView {
+        let group = NSStackView()
+        group.orientation = .vertical
+        group.alignment = .centerX
+        group.spacing = 6
+        group.translatesAutoresizingMaskIntoConstraints = false
+
+        let wordmark = NSTextField(labelWithString: "CONTINUUM")
+        wordmark.font = .monospacedSystemFont(ofSize: 22, weight: .semibold)
+        wordmark.textColor = NSColor.white.withAlphaComponent(0.9)
+        wordmark.alignment = .center
+
+        projectPathLabel.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        projectPathLabel.textColor = NSColor.white.withAlphaComponent(0.45)
+        projectPathLabel.alignment = .center
+        projectPathLabel.lineBreakMode = .byTruncatingMiddle
+        projectPathLabel.maximumNumberOfLines = 1
+
+        group.addArrangedSubview(wordmark)
+        group.addArrangedSubview(projectPathLabel)
+        NSLayoutConstraint.activate([
+            group.widthAnchor.constraint(lessThanOrEqualToConstant: 420),
+            projectPathLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 420)
+        ])
+        return group
+    }
+
+    private func makePaletteHint() -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let keycap = NSTextField(labelWithString: "⌘K")
+        keycap.font = .monospacedSystemFont(ofSize: 15, weight: .semibold)
+        keycap.textColor = NSColor.white.withAlphaComponent(0.92)
+        keycap.alignment = .center
+        keycap.wantsLayer = true
+        keycap.layer?.borderColor = NSColor.white.withAlphaComponent(0.35).cgColor
+        keycap.layer?.borderWidth = 1
+        keycap.layer?.cornerRadius = 5
+        keycap.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
+        NSLayoutConstraint.activate([
+            keycap.widthAnchor.constraint(equalToConstant: 42),
+            keycap.heightAnchor.constraint(equalToConstant: 24)
+        ])
+
+        let text = NSTextField(labelWithString: "open the command palette")
+        text.font = .monospacedSystemFont(ofSize: 15, weight: .regular)
+        text.textColor = NSColor.white.withAlphaComponent(0.75)
+
+        row.addArrangedSubview(keycap)
+        row.addArrangedSubview(text)
+        return row
+    }
+
+    private func makeActionGroup() -> NSView {
+        let group = NSStackView()
+        group.orientation = .vertical
+        group.alignment = .centerX
+        group.spacing = 8
+        group.translatesAutoresizingMaskIntoConstraints = false
+        group.addArrangedSubview(makeButton(title: "New Claude Terminal   ⌘1", action: #selector(spawnClaude)))
+        group.addArrangedSubview(makeButton(title: "New Shell Terminal    ⌘2", action: #selector(spawnShell)))
+        group.addArrangedSubview(makeButton(title: "New Browser           ⌘3", action: #selector(spawnBrowser)))
+        group.addArrangedSubview(makeButton(title: "Open in Nvim          ⌘4", action: #selector(openInEditor)))
+        return group
+    }
+
+    private func makeFooter() -> NSView {
+        let footer = NSTextField(labelWithString: "notes, files, and projects live in ⌘K")
+        footer.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        footer.textColor = NSColor.white.withAlphaComponent(0.35)
+        footer.alignment = .center
+        return footer
     }
 
     private func makeButton(title: String, action: Selector) -> NSButton {
@@ -69,11 +154,35 @@ final class CanvasEmptyStateNSView: NSView {
         button.controlSize = .regular
         button.setButtonType(.momentaryPushIn)
         button.translatesAutoresizingMaskIntoConstraints = false
+        button.alignment = .left
         NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 160),
-            button.heightAnchor.constraint(equalToConstant: 28)
+            button.widthAnchor.constraint(equalToConstant: 260),
+            button.heightAnchor.constraint(equalToConstant: 30)
         ])
         return button
+    }
+
+    struct QASnapshot: Equatable {
+        let accessibilityIdentifier: String?
+        let buttonTitles: [String]
+        let text: [String]
+    }
+
+    func qaSnapshot() -> QASnapshot {
+        QASnapshot(
+            accessibilityIdentifier: accessibilityIdentifier(),
+            buttonTitles: collectSubviews(of: self, as: NSButton.self).map(\.title),
+            text: collectSubviews(of: self, as: NSTextField.self).map(\.stringValue)
+        )
+    }
+
+    private func collectSubviews<T: NSView>(of view: NSView, as type: T.Type) -> [T] {
+        view.subviews.flatMap { subview -> [T] in
+            var matches: [T] = []
+            if let typed = subview as? T { matches.append(typed) }
+            matches.append(contentsOf: collectSubviews(of: subview, as: type))
+            return matches
+        }
     }
 
     @objc private func spawnClaude() {

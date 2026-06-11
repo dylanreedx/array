@@ -281,7 +281,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 openInEditor: { [weak self] in
                     self?.openProjectInEditor()
                 }
-            ))
+            ), projectPath: project.rootPath)
 
             installHotkeyMonitor()
             installTileFocusMonitor()
@@ -2395,30 +2395,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         scheduleInitialCapture(capture)
         var emptyStateWasInstalled = false
         var emptyStateWasRemoved = false
+        var emptyStateContentMatched = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             guard let canvasView = self.canvasView else {
                 capture("empty-canvas-skipped", 0.4, "canvas unavailable")
                 return
             }
+            let snapshot = canvasView.emptyStateQASnapshot()
+            let text = snapshot?.text.joined(separator: " | ") ?? ""
+            let buttons = snapshot?.buttonTitles ?? []
             emptyStateWasInstalled = canvasView.canvasState.tiles.isEmpty && canvasView.emptyStateInstalled
+            emptyStateContentMatched = snapshot?.accessibilityIdentifier == "ContinuumEmptyState"
+                && buttons.count >= 4
+                && text.contains("CONTINUUM")
+                && text.contains("⌘K")
+                && text.contains("open the command palette")
+                && text.contains("notes, files, and projects live in ⌘K")
+                && buttons.contains("New Claude Terminal   ⌘1")
+                && buttons.contains("New Shell Terminal    ⌘2")
+                && buttons.contains("New Browser           ⌘3")
+                && buttons.contains("Open in Nvim          ⌘4")
             capture(
                 "empty-canvas-visible",
                 0.4,
-                "tiles \(canvasView.canvasState.tiles.count), empty state \(canvasView.emptyStateInstalled)"
+                "tiles \(canvasView.canvasState.tiles.count), empty state \(canvasView.emptyStateInstalled), ax \(snapshot?.accessibilityIdentifier ?? "nil"), buttons \(buttons), contentMatched \(emptyStateContentMatched)"
             )
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
             let notes = self.spawnTerminalForQA(profileId: "shell")
+            capture("empty-canvas-spawn-requested", 0.6, notes)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
             emptyStateWasRemoved = self.canvasView?.canvasState.tiles.isEmpty == false
                 && self.canvasView?.emptyStateInstalled == false
-            capture("empty-canvas-spawned-shell", 0.6, notes)
+            capture("empty-canvas-spawned-shell", 0.9, "empty state removed \(emptyStateWasRemoved)")
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             self.recordLaunchTime()
-            capture("empty-canvas-final-state", 1.0, nil)
+            capture("empty-canvas-final-state", 1.2, nil)
             qaCapture?.writeManifest()
             self.qaPerf?.writeReport()
-            self.smokeTestExitCode = emptyStateWasInstalled && emptyStateWasRemoved ? 0 : 2
+            self.smokeTestExitCode = emptyStateWasInstalled && emptyStateContentMatched && emptyStateWasRemoved ? 0 : 2
             window.performClose(nil)
         }
     }

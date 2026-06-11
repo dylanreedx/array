@@ -19,6 +19,7 @@ final class CanvasNSView: NSView {
     private var tileViews: [UUID: TileNSView] = [:]
     private var emptyStateView: CanvasEmptyStateNSView?
     private var emptyStateActions: CanvasEmptyStateActions?
+    private var emptyStateProjectPath: String?
     private(set) var emptyStateInstalled = false
 
     private var spaceHeld = false
@@ -66,9 +67,11 @@ final class CanvasNSView: NSView {
         reorderTileSubviewsByZIndex()
     }
 
-    func configureEmptyStateActions(_ actions: CanvasEmptyStateActions) {
+    func configureEmptyStateActions(_ actions: CanvasEmptyStateActions, projectPath: String? = nil) {
         emptyStateActions = actions
+        emptyStateProjectPath = projectPath
         emptyStateView?.actions = actions
+        emptyStateView?.projectPath = projectPath
     }
 
     /// Returns the NSView currently registered for `tileId`, or nil. Intended
@@ -146,6 +149,10 @@ final class CanvasNSView: NSView {
 
     var viewport: CanvasViewport { canvasState.viewport }
 
+    func emptyStateQASnapshot() -> CanvasEmptyStateNSView.QASnapshot? {
+        emptyStateView?.qaSnapshot()
+    }
+
     private func reorderTileSubviewsByZIndex() {
         let ordering = NSMutableDictionary()
         for (index, tile) in canvasState.tiles.enumerated() {
@@ -202,7 +209,7 @@ final class CanvasNSView: NSView {
 
     private func installEmptyStateIfNeeded() {
         guard emptyStateView == nil else { return }
-        let view = CanvasEmptyStateNSView(actions: emptyStateActions)
+        let view = CanvasEmptyStateNSView(actions: emptyStateActions, projectPath: emptyStateProjectPath)
         emptyStateView = view
         addSubview(view, positioned: .above, relativeTo: nil)
         emptyStateInstalled = true
