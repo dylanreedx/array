@@ -131,6 +131,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--viewport-sanitize-check") {
+            do {
+                let artifact = try AppDelegate.runViewportSanitizeSelfCheck()
+                print("ContinuumRevivedViewportSanitizeChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         let executablePath = CommandLine.arguments.first ?? "continuum-revived"
         let ghosttyInitStatus = executablePath.withCString { executablePointer in
             var argv: [UnsafeMutablePointer<CChar>?] = [
@@ -223,8 +234,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 : []
 
             var canvasState: CanvasState
-            if let existing = try projectStore.tryLoadCanvas() {
-                canvasState = existing
+            if let existing = try projectStore.tryLoadCanvasWithSanitizationResult() {
+                canvasState = existing.canvas
+                if existing.recenteredViewport {
+                    for note in existing.notes {
+                        fputs("viewport sanitation: \(note)\n", stderr)
+                    }
+                }
             } else {
                 canvasState = Self.defaultCanvasState()
             }
@@ -2438,6 +2454,149 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.smokeTestExitCode = emptyStateWasInstalled && emptyStateContentMatched && emptyStateWasRemoved ? 0 : 2
             window.performClose(nil)
         }
+    }
+
+    static func runViewportSanitizeSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func allFinite(_ canvas: CanvasState) -> Bool {
+            canvas.viewport.x.isFinite && canvas.viewport.y.isFinite && canvas.viewport.zoom.isFinite &&
+                canvas.tiles.allSatisfy { tile in
+                    tile.frame.x.isFinite && tile.frame.y.isFinite && tile.frame.width.isFinite && tile.frame.height.isFinite
+                }
+        }
+
+        let fileManager = FileManager.default
+        let environment = ProcessInfo.processInfo.environment
+        let projectRoot = environment["CONTINUUM_PROJECT_ROOT"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? fileManager.temporaryDirectory.appendingPathComponent("continuum-viewport-sanitize-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = environment["CONTINUUM_APP_SUPPORT"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? fileManager.temporaryDirectory.appendingPathComponent("continuum-viewport-sanitize-appsupport-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: appSupport, withIntermediateDirectories: true)
+
+        let store = ProjectStore(projectRoot: projectRoot)
+        let now = Date()
+        let project = Project(
+            id: UUID(uuidString: "77777777-7777-7777-7777-777777777777")!,
+            name: "viewport-sanitize-check",
+            rootPath: projectRoot.path,
+            createdAt: now,
+            updatedAt: now,
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning
+            )
+        )
+        try store.saveProject(project)
+
+        let tileId = UUID(uuidString: "88888888-8888-8888-8888-888888888888")!
+        let runtimeId = UUID(uuidString: "99999999-9999-9999-9999-999999999999")!
+        let fixture = """
+        {
+          "schemaVersion": 1,
+          "viewport": { "x": 1000000000, "y": -1000000000, "zoom": "Infinity" },
+          "tiles": [
+            {
+              "id": "\(tileId.uuidString)",
+              "kind": "terminal",
+              "title": "Pathological terminal",
+              "frame": { "x": "NaN", "y": 80, "width": "-Infinity", "height": 0 },
+              "zIndex": 7,
+              "runtimeRef": { "kind": "terminalSession", "id": "\(runtimeId.uuidString)" },
+              "metadata": { "launchProfileId": "shell", "projectRelativeCwd": "." }
+            },
+            {
+              "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+              "kind": "note",
+              "title": "Visible anchor",
+              "frame": { "x": 120, "y": 140, "width": 320, "height": 220 },
+              "zIndex": 8,
+              "metadata": { "noteId": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff" }
+            }
+          ],
+          "groups": [],
+          "lastActiveTileId": "\(tileId.uuidString)"
+        }
+        """
+        try fileManager.createDirectory(at: store.layout.stateRoot, withIntermediateDirectories: true)
+        try Data(fixture.utf8).write(to: store.layout.canvasFile, options: .atomic)
+
+        let result = try store.loadCanvasWithSanitizationResult()
+        try expect(result.changed, "pathological persisted canvas should be changed")
+        try expect(result.recenteredViewport, "disjoint persisted viewport should be recentered")
+        try expect(allFinite(result.canvas), "sanitized canvas should contain only finite viewport/frame values")
+        try expect(CanvasEngine.defaultZoomRange.contains(result.canvas.viewport.zoom), "sanitized zoom should be clamped to default range")
+        try expect(result.canvas.tiles.count == 2, "sanitizer should preserve all tiles")
+        try expect(result.canvas.tiles[0].runtimeRef == RuntimeRef(kind: .terminalSession, id: runtimeId), "sanitizer should preserve runtime refs")
+        try expect(result.canvas.tiles[0].metadata.launchProfileId == "shell", "sanitizer should preserve metadata")
+        for tile in result.canvas.tiles {
+            let minimum = CanvasEngine.minimumFrame(for: tile.kind)
+            try expect(tile.frame.width >= minimum.width && tile.frame.height >= minimum.height, "tile \(tile.id) dimensions should meet minimum")
+        }
+        let viewportSize = CGSize(width: 1280, height: 800)
+        let screenFrames = result.canvas.tiles.map { CanvasEngine.tileScreenFrame($0.frame, viewport: result.canvas.viewport) }
+        let visibleScreen = CGRect(x: 0, y: 0, width: viewportSize.width, height: viewportSize.height)
+        let visibleIntersections = screenFrames.map { visibleScreen.intersects($0) }
+        try expect(visibleIntersections.contains(true), "at least one tile should be visible after sanitation")
+
+        for note in result.notes where note.contains("recentered") {
+            fputs("viewport sanitation: \(note)\n", stderr)
+        }
+        try store.saveCanvas(result.canvas)
+        let persisted = try store.loadCanvas()
+        try expect(allFinite(persisted), "persisted sanitized canvas should remain finite after reload")
+        try expect(CanvasEngine.defaultZoomRange.contains(persisted.viewport.zoom), "persisted sanitized zoom should remain clamped")
+        try expect(persisted.tiles.map(\.id) == result.canvas.tiles.map(\.id), "persisted sanitized output should preserve tile ids")
+
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("viewport-sanitize", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "check": "viewport-sanitize",
+            "projectRoot": projectRoot.path,
+            "appSupport": appSupport.path,
+            "canvasPath": store.layout.canvasFile.path,
+            "changed": result.changed,
+            "recenteredViewport": result.recenteredViewport,
+            "notes": result.notes,
+            "sanitizedViewport": [
+                "x": result.canvas.viewport.x,
+                "y": result.canvas.viewport.y,
+                "zoom": result.canvas.viewport.zoom,
+            ],
+            "tileFrames": result.canvas.tiles.map { tile in
+                [
+                    "id": tile.id.uuidString,
+                    "kind": tile.kind.rawValue,
+                    "x": tile.frame.x,
+                    "y": tile.frame.y,
+                    "width": tile.frame.width,
+                    "height": tile.frame.height,
+                ]
+            },
+            "visibleIntersections": visibleIntersections,
+            "runtimeRefPreserved": result.canvas.tiles[0].runtimeRef == RuntimeRef(kind: .terminalSession, id: runtimeId),
+            "metadataPreserved": result.canvas.tiles[0].metadata.launchProfileId == "shell",
+            "persistedFinite": allFinite(persisted),
+        ]
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
     }
 
     static func runPaletteBrowserSpawnSelfCheck() throws -> URL {

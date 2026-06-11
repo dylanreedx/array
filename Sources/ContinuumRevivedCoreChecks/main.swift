@@ -1361,4 +1361,136 @@ do {
     expect(missingSnapshot.finalMarkdown == nil, "RunArtifactsReader tolerates missing final.md")
 }
 
+// MARK: - Canvas sanitation
+
+do {
+    let tileId = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+    let bad = CanvasState(
+        viewport: CanvasViewport(x: Double.nan, y: Double.infinity, zoom: 0),
+        tiles: [
+            Tile(
+                id: tileId,
+                kind: .terminal,
+                title: "Bad frame",
+                frame: TileFrame(x: Double.nan, y: -Double.infinity, width: -1, height: 0),
+                zIndex: 0,
+                runtimeRef: RuntimeRef(kind: .terminalSession, id: UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!),
+                metadata: TileMetadata(launchProfileId: "shell", projectRelativeCwd: ".")
+            )
+        ],
+        groups: [],
+        lastActiveTileId: tileId
+    )
+    let result = CanvasEngine.sanitizePersistedCanvas(bad, visibleSize: CGSize(width: 800, height: 600))
+    expect(result.changed, "sanitizing pathological canvas should report changed")
+    expect(result.canvas.viewport.x.isFinite, "sanitized viewport x finite")
+    expect(result.canvas.viewport.y.isFinite, "sanitized viewport y finite")
+    expect(result.canvas.viewport.zoom.isFinite, "sanitized viewport zoom finite")
+    expect(CanvasEngine.defaultZoomRange.contains(result.canvas.viewport.zoom), "sanitized zoom within default range")
+    let frame = result.canvas.tiles[0].frame
+    let minFrame = CanvasEngine.minimumFrame(for: .terminal)
+    expect(frame.x.isFinite && frame.y.isFinite, "sanitized tile origin finite")
+    expect(frame.width >= minFrame.width && frame.height >= minFrame.height, "sanitized tile dimensions meet minimum")
+    expect(result.canvas.tiles[0].runtimeRef == bad.tiles[0].runtimeRef, "sanitizer preserves runtime refs")
+    expect(result.canvas.tiles[0].metadata == bad.tiles[0].metadata, "sanitizer preserves metadata")
+}
+
+do {
+    let tileId = UUID(uuidString: "cccccccc-cccc-cccc-cccc-cccccccccccc")!
+    let canvas = CanvasState(
+        viewport: CanvasViewport(x: 1_000_000_000, y: -1_000_000_000, zoom: 1),
+        tiles: [
+            Tile(
+                id: tileId,
+                kind: .note,
+                title: "Visible after recenter",
+                frame: TileFrame(x: 80, y: 90, width: 300, height: 220),
+                zIndex: 0,
+                runtimeRef: nil,
+                metadata: TileMetadata(noteId: UUID(uuidString: "dddddddd-dddd-dddd-dddd-dddddddddddd")!)
+            )
+        ],
+        groups: [],
+        lastActiveTileId: tileId
+    )
+    let result = CanvasEngine.sanitizePersistedCanvas(canvas, visibleSize: CGSize(width: 800, height: 600))
+    expect(result.recenteredViewport, "disjoint viewport should be recentered")
+    let visible = CanvasEngine.visibleWorldRect(viewport: result.canvas.viewport, visibleSize: CGSize(width: 800, height: 600))
+    let screenFrame = CanvasEngine.tileScreenFrame(result.canvas.tiles[0].frame, viewport: result.canvas.viewport)
+    expect(visible.intersects(CGRect(x: 80, y: 90, width: 300, height: 220)), "recentered visible world rect intersects tile")
+    expect(screenFrame.origin.x.isFinite && screenFrame.origin.y.isFinite && screenFrame.width.isFinite && screenFrame.height.isFinite, "screen frame after sanitation finite")
+    expect(CGRect(x: 0, y: 0, width: 800, height: 600).intersects(screenFrame), "tile screen frame intersects viewport after recenter")
+}
+
+do {
+    let canvas = CanvasState(
+        viewport: CanvasViewport(x: Double.nan, y: Double.infinity, zoom: Double.nan),
+        tiles: [],
+        groups: [],
+        lastActiveTileId: nil
+    )
+    let result = CanvasEngine.sanitizePersistedCanvas(canvas, visibleSize: CGSize(width: 800, height: 600))
+    expect(result.changed, "empty bad canvas should be sanitized")
+    expect(!result.recenteredViewport, "empty canvas should not report recenter")
+    expect(result.canvas.viewport == CanvasViewport(x: 0, y: 0, zoom: 1), "empty bad viewport resets to sane default")
+}
+
+do {
+    let tileId = UUID(uuidString: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")!
+    let canvas = CanvasState(
+        viewport: CanvasViewport(x: 10, y: 20, zoom: 8),
+        tiles: [
+            Tile(
+                id: tileId,
+                kind: .browser,
+                title: "Clamp zoom only",
+                frame: TileFrame(x: 30, y: 40, width: 1000, height: 700),
+                zIndex: 3,
+                runtimeRef: RuntimeRef(kind: .browserTile, id: UUID(uuidString: "ffffffff-ffff-ffff-ffff-ffffffffffff")!),
+                metadata: TileMetadata(url: "https://example.com")
+            )
+        ],
+        groups: [],
+        lastActiveTileId: tileId
+    )
+    let result = CanvasEngine.sanitizePersistedCanvas(canvas, visibleSize: CGSize(width: 1600, height: 1200))
+    expect(result.changed, "out-of-range zoom should be changed")
+    expect(result.canvas.viewport.zoom == CanvasEngine.defaultZoomRange.upperBound, "zoom clamps to upper bound")
+    expect(result.canvas.tiles[0] == canvas.tiles[0], "valid tile remains unchanged")
+}
+
+do {
+    let tileId = UUID(uuidString: "99999999-9999-9999-9999-999999999999")!
+    let canvas = CanvasState(
+        viewport: CanvasViewport(x: Double.greatestFiniteMagnitude, y: -Double.greatestFiniteMagnitude, zoom: 1),
+        tiles: [
+            Tile(
+                id: tileId,
+                kind: .terminal,
+                title: "Huge finite frame",
+                frame: TileFrame(
+                    x: Double.greatestFiniteMagnitude,
+                    y: -Double.greatestFiniteMagnitude,
+                    width: Double.greatestFiniteMagnitude,
+                    height: Double.greatestFiniteMagnitude
+                ),
+                zIndex: 0,
+                runtimeRef: nil,
+                metadata: TileMetadata()
+            )
+        ],
+        groups: [],
+        lastActiveTileId: tileId
+    )
+    let result = CanvasEngine.sanitizePersistedCanvas(canvas, visibleSize: CGSize(width: 800, height: 600))
+    expect(result.changed, "huge finite persisted geometry should be sanitized")
+    expect(result.canvas.viewport.x.isFinite && result.canvas.viewport.y.isFinite && result.canvas.viewport.zoom.isFinite, "huge finite geometry returns finite viewport")
+    let frame = result.canvas.tiles[0].frame
+    expect(frame.x.isFinite && frame.y.isFinite && frame.width.isFinite && frame.height.isFinite, "huge finite geometry returns finite tile frame")
+    expect(abs(frame.x) <= 1_000_000 && abs(frame.y) <= 1_000_000, "huge finite coordinates are capped")
+    expect(frame.width <= 20_000 && frame.height <= 20_000, "huge finite dimensions are capped")
+    let screenFrame = CanvasEngine.tileScreenFrame(frame, viewport: result.canvas.viewport)
+    expect(screenFrame.origin.x.isFinite && screenFrame.origin.y.isFinite && screenFrame.width.isFinite && screenFrame.height.isFinite, "huge finite geometry produces finite screen frame")
+}
+
 print("ContinuumRevivedCoreChecks passed")

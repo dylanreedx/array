@@ -99,6 +99,120 @@ public enum CanvasEngine {
         }
     }
 
+
+    // MARK: - Persisted canvas sanitation
+
+    public struct CanvasSanitizationResult: Equatable, Sendable {
+        public var canvas: CanvasState
+        public var changed: Bool
+        public var recenteredViewport: Bool
+        public var notes: [String]
+
+        public init(canvas: CanvasState, changed: Bool, recenteredViewport: Bool, notes: [String]) {
+            self.canvas = canvas
+            self.changed = changed
+            self.recenteredViewport = recenteredViewport
+            self.notes = notes
+        }
+    }
+
+    public static func sanitizePersistedCanvas(
+        _ canvas: CanvasState,
+        visibleSize: CGSize = CGSize(width: 1280, height: 800),
+        range: ClosedRange<Double> = defaultZoomRange
+    ) -> CanvasSanitizationResult {
+        var sanitized = canvas
+        var changed = false
+        var recentered = false
+        var notes: [String] = []
+
+        let originalViewport = sanitized.viewport
+        sanitized.viewport.zoom = sanitizedFiniteZoom(sanitized.viewport.zoom, range: range)
+        sanitized.viewport.x = sanitizedFiniteCoordinate(sanitized.viewport.x, fallback: 0)
+        sanitized.viewport.y = sanitizedFiniteCoordinate(sanitized.viewport.y, fallback: 0)
+        if sanitized.viewport != originalViewport {
+            changed = true
+            notes.append("sanitized persisted viewport")
+        }
+
+        sanitized.tiles = sanitized.tiles.map { tile in
+            var next = tile
+            let originalFrame = next.frame
+            next.frame = sanitizedFrame(next.frame, kind: next.kind)
+            if next.frame != originalFrame {
+                changed = true
+                notes.append("sanitized persisted tile frame \(next.id.uuidString)")
+            }
+            return next
+        }
+
+        if let bounds = finiteTileBounds(sanitized.tiles), !visibleWorldRect(viewport: sanitized.viewport, visibleSize: visibleSize, range: range).intersects(bounds) {
+            let old = sanitized.viewport
+            sanitized.viewport = fit(worldRect: bounds, viewportSize: visibleSize, range: range)
+            if sanitized.viewport != old {
+                changed = true
+                recentered = true
+                notes.append("recentered persisted viewport to visible tile bounds")
+            }
+        }
+
+        return CanvasSanitizationResult(canvas: sanitized, changed: changed, recenteredViewport: recentered, notes: notes)
+    }
+
+    public static func visibleWorldRect(
+        viewport: CanvasViewport,
+        visibleSize: CGSize,
+        range: ClosedRange<Double> = defaultZoomRange
+    ) -> CGRect {
+        let zoom = sanitizedFiniteZoom(viewport.zoom, range: range)
+        let x = sanitizedFiniteCoordinate(viewport.x, fallback: 0)
+        let y = sanitizedFiniteCoordinate(viewport.y, fallback: 0)
+        return CGRect(
+            x: x,
+            y: y,
+            width: max(Double(visibleSize.width), 1) / zoom,
+            height: max(Double(visibleSize.height), 1) / zoom
+        )
+    }
+
+    public static func finiteTileBounds(_ tiles: [Tile]) -> CGRect? {
+        let rects = tiles.map { rect(for: sanitizedFrame($0.frame, kind: $0.kind)) }
+            .filter { rect in
+                rect.origin.x.isFinite && rect.origin.y.isFinite && rect.width.isFinite && rect.height.isFinite && rect.width > 0 && rect.height > 0
+            }
+        guard var bounds = rects.first else { return nil }
+        for rect in rects.dropFirst() {
+            bounds = bounds.union(rect)
+        }
+        return bounds
+    }
+
+    private static func sanitizedFrame(_ frame: TileFrame, kind: TileKind) -> TileFrame {
+        let defaults = defaultFrame(for: kind)
+        let minimum = minimumFrame(for: kind)
+        let width = frame.width.isFinite && frame.width > 0 ? min(frame.width, persistedDimensionLimit) : Double(defaults.width)
+        let height = frame.height.isFinite && frame.height > 0 ? min(frame.height, persistedDimensionLimit) : Double(defaults.height)
+        return TileFrame(
+            x: sanitizedFiniteCoordinate(frame.x, fallback: 0),
+            y: sanitizedFiniteCoordinate(frame.y, fallback: 0),
+            width: max(width, Double(minimum.width)),
+            height: max(height, Double(minimum.height))
+        )
+    }
+
+    private static let persistedCoordinateLimit = 1_000_000.0
+    private static let persistedDimensionLimit = 20_000.0
+
+    private static func sanitizedFiniteZoom(_ zoom: Double, range: ClosedRange<Double>) -> Double {
+        guard zoom.isFinite, zoom > 0 else { return 1 }
+        return clamp(zoom, to: range)
+    }
+
+    private static func sanitizedFiniteCoordinate(_ value: Double, fallback: Double) -> Double {
+        guard value.isFinite else { return fallback }
+        return clamp(value, to: -persistedCoordinateLimit ... persistedCoordinateLimit)
+    }
+
     // MARK: - Spawn placement
 
     /// First-fit placement: scan candidate origins inside the visible viewport

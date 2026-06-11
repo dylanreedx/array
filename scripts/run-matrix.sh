@@ -44,6 +44,7 @@ run_app_check .build/debug/continuum-revived --note-click-focus-check
 run_app_check .build/debug/continuum-revived --browser-restore-state-check
 run_app_check .build/debug/continuum-revived --note-file-tile-spawn-check
 run_app_check .build/debug/continuum-revived --file-tree-boot-persistence-check
+run_app_check .build/debug/continuum-revived --viewport-sanitize-check
 run git diff --check
 
 printf '\nMatrix passed.\n'

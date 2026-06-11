@@ -104,11 +104,22 @@ public struct ProjectStore: Sendable {
     public func loadCanvas() throws -> CanvasState {
         let canvas: CanvasState = try writer.read(at: layout.canvasFile)
         try checkSchema(canvas.schemaVersion, supported: CanvasState.currentSchemaVersion, at: layout.canvasFile)
-        return canvas
+        return CanvasEngine.sanitizePersistedCanvas(canvas).canvas
+    }
+
+    public func loadCanvasWithSanitizationResult() throws -> CanvasEngine.CanvasSanitizationResult {
+        let canvas: CanvasState = try writer.read(at: layout.canvasFile)
+        try checkSchema(canvas.schemaVersion, supported: CanvasState.currentSchemaVersion, at: layout.canvasFile)
+        return CanvasEngine.sanitizePersistedCanvas(canvas)
     }
 
     public func tryLoadCanvas() throws -> CanvasState? {
         do { return try loadCanvas() }
+        catch AtomicWriterError.noValidBackup { return nil }
+    }
+
+    public func tryLoadCanvasWithSanitizationResult() throws -> CanvasEngine.CanvasSanitizationResult? {
+        do { return try loadCanvasWithSanitizationResult() }
         catch AtomicWriterError.noValidBackup { return nil }
     }
 
