@@ -35,8 +35,9 @@ anyway. Vision: `docs/20-product-vision.md`. Backlog: Linear, team
    artifact paths (`qa-runs/<id>/`, screenshots for visual work), and a
    PENDING list for anything you could not verify (e.g. needs a human
    mouse/manual test).
-6. **Hand off**: move the ticket to *In Review*. Only Dylan or a designated
-   reviewer agent moves tickets to *Done*.
+6. **Hand off**: add the `needs-review` label and leave the ticket *In
+   Progress* (the team has no In Review state). Only Dylan or a designated
+   reviewer agent moves tickets to *Done* and removes the label.
 
 ## Honesty rules (non-negotiable)
 
@@ -85,7 +86,8 @@ Assignment: <epic name or ticket IDs>.
 
 Follow the loop in docs/21 exactly: claim → implement on main →
 verify (full matrix + qa/run-autonomous.sh --scope changed) →
-evidence comment with real output → In Review. No ticket, no code.
+evidence comment with real output → add needs-review label. No
+ticket, no code.
 One ticket at a time. Respect Scope; propose, don't expand.
 
 Stop conditions and honesty rules are in docs/21. PENDING markers
