@@ -47,6 +47,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--palette-browser-spawn-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runPaletteBrowserSpawnSelfCheck()
+                print("ContinuumRevivedPaletteBrowserSpawnChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zindex-relaunch-hit-test-check") {
             do {
                 _ = NSApplication.shared
@@ -814,8 +826,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func spawnBrowserDefault() {
+        spawnBrowserFromPalette(url: nil)
+    }
+
+    private func spawnBrowserFromPalette(url: String?) {
         guard let spawner = tileSpawner else { return }
-        switch spawner.spawnBrowser() {
+        switch spawner.spawnBrowser(url: url) {
         case let .spawned(runtime):
             wireContentProcessTerminationHandler(runtime)
             browserRuntimes.append(runtime)
@@ -834,9 +850,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         switch action {
         case .newNote:
             spawnNoteFromPalette()
-        case .newBrowser, .openURL:
-            // CON-11 adds the pure palette actions; CON-12 wires them to TileSpawner.
-            break
+        case .newBrowser:
+            spawnBrowserDefault()
+        case let .openURL(url):
+            spawnBrowserFromPalette(url: url)
         case .openFile:
             openFileFromPalette()
         case .openFileTree:
@@ -2404,6 +2421,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.smokeTestExitCode = emptyStateWasInstalled && emptyStateWasRemoved ? 0 : 2
             window.performClose(nil)
         }
+    }
+
+    static func runPaletteBrowserSpawnSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-palette-browser-spawn-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        let now = Date()
+        let project = Project(
+            id: UUID(),
+            name: "palette-browser-spawn-check",
+            rootPath: tempRoot.path,
+            createdAt: now,
+            updatedAt: now,
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning
+            )
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        canvas.frame = CGRect(x: 0, y: 0, width: 2400, height: 1600)
+        let browserEngine = BrowserEngineContext()
+        let delegate = AppDelegate()
+        delegate.canvasView = canvas
+        delegate.browserEngine = browserEngine
+        delegate.projectStore = store
+        delegate.activeProject = project
+        delegate.tileSpawner = TileSpawner(
+            canvasView: canvas,
+            ghostty: nil,
+            browserEngine: browserEngine,
+            projectStore: store,
+            project: project
+        )
+        defer {
+            delegate.browserRuntimes.forEach { $0.terminate(policy: .requestClose) }
+            browserEngine.shutdown()
+        }
+
+        let explicitURL = "https://example.com/from-palette"
+        delegate.performPaletteAction(.newBrowser)
+        delegate.performPaletteAction(.openURL(explicitURL))
+
+        let browserTiles = canvas.canvasState.tiles.filter { $0.kind == .browser }
+        try expect(browserTiles.count == 2, "expected 2 browser tiles, got \(browserTiles.count)")
+        try expect(delegate.browserRuntimes.count == 2, "expected 2 browser runtimes, got \(delegate.browserRuntimes.count)")
+        try expect(browserTiles.map { $0.metadata.url } == ["http://localhost:3000", explicitURL], "unexpected browser tile URLs: \(browserTiles.map { $0.metadata.url ?? "nil" })")
+        try expect(delegate.browserRuntimes.map(\.url) == ["http://localhost:3000", explicitURL], "unexpected runtime URLs: \(delegate.browserRuntimes.map(\.url))")
+        let persisted = try store.loadBrowserState().tiles.map(\.url)
+        try expect(persisted == ["http://localhost:3000", explicitURL], "unexpected persisted browser URLs: \(persisted)")
+
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("palette-browser-spawn", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "check": "palette-browser-spawn",
+            "tileCount": browserTiles.count,
+            "runtimeCount": delegate.browserRuntimes.count,
+            "tileURLs": browserTiles.map { $0.metadata.url ?? "" },
+            "runtimeURLs": delegate.browserRuntimes.map(\.url),
+            "persistedURLs": persisted,
+        ]
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
     }
 
     private func runRestartPlaceholderClickFlow(window: NSWindow) {

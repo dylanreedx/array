@@ -15,6 +15,7 @@ run swift run ContinuumRevivedPaletteChecks
 run .build/debug/continuum-revived --palette-duplicate-root-check
 run .build/debug/continuum-revived --palette-first-responder-restore-check
 run .build/debug/continuum-revived --browser-url-focus-check
+run .build/debug/continuum-revived --palette-browser-spawn-check
 run .build/debug/continuum-revived --palette-captures-keys-over-browser-check
 run .build/debug/continuum-revived --zindex-relaunch-hit-test-check
 run .build/debug/continuum-revived --bring-to-front-focus-check
