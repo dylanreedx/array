@@ -790,6 +790,70 @@ do {
     expect(bottomRight.x <= 800 && bottomRight.y <= 600, "Fit places bottom-right inside viewport, got \(bottomRight)")
 }
 
+// MARK: - CanvasEngine: first-fit spawn placement
+
+do {
+    let viewport = CanvasViewport(x: 100, y: 200, zoom: 1)
+    let placed = CanvasEngine.placementFrame(
+        size: CGSize(width: 200, height: 120),
+        viewport: viewport,
+        visibleSize: CGSize(width: 800, height: 600),
+        existing: []
+    )
+    expect(placed == TileFrame(x: 100, y: 200, width: 200, height: 120), "Empty canvas uses first visible slot, got \(placed)")
+}
+
+do {
+    let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
+    let occupied = TileFrame(x: 0, y: 0, width: 200, height: 120)
+    let placed = CanvasEngine.placementFrame(
+        size: CGSize(width: 200, height: 120),
+        viewport: viewport,
+        visibleSize: CGSize(width: 800, height: 600),
+        existing: [occupied]
+    )
+    let inflatedOccupied = CGRect(x: occupied.x, y: occupied.y, width: occupied.width, height: occupied.height).insetBy(dx: -16, dy: -16)
+    let placedRect = CGRect(x: placed.x, y: placed.y, width: placed.width, height: placed.height)
+    expect(!inflatedOccupied.intersects(placedRect), "Second placement avoids occupied frame plus margin, got \(placed)")
+    expect(placed == TileFrame(x: 224, y: 0, width: 200, height: 120), "Second placement scans row-major on 32pt grid, got \(placed)")
+}
+
+do {
+    let placed = CanvasEngine.placementFrame(
+        size: CGSize(width: 50, height: 50),
+        viewport: CanvasViewport(x: 10, y: 20, zoom: 0),
+        visibleSize: CGSize(width: 200, height: 200),
+        existing: []
+    )
+    expect(placed == TileFrame(x: 10, y: 20, width: 50, height: 50), "Invalid zoom falls back to finite placement, got \(placed)")
+}
+
+do {
+    let viewport = CanvasViewport(x: 50, y: 75, zoom: 2)
+    let occupied = TileFrame(x: 50, y: 75, width: 96, height: 96)
+    let placed = CanvasEngine.placementFrame(
+        size: CGSize(width: 96, height: 96),
+        viewport: viewport,
+        visibleSize: CGSize(width: 512, height: 192),
+        existing: [occupied]
+    )
+    expect(placed == TileFrame(x: 178, y: 75, width: 96, height: 96), "Placement scans in world units from panned/zoomed viewport, got \(placed)")
+}
+
+do {
+    let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
+    let visibleSize = CGSize(width: 96, height: 96)
+    let existing = [
+        TileFrame(x: 0, y: 0, width: 96, height: 96),
+        TileFrame(x: 120, y: 120, width: 96, height: 96),
+    ]
+    let first = CanvasEngine.placementFrame(size: CGSize(width: 96, height: 96), viewport: viewport, visibleSize: visibleSize, existing: existing)
+    let second = CanvasEngine.placementFrame(size: CGSize(width: 96, height: 96), viewport: viewport, visibleSize: visibleSize, existing: existing)
+    expect(first == TileFrame(x: 144, y: 144, width: 96, height: 96), "Saturated viewport cascades from last tile by 24pt, got \(first)")
+    expect(first == second, "Placement is deterministic for identical inputs")
+    expect(first.x <= Double(visibleSize.width) * 2 && first.y <= Double(visibleSize.height) * 2, "Fallback stays within +1 viewport of visible area, got \(first)")
+}
+
 // MARK: - CanvasEngine: defaults per kind
 
 do {

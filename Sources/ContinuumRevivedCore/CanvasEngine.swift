@@ -99,6 +99,54 @@ public enum CanvasEngine {
         }
     }
 
+    // MARK: - Spawn placement
+
+    /// First-fit placement: scan candidate origins inside the visible viewport
+    /// (row-major, 32pt grid step) for the first rect of `size` that does not
+    /// intersect any existing tile frame inflated by 16pt margin. Falls back to
+    /// cascade (+24,+24 from the last tile) when the viewport is saturated.
+    public static func placementFrame(
+        size: CGSize,
+        viewport: CanvasViewport,
+        visibleSize: CGSize,
+        existing: [TileFrame]
+    ) -> TileFrame {
+        let width = max(Double(size.width), 0)
+        let height = max(Double(size.height), 0)
+        let zoom = viewport.zoom.isFinite && viewport.zoom > 0 ? viewport.zoom : 1
+        let visibleWidth = max(Double(visibleSize.width), 0) / zoom
+        let visibleHeight = max(Double(visibleSize.height), 0) / zoom
+        let minX = viewport.x
+        let minY = viewport.y
+        let maxX = max(minX, viewport.x + visibleWidth - width)
+        let maxY = max(minY, viewport.y + visibleHeight - height)
+        let step = 32.0
+        let inflatedExisting = existing.map { rect(for: $0).insetBy(dx: -16, dy: -16) }
+
+        var y = minY
+        while y <= maxY + 0.001 {
+            var x = minX
+            while x <= maxX + 0.001 {
+                let candidate = TileFrame(x: x, y: y, width: width, height: height)
+                let candidateRect = rect(for: candidate)
+                if !inflatedExisting.contains(where: { $0.intersects(candidateRect) }) {
+                    return candidate
+                }
+                x += step
+            }
+            y += step
+        }
+
+        guard let last = existing.last else {
+            return TileFrame(x: minX, y: minY, width: width, height: height)
+        }
+        return TileFrame(x: last.x + 24, y: last.y + 24, width: width, height: height)
+    }
+
+    private static func rect(for frame: TileFrame) -> CGRect {
+        CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
+    }
+
     // MARK: - Drag and resize
 
     /// Move the tile by a screen-space delta. World-space delta is `screenDelta / zoom`.
