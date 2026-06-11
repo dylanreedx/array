@@ -18,10 +18,40 @@ public enum DeleteConfirmPolicy: String, Sendable {
     case always
 
     public static let userDefaultsKey = "continuum.deleteConfirmPolicy"
+    public static let bundledDefaultsDomain = "com.continuum.revived"
+    public static let legacyDefaultsDomain = "continuum-revived"
 
     public static var current: DeleteConfirmPolicy {
-        let raw = UserDefaults.standard.string(forKey: userDefaultsKey) ?? "runtimes"
-        return DeleteConfirmPolicy(rawValue: raw) ?? .runtimes
+        resolvedFromDefaults().policy
+    }
+
+    public static func resolvedFromDefaults(
+        standardDefaults: UserDefaults = .standard,
+        legacyDefaults: UserDefaults? = UserDefaults(suiteName: legacyDefaultsDomain)
+    ) -> DeleteConfirmPolicyResolution {
+        if let raw = standardDefaults.string(forKey: userDefaultsKey) {
+            return DeleteConfirmPolicyResolution(
+                policy: DeleteConfirmPolicy(rawValue: raw) ?? .runtimes,
+                rawValue: raw,
+                source: .standardDomain
+            )
+        }
+
+        if let raw = legacyDefaults?.string(forKey: userDefaultsKey),
+           let policy = DeleteConfirmPolicy(rawValue: raw) {
+            standardDefaults.set(raw, forKey: userDefaultsKey)
+            return DeleteConfirmPolicyResolution(
+                policy: policy,
+                rawValue: raw,
+                source: .legacyDomainMigrated
+            )
+        }
+
+        return DeleteConfirmPolicyResolution(
+            policy: .runtimes,
+            rawValue: nil,
+            source: .fallbackDefault
+        )
     }
 
     public func requiresConfirmation(for kind: TileKind) -> Bool {
@@ -53,6 +83,18 @@ public enum DeleteConfirmPolicy: String, Sendable {
             defaultIsCancel: true
         )
     }
+}
+
+public struct DeleteConfirmPolicyResolution: Equatable, Sendable {
+    public enum Source: String, Sendable {
+        case standardDomain = "standard-domain"
+        case legacyDomainMigrated = "legacy-domain-migrated"
+        case fallbackDefault = "fallback-default"
+    }
+
+    public let policy: DeleteConfirmPolicy
+    public let rawValue: String?
+    public let source: Source
 }
 
 public struct DeleteConfirmAlertConfiguration: Equatable, Sendable {

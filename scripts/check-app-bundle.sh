@@ -70,6 +70,9 @@ GHOSTTY_LOG="$OUTPUT_DIR/ghostty-artifacts.txt"
 SELF_CHECK_LOG="$OUTPUT_DIR/self-checks.txt"
 MANIFEST="$OUTPUT_DIR/manifest.json"
 REAL_SUPPORT="$HOME/Library/Application Support"
+REAL_PREFS="$HOME/Library/Preferences"
+NEW_DEFAULTS_PLIST="$REAL_PREFS/com.continuum.revived.plist"
+OLD_DEFAULTS_PLIST="$REAL_PREFS/continuum-revived.plist"
 
 assert_eq() {
   local expected="$1" actual="$2" label="$3"
@@ -123,30 +126,63 @@ else
 fi
 
 before_support=$(find "$REAL_SUPPORT" -maxdepth 1 -iname '*continuum*' -print 2>/dev/null | sort || true)
+plist_snapshot() {
+  local path="$1"
+  if [[ ! -e "$path" ]]; then
+    printf 'absent'
+  else
+    plutil -convert json -o - "$path" 2>/dev/null || cat "$path"
+  fi
+}
+
+cleanup_empty_created_plist() {
+  local before="$1" path="$2"
+  if [[ "$before" == "absent" && -e "$path" ]] && [[ "$(plist_snapshot "$path")" == "{}" ]]; then
+    rm -f "$path"
+  fi
+}
+
+before_new_defaults=$(plist_snapshot "$NEW_DEFAULTS_PLIST")
+before_old_defaults=$(plist_snapshot "$OLD_DEFAULTS_PLIST")
 project_root=$(mktemp -d "${TMPDIR:-/tmp}/continuum-bundle-project.XXXXXX")
 app_support=$(mktemp -d "${TMPDIR:-/tmp}/continuum-bundle-appsupport.XXXXXX")
+isolated_home=$(mktemp -d "${TMPDIR:-/tmp}/continuum-bundle-home.XXXXXX")
 : > "$SELF_CHECK_LOG"
-self_checks=(--palette-duplicate-root-check --file-tree-boot-persistence-check)
+self_checks=(--palette-duplicate-root-check --file-tree-boot-persistence-check --menu-contract-check --delete-confirm-policy-defaults-check)
 for check in "${self_checks[@]}"; do
   printf '==> %s\n' "$check" | tee -a "$SELF_CHECK_LOG"
-  CONTINUUM_PROJECT_ROOT="$project_root" \
+  HOME="$isolated_home" \
+    CFFIXED_USER_HOME="$isolated_home" \
+    CONTINUUM_PROJECT_ROOT="$project_root" \
     CONTINUUM_APP_SUPPORT="$app_support" \
     "$EXE" "$check" 2>&1 | tee -a "$SELF_CHECK_LOG"
 done
-rm -rf "$project_root" "$app_support"
+rm -rf "$project_root" "$app_support" "$isolated_home"
 after_support=$(find "$REAL_SUPPORT" -maxdepth 1 -iname '*continuum*' -print 2>/dev/null | sort || true)
+cleanup_empty_created_plist "$before_new_defaults" "$NEW_DEFAULTS_PLIST"
+cleanup_empty_created_plist "$before_old_defaults" "$OLD_DEFAULTS_PLIST"
+after_new_defaults=$(plist_snapshot "$NEW_DEFAULTS_PLIST")
+after_old_defaults=$(plist_snapshot "$OLD_DEFAULTS_PLIST")
 if [[ "$before_support" != "$after_support" ]]; then
   echo "FAIL: real Application Support continuum entries changed" >&2
   exit 1
 fi
+if [[ "$before_new_defaults" != "$after_new_defaults" || "$before_old_defaults" != "$after_old_defaults" ]]; then
+  echo "FAIL: real Continuum defaults plists changed" >&2
+  exit 1
+fi
 persistent_pollution=false
+real_defaults_pollution=false
 
 BUNDLE_PATH="$BUNDLE_PATH" PLIST="$PLIST" EXE="$EXE" OUTPUT_DIR="$OUTPUT_DIR" \
 FILE_LOG="$FILE_LOG" OTOOL_LOG="$OTOOL_LOG" GHOSTTY_LOG="$GHOSTTY_LOG" SELF_CHECK_LOG="$SELF_CHECK_LOG" \
 bundle_id="$bundle_id" bundle_executable="$bundle_executable" bundle_name="$bundle_name" \
 bundle_package="$bundle_package" icon_file="$icon_file" minimum_system="$minimum_system" \
 forbidden_slices_absent="$forbidden_slices_absent" ghostty_runtime_dependency="$ghostty_runtime_dependency" \
-persistent_pollution="$persistent_pollution" MANIFEST="$MANIFEST" \
+persistent_pollution="$persistent_pollution" real_defaults_pollution="$real_defaults_pollution" \
+defaults_key="continuum.deleteConfirmPolicy" old_defaults_domain="continuum-revived" \
+isolated_home="$isolated_home" cf_fixed_user_home="$isolated_home" \
+MANIFEST="$MANIFEST" \
 uv run python - <<'PY'
 import json, os, pathlib
 manifest = {
@@ -163,9 +199,19 @@ manifest = {
     "ghosttyRuntimeDependency": os.environ["ghostty_runtime_dependency"] == "true",
     "ghosttyForbiddenSlicesAbsent": os.environ["forbidden_slices_absent"] == "true",
     "persistentAppSupportPollution": os.environ["persistent_pollution"] == "true",
+    "realDefaultsPollution": os.environ["real_defaults_pollution"] == "true",
+    "menuContract": {"name": "--menu-contract-check", "exitCode": 0},
+    "editMenuContract": {"name": "--menu-contract-check", "exitCode": 0},
+    "defaultsDomain": os.environ["bundle_id"],
+    "defaultsKey": os.environ["defaults_key"],
+    "oldDefaultsDomain": os.environ["old_defaults_domain"],
+    "isolatedHome": os.environ["isolated_home"],
+    "cfFixedUserHome": os.environ["cf_fixed_user_home"],
     "bundleSelfChecks": [
         {"name": "--palette-duplicate-root-check", "exitCode": 0},
         {"name": "--file-tree-boot-persistence-check", "exitCode": 0},
+        {"name": "--menu-contract-check", "exitCode": 0},
+        {"name": "--delete-confirm-policy-defaults-check", "exitCode": 0},
     ],
     "fileLog": os.environ["FILE_LOG"],
     "otoolLog": os.environ["OTOOL_LOG"],

@@ -76,6 +76,57 @@ do {
 
     let file = DeleteConfirmPolicy.always.alertConfiguration(for: .file)
     expect(file.informative == "This action cannot be undone.", "generic delete informative text")
+
+    let standardSuite = "continuum-revived-core-checks-standard-\(UUID().uuidString)"
+    let legacySuite = "continuum-revived-core-checks-legacy-\(UUID().uuidString)"
+    let standardDefaults = UserDefaults(suiteName: standardSuite)!
+    let legacyDefaults = UserDefaults(suiteName: legacySuite)!
+    defer {
+        standardDefaults.removePersistentDomain(forName: standardSuite)
+        legacyDefaults.removePersistentDomain(forName: legacySuite)
+    }
+
+    var resolution = DeleteConfirmPolicy.resolvedFromDefaults(
+        standardDefaults: standardDefaults,
+        legacyDefaults: legacyDefaults
+    )
+    expect(resolution.policy == .runtimes, "missing delete policy should fall back to runtimes")
+    expect(resolution.source == .fallbackDefault, "missing delete policy should report fallback source")
+
+    standardDefaults.set("bogus", forKey: DeleteConfirmPolicy.userDefaultsKey)
+    resolution = DeleteConfirmPolicy.resolvedFromDefaults(
+        standardDefaults: standardDefaults,
+        legacyDefaults: legacyDefaults
+    )
+    expect(resolution.policy == .runtimes, "invalid standard-domain delete policy should fall back to runtimes")
+    expect(resolution.source == .standardDomain, "invalid standard-domain delete policy should not migrate legacy")
+
+    standardDefaults.removeObject(forKey: DeleteConfirmPolicy.userDefaultsKey)
+    legacyDefaults.set("never", forKey: DeleteConfirmPolicy.userDefaultsKey)
+    resolution = DeleteConfirmPolicy.resolvedFromDefaults(
+        standardDefaults: standardDefaults,
+        legacyDefaults: legacyDefaults
+    )
+    expect(resolution.policy == .never, "valid legacy delete policy should be honored")
+    expect(resolution.source == .legacyDomainMigrated, "valid legacy delete policy should report migration")
+    expect(standardDefaults.string(forKey: DeleteConfirmPolicy.userDefaultsKey) == "never", "valid legacy delete policy should be copied to standard defaults")
+
+    standardDefaults.set("always", forKey: DeleteConfirmPolicy.userDefaultsKey)
+    legacyDefaults.set("never", forKey: DeleteConfirmPolicy.userDefaultsKey)
+    resolution = DeleteConfirmPolicy.resolvedFromDefaults(
+        standardDefaults: standardDefaults,
+        legacyDefaults: legacyDefaults
+    )
+    expect(resolution.policy == .always, "standard-domain delete policy should win over legacy")
+
+    standardDefaults.removeObject(forKey: DeleteConfirmPolicy.userDefaultsKey)
+    legacyDefaults.set("bogus", forKey: DeleteConfirmPolicy.userDefaultsKey)
+    resolution = DeleteConfirmPolicy.resolvedFromDefaults(
+        standardDefaults: standardDefaults,
+        legacyDefaults: legacyDefaults
+    )
+    expect(resolution.policy == .runtimes, "invalid legacy delete policy should fall back to runtimes")
+    expect(standardDefaults.string(forKey: DeleteConfirmPolicy.userDefaultsKey) == nil, "invalid legacy delete policy should not be copied")
 }
 
 // MARK: - JSONCodec

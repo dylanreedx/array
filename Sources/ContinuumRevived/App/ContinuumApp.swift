@@ -11,6 +11,30 @@ enum ContinuumApp {
 
     @MainActor
     static func main() {
+        if CommandLine.arguments.contains("--menu-contract-check") {
+            do {
+                _ = NSApplication.shared
+                installMainMenu()
+                try runMenuContractSelfCheck()
+                print("ContinuumRevivedMenuContractChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--delete-confirm-policy-defaults-check") {
+            do {
+                try runDeleteConfirmPolicyDefaultsSelfCheck()
+                print("ContinuumRevivedDeleteConfirmPolicyDefaultsChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--palette-duplicate-root-check") {
             do {
                 _ = NSApplication.shared
@@ -176,7 +200,147 @@ enum ContinuumApp {
 
         application.delegate = delegate
         application.setActivationPolicy(.regular)
+        installMainMenu()
         application.run()
+    }
+
+    @MainActor
+    private static func installMainMenu() {
+        let appName = "Continuum Revived"
+        let mainMenu = NSMenu(title: "Main Menu")
+
+        let appMenuItem = NSMenuItem(title: appName, action: nil, keyEquivalent: "")
+        let appMenu = NSMenu(title: appName)
+        appMenu.addItem(NSMenuItem(title: "About \(appName)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""))
+        appMenu.addItem(NSMenuItem.separator())
+
+        let servicesItem = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
+        let servicesMenu = NSMenu(title: "Services")
+        servicesItem.submenu = servicesMenu
+        appMenu.addItem(servicesItem)
+        NSApp.servicesMenu = servicesMenu
+
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(NSMenuItem(title: "Hide \(appName)", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h"))
+        let hideOthers = NSMenuItem(title: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(hideOthers)
+        appMenu.addItem(NSMenuItem(title: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: ""))
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(NSMenuItem(title: "Quit \(appName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        let editMenuItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
+        let redo = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redo)
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem(title: "Delete", action: #selector(NSText.delete(_:)), keyEquivalent: ""))
+        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    @MainActor
+    private static func runMenuContractSelfCheck() throws {
+        guard let mainMenu = NSApp.mainMenu else { throw SelfCheckError("missing NSApp.mainMenu") }
+        guard mainMenu.items.first?.title == "Continuum Revived",
+              let appMenu = mainMenu.items.first?.submenu,
+              appMenu.title == "Continuum Revived" else { throw SelfCheckError("missing Continuum Revived app menu") }
+        try expectMenuItem(appMenu, title: "About Continuum Revived", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        guard appMenu.item(withTitle: "Services")?.submenu === NSApp.servicesMenu else { throw SelfCheckError("missing Services menu") }
+        try expectMenuItem(appMenu, title: "Hide Continuum Revived", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        try expectMenuItem(appMenu, title: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h", modifiers: [.command, .option])
+        try expectMenuItem(appMenu, title: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        try expectMenuItem(appMenu, title: "Quit Continuum Revived", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+        guard let editMenu = mainMenu.item(withTitle: "Edit")?.submenu else { throw SelfCheckError("missing Edit menu") }
+        try expectMenuItem(editMenu, title: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        try expectMenuItem(editMenu, title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z", modifiers: [.command, .shift])
+        try expectMenuItem(editMenu, title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        try expectMenuItem(editMenu, title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        try expectMenuItem(editMenu, title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        try expectMenuItem(editMenu, title: "Delete", action: #selector(NSText.delete(_:)), keyEquivalent: "")
+        try expectMenuItem(editMenu, title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    }
+
+    private static func expectMenuItem(
+        _ menu: NSMenu,
+        title: String,
+        action: Selector,
+        keyEquivalent: String,
+        modifiers: NSEvent.ModifierFlags = [.command]
+    ) throws {
+        guard let item = menu.item(withTitle: title) else { throw SelfCheckError("missing menu item \(title)") }
+        guard item.action == action else { throw SelfCheckError("menu item \(title) has action \(String(describing: item.action))") }
+        guard item.target == nil else { throw SelfCheckError("menu item \(title) target should be nil") }
+        guard item.keyEquivalent == keyEquivalent else { throw SelfCheckError("menu item \(title) key equivalent expected \(keyEquivalent) got \(item.keyEquivalent)") }
+        if !keyEquivalent.isEmpty {
+            guard item.keyEquivalentModifierMask.intersection([.command, .shift, .option, .control]) == modifiers else {
+                throw SelfCheckError("menu item \(title) modifiers expected \(modifiers) got \(item.keyEquivalentModifierMask)")
+            }
+        }
+    }
+
+    private static func runDeleteConfirmPolicyDefaultsSelfCheck() throws {
+        guard Bundle.main.bundleIdentifier == DeleteConfirmPolicy.bundledDefaultsDomain else {
+            throw SelfCheckError("expected bundled executable domain \(DeleteConfirmPolicy.bundledDefaultsDomain), got \(Bundle.main.bundleIdentifier ?? "nil")")
+        }
+        let key = DeleteConfirmPolicy.userDefaultsKey
+        let standardSuite = "con113-standard-\(UUID().uuidString)"
+        let legacySuite = "con113-legacy-\(UUID().uuidString)"
+        guard let standard = UserDefaults(suiteName: standardSuite),
+              let legacy = UserDefaults(suiteName: legacySuite) else {
+            throw SelfCheckError("could not open isolated defaults domains")
+        }
+        defer {
+            standard.removePersistentDomain(forName: standardSuite)
+            legacy.removePersistentDomain(forName: legacySuite)
+        }
+
+        func assertResolution(_ expectedPolicy: DeleteConfirmPolicy, _ expectedSource: DeleteConfirmPolicyResolution.Source, _ label: String) throws {
+            let resolution = DeleteConfirmPolicy.resolvedFromDefaults(standardDefaults: standard, legacyDefaults: legacy)
+            guard resolution.policy == expectedPolicy else { throw SelfCheckError("\(label): expected policy \(expectedPolicy.rawValue) got \(resolution.policy.rawValue)") }
+            guard resolution.source == expectedSource else { throw SelfCheckError("\(label): expected source \(expectedSource.rawValue) got \(resolution.source.rawValue)") }
+            print("deleteConfirmPolicy \(label): policy=\(resolution.policy.rawValue) source=\(resolution.source.rawValue) raw=\(resolution.rawValue ?? "nil")")
+        }
+
+        try assertResolution(.runtimes, .fallbackDefault, "missing")
+        standard.set("never", forKey: key)
+        try assertResolution(.never, .standardDomain, "new-domain-never")
+        standard.set("runtimes", forKey: key)
+        try assertResolution(.runtimes, .standardDomain, "new-domain-runtimes")
+        standard.set("always", forKey: key)
+        try assertResolution(.always, .standardDomain, "new-domain-always")
+        standard.set("invalid", forKey: key)
+        try assertResolution(.runtimes, .standardDomain, "new-domain-invalid")
+
+        standard.removeObject(forKey: key)
+        legacy.set("never", forKey: key)
+        try assertResolution(.never, .legacyDomainMigrated, "legacy-only-valid")
+        guard standard.string(forKey: key) == "never" else { throw SelfCheckError("legacy-only-valid did not copy into standard domain") }
+
+        standard.set("always", forKey: key)
+        legacy.set("never", forKey: key)
+        try assertResolution(.always, .standardDomain, "new-domain-wins")
+
+        standard.removeObject(forKey: key)
+        legacy.set("invalid", forKey: key)
+        try assertResolution(.runtimes, .fallbackDefault, "legacy-invalid")
+        guard standard.string(forKey: key) == nil else { throw SelfCheckError("invalid legacy value was copied into standard domain") }
+    }
+
+    private struct SelfCheckError: Error, CustomStringConvertible {
+        let description: String
+        init(_ description: String) { self.description = description }
     }
 }
 
