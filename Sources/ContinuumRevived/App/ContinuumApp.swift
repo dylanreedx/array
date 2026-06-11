@@ -834,6 +834,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         switch action {
         case .newNote:
             spawnNoteFromPalette()
+        case .newBrowser, .openURL:
+            // CON-11 adds the pure palette actions; CON-12 wires them to TileSpawner.
+            break
         case .openFile:
             openFileFromPalette()
         case .openFileTree:

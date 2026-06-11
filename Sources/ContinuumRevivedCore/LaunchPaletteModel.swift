@@ -1,18 +1,24 @@
 import Foundation
 
-public enum LaunchPaletteAction: String, Equatable, Sendable {
+public enum LaunchPaletteAction: Equatable, Sendable {
     case newNote
+    case newBrowser
     case openFile
     case openFileTree
+    case openURL(String)
 
     public var displayName: String {
         switch self {
         case .newNote:
             return "New Note"
+        case .newBrowser:
+            return "New Browser"
         case .openFile:
             return "Open File..."
         case .openFileTree:
             return "Open File Tree..."
+        case let .openURL(url):
+            return "Open \"\(url)\"…"
         }
     }
 
@@ -20,10 +26,14 @@ public enum LaunchPaletteAction: String, Equatable, Sendable {
         switch self {
         case .newNote:
             return ["new", "note"]
+        case .newBrowser:
+            return ["new", "browser", "web"]
         case .openFile:
             return ["open", "file"]
         case .openFileTree:
             return ["open", "file", "tree"]
+        case .openURL:
+            return ["open", "url", "browser", "web"]
         }
     }
 }
@@ -83,14 +93,48 @@ public enum LaunchPaletteModel {
     public static func makeRows(profiles: [LaunchPaletteProfileRow]) -> [LaunchPaletteRow] {
         profiles.map(LaunchPaletteRow.profile) + [
             .action(.newNote),
+            .action(.newBrowser),
             .action(.openFile),
             .action(.openFileTree)
         ]
     }
 
     public static func filterRows(_ rows: [LaunchPaletteRow], query: String) -> [LaunchPaletteRow] {
-        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return rows.filter { $0.matches(query: normalized) }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = trimmed.lowercased()
+        let filtered = rows.filter { $0.matches(query: normalized) }
+        if let candidate = urlCandidate(from: trimmed) {
+            return [.action(.openURL(candidate))] + filtered
+        }
+        return filtered
+    }
+
+    public static func urlCandidate(from query: String) -> String? {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else { return nil }
+
+        if let schemeRange = trimmed.range(of: "://") {
+            let scheme = String(trimmed[..<schemeRange.lowerBound])
+            guard !scheme.isEmpty, scheme.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "+" || $0 == "-" || $0 == "." }) else { return nil }
+            return trimmed
+        }
+
+        let host = trimmed.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? trimmed
+        let hostWithoutPort = host.split(separator: ":", maxSplits: 1).first.map(String.init) ?? host
+        guard host.contains(".") || hostWithoutPort == "localhost" else { return nil }
+        let scheme = usesLocalHTTP(host: host) ? "http" : "https"
+        return "\(scheme)://\(trimmed)"
+    }
+
+    private static func usesLocalHTTP(host: String) -> Bool {
+        let hostWithoutPort = host.split(separator: ":", maxSplits: 1).first.map(String.init) ?? host
+        if hostWithoutPort == "localhost" { return true }
+        let octets = hostWithoutPort.split(separator: ".")
+        guard octets.count == 4 else { return false }
+        return octets.allSatisfy { octet in
+            guard let value = Int(octet), String(value) == octet else { return false }
+            return (0 ... 255).contains(value)
+        }
     }
 
     public static func isFileURL(_ fileURL: URL, insideProjectRoot projectRoot: URL) -> Bool {
