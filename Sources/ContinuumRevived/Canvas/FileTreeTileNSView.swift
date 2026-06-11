@@ -13,6 +13,7 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
     private var outlineModel = FileTreeOutlineModel(snapshot: FileTreeSnapshot(root: URL(fileURLWithPath: "/"), nodes: []), query: "")
     private var latestSnapshot: FileTreeSnapshot?
     private var searchDebounce: Timer?
+    private var suppressExpansionPersistence = false
 
     private let rootStack = NSStackView()
     private let searchField = NSSearchField()
@@ -115,6 +116,9 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         guard let item = notification.userInfo?["NSObject"] as? FileTreeOutlineItem else {
             return
         }
+        guard shouldPersistExpansionChanges else {
+            return
+        }
         if !fileTreeTile.expandedPaths.contains(item.node.relativePath) {
             fileTreeTile.expandedPaths.append(item.node.relativePath)
             persist()
@@ -123,6 +127,9 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
 
     func outlineViewItemDidCollapse(_ notification: Notification) {
         guard let item = notification.userInfo?["NSObject"] as? FileTreeOutlineItem else {
+            return
+        }
+        guard shouldPersistExpansionChanges else {
             return
         }
         fileTreeTile.expandedPaths.removeAll { $0 == item.node.relativePath }
@@ -257,8 +264,11 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
     private func apply(_ snapshot: FileTreeSnapshot) {
         latestSnapshot = snapshot
         outlineModel = FileTreeOutlineModel(snapshot: snapshot, query: fileTreeTile.searchQuery)
+        suppressExpansionPersistence = true
         outlineView.reloadData()
+        collapseVisibleItems()
         restoreExpansion()
+        suppressExpansionPersistence = false
         restoreSelection()
 
         if outlineModel.rootItems.isEmpty {
@@ -268,10 +278,30 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         }
     }
 
+    private var isSearchActive: Bool {
+        !fileTreeTile.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var shouldPersistExpansionChanges: Bool {
+        !suppressExpansionPersistence && !isSearchActive
+    }
+
     private func restoreExpansion() {
         let expanded = Set(fileTreeTile.expandedPaths)
-        let shouldRevealSearchResults = !fileTreeTile.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        expandMatchingItems(in: nil, expanded: expanded, revealAll: shouldRevealSearchResults)
+        expandMatchingItems(in: nil, expanded: expanded, revealAll: isSearchActive)
+    }
+
+    private func collapseVisibleItems() {
+        guard outlineView.numberOfRows > 0 else {
+            return
+        }
+        for row in stride(from: outlineView.numberOfRows - 1, through: 0, by: -1) {
+            guard let item = outlineView.item(atRow: row) as? FileTreeOutlineItem,
+                  outlineView.isItemExpanded(item) else {
+                continue
+            }
+            outlineView.collapseItem(item)
+        }
     }
 
     private func expandMatchingItems(in parent: FileTreeOutlineItem?, expanded: Set<String>, revealAll: Bool) {
@@ -458,8 +488,12 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
             if !condition() { throw CheckError.failed(message) }
         }
 
+        let fileManager = FileManager.default
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("continuum-file-tree-search-visibility-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
         let tile = Tile(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000F01")!,
             kind: .fileTree,
@@ -469,45 +503,124 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
             runtimeRef: nil,
             metadata: TileMetadata()
         )
-        let fileTreeTile = FileTreeTile(
-            tileId: tile.id,
-            rootPath: root.path,
-            expandedPaths: [],
-            selectedPath: nil,
-            searchQuery: "Needle.swift",
-            ignoredNames: [],
-            gitBadges: .off
-        )
-        let view = FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile, viewModel: FileTreeViewModel())
-        view.frame = NSRect(x: 0, y: 0, width: 420, height: 360)
-        view.layoutSubtreeIfNeeded()
-        view.apply(FileTreeSnapshot(root: root, nodes: [
-            FileTreeNode(relativePath: "Sources", displayName: "Sources", isDirectory: true, childCount: 1, isIgnored: false, gitStatus: nil),
-            FileTreeNode(relativePath: "Sources/Deep", displayName: "Deep", isDirectory: true, childCount: 1, isIgnored: false, gitStatus: nil),
+        let snapshot = FileTreeSnapshot(root: root, nodes: [
+            FileTreeNode(relativePath: "Sources", displayName: "Sources", isDirectory: true, childCount: 2, isIgnored: false, gitStatus: nil),
+            FileTreeNode(relativePath: "Sources/Deep", displayName: "Deep", isDirectory: true, childCount: 2, isIgnored: false, gitStatus: nil),
             FileTreeNode(relativePath: "Sources/Deep/Needle.swift", displayName: "Needle.swift", isDirectory: false, childCount: 0, isIgnored: false, gitStatus: nil),
             FileTreeNode(relativePath: "Sources/Deep/Other.swift", displayName: "Other.swift", isDirectory: false, childCount: 0, isIgnored: false, gitStatus: nil),
             FileTreeNode(relativePath: "Docs", displayName: "Docs", isDirectory: true, childCount: 1, isIgnored: false, gitStatus: nil),
             FileTreeNode(relativePath: "Docs/Guide.md", displayName: "Guide.md", isDirectory: false, childCount: 0, isIgnored: false, gitStatus: nil)
-        ]))
+        ])
 
-        let visiblePaths = (0..<view.outlineView.numberOfRows).compactMap { row in
-            (view.outlineView.item(atRow: row) as? FileTreeOutlineItem)?.node.relativePath
+        func makeView(expandedPaths: [String], query: String, recorder: FileTreeSearchVisibilityPersistRecorder) -> FileTreeTileNSView {
+            let fileTreeTile = FileTreeTile(
+                tileId: tile.id,
+                rootPath: root.path,
+                expandedPaths: expandedPaths,
+                selectedPath: nil,
+                searchQuery: query,
+                ignoredNames: [],
+                gitBadges: .off
+            )
+            let view = FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile, viewModel: FileTreeViewModel())
+            view.frame = NSRect(x: 0, y: 0, width: 420, height: 360)
+            view.onPersist = { tile in recorder.expandedPaths.append(tile.expandedPaths) }
+            view.layoutSubtreeIfNeeded()
+            return view
         }
-        try expect(visiblePaths.contains("Sources"), "search should keep matching file's root ancestor visible")
-        try expect(visiblePaths.contains("Sources/Deep"), "search should expand collapsed intermediate ancestor")
-        try expect(visiblePaths.contains("Sources/Deep/Needle.swift"), "search should show matched descendant file")
-        try expect(!visiblePaths.contains("Docs"), "search should hide unrelated collapsed roots")
+
+        func visiblePaths(in view: FileTreeTileNSView) -> [String] {
+            (0..<view.outlineView.numberOfRows).compactMap { row in
+                (view.outlineView.item(atRow: row) as? FileTreeOutlineItem)?.node.relativePath
+            }
+        }
+
+        func isExpanded(_ path: String, in view: FileTreeTileNSView) -> Bool {
+            for row in 0..<view.outlineView.numberOfRows {
+                guard let item = view.outlineView.item(atRow: row) as? FileTreeOutlineItem,
+                      item.node.relativePath == path else {
+                    continue
+                }
+                return view.outlineView.isItemExpanded(item)
+            }
+            return false
+        }
+
+        func row(_ name: String, view: FileTreeTileNSView, persisted: [[String]]) -> [String: Any] {
+            [
+                "scenario": name,
+                "query": view.currentFileTreeTile.searchQuery,
+                "visiblePaths": visiblePaths(in: view),
+                "expandedPaths": view.currentFileTreeTile.expandedPaths,
+                "isSourcesExpanded": isExpanded("Sources", in: view),
+                "isDeepExpanded": isExpanded("Sources/Deep", in: view),
+                "persistedCallCount": persisted.count,
+                "persistedExpandedPaths": persisted
+            ]
+        }
+
+        var table: [[String: Any]] = []
+
+        let collapsedRecorder = FileTreeSearchVisibilityPersistRecorder()
+        let collapsedView = makeView(expandedPaths: [], query: "", recorder: collapsedRecorder)
+        collapsedView.apply(snapshot)
+        try expect(visiblePaths(in: collapsedView) == ["Sources", "Docs"], "empty collapsed tree should show only root rows")
+        try expect(collapsedView.currentFileTreeTile.expandedPaths.isEmpty, "empty collapsed tree should keep expandedPaths empty")
+        table.append(row("empty-collapsed", view: collapsedView, persisted: collapsedRecorder.expandedPaths))
+
+        collapsedView.fileTreeTile.searchQuery = "Needle.swift"
+        collapsedView.apply(snapshot)
+        let searchCollapsedPaths = visiblePaths(in: collapsedView)
+        try expect(searchCollapsedPaths.contains("Sources"), "search should keep matching file's root ancestor visible")
+        try expect(searchCollapsedPaths.contains("Sources/Deep"), "search should reveal collapsed intermediate ancestor")
+        try expect(searchCollapsedPaths.contains("Sources/Deep/Needle.swift"), "search should show matched descendant file as an outline row")
+        try expect(!searchCollapsedPaths.contains("Docs"), "search should hide unrelated roots")
+        try expect(!searchCollapsedPaths.contains("Sources/Deep/Other.swift"), "search should hide unrelated siblings")
+        try expect(collapsedView.currentFileTreeTile.expandedPaths.isEmpty, "search reveal should not append collapsed ancestors to expandedPaths")
+        try expect(collapsedRecorder.expandedPaths.isEmpty, "search reveal should not persist expansion changes")
+        table.append(row("search-collapsed", view: collapsedView, persisted: collapsedRecorder.expandedPaths))
+
+        collapsedView.fileTreeTile.searchQuery = ""
+        collapsedView.apply(snapshot)
+        try expect(visiblePaths(in: collapsedView) == ["Sources", "Docs"], "clearing search should restore collapsed root-only visibility")
+        try expect(collapsedView.currentFileTreeTile.expandedPaths.isEmpty, "clearing search should keep collapsed expandedPaths empty")
+        table.append(row("clear-restores-collapsed", view: collapsedView, persisted: collapsedRecorder.expandedPaths))
+
+        let expandedRecorder = FileTreeSearchVisibilityPersistRecorder()
+        let expandedView = makeView(expandedPaths: ["Sources"], query: "", recorder: expandedRecorder)
+        expandedView.apply(snapshot)
+        try expect(visiblePaths(in: expandedView) == ["Sources", "Sources/Deep", "Docs"], "empty persisted-expanded tree should reveal only persisted ancestors")
+        try expect(expandedView.currentFileTreeTile.expandedPaths == ["Sources"], "empty persisted-expanded tree should preserve expandedPaths")
+        table.append(row("empty-persisted-expanded", view: expandedView, persisted: expandedRecorder.expandedPaths))
+
+        expandedView.fileTreeTile.searchQuery = "needle.swift"
+        expandedView.apply(snapshot)
+        let searchExpandedPaths = visiblePaths(in: expandedView)
+        try expect(searchExpandedPaths.contains("Sources/Deep/Needle.swift"), "case-insensitive search should show matched descendant file")
+        try expect(!searchExpandedPaths.contains("Docs"), "search from persisted-expanded state should hide unrelated roots")
+        try expect(expandedView.currentFileTreeTile.expandedPaths == ["Sources"], "search should preserve pre-existing expandedPaths exactly")
+        try expect(expandedRecorder.expandedPaths.isEmpty, "search should not persist transient expansion for pre-expanded state")
+        table.append(row("search-preserves-persisted", view: expandedView, persisted: expandedRecorder.expandedPaths))
+
+        expandedView.fileTreeTile.searchQuery = ""
+        expandedView.apply(snapshot)
+        try expect(visiblePaths(in: expandedView) == ["Sources", "Sources/Deep", "Docs"], "clearing search should restore persisted expansion visibility")
+        try expect(!isExpanded("Sources/Deep", in: expandedView), "clearing search should collapse search-expanded intermediate ancestor")
+        try expect(expandedView.currentFileTreeTile.expandedPaths == ["Sources"], "clearing search should preserve persisted expandedPaths exactly")
+        table.append(row("clear-restores-persisted", view: expandedView, persisted: expandedRecorder.expandedPaths))
 
         return [
             "check": "file-tree-search-visibility",
-            "query": fileTreeTile.searchQuery,
-            "initialExpandedPaths": fileTreeTile.expandedPaths,
-            "visiblePaths": visiblePaths
+            "table": table
         ]
     }
 }
 
 @MainActor
+private final class FileTreeSearchVisibilityPersistRecorder {
+    var expandedPaths: [[String]] = []
+}
+
 private final class FileTreeOutlineView: NSOutlineView {
     var onReturn: (() -> Void)?
 
