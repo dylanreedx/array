@@ -797,3 +797,35 @@ Consequences:
 - Palette filtering changes now belong in Core first, with matching executable-check coverage in `ContinuumRevivedPaletteChecks`.
 - AppKit code should keep adapting domain state into Core row DTOs instead of reintroducing filtering logic in the table delegate.
 - The Core purity invariant remains load-bearing: palette model code must not import AppKit, SwiftUI, WebKit, GhosttyKit, or NSWorkspace.
+
+## ADR-0022: Zoned Multi-Project Canvas Supersedes One-Project-Per-Window
+
+**Status:** Accepted
+**Date:** 2026-06-10
+
+Decision:
+
+Continuum's v1 target is a zoned multi-project canvas: every registered
+project renders as a spatial zone on one canvas, with multiple canvases
+("workspaces") switchable in one window. This supersedes the consequence of
+ADR-0003 that switching projects swaps the entire canvas, and the
+docs/18-project-lifecycle-plan.md Phase C design of one-project-at-a-time
+switching. ADR-0004 (project state lives project-locally in
+`.continuum-revived/`) is explicitly preserved: a central workspace document
+owns only zone placement and viewport, referencing projects by registry UUID;
+tile state remains project-local with frames interpreted as zone-local
+coordinates (world = zoneOrigin + tileFrame, so existing state is
+byte-compatible with zone origin 0,0).
+
+Key commitments: per-zone hydration tiers (Live / Snapshot / Cold) with a
+global LRU budget on live WKWebViews; one window (window-per-canvas
+deferred); `TileGroup` remains intra-zone visual grouping and is not the zone
+type; the AppDelegate's per-project runtime state is extracted into a
+per-project ZoneRuntimeController before any multi-zone work lands; the
+single-instance lock becomes per-hydrated-project with per-zone degradation
+instead of app-level refusal.
+
+Rationale, alternatives weighed (central-store vs hybrid ownership), staged
+migration, and risk register: `docs/20-product-vision.md`. Consequences for
+in-flight plans: docs/17 (focus broker) and docs/19 (spawn experience) stand
+unchanged; docs/18 Phases A/B/D stand, Phase C is retargeted.

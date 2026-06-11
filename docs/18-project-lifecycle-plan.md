@@ -4,6 +4,16 @@ Tickets: DD-005 (root resolution), DD-006 (single instance), DD-100 (project
 switcher), DD-013 (app bundle — final phase).
 Authored: 2026-06-10 against `main` @ `fdae439`.
 
+> **Retargeted 2026-06-10 (ADR-0022, `docs/20-product-vision.md`):** Phases
+> A, B, and D stand as written. Phase C's one-project-at-a-time switching is
+> superseded by the zoned multi-project canvas — the C1 extraction now
+> produces a per-project `ZoneRuntimeController` (same trap inventory,
+> instanced per project instead of swapped in place), and C2's palette
+> switching ships as interim UX that later becomes "jump to zone." The
+> single-instance lock (A2) becomes per-hydrated-project: lock failure
+> degrades that zone to cold with a badge rather than refusing app boot.
+> Authoritative epic breakdown lives in Linear (team `continuum`).
+
 This workstream turns "a binary that opens whatever directory it woke up in"
 into "an app that knows its projects." It is the daily-driver unlock: Dylan's
 goal is to stop dedicating a macOS Desktop per project; that requires fast,
