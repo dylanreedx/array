@@ -19,6 +19,7 @@ Rules:
 - Do not claim success from build-only evidence for UX behavior.
 - Always list what remains unproven, especially visual/manual checks.
 - Avoid destructive commands and machine-level changes.
+- Always include a reviewer checklist tailored to the ticket area so the master can prompt review agents dynamically.
 
 Expected workflow:
 1. Read the ticket, scout findings, and relevant files.
@@ -36,4 +37,22 @@ Output format:
 4. **Commands run** — command + result.
 5. **Artifacts** — QA run paths/logs if any.
 6. **Remaining risks / unproven** — concise.
-7. **Next review needed** — qa-reviewer/code-reviewer/ux-reviewer focus.
+7. **Reviewer checklist** — prompt seed for master/review agents:
+   - **Code reviewer focus**
+     - [ ] Production path changed: <files/functions>
+     - [ ] Persistence/state migration risk: <yes/no + why>
+     - [ ] Error handling / edge cases: <specific cases>
+     - [ ] Scope guard: <what should remain out of scope>
+   - **QA reviewer focus**
+     - [ ] Deterministic checks added/updated: <commands>
+     - [ ] False-positive risks to challenge: <specific risks>
+     - [ ] Artifacts to inspect: <paths>
+     - [ ] Matrix command expected: `./scripts/run-matrix.sh`
+   - **UX reviewer focus** (if user-facing)
+     - [ ] User-visible claim: <claim>
+     - [ ] Screenshot/AX/manual evidence: <paths or pending>
+     - [ ] Interaction path to test: <click/key path>
+     - [ ] What is not visually proven: <gaps>
+   - **Suggested extra probes**
+     - [ ] <small command or QA flow reviewer should run if relevant>
+8. **Next review needed** — qa-reviewer/code-reviewer/ux-reviewer focus.

@@ -9,20 +9,41 @@ run() {
   "$@"
 }
 
+run_app_check() {
+  local project_root app_support status
+  project_root=$(mktemp -d "${TMPDIR:-/tmp}/continuum-matrix-project.XXXXXX")
+  app_support=$(mktemp -d "${TMPDIR:-/tmp}/continuum-matrix-appsupport.XXXXXX")
+
+  printf '\n==> CONTINUUM_PROJECT_ROOT=%s CONTINUUM_APP_SUPPORT=%s %s\n' \
+    "$project_root" \
+    "$app_support" \
+    "$*"
+
+  set +e
+  CONTINUUM_PROJECT_ROOT="$project_root" \
+    CONTINUUM_APP_SUPPORT="$app_support" \
+    "$@"
+  status=$?
+  set -e
+
+  rm -rf "$project_root" "$app_support"
+  return "$status"
+}
+
 run swift build
 run swift run ContinuumRevivedCoreChecks
 run swift run ContinuumRevivedPaletteChecks
-run .build/debug/continuum-revived --palette-duplicate-root-check
-run .build/debug/continuum-revived --palette-first-responder-restore-check
-run .build/debug/continuum-revived --browser-url-focus-check
-run .build/debug/continuum-revived --palette-browser-spawn-check
-run .build/debug/continuum-revived --palette-captures-keys-over-browser-check
-run .build/debug/continuum-revived --zindex-relaunch-hit-test-check
-run .build/debug/continuum-revived --bring-to-front-focus-check
-run .build/debug/continuum-revived --note-click-focus-check
-run .build/debug/continuum-revived --browser-restore-state-check
-run .build/debug/continuum-revived --note-file-tile-spawn-check
-run .build/debug/continuum-revived --file-tree-boot-persistence-check
+run_app_check .build/debug/continuum-revived --palette-duplicate-root-check
+run_app_check .build/debug/continuum-revived --palette-first-responder-restore-check
+run_app_check .build/debug/continuum-revived --browser-url-focus-check
+run_app_check .build/debug/continuum-revived --palette-browser-spawn-check
+run_app_check .build/debug/continuum-revived --palette-captures-keys-over-browser-check
+run_app_check .build/debug/continuum-revived --zindex-relaunch-hit-test-check
+run_app_check .build/debug/continuum-revived --bring-to-front-focus-check
+run_app_check .build/debug/continuum-revived --note-click-focus-check
+run_app_check .build/debug/continuum-revived --browser-restore-state-check
+run_app_check .build/debug/continuum-revived --note-file-tile-spawn-check
+run_app_check .build/debug/continuum-revived --file-tree-boot-persistence-check
 run git diff --check
 
 printf '\nMatrix passed.\n'
