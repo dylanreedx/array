@@ -1,34 +1,48 @@
 import ContinuumRevivedCore
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 public struct FileTreeGitStatusProbe: Sendable {
     private let timeout: TimeInterval
+    private let terminationGrace: TimeInterval
+    private let maxOutputBytes: Int
+    private let environment: [String: String]?
+    private let executableURL: URL
+    private let argumentPrefix: [String]
 
-    public init(timeout: TimeInterval = 5) {
+    public init(
+        timeout: TimeInterval = 5,
+        terminationGrace: TimeInterval = 0.5,
+        maxOutputBytes: Int = 1_048_576,
+        environment: [String: String]? = nil,
+        executableURL: URL = URL(fileURLWithPath: "/usr/bin/env"),
+        argumentPrefix: [String] = ["git"]
+    ) {
         self.timeout = timeout
+        self.terminationGrace = terminationGrace
+        self.maxOutputBytes = maxOutputBytes
+        self.environment = environment
+        self.executableURL = executableURL
+        self.argumentPrefix = argumentPrefix
     }
 
     public func statuses(root: URL) -> [String: FileTreeGitStatus] {
         let root = root.standardizedFileURL
-        let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("continuum-git-status-\(UUID().uuidString).out")
-        FileManager.default.createFile(atPath: outputURL.path, contents: nil)
-
-        guard let outputHandle = try? FileHandle(forWritingTo: outputURL) else {
-            fputs("FileTreeGitStatusProbe could not open temporary output file\n", stderr)
-            return [:]
-        }
-        defer {
-            try? outputHandle.close()
-            try? FileManager.default.removeItem(at: outputURL)
-        }
-
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["git", "-C", root.path, "status", "--porcelain=v1", "-z"]
-        process.standardOutput = outputHandle
-        process.standardError = Pipe()
+        process.executableURL = executableURL
+        process.arguments = argumentPrefix + ["-C", root.path, "status", "--porcelain=v1", "-z"]
+        if let environment {
+            process.environment = environment
+        }
 
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        let outputState = OutputState(maxBytes: maxOutputBytes)
         do {
             try process.run()
         } catch {
@@ -36,26 +50,48 @@ public struct FileTreeGitStatusProbe: Sendable {
             return [:]
         }
 
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.05)
+        let drainGroup = DispatchGroup()
+        drainGroup.enter()
+        DispatchQueue.global(qos: .utility).async {
+            drain(stdoutPipe.fileHandleForReading, into: outputState)
+            drainGroup.leave()
+        }
+        drainGroup.enter()
+        DispatchQueue.global(qos: .utility).async {
+            drain(stderrPipe.fileHandleForReading, into: nil)
+            drainGroup.leave()
         }
 
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning && Date() < deadline && !outputState.exceededCap {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+
+        let exceededCap = outputState.exceededCap
         if process.isRunning {
-            process.terminate()
-            process.waitUntilExit()
-            fputs("FileTreeGitStatusProbe git status timed out for \(root.path)\n", stderr)
+            terminate(process, grace: terminationGrace)
+            if exceededCap {
+                fputs("FileTreeGitStatusProbe git status exceeded output cap for \(root.path)\n", stderr)
+            } else {
+                fputs("FileTreeGitStatusProbe git status timed out for \(root.path)\n", stderr)
+            }
+            _ = drainGroup.wait(timeout: .now() + 0.5)
             return [:]
         }
 
-        process.waitUntilExit()
+        _ = drainGroup.wait(timeout: .now() + 0.5)
+        guard !outputState.exceededCap else {
+            fputs("FileTreeGitStatusProbe git status exceeded output cap for \(root.path)\n", stderr)
+            return [:]
+        }
+
         guard process.terminationStatus == 0 else {
             fputs("FileTreeGitStatusProbe git status failed for \(root.path)\n", stderr)
             return [:]
         }
 
-        guard let data = try? Data(contentsOf: outputURL) else {
-            fputs("FileTreeGitStatusProbe could not read git status output\n", stderr)
+        guard let data = outputState.dataIfWithinCap else {
+            fputs("FileTreeGitStatusProbe git status exceeded output cap for \(root.path)\n", stderr)
             return [:]
         }
         return Self.parsePorcelain(data)
@@ -126,5 +162,72 @@ public struct FileTreeGitStatusProbe: Sendable {
         }
 
         return nil
+    }
+}
+
+private final class OutputState: @unchecked Sendable {
+    private let lock = NSLock()
+    private let maxBytes: Int
+    private var output = Data()
+    private var capExceeded = false
+
+    init(maxBytes: Int) {
+        self.maxBytes = max(0, maxBytes)
+    }
+
+    var exceededCap: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return capExceeded
+    }
+
+    var dataIfWithinCap: Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        return capExceeded ? nil : output
+    }
+
+    func append(_ chunk: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !chunk.isEmpty else { return }
+        let remaining = maxBytes - output.count
+        if remaining <= 0 {
+            capExceeded = true
+            return
+        }
+        if chunk.count > remaining {
+            output.append(chunk.prefix(remaining))
+            capExceeded = true
+        } else {
+            output.append(chunk)
+        }
+    }
+}
+
+private func drain(_ handle: FileHandle, into outputState: OutputState?) {
+    while true {
+        let chunk = handle.readData(ofLength: 16 * 1024)
+        if chunk.isEmpty {
+            break
+        }
+        outputState?.append(chunk)
+    }
+}
+
+private func terminate(_ process: Process, grace: TimeInterval) {
+    process.terminate()
+    let graceDeadline = Date().addingTimeInterval(grace)
+    while process.isRunning && Date() < graceDeadline {
+        Thread.sleep(forTimeInterval: 0.01)
+    }
+
+    guard process.isRunning else { return }
+#if canImport(Darwin)
+    kill(process.processIdentifier, SIGKILL)
+#endif
+    let killDeadline = Date().addingTimeInterval(max(0.2, grace))
+    while process.isRunning && Date() < killDeadline {
+        Thread.sleep(forTimeInterval: 0.01)
     }
 }

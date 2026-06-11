@@ -1,6 +1,9 @@
 import ContinuumRevivedFileTree
 import ContinuumRevivedCore
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     if !condition() {
@@ -169,6 +172,8 @@ expect(directStatuses["Sources/App.swift"] == .modified, "git probe should retur
 let nonGitStatuses = FileTreeGitStatusProbe().statuses(root: scratch.appendingPathComponent("not-a-repo", isDirectory: true))
 expect(nonGitStatuses.isEmpty, "git probe should hide badges when git status fails")
 
+try runHostileFakeGitProbeChecks(scratch: scratch)
+
 await MainActor.run {
     viewModel.start(rootPath: scratch.appendingPathComponent("Sources", isDirectory: true).path, ignoreList: [])
     viewModel.cancel()
@@ -255,4 +260,134 @@ func runGit(_ arguments: [String], in directory: URL) throws {
     if process.terminationStatus != 0 {
         throw CheckError("git \(arguments.joined(separator: " ")) failed")
     }
+}
+
+func runHostileFakeGitProbeChecks(scratch: URL) throws {
+    let bin = scratch.appendingPathComponent("fake-git-bin", isDirectory: true)
+    try makeDirectory(bin)
+    let fakeGit = bin.appendingPathComponent("git")
+    let chunk = String(repeating: "X", count: 1024)
+    let stderrChunk = String(repeating: "E", count: 1024)
+    let script = """
+    #!/bin/sh
+    case "$FAKE_GIT_MODE" in
+      ok)
+        printf ' M Sources/App.swift\\000'
+        exit 0
+        ;;
+      huge)
+        i=0
+        while [ $i -lt 512 ]; do
+          printf '\(chunk)'
+          i=$((i + 1))
+        done
+        sleep 5
+        ;;
+      infinite)
+        echo $$ > "$FAKE_GIT_PID_FILE"
+        trap '' TERM
+        while :; do
+          printf '\(chunk)'
+        done
+        ;;
+      ignore-term)
+        echo $$ > "$FAKE_GIT_PID_FILE"
+        trap '' TERM
+        while :; do
+          :
+        done
+        ;;
+      stderr-flood)
+        i=0
+        while [ $i -lt 512 ]; do
+          printf '\(stderrChunk)\\n' >&2
+          i=$((i + 1))
+        done
+        exit 1
+        ;;
+      *)
+        exit 2
+        ;;
+    esac
+    """
+    try makeFile(fakeGit, contents: script)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeGit.path)
+
+    var environment = ProcessInfo.processInfo.environment
+    environment["PATH"] = "\(bin.path):\(environment["PATH"] ?? "")"
+
+    let validStatuses = try runFakeGitProbe(
+        mode: "ok",
+        root: scratch,
+        environment: environment,
+        executableURL: fakeGit,
+        timeout: 1.0
+    )
+    expect(validStatuses.statuses["Sources/App.swift"] == .modified, "fake git valid output should still parse")
+
+    let huge = try runFakeGitProbe(mode: "huge", root: scratch, environment: environment, executableURL: fakeGit)
+    expect(huge.statuses.isEmpty, "fake git oversized stdout should hide badges")
+    expect(huge.elapsed < 2.0, "fake git oversized stdout should return within bounded time, got \(huge.elapsed)s")
+
+    let stderrFlood = try runFakeGitProbe(mode: "stderr-flood", root: scratch, environment: environment, executableURL: fakeGit)
+    expect(stderrFlood.statuses.isEmpty, "fake git stderr flood failure should hide badges")
+    expect(stderrFlood.elapsed < 2.0, "fake git stderr flood should not deadlock, got \(stderrFlood.elapsed)s")
+
+    let infinitePIDFile = scratch.appendingPathComponent("fake-git-infinite.pid")
+    var infiniteEnvironment = environment
+    infiniteEnvironment["FAKE_GIT_PID_FILE"] = infinitePIDFile.path
+    let infinite = try runFakeGitProbe(mode: "infinite", root: scratch, environment: infiniteEnvironment, executableURL: fakeGit)
+    expect(infinite.statuses.isEmpty, "fake git infinite stdout should hide badges")
+    expect(infinite.elapsed < 2.0, "fake git infinite stdout should be hard-killed within bounded time, got \(infinite.elapsed)s")
+    try expectNoLiveProcess(pidFile: infinitePIDFile, message: "fake git infinite stdout process should not be left running")
+
+    let ignoreTermPIDFile = scratch.appendingPathComponent("fake-git-ignore-term.pid")
+    var ignoreTermEnvironment = environment
+    ignoreTermEnvironment["FAKE_GIT_PID_FILE"] = ignoreTermPIDFile.path
+    let ignoreTerm = try runFakeGitProbe(mode: "ignore-term", root: scratch, environment: ignoreTermEnvironment, executableURL: fakeGit)
+    expect(ignoreTerm.statuses.isEmpty, "fake git ignoring SIGTERM should hide badges")
+    expect(ignoreTerm.elapsed < 2.0, "fake git ignoring SIGTERM should be hard-killed within bounded time, got \(ignoreTerm.elapsed)s")
+    try expectNoLiveProcess(pidFile: ignoreTermPIDFile, message: "fake git ignoring SIGTERM process should not be left running")
+}
+
+func runFakeGitProbe(
+    mode: String,
+    root: URL,
+    environment: [String: String],
+    executableURL: URL,
+    timeout: TimeInterval = 0.15
+) throws -> (statuses: [String: FileTreeGitStatus], elapsed: TimeInterval) {
+    var environment = environment
+    environment["FAKE_GIT_MODE"] = mode
+    let probe = FileTreeGitStatusProbe(
+        timeout: timeout,
+        terminationGrace: 0.15,
+        maxOutputBytes: 4 * 1024,
+        environment: environment,
+        executableURL: executableURL,
+        argumentPrefix: []
+    )
+    let start = Date()
+    let statuses = probe.statuses(root: root)
+    return (statuses, Date().timeIntervalSince(start))
+}
+
+func expectNoLiveProcess(pidFile: URL, message: String) throws {
+    let rawPID = try String(contentsOf: pidFile).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let pid = Int32(rawPID) else {
+        throw CheckError("could not parse fake git pid from \(pidFile.path)")
+    }
+    let deadline = Date().addingTimeInterval(1.0)
+    while processExists(pid) && Date() < deadline {
+        Thread.sleep(forTimeInterval: 0.02)
+    }
+    expect(!processExists(pid), message)
+}
+
+func processExists(_ pid: Int32) -> Bool {
+#if canImport(Darwin)
+    Darwin.kill(pid, 0) == 0
+#else
+    false
+#endif
 }
