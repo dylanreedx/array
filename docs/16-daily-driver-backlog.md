@@ -1,10 +1,15 @@
 # Daily-Driver Backlog
 
+> **SUPERSEDED 2026-06-10 (same day, evening):** the live backlog now lives in
+> **Linear, team `continuum`** (123 tickets across 15 epic projects, CON-1
+> onward). Every open DD item below was absorbed into Linear with its evidence;
+> work from Linear, not from this file. This document remains as the evidence
+> record for the original findings. Workflow: `docs/21-agent-workflow.md`.
+> Vision: `docs/20-product-vision.md`.
+
 Status: authored 2026-06-10 from a live exploration session (screenshots + AX
 driving + code reading) on `main` @ `fdae439`, cross-referenced against
 `docs/14-platform-bug-bash-backlog.md` and `docs/12-ux-exploration-backlog.md`.
-This is the **ranked source of truth** for getting Continuum Revived to the
-point where Dylan uses it daily instead of macOS Desktops.
 
 How to use this doc (implementing agents):
 
