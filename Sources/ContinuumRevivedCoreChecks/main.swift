@@ -1293,4 +1293,72 @@ do {
     }
 }
 
+// MARK: - RunArtifactsReader tolerant parsing
+
+do {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("continuum-run-artifacts-reader-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: root) }
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+
+    func makeRun(_ name: String) throws -> URL {
+        let dir = root.appendingPathComponent(name, isDirectory: true)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    let complete = try makeRun("complete")
+    try """
+    {"id":"code-scout-20260611T000000Z-abcd12","role":"code-scout","status":"done","task":"Scout things","cwd":"/tmp/project","createdAt":"2026-06-11T00:00:00Z","updatedAt":"2026-06-11T00:01:00Z"}
+    """.write(to: complete.appendingPathComponent("run.json"), atomically: true, encoding: .utf8)
+    try """
+    {"ts":"2026-06-11T00:00:00Z","type":"started","pid":123}
+    {"ts":"2026-06-11T00:00:01Z","type":"message_start"}
+    """.write(to: complete.appendingPathComponent("events.jsonl"), atomically: true, encoding: .utf8)
+    try "final output".write(to: complete.appendingPathComponent("final.md"), atomically: true, encoding: .utf8)
+    let completeSnapshot = RunArtifactsReader.read(runDirectory: complete)
+    expect(completeSnapshot.run.id == "code-scout-20260611T000000Z-abcd12", "RunArtifactsReader reads run id")
+    expect(completeSnapshot.run.role == "code-scout", "RunArtifactsReader reads role")
+    expect(completeSnapshot.run.status == .done, "RunArtifactsReader maps done status")
+    expect(completeSnapshot.run.task == "Scout things", "RunArtifactsReader reads task")
+    expect(completeSnapshot.run.cwd == "/tmp/project", "RunArtifactsReader reads cwd")
+    expect(completeSnapshot.run.createdAt == "2026-06-11T00:00:00Z", "RunArtifactsReader reads createdAt")
+    expect(completeSnapshot.run.updatedAt == "2026-06-11T00:01:00Z", "RunArtifactsReader reads updatedAt")
+    expect(completeSnapshot.run.rawJSON?.contains("\"status\":\"done\"") == true, "RunArtifactsReader preserves valid raw run.json")
+    expect(completeSnapshot.events.events.map(\.type) == ["started", "message_start"], "RunArtifactsReader streams valid events")
+    expect(completeSnapshot.events.events.first?.timestamp == "2026-06-11T00:00:00Z", "RunArtifactsReader reads event timestamp")
+    expect(completeSnapshot.events.events.first?.rawJSON.contains("\"pid\":123") == true, "RunArtifactsReader preserves event raw JSON")
+    expect(completeSnapshot.events.badLineCount == 0, "RunArtifactsReader reports no bad lines for complete events")
+    expect(completeSnapshot.finalMarkdown == "final output", "RunArtifactsReader reads final.md")
+
+    let inProgress = try makeRun("in-progress")
+    try """
+    {"id":"implementer-1","role":"implementer","status":"running"}
+    """.write(to: inProgress.appendingPathComponent("run.json"), atomically: true, encoding: .utf8)
+    try "{\"ts\":\"2026-06-11T00:00:00Z\",\"type\":\"started\"}\n{\"ts\":\"2026-06-11T00:00:01Z\",\"type\":\"turn_start\"}".write(to: inProgress.appendingPathComponent("events.jsonl"), atomically: true, encoding: .utf8)
+    let inProgressSnapshot = RunArtifactsReader.read(runDirectory: inProgress)
+    expect(inProgressSnapshot.run.status == .running, "RunArtifactsReader maps running status")
+    expect(inProgressSnapshot.events.events.count == 2, "RunArtifactsReader reads in-progress events without final newline")
+    expect(inProgressSnapshot.finalMarkdown == nil, "RunArtifactsReader tolerates missing final.md")
+
+    let truncated = try makeRun("truncated")
+    try "{ this is not json".write(to: truncated.appendingPathComponent("run.json"), atomically: true, encoding: .utf8)
+    try """
+    {"ts":"ok","type":"started"}
+    {"ts":"partial"
+    """.write(to: truncated.appendingPathComponent("events.jsonl"), atomically: true, encoding: .utf8)
+    let truncatedSnapshot = RunArtifactsReader.read(runDirectory: truncated)
+    expect(truncatedSnapshot.run.status == .unknown, "RunArtifactsReader marks garbled run.json unknown")
+    expect(truncatedSnapshot.run.rawJSON == "{ this is not json", "RunArtifactsReader preserves garbled raw run.json")
+    expect(truncatedSnapshot.events.events.map(\.type) == ["started"], "RunArtifactsReader keeps valid events before truncated line")
+    expect(truncatedSnapshot.events.badLineCount == 1, "RunArtifactsReader counts truncated event line")
+
+    let missing = try makeRun("missing")
+    let missingSnapshot = RunArtifactsReader.read(runDirectory: missing)
+    expect(missingSnapshot.run.status == .unknown, "RunArtifactsReader marks missing run.json unknown")
+    expect(missingSnapshot.run.rawJSON == nil, "RunArtifactsReader missing run.json has no raw JSON")
+    expect(missingSnapshot.events.events.isEmpty && missingSnapshot.events.badLineCount == 0, "RunArtifactsReader tolerates missing events.jsonl")
+    expect(missingSnapshot.finalMarkdown == nil, "RunArtifactsReader tolerates missing final.md")
+}
+
 print("ContinuumRevivedCoreChecks passed")
