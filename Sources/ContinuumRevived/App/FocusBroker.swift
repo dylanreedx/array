@@ -1,0 +1,113 @@
+import AppKit
+import ContinuumRevivedCore
+import Foundation
+
+@MainActor
+protocol FocusSurfaceAdapter: AnyObject {
+    var focusSurfaceID: FocusSurfaceID { get }
+    var focusSurfaceKind: FocusSurfaceKind { get }
+    func acquireFocus(reason: FocusRequest) -> Bool
+    func releaseFocus(reason: FocusRequest)
+    func canHandleReservedShortcut(_ shortcut: ReservedShortcut) -> Bool
+}
+
+@MainActor
+final class FocusBroker {
+    private var adapters: [FocusSurfaceID: FocusSurfaceAdapter] = [:]
+    private var modalSnapshots: [FocusModalKind: FocusSurfaceID?] = [:]
+    private var tileSpawnedDuringModal = false
+
+    private(set) var activeSurface: FocusSurfaceID?
+    var onAcceptedTileFocus: ((UUID) -> Void)?
+
+    func register(_ adapter: FocusSurfaceAdapter) {
+        adapters[adapter.focusSurfaceID] = adapter
+    }
+
+    func unregister(_ id: FocusSurfaceID) {
+        if activeSurface == id {
+            adapters[id]?.releaseFocus(reason: .recovery)
+            activeSurface = nil
+        }
+        adapters.removeValue(forKey: id)
+    }
+
+    @discardableResult
+    func requestFocus(_ id: FocusSurfaceID, reason: FocusRequest) -> Bool {
+        if reason == .tileSpawned, !modalSnapshots.isEmpty {
+            tileSpawnedDuringModal = true
+        }
+
+        if case .modal = id {
+            activeSurface = id
+            return true
+        }
+
+        guard let adapter = adapters[id], adapter.acquireFocus(reason: reason) else {
+            return false
+        }
+
+        if let previous = activeSurface, previous != id {
+            adapters[previous]?.releaseFocus(reason: reason)
+        }
+        activeSurface = id
+        if case let .tile(tileId) = id {
+            onAcceptedTileFocus?(tileId)
+        }
+        return true
+    }
+
+    func openModal(_ kind: FocusModalKind) {
+        modalSnapshots[kind] = activeSurface
+        _ = requestFocus(.modal(kind), reason: .modalOpened)
+    }
+
+    func closeModal(_ kind: FocusModalKind) {
+        let snapshot = modalSnapshots.removeValue(forKey: kind) ?? nil
+        let shouldRestoreSnapshot = !tileSpawnedDuringModal
+        if modalSnapshots.isEmpty {
+            tileSpawnedDuringModal = false
+        }
+        guard shouldRestoreSnapshot, let snapshot else { return }
+        _ = requestFocus(snapshot, reason: .modalDismissed)
+    }
+
+    func applicationDidBecomeActive() {
+        if let activeSurface, adapters[activeSurface]?.acquireFocus(reason: .appActivated) == true {
+            return
+        }
+        recoverToCanvas(reason: .appActivated)
+    }
+
+    func applicationDidResignActive() {
+        if let activeSurface {
+            adapters[activeSurface]?.releaseFocus(reason: .recovery)
+        }
+    }
+
+    func reservedShortcut(for event: NSEvent) -> ReservedShortcut? {
+        ReservedShortcut.classify(keyCode: event.keyCode, modifiers: FocusKeyModifiers(event.modifierFlags))
+    }
+
+    func shouldSurfaceReceive(_ shortcut: ReservedShortcut, surface: FocusSurfaceID) -> Bool {
+        if !modalSnapshots.isEmpty, activeSurface != surface {
+            return false
+        }
+        return adapters[surface]?.canHandleReservedShortcut(shortcut) ?? false
+    }
+
+    func recoverToCanvas(reason: FocusRequest) {
+        _ = requestFocus(.canvas, reason: reason)
+    }
+}
+
+private extension FocusKeyModifiers {
+    init(_ flags: NSEvent.ModifierFlags) {
+        var value: FocusKeyModifiers = []
+        if flags.contains(.command) { value.insert(.command) }
+        if flags.contains(.shift) { value.insert(.shift) }
+        if flags.contains(.option) { value.insert(.option) }
+        if flags.contains(.control) { value.insert(.control) }
+        self = value
+    }
+}

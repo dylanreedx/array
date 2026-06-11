@@ -38,6 +38,46 @@ do {
     expect(state.status == .error(message: "spawn failed"), "state should mark errors")
 }
 
+// MARK: - Focus model
+
+do {
+    expect(ReservedShortcut.classify(keyCode: 40, modifiers: .command) == .palette, "Cmd-K should classify as palette shortcut")
+    expect(ReservedShortcut.classify(keyCode: 18, modifiers: .command) == .spawnProfile(1), "Cmd-1 should classify as spawn profile 1")
+    expect(ReservedShortcut.classify(keyCode: 19, modifiers: .command) == .spawnProfile(2), "Cmd-2 should classify as spawn profile 2")
+    expect(ReservedShortcut.classify(keyCode: 20, modifiers: .command) == .spawnProfile(3), "Cmd-3 should classify as spawn profile 3")
+    expect(ReservedShortcut.classify(keyCode: 21, modifiers: .command) == .spawnProfile(4), "Cmd-4 should classify as spawn profile 4")
+    expect(ReservedShortcut.classify(keyCode: 40, modifiers: [.command, .shift]) == nil, "Cmd-Shift-K should not classify as a reserved shortcut")
+    expect(ReservedShortcut.classify(keyCode: 40, modifiers: []) == nil, "plain K should not classify as a reserved shortcut")
+    expect(ReservedShortcut.classify(keyCode: 53, modifiers: []) == nil, "plain Escape should not classify as a reserved shortcut")
+}
+
+// MARK: - Delete confirmation policy
+
+do {
+    expect(DeleteConfirmPolicy.runtimes.requiresConfirmation(for: .terminal), "runtimes policy should confirm terminal deletes")
+    expect(DeleteConfirmPolicy.runtimes.requiresConfirmation(for: .browser), "runtimes policy should confirm browser deletes")
+    expect(!DeleteConfirmPolicy.runtimes.requiresConfirmation(for: .note), "runtimes policy should not confirm note deletes")
+    expect(!DeleteConfirmPolicy.runtimes.requiresConfirmation(for: .file), "runtimes policy should not confirm file deletes")
+    expect(!DeleteConfirmPolicy.runtimes.requiresConfirmation(for: .fileTree), "runtimes policy should not confirm file-tree deletes")
+    expect(!DeleteConfirmPolicy.never.requiresConfirmation(for: .terminal), "never policy should not confirm terminal deletes")
+    expect(DeleteConfirmPolicy.always.requiresConfirmation(for: .note), "always policy should confirm note deletes")
+
+    let terminal = DeleteConfirmPolicy.runtimes.alertConfiguration(for: .terminal)
+    expect(terminal.message == "Delete this terminal tile?", "terminal delete message")
+    expect(terminal.informative == "The running session will be terminated.", "terminal delete informative text")
+    expect(terminal.buttonTitles == ["Cancel", "Delete"], "delete alert should render Cancel before Delete")
+    expect(terminal.cancelKeyEquivalent == "\r", "Cancel should be the Return default")
+    expect(terminal.destructiveKeyEquivalent == "", "Delete should not be Return-default")
+    expect(terminal.destructiveIndex == 1, "Delete should be the second alert button")
+    expect(terminal.defaultIsCancel, "delete alert default should be Cancel")
+
+    let browser = DeleteConfirmPolicy.runtimes.alertConfiguration(for: .browser)
+    expect(browser.informative == "The browser process and any unsaved page state will be lost.", "browser delete informative text")
+
+    let file = DeleteConfirmPolicy.always.alertConfiguration(for: .file)
+    expect(file.informative == "This action cannot be undone.", "generic delete informative text")
+}
+
 // MARK: - JSONCodec
 
 do {

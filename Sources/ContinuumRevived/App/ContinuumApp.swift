@@ -71,6 +71,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--note-click-focus-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try NoteTileNSView.runNoteClickFocusSelfCheck()
+                print("ContinuumRevivedNoteClickFocusChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-restore-state-check") {
             do {
                 _ = NSApplication.shared
@@ -154,6 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var activeProject: Project?
     private var tileSpawner: TileSpawner?
     private var profilePalette: LaunchProfilePalette?
+    private let focusBroker = FocusBroker()
     private var qaPerf: QAPerf?
     private var launchStartTime: CFTimeInterval?
     private var hotkeyMonitor: Any?
@@ -303,7 +316,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // a non-nil ghostty to forward set_focus into the surface.
             NSApp.activate(ignoringOtherApps: true)
 
-            if smokeTestEnabled {
+            if CommandLine.arguments.contains("--palette-captures-keys-over-browser-check") {
+                runPaletteCapturesKeysOverBrowserCheck(window: window)
+            } else if smokeTestEnabled {
                 runSmokeTest(window: window, runtime: runtimes.first)
             }
         } catch {
@@ -443,22 +458,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let canvasView else { return }
         guard let tile = canvasView.canvasState.tiles.first(where: { $0.id == id }) else { return }
 
+        fputs("deleteTile entry kind=\(tile.kind.rawValue) id=\(id.uuidString)\n", stderr)
+        var deleteOutcome = "deleted"
+        defer {
+            fputs("deleteTile exit kind=\(tile.kind.rawValue) id=\(id.uuidString) outcome=\(deleteOutcome)\n", stderr)
+        }
+
         let policy = DeleteConfirmPolicy.current
         if policy.requiresConfirmation(for: tile.kind) {
+            let configuration = policy.alertConfiguration(for: tile.kind)
             let alert = NSAlert()
-            alert.messageText = "Delete this \(tile.kind.rawValue) tile?"
-            switch tile.kind {
-            case .terminal:
-                alert.informativeText = "The running session will be terminated."
-            case .browser:
-                alert.informativeText = "The browser process and any unsaved page state will be lost."
-            default:
-                alert.informativeText = "This action cannot be undone."
-            }
+            alert.messageText = configuration.message
+            alert.informativeText = configuration.informative
             alert.alertStyle = .warning
-            alert.addButton(withTitle: "Delete")
-            alert.addButton(withTitle: "Cancel")
-            if alert.runModal() != .alertFirstButtonReturn {
+            let cancel = alert.addButton(withTitle: configuration.buttonTitles[0])
+            let delete = alert.addButton(withTitle: configuration.buttonTitles[1])
+            delete.hasDestructiveAction = true
+            delete.keyEquivalent = configuration.destructiveKeyEquivalent
+            cancel.keyEquivalent = configuration.cancelKeyEquivalent
+            if alert.runModal() != .alertSecondButtonReturn {
+                deleteOutcome = "skipped"
                 return
             }
         }
@@ -708,6 +727,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func handleHotkey(_ event: NSEvent) -> Bool {
+        if profilePalette?.handleKeyEvent(event) == true {
+            return true
+        }
+
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let onlyCommand: NSEvent.ModifierFlags = [.command]
         guard mods == onlyCommand else { return false }
@@ -724,24 +747,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return true
         }
 
-        guard let chars = event.charactersIgnoringModifiers else { return false }
-        switch chars {
-        case "k":
+        guard let shortcut = focusBroker.reservedShortcut(for: event) else { return false }
+        if let activeSurface = focusBroker.activeSurface,
+           focusBroker.shouldSurfaceReceive(shortcut, surface: activeSurface) {
+            return false
+        }
+
+        switch shortcut {
+        case .palette:
             openProfilePalette()
             return true
-        case "1":
+        case .spawnProfile(1):
             spawnTerminalFromProfile("claude")
             return true
-        case "2":
+        case .spawnProfile(2):
             spawnTerminalFromProfile("shell")
             return true
-        case "3":
+        case .spawnProfile(3):
             spawnBrowserDefault()
             return true
-        case "4":
+        case .spawnProfile(4):
             spawnTerminalFromProfile("nvim")
             return true
-        default:
+        case .spawnProfile:
             return false
         }
     }
@@ -1939,6 +1967,127 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             tSec: 1.8,
             success: true
         )
+    }
+
+    private func runPaletteCapturesKeysOverBrowserCheck(window: NSWindow) {
+        var runtime: WKWebViewBrowserRuntime?
+        var browserTile: BrowserTileNSView?
+        var webValue: String?
+        var webKeys: String?
+        var notes: [String] = []
+
+        func finish(success: Bool, _ message: String) {
+            if success {
+                print("ContinuumRevivedPaletteKeyCaptureOverBrowserChecks passed")
+            } else {
+                fputs("FAIL: \(message)\n", stderr)
+            }
+            smokeTestExitCode = success ? 0 : 1
+            window.performClose(nil)
+        }
+
+        func makeKeyEvent(_ character: String, keyCode: UInt16, modifiers: NSEvent.ModifierFlags = []) -> NSEvent? {
+            NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: modifiers,
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                characters: character,
+                charactersIgnoringModifiers: character.lowercased(),
+                isARepeat: false,
+                keyCode: keyCode
+            )
+        }
+
+        func send(_ character: String, keyCode: UInt16, modifiers: NSEvent.ModifierFlags = []) {
+            guard let event = makeKeyEvent(character, keyCode: keyCode, modifiers: modifiers) else {
+                notes.append("could not create key event for \(character)")
+                return
+            }
+            NSApplication.shared.sendEvent(event)
+        }
+
+        let html = """
+        <html><body><input id='qa' autofocus><script>
+        window.qaKeys = [];
+        document.addEventListener('keydown', function(e) {
+          if (e.key && e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) { window.qaKeys.push(e.key); }
+        });
+        window.onload = function() { document.getElementById('qa').focus(); };
+        </script></body></html>
+        """
+        let encoded = html.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? html
+        let url = "data:text/html;charset=utf-8,\(encoded)"
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            guard let spawner = self.tileSpawner else {
+                notes.append("tile spawner unavailable")
+                return
+            }
+            switch spawner.spawnBrowser(url: url) {
+            case let .spawned(spawned):
+                self.wireContentProcessTerminationHandler(spawned)
+                self.browserRuntimes.append(spawned)
+                runtime = spawned
+                browserTile = self.canvasView?.tileView(for: spawned.tileId) as? BrowserTileNSView
+            case let .invalidURL(invalid):
+                notes.append("invalid URL \(invalid)")
+            case let .failure(error):
+                notes.append("spawn failed: \(error)")
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+            guard let runtime, let browserTile else {
+                notes.append("browser runtime/tile unavailable")
+                return
+            }
+            self.canvasView?.bringToFront(tileId: runtime.tileId)
+            browserTile.layoutSubtreeIfNeeded()
+            runtime.focus()
+            send("K", keyCode: 40, modifiers: .command)
+            runtime.focus()
+            send("n", keyCode: 45)
+            send("o", keyCode: 31)
+            send("t", keyCode: 17)
+            send("e", keyCode: 14)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+            guard let runtime else {
+                finish(success: false, "runtime unavailable for JS evaluation; notes=\(notes)")
+                return
+            }
+
+            let group = DispatchGroup()
+            group.enter()
+            runtime.webView.evaluateJavaScript("document.getElementById('qa').value") { result, error in
+                if let error { notes.append("value JS error: \(error)") }
+                webValue = result as? String
+                group.leave()
+            }
+            group.enter()
+            runtime.webView.evaluateJavaScript("window.qaKeys.join('')") { result, error in
+                if let error { notes.append("keys JS error: \(error)") }
+                webKeys = result as? String
+                group.leave()
+            }
+            group.notify(queue: .main) {
+                let paletteText = self.profilePalette?.searchTextForQA
+                let selected = self.profilePalette?.selectedDisplayNameForQA
+                let contentFocused = browserTile?.browserContentHasFocusForQA == true
+                let success = paletteText == "note"
+                    && selected == LaunchPaletteAction.newNote.displayName
+                    && contentFocused
+                    && webValue == ""
+                    && webKeys == ""
+                    && notes.isEmpty
+                let message = "paletteText=\(String(describing: paletteText)) selected=\(String(describing: selected)) contentFocused=\(contentFocused) webValue=\(String(describing: webValue)) webKeys=\(String(describing: webKeys)) notes=\(notes)"
+                finish(success: success, message)
+            }
+        }
     }
 
     private func runBrowserURLFocusFlow(window: NSWindow) {

@@ -142,7 +142,7 @@ together via `docs/17-focus-input-routing-plan.md`, not as three patches.
   tile and focuses its URL field; `ContinuumRevivedPaletteChecks` extended to
   cover row presence/filter/selection; `--palette-browser-spawn-check`.
 
-### DD-007 [P0] Delete confirmation defaults to Delete on Return
+### DD-007 [P0] ✅ Fixed — Delete confirmation defaults to Delete on Return
 
 - **Evidence (live):** `deleteTile` (`ContinuumApp.swift:442-464`) adds
   "Delete" as the first (Return-default) NSAlert button. During palette

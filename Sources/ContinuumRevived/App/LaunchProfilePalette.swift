@@ -50,6 +50,44 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         close(restoreFocus: true)
     }
 
+    @discardableResult
+    func handleKeyEvent(_ event: NSEvent) -> Bool {
+        guard isVisible, event.type == .keyDown else { return false }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers.contains(.command) || modifiers.contains(.control) || modifiers.contains(.option) {
+            return false
+        }
+
+        switch event.keyCode {
+        case 36, 76: // Return / keypad Enter.
+            commitSelection()
+            return true
+        case 53: // Escape.
+            close(restoreFocus: true)
+            return true
+        case 125: // Down arrow.
+            moveSelection(by: 1)
+            return true
+        case 126: // Up arrow.
+            moveSelection(by: -1)
+            return true
+        case 51: // Delete / Backspace.
+            guard let searchField else { return true }
+            if !searchField.stringValue.isEmpty {
+                searchField.stringValue.removeLast()
+                applyFilter(query: searchField.stringValue)
+            }
+            return true
+        default:
+            guard let characters = event.characters, !characters.isEmpty else { return false }
+            guard characters.unicodeScalars.allSatisfy({ $0.value >= 32 }) else { return false }
+            guard let searchField else { return true }
+            searchField.stringValue += characters
+            applyFilter(query: searchField.stringValue)
+            return true
+        }
+    }
+
     private func close(restoreFocus: Bool) {
         let window = previousFirstResponderWindow ?? paletteView?.window
         let currentWasPaletteResponder = isPaletteResponder(window?.firstResponder)
@@ -78,6 +116,16 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     var isVisible: Bool { paletteView?.superview != nil }
+
+    var searchTextForQA: String { searchField?.stringValue ?? "" }
+
+    var selectedDisplayNameForQA: String? {
+        guard let tableView, tableView.selectedRow >= 0, tableView.selectedRow < filtered.count else { return nil }
+        switch filtered[tableView.selectedRow] {
+        case let .action(action): return action.displayName
+        case let .profile(profile): return profile.displayName
+        }
+    }
 
     static func paletteRootCount(in hostView: NSView) -> Int {
         hostView.subviews.filter { $0.accessibilityIdentifier() == rootAccessibilityIdentifier }.count
@@ -192,6 +240,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         case paletteDidNotTakeFocus(String)
         case unexpectedFirstResponder(String, expected: String)
         case typingProbeMissedSentinel(String, got: String)
+        case failed(String)
 
         var description: String {
             switch self {
@@ -205,6 +254,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
                 return "restored \(actual), expected \(expected)"
             case let .typingProbeMissedSentinel(sentinel, got):
                 return "typing sentinel \(sentinel) did not land in probe; got \(got)"
+            case let .failed(message):
+                return message
             }
         }
     }
@@ -471,7 +522,11 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
 
     func controlTextDidChange(_ obj: Notification) {
         guard let field = obj.object as? NSTextField else { return }
-        filtered = LaunchPaletteModel.filterRows(rows, query: field.stringValue)
+        applyFilter(query: field.stringValue)
+    }
+
+    private func applyFilter(query: String) {
+        filtered = LaunchPaletteModel.filterRows(rows, query: query)
         tableView?.reloadData()
         if !filtered.isEmpty {
             tableView?.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
