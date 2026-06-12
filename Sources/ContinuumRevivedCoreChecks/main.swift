@@ -1713,7 +1713,7 @@ do {
         lastActiveTileId: tileId
     )
     let result = CanvasEngine.sanitizePersistedCanvas(canvas, visibleSize: CGSize(width: 800, height: 600))
-    expect(result.recenteredViewport, "disjoint viewport should be recentered")
+    expect(result.recenteredViewport, "pathological disjoint viewport should be recentered")
     let visible = CanvasEngine.visibleWorldRect(viewport: result.canvas.viewport, visibleSize: CGSize(width: 800, height: 600))
     let screenFrame = CanvasEngine.tileScreenFrame(result.canvas.tiles[0].frame, viewport: result.canvas.viewport)
     expect(visible.intersects(CGRect(x: 80, y: 90, width: 300, height: 220)), "recentered visible world rect intersects tile")
@@ -1732,6 +1732,30 @@ do {
     expect(result.changed, "empty bad canvas should be sanitized")
     expect(!result.recenteredViewport, "empty canvas should not report recenter")
     expect(result.canvas.viewport == CanvasViewport(x: 0, y: 0, zoom: 1), "empty bad viewport resets to sane default")
+}
+
+do {
+    let tileId = UUID(uuidString: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")!
+    let canvas = CanvasState(
+        viewport: CanvasViewport(x: 500_000, y: 500_000, zoom: 1),
+        tiles: [
+            Tile(
+                id: tileId,
+                kind: .note,
+                title: "Legitimate empty pan",
+                frame: TileFrame(x: 80, y: 90, width: 300, height: 220),
+                zIndex: 0,
+                runtimeRef: nil,
+                metadata: TileMetadata(noteId: UUID(uuidString: "12121212-1212-1212-1212-121212121212")!)
+            )
+        ],
+        groups: [],
+        lastActiveTileId: tileId
+    )
+    let result = CanvasEngine.sanitizePersistedCanvas(canvas, visibleSize: CGSize(width: 800, height: 600))
+    expect(!result.changed, "legitimate finite viewport panned away from tiles should remain unchanged")
+    expect(!result.recenteredViewport, "legitimate finite viewport panned away from tiles should not be recentered")
+    expect(result.canvas.viewport == canvas.viewport, "legitimate finite empty-region viewport is preserved")
 }
 
 do {

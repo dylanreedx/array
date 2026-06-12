@@ -130,7 +130,9 @@ public enum CanvasEngine {
         sanitized.viewport.zoom = sanitizedFiniteZoom(sanitized.viewport.zoom, range: range)
         sanitized.viewport.x = sanitizedFiniteCoordinate(sanitized.viewport.x, fallback: 0)
         sanitized.viewport.y = sanitizedFiniteCoordinate(sanitized.viewport.y, fallback: 0)
-        if sanitized.viewport != originalViewport {
+        let viewportCoordinatesWerePathological = sanitized.viewport.x != originalViewport.x || sanitized.viewport.y != originalViewport.y
+        let viewportWasPathological = sanitized.viewport != originalViewport
+        if viewportWasPathological {
             changed = true
             notes.append("sanitized persisted viewport")
         }
@@ -146,13 +148,13 @@ public enum CanvasEngine {
             return next
         }
 
-        if let bounds = finiteTileBounds(sanitized.tiles), !visibleWorldRect(viewport: sanitized.viewport, visibleSize: visibleSize, range: range).intersects(bounds) {
+        if viewportCoordinatesWerePathological, let bounds = finiteTileBounds(sanitized.tiles) {
             let old = sanitized.viewport
             sanitized.viewport = fit(worldRect: bounds, viewportSize: visibleSize, range: range)
             if sanitized.viewport != old {
                 changed = true
                 recentered = true
-                notes.append("recentered persisted viewport to visible tile bounds")
+                notes.append("recentered pathological persisted viewport to visible tile bounds")
             }
         }
 

@@ -2975,6 +2975,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(CanvasEngine.defaultZoomRange.contains(persisted.viewport.zoom), "persisted sanitized zoom should remain clamped")
         try expect(persisted.tiles.map(\.id) == result.canvas.tiles.map(\.id), "persisted sanitized output should preserve tile ids")
 
+        let legitimateViewport = CanvasViewport(x: 500_000, y: -500_000, zoom: 1)
+        let legitimateCanvas = CanvasState(
+            viewport: legitimateViewport,
+            tiles: [
+                Tile(
+                    id: UUID(uuidString: "12345678-1234-1234-1234-123456789abc")!,
+                    kind: .note,
+                    title: "Legitimate offscreen pan",
+                    frame: TileFrame(x: 120, y: 140, width: 320, height: 220),
+                    zIndex: 1,
+                    runtimeRef: nil,
+                    metadata: TileMetadata(noteId: UUID(uuidString: "abcdefab-cdef-cdef-cdef-abcdefabcdef")!)
+                )
+            ],
+            groups: [],
+            lastActiveTileId: nil
+        )
+        let legitimateResult = CanvasEngine.sanitizePersistedCanvas(legitimateCanvas, visibleSize: viewportSize)
+        try expect(!legitimateResult.changed, "legitimate finite offscreen viewport should not be sanitized")
+        try expect(!legitimateResult.recenteredViewport, "legitimate finite offscreen viewport should not be recentered")
+        try expect(legitimateResult.canvas.viewport == legitimateViewport, "legitimate finite offscreen viewport should be preserved")
+
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
             .appendingPathComponent("qa-runs", isDirectory: true)
@@ -3008,6 +3030,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "runtimeRefPreserved": result.canvas.tiles[0].runtimeRef == RuntimeRef(kind: .terminalSession, id: runtimeId),
             "metadataPreserved": result.canvas.tiles[0].metadata.launchProfileId == "shell",
             "persistedFinite": allFinite(persisted),
+            "legitimateViewportPreserved": legitimateResult.canvas.viewport == legitimateViewport,
+            "legitimateChanged": legitimateResult.changed,
+            "legitimateRecenteredViewport": legitimateResult.recenteredViewport,
         ]
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
