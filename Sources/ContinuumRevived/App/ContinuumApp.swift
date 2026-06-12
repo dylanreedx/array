@@ -47,6 +47,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--project-root-resolution-check") {
+            do {
+                try AppDelegate.runProjectRootResolutionSelfCheck()
+                print("ContinuumRevivedProjectRootResolutionChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--project-picker-resolution-check") {
             do {
                 try AppDelegate.runProjectPickerResolutionSelfCheck()
@@ -1524,6 +1535,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         var registry = try store.loadOrEmpty()
         registry.upsertProject(project, openedAt: Date())
         try store.save(registry)
+    }
+
+    static func runProjectRootResolutionSelfCheck() throws {
+        struct CheckFailure: Error, CustomStringConvertible {
+            let description: String
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckFailure(description: message) }
+        }
+
+        let originalCwd = FileManager.default.currentDirectoryPath
+        let cwdProbe = "/tmp/continuum-root-resolution-cwd-should-not-be-used"
+        try? FileManager.default.createDirectory(atPath: cwdProbe, withIntermediateDirectories: true)
+        defer {
+            FileManager.default.changeCurrentDirectoryPath(originalCwd)
+            try? FileManager.default.removeItem(atPath: cwdProbe)
+        }
+        FileManager.default.changeCurrentDirectoryPath(cwdProbe)
+
+        let usableId = UUID()
+        let missingId = UUID()
+        let usablePath = "/tmp/continuum-root-resolution-usable"
+        let missingPath = "/tmp/continuum-root-resolution-missing"
+        let envPath = "/tmp/continuum-root-resolution-env"
+        var registry = Registry.empty()
+        registry.lastActiveProjectId = usableId
+        registry.projects = [
+            ProjectEntry(id: usableId, name: "Usable", rootPath: usablePath, workspaceId: nil, lastOpenedAt: Date(timeIntervalSince1970: 1_800_000_100), pinned: false),
+            ProjectEntry(id: missingId, name: "Missing", rootPath: missingPath, workspaceId: nil, lastOpenedAt: Date(timeIntervalSince1970: 1_800_000_000), pinned: false)
+        ]
+
+        final class ProbeRecorder: @unchecked Sendable {
+            private var storage: [String] = []
+            func append(_ value: String) { storage.append(value) }
+            func contains(_ value: String) -> Bool { storage.contains(value) }
+        }
+        let probedPaths = ProbeRecorder()
+        let probes = ProjectRootResolver.FileSystemProbes(
+            directoryExists: {
+                probedPaths.append($0)
+                return $0 == usablePath
+            },
+            continuumDirectoryExists: {
+                probedPaths.append($0 + "/.continuum-revived")
+                return $0 == usablePath
+            },
+            canCreateContinuumDirectory: {
+                probedPaths.append($0 + "/.continuum-revived:create")
+                return false
+            }
+        )
+
+        let envDecision = ProjectLaunchCoordinator.decide(environment: ["CONTINUUM_PROJECT_ROOT": envPath], registry: registry, fileSystem: probes)
+        try expect(envDecision == .open(URL(fileURLWithPath: envPath)), "environment root wins")
+
+        let registryDecision = ProjectLaunchCoordinator.decide(environment: [:], registry: registry, fileSystem: probes)
+        try expect(registryDecision == .open(URL(fileURLWithPath: usablePath)), "usable registry last-active root opens")
+
+        registry.lastActiveProjectId = missingId
+        guard case let .presentPicker(request) = ProjectLaunchCoordinator.decide(environment: [:], registry: registry, fileSystem: probes) else {
+            throw CheckFailure(description: "missing registry root should reach picker state")
+        }
+        try expect(request.reason == .noUsableProject, "missing registry root uses noUsableProject picker reason")
+        try expect(ProjectLaunchCoordinator.selectProject(id: usableId, from: request) == URL(fileURLWithPath: usablePath), "picker selection returns usable registry URL")
+        try expect(!probedPaths.contains(cwdProbe), "resolver must not probe cwd")
+        try expect(!probedPaths.contains(cwdProbe + "/.continuum-revived"), "resolver must not probe cwd continuum directory")
+
+        if ProcessInfo.processInfo.environment["CONTINUUM_PROJECT_ROOT"] == nil {
+            let smokeRoot = try resolveProjectRoot(smokeTest: true, registry: .empty())
+            try expect(smokeRoot.lastPathComponent.hasPrefix("continuum-smoke-project-"), "smoke path still bypasses picker with temp root")
+            try expect(FileManager.default.fileExists(atPath: smokeRoot.path), "smoke temp root is created")
+            try? FileManager.default.removeItem(at: smokeRoot)
+        }
     }
 
     static func runProjectPickerResolutionSelfCheck() throws {
