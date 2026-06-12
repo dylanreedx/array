@@ -101,6 +101,19 @@ class TileNSView: NSView {
         self.tile = tile
     }
 
+    func acquireFocus(reason: FocusRequest) -> Bool {
+        canvas?.bringToFront(tileId: tile.id)
+        if let contentView {
+            window?.makeFirstResponder(contentView)
+        } else {
+            window?.makeFirstResponder(self)
+        }
+        return true
+    }
+
+    func releaseFocus(reason: FocusRequest) {}
+    func canHandleReservedShortcut(_ shortcut: ReservedShortcut) -> Bool { false }
+
     // MARK: - Hit testing
 
     /// Reclaim the 8pt resize ring from any body content view. Without this

@@ -514,6 +514,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
             let canvasView = CanvasNSView(canvasState: canvasState)
             canvasView.delegate = self
+            canvasView.focusBroker = focusBroker
             canvasView.onTileCloseRequested = { [weak self] tileId in
                 self?.deleteTile(id: tileId)
             }
@@ -959,6 +960,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let pointInCanvas = canvas.convert(event.locationInWindow, from: nil)
             if let tileId = canvas.tileId(at: pointInCanvas) {
                 canvas.bringToFront(tileId: tileId)
+                self.focusBroker.acceptExistingFocus(.tile(tileId), reason: .userClick)
             }
             return event
         }
@@ -1208,22 +1210,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let app = try? ghostty?.app {
             ghostty_app_set_focus(app, true)
         }
-        if let targetId = canvasView?.canvasState.lastActiveTileId {
-            if let m = runtimes.first(where: { $0.tileId == targetId }) {
-                m.focus(); return
-            }
-            if let m = browserRuntimes.first(where: { $0.tileId == targetId }) {
-                m.focus(); return
-            }
+        if focusBroker.activeSurface == nil,
+           let targetId = canvasView?.canvasState.lastActiveTileId,
+           focusBroker.requestFocus(.tile(targetId), reason: .appActivated) {
+            return
         }
-        runtimes.last?.focus()
+        if focusBroker.activeSurface == nil,
+           let fallback = runtimes.last,
+           focusBroker.requestFocus(.tile(fallback.tileId), reason: .appActivated) {
+            return
+        }
+        focusBroker.applicationDidBecomeActive()
     }
 
     func applicationDidResignActive(_ notification: Notification) {
         if let app = try? ghostty?.app {
             ghostty_app_set_focus(app, false)
         }
-        for runtime in runtimes {
+        focusBroker.applicationDidResignActive()
+        for runtime in runtimes where focusBroker.activeSurface != .tile(runtime.tileId) {
             runtime.blur()
         }
     }

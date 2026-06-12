@@ -21,4 +21,14 @@ final class TerminalTileNSView: TileNSView {
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
     }
+
+    override func acquireFocus(reason: FocusRequest) -> Bool {
+        canvas?.bringToFront(tileId: tile.id)
+        runtime.focus()
+        return true
+    }
+
+    override func releaseFocus(reason: FocusRequest) {
+        runtime.blur()
+    }
 }

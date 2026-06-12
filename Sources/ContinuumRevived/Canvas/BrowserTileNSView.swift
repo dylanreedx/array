@@ -119,6 +119,16 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
         fatalError("init(coder:) is not supported")
     }
 
+    override func acquireFocus(reason: FocusRequest) -> Bool {
+        canvas?.bringToFront(tileId: tile.id)
+        runtime.focus()
+        return true
+    }
+
+    override func releaseFocus(reason: FocusRequest) {
+        runtime.blur()
+    }
+
     private func refresh() {
         // Don't clobber a URL the user is actively typing.
         if urlField.currentEditor() == nil {

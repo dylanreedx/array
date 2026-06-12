@@ -54,6 +54,12 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
+    override func acquireFocus(reason: FocusRequest) -> Bool {
+        canvas?.bringToFront(tileId: tile.id)
+        window?.makeFirstResponder(textView)
+        return true
+    }
+
     func textDidChange(_ notification: Notification) { onTextChange?() }
 
     static func runNoteClickFocusSelfCheck() throws -> URL {

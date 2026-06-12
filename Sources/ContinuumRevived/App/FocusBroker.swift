@@ -32,6 +32,21 @@ final class FocusBroker {
         adapters.removeValue(forKey: id)
     }
 
+    func acceptExistingFocus(_ id: FocusSurfaceID, reason: FocusRequest) {
+        guard case .modal = id else {
+            guard adapters[id] != nil else { return }
+            if let previous = activeSurface, previous != id {
+                adapters[previous]?.releaseFocus(reason: reason)
+            }
+            activeSurface = id
+            if case let .tile(tileId) = id {
+                onAcceptedTileFocus?(tileId)
+            }
+            return
+        }
+        activeSurface = id
+    }
+
     @discardableResult
     func requestFocus(_ id: FocusSurfaceID, reason: FocusRequest) -> Bool {
         if reason == .tileSpawned, !modalSnapshots.isEmpty {

@@ -62,6 +62,12 @@ final class FileTileNSView: TileNSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
+    override func acquireFocus(reason: FocusRequest) -> Bool {
+        canvas?.bringToFront(tileId: tile.id)
+        window?.makeFirstResponder(textView)
+        return true
+    }
+
     struct TextVisibilityEvidence: CustomStringConvertible {
         var containsExpectedText = false
         var documentViewMatches = false

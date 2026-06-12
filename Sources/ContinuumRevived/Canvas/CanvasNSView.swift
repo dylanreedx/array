@@ -14,6 +14,9 @@ final class CanvasNSView: NSView {
     /// wires every installed tile's `onClose` to call this, so the app sets
     /// this once at startup rather than at every TileSpawner install site.
     var onTileCloseRequested: ((UUID) -> Void)?
+    weak var focusBroker: FocusBroker? {
+        didSet { focusBroker?.register(self) }
+    }
 
     private(set) var canvasState: CanvasState
     private var tileViews: [UUID: TileNSView] = [:]
@@ -48,6 +51,7 @@ final class CanvasNSView: NSView {
         // must remove the old NSView; otherwise the prior view stays on top
         // of the new one and intercepts hits.
         if let existing = tileViews[tile.id] {
+            focusBroker?.unregister(existing.focusSurfaceID)
             existing.removeFromSuperview()
         }
         tileViews[tile.id] = tileView
@@ -57,6 +61,7 @@ final class CanvasNSView: NSView {
             self?.onTileCloseRequested?(tileId)
         }
         addSubview(tileView)
+        focusBroker?.register(tileView)
         layoutTile(tile)
         if let idx = canvasState.tiles.firstIndex(where: { $0.id == tile.id }) {
             canvasState.tiles[idx] = tile
@@ -96,6 +101,7 @@ final class CanvasNSView: NSView {
     /// responsibility — `removeTile` is the canvas-side teardown only.
     func removeTile(id: UUID) {
         if let view = tileViews[id] {
+            focusBroker?.unregister(view.focusSurfaceID)
             view.removeFromSuperview()
             tileViews.removeValue(forKey: id)
         }

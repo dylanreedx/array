@@ -63,6 +63,12 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
+    override func acquireFocus(reason: FocusRequest) -> Bool {
+        canvas?.bringToFront(tileId: tile.id)
+        window?.makeFirstResponder(searchField)
+        return true
+    }
+
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         outlineModel.children(of: item as? FileTreeOutlineItem).count
     }
