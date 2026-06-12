@@ -225,36 +225,44 @@ public enum CanvasEngine {
         visibleSize: CGSize,
         existing: [TileFrame]
     ) -> TileFrame {
-        let width = max(Double(size.width), 0)
-        let height = max(Double(size.height), 0)
+        let width = max(Double(size.width).isFinite ? Double(size.width) : 0, 0)
+        let height = max(Double(size.height).isFinite ? Double(size.height) : 0, 0)
         let zoom = viewport.zoom.isFinite && viewport.zoom > 0 ? viewport.zoom : 1
-        let visibleWidth = max(Double(visibleSize.width), 0) / zoom
-        let visibleHeight = max(Double(visibleSize.height), 0) / zoom
-        let minX = viewport.x
-        let minY = viewport.y
-        let maxX = max(minX, viewport.x + visibleWidth - width)
-        let maxY = max(minY, viewport.y + visibleHeight - height)
+        let visibleWidth = max(Double(visibleSize.width).isFinite ? Double(visibleSize.width) : 0, 0) / zoom
+        let visibleHeight = max(Double(visibleSize.height).isFinite ? Double(visibleSize.height) : 0, 0) / zoom
+        let minX = viewport.x.isFinite ? viewport.x : 0
+        let minY = viewport.y.isFinite ? viewport.y : 0
+        let maxX = max(minX, minX + visibleWidth - width)
+        let maxY = max(minY, minY + visibleHeight - height)
         let step = 32.0
+        let maxColumns = 256
+        let maxRows = 256
         let inflatedExisting = existing.map { rect(for: $0).insetBy(dx: -16, dy: -16) }
 
+        var row = 0
         var y = minY
-        while y <= maxY + 0.001 {
+        while y <= maxY + 0.001 && row < maxRows {
+            var column = 0
             var x = minX
-            while x <= maxX + 0.001 {
+            while x <= maxX + 0.001 && column < maxColumns {
                 let candidate = TileFrame(x: x, y: y, width: width, height: height)
                 let candidateRect = rect(for: candidate)
                 if !inflatedExisting.contains(where: { $0.intersects(candidateRect) }) {
                     return candidate
                 }
+                column += 1
                 x += step
             }
+            row += 1
             y += step
         }
 
         guard let last = existing.last else {
             return TileFrame(x: minX, y: minY, width: width, height: height)
         }
-        return TileFrame(x: last.x + 24, y: last.y + 24, width: width, height: height)
+        let fallbackX = clamp(last.x + 24, to: minX ... max(minX, minX + visibleWidth - width))
+        let fallbackY = clamp(last.y + 24, to: minY ... max(minY, minY + visibleHeight - height))
+        return TileFrame(x: fallbackX, y: fallbackY, width: width, height: height)
     }
 
     private static func rect(for frame: TileFrame) -> CGRect {

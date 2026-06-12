@@ -177,6 +177,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--spawn-placement-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try TileSpawner.runSpawnPlacementSelfCheck()
+                print("ContinuumRevivedSpawnPlacementChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--file-tree-hardening-check") {
             do {
                 _ = NSApplication.shared

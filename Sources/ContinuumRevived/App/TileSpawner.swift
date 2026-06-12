@@ -1003,6 +1003,75 @@ final class TileSpawner {
         return artifact
     }
 
+    static func runSpawnPlacementSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-spawn-placement-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        let project = Project(
+            id: UUID(),
+            name: "spawn-placement-check",
+            rootPath: tempRoot.path,
+            createdAt: Date(),
+            updatedAt: Date(),
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        canvas.setFrameSize(CGSize(width: 1800, height: 900))
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+        let spawner = TileSpawner(canvasView: canvas, ghostty: nil, browserEngine: browserEngine, projectStore: store, project: project)
+
+        var spawnedIds: [UUID] = []
+        for index in 1...4 {
+            switch spawner.spawnNote(title: "Placed \(index)") {
+            case let .spawned(_, tileId): spawnedIds.append(tileId)
+            case let .failure(error): throw CheckError.failed("spawnNote \(index) failed: \(error)")
+            }
+        }
+        let tiles = canvas.canvasState.tiles.filter { spawnedIds.contains($0.id) }
+        try expect(tiles.count == 4, "spawn-placement check should find all 4 spawned tiles in canvas state, got \(tiles.count)")
+        let rects = tiles.map { CGRect(x: $0.frame.x, y: $0.frame.y, width: $0.frame.width, height: $0.frame.height) }
+        for i in rects.indices {
+            for j in rects.indices where j > i {
+                try expect(!rects[i].intersects(rects[j]), "spawned tile frames should not intersect: \(rects[i]) vs \(rects[j])")
+            }
+        }
+
+        let manifest: [String: Any] = [
+            "check": "spawn-placement",
+            "tempProjectRoot": tempRoot.path,
+            "frames": tiles.map { ["id": $0.id.uuidString, "x": $0.frame.x, "y": $0.frame.y, "width": $0.frame.width, "height": $0.frame.height] }
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("spawn-placement", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
     // MARK: - File tree tiles
 
     func spawnFileTree(rootPath: String, at worldPoint: CGPoint? = nil) -> FileTreeOutcome {
@@ -1542,22 +1611,19 @@ final class TileSpawner {
     }
 
     private func makePlacement(worldPoint: CGPoint?, size: CGSize, in canvasView: CanvasNSView) -> TileFrame {
-        let cascadeStep: Double = 32
-        let world: CGPoint
         if let worldPoint {
-            world = worldPoint
-        } else {
-            let centerScreen = CGPoint(x: canvasView.bounds.midX, y: canvasView.bounds.midY)
-            world = CanvasEngine.screenToWorld(centerScreen, viewport: canvasView.viewport)
+            return TileFrame(
+                x: Double(worldPoint.x) - Double(size.width) / 2,
+                y: Double(worldPoint.y) - Double(size.height) / 2,
+                width: Double(size.width),
+                height: Double(size.height)
+            )
         }
-        // Cascade per existing tile so freshly spawned tiles do not stack.
-        let count = Double(canvasView.canvasState.tiles.count)
-        let offset = count * cascadeStep
-        return TileFrame(
-            x: Double(world.x) - Double(size.width) / 2 + offset,
-            y: Double(world.y) - Double(size.height) / 2 + offset,
-            width: Double(size.width),
-            height: Double(size.height)
+        return CanvasEngine.placementFrame(
+            size: size,
+            viewport: canvasView.viewport,
+            visibleSize: canvasView.bounds.size,
+            existing: canvasView.canvasState.tiles.map(\.frame)
         )
     }
 }

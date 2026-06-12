@@ -1128,9 +1128,29 @@ do {
     ]
     let first = CanvasEngine.placementFrame(size: CGSize(width: 96, height: 96), viewport: viewport, visibleSize: visibleSize, existing: existing)
     let second = CanvasEngine.placementFrame(size: CGSize(width: 96, height: 96), viewport: viewport, visibleSize: visibleSize, existing: existing)
-    expect(first == TileFrame(x: 144, y: 144, width: 96, height: 96), "Saturated viewport cascades from last tile by 24pt, got \(first)")
+    expect(first == TileFrame(x: 0, y: 0, width: 96, height: 96), "Saturated viewport fallback clamps into the visible viewport, got \(first)")
     expect(first == second, "Placement is deterministic for identical inputs")
-    expect(first.x <= Double(visibleSize.width) * 2 && first.y <= Double(visibleSize.height) * 2, "Fallback stays within +1 viewport of visible area, got \(first)")
+    let viewportRect = CGRect(x: viewport.x, y: viewport.y, width: Double(visibleSize.width), height: Double(visibleSize.height))
+    expect(viewportRect.intersects(CGRect(x: first.x, y: first.y, width: first.width, height: first.height)), "Fallback intersects visible viewport, got \(first)")
+}
+
+do {
+    let placed = CanvasEngine.placementFrame(
+        size: CGSize(width: 120, height: 80),
+        viewport: CanvasViewport(x: .nan, y: .infinity, zoom: 1),
+        visibleSize: CGSize(width: 400, height: 300),
+        existing: []
+    )
+    expect(placed == TileFrame(x: 0, y: 0, width: 120, height: 80), "Non-finite viewport origin falls back to finite visible placement, got \(placed)")
+}
+
+do {
+    let viewport = CanvasViewport(x: 10, y: 20, zoom: 1)
+    let visibleSize = CGSize(width: 160, height: 120)
+    let existing = [TileFrame(x: 10_000, y: 10_000, width: 96, height: 96)]
+    let placed = CanvasEngine.placementFrame(size: CGSize(width: 96, height: 96), viewport: viewport, visibleSize: visibleSize, existing: existing)
+    let viewportRect = CGRect(x: viewport.x, y: viewport.y, width: Double(visibleSize.width), height: Double(visibleSize.height))
+    expect(viewportRect.intersects(CGRect(x: placed.x, y: placed.y, width: placed.width, height: placed.height)), "Fallback from far-away last tile is clamped into visible viewport, got \(placed)")
 }
 
 // MARK: - CanvasEngine: defaults per kind
