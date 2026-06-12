@@ -122,6 +122,16 @@ final class FocusBroker {
         return adapters[surface]?.canHandleReservedShortcut(shortcut) ?? false
     }
 
+    @discardableResult
+    func recoverFocus(candidates: [FocusSurfaceID], reason: FocusRequest) -> Bool {
+        for candidate in candidates {
+            if requestFocus(candidate, reason: reason) {
+                return true
+            }
+        }
+        return requestFocus(.canvas, reason: reason)
+    }
+
     func recoverToCanvas(reason: FocusRequest) {
         _ = requestFocus(.canvas, reason: reason)
     }

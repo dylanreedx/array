@@ -752,6 +752,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             restartable: true,
             in: canvasView
         )
+        _ = focusBroker.requestFocus(.tile(tileId), reason: .runtimeExited)
     }
 
     private func handleRuntimeExited(runtimeId: TerminalSessionID, exitCode: Int32?) {
@@ -778,6 +779,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             statusText = "Shell exited"
         }
         installRestartPlaceholder(for: tile, statusText: statusText, restartable: true, in: canvasView)
+        _ = focusBroker.requestFocus(.tile(tileId), reason: .runtimeExited)
+    }
+
+    private func recoverFocusAfterTileRemoval(deletedTileId: UUID, in canvasView: CanvasNSView) {
+        let fallbackTiles = canvasView.canvasState.tiles
+            .filter { $0.id != deletedTileId }
+            .sorted { lhs, rhs in
+                if lhs.zIndex == rhs.zIndex {
+                    return lhs.id.uuidString < rhs.id.uuidString
+                }
+                return lhs.zIndex > rhs.zIndex
+            }
+            .map { FocusSurfaceID.tile($0.id) }
+        _ = focusBroker.recoverFocus(candidates: fallbackTiles, reason: .tileClosed)
     }
 
     /// Tile-delete orchestrator. Per-kind cleanup mirrors the
@@ -861,6 +876,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         canvasView.removeTile(id: id)
+        recoverFocusAfterTileRemoval(deletedTileId: id, in: canvasView)
         flushCanvasSave()
     }
 
@@ -3456,6 +3472,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(fallbackTile.acquireReasons.suffix(1) == [.appActivated], "failed active tile should recover through broker fallback; reasons=\(fallbackTile.acquireReasons)")
         try expect(broker.activeSurface == .tile(fallbackTileId), "failed active tile should set fallback tile active")
 
+        let deletedTileId = UUID()
+        let survivorTileId = UUID()
+        let deletedTile = ProbeAdapter(id: .tile(deletedTileId), kind: .note)
+        let survivorTile = ProbeAdapter(id: .tile(survivorTileId), kind: .fileTree)
+        broker.register(deletedTile)
+        broker.register(survivorTile)
+        try expect(broker.requestFocus(.tile(deletedTileId), reason: .userClick), "delete-recovery setup focus failed")
+        broker.unregister(.tile(deletedTileId))
+        try expect(broker.recoverFocus(candidates: [.tile(deletedTileId), .tile(survivorTileId)], reason: .tileClosed), "tile close recovery should skip deleted tile and focus survivor")
+        try expect(broker.activeSurface == .tile(survivorTileId), "tile close recovery should set survivor active")
+        try expect(survivorTile.acquireReasons.suffix(1) == [.tileClosed], "survivor should acquire for tileClosed; reasons=\(survivorTile.acquireReasons)")
+
+        let runtimeTileId = UUID()
+        let exitedAdapter = ProbeAdapter(id: .tile(runtimeTileId), kind: .terminal)
+        broker.register(exitedAdapter)
+        try expect(broker.requestFocus(.tile(runtimeTileId), reason: .userClick), "runtime-recovery setup focus failed")
+        broker.unregister(.tile(runtimeTileId))
+        let placeholderAdapter = ProbeAdapter(id: .tile(runtimeTileId), kind: .terminal)
+        broker.register(placeholderAdapter)
+        try expect(broker.requestFocus(.tile(runtimeTileId), reason: .runtimeExited), "runtime exit should focus replacement adapter")
+        try expect(broker.activeSurface == .tile(runtimeTileId), "runtime exit should keep replacement tile active")
+        try expect(placeholderAdapter.acquireReasons == [.runtimeExited], "replacement should acquire for runtimeExited; reasons=\(placeholderAdapter.acquireReasons)")
+
+        let canvasBroker = FocusBroker()
+        let canvasState = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil)
+        let realCanvas = CanvasNSView(canvasState: canvasState)
+        realCanvas.focusBroker = canvasBroker
+        let frontTileId = UUID()
+        let rearTileId = UUID()
+        let frontTile = Tile(id: frontTileId, kind: .note, title: "front", frame: TileFrame(x: 0, y: 0, width: 100, height: 100), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let rearTile = Tile(id: rearTileId, kind: .note, title: "rear", frame: TileFrame(x: 120, y: 0, width: 100, height: 100), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        realCanvas.install(tileView: TileNSView(tile: rearTile), for: rearTile)
+        realCanvas.install(tileView: TileNSView(tile: frontTile), for: frontTile)
+        try expect(canvasBroker.requestFocus(.tile(frontTileId), reason: .userClick), "real-canvas focused tile setup failed")
+        realCanvas.removeTile(id: frontTileId)
+        try expect(!realCanvas.canvasState.tiles.contains(where: { $0.id == frontTileId }), "real-canvas removal should remove deleted tile from canvasState")
+        let survivorCandidates = realCanvas.canvasState.tiles
+            .sorted { $0.zIndex > $1.zIndex }
+            .map { FocusSurfaceID.tile($0.id) }
+        try expect(survivorCandidates == [.tile(rearTileId)], "real-canvas survivor candidates should derive from post-removal canvasState; candidates=\(survivorCandidates)")
+        try expect(canvasBroker.recoverFocus(candidates: survivorCandidates, reason: .tileClosed), "real-canvas removal should recover to remaining tile")
+        try expect(canvasBroker.activeSurface == .tile(rearTileId), "real-canvas removal should set remaining tile active")
+        realCanvas.removeTile(id: rearTileId)
+        try expect(realCanvas.canvasState.tiles.isEmpty, "real-canvas last tile removal should leave no tile candidates")
+        let emptyCandidates = realCanvas.canvasState.tiles.map { FocusSurfaceID.tile($0.id) }
+        try expect(canvasBroker.recoverFocus(candidates: emptyCandidates, reason: .tileClosed), "real-canvas last tile removal should recover to canvas")
+        try expect(canvasBroker.activeSurface == .canvas, "real-canvas last tile removal should set canvas active")
+
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
             .appendingPathComponent("qa-runs", isDirectory: true)
@@ -3469,6 +3533,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "tileAcquireReasons": tile.acquireReasons.map(\.rawValue),
             "tileReleaseReasons": tile.releaseReasons.map(\.rawValue),
             "fallbackTileAcquireReasons": fallbackTile.acquireReasons.map(\.rawValue),
+            "tileClosedRecoverySurface": survivorTileId.uuidString,
+            "tileClosedAcquireReasons": survivorTile.acquireReasons.map(\.rawValue),
+            "runtimeExitedRecoverySurface": runtimeTileId.uuidString,
+            "runtimeExitedAcquireReasons": placeholderAdapter.acquireReasons.map(\.rawValue),
+            "realCanvasTileClosedRecoverySurface": rearTileId.uuidString,
+            "realCanvasLastTileRecoverySurface": "canvas",
             "modalPreservedDuringActivation": true,
             "canvasAcquireReasons": canvas.acquireReasons.map(\.rawValue),
             "activeSurface": String(describing: broker.activeSurface),
