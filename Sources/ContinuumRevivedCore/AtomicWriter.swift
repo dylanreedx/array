@@ -49,8 +49,10 @@ public struct AtomicWriter: Sendable {
     /// to the newest valid backup. Throws if neither path yields a parseable
     /// value of `T`.
     public func read<T: Codable>(at url: URL) throws -> T {
-        let decoder = JSONCodec.makeDecoder()
+        try read(at: url, decoder: JSONCodec.makeDecoder())
+    }
 
+    public func read<T: Codable>(at url: URL, decoder: JSONDecoder) throws -> T {
         if let data = try? Data(contentsOf: url),
            let value = try? decoder.decode(T.self, from: data) {
             return value

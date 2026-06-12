@@ -102,13 +102,13 @@ public struct ProjectStore: Sendable {
     }
 
     public func loadCanvas() throws -> CanvasState {
-        let canvas: CanvasState = try writer.read(at: layout.canvasFile)
+        let canvas: CanvasState = try writer.read(at: layout.canvasFile, decoder: JSONCodec.makeCanvasDecoder())
         try checkSchema(canvas.schemaVersion, supported: CanvasState.currentSchemaVersion, at: layout.canvasFile)
         return CanvasEngine.sanitizePersistedCanvas(canvas).canvas
     }
 
     public func loadCanvasWithSanitizationResult() throws -> CanvasEngine.CanvasSanitizationResult {
-        let canvas: CanvasState = try writer.read(at: layout.canvasFile)
+        let canvas: CanvasState = try writer.read(at: layout.canvasFile, decoder: JSONCodec.makeCanvasDecoder())
         try checkSchema(canvas.schemaVersion, supported: CanvasState.currentSchemaVersion, at: layout.canvasFile)
         return CanvasEngine.sanitizePersistedCanvas(canvas)
     }

@@ -157,6 +157,17 @@ do {
     expect(json.contains("2023-11-14T22:13:20Z"), "JSONCodec should encode dates as ISO8601 UTC, got: \(json)")
     let decoded = try decoder.decode(Sample.self, from: data)
     expect(decoded.when == date, "JSONCodec date round trip")
+
+    struct FloatSample: Codable { let value: Double }
+    let nonFiniteJSON = Data(#"{"value":"NaN"}"#.utf8)
+    do {
+        _ = try JSONCodec.makeDecoder().decode(FloatSample.self, from: nonFiniteJSON)
+        expect(false, "JSONCodec default decoder should reject non-finite float strings")
+    } catch {
+        // Expected: non-finite tolerance is canvas-scoped, not global.
+    }
+    let tolerant = try JSONCodec.makeCanvasDecoder().decode(FloatSample.self, from: nonFiniteJSON)
+    expect(tolerant.value.isNaN, "JSONCodec canvas decoder should retain canvas non-finite tolerance")
 }
 
 // MARK: - Project round trip
@@ -438,6 +449,29 @@ do {
     try store.saveCanvas(canvas)
     let loadedCanvas = try store.loadCanvas()
     expect(loadedCanvas == canvas, "ProjectStore.loadCanvas returns saved value")
+
+    let nonFiniteCanvasJSON = #"{"schemaVersion":1,"viewport":{"x":"NaN","y":"Infinity","zoom":"-Infinity"},"tiles":[],"groups":[],"lastActiveTileId":null}"#
+    try Data(nonFiniteCanvasJSON.utf8).write(to: store.layout.canvasFile)
+    let sanitizedCanvas = try store.loadCanvasWithSanitizationResult()
+    expect(sanitizedCanvas.changed, "ProjectStore canvas load should accept then sanitize non-finite canvas JSON")
+    expect(sanitizedCanvas.canvas.viewport.x.isFinite, "sanitized canvas viewport x should be finite")
+    expect(sanitizedCanvas.canvas.viewport.y.isFinite, "sanitized canvas viewport y should be finite")
+    expect(sanitizedCanvas.canvas.viewport.zoom.isFinite, "sanitized canvas viewport zoom should be finite")
+
+    let nonCanvasWriter = AtomicWriter()
+    let nonCanvasURL = scratch.appendingPathComponent("non-canvas-double.json")
+    struct NonCanvasDoubleFixture: Codable { let value: Double }
+    try Data(#"{"value":"NaN"}"#.utf8).write(to: nonCanvasURL)
+    do {
+        let _: NonCanvasDoubleFixture = try nonCanvasWriter.read(at: nonCanvasURL)
+        expect(false, "AtomicWriter default read should reject non-canvas non-finite float strings")
+    } catch AtomicWriterError.noValidBackup {
+        // Expected: the shared/default persistence path remains strict.
+    } catch {
+        expect(false, "AtomicWriter strict non-canvas read should report no valid backup, got \(error)")
+    }
+
+    try store.saveCanvas(canvas)
 
     let s1 = TerminalSessionDescriptor(
         id: UUID(),
