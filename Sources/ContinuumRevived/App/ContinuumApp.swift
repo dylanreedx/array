@@ -16,6 +16,9 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 installMainMenu()
                 try runMenuContractSelfCheck()
+                if let sentinel = launchProbeSentinelPath() {
+                    try "menu-contract-check passed\n".write(toFile: sentinel, atomically: true, encoding: .utf8)
+                }
                 print("ContinuumRevivedMenuContractChecks passed")
                 Foundation.exit(0)
             } catch {
@@ -361,6 +364,13 @@ enum ContinuumApp {
         mainMenu.addItem(editMenuItem)
 
         NSApp.mainMenu = mainMenu
+    }
+
+    private static func launchProbeSentinelPath() -> String? {
+        guard let index = CommandLine.arguments.firstIndex(of: "--launch-probe-sentinel") else { return nil }
+        let valueIndex = CommandLine.arguments.index(after: index)
+        guard valueIndex < CommandLine.arguments.endIndex else { return nil }
+        return CommandLine.arguments[valueIndex]
     }
 
     @MainActor

@@ -46,6 +46,7 @@ anyway. Vision: `docs/20-product-vision.md`. Backlog: Linear, team
   justification, and the ticket comment must call it out loudly.
 - Never report success from build-only evidence. "It compiles" is not "it
   works."
+- Evidence artifacts must contain measured values, never constants.
 - Unverifiable claims get a PENDING marker, not optimistic phrasing. The
   precedent: DD-002 was honestly reported as "synthetic path passes, manual
   PENDING" — that is the standard.

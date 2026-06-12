@@ -12,6 +12,7 @@ Goal: maximize completed Linear tickets without false positives. Linear is the q
 - Do not start another implementation while uncommitted implementation changes exist.
 - Do not claim manual/visual/user behavior without artifact or manual evidence.
 - Do not weaken or delete checks to get green.
+- Evidence artifacts must contain measured values, never constants.
 - Stop on unexpected dirty files, protected files, matrix failure, reviewer blocker, or ambiguous ticket scope.
 
 ## 1. Deterministic ticket state machine
