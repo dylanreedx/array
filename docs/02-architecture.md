@@ -163,6 +163,8 @@ Rules:
 
 ### FocusBroker
 
+Status: implemented and actively adopted as the broker for focus transitions. `CanvasState.lastActiveTileId` remains persisted resume state; it is not intended to be a competing in-memory focus owner. Some legacy AppKit first-responder mechanics still exist while surfaces finish migrating to broker requests.
+
 Responsibilities:
 
 - Track active surface.
@@ -176,6 +178,7 @@ Rules:
 - Every interactive embedded surface must explicitly acquire and release focus.
 - FocusBroker is not optional polish; it is core infrastructure.
 - Terminal and browser adapters must ask before consuming reserved shortcuts.
+- New production focus policy routes through FocusBroker. Direct `makeFirstResponder` calls should be limited to adapter, modal, picker, legacy transition, or QA mechanics; new side-channel focus policy outside broker requests should be treated as a bug or follow-up ticket.
 
 ## Data Flow
 

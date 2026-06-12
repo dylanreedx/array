@@ -829,3 +829,48 @@ Rationale, alternatives weighed (central-store vs hybrid ownership), staged
 migration, and risk register: `docs/20-product-vision.md`. Consequences for
 in-flight plans: docs/17 (focus broker) and docs/19 (spawn experience) stand
 unchanged; docs/18 Phases A/B/D stand, Phase C is retargeted.
+
+## ADR-0023: FocusBroker Runtime Authority and Modal/Spawn Focus Policy
+
+**Status:** Accepted
+**Date:** 2026-06-12
+
+Decision:
+
+FocusBroker is Continuum's runtime authority for broker-routed focus transitions
+and the target authority for new focus policy. Canvas and tile surfaces register
+adapters with the broker; modal palette interactions use broker snapshots;
+spawn completion, activation repair, tile close, runtime exit, and reserved
+shortcut decisions route through that authority as their migrations land.
+`CanvasState.lastActiveTileId` remains the persisted resume hint and is updated
+from broker-approved tile focus, but it is not intended to be a second
+in-memory focus owner.
+
+Modal close restores the broker's snapshot unless a `.tileSpawned` focus
+request happened while the modal was open. In that case the newly spawned
+tile's primary input wins and the modal restore is suppressed. This records the
+DD-003 precedence rule: palette dismissal must not steal focus back from a tile
+that the palette just created.
+
+Reserved app shortcuts are classified centrally. The app-level event monitor is
+the earliest interception point, and terminal/browser key paths provide the
+second line of defense by asking `FocusBroker.shouldSurfaceReceive` before an
+embedded surface consumes command-modified reserved chords such as Cmd-K and
+Cmd-1 through Cmd-4.
+
+Direct AppKit `makeFirstResponder` calls remain legitimate implementation
+mechanics inside registered adapters, modal/picker setup and restoration,
+legacy transition paths awaiting follow-up, or QA probes. They are not valid
+independent production focus policy for new behavior: new code that decides
+*which* surface should own focus must go through FocusBroker first.
+
+Consequences:
+
+- Future surface kinds must define an adapter/acquire-focus seam before they
+  participate in app focus policy.
+- Docs and reviews should treat new side-channel focus decisions outside broker
+  requests as bugs, while allowing adapter-internal AppKit mechanics and
+  explicitly identified legacy transition paths.
+- `lastActiveTileId` persistence bugs and runtime first-responder repair bugs
+  have different owners: persistence remains in canvas/project state, runtime
+  arbitration remains in FocusBroker.

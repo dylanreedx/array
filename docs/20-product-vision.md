@@ -55,7 +55,7 @@ local-first, harness-integrated version for a terminal-first developer.
   per ADR-0007). Editor tile is post-v1.
 - No todo-inbox tile in v1 (the conductor queue tile covers "what's next").
 
-## Architecture (decided 2026-06-10; ADR-0023)
+## Architecture (decided 2026-06-10; ADR-0022)
 
 ### Zone model — hybrid ownership
 

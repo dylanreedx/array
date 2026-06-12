@@ -1,20 +1,20 @@
 # FocusBroker Subsystem Design
 
-**Status:** Proposed
+**Status:** Implemented
 **Date:** 2026-05-09
-**Scope:** Design only. No production implementation is included in this task.
+**Scope:** Implemented as the design record for the current FocusBroker code (`Sources/ContinuumRevived/App/FocusBroker.swift`, `FocusAdapters.swift`, and `Sources/ContinuumRevivedCore/FocusModel.swift`). Some integration-plan text below remains useful as migration guidance for legacy direct first-responder paths.
 
 ## Problem Statement
 
 The architecture calls out FocusBroker as core infrastructure, but focus is still split across AppDelegate, canvas hit testing, terminal views, and browser runtimes. `applicationDidBecomeActive` forwards focus into Ghostty, tries `canvasState.lastActiveTileId`, then falls back to the last terminal runtime. `TileNSView.mouseDown` brings a tile forward before deciding whether the click is resize, move, or content interaction. `GhosttyTerminalView` makes itself first responder and sets Ghostty surface focus from inside the terminal view. `WKWebViewBrowserRuntime` exposes a direct `focus()` wrapper that makes the web view first responder.
 
-That shape worked for early phases, but Phase 7 needs focus to be explicit and testable. The missing parts are a single active-surface authority, modal dismissal restore, first-responder recovery, and reserved app-level shortcut routing for Cmd-K and Cmd-1 through Cmd-4. Without that authority, every new surface has to learn the same focus rules, and terminal/browser adapters can accidentally consume app shortcuts that should stay global.
+That shape worked for early phases, but Phase 7 needs focus to be explicit and testable. The missing parts are a broker-routed active-surface authority, modal dismissal restore, first-responder recovery, and reserved app-level shortcut routing for Cmd-K and Cmd-1 through Cmd-4. Without that authority target, every new surface has to learn the same focus rules, and terminal/browser adapters can accidentally consume app shortcuts that should stay global.
 
 ## Decision
 
 Introduce a `@MainActor` `FocusBroker` owned by AppDelegate during the current AppShell era and movable into AppShell when that boundary lands. The broker owns transient focus state, surface registration, modal focus snapshots, app activation/resignation handling, and reserved shortcut classification. It does not own canvas geometry, runtime lifecycle, or tile persistence.
 
-`CanvasState.lastActiveTileId` remains the persisted resume field. FocusBroker becomes the runtime source of truth for the active surface and writes `lastActiveTileId` through a canvas callback only when a tile surface is accepted as active. This keeps saved project state in the existing model while avoiding a second runtime authority in `CanvasState`.
+`CanvasState.lastActiveTileId` remains the persisted resume field. FocusBroker is the runtime source of truth for broker-routed active-surface decisions and writes `lastActiveTileId` through a canvas callback only when a tile surface is accepted as active. This keeps saved project state in the existing model while avoiding a second intended runtime authority in `CanvasState`; legacy direct first-responder paths are transitional mechanics, not the target policy shape.
 
 Reserved shortcuts stay enforced through the existing local NSEvent monitor at the app boundary, but FocusBroker becomes the policy object behind that monitor. Terminal and browser adapters ask the broker before consuming command-modified keys. The monitor remains the earliest interception point for app commands; adapters provide the second line of defense for embedded surfaces that receive key events directly.
 
@@ -105,7 +105,7 @@ This avoids turning Escape into a global terminal-breaking shortcut while still 
 
 Phase 7 FocusBroker is ready to implement when all of the following are true in the implementation plan:
 
-1. There is exactly one runtime authority for active focus.
+1. Broker-routed focus decisions have one runtime authority, with any remaining direct first-responder paths identified as legacy transition work rather than new policy.
 2. `CanvasState.lastActiveTileId` is documented as persisted resume state, not runtime focus authority.
 3. Every interactive embedded surface has an adapter or an explicit reason it is out of scope.
 4. Cmd-K and Cmd-1 through Cmd-4 are classified in one place.
