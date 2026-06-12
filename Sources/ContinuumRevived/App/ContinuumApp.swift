@@ -47,6 +47,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--project-picker-resolution-check") {
+            do {
+                try AppDelegate.runProjectPickerResolutionSelfCheck()
+                print("ContinuumRevivedProjectPickerResolutionChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--palette-first-responder-restore-check") {
             do {
                 _ = NSApplication.shared
@@ -431,13 +442,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         launchStartTime = QAPerf.timestamp()
         qaPerf = QAPerf()
         do {
-            let projectRoot = Self.resolveProjectRoot(smokeTest: smokeTestEnabled)
+            let appSupportDir = Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
+            let registryStore = RegistryStore(applicationSupportDirectory: appSupportDir)
+            let registry = try registryStore.loadOrEmpty()
+            let projectRoot = try Self.resolveProjectRoot(smokeTest: smokeTestEnabled, registry: registry)
             let projectLock = ProjectLock(root: projectRoot)
             try projectLock.acquire()
             self.projectLock = projectLock
-            let appSupportDir = Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
             let projectStore = ProjectStore(projectRoot: projectRoot)
-            let registryStore = RegistryStore(applicationSupportDirectory: appSupportDir)
             self.projectStore = projectStore
             self.registryStore = registryStore
 
@@ -1335,17 +1347,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     // MARK: - Persistence helpers
 
-    private static func resolveProjectRoot(smokeTest: Bool) -> URL {
-        if let override = ProcessInfo.processInfo.environment["CONTINUUM_PROJECT_ROOT"] {
-            return URL(fileURLWithPath: override, isDirectory: true)
-        }
-        if smokeTest {
+    private static func resolveProjectRoot(smokeTest: Bool, registry: Registry) throws -> URL {
+        if smokeTest, ProcessInfo.processInfo.environment["CONTINUUM_PROJECT_ROOT"] == nil {
             let temp = FileManager.default.temporaryDirectory
                 .appendingPathComponent("continuum-smoke-project-\(UUID().uuidString)", isDirectory: true)
             try? FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
             return temp
         }
-        return URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+
+        switch ProjectLaunchCoordinator.decide(registry: registry) {
+        case let .open(url):
+            return url
+        case let .presentPicker(request):
+            let picker = ProjectPickerPanel(request: request)
+            guard let selected = picker.runModal() else {
+                NSApp.terminate(nil)
+                throw CocoaError(.userCancelled)
+            }
+            return selected
+        }
     }
 
     private static func resolveAppSupportDir(smokeTest: Bool) -> URL? {
@@ -1504,6 +1524,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         var registry = try store.loadOrEmpty()
         registry.upsertProject(project, openedAt: Date())
         try store.save(registry)
+    }
+
+    static func runProjectPickerResolutionSelfCheck() throws {
+        struct CheckFailure: Error, CustomStringConvertible {
+            let description: String
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckFailure(description: message) }
+        }
+
+        let availableId = UUID()
+        let missingId = UUID()
+        let unusableId = UUID()
+        let availablePath = "/tmp/continuum-picker-available"
+        let missingPath = "/tmp/continuum-picker-missing"
+        let unusablePath = "/tmp/continuum-picker-unusable"
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        var registry = Registry.empty()
+        registry.lastActiveProjectId = missingId
+        registry.projects = [
+            ProjectEntry(id: missingId, name: "Missing", rootPath: missingPath, workspaceId: nil, lastOpenedAt: now, pinned: false),
+            ProjectEntry(id: availableId, name: "Available", rootPath: availablePath, workspaceId: nil, lastOpenedAt: now.addingTimeInterval(-10), pinned: false),
+            ProjectEntry(id: unusableId, name: "Unusable", rootPath: unusablePath, workspaceId: nil, lastOpenedAt: now.addingTimeInterval(-20), pinned: false)
+        ]
+        let probes = ProjectRootResolver.FileSystemProbes(
+            directoryExists: { $0 == availablePath || $0 == unusablePath },
+            continuumDirectoryExists: { $0 == availablePath },
+            canCreateContinuumDirectory: { _ in false }
+        )
+
+        let pickerDecision = ProjectLaunchCoordinator.decide(environment: [:], registry: registry, fileSystem: probes)
+        guard case let .presentPicker(request) = pickerDecision else {
+            throw CheckFailure(description: "missing last-active project should present picker")
+        }
+        try expect(request.reason == .noUsableProject, "picker receives noUsableProject reason")
+        try expect(request.rows.map(\.id) == [missingId, availableId, unusableId], "picker receives model rows in recency order")
+        try expect(ProjectLaunchCoordinator.selectProject(id: availableId, from: request) == URL(fileURLWithPath: availablePath), "available row continues with exact URL")
+        try expect(ProjectLaunchCoordinator.selectProject(id: missingId, from: request) == nil, "missing row does not continue")
+        try expect(ProjectLaunchCoordinator.selectProject(id: unusableId, from: request) == nil, "unusable row does not continue")
+
+        registry.lastActiveProjectId = availableId
+        let autoOpenDecision = ProjectLaunchCoordinator.decide(environment: [:], registry: registry, fileSystem: probes)
+        try expect(autoOpenDecision == .open(URL(fileURLWithPath: availablePath)), "usable last-active project opens without picker")
+
+        let envPath = "/tmp/continuum-picker-env"
+        let envDecision = ProjectLaunchCoordinator.decide(environment: ["CONTINUUM_PROJECT_ROOT": envPath], registry: registry, fileSystem: probes)
+        try expect(envDecision == .open(URL(fileURLWithPath: envPath)), "environment root bypasses picker")
+
+        registry.settings.openLastProjectOnLaunch = false
+        guard case let .presentPicker(disabledRequest) = ProjectLaunchCoordinator.decide(environment: [:], registry: registry, fileSystem: probes) else {
+            throw CheckFailure(description: "openLastProject disabled should present picker")
+        }
+        try expect(disabledRequest.reason == .openLastProjectDisabled, "picker receives disabled-open-last reason")
     }
 
     private func presentFatalError(_ error: Error) {
