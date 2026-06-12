@@ -944,7 +944,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// are consumed by the content child before TileNSView.mouseDown can fire,
     /// so the existing in-tile bring-to-front never runs for them. A
     /// non-consuming local monitor lets us bring the tile forward without
-    /// taking the event away from its real target.
+    /// taking the event away from its real target. Clicks route through
+    /// FocusBroker so adapter-specific primary-input focus stays canonical.
     ///
     /// We listen on `.leftMouseUp` rather than `.leftMouseDown`: bringToFront
     /// removes the target view from its superview and re-adds it (to push it
@@ -957,11 +958,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
             guard let self, let canvas = self.canvasView else { return event }
             guard let window = canvas.window, event.window === window else { return event }
-            let pointInCanvas = canvas.convert(event.locationInWindow, from: nil)
-            if let tileId = canvas.tileId(at: pointInCanvas) {
-                canvas.bringToFront(tileId: tileId)
-                self.focusBroker.acceptExistingFocus(.tile(tileId), reason: .userClick)
-            }
+            Self.routeTileClickFocus(at: event.locationInWindow, in: canvas, focusBroker: self.focusBroker)
             return event
         }
         self.tileFocusMonitor = monitor
@@ -973,6 +970,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// trackpad case and route background events to the canvas. Events over an
     /// NSScrollView/NSTextView, WKWebView/browser host, or Ghostty terminal host
     /// are passed through so tile content keeps native trackpad scrolling.
+    static func routeTileClickFocus(at windowPoint: NSPoint, in canvas: CanvasNSView, focusBroker: FocusBroker) {
+        let pointInCanvas = canvas.convert(windowPoint, from: nil)
+        guard let tileId = canvas.tileId(at: pointInCanvas) else { return }
+        let surface: FocusSurfaceID = .tile(tileId)
+        if let firstResponder = canvas.window?.firstResponder as? NSView,
+           let tileView = canvas.tileView(for: tileId),
+           firstResponder.isDescendant(of: tileView) {
+            focusBroker.acceptExistingFocus(surface, reason: .userClick)
+            return
+        }
+        _ = focusBroker.requestFocus(surface, reason: .userClick)
+    }
+
     private func installCanvasGestureMonitors() {
         let scrollMon = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             guard let self, let canvas = self.canvasView else { return event }

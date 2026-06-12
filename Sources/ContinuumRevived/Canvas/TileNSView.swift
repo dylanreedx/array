@@ -27,6 +27,7 @@ class TileNSView: NSView {
     private(set) var contentView: NSView?
     private var dragKind: DragKind = .none
     private var dragLastWindowPoint: CGPoint = .zero
+    private var mouseDraggedSinceDown = false
 
     override var isFlipped: Bool { true }
 
@@ -132,7 +133,7 @@ class TileNSView: NSView {
     // MARK: - Mouse handling for drag and resize
 
     override func mouseDown(with event: NSEvent) {
-        canvas?.markActive(tileId: tile.id)
+        mouseDraggedSinceDown = false
         dragLastWindowPoint = event.locationInWindow
         let local = convert(event.locationInWindow, from: nil)
         if let edge = resizeEdge(at: local) {
@@ -149,6 +150,7 @@ class TileNSView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        mouseDraggedSinceDown = true
         guard let canvas else { return super.mouseDragged(with: event) }
         let dx = event.locationInWindow.x - dragLastWindowPoint.x
         let dy = event.locationInWindow.y - dragLastWindowPoint.y
@@ -169,7 +171,16 @@ class TileNSView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        let completedDragKind = dragKind
+        let wasClick = !mouseDraggedSinceDown
         dragKind = .none
+        mouseDraggedSinceDown = false
+
+        if case .move = completedDragKind, wasClick {
+            _ = canvas?.focusBroker?.requestFocus(.tile(tile.id), reason: .userClick)
+            return
+        }
+
         super.mouseUp(with: event)
     }
 

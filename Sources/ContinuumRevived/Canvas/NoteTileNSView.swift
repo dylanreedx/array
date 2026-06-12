@@ -135,6 +135,8 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
             metadata: TileMetadata(noteId: noteId)
         )
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile], groups: [], lastActiveTileId: nil))
+        let focusBroker = FocusBroker()
+        canvas.focusBroker = focusBroker
         canvas.frame = NSRect(x: 0, y: 0, width: 640, height: 480)
 
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -150,12 +152,20 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         noteView.scrollView.layoutSubtreeIfNeeded()
         noteView.textView.layoutSubtreeIfNeeded()
 
+        let titlePoint = noteView.convert(NSPoint(x: noteView.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil)
+        noteView.mouseDown(with: try makeMouse(.leftMouseDown, at: titlePoint, in: window))
+        noteView.mouseUp(with: try makeMouse(.leftMouseUp, at: titlePoint, in: window))
+        try expect(focusBroker.activeSurface == .tile(tileId), "title click should route focus through broker; activeSurface=\(String(describing: focusBroker.activeSurface))")
+        try expect(canvas.canvasState.lastActiveTileId == tileId, "title click broker callback should mark tile active")
+
         let textLocalPoint = NSPoint(x: max(12, noteView.textView.bounds.midX), y: max(12, noteView.textView.bounds.midY))
         let windowPoint = noteView.textView.convert(textLocalPoint, to: nil)
         let canvasPoint = canvas.convert(windowPoint, from: nil)
         let hitView = window.contentView?.hitTest(canvasPoint)
 
         try dispatchClick(at: windowPoint, in: window)
+        AppDelegate.routeTileClickFocus(at: windowPoint, in: canvas, focusBroker: focusBroker)
+        try expect(focusBroker.activeSurface == .tile(tileId), "body click production focus router should keep note tile active; activeSurface=\(String(describing: focusBroker.activeSurface))")
 
         let firstResponderDescription = String(describing: window.firstResponder)
         let textViewHasFocus = window.firstResponder === noteView.textView
@@ -170,6 +180,8 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
             "check": "note-click-focus",
             "tileId": tileId.uuidString,
             "noteId": noteId.uuidString,
+            "titlePoint": ["x": titlePoint.x, "y": titlePoint.y],
+            "brokerActiveSurface": String(describing: focusBroker.activeSurface),
             "windowPoint": ["x": windowPoint.x, "y": windowPoint.y],
             "canvasPoint": ["x": canvasPoint.x, "y": canvasPoint.y],
             "hitView": String(describing: hitView),
