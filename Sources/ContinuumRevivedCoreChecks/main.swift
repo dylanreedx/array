@@ -682,6 +682,109 @@ do {
     )
 }
 
+// MARK: - ProjectRootResolver
+
+do {
+    let projectId = UUID()
+    let registry = Registry(
+        lastActiveWorkspaceId: nil,
+        lastActiveProjectId: projectId,
+        workspaces: [],
+        projects: [
+            ProjectEntry(
+                id: projectId,
+                name: "continuum-revived",
+                rootPath: "/registry/project",
+                workspaceId: nil,
+                lastOpenedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                pinned: false
+            )
+        ],
+        settings: RegistrySettings(
+            preferredEditor: .auto,
+            zoomModifier: .command,
+            openLastProjectOnLaunch: true
+        )
+    )
+
+    final class ProbeLog: @unchecked Sendable {
+        var paths: [String] = []
+        func append(_ value: String) { paths.append(value) }
+    }
+    let probeLog = ProbeLog()
+    let probes = ProjectRootResolver.FileSystemProbes(
+        directoryExists: { path in probeLog.append("dir:\(path)"); return path == "/registry/project" },
+        continuumDirectoryExists: { path in probeLog.append("state:\(path)"); return path == "/registry/project" },
+        canCreateContinuumDirectory: { path in probeLog.append("create:\(path)"); return false }
+    )
+
+    let envDecision = ProjectRootResolver(
+        environment: ["CONTINUUM_PROJECT_ROOT": "/env/project"],
+        registry: registry,
+        fileSystem: probes
+    ).resolve()
+    expect(envDecision == .resolved(URL(fileURLWithPath: "/env/project"), .environment), "ProjectRootResolver env root wins")
+    expect(probeLog.paths.isEmpty, "ProjectRootResolver env root does not consult registry probes")
+
+    let relativeEnvDecision = ProjectRootResolver(
+        environment: ["CONTINUUM_PROJECT_ROOT": "relative/project"],
+        registry: Registry.empty(),
+        fileSystem: probes
+    ).resolve()
+    expect(relativeEnvDecision == .needsPicker(.noUsableProject), "ProjectRootResolver rejects relative env roots instead of resolving via cwd")
+
+    let registryDecision = ProjectRootResolver(environment: [:], registry: registry, fileSystem: probes).resolve()
+    expect(
+        registryDecision == .resolved(URL(fileURLWithPath: "/registry/project"), .registryLastActiveProject),
+        "ProjectRootResolver uses usable registry lastActiveProjectId"
+    )
+
+    let missingRegistry = Registry(
+        lastActiveWorkspaceId: nil,
+        lastActiveProjectId: projectId,
+        workspaces: [],
+        projects: [
+            ProjectEntry(
+                id: projectId,
+                name: "missing",
+                rootPath: "/missing/project",
+                workspaceId: nil,
+                lastOpenedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                pinned: false
+            )
+        ],
+        settings: registry.settings
+    )
+    let missingDecision = ProjectRootResolver(environment: [:], registry: missingRegistry, fileSystem: probes).resolve()
+    expect(missingDecision == .needsPicker(.noUsableProject), "ProjectRootResolver skips missing registry root")
+
+    var relativeRegistry = registry
+    relativeRegistry.projects[0].rootPath = "relative/project"
+    let relativeRegistryDecision = ProjectRootResolver(environment: [:], registry: relativeRegistry, fileSystem: probes).resolve()
+    expect(relativeRegistryDecision == .needsPicker(.noUsableProject), "ProjectRootResolver rejects relative registry roots instead of probing via cwd")
+
+    var disabledRegistry = registry
+    disabledRegistry.settings.openLastProjectOnLaunch = false
+    let disabledDecision = ProjectRootResolver(environment: [:], registry: disabledRegistry, fileSystem: probes).resolve()
+    expect(disabledDecision == .needsPicker(.openLastProjectDisabled), "ProjectRootResolver honors openLastProjectOnLaunch=false")
+
+    let emptyDecision = ProjectRootResolver(environment: [:], registry: Registry.empty(), fileSystem: probes).resolve()
+    expect(emptyDecision == .needsPicker(.noUsableProject), "ProjectRootResolver empty registry needs picker")
+
+    let creatableProbes = ProjectRootResolver.FileSystemProbes(
+        directoryExists: { $0 == "/creatable/project" },
+        continuumDirectoryExists: { _ in false },
+        canCreateContinuumDirectory: { $0 == "/creatable/project" }
+    )
+    var creatableRegistry = registry
+    creatableRegistry.projects[0].rootPath = "/creatable/project"
+    let creatableDecision = ProjectRootResolver(environment: [:], registry: creatableRegistry, fileSystem: creatableProbes).resolve()
+    expect(
+        creatableDecision == .resolved(URL(fileURLWithPath: "/creatable/project"), .registryLastActiveProject),
+        "ProjectRootResolver accepts registry root when .continuum-revived can be created"
+    )
+}
+
 // MARK: - CanvasEngine: coordinate conversion
 
 do {
