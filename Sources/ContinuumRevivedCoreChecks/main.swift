@@ -1153,6 +1153,65 @@ do {
     expect(viewportRect.intersects(CGRect(x: placed.x, y: placed.y, width: placed.width, height: placed.height)), "Fallback from far-away last tile is clamped into visible viewport, got \(placed)")
 }
 
+// MARK: - TileArrangement: geometry
+
+do {
+    let frame = TileFrame(x: 100, y: 100, width: 80, height: 60)
+    expect(TileArrangement.nudge(frame, direction: .right, step: 12) == TileFrame(x: 112, y: 100, width: 80, height: 60), "Nudge right moves by step")
+    expect(TileArrangement.nudge(frame, direction: .up, step: 10) == TileFrame(x: 100, y: 90, width: 80, height: 60), "Nudge up moves by step")
+    expect(TileArrangement.Direction.fromKey("h") == .left, "h maps left")
+    expect(TileArrangement.Direction.fromKey("ArrowDown") == .down, "ArrowDown maps down")
+    expect(TileArrangement.Direction.fromKey("x") == nil, "unmapped key returns nil")
+}
+
+do {
+    let moving = TileFrame(x: 100, y: 100, width: 50, height: 50)
+    let left = TileFrame(x: 20, y: 110, width: 40, height: 40)
+    let fartherLeft = TileFrame(x: -80, y: 110, width: 40, height: 40)
+    let nonOverlapping = TileFrame(x: 20, y: 10, width: 40, height: 40)
+    let thrownLeft = TileArrangement.throwDestination(moving, direction: .left, others: [fartherLeft, nonOverlapping, left], gap: 8)
+    expect(thrownLeft == TileFrame(x: 68, y: 100, width: 50, height: 50), "Throw left stops at first obstructing neighbor plus gap, got \(thrownLeft)")
+
+    let thrownRightNoObstacle = TileArrangement.throwDestination(moving, direction: .right, others: [left], gap: 8)
+    expect(thrownRightNoObstacle == TileFrame(x: 68, y: 100, width: 50, height: 50), "Throw right without obstacle becomes outermost against other tile bounds, got \(thrownRightNoObstacle)")
+
+    let alreadyOutermost = TileArrangement.throwDestination(moving, direction: .right, others: [left], gap: 8)
+    let repeatedOutermost = TileArrangement.throwDestination(alreadyOutermost, direction: .right, others: [left], gap: 8)
+    expect(repeatedOutermost == alreadyOutermost, "Repeated throw at outer edge is idempotent, got \(repeatedOutermost)")
+
+    let sole = TileArrangement.throwDestination(moving, direction: .down, others: [], gap: 8)
+    expect(sole == moving, "Sole tile throw is a no-op")
+}
+
+do {
+    let moving = TileFrame(x: 101, y: 50, width: 50, height: 40)
+    let other = TileFrame(x: 160, y: 52, width: 70, height: 40)
+    let snapped = TileArrangement.snapAdjustment(moving, others: [other], gap: 8, threshold: 12)
+    expect(snapped.frame == TileFrame(x: 102, y: 50, width: 50, height: 40), "Snap adjusts trailing edge to neighbor gap, got \(snapped.frame)")
+    expect(snapped.guides == [.trailingToLeadingGap], "Snap reports matched gap guide, got \(snapped.guides)")
+
+    let noSnap = TileArrangement.snapAdjustment(moving, others: [other], gap: 8, threshold: 0.5)
+    expect(noSnap.frame == moving && noSnap.guides.isEmpty, "Outside threshold does not snap")
+
+    let unrelated = TileFrame(x: 102, y: 500, width: 70, height: 40)
+    let unrelatedSnap = TileArrangement.snapAdjustment(moving, others: [unrelated], gap: 8, threshold: 12)
+    expect(unrelatedSnap.frame == moving && unrelatedSnap.guides.isEmpty, "Snap ignores edge candidates without orthogonal overlap")
+}
+
+do {
+    let defaultsName = "TileArrangementChecks-\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: defaultsName) else {
+        expect(false, "Could not create isolated UserDefaults suite")
+        fatalError("unreachable")
+    }
+    defer { UserDefaults().removePersistentDomain(forName: defaultsName) }
+    expect(TileGapResolver.resolvedGap(defaults: defaults) == 8, "Default tile gap is 8pt")
+    defaults.set(12.5, forKey: TileGapResolver.userDefaultsKey)
+    expect(TileGapResolver.resolvedGap(defaults: defaults) == 12.5, "Tile gap resolver honors positive override")
+    defaults.set(-1, forKey: TileGapResolver.userDefaultsKey)
+    expect(TileGapResolver.resolvedGap(defaults: defaults) == 8, "Tile gap resolver rejects non-positive override")
+}
+
 // MARK: - TileGeometry: presets per kind
 
 do {
