@@ -800,6 +800,38 @@ do {
     expect(!switchRegistry.selectProjectForNextLaunch(id: UUID()), "Registry.selectProjectForNextLaunch rejects unknown project")
     expect(switchRegistry.lastActiveProjectId == projectId, "Registry.selectProjectForNextLaunch leaves active project unchanged on unknown id")
 
+    var missingRegistry = switchRegistry
+    let changedMissing = missingRegistry.markProjectMissingStatus { $0 != "/tmp/continuum-renamed" }
+    expect(changedMissing == [projectId], "Registry.markProjectMissingStatus reports projects whose missing flag changed")
+    expect(missingRegistry.projects.first(where: { $0.id == projectId })?.missing == true, "Registry.markProjectMissingStatus marks missing paths instead of dropping entries")
+    expect(missingRegistry.projects.contains(where: { $0.id == projectId }), "Registry.markProjectMissingStatus preserves missing project ids")
+    expect(missingRegistry.repairProjectPath(id: projectId, newRootPath: "/tmp/continuum-repaired"), "Registry.repairProjectPath locates known project")
+    expect(missingRegistry.projects.first(where: { $0.id == projectId })?.rootPath == "/tmp/continuum-repaired", "Registry.repairProjectPath updates rootPath")
+    expect(missingRegistry.projects.first(where: { $0.id == projectId })?.missing == false, "Registry.repairProjectPath clears missing flag")
+    expect(!missingRegistry.repairProjectPath(id: UUID(), newRootPath: "/tmp/nope"), "Registry.repairProjectPath rejects unknown id")
+
+    var persistedMissingRegistry = missingRegistry
+    _ = persistedMissingRegistry.markProjectMissingStatus { $0 != "/tmp/other" }
+    try store.save(persistedMissingRegistry)
+    let persistedMissingReloaded = try store.load()
+    expect(
+        persistedMissingReloaded.projects.first(where: { $0.id == otherProjectId })?.missing == true,
+        "RegistryStore persists ProjectEntry.missing=true round-trip"
+    )
+
+    let legacyProjectJSON = """
+    {
+      "id": "00000000-0000-0000-0000-000000000099",
+      "name": "legacy",
+      "rootPath": "/tmp/legacy",
+      "workspaceId": null,
+      "lastOpenedAt": 1700000000,
+      "pinned": false
+    }
+    """.data(using: .utf8)!
+    let legacyProject = try JSONDecoder().decode(ProjectEntry.self, from: legacyProjectJSON)
+    expect(legacyProject.missing == false, "ProjectEntry decodes legacy entries without missing as present")
+
     // The default Application Support path should at least include the app name.
     let defaultDir = RegistryStore.defaultApplicationSupportDirectory()
     expect(

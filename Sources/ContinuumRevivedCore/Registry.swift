@@ -45,6 +45,7 @@ public struct Registry: Codable, Equatable, Sendable {
             projects[idx].name = project.name
             projects[idx].rootPath = project.rootPath
             projects[idx].lastOpenedAt = openedAt
+            projects[idx].missing = false
         } else {
             projects.append(ProjectEntry(
                 id: project.id,
@@ -52,7 +53,8 @@ public struct Registry: Codable, Equatable, Sendable {
                 rootPath: project.rootPath,
                 workspaceId: nil,
                 lastOpenedAt: openedAt,
-                pinned: false
+                pinned: false,
+                missing: false
             ))
         }
         lastActiveProjectId = project.id
@@ -62,6 +64,29 @@ public struct Registry: Codable, Equatable, Sendable {
     public mutating func selectProjectForNextLaunch(id: UUID) -> Bool {
         guard projects.contains(where: { $0.id == id }) else { return false }
         lastActiveProjectId = id
+        return true
+    }
+
+    @discardableResult
+    public mutating func markProjectMissingStatus(
+        directoryExists: @Sendable (String) -> Bool
+    ) -> [UUID] {
+        var changed: [UUID] = []
+        for idx in projects.indices {
+            let shouldBeMissing = !directoryExists(projects[idx].rootPath)
+            if projects[idx].missing != shouldBeMissing {
+                projects[idx].missing = shouldBeMissing
+                changed.append(projects[idx].id)
+            }
+        }
+        return changed
+    }
+
+    @discardableResult
+    public mutating func repairProjectPath(id: UUID, newRootPath: String) -> Bool {
+        guard let idx = projects.firstIndex(where: { $0.id == id }) else { return false }
+        projects[idx].rootPath = newRootPath
+        projects[idx].missing = false
         return true
     }
 }
@@ -95,6 +120,7 @@ public struct ProjectEntry: Codable, Equatable, Sendable {
     public var workspaceId: UUID?
     public var lastOpenedAt: Date
     public var pinned: Bool
+    public var missing: Bool
 
     public init(
         id: UUID,
@@ -102,7 +128,8 @@ public struct ProjectEntry: Codable, Equatable, Sendable {
         rootPath: String,
         workspaceId: UUID?,
         lastOpenedAt: Date,
-        pinned: Bool
+        pinned: Bool,
+        missing: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -110,6 +137,22 @@ public struct ProjectEntry: Codable, Equatable, Sendable {
         self.workspaceId = workspaceId
         self.lastOpenedAt = lastOpenedAt
         self.pinned = pinned
+        self.missing = missing
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, rootPath, workspaceId, lastOpenedAt, pinned, missing
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        rootPath = try container.decode(String.self, forKey: .rootPath)
+        workspaceId = try container.decodeIfPresent(UUID.self, forKey: .workspaceId)
+        lastOpenedAt = try container.decode(Date.self, forKey: .lastOpenedAt)
+        pinned = try container.decode(Bool.self, forKey: .pinned)
+        missing = try container.decodeIfPresent(Bool.self, forKey: .missing) ?? false
     }
 }
 

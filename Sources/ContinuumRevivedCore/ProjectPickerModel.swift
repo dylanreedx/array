@@ -70,7 +70,7 @@ public enum ProjectPickerModel {
                     lastOpenedAt: entry.lastOpenedAt,
                     pinned: entry.pinned,
                     isLastActive: entry.id == lastActiveProjectId,
-                    availability: availability(for: entry.rootPath, fileSystem: fileSystem)
+                    availability: entry.missing ? .missingDirectory : availability(for: entry.rootPath, fileSystem: fileSystem)
                 )
             }
             .sorted(by: rowPrecedes)
