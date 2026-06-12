@@ -1465,22 +1465,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private static func recordProjectInRegistry(project: Project, in store: RegistryStore) throws {
         var registry = try store.loadOrEmpty()
-        let now = Date()
-        if let idx = registry.projects.firstIndex(where: { $0.id == project.id }) {
-            registry.projects[idx].name = project.name
-            registry.projects[idx].rootPath = project.rootPath
-            registry.projects[idx].lastOpenedAt = now
-        } else {
-            registry.projects.append(ProjectEntry(
-                id: project.id,
-                name: project.name,
-                rootPath: project.rootPath,
-                workspaceId: nil,
-                lastOpenedAt: now,
-                pinned: false
-            ))
-        }
-        registry.lastActiveProjectId = project.id
+        registry.upsertProject(project, openedAt: Date())
         try store.save(registry)
     }
 

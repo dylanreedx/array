@@ -674,6 +674,60 @@ do {
     let reloaded = try store.load()
     expect(reloaded == registry, "RegistryStore round trip")
 
+    var upsertRegistry = Registry.empty()
+    let firstOpen = Date(timeIntervalSince1970: 1_700_001_000)
+    let secondOpen = Date(timeIntervalSince1970: 1_700_001_500)
+    let project = Project(
+        id: projectId,
+        name: "continuum-revived",
+        rootPath: "/tmp/continuum-revived",
+        createdAt: firstOpen,
+        updatedAt: firstOpen,
+        defaultLaunchProfileId: "shell",
+        editorPreference: .auto,
+        settings: ProjectSettings(
+            restorePolicy: .restoreDescriptors,
+            browserStoragePolicy: .perProject,
+            terminalClosePolicy: .askWhenRunning
+        )
+    )
+    upsertRegistry.upsertProject(project, openedAt: firstOpen)
+    expect(upsertRegistry.projects.count == 1, "Registry.upsertProject creates one entry")
+    expect(upsertRegistry.lastActiveProjectId == projectId, "Registry.upsertProject sets lastActiveProjectId on insert")
+    expect(upsertRegistry.projects.first?.lastOpenedAt == firstOpen, "Registry.upsertProject records insert lastOpenedAt")
+
+    let renamedProject = Project(
+        id: projectId,
+        name: "continuum-renamed",
+        rootPath: "/tmp/continuum-renamed",
+        createdAt: firstOpen,
+        updatedAt: secondOpen,
+        defaultLaunchProfileId: "shell",
+        editorPreference: .auto,
+        settings: project.settings
+    )
+    upsertRegistry.upsertProject(renamedProject, openedAt: secondOpen)
+    expect(upsertRegistry.projects.count == 1, "Registry.upsertProject updates existing entry without duplicating")
+    expect(upsertRegistry.projects.first?.name == "continuum-renamed", "Registry.upsertProject updates name")
+    expect(upsertRegistry.projects.first?.rootPath == "/tmp/continuum-renamed", "Registry.upsertProject updates rootPath")
+    expect(upsertRegistry.projects.first?.lastOpenedAt == secondOpen, "Registry.upsertProject advances lastOpenedAt")
+    expect(upsertRegistry.lastActiveProjectId == projectId, "Registry.upsertProject keeps updated project active")
+
+    let otherProjectId = UUID()
+    let otherProject = Project(
+        id: otherProjectId,
+        name: "other",
+        rootPath: "/tmp/other",
+        createdAt: secondOpen,
+        updatedAt: secondOpen,
+        defaultLaunchProfileId: "shell",
+        editorPreference: .auto,
+        settings: project.settings
+    )
+    upsertRegistry.upsertProject(otherProject, openedAt: secondOpen)
+    expect(upsertRegistry.projects.count == 2, "Registry.upsertProject appends a different project")
+    expect(upsertRegistry.lastActiveProjectId == otherProjectId, "Registry.upsertProject sets lastActiveProjectId to appended project")
+
     // The default Application Support path should at least include the app name.
     let defaultDir = RegistryStore.defaultApplicationSupportDirectory()
     expect(

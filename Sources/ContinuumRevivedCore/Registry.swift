@@ -39,6 +39,24 @@ public struct Registry: Codable, Equatable, Sendable {
             )
         )
     }
+
+    public mutating func upsertProject(_ project: Project, openedAt: Date) {
+        if let idx = projects.firstIndex(where: { $0.id == project.id }) {
+            projects[idx].name = project.name
+            projects[idx].rootPath = project.rootPath
+            projects[idx].lastOpenedAt = openedAt
+        } else {
+            projects.append(ProjectEntry(
+                id: project.id,
+                name: project.name,
+                rootPath: project.rootPath,
+                workspaceId: nil,
+                lastOpenedAt: openedAt,
+                pinned: false
+            ))
+        }
+        lastActiveProjectId = project.id
+    }
 }
 
 public struct WorkspaceEntry: Codable, Equatable, Sendable {
