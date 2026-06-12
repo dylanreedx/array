@@ -58,7 +58,9 @@ SCOUT → PLAN → IMPLEMENT → VERIFY → REVIEW → (REWORK) → COMMIT → L
   and exit.
 - Rework prompts: name the reviewer run ID and the single blocker — one
   blocker per rework round converges fastest.
-- Never push (no remote). Never weaken or delete checks. Evidence artifact
+- After COMMIT, run `git push origin main`. A failed push is non-blocking:
+  note "push failed, commit local-only" in the Linear comment and continue.
+  Never force-push. Never weaken or delete checks. Evidence artifact
   values must be measured, never constants. Commit format
   `type(scope): summary`. Linear Done-comment must include: commit SHA,
   files, validation commands + real output, reviewer run IDs + DECISION

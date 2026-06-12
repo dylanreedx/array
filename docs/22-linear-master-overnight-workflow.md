@@ -7,7 +7,7 @@ Goal: maximize completed Linear tickets without false positives. Linear is the q
 ## 0. Non-negotiables
 
 - Work on `main` unless Dylan explicitly says otherwise.
-- The repo currently has no remote. Every Linear completion must say commits are local-only until backed up/pushed.
+- Remote exists since 2026-06-12: `origin` = github.com/dylanreedx/continuum. Push `main` after every committed ticket (`git push origin main`). A failed push is non-blocking: note "commit local-only, push failed" in the Linear comment and continue.
 - One writer at a time in the current worktree.
 - Do not start another implementation while uncommitted implementation changes exist.
 - Do not claim manual/visual/user behavior without artifact or manual evidence.
@@ -153,7 +153,7 @@ Linear comment must include:
 - reviewer run IDs and verdicts;
 - artifact paths;
 - manual pending items or `none`;
-- no-remote warning.
+- push status (pushed to origin / local-only + reason).
 
 ### NEXT
 
@@ -272,7 +272,7 @@ Before context gets long, or before starting a large new ticket, stop and write 
 - background run IDs and artifact paths;
 - commands passed/failed;
 - decisions made;
-- risks/no-remote warning;
+- risks/push status;
 - exact next action.
 
 After compaction/resume, the master must reload this workflow doc and continue from the recorded state. If state is ambiguous, stop and ask Dylan.

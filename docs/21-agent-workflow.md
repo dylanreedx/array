@@ -91,8 +91,9 @@ ticket, no code.
 One ticket at a time. Respect Scope; propose, don't expand.
 
 Stop conditions and honesty rules are in docs/21. PENDING markers
-for anything you cannot verify. The repo has no git remote — do not
-attempt to push; flag it in your report.
+for anything you cannot verify. Remote: `origin` (github.com/dylanreedx/
+continuum) — push `main` after each green, committed ticket; if the push
+fails, continue working and flag it in your report.
 ```
 
 ## Roles (optional escalation)
