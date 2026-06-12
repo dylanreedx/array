@@ -28,9 +28,14 @@ A. **Resume:** if the tree has uncommitted implementation changes or a ticket
    `Sources/ContinuumRevivedCoreChecks/main.swift:92-99`. Fix, verify,
    re-review, commit, close.)
 B. **Next ticket:** the first unblocked **Todo** ticket in this order:
-   - Track A: CON-17 → CON-18 → CON-24 → CON-23 → CON-19 → CON-21 → CON-22
+   - Track A: CON-17 → CON-18 → CON-24 → CON-19 → CON-21 → CON-22 → CON-23
+     (CON-23 last — it integrates the resolver, lock, and picker and is
+     blocked until CON-19 and CON-22 are Done)
    - Track B: CON-10 → CON-2 → CON-3 → CON-4 (interleave when A is blocked)
    - then CON-124
+   If the next listed ticket has unmet blockedBy relations or its scoped
+   dependencies are missing from main, SKIP it and take the next unblocked
+   ticket in the list — only STOP if nothing in the list is workable.
    Never start Backlog-state tickets. Never touch CON-1 or CON-109 (Dylan's).
    Read the ticket's CURRENT description — several were rewritten 2026-06-11.
 C. **Queue empty:** print `LOOP: STOP queue-empty` and exit.
