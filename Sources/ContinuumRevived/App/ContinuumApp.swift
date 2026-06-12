@@ -586,6 +586,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawner.fileTreePersistenceHandler = { [weak self] in
                 self?.scheduleFileTreeSave()
             }
+            spawner.reservedShortcutHandler = { [weak self] event in
+                self?.handleReservedShortcut(event) ?? false
+            }
             self.tileSpawner = spawner
             canvasView.configureEmptyStateActions(CanvasEmptyStateActions(
                 spawnClaude: { [weak self] in
@@ -1105,6 +1108,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return true
         }
 
+        return handleReservedShortcut(event)
+    }
+
+    private func handleReservedShortcut(_ event: NSEvent) -> Bool {
         guard let shortcut = focusBroker.reservedShortcut(for: event) else { return false }
         if let activeSurface = focusBroker.activeSurface,
            focusBroker.shouldSurfaceReceive(shortcut, surface: activeSurface) {
@@ -2464,6 +2471,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         var browserTile: BrowserTileNSView?
         var webValue: String?
         var webKeys: String?
+        var initialTerminalCount = 0
+        var terminalCountAfterCmd1 = 0
         var notes: [String] = []
 
         func finish(success: Bool, _ message: String) {
@@ -2537,6 +2546,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.canvasView?.bringToFront(tileId: runtime.tileId)
             browserTile.layoutSubtreeIfNeeded()
             runtime.focus()
+            initialTerminalCount = self.canvasView?.canvasState.tiles.filter { $0.kind == .terminal }.count ?? 0
+            send("1", keyCode: 18, modifiers: .command)
+            terminalCountAfterCmd1 = self.canvasView?.canvasState.tiles.filter { $0.kind == .terminal }.count ?? 0
+            runtime.focus()
             send("K", keyCode: 40, modifiers: .command)
             runtime.focus()
             send("n", keyCode: 45)
@@ -2568,13 +2581,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 let paletteText = self.profilePalette?.searchTextForQA
                 let selected = self.profilePalette?.selectedDisplayNameForQA
                 let contentFocused = browserTile?.browserContentHasFocusForQA == true
+                let cmd1SpawnedTerminal = terminalCountAfterCmd1 == initialTerminalCount + 1
                 let success = paletteText == "note"
                     && selected == LaunchPaletteAction.newNote.displayName
                     && contentFocused
+                    && cmd1SpawnedTerminal
                     && webValue == ""
                     && webKeys == ""
                     && notes.isEmpty
-                let message = "paletteText=\(String(describing: paletteText)) selected=\(String(describing: selected)) contentFocused=\(contentFocused) webValue=\(String(describing: webValue)) webKeys=\(String(describing: webKeys)) notes=\(notes)"
+                let message = "paletteText=\(String(describing: paletteText)) selected=\(String(describing: selected)) contentFocused=\(contentFocused) initialTerminalCount=\(initialTerminalCount) terminalCountAfterCmd1=\(terminalCountAfterCmd1) webValue=\(String(describing: webValue)) webKeys=\(String(describing: webKeys)) notes=\(notes)"
                 finish(success: success, message)
             }
         }

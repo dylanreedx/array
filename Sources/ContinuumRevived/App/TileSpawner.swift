@@ -42,6 +42,10 @@ final class TileSpawner {
     /// AppDelegate can schedule a debounced FileTreeState save.
     var fileTreePersistenceHandler: (() -> Void)?
 
+    /// Lets runtime-owned key paths route reserved shortcuts through the app's
+    /// FocusBroker instead of consuming them inside terminal/browser content.
+    var reservedShortcutHandler: ((NSEvent) -> Bool)?
+
     init(
         canvasView: CanvasNSView,
         ghostty: GhosttyRuntimeContext?,
@@ -118,6 +122,7 @@ final class TileSpawner {
             launchProfile: profile,
             ghostty: ghostty
         )
+        runtime.reservedShortcutHandler = reservedShortcutHandler
         tile.runtimeRef = RuntimeRef(kind: .terminalSession, id: runtime.id)
 
         let view = TerminalTileNSView(tile: tile, runtime: runtime)
@@ -188,6 +193,7 @@ final class TileSpawner {
             launchProfile: profile,
             ghostty: ghostty
         )
+        runtime.reservedShortcutHandler = reservedShortcutHandler
         var tile = existing
         tile.runtimeRef = RuntimeRef(kind: .terminalSession, id: runtime.id)
         tile.title = profile.title
@@ -296,6 +302,7 @@ final class TileSpawner {
             webView: webView,
             initialURL: urlString
         )
+        runtime.reservedShortcutHandler = reservedShortcutHandler
         tile.runtimeRef = RuntimeRef(kind: .browserTile, id: runtime.id)
 
         let view = BrowserTileNSView(tile: tile, runtime: runtime)
@@ -348,6 +355,7 @@ final class TileSpawner {
             webView: webView,
             initialURL: urlString
         )
+        runtime.reservedShortcutHandler = reservedShortcutHandler
         var tile = existing
         tile.runtimeRef = RuntimeRef(kind: .browserTile, id: runtime.id)
         if let persistedTitle = persistedBrowserTile?.title, !persistedTitle.isEmpty {

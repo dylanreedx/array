@@ -12,16 +12,19 @@ final class GhosttyTerminalView: NSView {
     private var previousModifierFlags: NSEvent.ModifierFlags = []
     private var markedText = NSMutableAttributedString()
     private var keyTextAccumulator: [String]?
+    var reservedShortcutHandler: ((NSEvent) -> Bool)?
 
     override var acceptsFirstResponder: Bool { true }
 
     init(
         ghosttyApp: ghostty_app_t,
         launchProfile: LaunchProfile,
+        reservedShortcutHandler: ((NSEvent) -> Bool)? = nil,
         statusChanged: @escaping (TerminalStatus) -> Void
     ) {
         self.launchProfile = launchProfile
         self.statusChanged = statusChanged
+        self.reservedShortcutHandler = reservedShortcutHandler
         super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
 
         statusChanged(.configuring)
@@ -52,6 +55,10 @@ final class GhosttyTerminalView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if reservedShortcutHandler?(event) == true {
+            return
+        }
+
         let action = event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS
         keyTextAccumulator = []
         defer { keyTextAccumulator = nil }

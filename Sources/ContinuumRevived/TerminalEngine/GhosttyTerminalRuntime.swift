@@ -16,6 +16,10 @@ final class GhosttyTerminalRuntime: TerminalRuntime {
     private var terminalView: GhosttyTerminalView?
     private var didNotifyExit = false
 
+    var reservedShortcutHandler: ((NSEvent) -> Bool)? {
+        didSet { terminalView?.reservedShortcutHandler = reservedShortcutHandler }
+    }
+
     /// Invoked when the underlying shell exits while the runtime is attached.
     /// Fires at most once per runtime instance. Always called on MainActor.
     var onRuntimeExited: ((TerminalSessionID, Int32?) -> Void)?
@@ -41,7 +45,8 @@ final class GhosttyTerminalRuntime: TerminalRuntime {
 
         let view = GhosttyTerminalView(
             ghosttyApp: try! ghostty.app,
-            launchProfile: launchProfile
+            launchProfile: launchProfile,
+            reservedShortcutHandler: reservedShortcutHandler
         ) { [weak self] status in
             guard let self else { return }
             switch status {

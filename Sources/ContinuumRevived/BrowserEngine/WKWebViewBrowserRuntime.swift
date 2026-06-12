@@ -23,6 +23,9 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
     let webView: WKWebView
     private weak var hostView: BrowserHostView?
     private var observers: [NSKeyValueObservation] = []
+    var reservedShortcutHandler: ((NSEvent) -> Bool)? {
+        didSet { hostView?.reservedShortcutHandler = reservedShortcutHandler }
+    }
 
     init(
         id: BrowserRuntimeID = UUID(),
@@ -84,6 +87,7 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
 
     func attach(to hostView: BrowserHostView) {
         self.hostView = hostView
+        hostView.reservedShortcutHandler = reservedShortcutHandler
         webView.translatesAutoresizingMaskIntoConstraints = false
         hostView.addSubview(webView)
         NSLayoutConstraint.activate([

@@ -35,6 +35,7 @@ protocol BrowserRuntime: AnyObject {
 
 final class BrowserHostView: NSView {
     private weak var runtime: BrowserRuntime?
+    var reservedShortcutHandler: ((NSEvent) -> Bool)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -54,5 +55,12 @@ final class BrowserHostView: NSView {
     func detachRuntime() {
         runtime?.detach()
         runtime = nil
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if reservedShortcutHandler?(event) == true {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 }
