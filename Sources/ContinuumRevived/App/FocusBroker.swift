@@ -19,6 +19,7 @@ final class FocusBroker {
 
     private(set) var activeSurface: FocusSurfaceID?
     var onAcceptedTileFocus: ((UUID) -> Void)?
+    var activationFallbackSurfaces: (() -> [FocusSurfaceID])?
 
     func register(_ adapter: FocusSurfaceAdapter) {
         adapters[adapter.focusSurfaceID] = adapter
@@ -88,8 +89,18 @@ final class FocusBroker {
     }
 
     func applicationDidBecomeActive() {
-        if let activeSurface, adapters[activeSurface]?.acquireFocus(reason: .appActivated) == true {
-            return
+        if let activeSurface {
+            if case .modal = activeSurface {
+                return
+            }
+            if adapters[activeSurface]?.acquireFocus(reason: .appActivated) == true {
+                return
+            }
+        }
+        for fallback in activationFallbackSurfaces?() ?? [] {
+            if requestFocus(fallback, reason: .appActivated) {
+                return
+            }
         }
         recoverToCanvas(reason: .appActivated)
     }

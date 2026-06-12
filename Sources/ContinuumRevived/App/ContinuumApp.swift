@@ -117,6 +117,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--focus-broker-activation-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runFocusBrokerActivationSelfCheck()
+                print("ContinuumRevivedFocusBrokerActivationChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zindex-relaunch-hit-test-check") {
             do {
                 _ = NSApplication.shared
@@ -546,6 +558,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.ghostty = ghostty
             self.browserEngine = browserEngine
             self.canvasView = canvasView
+            focusBroker.activationFallbackSurfaces = { [weak self] in
+                var fallbacks: [FocusSurfaceID] = []
+                if let targetId = self?.canvasView?.canvasState.lastActiveTileId {
+                    fallbacks.append(.tile(targetId))
+                }
+                if let fallback = self?.runtimes.last?.tileId,
+                   !fallbacks.contains(.tile(fallback)) {
+                    fallbacks.append(.tile(fallback))
+                }
+                return fallbacks
+            }
 
             let spawner = TileSpawner(
                 canvasView: canvasView,
@@ -1257,16 +1280,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let app = try? ghostty?.app {
             ghostty_app_set_focus(app, true)
         }
-        if focusBroker.activeSurface == nil,
-           let targetId = canvasView?.canvasState.lastActiveTileId,
-           focusBroker.requestFocus(.tile(targetId), reason: .appActivated) {
-            return
-        }
-        if focusBroker.activeSurface == nil,
-           let fallback = runtimes.last,
-           focusBroker.requestFocus(.tile(fallback.tileId), reason: .appActivated) {
-            return
-        }
         focusBroker.applicationDidBecomeActive()
     }
 
@@ -1275,9 +1288,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ghostty_app_set_focus(app, false)
         }
         focusBroker.applicationDidResignActive()
-        for runtime in runtimes where focusBroker.activeSurface != .tile(runtime.tileId) {
-            runtime.blur()
-        }
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -3373,6 +3383,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "browserTileId": browserTile.id.uuidString,
             "activeSurface": String(describing: delegate.focusBroker.activeSurface),
             "lastActiveTileId": canvas.canvasState.lastActiveTileId?.uuidString ?? "nil",
+        ]
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runFocusBrokerActivationSelfCheck() throws -> URL {
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() {
+                throw NSError(domain: "ContinuumRevivedFocusBrokerActivationChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+            }
+        }
+
+        final class ProbeAdapter: FocusSurfaceAdapter {
+            let focusSurfaceID: FocusSurfaceID
+            let focusSurfaceKind: FocusSurfaceKind
+            var acquireReasons: [FocusRequest] = []
+            var releaseReasons: [FocusRequest] = []
+            var shouldAcquire = true
+
+            init(id: FocusSurfaceID, kind: FocusSurfaceKind) {
+                self.focusSurfaceID = id
+                self.focusSurfaceKind = kind
+            }
+
+            func acquireFocus(reason: FocusRequest) -> Bool {
+                acquireReasons.append(reason)
+                return shouldAcquire
+            }
+
+            func releaseFocus(reason: FocusRequest) {
+                releaseReasons.append(reason)
+            }
+
+            func canHandleReservedShortcut(_ shortcut: ReservedShortcut) -> Bool { false }
+        }
+
+        let fileManager = FileManager.default
+        let broker = FocusBroker()
+        let canvas = ProbeAdapter(id: .canvas, kind: .canvas)
+        let tileId = UUID()
+        let fallbackTileId = UUID()
+        let tile = ProbeAdapter(id: .tile(tileId), kind: .terminal)
+        let fallbackTile = ProbeAdapter(id: .tile(fallbackTileId), kind: .note)
+        broker.register(canvas)
+        broker.register(tile)
+        broker.register(fallbackTile)
+        broker.activationFallbackSurfaces = { [.tile(fallbackTileId)] }
+
+        broker.applicationDidBecomeActive()
+        try expect(fallbackTile.acquireReasons == [.appActivated], "nil active surface should use broker fallback tile; reasons=\(fallbackTile.acquireReasons)")
+        try expect(broker.activeSurface == .tile(fallbackTileId), "nil active surface should set fallback tile active")
+
+        broker.openModal(.palette)
+        broker.applicationDidBecomeActive()
+        try expect(broker.activeSurface == .modal(.palette), "activation while modal is open should preserve modal active surface")
+        broker.closeModal(.palette)
+
+        try expect(broker.requestFocus(.tile(tileId), reason: .userClick), "initial tile focus failed")
+        broker.applicationDidResignActive()
+        try expect(tile.releaseReasons == [.recovery], "resign should release only active tile through broker; reasons=\(tile.releaseReasons)")
+        try expect(canvas.releaseReasons.isEmpty, "resign should not release inactive canvas")
+
+        broker.applicationDidBecomeActive()
+        try expect(tile.acquireReasons.suffix(1) == [.appActivated], "activation should reacquire active tile; reasons=\(tile.acquireReasons)")
+        try expect(broker.activeSurface == .tile(tileId), "activation should keep active tile")
+
+        tile.shouldAcquire = false
+        broker.applicationDidBecomeActive()
+        try expect(fallbackTile.acquireReasons.suffix(1) == [.appActivated], "failed active tile should recover through broker fallback; reasons=\(fallbackTile.acquireReasons)")
+        try expect(broker.activeSurface == .tile(fallbackTileId), "failed active tile should set fallback tile active")
+
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("focus-broker-activation", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "check": "focus-broker-activation",
+            "tileId": tileId.uuidString,
+            "fallbackTileId": fallbackTileId.uuidString,
+            "tileAcquireReasons": tile.acquireReasons.map(\.rawValue),
+            "tileReleaseReasons": tile.releaseReasons.map(\.rawValue),
+            "fallbackTileAcquireReasons": fallbackTile.acquireReasons.map(\.rawValue),
+            "modalPreservedDuringActivation": true,
+            "canvasAcquireReasons": canvas.acquireReasons.map(\.rawValue),
+            "activeSurface": String(describing: broker.activeSurface),
         ]
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
