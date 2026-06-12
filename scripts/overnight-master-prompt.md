@@ -22,23 +22,21 @@ Linear team `continuum` id: `9d6655c7-35cb-47ef-9b24-d0342700691d`. Use the
 ## PICK YOUR ONE UNIT (first match wins)
 
 A. **Resume:** if the tree has uncommitted implementation changes or a ticket
-   is In Progress, that is your unit — finish it. (Known at write time:
-   CON-114 may be mid-flight with an unresolved code-reviewer blocker:
-   "CoreChecks global scrub is not failure-safe",
-   `Sources/ContinuumRevivedCoreChecks/main.swift:92-99`. Fix, verify,
-   re-review, commit, close.)
-B. **Next ticket:** the first unblocked **Todo** ticket in this order:
-   - Track A: CON-17 → CON-18 → CON-24 → CON-19 → CON-21 → CON-22 → CON-23
-     (CON-23 last — it integrates the resolver, lock, and picker and is
-     blocked until CON-19 and CON-22 are Done)
-   - Track B: CON-10 → CON-2 → CON-3 → CON-4 (interleave when A is blocked)
-   - then CON-124
-   If the next listed ticket has unmet blockedBy relations or its scoped
-   dependencies are missing from main, SKIP it and take the next unblocked
-   ticket in the list — only STOP if nothing in the list is workable.
-   Never start Backlog-state tickets. Never touch CON-1 or CON-109 (Dylan's).
-   Read the ticket's CURRENT description — several were rewritten 2026-06-11.
-C. **Queue empty:** print `LOOP: STOP queue-empty` and exit.
+   is In Progress, that is your unit — finish it.
+B. **Next ticket — general policy (Todo state IS the autonomous pool):**
+   pick the highest-priority unblocked Todo ticket; tie-break by dependency
+   depth (prerequisites before dependents), then oldest. SKIP any ticket
+   whose blockedBy is not Done, whose scoped dependencies are missing from
+   main, or that is assigned to Dylan — take the next workable one instead.
+   Never start Backlog-state tickets, even if they look related to your
+   unit; if a Todo ticket's scope depends on work that only exists as a
+   Backlog ticket, skip it and note why in a comment.
+   Spike tickets (type:spike) close with MANUAL_CHECK-grade evidence:
+   findings committed to docs/ + real logged output in the Linear comment.
+   Read each ticket's CURRENT description before working it — descriptions
+   are amended as the codebase moves; trust them over your priors.
+C. **Pool empty (no workable Todo ticket):** print `LOOP: STOP queue-empty`
+   and exit.
 
 ## WORK IT (docs/22 state machine, adapted for non-interactive mode)
 
