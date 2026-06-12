@@ -660,7 +660,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 backing: .buffered,
                 defer: false
             )
-            window.title = "continuum-revived"
+            // E7: workspace switching will replace this with `<workspace name> — Continuum`.
+            window.title = Self.mainWindowTitle(for: project)
             window.center()
             window.contentView = canvasView
             window.delegate = self
@@ -1710,6 +1711,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try store.save(registry)
     }
 
+    private static func mainWindowTitle(for project: Project) -> String {
+        "\(project.name) — Continuum"
+    }
+
     static func runProjectRootResolutionSelfCheck() throws {
         struct CheckFailure: Error, CustomStringConvertible {
             let description: String
@@ -1762,6 +1767,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let envDecision = ProjectLaunchCoordinator.decide(environment: ["CONTINUUM_PROJECT_ROOT": envPath], registry: registry, fileSystem: probes)
         try expect(envDecision == .open(URL(fileURLWithPath: envPath)), "environment root wins")
+
+        let titleProbeDate = Date(timeIntervalSince1970: 1_800_000_000)
+        let titleProbe = Project(
+            id: usableId,
+            name: "Usable",
+            rootPath: usablePath,
+            createdAt: titleProbeDate,
+            updatedAt: titleProbeDate,
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning
+            )
+        )
+        try expect(mainWindowTitle(for: titleProbe) == "Usable — Continuum", "window title includes active project name")
 
         let registryDecision = ProjectLaunchCoordinator.decide(environment: [:], registry: registry, fileSystem: probes)
         try expect(registryDecision == .open(URL(fileURLWithPath: usablePath)), "usable registry last-active root opens")
