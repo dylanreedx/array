@@ -259,10 +259,10 @@ final class TileSpawner {
         case failure(Error)
     }
 
-    private static let defaultBrowserURL = "http://localhost:3000"
+    private static var defaultBrowserURL: String { DefaultBrowserURL.current }
 
-    /// Spawns a live `WKWebView` browser tile. Defaults to localhost:3000 if
-    /// `url` is nil. Persists a BrowserTile entry into BrowserState alongside
+    /// Spawns a live `WKWebView` browser tile. Defaults to the configured
+    /// browser URL (`about:blank` unless overridden) if `url` is nil. Persists a BrowserTile entry into BrowserState alongside
     /// the canvas state. Returns the runtime so the caller can track it for
     /// shutdown.
     func spawnBrowser(url: String? = nil, at worldPoint: CGPoint? = nil) -> BrowserOutcome {

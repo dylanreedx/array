@@ -277,6 +277,38 @@ do {
     expect(exitedDecoded == withExit, "TerminalSessionDescriptor with exit round trip")
 }
 
+// MARK: - DefaultBrowserURL
+
+do {
+    let unsetStandard = UserDefaults(suiteName: "continuum-default-browser-url-unset-\(UUID().uuidString)")!
+    let unset = DefaultBrowserURL.resolvedFromDefaults(standardDefaults: unsetStandard, legacyDefaults: nil)
+    expect(unset == DefaultBrowserURLResolution(url: "about:blank", rawValue: nil, source: .fallbackDefault), "DefaultBrowserURL unset falls back to about:blank")
+
+    let explicitStandard = UserDefaults(suiteName: "continuum-default-browser-url-explicit-\(UUID().uuidString)")!
+    explicitStandard.set("https://example.com/start", forKey: DefaultBrowserURL.userDefaultsKey)
+    let explicit = DefaultBrowserURL.resolvedFromDefaults(standardDefaults: explicitStandard, legacyDefaults: nil)
+    expect(explicit == DefaultBrowserURLResolution(url: "https://example.com/start", rawValue: "https://example.com/start", source: .standardDomain), "DefaultBrowserURL accepts configured URL")
+
+    let garbageStandard = UserDefaults(suiteName: "continuum-default-browser-url-garbage-\(UUID().uuidString)")!
+    garbageStandard.set("not a url", forKey: DefaultBrowserURL.userDefaultsKey)
+    let garbage = DefaultBrowserURL.resolvedFromDefaults(standardDefaults: garbageStandard, legacyDefaults: nil)
+    expect(garbage == DefaultBrowserURLResolution(url: "about:blank", rawValue: "not a url", source: .standardDomain), "DefaultBrowserURL garbage falls back to about:blank")
+
+    let legacyStandard = UserDefaults(suiteName: "continuum-default-browser-url-legacy-standard-\(UUID().uuidString)")!
+    let legacyDefaults = UserDefaults(suiteName: "continuum-default-browser-url-legacy-\(UUID().uuidString)")!
+    legacyDefaults.set("http://127.0.0.1:3000", forKey: DefaultBrowserURL.userDefaultsKey)
+    let legacy = DefaultBrowserURL.resolvedFromDefaults(standardDefaults: legacyStandard, legacyDefaults: legacyDefaults)
+    expect(legacy == DefaultBrowserURLResolution(url: "http://127.0.0.1:3000", rawValue: "http://127.0.0.1:3000", source: .legacyDomainMigrated), "DefaultBrowserURL migrates valid legacy value")
+    expect(legacyStandard.string(forKey: DefaultBrowserURL.userDefaultsKey) == "http://127.0.0.1:3000", "DefaultBrowserURL writes migrated legacy value")
+
+    let invalidLegacyStandard = UserDefaults(suiteName: "continuum-default-browser-url-invalid-legacy-standard-\(UUID().uuidString)")!
+    let invalidLegacyDefaults = UserDefaults(suiteName: "continuum-default-browser-url-invalid-legacy-\(UUID().uuidString)")!
+    invalidLegacyDefaults.set("not a url", forKey: DefaultBrowserURL.userDefaultsKey)
+    let invalidLegacy = DefaultBrowserURL.resolvedFromDefaults(standardDefaults: invalidLegacyStandard, legacyDefaults: invalidLegacyDefaults)
+    expect(invalidLegacy == DefaultBrowserURLResolution(url: "about:blank", rawValue: nil, source: .fallbackDefault), "DefaultBrowserURL ignores invalid legacy value")
+    expect(invalidLegacyStandard.string(forKey: DefaultBrowserURL.userDefaultsKey) == nil, "DefaultBrowserURL does not migrate invalid legacy value")
+}
+
 // MARK: - BrowserState round trip
 
 do {

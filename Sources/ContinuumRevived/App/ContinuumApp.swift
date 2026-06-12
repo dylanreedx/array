@@ -3271,6 +3271,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if !condition() { throw CheckError.failed(message) }
         }
 
+        let legacyDefaults = UserDefaults(suiteName: DeleteConfirmPolicy.legacyDefaultsDomain)
+        let savedDefaultBrowserURL = UserDefaults.standard.object(forKey: DefaultBrowserURL.userDefaultsKey)
+        let savedLegacyDefaultBrowserURL = legacyDefaults?.object(forKey: DefaultBrowserURL.userDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: DefaultBrowserURL.userDefaultsKey)
+        legacyDefaults?.removeObject(forKey: DefaultBrowserURL.userDefaultsKey)
+        defer {
+            if let savedDefaultBrowserURL {
+                UserDefaults.standard.set(savedDefaultBrowserURL, forKey: DefaultBrowserURL.userDefaultsKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: DefaultBrowserURL.userDefaultsKey)
+            }
+            if let savedLegacyDefaultBrowserURL {
+                legacyDefaults?.set(savedLegacyDefaultBrowserURL, forKey: DefaultBrowserURL.userDefaultsKey)
+            } else {
+                legacyDefaults?.removeObject(forKey: DefaultBrowserURL.userDefaultsKey)
+            }
+        }
+
         let fileManager = FileManager.default
         let tempRoot = fileManager.temporaryDirectory
             .appendingPathComponent("continuum-palette-browser-spawn-\(UUID().uuidString)", isDirectory: true)
@@ -3321,10 +3339,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let browserTiles = canvas.canvasState.tiles.filter { $0.kind == .browser }
         try expect(browserTiles.count == 2, "expected 2 browser tiles, got \(browserTiles.count)")
         try expect(delegate.browserRuntimes.count == 2, "expected 2 browser runtimes, got \(delegate.browserRuntimes.count)")
-        try expect(browserTiles.map { $0.metadata.url } == ["http://localhost:3000", explicitURL], "unexpected browser tile URLs: \(browserTiles.map { $0.metadata.url ?? "nil" })")
-        try expect(delegate.browserRuntimes.map(\.url) == ["http://localhost:3000", explicitURL], "unexpected runtime URLs: \(delegate.browserRuntimes.map(\.url))")
+        try expect(browserTiles.map { $0.metadata.url } == ["about:blank", explicitURL], "unexpected browser tile URLs: \(browserTiles.map { $0.metadata.url ?? "nil" })")
+        try expect(delegate.browserRuntimes.map(\.url) == ["about:blank", explicitURL], "unexpected runtime URLs: \(delegate.browserRuntimes.map(\.url))")
         let persisted = try store.loadBrowserState().tiles.map(\.url)
-        try expect(persisted == ["http://localhost:3000", explicitURL], "unexpected persisted browser URLs: \(persisted)")
+        try expect(persisted == ["about:blank", explicitURL], "unexpected persisted browser URLs: \(persisted)")
 
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
