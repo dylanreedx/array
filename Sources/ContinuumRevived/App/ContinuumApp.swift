@@ -301,10 +301,19 @@ enum ContinuumApp {
               let legacy = UserDefaults(suiteName: legacySuite) else {
             throw SelfCheckError("could not open isolated defaults domains")
         }
+        let globalDefaults = UserDefaults.standard
+        let globalDomain = UserDefaults.globalDomain
+        let originalGlobalDomain = globalDefaults.persistentDomain(forName: globalDomain) ?? [:]
         defer {
+            globalDefaults.setPersistentDomain(originalGlobalDomain, forName: globalDomain)
             standard.removePersistentDomain(forName: standardSuite)
             legacy.removePersistentDomain(forName: legacySuite)
         }
+        var scrubbedGlobalDomain = originalGlobalDomain
+        scrubbedGlobalDomain.removeValue(forKey: key)
+        globalDefaults.setPersistentDomain(scrubbedGlobalDomain, forName: globalDomain)
+        standard.setPersistentDomain([:], forName: standardSuite)
+        legacy.setPersistentDomain([:], forName: legacySuite)
 
         func assertResolution(_ expectedPolicy: DeleteConfirmPolicy, _ expectedSource: DeleteConfirmPolicyResolution.Source, _ label: String) throws {
             let resolution = DeleteConfirmPolicy.resolvedFromDefaults(standardDefaults: standard, legacyDefaults: legacy)
