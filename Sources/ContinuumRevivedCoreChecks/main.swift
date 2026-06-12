@@ -839,6 +839,61 @@ do {
     )
 }
 
+// MARK: - ProjectPickerModel
+
+do {
+    let pinnedId = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    let recentId = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+    let olderId = UUID(uuidString: "00000000-0000-0000-0000-000000000003")!
+    let missingId = UUID(uuidString: "00000000-0000-0000-0000-000000000004")!
+    let relativeId = UUID(uuidString: "00000000-0000-0000-0000-000000000005")!
+    let unusableId = UUID(uuidString: "00000000-0000-0000-0000-000000000006")!
+
+    let registry = Registry(
+        lastActiveWorkspaceId: nil,
+        lastActiveProjectId: recentId,
+        workspaces: [],
+        projects: [
+            ProjectEntry(id: olderId, name: "Older", rootPath: "/projects/older", workspaceId: nil, lastOpenedAt: Date(timeIntervalSince1970: 100), pinned: false),
+            ProjectEntry(id: missingId, name: "Missing", rootPath: "/projects/missing", workspaceId: nil, lastOpenedAt: Date(timeIntervalSince1970: 500), pinned: false),
+            ProjectEntry(id: recentId, name: "Recent", rootPath: "/projects/recent", workspaceId: nil, lastOpenedAt: Date(timeIntervalSince1970: 1_000), pinned: false),
+            ProjectEntry(id: pinnedId, name: "Pinned", rootPath: "/projects/pinned", workspaceId: nil, lastOpenedAt: Date(timeIntervalSince1970: 10), pinned: true),
+            ProjectEntry(id: relativeId, name: "Relative", rootPath: "relative/project", workspaceId: nil, lastOpenedAt: Date(timeIntervalSince1970: 900), pinned: false),
+            ProjectEntry(id: unusableId, name: "Unusable", rootPath: "/projects/unusable", workspaceId: nil, lastOpenedAt: Date(timeIntervalSince1970: 800), pinned: false)
+        ],
+        settings: Registry.empty().settings
+    )
+
+    let probes = ProjectRootResolver.FileSystemProbes(
+        directoryExists: { path in path != "/projects/missing" },
+        continuumDirectoryExists: { path in path == "/projects/pinned" || path == "/projects/recent" || path == "/projects/older" },
+        canCreateContinuumDirectory: { _ in false }
+    )
+
+    let rows = ProjectPickerModel.makeRows(registry: registry, fileSystem: probes)
+    expect(rows.map(\.id) == [pinnedId, recentId, relativeId, unusableId, missingId, olderId], "ProjectPickerModel sorts pinned first, then lastOpenedAt descending")
+    expect(rows.count == registry.projects.count, "ProjectPickerModel includes missing and unavailable projects")
+    expect(rows.first(where: { $0.id == recentId })?.isLastActive == true, "ProjectPickerModel marks last active project")
+    expect(rows.first(where: { $0.id == recentId })?.availability == .available, "ProjectPickerModel marks usable rows available")
+    expect(rows.first(where: { $0.id == missingId })?.availability == .missingDirectory, "ProjectPickerModel marks missing directories")
+    expect(rows.first(where: { $0.id == relativeId })?.availability == .relativePath, "ProjectPickerModel marks relative paths")
+    expect(rows.first(where: { $0.id == unusableId })?.availability == .unusableStateDirectory, "ProjectPickerModel marks roots without usable state dir")
+    expect(rows.first(where: { $0.id == missingId })?.isSelectable == false, "ProjectPickerModel missing rows are non-selectable")
+    expect(rows.first(where: { $0.id == relativeId })?.isSelectable == false, "ProjectPickerModel relative rows are non-selectable")
+
+    expect(ProjectPickerModel.filterRows(rows, query: "").map(\.id) == rows.map(\.id), "ProjectPickerModel blank filter returns sorted rows")
+    expect(ProjectPickerModel.filterRows(rows, query: "recent").map(\.id) == [recentId], "ProjectPickerModel filters by name")
+    expect(ProjectPickerModel.filterRows(rows, query: "projects missing").map(\.id) == [missingId], "ProjectPickerModel filters by path tokens and keeps missing rows visible")
+    expect(ProjectPickerModel.filterRows(rows, query: "000000000004").map(\.id) == [missingId], "ProjectPickerModel filters by id")
+
+    expect(ProjectPickerModel.select(id: recentId, from: rows) == .selected(URL(fileURLWithPath: "/projects/recent")), "ProjectPickerModel selects available rows")
+    expect(ProjectPickerModel.select(id: missingId, from: rows) == .unselectable(.missingDirectory), "ProjectPickerModel refuses missing rows")
+    expect(ProjectPickerModel.select(id: UUID(), from: rows) == .notFound, "ProjectPickerModel reports unknown selections")
+
+    let emptyRows = ProjectPickerModel.makeRows(registry: Registry.empty(), fileSystem: probes)
+    expect(emptyRows.isEmpty, "ProjectPickerModel empty registry yields empty state")
+}
+
 // MARK: - CanvasEngine: coordinate conversion
 
 do {
