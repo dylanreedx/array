@@ -73,6 +73,6 @@ done
 
 echo "[loop] finished $(date)."
 echo "[loop] summary of iterations:"
-grep -hE '^LOOP: ' "$LOG_DIR"/iter-"$STAMP"-*.log 2>/dev/null | sed 's/^/[loop]   /'
+ls "$LOG_DIR"/iter-"$STAMP"-*.log 2>/dev/null | sort -V | xargs -I{} grep -hE '^LOOP: ' {} 2>/dev/null | sed 's/^/[loop]   /'
 echo "[loop] commits since start:"
 git log --oneline -15 | sed 's/^/[loop]   /'
