@@ -105,6 +105,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--spawn-focus-policy-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runSpawnFocusPolicySelfCheck()
+                print("ContinuumRevivedSpawnFocusPolicyChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zindex-relaunch-hit-test-check") {
             do {
                 _ = NSApplication.shared
@@ -1073,7 +1085,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let spawner = tileSpawner,
               let host = window else { return }
         let palette = profilePalette ?? makeProfilePalette()
+        let wasVisible = palette.isVisible
         profilePalette = palette
+        if !wasVisible {
+            focusBroker.openModal(.palette)
+        }
         palette.show(near: host, profiles: spawner.annotatedProfiles())
     }
 
@@ -1086,9 +1102,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self?.performPaletteAction(action)
         }
         palette.onClose = { [weak self] in
+            self?.focusBroker.closeModal(.palette)
             self?.profilePalette = nil
         }
         return palette
+    }
+
+    private func focusSpawnedTile(_ tileId: UUID) {
+        _ = focusBroker.requestFocus(.tile(tileId), reason: .tileSpawned)
     }
 
     private func spawnTerminalFromProfile(_ profileId: String) {
@@ -1097,6 +1118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case let .spawned(runtime):
             wireRuntimeExitHandler(runtime)
             runtimes.append(runtime)
+            focusSpawnedTile(runtime.tileId)
         case let .missingCommand(executable):
             presentMissingCommand(executable: executable, profileId: profileId)
         case let .notConfigured(id):
@@ -1118,6 +1140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case let .spawned(runtime):
             wireContentProcessTerminationHandler(runtime)
             browserRuntimes.append(runtime)
+            focusSpawnedTile(runtime.tileId)
         case let .invalidURL(url):
             fputs("TileSpawner.spawnBrowser invalid URL: \(url)\n", stderr)
         case let .failure(error):
@@ -1151,6 +1174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if let view = canvasView?.tileView(for: tileId) as? NoteTileNSView {
                 noteViews[noteId] = view
             }
+            focusSpawnedTile(tileId)
         case let .failure(error):
             fputs("TileSpawner.spawnNote failed: \(error)\n", stderr)
         }
@@ -1175,8 +1199,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         switch spawner.spawnFile(path: selectedURL.standardizedFileURL.path, title: selectedURL.lastPathComponent) {
-        case .spawned:
-            break
+        case let .spawned(tileId):
+            focusSpawnedTile(tileId)
         case .invalidPath:
             fputs("TileSpawner.spawnFile rejected empty file path\n", stderr)
         case let .failure(error):
@@ -1192,6 +1216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if let view = canvasView?.tileView(for: tileId) as? FileTreeTileNSView {
                 fileTreeViews[tileId] = view
             }
+            focusSpawnedTile(tileId)
         case .invalidPath:
             fputs("TileSpawner.spawnFileTree rejected project root: \(project.rootPath)\n", stderr)
         case let .failure(error):
@@ -3160,6 +3185,157 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "tileURLs": browserTiles.map { $0.metadata.url ?? "" },
             "runtimeURLs": delegate.browserRuntimes.map(\.url),
             "persistedURLs": persisted,
+        ]
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runSpawnFocusPolicySelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-spawn-focus-policy-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        let now = Date()
+        let project = Project(
+            id: UUID(),
+            name: "spawn-focus-policy-check",
+            rootPath: tempRoot.path,
+            createdAt: now,
+            updatedAt: now,
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning
+            )
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        canvas.frame = CGRect(x: 0, y: 0, width: 1600, height: 1000)
+        let delegate = AppDelegate()
+        let browserEngine = BrowserEngineContext()
+        delegate.canvasView = canvas
+        delegate.browserEngine = browserEngine
+        delegate.projectStore = store
+        delegate.activeProject = project
+        canvas.focusBroker = delegate.focusBroker
+        delegate.tileSpawner = TileSpawner(
+            canvasView: canvas,
+            ghostty: nil,
+            browserEngine: browserEngine,
+            projectStore: store,
+            project: project
+        )
+        defer { browserEngine.shutdown() }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1600, height: 1000),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = canvas
+        delegate.window = window
+
+        try expect(delegate.focusBroker.requestFocus(.canvas, reason: .appActivated), "initial canvas focus failed")
+        delegate.openProfilePalette()
+        delegate.openProfilePalette()
+        try expect(delegate.focusBroker.activeSurface == .modal(.palette), "palette did not become active modal")
+        guard let palette = delegate.profilePalette else {
+            throw CheckError.failed("palette was not created")
+        }
+        for scalar in "note".unicodeScalars {
+            let character = String(scalar)
+            let event = NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                characters: character,
+                charactersIgnoringModifiers: character,
+                isARepeat: false,
+                keyCode: 0
+            )!
+            try expect(palette.handleKeyEvent(event), "palette did not handle search character \(character)")
+        }
+        let returnEvent = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "\r",
+            charactersIgnoringModifiers: "\r",
+            isARepeat: false,
+            keyCode: 36
+        )!
+        try expect(palette.handleKeyEvent(returnEvent), "palette did not handle Return")
+        guard let spawnedTile = canvas.canvasState.tiles.first(where: { $0.kind == .note }) else {
+            throw CheckError.failed("new note spawn did not create a note tile")
+        }
+        try expect(delegate.profilePalette == nil, "palette did not close after action selection")
+        try expect(delegate.focusBroker.activeSurface == .tile(spawnedTile.id), "modal close restored pre-spawn focus instead of keeping spawned tile")
+        try expect(canvas.canvasState.lastActiveTileId == spawnedTile.id, "spawned note did not become lastActiveTileId")
+        guard let noteView = canvas.tileView(for: spawnedTile.id) as? NoteTileNSView else {
+            throw CheckError.failed("spawned note view missing")
+        }
+        try expect(window.firstResponder === noteView.textView, "spawned note text view is not first responder")
+        noteView.textView.keyDown(with: NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "z",
+            charactersIgnoringModifiers: "z",
+            isARepeat: false,
+            keyCode: 6
+        )!)
+        try expect(noteView.textView.string.contains("z"), "typing sentinel did not land in spawned note")
+
+        delegate.performPaletteAction(.newBrowser)
+        guard let browserTile = canvas.canvasState.tiles.last(where: { $0.kind == .browser }) else {
+            throw CheckError.failed("new browser spawn did not create a browser tile")
+        }
+        guard let browserRuntime = delegate.browserRuntimes.last else {
+            throw CheckError.failed("new browser spawn did not create a browser runtime")
+        }
+        try expect(delegate.focusBroker.activeSurface == .tile(browserTile.id), "spawned browser did not become active")
+        try expect(canvas.canvasState.lastActiveTileId == browserTile.id, "spawned browser did not become lastActiveTileId")
+        try expect(browserRuntime.isSemanticContentResponder(window.firstResponder), "spawned browser content is not semantic first responder")
+
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("spawn-focus-policy", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "check": "spawn-focus-policy",
+            "noteTileId": spawnedTile.id.uuidString,
+            "browserTileId": browserTile.id.uuidString,
+            "activeSurface": String(describing: delegate.focusBroker.activeSurface),
+            "lastActiveTileId": canvas.canvasState.lastActiveTileId?.uuidString ?? "nil",
         ]
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

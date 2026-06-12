@@ -569,8 +569,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             onSelectProfile?(profile.id)
             close(restoreFocus: true)
         case let .action(action):
-            close(restoreFocus: true)
             onSelectAction?(action)
+            close(restoreFocus: true)
         }
     }
 
