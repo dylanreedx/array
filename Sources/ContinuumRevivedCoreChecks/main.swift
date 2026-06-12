@@ -1153,13 +1153,49 @@ do {
     expect(viewportRect.intersects(CGRect(x: placed.x, y: placed.y, width: placed.width, height: placed.height)), "Fallback from far-away last tile is clamped into visible viewport, got \(placed)")
 }
 
-// MARK: - CanvasEngine: defaults per kind
+// MARK: - TileGeometry: presets per kind
 
 do {
-    let term = CanvasEngine.defaultFrame(for: .terminal)
-    expect(term.width == 900 && term.height == 620, "Terminal default 900x620, got \(term)")
-    let browser = CanvasEngine.defaultFrame(for: .browser)
-    expect(browser.width == 1000 && browser.height == 700, "Browser default 1000x700, got \(browser)")
+    let terminal = TileGeometry.preset(for: .terminal)
+    expect(terminal.defaultSize == CGSize(width: 1080, height: 664), "Terminal default is 120x32 grid at 9x20 plus 24pt chrome, got \(terminal.defaultSize)")
+    expect(terminal.aspect == .free, "Terminal aspect is free")
+    expect(terminal.sizeQuantum == CGSize(width: 9, height: 20), "Terminal quantum is cell size, got \(String(describing: terminal.sizeQuantum))")
+    expect(TileGeometry.minimumSize(for: .terminal) == CGSize(width: 180, height: 124), "Terminal minimum is 20x5 cells plus chrome")
+
+    let customTerminal = TileGeometry.preset(for: .terminal, terminalCell: TerminalCellSize(width: 10, height: 18))
+    expect(customTerminal.defaultSize == CGSize(width: 1200, height: 600), "Terminal grid math honors injectable cell size, got \(customTerminal.defaultSize)")
+    expect(customTerminal.sizeQuantum == CGSize(width: 10, height: 18), "Terminal quantum honors injectable cell size")
+    expect(TileGeometry.minimumSize(for: .terminal, terminalCell: TerminalCellSize(width: 10, height: 18)) == CGSize(width: 200, height: 114), "Terminal min-cells floor honors injectable cell size")
+
+    let browser = TileGeometry.preset(for: .browser)
+    expect(browser.defaultSize == CGSize(width: 1024, height: 640), "Browser default is 16:10 1024x640, got \(browser.defaultSize)")
+    expect(browser.aspect == .free && browser.sizeQuantum == nil, "Browser carries free aspect and no quantum")
+
+    struct TileGeometryPresetCase {
+        let kind: TileKind
+        let defaultSize: CGSize
+        let minimumSize: CGSize
+        let aspect: TileAspect
+        let quantum: CGSize?
+    }
+
+    let cases: [TileGeometryPresetCase] = [
+        TileGeometryPresetCase(kind: .terminal, defaultSize: CGSize(width: 1080, height: 664), minimumSize: CGSize(width: 180, height: 124), aspect: .free, quantum: CGSize(width: 9, height: 20)),
+        TileGeometryPresetCase(kind: .browser, defaultSize: CGSize(width: 1024, height: 640), minimumSize: CGSize(width: 320, height: 220), aspect: .free, quantum: nil),
+        TileGeometryPresetCase(kind: .note, defaultSize: CGSize(width: 640, height: 400), minimumSize: CGSize(width: 240, height: 160), aspect: .free, quantum: nil),
+        TileGeometryPresetCase(kind: .file, defaultSize: CGSize(width: 320, height: 480), minimumSize: CGSize(width: 200, height: 200), aspect: .free, quantum: nil),
+        TileGeometryPresetCase(kind: .fileTree, defaultSize: CGSize(width: 360, height: 520), minimumSize: CGSize(width: 220, height: 240), aspect: .free, quantum: nil),
+    ]
+
+    for row in cases {
+        let preset = TileGeometry.preset(for: row.kind)
+        expect(preset.defaultSize == row.defaultSize, "\(row.kind) default size expected \(row.defaultSize), got \(preset.defaultSize)")
+        expect(TileGeometry.minimumSize(for: row.kind) == row.minimumSize, "\(row.kind) minimum size expected \(row.minimumSize), got \(TileGeometry.minimumSize(for: row.kind))")
+        expect(preset.aspect == row.aspect, "\(row.kind) aspect expected \(row.aspect), got \(preset.aspect)")
+        expect(preset.sizeQuantum == row.quantum, "\(row.kind) quantum expected \(String(describing: row.quantum)), got \(String(describing: preset.sizeQuantum))")
+        expect(CanvasEngine.defaultFrame(for: row.kind) == row.defaultSize, "CanvasEngine default delegates to TileGeometry for \(row.kind)")
+        expect(CanvasEngine.minimumFrame(for: row.kind) == row.minimumSize, "CanvasEngine minimum delegates to TileGeometry for \(row.kind)")
+    }
 }
 
 // MARK: - LaunchProfileRegistry: built-ins

@@ -80,23 +80,11 @@ public enum CanvasEngine {
     // MARK: - Defaults and minimums per tile kind
 
     public static func defaultFrame(for kind: TileKind) -> CGSize {
-        switch kind {
-        case .terminal: return CGSize(width: 900, height: 620)
-        case .browser:  return CGSize(width: 1000, height: 700)
-        case .note:     return CGSize(width: 600, height: 400)
-        case .file:     return CGSize(width: 320, height: 500)
-        case .fileTree: return CGSize(width: 360, height: 520)
-        }
+        TileGeometry.preset(for: kind).defaultSize
     }
 
     public static func minimumFrame(for kind: TileKind) -> CGSize {
-        switch kind {
-        case .terminal: return CGSize(width: 280, height: 180)
-        case .browser:  return CGSize(width: 320, height: 220)
-        case .note:     return CGSize(width: 240, height: 160)
-        case .file:     return CGSize(width: 200, height: 200)
-        case .fileTree: return CGSize(width: 220, height: 240)
-        }
+        TileGeometry.minimumSize(for: kind)
     }
 
 
