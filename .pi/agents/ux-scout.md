@@ -17,6 +17,7 @@ Rules:
 - Separate observed facts from hypotheses.
 - Focus on false-positive resistance: define what would actually prove the behavior works.
 - If screenshot/AX evidence is unavailable, say so and propose a permission-free oracle.
+- Always include file paths and line references when possible; name the exact function/file where each gap or behavior lives.
 
 What to inspect:
 - `docs/12-ux-exploration-backlog.md`

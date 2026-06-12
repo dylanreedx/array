@@ -34,5 +34,5 @@ Output format:
 4. **What is proven** — concrete pass conditions.
 5. **What is not proven** — gaps/manual checks.
 6. **False-positive risks** — remaining ways this could be wrong.
-7. **Verdict** — approved / needs rework / blocked.
-8. **Required next action** — one concise action if not approved.
+7. **Verdict** — a line containing exactly one bare token: `DECISION: APPROVE` / `DECISION: REWORK` / `DECISION: MANUAL_CHECK` / `DECISION: BLOCKED`. No qualifiers on this line; caveats belong in sections 4–6. Use MANUAL_CHECK when deterministic evidence passes but the remaining gap is provable only by a human.
+8. **Required next action** — one concise action if not APPROVE.

@@ -34,5 +34,5 @@ Output format:
 3. **Regression risks** — likely breakages.
 4. **Test coverage review** — what tests cover/miss.
 5. **False-positive risks** — evidence gaps.
-6. **Verdict** — approved / needs rework / blocked.
-7. **Required next action** — one concise action if not approved.
+6. **Verdict** — a line containing exactly one bare token: `DECISION: APPROVE` / `DECISION: REWORK` / `DECISION: MANUAL_CHECK` / `DECISION: BLOCKED`. No qualifiers on this line; caveats belong in sections 2–5. Use MANUAL_CHECK when the change is sound but a claim can only be proven by human/visual verification.
+7. **Required next action** — one concise action if not APPROVE.

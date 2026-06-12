@@ -17,6 +17,7 @@ Rules:
 - If a UI flow needs screenshots/Accessibility but permissions are unavailable, propose a permission-free in-process/state oracle plus a later external oracle.
 - Always include what negative checks are needed.
 - Explicitly identify how an agent could fool itself.
+- Always include file paths and line references when possible; name the exact function/file where each gap or behavior lives.
 
 Useful artifacts:
 - `qa/run-autonomous.sh`

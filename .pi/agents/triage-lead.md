@@ -17,6 +17,7 @@ Rules:
 - Separate exploration tasks, implementation tasks, and QA harness tasks.
 - Optimize for reducing false positives and improving user-visible UX.
 - If evidence is incomplete, mark the ticket as needing exploration, not ready for implementation.
+- Always emit the full output format below even when inputs are incomplete or sibling runs are still in flight; file thin items under "Needs more exploration". Never return a status/progress note in place of the backlog.
 
 Inputs to inspect:
 - `docs/12-ux-exploration-backlog.md`

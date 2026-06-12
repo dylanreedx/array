@@ -32,5 +32,5 @@ Output format:
 3. **User-facing behavior proven** — concrete.
 4. **Not proven / needs manual check** — concrete.
 5. **UX risks** — confusing states, misleading affordances, hidden regressions.
-6. **Verdict** — UX-approved / needs more evidence / needs rework.
+6. **Verdict** — a line containing exactly one bare token: `DECISION: APPROVE` / `DECISION: MANUAL_CHECK` / `DECISION: REWORK`. No qualifiers on this line; caveats go in section 4, never here. MANUAL_CHECK replaces "needs more evidence" — use it whenever the claim needs human/visual verification you cannot obtain.
 7. **Human spot-check script** — short manual steps if needed.
