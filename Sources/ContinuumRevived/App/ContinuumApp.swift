@@ -1148,7 +1148,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if !wasVisible {
             focusBroker.openModal(.palette)
         }
-        palette.show(near: host, profiles: spawner.annotatedProfiles())
+        palette.show(near: host, profiles: spawner.annotatedProfiles(), projects: switchableProjectRows())
+    }
+
+    private func switchableProjectRows() -> [ProjectPickerRow] {
+        guard let registryStore,
+              let activeProject,
+              let registry = try? registryStore.loadOrEmpty() else { return [] }
+        return ProjectPickerModel.makeRows(registry: registry)
+            .filter { $0.id != activeProject.id }
     }
 
     private func makeProfilePalette() -> LaunchProfilePalette {
@@ -1222,6 +1230,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             openFileFromPalette()
         case .openFileTree:
             spawnFileTreeFromPalette()
+        case let .switchProject(projectId):
+            switchProjectAndRelaunch(projectId: projectId)
+        }
+    }
+
+    private func switchProjectAndRelaunch(projectId: UUID) {
+        guard let registryStore else { return }
+        do {
+            var registry = try registryStore.loadOrEmpty()
+            let rows = ProjectPickerModel.makeRows(registry: registry)
+            guard case let .selected(projectRoot) = ProjectPickerModel.select(id: projectId, from: rows) else {
+                fputs("Switch Project failed: unavailable project \(projectId)\n", stderr)
+                return
+            }
+            guard registry.selectProjectForNextLaunch(id: projectId) else {
+                fputs("Switch Project failed: unknown project \(projectId)\n", stderr)
+                return
+            }
+            flushCanvasSave()
+            flushBrowserSave()
+            flushNoteSave()
+            flushFileTreeSave()
+            try registryStore.save(registry)
+            relaunchApplication(projectRoot: projectRoot)
+        } catch {
+            fputs("Switch Project failed: \(error)\n", stderr)
+        }
+    }
+
+    private func relaunchApplication(projectRoot: URL) {
+        let bundleURL = Bundle.main.bundleURL
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        configuration.environment = ProcessInfo.processInfo.environment.merging([
+            "CONTINUUM_PROJECT_ROOT": projectRoot.path
+        ]) { _, selected in selected }
+        NSWorkspace.shared.openApplication(
+            at: bundleURL,
+            configuration: configuration
+        ) { _, error in
+            if let error {
+                fputs("Switch Project relaunch failed: \(error)\n", stderr)
+                return
+            }
+            Task { @MainActor in NSApp.terminate(nil) }
         }
     }
 

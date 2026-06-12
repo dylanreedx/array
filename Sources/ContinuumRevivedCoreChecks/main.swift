@@ -728,6 +728,12 @@ do {
     expect(upsertRegistry.projects.count == 2, "Registry.upsertProject appends a different project")
     expect(upsertRegistry.lastActiveProjectId == otherProjectId, "Registry.upsertProject sets lastActiveProjectId to appended project")
 
+    var switchRegistry = upsertRegistry
+    expect(switchRegistry.selectProjectForNextLaunch(id: projectId), "Registry.selectProjectForNextLaunch accepts known project")
+    expect(switchRegistry.lastActiveProjectId == projectId, "Registry.selectProjectForNextLaunch sets lastActiveProjectId")
+    expect(!switchRegistry.selectProjectForNextLaunch(id: UUID()), "Registry.selectProjectForNextLaunch rejects unknown project")
+    expect(switchRegistry.lastActiveProjectId == projectId, "Registry.selectProjectForNextLaunch leaves active project unchanged on unknown id")
+
     // The default Application Support path should at least include the app name.
     let defaultDir = RegistryStore.defaultApplicationSupportDirectory()
     expect(
@@ -821,6 +827,12 @@ do {
     disabledRegistry.settings.openLastProjectOnLaunch = false
     let disabledDecision = ProjectRootResolver(environment: [:], registry: disabledRegistry, fileSystem: probes).resolve()
     expect(disabledDecision == .needsPicker(.openLastProjectDisabled), "ProjectRootResolver honors openLastProjectOnLaunch=false")
+    let envWinsDisabled = ProjectRootResolver(
+        environment: ["CONTINUUM_PROJECT_ROOT": "/env/selected-project"],
+        registry: disabledRegistry,
+        fileSystem: probes
+    ).resolve()
+    expect(envWinsDisabled == .resolved(URL(fileURLWithPath: "/env/selected-project"), .environment), "ProjectRootResolver env override supports explicit switch relaunch when open-last is disabled")
 
     let emptyDecision = ProjectRootResolver(environment: [:], registry: Registry.empty(), fileSystem: probes).resolve()
     expect(emptyDecision == .needsPicker(.noUsableProject), "ProjectRootResolver empty registry needs picker")

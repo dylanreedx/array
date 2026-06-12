@@ -6,6 +6,7 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case openFile
     case openFileTree
     case openURL(String)
+    case switchProject(UUID)
 
     public var displayName: String {
         switch self {
@@ -19,6 +20,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "Open File Tree..."
         case let .openURL(url):
             return "Open \"\(url)\"…"
+        case .switchProject:
+            return "Switch Project…"
         }
     }
 
@@ -34,6 +37,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["open", "file", "tree"]
         case .openURL:
             return ["open", "url", "browser", "web"]
+        case .switchProject:
+            return ["switch", "project"]
         }
     }
 }
@@ -55,11 +60,13 @@ public struct LaunchPaletteProfileRow: Equatable, Sendable {
 public enum LaunchPaletteRow: Equatable, Sendable {
     case profile(LaunchPaletteProfileRow)
     case action(LaunchPaletteAction)
+    case project(ProjectPickerRow)
 
     public var displayName: String {
         switch self {
         case let .profile(profile): return profile.displayName
         case let .action(action): return action.displayName
+        case let .project(project): return "Switch to \(project.name)"
         }
     }
 
@@ -67,6 +74,7 @@ public enum LaunchPaletteRow: Equatable, Sendable {
         switch self {
         case let .profile(profile): return profile.isSelectable
         case .action: return true
+        case let .project(project): return project.isSelectable
         }
     }
 
@@ -85,18 +93,22 @@ public enum LaunchPaletteRow: Equatable, Sendable {
             return queryTokens.allSatisfy { queryToken in
                 action.filterTokens.contains { token in queryToken.contains(token) || token.contains(queryToken) }
             }
+        case let .project(project):
+            let haystacks = ["switch project", project.name, project.rootPath, project.id.uuidString].map { $0.lowercased() }
+            let queryTokens = query.split(separator: " ").map(String.init)
+            return queryTokens.allSatisfy { token in haystacks.contains { $0.contains(token) } }
         }
     }
 }
 
 public enum LaunchPaletteModel {
-    public static func makeRows(profiles: [LaunchPaletteProfileRow]) -> [LaunchPaletteRow] {
+    public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = []) -> [LaunchPaletteRow] {
         profiles.map(LaunchPaletteRow.profile) + [
             .action(.newNote),
             .action(.newBrowser),
             .action(.openFile),
             .action(.openFileTree)
-        ]
+        ] + projects.map(LaunchPaletteRow.project)
     }
 
     public static func filterRows(_ rows: [LaunchPaletteRow], query: String) -> [LaunchPaletteRow] {

@@ -57,6 +57,13 @@ public struct Registry: Codable, Equatable, Sendable {
         }
         lastActiveProjectId = project.id
     }
+
+    @discardableResult
+    public mutating func selectProjectForNextLaunch(id: UUID) -> Bool {
+        guard projects.contains(where: { $0.id == id }) else { return false }
+        lastActiveProjectId = id
+        return true
+    }
 }
 
 public struct WorkspaceEntry: Codable, Equatable, Sendable {

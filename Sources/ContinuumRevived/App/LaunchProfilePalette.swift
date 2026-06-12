@@ -19,8 +19,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private weak var previousFirstResponder: NSResponder?
     private weak var previousFirstResponderWindow: NSWindow?
 
-    func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile]) {
-        self.rows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)))
+    func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = []) {
+        self.rows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)), projects: projects)
         self.filtered = rows
         guard let hostView = host.contentView else { return }
         let wasVisible = isVisible
@@ -124,6 +124,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         switch filtered[tableView.selectedRow] {
         case let .action(action): return action.displayName
         case let .profile(profile): return profile.displayName
+        case let .project(project): return "Switch to \(project.name)"
         }
     }
 
@@ -514,6 +515,9 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         case let .action(action):
             text.stringValue = action.displayName
             text.textColor = .labelColor
+        case let .project(project):
+            text.stringValue = "Switch to \(project.name) — \(project.rootPath)"
+            text.textColor = project.isSelectable ? .labelColor : .secondaryLabelColor
         }
         return cell
     }
@@ -570,6 +574,13 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             close(restoreFocus: true)
         case let .action(action):
             onSelectAction?(action)
+            close(restoreFocus: true)
+        case let .project(project):
+            guard project.isSelectable else {
+                NSSound.beep()
+                return
+            }
+            onSelectAction?(.switchProject(project.id))
             close(restoreFocus: true)
         }
     }

@@ -59,6 +59,23 @@ expect(LaunchPaletteModel.filterRows(rows, query: "web.dev").first?.displayName 
 expect(LaunchPaletteModel.filterRows(rows, query: "notebook.com").first?.displayName == "Open \"https://notebook.com\"…", "URL row is default before fuzzy note matches")
 expect(LaunchPaletteModel.filterRows(rows, query: "open.ai").first?.displayName == "Open \"https://open.ai\"…", "URL row is default before fuzzy open matches")
 
+let switchProjectId = UUID(uuidString: "00000000-0000-0000-0000-000000000129")!
+let projectRows = LaunchPaletteModel.makeRows(
+    profiles: [],
+    projects: [ProjectPickerRow(
+        id: switchProjectId,
+        name: "Work Project",
+        rootPath: "/projects/work",
+        lastOpenedAt: Date(timeIntervalSince1970: 1_000),
+        pinned: false,
+        isLastActive: false,
+        availability: .available
+    )]
+)
+expect(projectRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "Switch to Work Project"], "palette appends switch-project rows")
+expect(LaunchPaletteModel.filterRows(projectRows, query: "switch work").map(\.displayName) == ["Switch to Work Project"], "switch-project row filters by switch token and project name")
+expect(projectRows.last?.isSelectable == true, "available switch-project row is selectable")
+
 let missingRows = LaunchPaletteModel.makeRows(profiles: [
     profile(id: "shell", displayName: "Shell", detail: "zsh not found", isSelectable: false),
     profile(id: "custom", displayName: "Custom Command", detail: "custom not configured", isSelectable: false)
