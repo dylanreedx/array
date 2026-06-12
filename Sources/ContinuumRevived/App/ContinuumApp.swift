@@ -295,6 +295,19 @@ enum ContinuumApp {
             Foundation.exit(1)
         }
 
+        if CommandLine.arguments.contains("--ghostty-zoom-scale-spike") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try GhosttyTerminalView.runZoomScaleSpike()
+                print("GhosttyZoomScaleSpike artifact: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         let application = NSApplication.shared
         let delegate = AppDelegate()
         Self.delegate = delegate

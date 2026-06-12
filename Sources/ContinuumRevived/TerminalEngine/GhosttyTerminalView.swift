@@ -451,6 +451,77 @@ final class GhosttyTerminalView: NSView {
         let size = ghostty_surface_size(surface)
         Swift.print("Ghostty size: \(size.columns)x\(size.rows), \(size.width_px)x\(size.height_px) px")
     }
+
+    struct ZoomScaleSample {
+        let scale: Double
+        let columns: UInt16
+        let rows: UInt16
+        let widthPx: UInt32
+        let heightPx: UInt32
+        let cellWidthPx: UInt32
+        let cellHeightPx: UInt32
+        let elapsedMs: Double
+    }
+
+    static func runZoomScaleSpike() throws -> URL {
+        let started = Date()
+        let context = try GhosttyRuntimeContext()
+        defer { context.shutdown() }
+
+        let cwd = FileManager.default.currentDirectoryPath
+        let view = GhosttyTerminalView(
+            ghosttyApp: try context.app,
+            launchProfile: LaunchProfile(command: "/bin/sh", arguments: [], cwd: cwd, title: "Ghostty zoom scale spike"),
+            statusChanged: { _ in }
+        )
+        view.setFrameSize(NSSize(width: 900, height: 600))
+        view.updateSurfaceSize()
+
+        // Give libghostty a short chance to finish its initial surface sizing work.
+        for _ in 0..<5 {
+            ghostty_app_tick(try context.app)
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+
+        let scales: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+        var samples: [ZoomScaleSample] = []
+        for scale in scales {
+            guard let surface = view.surface else { throw ZoomScaleSpikeError.surfaceMissing }
+            let before = Date()
+            ghostty_surface_set_content_scale(surface, scale, scale)
+            for _ in 0..<3 {
+                ghostty_app_tick(try context.app)
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            }
+            let size = ghostty_surface_size(surface)
+            samples.append(ZoomScaleSample(
+                scale: scale,
+                columns: size.columns,
+                rows: size.rows,
+                widthPx: size.width_px,
+                heightPx: size.height_px,
+                cellWidthPx: size.cell_width_px,
+                cellHeightPx: size.cell_height_px,
+                elapsedMs: Date().timeIntervalSince(before) * 1000
+            ))
+        }
+
+        view.requestClose(force: true)
+        let runId = ISO8601DateFormatter().string(from: started).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: "qa-runs/ghostty-zoom-scale-spike-\(runId)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let log = directory.appendingPathComponent("scale-sweep.log")
+        var lines = ["scale,columns,rows,width_px,height_px,cell_width_px,cell_height_px,elapsed_ms"]
+        lines.append(contentsOf: samples.map { sample in
+            String(format: "%.2f,%u,%u,%u,%u,%u,%u,%.2f", sample.scale, sample.columns, sample.rows, sample.widthPx, sample.heightPx, sample.cellWidthPx, sample.cellHeightPx, sample.elapsedMs)
+        })
+        try lines.joined(separator: "\n").appending("\n").write(to: log, atomically: true, encoding: .utf8)
+        return log
+    }
+
+    enum ZoomScaleSpikeError: Error {
+        case surfaceMissing
+    }
 }
 
 extension GhosttyTerminalView: @preconcurrency NSTextInputClient {
