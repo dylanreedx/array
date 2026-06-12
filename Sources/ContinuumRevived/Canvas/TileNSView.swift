@@ -78,22 +78,30 @@ class TileNSView: NSView {
     func setContentView(_ view: NSView) {
         contentView?.removeFromSuperview()
         contentView = view
-        view.translatesAutoresizingMaskIntoConstraints = false
+        view.translatesAutoresizingMaskIntoConstraints = true
+        view.autoresizingMask = []
         // Place the body below the corner overlay so the corner brackets
-        // remain visible above any tile content. The title bar and × button
-        // sit above the body's title-bar zone (y < titleBarHeight) regardless
-        // of subview order because the body's frame starts at titleBarHeight.
+        // remain visible above any tile content. Manual layout keeps the body
+        // in world coordinates when the tile view's frame is AppKit-scaled by
+        // a frame/bounds transform during canvas zoom.
         if let cornerOverlay {
             addSubview(view, positioned: .below, relativeTo: cornerOverlay)
         } else {
             addSubview(view)
         }
-        NSLayoutConstraint.activate([
-            view.leadingAnchor.constraint(equalTo: leadingAnchor),
-            view.trailingAnchor.constraint(equalTo: trailingAnchor),
-            view.topAnchor.constraint(equalTo: topAnchor, constant: Self.titleBarHeight),
-            view.bottomAnchor.constraint(equalTo: bottomAnchor)
-        ])
+        layoutContentView()
+    }
+
+    override func layout() {
+        super.layout()
+        layoutContentView()
+    }
+
+    private func layoutContentView() {
+        let nextFrame = NSRect(x: 0, y: Self.titleBarHeight, width: bounds.width, height: max(0, bounds.height - Self.titleBarHeight))
+        if contentView?.frame != nextFrame {
+            contentView?.frame = nextFrame
+        }
     }
 
     /// Update the cached `tile` model and re-display the title bar. The
@@ -191,7 +199,7 @@ class TileNSView: NSView {
     /// user reads it as draggable instead of a thin gray strip.
     override func resetCursorRects() {
         super.resetCursorRects()
-        let m = Self.resizeMargin
+        let m = resizeMarginInLocalCoordinates
         let titleH = Self.titleBarHeight
         let w = bounds.width
         let h = bounds.height
@@ -207,11 +215,23 @@ class TileNSView: NSView {
         addCursorRect(NSRect(x: w - m, y: m, width: m, height: h - 2 * m), cursor: .resizeLeftRight)
 
         // Title bar (below the top resize ring) reads as a drag handle.
-        addCursorRect(NSRect(x: m, y: m, width: w - 2 * m, height: titleH - m), cursor: .openHand)
+        let titleDragHeight = max(0, titleH - m)
+        if titleDragHeight > 0 {
+            addCursorRect(NSRect(x: m, y: m, width: w - 2 * m, height: titleDragHeight), cursor: .openHand)
+        }
+    }
+
+    var resizeMarginInLocalCoordinates: CGFloat {
+        guard let zoom = canvas?.viewport.zoom, zoom.isFinite, zoom > 0 else { return Self.resizeMargin }
+        return Self.resizeMargin / CGFloat(zoom)
+    }
+
+    func qaResizeEdge(at point: CGPoint) -> ResizeEdge? {
+        resizeEdge(at: point)
     }
 
     private func resizeEdge(at point: CGPoint) -> ResizeEdge? {
-        let m = Self.resizeMargin
+        let m = resizeMarginInLocalCoordinates
         let nearLeft = point.x <= m
         let nearRight = point.x >= bounds.width - m
         let nearTop = point.y <= m

@@ -202,7 +202,9 @@ final class CanvasNSView: NSView {
         guard let view = tileViews[tile.id] else { return }
         let rect = CanvasEngine.tileScreenFrame(tile.frame, viewport: canvasState.viewport)
         view.frame = rect
+        view.bounds = NSRect(x: 0, y: 0, width: tile.frame.width, height: tile.frame.height)
         view.tile = tile
+        view.setNeedsDisplay(view.bounds)
     }
 
     private func updateEmptyStateVisibility() {
@@ -394,6 +396,97 @@ final class CanvasNSView: NSView {
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("zindex-relaunch", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runTileWorldBoundsSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        final class SizeProbeView: NSView {
+            var setFrameSizeCalls = 0
+            var observedSizes: [CGSize] = []
+            override func setFrameSize(_ newSize: NSSize) {
+                setFrameSizeCalls += 1
+                observedSizes.append(newSize)
+                super.setFrameSize(newSize)
+            }
+        }
+        final class ProbeTileView: TileNSView {
+            let probe = SizeProbeView(frame: .zero)
+            override init(tile: Tile) {
+                super.init(tile: tile)
+                setContentView(probe)
+            }
+            required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+        }
+
+        let tile = Tile(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000001133")!,
+            kind: .terminal,
+            title: "WORLD_BOUNDS_PROBE",
+            frame: TileFrame(x: 40, y: 30, width: 400, height: 240),
+            zIndex: 1,
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile], groups: [], lastActiveTileId: nil))
+        canvas.frame = NSRect(x: 0, y: 0, width: 900, height: 700)
+        let tileView = ProbeTileView(tile: tile)
+        canvas.install(tileView: tileView, for: tile)
+        tileView.layoutSubtreeIfNeeded()
+        let callsAfterInstall = tileView.probe.setFrameSizeCalls
+        tileView.probe.setFrameSizeCalls = 0
+        tileView.probe.observedSizes.removeAll()
+
+        let zooms: [Double] = [0.5, 1.0, 2.0]
+        var frames: [String: [String: Double]] = [:]
+        var bounds: [String: [String: Double]] = [:]
+        var edgePasses: [String: Bool] = [:]
+        for zoom in zooms {
+            canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
+            tileView.layoutSubtreeIfNeeded()
+            frames[String(zoom)] = ["width": tileView.frame.width, "height": tileView.frame.height]
+            bounds[String(zoom)] = ["width": tileView.bounds.width, "height": tileView.bounds.height]
+            let m = TileNSView.resizeMargin / CGFloat(zoom)
+            let left = tileView.qaResizeEdge(at: CGPoint(x: max(0.25, m / 2), y: tileView.bounds.midY)) == .left
+            let right = tileView.qaResizeEdge(at: CGPoint(x: tileView.bounds.width - max(0.25, m / 2), y: tileView.bounds.midY)) == .right
+            let center = tileView.qaResizeEdge(at: CGPoint(x: tileView.bounds.midX, y: tileView.bounds.midY)) == nil
+            edgePasses[String(zoom)] = left && right && center
+            try expect(tileView.bounds.size == CGSize(width: tile.frame.width, height: tile.frame.height), "bounds should remain world-sized at zoom \(zoom)")
+        }
+
+        try expect(tileView.probe.setFrameSizeCalls == 0, "content setFrameSize calls during zoom should be zero, got \(tileView.probe.setFrameSizeCalls) sizes=\(tileView.probe.observedSizes)")
+        try expect(edgePasses.values.allSatisfy { $0 }, "resize-edge hit tests failed: \(edgePasses)")
+
+        let manifest: [String: Any] = [
+            "check": "tile-world-bounds",
+            "worldSize": ["width": tile.frame.width, "height": tile.frame.height],
+            "zooms": zooms,
+            "screenFrames": frames,
+            "bounds": bounds,
+            "contentSetFrameSizeCallsAfterInstall": callsAfterInstall,
+            "contentSetFrameSizeCallsDuringZoom": tileView.probe.setFrameSizeCalls,
+            "resizeEdgePasses": edgePasses
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("tile-world-bounds", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

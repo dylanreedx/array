@@ -41,6 +41,7 @@ run_app_check .build/debug/continuum-revived --palette-browser-spawn-check
 run_app_check .build/debug/continuum-revived --spawn-focus-policy-check
 run_app_check .build/debug/continuum-revived --palette-captures-keys-over-browser-check
 run_app_check .build/debug/continuum-revived --zindex-relaunch-hit-test-check
+run_app_check .build/debug/continuum-revived --tile-world-bounds-check
 run_app_check .build/debug/continuum-revived --bring-to-front-focus-check
 run_app_check .build/debug/continuum-revived --note-click-focus-check
 run_app_check .build/debug/continuum-revived --browser-restore-state-check
