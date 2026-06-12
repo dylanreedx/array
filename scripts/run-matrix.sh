@@ -47,6 +47,7 @@ run_app_check .build/debug/continuum-revived --note-file-tile-spawn-check
 run_app_check .build/debug/continuum-revived --file-tree-boot-persistence-check
 run_app_check .build/debug/continuum-revived --file-tree-hardening-check
 run_app_check .build/debug/continuum-revived --viewport-sanitize-check
+run_app_check .build/debug/continuum-revived --project-lock-check
 run scripts/check-app-bundle.sh --configuration debug
 run scripts/check-root-docs.sh
 run git diff --check

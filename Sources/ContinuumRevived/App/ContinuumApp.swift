@@ -178,6 +178,37 @@ enum ContinuumApp {
             }
         }
 
+        if let probeIndex = CommandLine.arguments.firstIndex(of: "--project-lock-probe") {
+            guard CommandLine.arguments.indices.contains(probeIndex + 1) else {
+                fputs("FAIL: --project-lock-probe requires a root path\n", stderr)
+                Foundation.exit(2)
+            }
+            let root = URL(fileURLWithPath: CommandLine.arguments[probeIndex + 1], isDirectory: true)
+            let lock = ProjectLock(root: root)
+            do {
+                try lock.acquire()
+                print("project-lock-probe: acquired")
+                Foundation.exit(0)
+            } catch ProjectLockError.alreadyLocked {
+                fputs("project-lock-probe: locked\n", stderr)
+                Foundation.exit(1)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(2)
+            }
+        }
+
+        if CommandLine.arguments.contains("--project-lock-check") {
+            do {
+                let artifact = try AppDelegate.runProjectLockSelfCheck()
+                print("ContinuumRevivedProjectLockChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         let executablePath = CommandLine.arguments.first ?? "continuum-revived"
         let ghosttyInitStatus = executablePath.withCString { executablePointer in
             var argv: [UnsafeMutablePointer<CChar>?] = [
@@ -371,6 +402,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var smokeTestExitCode: Int32?
     private var projectStore: ProjectStore?
     private var registryStore: RegistryStore?
+    private var projectLock: ProjectLock?
     private var activeProject: Project?
     private var tileSpawner: TileSpawner?
     private var profilePalette: LaunchProfilePalette?
@@ -400,6 +432,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         qaPerf = QAPerf()
         do {
             let projectRoot = Self.resolveProjectRoot(smokeTest: smokeTestEnabled)
+            let projectLock = ProjectLock(root: projectRoot)
+            try projectLock.acquire()
+            self.projectLock = projectLock
             let appSupportDir = Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
             let projectStore = ProjectStore(projectRoot: projectRoot)
             let registryStore = RegistryStore(applicationSupportDirectory: appSupportDir)
@@ -1222,6 +1257,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         ghostty = nil
         browserEngine?.shutdown()
         browserEngine = nil
+        projectLock?.release()
+        projectLock = nil
         if let exitCode = smokeTestExitCode {
             Foundation.exit(exitCode)
         }
@@ -2762,6 +2799,97 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "runtimeRefPreserved": result.canvas.tiles[0].runtimeRef == RuntimeRef(kind: .terminalSession, id: runtimeId),
             "metadataPreserved": result.canvas.tiles[0].metadata.launchProfileId == "shell",
             "persistedFinite": allFinite(persisted),
+        ]
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runProjectLockSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent("continuum-project-lock-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        let lock = ProjectLock(root: root)
+        try lock.acquire()
+
+        let executable = URL(fileURLWithPath: CommandLine.arguments[0])
+        func runProbe() throws -> (code: Int32, stdout: String, stderr: String) {
+            let process = Process()
+            process.executableURL = executable
+            process.arguments = ["--project-lock-probe", root.path]
+            let out = Pipe()
+            let err = Pipe()
+            process.standardOutput = out
+            process.standardError = err
+            try process.run()
+            process.waitUntilExit()
+            return (
+                process.terminationStatus,
+                String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
+                String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            )
+        }
+
+        let lockedProbe = try runProbe()
+        try expect(lockedProbe.code == 1, "probe should fail while parent holds lock; got \(lockedProbe.code) stdout=\(lockedProbe.stdout) stderr=\(lockedProbe.stderr)")
+
+        let inheritedFdGuard = Process()
+        inheritedFdGuard.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        inheritedFdGuard.arguments = ["10"]
+        try inheritedFdGuard.run()
+        defer {
+            if inheritedFdGuard.isRunning {
+                inheritedFdGuard.terminate()
+                inheritedFdGuard.waitUntilExit()
+            }
+        }
+        usleep(100_000)
+
+        let lsof = Process()
+        lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        lsof.arguments = ["-p", String(inheritedFdGuard.processIdentifier)]
+        let lsofOut = Pipe()
+        lsof.standardOutput = lsofOut
+        lsof.standardError = Pipe()
+        try lsof.run()
+        lsof.waitUntilExit()
+        let childOpenFiles = String(data: lsofOut.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        try expect(!childOpenFiles.contains(lock.lockFile.path), "child process inherited project lock fd: \(childOpenFiles)")
+
+        lock.release()
+        let unlockedProbe = try runProbe()
+        try expect(unlockedProbe.code == 0, "probe should acquire after release while a child process remains alive; got \(unlockedProbe.code) stdout=\(unlockedProbe.stdout) stderr=\(unlockedProbe.stderr)")
+
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("project-lock", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "check": "project-lock",
+            "projectRoot": root.path,
+            "lockFile": lock.lockFile.path,
+            "lockedProbeExit": lockedProbe.code,
+            "lockedProbeStdout": lockedProbe.stdout,
+            "lockedProbeStderr": lockedProbe.stderr,
+            "unlockedProbeExit": unlockedProbe.code,
+            "unlockedProbeStdout": unlockedProbe.stdout,
+            "unlockedProbeStderr": unlockedProbe.stderr,
+            "childAliveDuringRelease": inheritedFdGuard.isRunning,
+            "childOpenFilesCheckedWithLsof": true,
+            "childOpenFilesContainsLockPath": childOpenFiles.contains(lock.lockFile.path),
         ]
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
