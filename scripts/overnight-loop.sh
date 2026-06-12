@@ -13,7 +13,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-MAX_ITER="${MAX_ITER:-14}"
+MAX_ITER="${MAX_ITER:-40}"
 PROMPT_FILE="scripts/overnight-master-prompt.md"
 STOP_FILE="STOP"
 BACKUP_DIR="${BACKUP_DIR:-$HOME/continuum-backups}"
