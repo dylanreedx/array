@@ -764,6 +764,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private lazy var terminalSpawnAdmission = TerminalSpawnAdmission(maxLive: TerminalSpawnAdmission.resolveMaxLive())
     private var hotkeyMonitor: Any?
     private var passThroughNavModeLeaderEvent: NSEvent?
+    private var lastNeedsAttentionCount = 0
     private var tileFocusMonitor: Any?
     private var canvasScrollMonitor: Any?
     private var canvasMagnifyMonitor: Any?
@@ -932,6 +933,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
 
             try projectStore.saveCanvas(canvasView.canvasState)
+            refreshAgentAttentionSurface(notify: false)
 
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
@@ -1190,6 +1192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasView.removeTile(id: id)
         recoverFocusAfterTileRemoval(deletedTileId: id, in: canvasView)
         flushCanvasSave()
+        refreshAgentAttentionSurface()
     }
 
     private func restartTile(tileId: UUID) {
@@ -1638,6 +1641,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if let status, agentStatus != status { return nil }
             return tile.id
         }
+    }
+
+    private func refreshAgentAttentionSurface(notify: Bool = true) {
+        let count = currentAgentTileIds(status: .needsAttention).count
+        NSApplication.shared.dockTile.badgeLabel = Self.dockBadgeLabel(needsAttentionCount: count)
+        if notify, Self.shouldNotifyNeedsAttention(previousCount: lastNeedsAttentionCount, newCount: count, appIsActive: NSApplication.shared.isActive) {
+            deliverNeedsAttentionNotification(count: count)
+        }
+        lastNeedsAttentionCount = count
+    }
+
+    private func updateAgentStatus(tileId: UUID, status: AgentStatus, now: Date = Date()) {
+        canvasView?.tileView(for: tileId)?.agentStatus = status
+        if var sessions = try? projectStore?.listSessions(), let index = sessions.firstIndex(where: { $0.tileId == tileId }), var descriptor = sessions[index].agentDescriptor {
+            descriptor.status = status
+            descriptor.statusUpdatedAt = now
+            sessions[index].agentDescriptor = descriptor
+            try? projectStore?.saveSession(sessions[index])
+        }
+        refreshAgentAttentionSurface()
+    }
+
+    private static func dockBadgeLabel(needsAttentionCount count: Int) -> String? {
+        count > 0 ? String(count) : nil
+    }
+
+    private static func shouldNotifyNeedsAttention(previousCount: Int, newCount: Int, appIsActive: Bool) -> Bool {
+        !appIsActive && previousCount == 0 && newCount > 0
+    }
+
+    private func deliverNeedsAttentionNotification(count: Int) {
+        let notification = NSUserNotification()
+        notification.title = "Continuum agent needs attention"
+        notification.informativeText = count == 1 ? "1 agent needs input." : "\(count) agents need input."
+        NSUserNotificationCenter.default.deliver(notification)
     }
 
     private func moveNavSelection(direction: TileArrangement.Direction) {
@@ -2192,6 +2230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ghostty_app_set_focus(app, true)
         }
         focusBroker.applicationDidBecomeActive()
+        refreshAgentAttentionSurface()
     }
 
     func applicationDidResignActive(_ notification: Notification) {
@@ -2199,6 +2238,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ghostty_app_set_focus(app, false)
         }
         focusBroker.applicationDidResignActive()
+        refreshAgentAttentionSurface()
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -2669,9 +2709,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try store.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: needsTileId, launchProfileId: "codex", command: "/bin/zsh", args: [], cwd: projectRoot.path, env: [:], title: "Agent · Codex", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: "codex", worktreePath: projectRoot.path, status: .needsAttention, statusUpdatedAt: now)))
         try store.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: orphanTileId, launchProfileId: "old", command: "/bin/zsh", args: [], cwd: projectRoot.path, env: [:], title: "Old Agent", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: "claude", worktreePath: projectRoot.path, status: .done, statusUpdatedAt: now)))
 
+        let productionCanvas = CanvasNSView(canvasState: try store.loadCanvas(), activeZone: zone, zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: zone, displayName: "Agent Project")])
+        productionCanvas.install(tileView: TileNSView(tile: productionCanvas.canvasState.tiles[0]), for: productionCanvas.canvasState.tiles[0])
+        productionCanvas.install(tileView: TileNSView(tile: productionCanvas.canvasState.tiles[1]), for: productionCanvas.canvasState.tiles[1])
+        productionCanvas.tileView(for: workingTileId)?.agentStatus = AgentStatus.working
+        productionCanvas.tileView(for: needsTileId)?.agentStatus = AgentStatus.needsAttention
+        let delegate = AppDelegate()
+        delegate.canvasView = productionCanvas
+        delegate.zoneRuntimeController = ZoneRuntimeController(
+            projectRoot: projectRoot,
+            projectStore: store,
+            project: Project(
+                id: projectId,
+                name: "Agent Project",
+                rootPath: projectRoot.path,
+                createdAt: now,
+                updatedAt: now,
+                defaultLaunchProfileId: "shell",
+                editorPreference: .auto,
+                settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
+            )
+        )
+        delegate.refreshAgentAttentionSurface(notify: false)
+        try expect(NSApplication.shared.dockTile.badgeLabel == "1", "production refresh should count current needs-attention agent tiles")
+        productionCanvas.removeTile(id: needsTileId)
+        delegate.refreshAgentAttentionSurface(notify: false)
+        try expect(NSApplication.shared.dockTile.badgeLabel == nil, "production refresh should clear the dock badge after needs-attention tile removal")
+
         let models = try loadActiveZoneRenderModels(from: RegistryStore(applicationSupportDirectory: appSupport))
         try expect(models.count == 1, "production zone render model should load")
         try expect(models[0].agentStatusRollup.displayText == "2 stale", "production zone render model should derive rollup from current restored project sessions only")
+        try expect(dockBadgeLabel(needsAttentionCount: 0) == nil, "zero needs-attention agents should clear the dock badge")
+        try expect(dockBadgeLabel(needsAttentionCount: 2) == "2", "dock badge should show the measured needs-attention count")
+        try expect(shouldNotifyNeedsAttention(previousCount: 0, newCount: 1, appIsActive: false), "inactive transition into needs-attention should request notification")
+        try expect(!shouldNotifyNeedsAttention(previousCount: 1, newCount: 2, appIsActive: false), "additional needs-attention agents should not spam notifications")
+        try expect(!shouldNotifyNeedsAttention(previousCount: 0, newCount: 1, appIsActive: true), "active app should not request a notification")
+        NSApplication.shared.dockTile.badgeLabel = dockBadgeLabel(needsAttentionCount: 1)
+        try expect(NSApplication.shared.dockTile.badgeLabel == "1", "dock tile badge label should be writable from the agent attention surface")
+        NSApplication.shared.dockTile.badgeLabel = nil
         return artifact
     }
 
