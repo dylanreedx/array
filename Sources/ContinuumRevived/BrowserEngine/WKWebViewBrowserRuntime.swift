@@ -10,6 +10,8 @@ protocol BrowserUIDialogPresenting: AnyObject {
     func presentJavaScriptPrompt(prompt: String, defaultText: String?, window: NSWindow?, completion: @escaping (String?) -> Void)
     func presentOpenPanel(allowsMultipleSelection: Bool, allowsDirectories: Bool, window: NSWindow?, completion: @escaping ([URL]?) -> Void)
     func presentDownloadSavePanel(suggestedFilename: String, window: NSWindow?, completion: @escaping (URL?) -> Void)
+    func presentHTTPAuthenticationPrompt(host: String, realm: String?, previousFailureCount: Int, window: NSWindow?, completion: @escaping ((username: String, password: String)?) -> Void)
+    func presentTLSChallengePrompt(host: String, window: NSWindow?, completion: @escaping (Bool) -> Void)
 }
 
 @MainActor
@@ -68,6 +70,40 @@ final class AppKitBrowserUIDialogPresenter: BrowserUIDialogPresenting {
             panel.beginSheetModal(for: window, completionHandler: finish)
         } else {
             finish(panel.runModal())
+        }
+    }
+
+    func presentHTTPAuthenticationPrompt(host: String, realm: String?, previousFailureCount: Int, window: NSWindow?, completion: @escaping ((username: String, password: String)?) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "Authentication Required"
+        alert.informativeText = [host, realm.map { "Realm: \($0)" }, previousFailureCount > 0 ? "Previous credentials were rejected." : nil].compactMap { $0 }.joined(separator: "\n")
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.spacing = 8
+        let username = NSTextField(string: "")
+        username.placeholderString = "Username"
+        let password = NSSecureTextField(string: "")
+        password.placeholderString = "Password"
+        stack.addArrangedSubview(username)
+        stack.addArrangedSubview(password)
+        stack.frame = NSRect(x: 0, y: 0, width: 320, height: 56)
+        alert.accessoryView = stack
+        alert.addButton(withTitle: "Log In")
+        alert.addButton(withTitle: "Cancel")
+        run(alert: alert, window: window) { response in
+            completion(response == .alertFirstButtonReturn ? (username.stringValue, password.stringValue) : nil)
+        }
+    }
+
+    func presentTLSChallengePrompt(host: String, window: NSWindow?, completion: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Certificate Warning"
+        alert.informativeText = "The certificate for \(host) could not be verified. Continue for this session?"
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Continue")
+        run(alert: alert, window: window) { response in
+            completion(response == .alertSecondButtonReturn)
         }
     }
 
@@ -284,6 +320,12 @@ extension WKWebViewBrowserRuntime: WKNavigationDelegate {
         MainActor.assumeIsolated { self.beginDownload(download) }
     }
 
+    nonisolated func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping @MainActor @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        Task { @MainActor in
+            self.handleAuthenticationChallenge(challenge, completion: completionHandler)
+        }
+    }
+
     @available(macOS 11.3, *)
     nonisolated func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
         Task { @MainActor in
@@ -341,6 +383,42 @@ extension WKWebViewBrowserRuntime {
     func handleDownloadDestination(suggestedFilename: String, completion: @escaping (URL?) -> Void) {
         uiDialogPresenter.presentDownloadSavePanel(suggestedFilename: Self.sanitizedDownloadFilename(suggestedFilename), window: dialogWindow) { url in
             completion(url)
+        }
+    }
+
+    func handleAuthenticationChallenge(_ challenge: URLAuthenticationChallenge, completion: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard !isTerminated else {
+            completion(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        let space = challenge.protectionSpace
+        switch space.authenticationMethod {
+        case NSURLAuthenticationMethodHTTPBasic, NSURLAuthenticationMethodHTTPDigest:
+            uiDialogPresenter.presentHTTPAuthenticationPrompt(host: space.host, realm: space.realm, previousFailureCount: challenge.previousFailureCount, window: dialogWindow) { credentials in
+                guard let credentials else {
+                    completion(.cancelAuthenticationChallenge, nil)
+                    return
+                }
+                completion(.useCredential, URLCredential(user: credentials.username, password: credentials.password, persistence: .forSession))
+            }
+        case NSURLAuthenticationMethodServerTrust:
+            guard let trust = space.serverTrust else {
+                completion(.cancelAuthenticationChallenge, nil)
+                return
+            }
+            if SecTrustEvaluateWithError(trust, nil) {
+                completion(.performDefaultHandling, nil)
+                return
+            }
+            handleRejectedServerTrust(host: space.host, credential: URLCredential(trust: trust), completion: completion)
+        default:
+            completion(.performDefaultHandling, nil)
+        }
+    }
+
+    func handleRejectedServerTrust(host: String, credential: URLCredential, completion: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        uiDialogPresenter.presentTLSChallengePrompt(host: host, window: dialogWindow) { accepted in
+            completion(accepted ? .useCredential : .cancelAuthenticationChallenge, accepted ? credential : nil)
         }
     }
 
@@ -407,6 +485,8 @@ extension WKWebViewBrowserRuntime {
                 var allowsMultipleSelection: Bool
                 var allowsDirectories: Bool
             }
+            var nextHTTPAuth: (username: String, password: String)? = ("dylan", "secret")
+            var nextTLSDecision = true
             weak var expectedWindow: NSWindow?
             var calls: [Call] = []
             func presentJavaScriptAlert(message: String, window: NSWindow?, completion: @escaping () -> Void) {
@@ -430,6 +510,22 @@ extension WKWebViewBrowserRuntime {
                 calls.append(Call(kind: "download", message: suggestedFilename, windowMatched: window === expectedWindow, allowsMultipleSelection: false, allowsDirectories: false))
                 completion(downloadDirectory.appendingPathComponent(suggestedFilename))
             }
+            func presentHTTPAuthenticationPrompt(host: String, realm: String?, previousFailureCount: Int, window: NSWindow?, completion: @escaping ((username: String, password: String)?) -> Void) {
+                calls.append(Call(kind: "http-auth", message: "\(host)|\(realm ?? "")|\(previousFailureCount)", windowMatched: window === expectedWindow, allowsMultipleSelection: false, allowsDirectories: false))
+                completion(nextHTTPAuth)
+            }
+            func presentTLSChallengePrompt(host: String, window: NSWindow?, completion: @escaping (Bool) -> Void) {
+                calls.append(Call(kind: "tls", message: host, windowMatched: window === expectedWindow, allowsMultipleSelection: false, allowsDirectories: false))
+                completion(nextTLSDecision)
+            }
+        }
+
+        final class DummyChallengeSender: NSObject, URLAuthenticationChallengeSender {
+            func use(_ credential: URLCredential, for challenge: URLAuthenticationChallenge) {}
+            func continueWithoutCredential(for challenge: URLAuthenticationChallenge) {}
+            func cancel(_ challenge: URLAuthenticationChallenge) {}
+            func performDefaultHandling(for challenge: URLAuthenticationChallenge) {}
+            func rejectProtectionSpaceAndContinue(with challenge: URLAuthenticationChallenge) {}
         }
 
         enum CheckError: Error, CustomStringConvertible {
@@ -475,13 +571,58 @@ extension WKWebViewBrowserRuntime {
         try expect(downloadURL?.lastPathComponent == "reports-quarterly-one.txt", "download destination handler should receive a safe suggested filename")
         try expect(Self.sanitizedDownloadFilename("/:") == "download", "download filename sanitizer should fall back when stripping invalid characters empties the name")
 
+        let challengeSender = DummyChallengeSender()
+        let authSpace = URLProtectionSpace(host: "example.test", port: 443, protocol: "https", realm: "private", authenticationMethod: NSURLAuthenticationMethodHTTPBasic)
+        let authChallenge = URLAuthenticationChallenge(protectionSpace: authSpace, proposedCredential: nil, previousFailureCount: 1, failureResponse: nil, error: nil, sender: challengeSender)
+        var authDisposition: URLSession.AuthChallengeDisposition?
+        var authCredential: URLCredential?
+        runtime.handleAuthenticationChallenge(authChallenge) { disposition, credential in
+            authDisposition = disposition
+            authCredential = credential
+        }
+        try expect(authDisposition == .useCredential, "HTTP auth accept should use the entered credential")
+        try expect(authCredential?.user == "dylan", "HTTP auth should forward the entered username")
+
+        fake.nextHTTPAuth = nil
+        let cancelChallenge = URLAuthenticationChallenge(protectionSpace: authSpace, proposedCredential: nil, previousFailureCount: 0, failureResponse: nil, error: nil, sender: challengeSender)
+        var cancelDisposition: URLSession.AuthChallengeDisposition?
+        runtime.handleAuthenticationChallenge(cancelChallenge) { disposition, _ in cancelDisposition = disposition }
+        try expect(cancelDisposition == .cancelAuthenticationChallenge, "HTTP auth cancel should cancel the challenge")
+
+        let tlsSpace = URLProtectionSpace(host: "self-signed.test", port: 443, protocol: "https", realm: nil, authenticationMethod: NSURLAuthenticationMethodServerTrust)
+        let tlsChallenge = URLAuthenticationChallenge(protectionSpace: tlsSpace, proposedCredential: nil, previousFailureCount: 0, failureResponse: nil, error: nil, sender: challengeSender)
+        var tlsDisposition: URLSession.AuthChallengeDisposition?
+        runtime.handleAuthenticationChallenge(tlsChallenge) { disposition, _ in tlsDisposition = disposition }
+        try expect(tlsDisposition == .cancelAuthenticationChallenge, "TLS challenge without a serverTrust should cancel rather than silently proceed")
+
+        let tlsCredential = URLCredential(user: "trust-fixture", password: "", persistence: .forSession)
+        var tlsAcceptDisposition: URLSession.AuthChallengeDisposition?
+        var tlsAcceptCredential: URLCredential?
+        runtime.handleRejectedServerTrust(host: "self-signed.test", credential: tlsCredential) { disposition, credential in
+            tlsAcceptDisposition = disposition
+            tlsAcceptCredential = credential
+        }
+        try expect(tlsAcceptDisposition == .useCredential && tlsAcceptCredential === tlsCredential, "TLS Continue should use the provided trust credential")
+        fake.nextTLSDecision = false
+        var tlsCancelDisposition: URLSession.AuthChallengeDisposition?
+        var tlsCancelCredential: URLCredential?
+        runtime.handleRejectedServerTrust(host: "self-signed.test", credential: tlsCredential) { disposition, credential in
+            tlsCancelDisposition = disposition
+            tlsCancelCredential = credential
+        }
+        try expect(tlsCancelDisposition == .cancelAuthenticationChallenge && tlsCancelCredential == nil, "TLS Cancel should cancel without a credential")
+
         try expect(fake.calls == [
             .init(kind: "alert", message: "hello", windowMatched: true, allowsMultipleSelection: false, allowsDirectories: false),
             .init(kind: "confirm", message: "continue?", windowMatched: true, allowsMultipleSelection: false, allowsDirectories: false),
             .init(kind: "prompt", message: "name|Dylan", windowMatched: true, allowsMultipleSelection: false, allowsDirectories: false),
             .init(kind: "open", message: "", windowMatched: true, allowsMultipleSelection: true, allowsDirectories: true),
-            .init(kind: "download", message: "reports-quarterly-one.txt", windowMatched: true, allowsMultipleSelection: false, allowsDirectories: false)
-        ], "delegate calls should preserve kind, payload, window anchor, and open-panel/download flags")
+            .init(kind: "download", message: "reports-quarterly-one.txt", windowMatched: true, allowsMultipleSelection: false, allowsDirectories: false),
+            .init(kind: "http-auth", message: "example.test|private|1", windowMatched: true, allowsMultipleSelection: false, allowsDirectories: false),
+            .init(kind: "http-auth", message: "example.test|private|0", windowMatched: true, allowsMultipleSelection: false, allowsDirectories: false),
+            .init(kind: "tls", message: "self-signed.test", windowMatched: true, allowsMultipleSelection: false, allowsDirectories: false),
+            .init(kind: "tls", message: "self-signed.test", windowMatched: true, allowsMultipleSelection: false, allowsDirectories: false)
+        ], "delegate calls should preserve kind, payload, window anchor, and open-panel/download/auth flags")
 
         fake.calls.removeAll()
         fake.downloadDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("continuum-download-check-\(UUID().uuidString)", isDirectory: true)

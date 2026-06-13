@@ -131,6 +131,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-auth-challenge-check") {
+            do {
+                _ = NSApplication.shared
+                try WKWebViewBrowserRuntime.runUIDelegateSelfCheck()
+                print("ContinuumRevivedBrowserAuthChallengeChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--nav-mode-check") {
             do {
                 _ = NSApplication.shared
