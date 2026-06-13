@@ -694,6 +694,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
             if CommandLine.arguments.contains("--palette-captures-keys-over-browser-check") {
                 runPaletteCapturesKeysOverBrowserCheck(window: window)
+            } else if CommandLine.arguments.contains("--terminal-exit-code-check") {
+                runTerminalExitCodeCheck(window: window, ghostty: ghostty, projectRoot: projectRoot)
             } else if smokeTestEnabled {
                 runSmokeTest(window: window, runtime: runtimes.first)
             }
@@ -2533,6 +2535,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             tSec: 1.8,
             success: true
         )
+    }
+
+    private func runTerminalExitCodeCheck(window: NSWindow, ghostty: GhosttyRuntimeContext, projectRoot: URL) {
+        let host = TerminalHostView(frame: NSRect(x: 0, y: 0, width: 640, height: 240))
+        host.isHidden = true
+        window.contentView?.addSubview(host)
+        let runtime = GhosttyTerminalRuntime(
+            tileId: UUID(),
+            title: "Exit Code Check",
+            launchProfile: LaunchProfile(
+                command: "/bin/sh",
+                arguments: ["exit 7\n"],
+                cwd: projectRoot.path,
+                title: "Exit Code Check"
+            ),
+            ghostty: ghostty
+        )
+        var observedExitCode: Int32?
+        runtime.onRuntimeExited = { _, exitCode in
+            observedExitCode = exitCode
+        }
+        host.attach(runtime: runtime)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            let statusMatches = runtime.status == .exited(exitCode: 7)
+            let callbackMatches = observedExitCode == 7
+            if statusMatches && callbackMatches {
+                print("ContinuumRevivedTerminalExitCodeChecks passed: exitCode=7")
+                self.smokeTestExitCode = 0
+            } else {
+                fputs("FAIL: terminal exit code check status=\(runtime.status) callback=\(String(describing: observedExitCode))\n", stderr)
+                self.smokeTestExitCode = 1
+            }
+            host.detachRuntime()
+            host.removeFromSuperview()
+            window.performClose(nil)
+        }
     }
 
     private func runPaletteCapturesKeysOverBrowserCheck(window: NSWindow) {

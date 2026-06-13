@@ -209,7 +209,9 @@ final class GhosttyRuntimeContext {
                     ghostty_app_tick(app)
                 }
             },
-            action_cb: { _, _, _ in false },
+            action_cb: { _, target, action in
+                GhosttyTerminalView.handleGhosttyAction(target: target, action: action)
+            },
             read_clipboard_cb: { _, _, _ in false },
             confirm_read_clipboard_cb: { _, _, _, _ in },
             write_clipboard_cb: { _, _, _, _, _ in },

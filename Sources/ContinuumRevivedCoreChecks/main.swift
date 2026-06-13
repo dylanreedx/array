@@ -38,6 +38,20 @@ do {
     expect(state.status == .error(message: "spawn failed"), "state should mark errors")
 }
 
+// CON-128: action_cb child-exited events are per-surface and may arrive
+// before the process-exit poller observes termination. The event stream caches
+// the measured code and consumes it exactly once when the surface exits.
+do {
+    var observation = TerminalProcessExitObservation()
+    expect(observation.consumeProcessExitCode() == nil, "no child-exit event should yield nil exit code")
+    observation.record(.childExited(exitCode: 7))
+    expect(observation.consumeProcessExitCode() == 7, "child-exit event should supply measured exit code")
+    expect(observation.consumeProcessExitCode() == nil, "child-exit code should be consumed once")
+    observation.record(.childExited(exitCode: 3))
+    observation.record(.childExited(exitCode: 9))
+    expect(observation.consumeProcessExitCode() == 9, "latest child-exit event should win before process-exit observation")
+}
+
 // MARK: - Focus model
 
 do {

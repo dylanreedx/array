@@ -12,6 +12,7 @@ final class GhosttyTerminalView: NSView {
     private var previousModifierFlags: NSEvent.ModifierFlags = []
     private var markedText = NSMutableAttributedString()
     private var keyTextAccumulator: [String]?
+    private var processExitObservation = TerminalProcessExitObservation()
     var reservedShortcutHandler: ((NSEvent) -> Bool)?
 
     override var acceptsFirstResponder: Bool { true }
@@ -369,13 +370,39 @@ final class GhosttyTerminalView: NSView {
         }
     }
 
+    nonisolated static func handleGhosttyAction(target: ghostty_target_s, action: ghostty_action_s) -> Bool {
+        guard target.tag == GHOSTTY_TARGET_SURFACE,
+              let userdata = ghostty_surface_userdata(target.target.surface)
+        else { return false }
+
+        let exitCode: Int32
+        switch action.tag {
+        case GHOSTTY_ACTION_SHOW_CHILD_EXITED:
+            exitCode = Int32(bitPattern: action.action.child_exited.exit_code)
+        case GHOSTTY_ACTION_COMMAND_FINISHED:
+            guard action.action.command_finished.exit_code >= 0 else { return false }
+            exitCode = Int32(action.action.command_finished.exit_code)
+        default:
+            return false
+        }
+        let view = Unmanaged<GhosttyTerminalView>.fromOpaque(userdata).takeUnretainedValue()
+        DispatchQueue.main.async {
+            view.recordChildExited(exitCode: exitCode)
+        }
+        return true
+    }
+
     static func handleGhosttyClose(userdata: UnsafeMutableRawPointer?, processAlive: Bool) {
         guard let userdata else { return }
         let view = Unmanaged<GhosttyTerminalView>.fromOpaque(userdata).takeUnretainedValue()
         DispatchQueue.main.async {
-            view.statusChanged(.exited(exitCode: nil))
+            view.statusChanged(.exited(exitCode: view.processExitObservation.consumeProcessExitCode()))
             view.closeSurface()
         }
+    }
+
+    private func recordChildExited(exitCode: Int32) {
+        processExitObservation.record(.childExited(exitCode: exitCode))
     }
 
     private func createSurface(app: ghostty_app_t) {
@@ -394,11 +421,19 @@ final class GhosttyTerminalView: NSView {
         config.wait_after_command = false
         config.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
 
+        let initialInput = launchProfile.arguments.isEmpty ? nil : launchProfile.arguments.joined(separator: " ")
         launchProfile.cwd.withCString { cwdPointer in
             launchProfile.command.withCString { commandPointer in
                 config.working_directory = cwdPointer
                 config.command = commandPointer
-                surface = ghostty_surface_new(app, &config)
+                if let initialInput {
+                    initialInput.withCString { inputPointer in
+                        config.initial_input = inputPointer
+                        surface = ghostty_surface_new(app, &config)
+                    }
+                } else {
+                    surface = ghostty_surface_new(app, &config)
+                }
             }
         }
 
@@ -417,16 +452,16 @@ final class GhosttyTerminalView: NSView {
         // close_surface_cb path is only triggered by explicit requestClose
         // calls in this Ghostty build; natural shell exits (e.g. `exit`
         // typed at the prompt) are only observable via this polling API.
-        // The exit code is delivered via the action_cb's child_exited message
-        // (currently a no-op); until that's wired through, we stamp nil.
-        // TODO: route action_cb's GHOSTTY_ACTION_CHILD_EXITED to capture the code.
+        // The exit code is delivered via action_cb's child_exited message.
+        // Cache it on this per-surface view, then consume it when the poller
+        // observes process exit.
         let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, let surface = self.surface else { return }
                 if ghostty_surface_process_exited(surface) {
                     self.processExitPoller?.invalidate()
                     self.processExitPoller = nil
-                    self.statusChanged(.exited(exitCode: nil))
+                    self.statusChanged(.exited(exitCode: self.processExitObservation.consumeProcessExitCode()))
                     self.closeSurface()
                 }
             }
