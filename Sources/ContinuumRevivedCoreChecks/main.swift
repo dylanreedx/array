@@ -282,6 +282,64 @@ do {
     expect(json.contains("\"hydrationPolicy\":\"pinnedLive\""), "WorkspaceDocument encodes pinned-live hydration policy")
 }
 
+// MARK: - Hydration tier visibility math
+
+do {
+    let zoneId = UUID(uuidString: "aaaaaaaa-0000-4000-8000-000000000001")!
+    let otherZoneId = UUID(uuidString: "aaaaaaaa-0000-4000-8000-000000000002")!
+    let projectId = UUID(uuidString: "bbbbbbbb-0000-4000-8000-000000000001")!
+    func zone(originX: Double, originY: Double = 0, policy: ZoneHydrationPolicy = .automatic) -> ZonePlacement {
+        ZonePlacement(
+            zoneId: zoneId,
+            projectId: projectId,
+            origin: ZonePoint(x: originX, y: originY),
+            size: ZoneSize(width: 200, height: 120),
+            color: "blue",
+            collapsed: false,
+            hydrationPolicy: policy
+        )
+    }
+    let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
+    let visibleSize = CGSize(width: 800, height: 600)
+
+    let visibilityCases: [(String, ZonePlacement, HydrationTier)] = [
+        ("center intersection", zone(originX: 100, originY: 100), .live),
+        ("right edge touching is snapshot", zone(originX: 800, originY: 100), .snapshot),
+        ("right one point outside is snapshot", zone(originX: 801, originY: 100), .snapshot),
+        ("right margin boundary touches snapshot band", zone(originX: 1056, originY: 100), .snapshot),
+        ("right outside margin is cold", zone(originX: 1057, originY: 100), .cold),
+        ("left edge touching is snapshot", zone(originX: -200, originY: 100), .snapshot),
+        ("left outside margin is cold", zone(originX: -457, originY: 100), .cold),
+        ("top edge touching is snapshot", zone(originX: 100, originY: -120), .snapshot),
+        ("top outside margin is cold", zone(originX: 100, originY: -377), .cold),
+        ("bottom edge touching is snapshot", zone(originX: 100, originY: 600), .snapshot),
+        ("bottom outside margin is cold", zone(originX: 100, originY: 857), .cold)
+    ]
+    for (name, placement, expected) in visibilityCases {
+        expect(
+            CanvasEngine.hydrationTier(zone: placement, viewport: viewport, visibleSize: visibleSize, focusedTileZone: nil) == expected,
+            "hydration tier table: \(name)"
+        )
+    }
+
+    expect(
+        CanvasEngine.hydrationTier(zone: zone(originX: 1200), viewport: viewport, visibleSize: visibleSize, focusedTileZone: zoneId) == .live,
+        "focused tile zone is forced live"
+    )
+    expect(
+        CanvasEngine.hydrationTier(zone: zone(originX: 1200), viewport: viewport, visibleSize: visibleSize, focusedTileZone: otherZoneId) == .cold,
+        "focused tile zone override is scoped to matching zone id"
+    )
+    expect(
+        CanvasEngine.hydrationTier(zone: zone(originX: 1200, policy: .pinnedLive), viewport: viewport, visibleSize: visibleSize, focusedTileZone: nil) == .live,
+        "pinned hydration policy is forced live"
+    )
+    expect(
+        CanvasEngine.hydrationTier(zone: zone(originX: 530), viewport: CanvasViewport(x: 0, y: 0, zoom: 2), visibleSize: visibleSize, focusedTileZone: nil) == .snapshot,
+        "hydration tier converts visible screen size through viewport zoom"
+    )
+}
+
 // MARK: - WorkspaceDocument fixture and schema checks
 
 do {

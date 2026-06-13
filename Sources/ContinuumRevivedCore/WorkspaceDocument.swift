@@ -86,3 +86,9 @@ public enum ZoneHydrationPolicy: String, Codable, Equatable, Sendable, CaseItera
     case automatic
     case pinnedLive
 }
+
+public enum HydrationTier: String, Codable, Equatable, Sendable, CaseIterable {
+    case live
+    case snapshot
+    case cold
+}

@@ -80,6 +80,57 @@ public enum CanvasEngine {
         TileFrame(x: zone.origin.x, y: zone.origin.y, width: zone.size.width, height: zone.size.height)
     }
 
+    // MARK: - Hydration tiers
+
+    public static let defaultHydrationSnapshotMargin: Double = 256
+
+    public static func hydrationTier(
+        zone: ZonePlacement,
+        viewport: CanvasViewport,
+        visibleSize: CGSize,
+        focusedTileZone: UUID?,
+        snapshotMargin: Double = defaultHydrationSnapshotMargin
+    ) -> HydrationTier {
+        if zone.hydrationPolicy == .pinnedLive || focusedTileZone == zone.zoneId {
+            return .live
+        }
+
+        let zoneFrame = zoneWorldFrame(zone)
+        let visibleWorldFrame = TileFrame(
+            x: viewport.x,
+            y: viewport.y,
+            width: Double(visibleSize.width) / viewport.zoom,
+            height: Double(visibleSize.height) / viewport.zoom
+        )
+
+        if intersects(zoneFrame, visibleWorldFrame) {
+            return .live
+        }
+
+        let margin = max(0, snapshotMargin)
+        let snapshotBand = TileFrame(
+            x: visibleWorldFrame.x - margin,
+            y: visibleWorldFrame.y - margin,
+            width: visibleWorldFrame.width + margin * 2,
+            height: visibleWorldFrame.height + margin * 2
+        )
+        return touchesOrIntersects(zoneFrame, snapshotBand) ? .snapshot : .cold
+    }
+
+    private static func intersects(_ a: TileFrame, _ b: TileFrame) -> Bool {
+        a.x < b.x + b.width
+            && a.x + a.width > b.x
+            && a.y < b.y + b.height
+            && a.y + a.height > b.y
+    }
+
+    private static func touchesOrIntersects(_ a: TileFrame, _ b: TileFrame) -> Bool {
+        a.x <= b.x + b.width
+            && a.x + a.width >= b.x
+            && a.y <= b.y + b.height
+            && a.y + a.height >= b.y
+    }
+
     // MARK: - Zoom
 
     public static let defaultZoomRange: ClosedRange<Double> = 0.1 ... 4.0
