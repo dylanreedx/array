@@ -874,3 +874,35 @@ Consequences:
 - `lastActiveTileId` persistence bugs and runtime first-responder repair bugs
   have different owners: persistence remains in canvas/project state, runtime
   arbitration remains in FocusBroker.
+
+## ADR-0024: ZoneRuntimeController Owns Per-Project Runtime State
+
+**Status:** Accepted
+**Date:** 2026-06-13
+
+Decision:
+
+The E4 extraction boundary is closed: per-project runtime state lives behind
+`ZoneRuntimeController`, while `AppDelegate` remains the one-window app shell.
+A controller owns the active project identity, project store, project lock,
+terminal/browser/note/file-tree runtime and view collections, and the
+project-local debounced save/flush paths. Closing a controller flushes pending
+project state before runtime teardown and releases the project lock after the
+project-owned resources are quiesced.
+
+The app shell still owns app/window-scoped resources: `NSWindow`, global event
+monitors, `FocusBroker`, the Ghostty app/engine instance, registry and picker
+bootstrapping, QA/smoke exit plumbing, and process lifecycle. The controller may
+hold transitional weak seams to app-owned presentation objects such as
+`CanvasNSView` and `TileSpawner` while E5/E6 introduce zone-local placement and
+hydration APIs, but those seams do not make the controller the window owner.
+
+Consequences:
+
+- New project-local runtime collections, save timers, and per-project lifecycle
+  hooks belong on `ZoneRuntimeController`, not `AppDelegate`.
+- New app-global policy, monitor installation, window management, and broker
+  arbitration stay app-scoped unless a later ADR explicitly changes ownership.
+- E5/E6 multi-zone work can instantiate/reuse controllers per project without
+  changing project-local storage shape; single-zone behavior remains the
+  equivalence baseline until zone tickets add new semantics with checks.

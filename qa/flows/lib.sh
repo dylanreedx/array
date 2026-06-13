@@ -162,7 +162,7 @@ launch_continuum() {
 }
 
 window_bounds() {
-  osascript <<'APPLESCRIPT'
+  osascript <<'APPLESCRIPT' 2>/dev/null || swift - <<'SWIFT'
 tell application "System Events"
   set matches to windows of processes whose name contains "continuum-revived"
   if (count of matches) is 0 then error "continuum-revived window not found"
@@ -173,6 +173,33 @@ tell application "System Events"
   end tell
 end tell
 APPLESCRIPT
+import CoreGraphics
+import Foundation
+let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+let candidates = windows.filter { window in
+  let owner = (window[kCGWindowOwnerName as String] as? String ?? "").lowercased()
+  let layer = window[kCGWindowLayer as String] as? Int ?? -1
+  return layer == 0 && owner.contains("continuum-revived")
+}
+let window = candidates.max { lhs, rhs in
+  func area(_ window: [String: Any]) -> Double {
+    guard let bounds = window[kCGWindowBounds as String] as? [String: Any] else { return 0 }
+    let width = bounds["Width"] as? Double ?? 0
+    let height = bounds["Height"] as? Double ?? 0
+    return width * height
+  }
+  return area(lhs) < area(rhs)
+}
+guard let bounds = window?[kCGWindowBounds as String] as? [String: Any],
+      let x = bounds["X"] as? Double,
+      let y = bounds["Y"] as? Double,
+      let width = bounds["Width"] as? Double,
+      let height = bounds["Height"] as? Double else {
+  fputs("continuum-revived window not found\n", stderr)
+  exit(1)
+}
+print("\(Int(x)),\(Int(y)),\(Int(width)),\(Int(height))")
+SWIFT
 }
 
 set_window_bounds() {
@@ -180,7 +207,7 @@ set_window_bounds() {
   local top="$2"
   local width="$3"
   local height="$4"
-  osascript "$left" "$top" "$width" "$height" <<'APPLESCRIPT'
+  if osascript - "$left" "$top" "$width" "$height" <<'APPLESCRIPT' 2>/dev/null; then
 on run argv
   set leftPos to item 1 of argv as integer
   set topPos to item 2 of argv as integer
@@ -196,6 +223,19 @@ on run argv
   end tell
 end run
 APPLESCRIPT
+    return 0
+  fi
+
+  # Fallback for hosts without System Events/AX trust: use CGWindow bounds for
+  # measurement and cliclick to drag the lower-right resize corner.
+  local bounds current_left current_top current_width current_height start_x start_y end_x end_y
+  bounds="$(window_bounds)"
+  IFS=',' read -r current_left current_top current_width current_height <<< "$bounds"
+  start_x=$((current_left + current_width - 6))
+  start_y=$((current_top + current_height - 6))
+  end_x=$((current_left + width - 6))
+  end_y=$((current_top + height - 6))
+  cliclick "m:${start_x},${start_y}" "dd:${start_x},${start_y}" "dm:${end_x},${end_y}" "du:${end_x},${end_y}"
 }
 
 click_center_of_window() {

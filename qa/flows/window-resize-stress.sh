@@ -7,6 +7,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 require_command osascript
 require_command screencapture
+require_command cliclick
 begin_flow "window-resize-stress"
 launch_continuum
 
