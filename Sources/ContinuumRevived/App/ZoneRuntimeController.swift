@@ -22,6 +22,10 @@ final class ZoneRuntimeController {
     private var browserSaveTimer: Timer?
     private var noteSaveTimer: Timer?
     private var fileTreeSaveTimer: Timer?
+    private var isCanvasDirty = false
+    private var isBrowserDirty = false
+    private var isNoteDirty = false
+    private var isFileTreeDirty = false
 
     private let projectLock: ProjectLock?
     private var isClosed = false
@@ -190,6 +194,7 @@ final class ZoneRuntimeController {
     func scheduleCanvasSave() {
         // Coalesce drag-rate writes: schedule a save after the last change.
         // flushPendingSaves() runs immediately for project switch and close.
+        isCanvasDirty = true
         saveTimer?.invalidate()
         saveTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in
             Task { @MainActor in self?.flushCanvasSave() }
@@ -198,6 +203,7 @@ final class ZoneRuntimeController {
 
     func scheduleBrowserSave() {
         // Browser url/title changes coalesce identically to canvas drags.
+        isBrowserDirty = true
         browserSaveTimer?.invalidate()
         browserSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in
             Task { @MainActor in self?.flushBrowserSave() }
@@ -205,6 +211,7 @@ final class ZoneRuntimeController {
     }
 
     func scheduleNoteSave() {
+        isNoteDirty = true
         noteSaveTimer?.invalidate()
         noteSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
             Task { @MainActor in self?.flushNoteSave() }
@@ -212,6 +219,7 @@ final class ZoneRuntimeController {
     }
 
     func scheduleFileTreeSave() {
+        isFileTreeDirty = true
         fileTreeSaveTimer?.invalidate()
         fileTreeSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
             Task { @MainActor in self?.flushFileTreeSave() }
@@ -228,35 +236,39 @@ final class ZoneRuntimeController {
     func flushCanvasSave() {
         saveTimer?.invalidate()
         saveTimer = nil
-        guard let canvasView else { return }
+        guard isCanvasDirty, let canvasView else { return }
         try? projectStore.saveCanvas(canvasView.canvasState)
+        isCanvasDirty = false
     }
 
     func flushBrowserSave() {
         browserSaveTimer?.invalidate()
         browserSaveTimer = nil
-        guard let tileSpawner else { return }
+        guard isBrowserDirty, let tileSpawner else { return }
         for runtime in browserRuntimes {
             tileSpawner.writeBrowserTileSnapshot(for: runtime)
         }
+        isBrowserDirty = false
     }
 
     func flushNoteSave() {
         noteSaveTimer?.invalidate()
         noteSaveTimer = nil
-        guard let tileSpawner else { return }
+        guard isNoteDirty, let tileSpawner else { return }
         for view in noteViews.values {
             tileSpawner.writeNoteSnapshot(noteId: view.noteId, tileId: view.tile.id, text: view.textView.string)
         }
+        isNoteDirty = false
     }
 
     func flushFileTreeSave() {
         fileTreeSaveTimer?.invalidate()
         fileTreeSaveTimer = nil
-        guard let tileSpawner else { return }
+        guard isFileTreeDirty, let tileSpawner else { return }
         for view in fileTreeViews.values {
             tileSpawner.writeFileTreeTileSnapshot(for: view)
         }
+        isFileTreeDirty = false
     }
 
     static func runHydrationLifecycleSelfCheck() throws -> URL {
@@ -376,6 +388,162 @@ final class ZoneRuntimeController {
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("zone-hydration-lifecycle", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: manifestURL, options: .atomic)
+        return manifestURL
+    }
+
+    static func runSaveIsolationSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func seedProject(root: URL, name: String, tileId: UUID) throws -> (ProjectStore, Project, CanvasState) {
+            let store = ProjectStore(projectRoot: root)
+            let project = Project(
+                name: name,
+                rootPath: root.path,
+                createdAt: Date(),
+                updatedAt: Date(),
+                defaultLaunchProfileId: "shell",
+                editorPreference: .auto,
+                settings: ProjectSettings(
+                    restorePolicy: .restoreDescriptors,
+                    browserStoragePolicy: .perProject,
+                    terminalClosePolicy: .askWhenRunning
+                )
+            )
+            let canvas = CanvasState(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                tiles: [Tile(
+                    id: tileId,
+                    kind: .note,
+                    title: name,
+                    frame: TileFrame(x: 20, y: 20, width: 300, height: 180),
+                    zIndex: 1,
+                    runtimeRef: nil,
+                    metadata: TileMetadata(noteId: tileId)
+                )],
+                groups: [],
+                lastActiveTileId: nil
+            )
+            try store.saveProject(project)
+            try store.saveCanvas(canvas)
+            return (store, project, canvas)
+        }
+        func bytes(at url: URL) throws -> Data { try Data(contentsOf: url) }
+        func modificationDate(at url: URL) throws -> Date {
+            let values = try url.resourceValues(forKeys: [.contentModificationDateKey])
+            guard let date = values.contentModificationDate else { throw CheckError.failed("missing modification date for \(url.path)") }
+            return date
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-zone-save-isolation-\(UUID().uuidString)", isDirectory: true)
+        let projectARoot = tempRoot.appendingPathComponent("ProjectA", isDirectory: true)
+        let projectBRoot = tempRoot.appendingPathComponent("ProjectB", isDirectory: true)
+        let projectCRoot = tempRoot.appendingPathComponent("ProjectC", isDirectory: true)
+        try fileManager.createDirectory(at: projectARoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: projectBRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: projectCRoot, withIntermediateDirectories: true)
+
+        let tileA = UUID(uuidString: "00000000-0000-0000-0000-0000000049A1")!
+        let tileB = UUID(uuidString: "00000000-0000-0000-0000-0000000049B2")!
+        let tileC = UUID(uuidString: "00000000-0000-0000-0000-0000000049C3")!
+        let (storeA, projectA, canvasA) = try seedProject(root: projectARoot, name: "Project A", tileId: tileA)
+        let (storeB, projectB, canvasB) = try seedProject(root: projectBRoot, name: "Project B", tileId: tileB)
+        let (storeC, projectC, canvasC) = try seedProject(root: projectCRoot, name: "Project C", tileId: tileC)
+        let beforeB = try bytes(at: storeB.layout.canvasFile)
+        let beforeBModifiedAt = try modificationDate(at: storeB.layout.canvasFile)
+        let beforeC = try bytes(at: storeC.layout.canvasFile)
+        let beforeCModifiedAt = try modificationDate(at: storeC.layout.canvasFile)
+        Thread.sleep(forTimeInterval: 1.1)
+
+        let viewA = CanvasNSView(canvasState: canvasA)
+        let viewB = CanvasNSView(canvasState: canvasB)
+        let viewC = CanvasNSView(canvasState: canvasC)
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+        let spawnerA = TileSpawner(canvasView: viewA, ghostty: nil, browserEngine: browserEngine, projectStore: storeA, project: projectA)
+        let spawnerB = TileSpawner(canvasView: viewB, ghostty: nil, browserEngine: browserEngine, projectStore: storeB, project: projectB)
+        let spawnerC = TileSpawner(canvasView: viewC, ghostty: nil, browserEngine: browserEngine, projectStore: storeC, project: projectC)
+        let controllerA = ZoneRuntimeController(projectRoot: projectARoot, projectStore: storeA, project: projectA)
+        let controllerB = ZoneRuntimeController(projectRoot: projectBRoot, projectStore: storeB, project: projectB)
+        let controllerC = ZoneRuntimeController(projectRoot: projectCRoot, projectStore: storeC, project: projectC)
+        controllerA.attachUI(canvasView: viewA, tileSpawner: spawnerA, focusBroker: FocusBroker())
+        controllerB.attachUI(canvasView: viewB, tileSpawner: spawnerB, focusBroker: FocusBroker())
+        controllerC.attachUI(canvasView: viewC, tileSpawner: spawnerC, focusBroker: FocusBroker())
+
+        controllerB.flushPendingSaves()
+        controllerC.flushPendingSaves()
+        let afterBCleanFlush = try bytes(at: storeB.layout.canvasFile)
+        let afterBCleanFlushModifiedAt = try modificationDate(at: storeB.layout.canvasFile)
+        let afterCCleanFlush = try bytes(at: storeC.layout.canvasFile)
+        let afterCCleanFlushModifiedAt = try modificationDate(at: storeC.layout.canvasFile)
+        let cleanSidecarsAbsent = !fileManager.fileExists(atPath: storeB.layout.browserFile.path)
+            && !fileManager.fileExists(atPath: storeB.layout.notesIndexFile.path)
+            && !fileManager.fileExists(atPath: storeB.layout.fileTreeIndexFile.path)
+            && !fileManager.fileExists(atPath: storeC.layout.browserFile.path)
+            && !fileManager.fileExists(atPath: storeC.layout.notesIndexFile.path)
+            && !fileManager.fileExists(atPath: storeC.layout.fileTreeIndexFile.path)
+
+        viewA.setViewport(CanvasViewport(x: 49, y: 0, zoom: 1))
+        controllerA.scheduleCanvasSave()
+        controllerA.flushPendingSaves()
+
+        let afterBWhenAFlushed = try bytes(at: storeB.layout.canvasFile)
+        let afterBWhenAFlushedModifiedAt = try modificationDate(at: storeB.layout.canvasFile)
+        let reloadedA = try storeA.loadCanvas()
+        let bCleanFlushUnchanged = beforeB == afterBCleanFlush && beforeBModifiedAt == afterBCleanFlushModifiedAt
+        let cCleanFlushUnchanged = beforeC == afterCCleanFlush && beforeCModifiedAt == afterCCleanFlushModifiedAt
+        let bUnchangedAfterAFlush = beforeB == afterBWhenAFlushed && beforeBModifiedAt == afterBWhenAFlushedModifiedAt
+        let aViewportFlushed = reloadedA.viewport.x == 49
+
+        viewA.setViewport(CanvasViewport(x: 98, y: 0, zoom: 1))
+        controllerA.scheduleCanvasSave()
+        try controllerA.setTier(.snapshot, allowDehydratingFocusedZone: true)
+        let reloadedAAfterDehydrate = try storeA.loadCanvas()
+        let afterBAfterDehydrate = try bytes(at: storeB.layout.canvasFile)
+        let afterBAfterDehydrateModifiedAt = try modificationDate(at: storeB.layout.canvasFile)
+        let pendingFlushOnDehydrate = reloadedAAfterDehydrate.viewport.x == 98
+        let bUnchangedAfterDehydrate = beforeB == afterBAfterDehydrate && beforeBModifiedAt == afterBAfterDehydrateModifiedAt
+
+        try expect(bCleanFlushUnchanged, "clean zone B flush did not rewrite project B canvas")
+        try expect(cCleanFlushUnchanged, "clean zone C flush did not rewrite project C canvas")
+        try expect(cleanSidecarsAbsent, "clean browser/note/file-tree flushes did not create sidecar files in clean zones")
+        try expect(aViewportFlushed, "zone A canvas change flushed to project A")
+        try expect(bUnchangedAfterAFlush, "flushing zone A did not rewrite project B canvas")
+        try expect(pendingFlushOnDehydrate, "dehydrating zone A flushes pending canvas changes")
+        try expect(bUnchangedAfterDehydrate, "dehydrating zone A did not rewrite project B canvas")
+
+        let manifest: [String: Any] = [
+            "check": "zone-save-isolation",
+            "bCleanFlushUnchanged": bCleanFlushUnchanged,
+            "cCleanFlushUnchanged": cCleanFlushUnchanged,
+            "cleanSidecarsAbsent": cleanSidecarsAbsent,
+            "aViewportFlushed": aViewportFlushed,
+            "bUnchangedAfterAFlush": bUnchangedAfterAFlush,
+            "pendingFlushOnDehydrate": pendingFlushOnDehydrate,
+            "bUnchangedAfterDehydrate": bUnchangedAfterDehydrate,
+            "projectACanvas": storeA.layout.canvasFile.path,
+            "projectBCanvas": storeB.layout.canvasFile.path,
+            "projectCCanvas": storeC.layout.canvasFile.path,
+            "projectBCanvasModifiedAt": beforeBModifiedAt.timeIntervalSince1970,
+            "tempRoot": tempRoot.path
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("zone-save-isolation", isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let manifestURL = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

@@ -252,6 +252,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--zone-save-isolation-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try ZoneRuntimeController.runSaveIsolationSelfCheck()
+                print("ContinuumRevivedZoneSaveIsolationChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--add-zone-check") {
             do {
                 let artifact = try AppDelegate.runAddZoneSelfCheck()
