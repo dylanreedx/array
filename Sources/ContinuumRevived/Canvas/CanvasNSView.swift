@@ -15,7 +15,17 @@ final class CanvasNSView: NSView {
     /// this once at startup rather than at every TileSpawner install site.
     var onTileCloseRequested: ((UUID) -> Void)?
     weak var focusBroker: FocusBroker? {
-        didSet { focusBroker?.register(self) }
+        didSet {
+            guard oldValue !== focusBroker else { return }
+            oldValue?.unregister(focusSurfaceID)
+            for view in tileViews.values {
+                oldValue?.unregister(view.focusSurfaceID)
+            }
+            focusBroker?.register(self)
+            for view in tileViews.values {
+                focusBroker?.register(view)
+            }
+        }
     }
 
     private(set) var canvasState: CanvasState
@@ -77,6 +87,15 @@ final class CanvasNSView: NSView {
         emptyStateProjectPath = projectPath
         emptyStateView?.actions = actions
         emptyStateView?.projectPath = projectPath
+    }
+
+    func detachFocusBroker() {
+        guard let focusBroker else { return }
+        focusBroker.unregister(focusSurfaceID)
+        for view in tileViews.values {
+            focusBroker.unregister(view.focusSurfaceID)
+        }
+        self.focusBroker = nil
     }
 
     /// Returns the NSView currently registered for `tileId`, or nil. Intended

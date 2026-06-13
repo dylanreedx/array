@@ -14,6 +14,7 @@ final class ZoneRuntimeController {
 
     weak var canvasView: CanvasNSView?
     weak var tileSpawner: TileSpawner?
+    private weak var focusBroker: FocusBroker?
 
     private var saveTimer: Timer?
     private var browserSaveTimer: Timer?
@@ -48,6 +49,7 @@ final class ZoneRuntimeController {
         isClosed = true
 
         flushPendingSaves()
+        detachUI()
 
         let now = Date()
         for runtime in runtimes {
@@ -58,6 +60,44 @@ final class ZoneRuntimeController {
         }
 
         projectLock?.release()
+    }
+
+    func attachUI(canvasView: CanvasNSView, tileSpawner: TileSpawner, focusBroker: FocusBroker) {
+        self.canvasView = canvasView
+        self.tileSpawner = tileSpawner
+        self.focusBroker = focusBroker
+        canvasView.focusBroker = focusBroker
+        focusBroker.activationFallbackSurfaces = { [weak self] in
+            guard let self else { return [] }
+            var fallbacks: [FocusSurfaceID] = []
+            if let targetId = self.canvasView?.canvasState.lastActiveTileId {
+                fallbacks.append(.tile(targetId))
+            }
+            if let fallback = self.runtimes.last?.tileId,
+               !fallbacks.contains(.tile(fallback)) {
+                fallbacks.append(.tile(fallback))
+            }
+            return fallbacks
+        }
+    }
+
+    func detachUI() {
+        canvasView?.detachFocusBroker()
+        focusBroker?.activationFallbackSurfaces = nil
+        focusBroker = nil
+        canvasView = nil
+        tileSpawner = nil
+    }
+
+    func paletteRows(registryStore: RegistryStore?) -> (profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow]) {
+        let profiles = tileSpawner?.annotatedProfiles() ?? []
+        guard let registryStore,
+              let registry = try? registryStore.loadOrEmpty() else {
+            return (profiles, [])
+        }
+        let projects = ProjectPickerModel.makeRows(registry: registry)
+            .filter { $0.id != project.id }
+        return (profiles, projects)
     }
 
     func scheduleCanvasSave() {

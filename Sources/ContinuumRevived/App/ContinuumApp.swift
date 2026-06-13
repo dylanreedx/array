@@ -589,7 +589,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
             let canvasView = CanvasNSView(canvasState: canvasState)
             canvasView.delegate = self
-            canvasView.focusBroker = focusBroker
             canvasView.onTileCloseRequested = { [weak self] tileId in
                 self?.deleteTile(id: tileId)
             }
@@ -597,18 +596,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.ghostty = ghostty
             self.browserEngine = browserEngine
             self.canvasView = canvasView
-            zoneRuntimeController.canvasView = canvasView
-            focusBroker.activationFallbackSurfaces = { [weak self] in
-                var fallbacks: [FocusSurfaceID] = []
-                if let targetId = self?.canvasView?.canvasState.lastActiveTileId {
-                    fallbacks.append(.tile(targetId))
-                }
-                if let fallback = self?.runtimes.last?.tileId,
-                   !fallbacks.contains(.tile(fallback)) {
-                    fallbacks.append(.tile(fallback))
-                }
-                return fallbacks
-            }
 
             let spawner = TileSpawner(
                 canvasView: canvasView,
@@ -630,7 +617,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self?.handleReservedShortcut(event) ?? false
             }
             self.tileSpawner = spawner
-            zoneRuntimeController.tileSpawner = spawner
+            zoneRuntimeController.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
             canvasView.configureEmptyStateActions(CanvasEmptyStateActions(
                 spawnClaude: { [weak self] in
                     self?.spawnTerminalFromProfile("claude")
@@ -1182,7 +1169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func openProfilePalette() {
-        guard let spawner = tileSpawner,
+        guard let zoneRuntimeController,
               let host = window else { return }
         let palette = profilePalette ?? makeProfilePalette()
         let wasVisible = palette.isVisible
@@ -1190,15 +1177,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if !wasVisible {
             focusBroker.openModal(.palette)
         }
-        palette.show(near: host, profiles: spawner.annotatedProfiles(), projects: switchableProjectRows())
-    }
-
-    private func switchableProjectRows() -> [ProjectPickerRow] {
-        guard let registryStore,
-              let activeProject,
-              let registry = try? registryStore.loadOrEmpty() else { return [] }
-        return ProjectPickerModel.makeRows(registry: registry)
-            .filter { $0.id != activeProject.id }
+        let rows = zoneRuntimeController.paletteRows(registryStore: registryStore)
+        palette.show(near: host, profiles: rows.profiles, projects: rows.projects)
     }
 
     private func makeProfilePalette() -> LaunchProfilePalette {
