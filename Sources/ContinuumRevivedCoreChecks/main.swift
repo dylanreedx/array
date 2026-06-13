@@ -118,6 +118,21 @@ do {
     let encoded = try encoder.encode(configured)
     let decoded = try decoder.decode(ProjectEntry.self, from: encoded)
     expect(decoded.linearTicketQueue == configured.linearTicketQueue, "project entry round-trips ticket queue config")
+
+    expect(entry.worktreeOf == nil, "project entry tolerantly decodes without worktree link")
+    let canonicalId = UUID(uuidString: "A0000000-0000-4000-8000-000000000003")!
+    let worktree = ProjectEntry(
+        id: UUID(uuidString: "A0000000-0000-4000-8000-000000000004")!,
+        name: "Configured Worktree",
+        rootPath: "/tmp/configured-worktree",
+        workspaceId: nil,
+        lastOpenedAt: Date(timeIntervalSince1970: 0),
+        pinned: false,
+        worktreeOf: canonicalId
+    )
+    let worktreeEncoded = try encoder.encode(worktree)
+    let worktreeDecoded = try decoder.decode(ProjectEntry.self, from: worktreeEncoded)
+    expect(worktreeDecoded.worktreeOf == canonicalId, "project entry round-trips worktree link")
 }
 
 // MARK: - Git diff engine
@@ -700,6 +715,9 @@ do {
     let restoredDescriptor = agentDescriptor.restoredForBoot(now: restoreClock)
     expect(restoredDescriptor.status == .stale, "agent descriptor stale restoration status")
     expect(restoredDescriptor.statusUpdatedAt == restoreClock, "agent descriptor stale restoration timestamp")
+    let worktreeSpawnDescriptor = AgentDescriptor.configuring(agentKind: "claude", worktreePath: "/tmp/worktree-checkout", now: agentUpdatedAt)
+    expect(worktreeSpawnDescriptor.worktreePath == "/tmp/worktree-checkout", "agent descriptor configuring seam preserves worktree path")
+    expect(worktreeSpawnDescriptor.status == .configuring, "agent descriptor configuring seam starts configuring")
 }
 
 // MARK: - DefaultBrowserURL
@@ -1740,6 +1758,29 @@ do {
 
     let emptyRows = ProjectPickerModel.makeRows(registry: Registry.empty(), fileSystem: probes)
     expect(emptyRows.isEmpty, "ProjectPickerModel empty registry yields empty state")
+}
+
+do {
+    let canonicalId = UUID(uuidString: "00000000-0000-0000-0000-000000008401")!
+    let worktreeId = UUID(uuidString: "00000000-0000-0000-0000-000000008402")!
+    let rows = ProjectPickerModel.makeRows(
+        projects: [
+            ProjectEntry(id: canonicalId, name: "Continuum", rootPath: "/repo/continuum", workspaceId: nil, lastOpenedAt: Date(timeIntervalSince1970: 10), pinned: false),
+            ProjectEntry(id: worktreeId, name: "Continuum", rootPath: "/repo/continuum-wt", workspaceId: nil, lastOpenedAt: Date(timeIntervalSince1970: 20), pinned: false, worktreeOf: canonicalId)
+        ],
+        lastActiveProjectId: nil,
+        fileSystem: ProjectRootResolver.FileSystemProbes(
+            directoryExists: { _ in true },
+            continuumDirectoryExists: { _ in true },
+            canCreateContinuumDirectory: { _ in true }
+        )
+    )
+    let worktreeRow = rows.first(where: { $0.id == worktreeId })
+    expect(worktreeRow?.worktreeOf == canonicalId, "ProjectPickerModel exposes worktree link on rows")
+    expect(ProjectPickerModel.filterRows(rows, query: "worktree").map(\.id) == [worktreeId], "ProjectPickerModel filters worktree rows by worktree token")
+    let paletteRows = LaunchPaletteModel.makeRows(profiles: [], projects: rows)
+    expect(worktreeRow.map { paletteRows.contains(.project($0)) } == true, "LaunchPaletteModel includes distinct worktree project row")
+    expect(LaunchPaletteModel.filterRows(paletteRows, query: "worktree").map(\.displayName).contains("Add Continuum Worktree to Canvas"), "LaunchPaletteModel labels and filters worktree project rows distinctly")
 }
 
 // MARK: - CanvasEngine: coordinate conversion

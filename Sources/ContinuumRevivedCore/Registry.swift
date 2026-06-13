@@ -169,6 +169,7 @@ public struct ProjectEntry: Codable, Equatable, Sendable {
     public var lastOpenedAt: Date
     public var pinned: Bool
     public var missing: Bool
+    public var worktreeOf: UUID?
     public var linearTicketQueue: LinearTicketQueueConfig?
 
     public init(
@@ -179,6 +180,7 @@ public struct ProjectEntry: Codable, Equatable, Sendable {
         lastOpenedAt: Date,
         pinned: Bool,
         missing: Bool = false,
+        worktreeOf: UUID? = nil,
         linearTicketQueue: LinearTicketQueueConfig? = nil
     ) {
         self.id = id
@@ -188,11 +190,12 @@ public struct ProjectEntry: Codable, Equatable, Sendable {
         self.lastOpenedAt = lastOpenedAt
         self.pinned = pinned
         self.missing = missing
+        self.worktreeOf = worktreeOf
         self.linearTicketQueue = linearTicketQueue
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, rootPath, workspaceId, lastOpenedAt, pinned, missing, linearTicketQueue
+        case id, name, rootPath, workspaceId, lastOpenedAt, pinned, missing, worktreeOf, linearTicketQueue
     }
 
     public init(from decoder: Decoder) throws {
@@ -204,6 +207,7 @@ public struct ProjectEntry: Codable, Equatable, Sendable {
         lastOpenedAt = try container.decode(Date.self, forKey: .lastOpenedAt)
         pinned = try container.decode(Bool.self, forKey: .pinned)
         missing = try container.decodeIfPresent(Bool.self, forKey: .missing) ?? false
+        worktreeOf = try container.decodeIfPresent(UUID.self, forKey: .worktreeOf)
         linearTicketQueue = try container.decodeIfPresent(LinearTicketQueueConfig.self, forKey: .linearTicketQueue)
     }
 }

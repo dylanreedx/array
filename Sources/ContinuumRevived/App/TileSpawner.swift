@@ -34,6 +34,12 @@ final class TileSpawner {
 
     /// Dynamic source used by browser tile profile menus after registry edits.
     var browserProfileMenuProvider: (() -> [BrowserProfile])?
+
+    /// Optional zone/project context for terminal launches. When present, agent
+    /// descriptors and launch-profile resolution use this root rather than the
+    /// process-wide active project root, allowing worktree project entries to
+    /// spawn agents into their own checkout.
+    var terminalProjectContextProvider: (() -> ProjectEntry?)?
     var browserProfileSwitchHandler: ((UUID, UUID) -> Void)?
     var browserProfileCreateHandler: ((UUID) -> Void)?
     var browserProfileRenameHandler: ((UUID, UUID) -> Void)?
@@ -98,9 +104,10 @@ final class TileSpawner {
         guard let spec = registry.spec(for: profileId) else {
             return .unknownProfile(id: profileId)
         }
+        let projectRoot = terminalProjectRoot()
         let resolution = registry.resolve(
             spec,
-            in: project.rootPath,
+            in: projectRoot,
             environment: ProcessInfo.processInfo.environment,
             detector: detector
         )
@@ -137,24 +144,18 @@ final class TileSpawner {
         tile.runtimeRef = RuntimeRef(kind: .terminalSession, id: runtime.id)
 
         let now = Date()
-        let agentDescriptor = agentDescriptor(for: spec, at: now)
+        let agentDescriptor = agentDescriptor(for: spec, projectRoot: projectRoot, at: now)
         let view = TerminalTileNSView(tile: tile, runtime: runtime)
         view.agentStatus = agentDescriptor?.status
         canvasView.install(tileView: view, for: tile)
 
-        let descriptor = TerminalSessionDescriptor(
-            id: runtime.id,
+        let descriptor = Self.makeTerminalSessionDescriptor(
+            runtimeId: runtime.id,
             tileId: tile.id,
-            launchProfileId: spec.id,
-            command: profile.command,
-            args: profile.arguments,
-            cwd: profile.cwd,
-            env: [:],
-            title: profile.title,
-            createdAt: now,
-            lastStartedAt: now,
-            lastExit: nil,
-            agentDescriptor: agentDescriptor
+            spec: spec,
+            profile: profile,
+            projectRoot: projectRoot,
+            now: now
         )
         do {
             try projectStore.saveSession(descriptor)
@@ -165,13 +166,40 @@ final class TileSpawner {
         return .spawned(runtime)
     }
 
-    private func agentDescriptor(for spec: LaunchProfileSpec, at now: Date) -> AgentDescriptor? {
+    private func terminalProjectRoot() -> String {
+        terminalProjectContextProvider?().map(\.rootPath) ?? project.rootPath
+    }
+
+    private func agentDescriptor(for spec: LaunchProfileSpec, projectRoot: String, at now: Date) -> AgentDescriptor? {
+        Self.agentDescriptor(for: spec, projectRoot: projectRoot, at: now)
+    }
+
+    static func agentDescriptor(for spec: LaunchProfileSpec, projectRoot: String, at now: Date) -> AgentDescriptor? {
         guard let agentKind = spec.agentKind else { return nil }
-        return AgentDescriptor(
-            agentKind: agentKind,
-            worktreePath: project.rootPath,
-            status: .configuring,
-            statusUpdatedAt: now
+        return AgentDescriptor.configuring(agentKind: agentKind, worktreePath: projectRoot, now: now)
+    }
+
+    static func makeTerminalSessionDescriptor(
+        runtimeId: UUID,
+        tileId: UUID,
+        spec: LaunchProfileSpec,
+        profile: LaunchProfile,
+        projectRoot: String,
+        now: Date
+    ) -> TerminalSessionDescriptor {
+        TerminalSessionDescriptor(
+            id: runtimeId,
+            tileId: tileId,
+            launchProfileId: spec.id,
+            command: profile.command,
+            args: profile.arguments,
+            cwd: profile.cwd,
+            env: [:],
+            title: profile.title,
+            createdAt: now,
+            lastStartedAt: now,
+            lastExit: nil,
+            agentDescriptor: agentDescriptor(for: spec, projectRoot: projectRoot, at: now)
         )
     }
 
@@ -197,9 +225,10 @@ final class TileSpawner {
         guard let spec = registry.spec(for: profileId) else {
             return .unknownProfile(id: profileId)
         }
+        let projectRoot = terminalProjectRoot()
         let resolution = registry.resolve(
             spec,
-            in: project.rootPath,
+            in: projectRoot,
             environment: ProcessInfo.processInfo.environment,
             detector: detector
         )
@@ -222,24 +251,18 @@ final class TileSpawner {
         tile.runtimeRef = RuntimeRef(kind: .terminalSession, id: runtime.id)
         tile.title = profile.title
         let now = Date()
-        let agentDescriptor = agentDescriptor(for: spec, at: now)
+        let agentDescriptor = agentDescriptor(for: spec, projectRoot: projectRoot, at: now)
         let view = TerminalTileNSView(tile: tile, runtime: runtime)
         view.agentStatus = agentDescriptor?.status
         canvasView.install(tileView: view, for: tile)
 
-        let descriptor = TerminalSessionDescriptor(
-            id: runtime.id,
+        let descriptor = Self.makeTerminalSessionDescriptor(
+            runtimeId: runtime.id,
             tileId: tile.id,
-            launchProfileId: spec.id,
-            command: profile.command,
-            args: profile.arguments,
-            cwd: profile.cwd,
-            env: [:],
-            title: profile.title,
-            createdAt: now,
-            lastStartedAt: now,
-            lastExit: nil,
-            agentDescriptor: agentDescriptor
+            spec: spec,
+            profile: profile,
+            projectRoot: projectRoot,
+            now: now
         )
         do {
             try projectStore.saveSession(descriptor)

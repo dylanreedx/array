@@ -98,7 +98,11 @@ public enum LaunchPaletteRow: Equatable, Sendable {
         switch self {
         case let .profile(profile): return profile.displayName
         case let .action(action): return action.displayName
-        case let .project(project): return "Add \(project.name) to Canvas"
+        case let .project(project):
+            if project.worktreeOf != nil {
+                return "Add \(project.name) Worktree to Canvas"
+            }
+            return "Add \(project.name) to Canvas"
         case let .workspace(workspace): return "Switch to \(workspace.name) Workspace"
         case let .workspaceAction(action, workspace):
             switch action {
@@ -135,9 +139,13 @@ public enum LaunchPaletteRow: Equatable, Sendable {
                 action.filterTokens.contains { token in queryToken.contains(token) || token.contains(queryToken) }
             }
         case let .project(project):
-            let haystacks = ["add project canvas zone", "switch project", project.name, project.rootPath, project.id.uuidString].map { $0.lowercased() }
+            var haystacks = ["add project canvas zone", "switch project", project.name, project.rootPath, project.id.uuidString]
+            if let worktreeOf = project.worktreeOf {
+                haystacks += ["worktree", worktreeOf.uuidString]
+            }
+            let normalizedHaystacks = haystacks.map { $0.lowercased() }
             let queryTokens = query.split(separator: " ").map(String.init)
-            return queryTokens.allSatisfy { token in haystacks.contains { $0.contains(token) } }
+            return queryTokens.allSatisfy { token in normalizedHaystacks.contains { $0.contains(token) } }
         case let .workspace(workspace):
             let haystacks = ["switch workspace canvas", workspace.name, workspace.id.uuidString].map { $0.lowercased() }
             let queryTokens = query.split(separator: " ").map(String.init)

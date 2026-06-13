@@ -14,6 +14,7 @@ public struct ProjectPickerRow: Equatable, Sendable {
     public let lastOpenedAt: Date
     public let pinned: Bool
     public let isLastActive: Bool
+    public let worktreeOf: UUID?
     public let availability: ProjectPickerAvailability
 
     public var isMissing: Bool { availability != .available }
@@ -26,6 +27,7 @@ public struct ProjectPickerRow: Equatable, Sendable {
         lastOpenedAt: Date,
         pinned: Bool,
         isLastActive: Bool,
+        worktreeOf: UUID? = nil,
         availability: ProjectPickerAvailability
     ) {
         self.id = id
@@ -34,6 +36,7 @@ public struct ProjectPickerRow: Equatable, Sendable {
         self.lastOpenedAt = lastOpenedAt
         self.pinned = pinned
         self.isLastActive = isLastActive
+        self.worktreeOf = worktreeOf
         self.availability = availability
     }
 }
@@ -70,6 +73,7 @@ public enum ProjectPickerModel {
                     lastOpenedAt: entry.lastOpenedAt,
                     pinned: entry.pinned,
                     isLastActive: entry.id == lastActiveProjectId,
+                    worktreeOf: entry.worktreeOf,
                     availability: entry.missing ? .missingDirectory : availability(for: entry.rootPath, fileSystem: fileSystem)
                 )
             }
@@ -81,9 +85,13 @@ public enum ProjectPickerModel {
         guard !trimmed.isEmpty else { return rows }
         let tokens = trimmed.split(separator: " ").map(String.init)
         return rows.filter { row in
-            let haystacks = [row.name, row.rootPath, row.id.uuidString].map { $0.lowercased() }
+            var haystacks = [row.name, row.rootPath, row.id.uuidString]
+            if let worktreeOf = row.worktreeOf {
+                haystacks += ["worktree", worktreeOf.uuidString]
+            }
+            let normalizedHaystacks = haystacks.map { $0.lowercased() }
             return tokens.allSatisfy { token in
-                haystacks.contains { $0.contains(token) }
+                normalizedHaystacks.contains { $0.contains(token) }
             }
         }
     }

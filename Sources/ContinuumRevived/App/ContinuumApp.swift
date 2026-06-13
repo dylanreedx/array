@@ -866,6 +866,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawner.browserProfileMenuProvider = { [weak self] in
                 (try? self?.registryStore?.loadOrEmpty().settings.browserProfiles) ?? registry.settings.browserProfiles
             }
+            spawner.terminalProjectContextProvider = { [weak self] in
+                self?.activeZoneProjectEntry()
+            }
             spawner.browserProfileSwitchHandler = { [weak self] tileId, profileId in
                 self?.switchBrowserTileProfile(tileId: tileId, profileId: profileId)
             }
@@ -2287,6 +2290,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     // MARK: - Persistence helpers
 
+    private func activeZoneProjectEntry() -> ProjectEntry? {
+        guard let projectId = canvasView?.activeZone?.projectId ?? zoneRuntimeController?.project.id,
+              let registry = try? registryStore?.loadOrEmpty()
+        else { return nil }
+        return registry.projects.first(where: { $0.id == projectId })
+    }
+
     private func presentLockContentionUXIfNeeded(projectRoot: URL, registry: Registry) throws -> ZoneRuntimeController {
         var candidate = projectRoot
         while true {
@@ -2723,6 +2733,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(reloaded == document, "workspace add-zone document round trips")
         try expect(reloaded.zones[0].projectId == projectA, "existing project zone preserved")
         try expect(reloaded.zones[1].projectId == projectB, "new project zone persisted")
+
+        let worktreeRoot = tempRoot.appendingPathComponent("ProjectBWorktree", isDirectory: true).path
+        let agentSpec = LaunchProfileSpec(id: "claude", displayName: "Claude", kind: .shell, title: "Agent · Claude", agentKind: "claude")
+        let worktreeProfile = LaunchProfile(command: "/bin/zsh", arguments: [], cwd: worktreeRoot, title: "Agent · Claude")
+        let descriptor = TileSpawner.makeTerminalSessionDescriptor(
+            runtimeId: UUID(uuidString: "00000000-0000-0000-0000-0000000047C1")!,
+            tileId: UUID(uuidString: "00000000-0000-0000-0000-0000000047C2")!,
+            spec: agentSpec,
+            profile: worktreeProfile,
+            projectRoot: worktreeRoot,
+            now: Date(timeIntervalSince1970: 1_780_000_000)
+        )
+        try expect(descriptor.cwd == worktreeRoot, "worktree agent spawn descriptor uses worktree cwd")
+        try expect(descriptor.agentDescriptor?.worktreePath == worktreeRoot, "worktree agent spawn descriptor persists worktree path")
         return store.layout.canvasFile
     }
 

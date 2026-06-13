@@ -76,6 +76,10 @@ public struct AgentDescriptor: Codable, Equatable, Sendable {
         self.statusUpdatedAt = statusUpdatedAt
     }
 
+    public static func configuring(agentKind: String, worktreePath: String?, now: Date) -> AgentDescriptor {
+        AgentDescriptor(agentKind: agentKind, worktreePath: worktreePath, status: .configuring, statusUpdatedAt: now)
+    }
+
     public func restoredForBoot(now: Date = Date()) -> AgentDescriptor {
         var restored = self
         restored.status = .stale

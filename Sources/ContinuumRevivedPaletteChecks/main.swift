@@ -77,6 +77,23 @@ expect(projectRows.map(\.displayName) == ["New Note", "New Browser", "Open File.
 expect(LaunchPaletteModel.filterRows(projectRows, query: "add work").map(\.displayName) == ["Add Work Project to Canvas"], "add-project row filters by add token and project name")
 expect(projectRows.last?.isSelectable == true, "available add-project row is selectable")
 
+let worktreeProjectId = UUID(uuidString: "00000000-0000-0000-0000-000000000130")!
+let worktreeRows = LaunchPaletteModel.makeRows(
+    profiles: [],
+    projects: [ProjectPickerRow(
+        id: worktreeProjectId,
+        name: "Work Project",
+        rootPath: "/projects/work-wt",
+        lastOpenedAt: Date(timeIntervalSince1970: 1_100),
+        pinned: false,
+        isLastActive: false,
+        worktreeOf: switchProjectId,
+        availability: .available
+    )]
+)
+expect(worktreeRows.last?.displayName == "Add Work Project Worktree to Canvas", "palette labels worktree add-project rows distinctly")
+expect(LaunchPaletteModel.filterRows(worktreeRows, query: "worktree").map(\.displayName).contains("Add Work Project Worktree to Canvas"), "palette worktree rows filter by worktree token")
+
 let workspaceId = UUID(uuidString: "00000000-0000-0000-0000-000000000154")!
 let workspaceRows = LaunchPaletteModel.makeRows(
     profiles: [],
