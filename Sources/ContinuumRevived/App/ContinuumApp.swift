@@ -72,6 +72,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-switch-check") {
+            do {
+                try AppDelegate.runWorkspaceSwitchSelfCheck()
+                print("ContinuumRevivedWorkspaceSwitchChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--palette-first-responder-restore-check") {
             do {
                 _ = NSApplication.shared
@@ -726,7 +737,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
             let projectStore = zoneRuntimeController.projectStore
             let project = zoneRuntimeController.project
-            try Self.recordProjectInRegistry(project: project, in: registryStore)
+            try Self.recordProjectInRegistry(project: project, in: registryStore, preferredWorkspaceId: ProjectLaunchCoordinator.consumePendingWorkspaceSelection())
+            let updatedRegistry = try registryStore.loadOrEmpty()
             let zoneRenderModels = try Self.loadActiveZoneRenderModels(from: registryStore)
             let activeZone = zoneRenderModels.first(where: { $0.placement.projectId == project.id })?.placement
 
@@ -849,8 +861,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 backing: .buffered,
                 defer: false
             )
-            // E7: workspace switching will replace this with `<workspace name> — Continuum`.
-            window.title = Self.mainWindowTitle(for: project)
+            window.title = Self.mainWindowTitle(for: project, registry: updatedRegistry)
             window.center()
             window.contentView = canvasView
             window.delegate = self
@@ -2309,13 +2320,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         ]
     }
 
-    private static func recordProjectInRegistry(project: Project, in store: RegistryStore) throws {
+    private static func recordProjectInRegistry(project: Project, in store: RegistryStore, preferredWorkspaceId: UUID? = nil) throws {
         var registry = try store.loadOrEmpty()
-        _ = try DefaultWorkspaceMigration().ensureDefaultWorkspace(
+        if let preferredWorkspaceId,
+           registry.workspaces.contains(where: { $0.id == preferredWorkspaceId && $0.projectIds.contains(project.id) }) {
+            registry.lastActiveWorkspaceId = preferredWorkspaceId
+            registry.lastActiveProjectId = project.id
+        }
+        let workspaceId = try DefaultWorkspaceMigration().ensureDefaultWorkspace(
             for: project,
             registry: &registry,
             applicationSupportDirectory: store.registryFile.deletingLastPathComponent()
         )
+        registry.lastActiveWorkspaceId = workspaceId
+        registry.lastActiveProjectId = project.id
         try store.save(registry)
     }
 
@@ -2426,8 +2444,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return artifact
     }
 
-    private static func mainWindowTitle(for project: Project) -> String {
-        "\(project.name) — Continuum"
+    private static func mainWindowTitle(for project: Project, registry: Registry? = nil) -> String {
+        if let registry,
+           let workspaceId = registry.lastActiveWorkspaceId,
+           let workspace = registry.workspaces.first(where: { $0.id == workspaceId }) {
+            return "\(workspace.name) — Continuum"
+        }
+        return "\(project.name) — Continuum"
     }
 
     static func runAddZoneSelfCheck() throws -> URL {
@@ -2682,6 +2705,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             throw CheckFailure(description: "openLastProject disabled should present picker")
         }
         try expect(disabledRequest.reason == .openLastProjectDisabled, "picker receives disabled-open-last reason")
+    }
+
+    static func runWorkspaceSwitchSelfCheck() throws {
+        struct CheckFailure: Error, CustomStringConvertible { let description: String }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckFailure(description: message) }
+        }
+
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let projectA = UUID(uuidString: "00000000-0000-0000-0000-000000005501")!
+        let projectB = UUID(uuidString: "00000000-0000-0000-0000-000000005502")!
+        let workspaceA = UUID(uuidString: "00000000-0000-0000-0000-0000000055A1")!
+        let workspaceB = UUID(uuidString: "00000000-0000-0000-0000-0000000055B2")!
+        let emptyWorkspace = UUID(uuidString: "00000000-0000-0000-0000-0000000055EE")!
+        var registry = Registry.empty()
+        registry.lastActiveProjectId = projectA
+        registry.lastActiveWorkspaceId = workspaceA
+        registry.projects = [
+            ProjectEntry(id: projectA, name: "Alpha", rootPath: "/tmp/continuum-ws-alpha", workspaceId: workspaceA, lastOpenedAt: now, pinned: false),
+            ProjectEntry(id: projectB, name: "Beta", rootPath: "/tmp/continuum-ws-beta", workspaceId: workspaceB, lastOpenedAt: now.addingTimeInterval(-1), pinned: false)
+        ]
+        registry.workspaces = [
+            WorkspaceEntry(id: workspaceA, name: "Main Canvas", projectIds: [projectA], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: workspaceB, name: "Review Canvas", projectIds: [projectB], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: emptyWorkspace, name: "Empty Canvas", projectIds: [], createdAt: now, updatedAt: now)
+        ]
+        let probes = ProjectRootResolver.FileSystemProbes(
+            directoryExists: { $0 == "/tmp/continuum-ws-alpha" || $0 == "/tmp/continuum-ws-beta" },
+            continuumDirectoryExists: { $0 == "/tmp/continuum-ws-alpha" || $0 == "/tmp/continuum-ws-beta" },
+            canCreateContinuumDirectory: { _ in false }
+        )
+        var pickerRegistry = registry
+        pickerRegistry.settings.openLastProjectOnLaunch = false
+        guard case let .presentPicker(request) = ProjectLaunchCoordinator.decide(environment: [:], registry: pickerRegistry, fileSystem: probes) else {
+            throw CheckFailure(description: "disabled open-last should present workspace-aware picker")
+        }
+        try expect(request.workspaces.map { $0.workspace.id } == [workspaceA, workspaceB, emptyWorkspace], "picker request includes workspace section rows")
+        try expect(ProjectLaunchCoordinator.selectWorkspace(id: workspaceB, from: request) == projectB, "workspace picker row resolves to first project")
+        try expect(ProjectLaunchCoordinator.selectWorkspaceForNextLaunch(id: workspaceB, from: request) == projectB, "workspace picker records pending workspace selection")
+        try expect(ProjectLaunchCoordinator.consumePendingWorkspaceSelection() == workspaceB, "pending workspace selection is available to startup")
+        try expect(ProjectLaunchCoordinator.selectWorkspace(id: emptyWorkspace, from: request) == nil, "empty workspace picker row is not selectable")
+        let rows = LaunchPaletteModel.makeRows(profiles: [], projects: ProjectPickerModel.makeRows(registry: registry, fileSystem: probes), workspaces: registry.workspaces)
+        try expect(rows.contains(where: { if case let .workspace(workspace) = $0 { return workspace.id == workspaceB }; return false }), "palette exposes switch workspace row")
+        let titleProject = Project(id: projectA, name: "Alpha", rootPath: "/tmp/continuum-ws-alpha", createdAt: now, updatedAt: now, defaultLaunchProfileId: "shell", editorPreference: .auto, settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning))
+        try expect(mainWindowTitle(for: titleProject, registry: registry) == "Main Canvas — Continuum", "window title uses active workspace name")
     }
 
     private func presentFatalError(_ error: Error) {
