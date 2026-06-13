@@ -339,6 +339,26 @@ final class TileSpawner {
         return .spawned(runtime)
     }
 
+    func installBrowserSnapshotTile(runtime: WKWebViewBrowserRuntime, snapshotImage: NSImage) throws {
+        guard let canvasView,
+              let existing = canvasView.canvasState.tiles.first(where: { $0.id == runtime.tileId })
+        else { throw SpawnError.canvasUnavailable }
+        try writeBrowserTileSnapshotOrThrow(for: runtime)
+        var tile = existing
+        tile.runtimeRef = nil
+        if !runtime.title.isEmpty {
+            tile.title = runtime.title
+        }
+        let view = BrowserSnapshotTileNSView(
+            tile: tile,
+            snapshotImage: snapshotImage,
+            urlString: runtime.url
+        )
+        canvasView.install(tileView: view, for: tile)
+        try projectStore.saveCanvas(canvasView.canvasState)
+        runtime.terminate(policy: .force)
+    }
+
     /// Re-resolve an existing browser tile's URL and replace its view with a
     /// fresh runtime. Reuses tile id, frame, and z-index.
     func restartBrowserTile(tileId: UUID) -> BrowserRestartOutcome {
@@ -581,15 +601,21 @@ final class TileSpawner {
     /// Persist the current url/title for a runtime's tile. Called by the
     /// AppDelegate's debounced flush in response to runtime state changes.
     func writeBrowserTileSnapshot(for runtime: WKWebViewBrowserRuntime) {
+        try? writeBrowserTileSnapshotOrThrow(for: runtime)
+    }
+
+    func writeBrowserTileSnapshotOrThrow(for runtime: WKWebViewBrowserRuntime) throws {
         guard let canvasView,
               let tile = canvasView.canvasState.tiles.first(where: { $0.id == runtime.tileId })
         else { return }
         let storageGroupId = BrowserState.storageGroupIdentifier(for: project)
-        try? upsertBrowserTile(
+        let persistedTitle = try loadBrowserStateIfAvailable()?.tiles.first(where: { $0.tileId == tile.id })?.title
+        let title = runtime.title.isEmpty ? (persistedTitle ?? runtime.title) : runtime.title
+        try upsertBrowserTile(
             runtimeId: runtime.id,
             tileId: tile.id,
             url: runtime.url,
-            title: runtime.title,
+            title: title,
             storageGroupId: storageGroupId
         )
     }
@@ -684,12 +710,44 @@ final class TileSpawner {
         case let .failure(error):
             throw CheckError.failed("restartBrowserTile failed: \(error)")
         }
+        var runtimeToClose: WKWebViewBrowserRuntime?
         defer {
-            runtime.terminate(policy: .requestClose)
+            runtimeToClose?.terminate(policy: .requestClose)
             browserEngine.shutdown()
         }
 
         let browserTileView = canvas.tileView(for: tileId) as? BrowserTileNSView
+        let snapshotImage = NSImage(size: NSSize(width: 80, height: 60))
+        snapshotImage.lockFocus()
+        NSColor.systemBlue.setFill()
+        NSRect(x: 0, y: 0, width: 80, height: 60).fill()
+        snapshotImage.unlockFocus()
+        do {
+            try spawner.installBrowserSnapshotTile(runtime: runtime, snapshotImage: snapshotImage)
+        } catch {
+            throw CheckError.failed("installBrowserSnapshotTile failed: \(error)")
+        }
+        let installedSnapshot = true
+        let snapshotTileView = canvas.tileView(for: tileId) as? BrowserSnapshotTileNSView
+        let snapshotCanvasTile = canvas.canvasState.tiles.first(where: { $0.id == tileId })
+        let snapshotContainsWKWebView = snapshotTileView?.subviews.contains { subview in
+            String(describing: type(of: subview)).contains("WKWebView")
+        } ?? false
+        let postSnapshotState = try store.loadBrowserState()
+        let postSnapshotEntry = postSnapshotState.tiles.first(where: { $0.tileId == tileId })
+        let rehydratedRuntime: WKWebViewBrowserRuntime
+        switch spawner.restartBrowserTile(tileId: tileId) {
+        case let .restarted(created):
+            rehydratedRuntime = created
+            runtimeToClose = created
+        case let .invalidURL(url):
+            throw CheckError.failed("rehydrate rejected snapshot URL: \(url)")
+        case .tileNotFound:
+            throw CheckError.failed("rehydrate did not find snapshotted tile")
+        case let .failure(error):
+            throw CheckError.failed("rehydrate failed: \(error)")
+        }
+        let rehydratedTileView = canvas.tileView(for: tileId) as? BrowserTileNSView
         let runtimeURL = runtime.url
         let chromeURL = browserTileView?.chromeURLStringForQA
         let tileTitle = browserTileView?.tile.title
@@ -842,6 +900,14 @@ final class TileSpawner {
             "postBootBrowserStateTitle": postBootTitle as Any,
             "postBootStorageGroupId": postBootStorageGroupId as Any,
             "browserStateTileCount": postBootState.tiles.count,
+            "snapshotInstalled": installedSnapshot,
+            "snapshotViewPresent": snapshotTileView != nil,
+            "snapshotCanvasRuntimeRefCleared": snapshotCanvasTile?.runtimeRef == nil,
+            "snapshotContainsWKWebView": snapshotContainsWKWebView,
+            "postSnapshotBrowserStateUrl": postSnapshotEntry?.url as Any,
+            "postSnapshotBrowserStateTitle": postSnapshotEntry?.title as Any,
+            "rehydratedViewPresent": rehydratedTileView != nil,
+            "rehydratedRuntimeUrl": rehydratedRuntime.url,
             "corruptRestartFailedSafely": corruptRestartFailedSafely,
             "corruptRestartFailureDescription": corruptRestartFailureDescription,
             "corruptBrowserStateUnchanged": corruptBrowserStateUnchanged,
@@ -884,6 +950,13 @@ final class TileSpawner {
         try expect(postBootTitle == browserStateTitle, "boot should preserve BrowserState title B")
         try expect(postBootStorageGroupId == expectedStorageGroupId, "boot should preserve expected storage group id")
         try expect(postBootState.tiles.count == 1, "boot should not create an extra BrowserState entry")
+        try expect(installedSnapshot, "dehydrate should install a browser snapshot tile")
+        try expect(snapshotTileView != nil, "dehydrate should replace live browser view with BrowserSnapshotTileNSView")
+        try expect(snapshotCanvasTile?.runtimeRef == nil, "snapshot canvas tile should not reference a live runtime")
+        try expect(!snapshotContainsWKWebView, "snapshot tile should not retain a WKWebView descendant")
+        try expect(postSnapshotEntry?.url == browserStateURL, "dehydrate should persist BrowserState URL before terminating runtime")
+        try expect(rehydratedTileView != nil, "rehydrate should reinstall live BrowserTileNSView")
+        try expect(rehydratedRuntime.url == browserStateURL, "rehydrate should restore URL from BrowserState")
         try expect(runtimeURL != canvasURL && chromeURL != canvasURL && postBootURL != canvasURL, "URL A must not be used for runtime, chrome, or post-boot BrowserState")
         try expect(runtimeURL != Self.defaultBrowserURL && chromeURL != Self.defaultBrowserURL && postBootURL != Self.defaultBrowserURL, "default URL must not mask restore source")
         try expect(corruptRestartFailedSafely, "corrupt BrowserState should fail safely instead of restarting from canvas metadata")
