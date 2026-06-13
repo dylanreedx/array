@@ -1649,7 +1649,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private static func recordProjectInRegistry(project: Project, in store: RegistryStore) throws {
         var registry = try store.loadOrEmpty()
-        registry.upsertProject(project, openedAt: Date())
+        _ = try DefaultWorkspaceMigration().ensureDefaultWorkspace(
+            for: project,
+            registry: &registry,
+            applicationSupportDirectory: store.registryFile.deletingLastPathComponent()
+        )
         try store.save(registry)
     }
 

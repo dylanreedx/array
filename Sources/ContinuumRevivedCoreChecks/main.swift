@@ -609,6 +609,106 @@ do {
     }
 }
 
+// MARK: - DefaultWorkspaceMigration
+
+do {
+    let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-default-workspace-migration-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: scratch) }
+
+    let projectId = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+    let workspaceId = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+    let zoneId = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let project = Project(
+        id: projectId,
+        name: "continuum-revived",
+        rootPath: scratch.appendingPathComponent("project").path,
+        createdAt: now,
+        updatedAt: now,
+        defaultLaunchProfileId: "shell",
+        editorPreference: .auto,
+        settings: ProjectSettings(
+            restorePolicy: .restoreDescriptors,
+            browserStoragePolicy: .perProject,
+            terminalClosePolicy: .askWhenRunning
+        )
+    )
+
+    var registry = Registry.empty()
+    let migration = DefaultWorkspaceMigration()
+    let ensuredWorkspaceId = try migration.ensureDefaultWorkspace(
+        for: project,
+        registry: &registry,
+        applicationSupportDirectory: scratch,
+        now: now,
+        workspaceId: workspaceId,
+        zoneId: zoneId
+    )
+
+    expect(ensuredWorkspaceId == workspaceId, "DefaultWorkspaceMigration returns created workspace id")
+    expect(registry.workspaces.count == 1, "DefaultWorkspaceMigration creates one workspace")
+    expect(registry.workspaces[0].name == "Default", "DefaultWorkspaceMigration names workspace Default")
+    expect(registry.workspaces[0].projectIds == [projectId], "DefaultWorkspaceMigration attaches project to workspace")
+    expect(registry.lastActiveWorkspaceId == workspaceId, "DefaultWorkspaceMigration sets lastActiveWorkspaceId")
+    expect(registry.lastActiveProjectId == projectId, "DefaultWorkspaceMigration preserves lastActiveProjectId behavior")
+    expect(registry.projects.first?.workspaceId == workspaceId, "DefaultWorkspaceMigration links project entry to workspace")
+
+    let loaded = try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: scratch).load()
+    expect(loaded.zones.count == 1, "DefaultWorkspaceMigration creates one zone")
+    expect(loaded.zones[0].projectId == projectId, "DefaultWorkspaceMigration zone references project")
+    expect(loaded.zones[0].origin == ZonePoint(x: 0, y: 0), "DefaultWorkspaceMigration zone starts at origin")
+    expect(loaded.zoneZOrder == [zoneId], "DefaultWorkspaceMigration z-order matches zone")
+    expect(loaded.lastActiveZoneId == zoneId, "DefaultWorkspaceMigration records active zone")
+
+    let secondWorkspaceId = try migration.ensureDefaultWorkspace(
+        for: project,
+        registry: &registry,
+        applicationSupportDirectory: scratch,
+        now: now.addingTimeInterval(60),
+        workspaceId: UUID(),
+        zoneId: UUID()
+    )
+    let loadedAgain = try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: scratch).load()
+    expect(secondWorkspaceId == workspaceId, "DefaultWorkspaceMigration reuses workspace on second boot")
+    expect(registry.workspaces.count == 1, "DefaultWorkspaceMigration does not duplicate workspace")
+    expect(loadedAgain.zones.count == 1, "DefaultWorkspaceMigration does not duplicate zones")
+    expect(loadedAgain.zones[0].zoneId == zoneId, "DefaultWorkspaceMigration preserves existing zone id")
+
+    let workspaceA = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+    let workspaceB = UUID(uuidString: "55555555-5555-5555-5555-555555555555")!
+    var existingRegistry = Registry(
+        lastActiveWorkspaceId: workspaceA,
+        lastActiveProjectId: projectId,
+        workspaces: [
+            WorkspaceEntry(id: workspaceA, name: "A", projectIds: [], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: workspaceB, name: "B", projectIds: [projectId], createdAt: now, updatedAt: now)
+        ],
+        projects: [ProjectEntry(
+            id: projectId,
+            name: project.name,
+            rootPath: project.rootPath,
+            workspaceId: workspaceB,
+            lastOpenedAt: now,
+            pinned: false
+        )],
+        settings: Registry.empty().settings
+    )
+    let preservedWorkspaceId = try migration.ensureDefaultWorkspace(
+        for: project,
+        registry: &existingRegistry,
+        applicationSupportDirectory: scratch,
+        now: now.addingTimeInterval(120),
+        workspaceId: UUID(),
+        zoneId: UUID()
+    )
+    expect(preservedWorkspaceId == workspaceB, "DefaultWorkspaceMigration preserves a project's assigned workspace")
+    expect(existingRegistry.workspaces.first(where: { $0.id == workspaceA })?.projectIds.contains(projectId) == false, "DefaultWorkspaceMigration does not duplicate project into last active workspace")
+    expect(existingRegistry.workspaces.first(where: { $0.id == workspaceB })?.projectIds == [projectId], "DefaultWorkspaceMigration keeps project in assigned workspace")
+    expect(existingRegistry.projects.first?.workspaceId == workspaceB, "DefaultWorkspaceMigration keeps project entry workspace assignment")
+}
+
 // MARK: - AtomicWriter
 
 do {
