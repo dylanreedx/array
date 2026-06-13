@@ -556,6 +556,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let projectStore = zoneRuntimeController.projectStore
             let project = zoneRuntimeController.project
             try Self.recordProjectInRegistry(project: project, in: registryStore)
+            let activeZone = try Self.loadActiveSingleZone(for: project, from: registryStore)
 
             let ghostty = try GhosttyRuntimeContext()
             let browserEngine = BrowserEngineContext()
@@ -587,7 +588,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 canvasState.tiles.append(Self.defaultTerminalTile())
             }
 
-            let canvasView = CanvasNSView(canvasState: canvasState)
+            let canvasView = CanvasNSView(canvasState: canvasState, activeZone: activeZone)
             canvasView.delegate = self
             canvasView.onTileCloseRequested = { [weak self] tileId in
                 self?.deleteTile(id: tileId)
@@ -1655,6 +1656,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             applicationSupportDirectory: store.registryFile.deletingLastPathComponent()
         )
         try store.save(registry)
+    }
+
+    private static func loadActiveSingleZone(for project: Project, from store: RegistryStore) throws -> ZonePlacement? {
+        let registry = try store.loadOrEmpty()
+        let projectWorkspaceId = registry.projects.first(where: { $0.id == project.id })?.workspaceId
+        guard let workspaceId = projectWorkspaceId ?? registry.lastActiveWorkspaceId else { return nil }
+        let workspaceStore = WorkspaceStore(
+            workspaceId: workspaceId,
+            applicationSupportDirectory: store.registryFile.deletingLastPathComponent()
+        )
+        let document = try workspaceStore.load()
+        return document.zones.first { $0.projectId == project.id }
     }
 
     private static func mainWindowTitle(for project: Project) -> String {

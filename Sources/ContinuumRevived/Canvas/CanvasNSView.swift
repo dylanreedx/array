@@ -29,6 +29,10 @@ final class CanvasNSView: NSView {
     }
 
     private(set) var canvasState: CanvasState
+    /// Active single-zone placement for stage-2 integration. Tile frames remain
+    /// persisted zone-local; layout/hit-testing consume world frames through
+    /// CanvasEngine. With the default origin (0,0), this is behavior-neutral.
+    private let activeZone: ZonePlacement?
     private var tileViews: [UUID: TileNSView] = [:]
     private var emptyStateView: CanvasEmptyStateNSView?
     private var emptyStateActions: CanvasEmptyStateActions?
@@ -41,8 +45,9 @@ final class CanvasNSView: NSView {
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
-    init(canvasState: CanvasState) {
+    init(canvasState: CanvasState, activeZone: ZonePlacement? = nil) {
         self.canvasState = canvasState
+        self.activeZone = activeZone
         super.init(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.withAlphaComponent(0.92).cgColor
@@ -169,7 +174,15 @@ final class CanvasNSView: NSView {
     /// Returns the topmost tile id at a screen-space point according to the
     /// semantic canvas model, not AppKit subview insertion order.
     func tileId(at screenPoint: CGPoint) -> UUID? {
-        CanvasEngine.hitTest(screenPoint: screenPoint, viewport: canvasState.viewport, tiles: canvasState.tiles)?.id
+        if let activeZone {
+            let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: canvasState.viewport)
+            return CanvasEngine.hitTest(
+                worldPoint: worldPoint,
+                zones: [CanvasEngine.NavigationZone(id: activeZone.zoneId, frame: CanvasEngine.zoneWorldFrame(activeZone), zIndex: 0)],
+                tilesByZone: [activeZone.zoneId: canvasState.tiles]
+            )?.tile.id
+        }
+        return CanvasEngine.hitTest(screenPoint: screenPoint, viewport: canvasState.viewport, tiles: canvasState.tiles)?.id
     }
 
     var viewport: CanvasViewport { canvasState.viewport }
@@ -219,7 +232,8 @@ final class CanvasNSView: NSView {
 
     private func layoutTile(_ tile: Tile) {
         guard let view = tileViews[tile.id] else { return }
-        let rect = CanvasEngine.tileScreenFrame(tile.frame, viewport: canvasState.viewport)
+        let worldFrame = activeZone.map { CanvasEngine.worldFrame(tile: tile, in: $0) } ?? tile.frame
+        let rect = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport)
         view.frame = rect
         view.bounds = NSRect(x: 0, y: 0, width: tile.frame.width, height: tile.frame.height)
         view.tile = tile
@@ -725,7 +739,8 @@ final class CanvasNSView: NSView {
         }
         let screenPoint = convert(sender.draggingLocation, from: nil)
         let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: canvasState.viewport)
-        onFileURLDrop?(url.path, worldPoint)
+        let spawnPoint = activeZone.map { CanvasEngine.zoneLocalPoint(world: worldPoint, zone: $0) } ?? worldPoint
+        onFileURLDrop?(url.path, spawnPoint)
         return true
     }
 
