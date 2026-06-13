@@ -1343,7 +1343,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func installInitialDiffReviewTile(_ tile: Tile, in canvasView: CanvasNSView) {
-        canvasView.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+        if let activeProject {
+            canvasView.install(tileView: DiffReviewTileNSView(tile: tile, repositoryURL: URL(fileURLWithPath: activeProject.rootPath, isDirectory: true)), for: tile)
+        } else {
+            canvasView.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+        }
     }
 
     private func dispatchAgent(for row: LinearTicketQueueRow) {
@@ -2131,14 +2135,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func spawnDiffReviewFromPalette() {
         guard let canvasView,
-              let projectStore else { return }
+              let projectStore,
+              let activeProject else { return }
         let reviewId = UUID()
         var canvasState = canvasView.canvasState
         let tile = Self.materializeDiffReviewTile(in: &canvasState, reviewId: reviewId)
         let reviewState = ReviewCommentState(reviewId: reviewId, comments: [])
         do {
             try projectStore.saveReviewCommentState(reviewState)
-            canvasView.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+            canvasView.install(tileView: DiffReviewTileNSView(tile: tile, repositoryURL: URL(fileURLWithPath: activeProject.rootPath, isDirectory: true)), for: tile)
             try projectStore.saveCanvas(canvasView.canvasState)
             focusSpawnedTile(tile.id)
         } catch {
@@ -5273,6 +5278,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             throw NSError(domain: "DiffTileCheck", code: 2, userInfo: [NSLocalizedDescriptionKey: "GitDiffEngine did not parse fixture diff"])
         }
 
+        let diffView = DiffReviewTileNSView(tile: tile, model: diff)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 420), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = diffView
+        diffView.frame = window.contentView?.bounds ?? .zero
+        diffView.autoresizingMask = [.width, .height]
+        window.layoutIfNeeded()
+        let diffViewEvidence = diffView.visibilityEvidence(containing: "+two")
+        guard diffViewEvidence.ok else {
+            throw NSError(domain: "DiffTileCheck", code: 5, userInfo: [NSLocalizedDescriptionKey: "diff review tile did not render visible read-only diff text: \(diffViewEvidence)"])
+        }
+
         let store = ProjectStore(projectRoot: projectRoot)
         try store.saveCanvas(materialized)
         let now = Date()
@@ -5297,12 +5313,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let dir = URL(fileURLWithPath: "qa-runs/diff-tile-\(timestamp)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let screenshot = dir.appendingPathComponent("diff-review-tile.png")
+        if let bitmap = diffView.bitmapImageRepForCachingDisplay(in: diffView.bounds) {
+            diffView.cacheDisplay(in: diffView.bounds, to: bitmap)
+            if let png = bitmap.representation(using: .png, properties: [:]) {
+                try png.write(to: screenshot, options: .atomic)
+            }
+        }
         let artifact = dir.appendingPathComponent("manifest.json")
         let manifest: [String: Any] = [
             "tileId": tile.id.uuidString,
             "kind": tile.kind.rawValue,
             "reviewId": reviewId.uuidString,
             "diffFiles": diff.files.map { $0.newPath ?? $0.oldPath ?? "" },
+            "diffViewEvidence": diffViewEvidence.description,
+            "screenshot": screenshot.path,
             "persistedComments": restoredReview.comments.count,
             "reviewSidecarRemoved": true,
             "status": "passed"

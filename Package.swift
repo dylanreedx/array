@@ -31,6 +31,7 @@ let package = Package(
                 "Canvas/CanvasEmptyStateNSView.swift",
                 "Canvas/CanvasNSView.swift",
                 "Canvas/DescriptorTileNSView.swift",
+                "Canvas/DiffReviewTileNSView.swift",
                 "Canvas/FileTileNSView.swift",
                 "Canvas/FileTreeTileNSView.swift",
                 "Canvas/NoteTileNSView.swift",
