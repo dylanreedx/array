@@ -455,16 +455,37 @@ final class ZoneRuntimeController {
         let projectARoot = tempRoot.appendingPathComponent("ProjectA", isDirectory: true)
         let projectBRoot = tempRoot.appendingPathComponent("ProjectB", isDirectory: true)
         let projectCRoot = tempRoot.appendingPathComponent("ProjectC", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
         try fileManager.createDirectory(at: projectARoot, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: projectBRoot, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: projectCRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: appSupport, withIntermediateDirectories: true)
 
         let tileA = UUID(uuidString: "00000000-0000-0000-0000-0000000049A1")!
         let tileB = UUID(uuidString: "00000000-0000-0000-0000-0000000049B2")!
         let tileC = UUID(uuidString: "00000000-0000-0000-0000-0000000049C3")!
+        let workspaceId = UUID(uuidString: "00000000-0000-0000-0000-0000000049D4")!
         let (storeA, projectA, canvasA) = try seedProject(root: projectARoot, name: "Project A", tileId: tileA)
         let (storeB, projectB, canvasB) = try seedProject(root: projectBRoot, name: "Project B", tileId: tileB)
         let (storeC, projectC, canvasC) = try seedProject(root: projectCRoot, name: "Project C", tileId: tileC)
+        let workspaceStore = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
+        var workspaceDocument = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [ZonePlacement(
+                zoneId: UUID(uuidString: "00000000-0000-0000-0000-0000000049E5")!,
+                projectId: projectA.id,
+                origin: ZonePoint(x: 0, y: 0),
+                size: ZoneSize(width: 1280, height: 720),
+                color: "mint",
+                collapsed: false,
+                hydrationPolicy: .automatic
+            )],
+            zoneZOrder: [UUID(uuidString: "00000000-0000-0000-0000-0000000049E5")!],
+            lastActiveZoneId: UUID(uuidString: "00000000-0000-0000-0000-0000000049E5")!
+        )
+        try workspaceStore.save(workspaceDocument)
+        let beforeWorkspace = try bytes(at: workspaceStore.layout.canvasFile)
+        let beforeWorkspaceModifiedAt = try modificationDate(at: workspaceStore.layout.canvasFile)
         let beforeB = try bytes(at: storeB.layout.canvasFile)
         let beforeBModifiedAt = try modificationDate(at: storeB.layout.canvasFile)
         let beforeC = try bytes(at: storeC.layout.canvasFile)
@@ -505,11 +526,22 @@ final class ZoneRuntimeController {
 
         let afterBWhenAFlushed = try bytes(at: storeB.layout.canvasFile)
         let afterBWhenAFlushedModifiedAt = try modificationDate(at: storeB.layout.canvasFile)
+        let afterWorkspaceWhenProjectAFlushed = try bytes(at: workspaceStore.layout.canvasFile)
+        let afterWorkspaceWhenProjectAFlushedModifiedAt = try modificationDate(at: workspaceStore.layout.canvasFile)
         let reloadedA = try storeA.loadCanvas()
         let bCleanFlushUnchanged = beforeB == afterBCleanFlush && beforeBModifiedAt == afterBCleanFlushModifiedAt
         let cCleanFlushUnchanged = beforeC == afterCCleanFlush && beforeCModifiedAt == afterCCleanFlushModifiedAt
         let bUnchangedAfterAFlush = beforeB == afterBWhenAFlushed && beforeBModifiedAt == afterBWhenAFlushedModifiedAt
+        let workspaceUnchangedAfterProjectFlush = beforeWorkspace == afterWorkspaceWhenProjectAFlushed && beforeWorkspaceModifiedAt == afterWorkspaceWhenProjectAFlushedModifiedAt
         let aViewportFlushed = reloadedA.viewport.x == 49
+
+        workspaceDocument.zones[0].origin.x = 240
+        let workspaceSaveController = WorkspaceDocumentSaveController(store: workspaceStore)
+        workspaceSaveController.scheduleZoneLayoutSave(workspaceDocument)
+        try workspaceSaveController.flushPendingSave()
+        let afterWorkspaceLayoutChange = try bytes(at: workspaceStore.layout.canvasFile)
+        let reloadedWorkspace = try workspaceStore.load()
+        let workspaceChangedAfterZoneLayout = beforeWorkspace != afterWorkspaceLayoutChange && reloadedWorkspace.zones[0].origin.x == 240
 
         viewA.setViewport(CanvasViewport(x: 98, y: 0, zoom: 1))
         controllerA.scheduleCanvasSave()
@@ -525,6 +557,8 @@ final class ZoneRuntimeController {
         try expect(cleanSidecarsAbsent, "clean browser/note/file-tree flushes did not create sidecar files in clean zones")
         try expect(aViewportFlushed, "zone A canvas change flushed to project A")
         try expect(bUnchangedAfterAFlush, "flushing zone A did not rewrite project B canvas")
+        try expect(workspaceUnchangedAfterProjectFlush, "project canvas changes do not rewrite workspace document")
+        try expect(workspaceChangedAfterZoneLayout, "zone-layout changes rewrite workspace document")
         try expect(pendingFlushOnDehydrate, "dehydrating zone A flushes pending canvas changes")
         try expect(bUnchangedAfterDehydrate, "dehydrating zone A did not rewrite project B canvas")
 
@@ -535,8 +569,11 @@ final class ZoneRuntimeController {
             "cleanSidecarsAbsent": cleanSidecarsAbsent,
             "aViewportFlushed": aViewportFlushed,
             "bUnchangedAfterAFlush": bUnchangedAfterAFlush,
+            "workspaceUnchangedAfterProjectFlush": workspaceUnchangedAfterProjectFlush,
+            "workspaceChangedAfterZoneLayout": workspaceChangedAfterZoneLayout,
             "pendingFlushOnDehydrate": pendingFlushOnDehydrate,
             "bUnchangedAfterDehydrate": bUnchangedAfterDehydrate,
+            "workspaceCanvas": workspaceStore.layout.canvasFile.path,
             "projectACanvas": storeA.layout.canvasFile.path,
             "projectBCanvas": storeB.layout.canvasFile.path,
             "projectCCanvas": storeC.layout.canvasFile.path,

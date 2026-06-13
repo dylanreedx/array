@@ -1635,7 +1635,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 registry.projects[projectIndex].workspaceId = workspaceId
             }
             zoneRuntimeController?.flushPendingSaves()
-            try workspaceStore.save(document)
+            let workspaceSaveController = WorkspaceDocumentSaveController(store: workspaceStore)
+            workspaceSaveController.scheduleZoneLayoutSave(document)
+            try workspaceSaveController.flushPendingSave()
             try registryStore.save(registry)
             fputs("Added project zone for \(projectEntry.name) (\(projectId))\n", stderr)
         } catch {
