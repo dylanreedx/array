@@ -4,6 +4,68 @@ import Foundation
 import WebKit
 
 @MainActor
+protocol BrowserUIDialogPresenting: AnyObject {
+    func presentJavaScriptAlert(message: String, window: NSWindow?, completion: @escaping () -> Void)
+    func presentJavaScriptConfirm(message: String, window: NSWindow?, completion: @escaping (Bool) -> Void)
+    func presentJavaScriptPrompt(prompt: String, defaultText: String?, window: NSWindow?, completion: @escaping (String?) -> Void)
+    func presentOpenPanel(allowsMultipleSelection: Bool, allowsDirectories: Bool, window: NSWindow?, completion: @escaping ([URL]?) -> Void)
+}
+
+@MainActor
+final class AppKitBrowserUIDialogPresenter: BrowserUIDialogPresenting {
+    func presentJavaScriptAlert(message: String, window: NSWindow?, completion: @escaping () -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        run(alert: alert, window: window) { _ in completion() }
+    }
+
+    func presentJavaScriptConfirm(message: String, window: NSWindow?, completion: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        run(alert: alert, window: window) { response in completion(response == .alertFirstButtonReturn) }
+    }
+
+    func presentJavaScriptPrompt(prompt: String, defaultText: String?, window: NSWindow?, completion: @escaping (String?) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = prompt
+        let field = NSTextField(string: defaultText ?? "")
+        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        run(alert: alert, window: window) { response in
+            completion(response == .alertFirstButtonReturn ? field.stringValue : nil)
+        }
+    }
+
+    func presentOpenPanel(allowsMultipleSelection: Bool, allowsDirectories: Bool, window: NSWindow?, completion: @escaping ([URL]?) -> Void) {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = allowsMultipleSelection
+        panel.canChooseDirectories = allowsDirectories
+        panel.canChooseFiles = true
+        let finish: (NSApplication.ModalResponse) -> Void = { response in
+            completion(response == .OK ? panel.urls : nil)
+        }
+        if let window {
+            panel.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            finish(panel.runModal())
+        }
+    }
+
+    private func run(alert: NSAlert, window: NSWindow?, completion: @escaping (NSApplication.ModalResponse) -> Void) {
+        if let window {
+            alert.beginSheetModal(for: window, completionHandler: completion)
+        } else {
+            completion(alert.runModal())
+        }
+    }
+}
+
+@MainActor
 final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
     let id: BrowserRuntimeID
     let tileId: TileID
@@ -22,6 +84,7 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
 
     let webView: WKWebView
     private weak var hostView: BrowserHostView?
+    private let uiDialogPresenter: BrowserUIDialogPresenting
     private var observers: [NSKeyValueObservation] = []
     var reservedShortcutHandler: ((NSEvent) -> Bool)? {
         didSet { hostView?.reservedShortcutHandler = reservedShortcutHandler }
@@ -31,11 +94,13 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         id: BrowserRuntimeID = UUID(),
         tileId: TileID,
         webView: WKWebView,
-        initialURL: String
+        initialURL: String,
+        uiDialogPresenter: BrowserUIDialogPresenting = AppKitBrowserUIDialogPresenter()
     ) {
         self.id = id
         self.tileId = tileId
         self.webView = webView
+        self.uiDialogPresenter = uiDialogPresenter
         self.url = initialURL
         self.title = ""
         super.init()
@@ -192,6 +257,123 @@ extension WKWebViewBrowserRuntime: WKNavigationDelegate {
 }
 
 extension WKWebViewBrowserRuntime: WKUIDelegate {
-    // Default WKUIDelegate behavior is sufficient for Phase 5 — no JS alerts /
-    // confirms / file pickers / new-window UX yet.
+    private var dialogWindow: NSWindow? { webView.window ?? hostView?.window }
+
+    func handleJavaScriptAlert(message: String, completion: @escaping () -> Void) {
+        uiDialogPresenter.presentJavaScriptAlert(message: message, window: dialogWindow, completion: completion)
+    }
+
+    func handleJavaScriptConfirm(message: String, completion: @escaping (Bool) -> Void) {
+        uiDialogPresenter.presentJavaScriptConfirm(message: message, window: dialogWindow, completion: completion)
+    }
+
+    func handleJavaScriptPrompt(prompt: String, defaultText: String?, completion: @escaping (String?) -> Void) {
+        uiDialogPresenter.presentJavaScriptPrompt(prompt: prompt, defaultText: defaultText, window: dialogWindow, completion: completion)
+    }
+
+    func handleOpenPanel(allowsMultipleSelection: Bool, allowsDirectories: Bool, completion: @escaping ([URL]?) -> Void) {
+        uiDialogPresenter.presentOpenPanel(
+            allowsMultipleSelection: allowsMultipleSelection,
+            allowsDirectories: allowsDirectories,
+            window: dialogWindow,
+            completion: completion
+        )
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable () -> Void) {
+        handleJavaScriptAlert(message: message, completion: completionHandler)
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable (Bool) -> Void) {
+        handleJavaScriptConfirm(message: message, completion: completionHandler)
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable (String?) -> Void) {
+        handleJavaScriptPrompt(prompt: prompt, defaultText: defaultText, completion: completionHandler)
+    }
+
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable ([URL]?) -> Void) {
+        handleOpenPanel(
+            allowsMultipleSelection: parameters.allowsMultipleSelection,
+            allowsDirectories: parameters.allowsDirectories,
+            completion: completionHandler
+        )
+    }
+}
+
+extension WKWebViewBrowserRuntime {
+    static func runUIDelegateSelfCheck() throws {
+        final class FakePresenter: BrowserUIDialogPresenting {
+            struct Call: Equatable {
+                var kind: String
+                var message: String
+                var windowMatched: Bool
+                var allowsMultipleSelection: Bool
+                var allowsDirectories: Bool
+            }
+            weak var expectedWindow: NSWindow?
+            var calls: [Call] = []
+            func presentJavaScriptAlert(message: String, window: NSWindow?, completion: @escaping () -> Void) {
+                calls.append(Call(kind: "alert", message: message, windowMatched: window === expectedWindow, allowsMultipleSelection: false, allowsDirectories: false))
+                completion()
+            }
+            func presentJavaScriptConfirm(message: String, window: NSWindow?, completion: @escaping (Bool) -> Void) {
+                calls.append(Call(kind: "confirm", message: message, windowMatched: window === expectedWindow, allowsMultipleSelection: false, allowsDirectories: false))
+                completion(false)
+            }
+            func presentJavaScriptPrompt(prompt: String, defaultText: String?, window: NSWindow?, completion: @escaping (String?) -> Void) {
+                calls.append(Call(kind: "prompt", message: "\(prompt)|\(defaultText ?? "")", windowMatched: window === expectedWindow, allowsMultipleSelection: false, allowsDirectories: false))
+                completion("typed")
+            }
+            func presentOpenPanel(allowsMultipleSelection: Bool, allowsDirectories: Bool, window: NSWindow?, completion: @escaping ([URL]?) -> Void) {
+                calls.append(Call(kind: "open", message: "", windowMatched: window === expectedWindow, allowsMultipleSelection: allowsMultipleSelection, allowsDirectories: allowsDirectories))
+                completion([URL(fileURLWithPath: "/tmp/continuum-upload.txt")])
+            }
+        }
+
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { if case let .failed(message) = self { return message }; return "failed" }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fake = FakePresenter()
+        let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let runtime = WKWebViewBrowserRuntime(tileId: TileID(), webView: webView, initialURL: "about:blank", uiDialogPresenter: fake)
+        let host = BrowserHostView()
+        runtime.attach(to: host)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 240), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = host
+        fake.expectedWindow = window
+        window.makeKeyAndOrderFront(nil)
+        defer {
+            runtime.terminate(policy: .requestClose)
+            window.close()
+        }
+
+        var alertCompleted = false
+        runtime.handleJavaScriptAlert(message: "hello") { alertCompleted = true }
+        try expect(alertCompleted, "alert completion should be called")
+
+        var confirmValue: Bool?
+        runtime.handleJavaScriptConfirm(message: "continue?") { confirmValue = $0 }
+        try expect(confirmValue == false, "confirm should forward presenter's default-button/cancel result")
+
+        var promptValue: String?
+        runtime.handleJavaScriptPrompt(prompt: "name", defaultText: "Dylan") { promptValue = $0 }
+        try expect(promptValue == "typed", "prompt should forward presenter text result")
+
+        var urls: [URL]?
+        runtime.handleOpenPanel(allowsMultipleSelection: true, allowsDirectories: true) { urls = $0 }
+        try expect(urls?.map(\.lastPathComponent) == ["continuum-upload.txt"], "open panel should forward selected URLs")
+
+        try expect(fake.calls == [
+            .init(kind: "alert", message: "hello", windowMatched: true, allowsMultipleSelection: false, allowsDirectories: false),
+            .init(kind: "confirm", message: "continue?", windowMatched: true, allowsMultipleSelection: false, allowsDirectories: false),
+            .init(kind: "prompt", message: "name|Dylan", windowMatched: true, allowsMultipleSelection: false, allowsDirectories: false),
+            .init(kind: "open", message: "", windowMatched: true, allowsMultipleSelection: true, allowsDirectories: true)
+        ], "delegate calls should preserve kind, payload, window anchor, and open-panel flags")
+    }
 }
