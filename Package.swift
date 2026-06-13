@@ -36,6 +36,7 @@ let package = Package(
                 "Canvas/NoteTileNSView.swift",
                 "Canvas/TerminalRestartTileNSView.swift",
                 "Canvas/TerminalTileNSView.swift",
+                "Canvas/TicketQueueTileNSView.swift",
                 "Canvas/TileNSView.swift"
             ],
             sources: [

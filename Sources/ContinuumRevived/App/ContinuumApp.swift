@@ -323,6 +323,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--ticket-queue-tile-check") {
+            do {
+                let artifact = try AppDelegate.runTicketQueueTileSelfCheck()
+                print("ContinuumRevivedTicketQueueTileChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--spawn-placement-check") {
             do {
                 _ = NSApplication.shared
@@ -710,6 +721,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                !canvasState.tiles.contains(where: { $0.kind == .terminal }) {
                 canvasState.tiles.append(Self.defaultTerminalTile())
             }
+            if let queueConfig = registry.projects.first(where: { $0.id == project.id })?.linearTicketQueue {
+                Self.materializeTicketQueueTile(in: &canvasState, config: queueConfig)
+            }
 
             let canvasView = CanvasNSView(canvasState: canvasState, activeZone: activeZone, zoneRenderModels: zoneRenderModels)
             canvasView.delegate = self
@@ -784,6 +798,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     installInitialFileTile(tile, in: canvasView, via: spawner)
                 case .fileTree:
                     installInitialFileTreeTile(tile, in: canvasView, via: spawner)
+                case .ticketQueue:
+                    installInitialTicketQueueTile(tile, in: canvasView)
                 }
             }
 
@@ -1035,6 +1051,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 fileTreeState.tiles.removeAll { $0.tileId == id }
                 try? projectStore.saveFileTreeState(fileTreeState)
             }
+        case .ticketQueue:
+            break
         }
 
         canvasView.removeTile(id: id)
@@ -1187,6 +1205,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case let .failure(error):
             fputs("Boot file-tree install failed: \(error)\n", stderr)
         }
+    }
+
+    private func installInitialTicketQueueTile(_ tile: Tile, in canvasView: CanvasNSView) {
+        canvasView.install(tileView: TicketQueueTileNSView(tile: tile), for: tile)
     }
 
     // MARK: - Hotkeys + spawning
@@ -1876,6 +1898,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: "shell", projectRelativeCwd: ".")
         )
+    }
+
+    private static func materializeTicketQueueTile(in canvasState: inout CanvasState, config: LinearTicketQueueConfig) {
+        guard !canvasState.tiles.contains(where: { $0.kind == .ticketQueue }) else { return }
+        canvasState.tiles.append(Tile(
+            id: UUID(),
+            kind: .ticketQueue,
+            title: "\(config.teamKey) Ticket Queue",
+            frame: TileFrame(x: 80, y: 80, width: 520, height: 480),
+            zIndex: (canvasState.tiles.map(\.zIndex).max() ?? 0) + 1,
+            runtimeRef: nil,
+            metadata: TileMetadata(linearTeamKey: config.teamKey, linearTeamId: config.teamId, linearQuery: config.query)
+        ))
     }
 
     private static func seedSmokeTestTiles(in projectStore: ProjectStore, projectRoot: URL) throws -> [Tile] {
@@ -4412,6 +4447,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             tSec: 1.8,
             success: true
         )
+    }
+    static func runTicketQueueTileSelfCheck() throws -> URL {
+        var materialized = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil)
+        Self.materializeTicketQueueTile(in: &materialized, config: LinearTicketQueueConfig(teamKey: "CON", teamId: "9d6655c7-35cb-47ef-9b24-d0342700691d", query: "state:Todo"))
+        guard materialized.tiles.count == 1,
+              materialized.tiles[0].kind == .ticketQueue,
+              materialized.tiles[0].metadata.linearTeamKey == "CON" else {
+            throw NSError(domain: "TicketQueueTileCheck", code: 4, userInfo: [NSLocalizedDescriptionKey: "registry ticket queue config did not materialize a canvas tile"])
+        }
+
+        let tileId = UUID(uuidString: "A1300000-0000-4000-8000-000000000130")!
+        let state = CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [Tile(
+                id: tileId,
+                kind: .ticketQueue,
+                title: "CON Ticket Queue",
+                frame: TileFrame(x: 40, y: 60, width: 520, height: 480),
+                zIndex: 1,
+                runtimeRef: nil,
+                metadata: TileMetadata(linearTeamKey: "CON", linearTeamId: "9d6655c7-35cb-47ef-9b24-d0342700691d", linearQuery: "state:Todo")
+            )],
+            groups: [],
+            lastActiveTileId: tileId
+        )
+        let projectRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("continuum-ticket-queue-check-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        let store = ProjectStore(projectRoot: projectRoot)
+        try store.saveCanvas(state)
+        let restored = try store.loadCanvas()
+        guard restored.tiles.count == 1,
+              restored.tiles[0].kind == .ticketQueue,
+              restored.tiles[0].metadata.linearTeamKey == "CON",
+              restored.tiles[0].metadata.linearTeamId == "9d6655c7-35cb-47ef-9b24-d0342700691d",
+              restored.tiles[0].metadata.linearQuery == "state:Todo" else {
+            throw NSError(domain: "TicketQueueTileCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: "ticket queue tile did not persist through ProjectStore"])
+        }
+
+        let fixture = """
+        {"issues":{"nodes":[{"identifier":"CON-130","title":"Ticket queue","priority":2,"state":{"name":"Todo","type":"unstarted"},"labels":{"nodes":[{"name":"v1"}]}}]}}
+        """.data(using: .utf8)!
+        let rows = try LinearTicketQueueMapper.rows(from: fixture)
+        let rendered = TicketQueueTileNSView(tile: restored.tiles[0], rows: rows, emptyStateMessage: nil)
+        let renderedTexts = Self.textFieldStrings(in: rendered)
+        guard rendered.renderedRowIdentifiers == ["CON-130"],
+              renderedTexts.contains(where: { $0.contains("CON-130") && $0.contains("High") && $0.contains("Todo") }) else {
+            throw NSError(domain: "TicketQueueTileCheck", code: 2, userInfo: [NSLocalizedDescriptionKey: "ticket queue tile did not render fixture row text"])
+        }
+        let empty = TicketQueueTileNSView(tile: restored.tiles[0], rows: [], emptyStateMessage: "No Linear API key configured")
+        let emptyTexts = Self.textFieldStrings(in: empty)
+        guard empty.emptyStateMessage == "No Linear API key configured",
+              emptyTexts.contains("No Linear API key configured") else {
+            throw NSError(domain: "TicketQueueTileCheck", code: 3, userInfo: [NSLocalizedDescriptionKey: "ticket queue tile did not render no-key empty-state text"])
+        }
+
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let dir = URL(fileURLWithPath: "qa-runs/ticket-queue-tile-\(timestamp)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let artifact = dir.appendingPathComponent("manifest.json")
+        try Data(contentsOf: store.layout.canvasFile).write(to: dir.appendingPathComponent("canvas.json"))
+        let observedText = (renderedTexts + emptyTexts).map { $0.replacingOccurrences(of: "\"", with: "'") }.joined(separator: " | ")
+        try "{\"tileId\":\"\(tileId.uuidString)\",\"kind\":\"ticketQueue\",\"teamKey\":\"CON\",\"renderedRows\":[\"CON-130\"],\"emptyState\":\"No Linear API key configured\",\"observedText\":\"\(observedText)\",\"status\":\"passed\"}\n".write(to: artifact, atomically: true, encoding: .utf8)
+        return artifact
+    }
+
+    private static func textFieldStrings(in view: NSView) -> [String] {
+        var result: [String] = []
+        if let textField = view as? NSTextField {
+            result.append(textField.stringValue)
+        }
+        for subview in view.subviews {
+            result.append(contentsOf: textFieldStrings(in: subview))
+        }
+        return result
     }
 }
 

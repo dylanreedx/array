@@ -906,3 +906,18 @@ Consequences:
 - E5/E6 multi-zone work can instantiate/reuse controllers per project without
   changing project-local storage shape; single-zone behavior remains the
   equivalence baseline until zone tickets add new semantics with checks.
+
+## ADR-0025: Linear Ticket Queue Tile Is Read-Only V1
+
+**Status:** Accepted
+**Date:** 2026-06-13
+
+Decision:
+
+Continuum v1 includes a `ticketQueue` tile kind for the Linear CON backlog. The tile stores only configuration/identity (team key/id and optional query) in project/canvas metadata and treats fetched issue rows as refreshable view data. API credentials must come from the environment/keychain at runtime and are never persisted in project files.
+
+Consequences:
+
+- The deterministic model boundary is fixture JSON → queue rows in Core; app checks use seeded metadata/stubs, not live Linear.
+- Offline/no-key is a normal empty state, not a startup error.
+- Dispatching agents, editing tickets, and OAuth remain follow-up work.

@@ -26,6 +26,7 @@ extension TileNSView: FocusSurfaceAdapter {
         case .note: return .note
         case .file: return .file
         case .fileTree: return .fileTree
+        case .ticketQueue: return .ticketQueue
         }
     }
 

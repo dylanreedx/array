@@ -35,13 +35,16 @@ local-first, harness-integrated version for a terminal-first developer.
    from the pi/conductor setup (`.pi/agents/` roles, `.conductor/conductor.db`
    task queue, `run.json`/`final.md`/`events.jsonl` artifacts, `qa-runs/`
    verdicts). Opinionated: we build for our harness first, generalize later.
-5. **Diff review tile** — review a worktree/branch diff on-canvas like a PR;
+5. **Ticket queue tile** — show the Linear CON backlog on-canvas as a
+   read-only queue tile (identifier, title, state, priority, labels) with
+   offline/no-key empty states; dispatch/editing are follow-ups.
+6. **Diff review tile** — review a worktree/branch diff on-canvas like a PR;
    send feedback to an agent without copy-paste (v1: read + comment file;
    flyback via harness prompt).
-6. **Real-browser tiles** — persistent credentials, cookies, localStorage via
+7. **Real-browser tiles** — persistent credentials, cookies, localStorage via
    per-profile persistent `WKWebsiteDataStore`s; profile picker per tile;
    good-enough-to-test-your-app fidelity.
-7. **Focus mode** — collapse the canvas to one tile + one agent split pane;
+8. **Focus mode** — collapse the canvas to one tile + one agent split pane;
    Escape restores the canvas exactly.
 
 ## Explicit v1 non-goals
@@ -53,7 +56,7 @@ local-first, harness-integrated version for a terminal-first developer.
   only; document the boundary honestly.
 - No native code editor (Neovim profile + external editor handoff stays,
   per ADR-0007). Editor tile is post-v1.
-- No todo-inbox tile in v1 (the conductor queue tile covers "what's next").
+- No generic todo-inbox tile in v1; the v1 queue is Linear CON read-only.
 
 ## Architecture (decided 2026-06-10; ADR-0022)
 

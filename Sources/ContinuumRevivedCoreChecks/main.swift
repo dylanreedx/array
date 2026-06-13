@@ -71,6 +71,48 @@ do {
     expect(engine.tick(at: t0.addingTimeInterval(8)) == .idle, "unknown title should not prolong working-to-idle hysteresis")
 }
 
+// MARK: - Linear ticket queue model
+
+do {
+    let fixture = """
+    {"issues":{"nodes":[
+      {"identifier":"CON-131","title":"Dispatch agent","priority":3,"state":{"name":"Todo","type":"unstarted"},"labels":{"nodes":[{"name":"agent"},{"name":"v1"}]}},
+      {"identifier":"CON-130","title":"Ticket queue","priority":2,"state":{"name":"In Progress","type":"started"},"labels":{"nodes":[]}},
+      {"identifier":"CON-123","title":"QA hardening","priority":4,"state":{"name":"Todo","type":"unstarted"}}
+    ]}}
+    """.data(using: .utf8)!
+    let rows = try LinearTicketQueueMapper.rows(from: fixture)
+    expect(rows.map(\.identifier) == ["CON-130", "CON-131", "CON-123"], "ticket queue rows sort by Linear priority then identifier")
+    expect(rows[0].priority == .high && rows[0].priority.displayName == "High", "priority 2 maps to High")
+    expect(rows[1].labels == ["agent", "v1"], "labels decode and sort")
+    expect(rows[2].state == "Todo" && rows[2].stateType == "unstarted", "state fields decode")
+}
+
+do {
+    let legacy = """
+    {"id":"A0000000-0000-4000-8000-000000000001","name":"Project","rootPath":"/tmp/project","lastOpenedAt":"2026-06-13T00:00:00Z","pinned":false}
+    """.data(using: .utf8)!
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let entry = try decoder.decode(ProjectEntry.self, from: legacy)
+    expect(entry.linearTicketQueue == nil, "project entry tolerantly decodes without ticket queue config")
+
+    let configured = ProjectEntry(
+        id: UUID(uuidString: "A0000000-0000-4000-8000-000000000002")!,
+        name: "Configured",
+        rootPath: "/tmp/configured",
+        workspaceId: nil,
+        lastOpenedAt: Date(timeIntervalSince1970: 0),
+        pinned: false,
+        linearTicketQueue: LinearTicketQueueConfig(teamKey: "CON", teamId: "9d6655c7-35cb-47ef-9b24-d0342700691d", query: "state:Todo")
+    )
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    let encoded = try encoder.encode(configured)
+    let decoded = try decoder.decode(ProjectEntry.self, from: encoded)
+    expect(decoded.linearTicketQueue == configured.linearTicketQueue, "project entry round-trips ticket queue config")
+}
+
 // MARK: - Focus model
 
 do {
@@ -1975,6 +2017,7 @@ do {
         TileGeometryPresetCase(kind: .note, defaultSize: CGSize(width: 640, height: 400), minimumSize: CGSize(width: 240, height: 160), aspect: .free, quantum: nil),
         TileGeometryPresetCase(kind: .file, defaultSize: CGSize(width: 320, height: 480), minimumSize: CGSize(width: 200, height: 200), aspect: .free, quantum: nil),
         TileGeometryPresetCase(kind: .fileTree, defaultSize: CGSize(width: 360, height: 520), minimumSize: CGSize(width: 220, height: 240), aspect: .free, quantum: nil),
+        TileGeometryPresetCase(kind: .ticketQueue, defaultSize: CGSize(width: 520, height: 480), minimumSize: CGSize(width: 320, height: 240), aspect: .free, quantum: nil),
     ]
 
     for row in cases {
