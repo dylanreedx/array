@@ -168,6 +168,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--multi-zone-render-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try CanvasNSView.runMultiZoneRenderSelfCheck()
+                print("ContinuumRevivedMultiZoneRenderChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--tile-world-bounds-check") {
             do {
                 _ = NSApplication.shared
@@ -629,7 +641,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let projectStore = zoneRuntimeController.projectStore
             let project = zoneRuntimeController.project
             try Self.recordProjectInRegistry(project: project, in: registryStore)
-            let activeZone = try Self.loadActiveSingleZone(for: project, from: registryStore)
+            let zoneRenderModels = try Self.loadActiveZoneRenderModels(from: registryStore)
+            let activeZone = zoneRenderModels.first(where: { $0.placement.projectId == project.id })?.placement
 
             let ghostty = try GhosttyRuntimeContext()
             let browserEngine = BrowserEngineContext()
@@ -661,7 +674,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 canvasState.tiles.append(Self.defaultTerminalTile())
             }
 
-            let canvasView = CanvasNSView(canvasState: canvasState, activeZone: activeZone)
+            let canvasView = CanvasNSView(canvasState: canvasState, activeZone: activeZone, zoneRenderModels: zoneRenderModels)
             canvasView.delegate = self
             canvasView.onTileCloseRequested = { [weak self] tileId in
                 self?.deleteTile(id: tileId)
@@ -1824,16 +1837,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try store.save(registry)
     }
 
-    private static func loadActiveSingleZone(for project: Project, from store: RegistryStore) throws -> ZonePlacement? {
+    private static func loadActiveZoneRenderModels(from store: RegistryStore) throws -> [CanvasNSView.ZoneRenderModel] {
         let registry = try store.loadOrEmpty()
-        let projectWorkspaceId = registry.projects.first(where: { $0.id == project.id })?.workspaceId
-        guard let workspaceId = projectWorkspaceId ?? registry.lastActiveWorkspaceId else { return nil }
+        let projectWorkspaceId = registry.lastActiveProjectId.flatMap { activeProjectId in
+            registry.projects.first(where: { $0.id == activeProjectId })?.workspaceId
+        }
+        guard let workspaceId = projectWorkspaceId ?? registry.lastActiveWorkspaceId else { return [] }
         let workspaceStore = WorkspaceStore(
             workspaceId: workspaceId,
             applicationSupportDirectory: store.registryFile.deletingLastPathComponent()
         )
         let document = try workspaceStore.load()
-        return document.zones.first { $0.projectId == project.id }
+        let zOrder = Dictionary(uniqueKeysWithValues: document.zoneZOrder.enumerated().map { ($0.element, $0.offset) })
+        let orderedZones = document.zones.sorted { lhs, rhs in
+            let lhsOrder = zOrder[lhs.zoneId] ?? Int.min
+            let rhsOrder = zOrder[rhs.zoneId] ?? Int.min
+            if lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
+            return lhs.zoneId.uuidString < rhs.zoneId.uuidString
+        }
+        return orderedZones.map { zone in
+            let name = registry.projects.first(where: { $0.id == zone.projectId })?.name ?? "Project"
+            return CanvasNSView.ZoneRenderModel(placement: zone, displayName: name)
+        }
     }
 
     private static func mainWindowTitle(for project: Project) -> String {

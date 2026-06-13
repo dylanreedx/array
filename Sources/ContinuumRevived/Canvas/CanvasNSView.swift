@@ -28,12 +28,19 @@ final class CanvasNSView: NSView {
         }
     }
 
+    struct ZoneRenderModel: Equatable {
+        var placement: ZonePlacement
+        var displayName: String
+    }
+
     private(set) var canvasState: CanvasState
     /// Active single-zone placement for stage-2 integration. Tile frames remain
     /// persisted zone-local; layout/hit-testing consume world frames through
     /// CanvasEngine. With the default origin (0,0), this is behavior-neutral.
     private let activeZone: ZonePlacement?
+    private let zoneRenderModels: [ZoneRenderModel]
     private var tileViews: [UUID: TileNSView] = [:]
+    private var zoneChromeViews: [UUID: ZoneChromeNSView] = [:]
     private var emptyStateView: CanvasEmptyStateNSView?
     private var emptyStateActions: CanvasEmptyStateActions?
     private var emptyStateProjectPath: String?
@@ -45,18 +52,42 @@ final class CanvasNSView: NSView {
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
-    init(canvasState: CanvasState, activeZone: ZonePlacement? = nil) {
+    init(canvasState: CanvasState, activeZone: ZonePlacement? = nil, zoneRenderModels: [ZoneRenderModel] = []) {
         self.canvasState = canvasState
         self.activeZone = activeZone
+        if zoneRenderModels.isEmpty, let activeZone {
+            self.zoneRenderModels = [ZoneRenderModel(placement: activeZone, displayName: "Project")]
+        } else {
+            self.zoneRenderModels = zoneRenderModels
+        }
         super.init(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.withAlphaComponent(0.92).cgColor
         registerForDraggedTypes([.fileURL])
+        installZoneChromeViews()
         updateEmptyStateVisibility()
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
+    }
+
+    private func installZoneChromeViews() {
+        for model in zoneRenderModels {
+            let view = ZoneChromeNSView(model: model)
+            zoneChromeViews[model.placement.zoneId] = view
+            addSubview(view)
+        }
+        layoutZoneChromeViews()
+    }
+
+    private func layoutZoneChromeViews() {
+        for model in zoneRenderModels {
+            guard let view = zoneChromeViews[model.placement.zoneId] else { continue }
+            let worldFrame = CanvasEngine.zoneWorldFrame(model.placement)
+            view.frame = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport)
+            view.needsDisplay = true
+        }
     }
 
     // MARK: - Tile management
@@ -175,6 +206,7 @@ final class CanvasNSView: NSView {
     /// semantic canvas model, not AppKit subview insertion order.
     func tileId(at screenPoint: CGPoint) -> UUID? {
         if let activeZone {
+            if activeZone.collapsed { return nil }
             let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: canvasState.viewport)
             return CanvasEngine.hitTest(
                 worldPoint: worldPoint,
@@ -183,6 +215,19 @@ final class CanvasNSView: NSView {
             )?.tile.id
         }
         return CanvasEngine.hitTest(screenPoint: screenPoint, viewport: canvasState.viewport, tiles: canvasState.tiles)?.id
+    }
+
+    func zoneId(at screenPoint: CGPoint) -> UUID? {
+        let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: canvasState.viewport)
+        return zoneRenderModels.reversed().first { model in
+            let frame = CanvasEngine.zoneWorldFrame(model.placement)
+            return worldPoint.x >= frame.x && worldPoint.x <= frame.x + frame.width
+                && worldPoint.y >= frame.y && worldPoint.y <= frame.y + frame.height
+        }?.placement.zoneId
+    }
+
+    func zoneChromeSnapshot(for zoneId: UUID) -> ZoneChromeNSView.Snapshot? {
+        zoneChromeViews[zoneId]?.snapshot
     }
 
     var viewport: CanvasViewport { canvasState.viewport }
@@ -225,6 +270,7 @@ final class CanvasNSView: NSView {
     }
 
     private func layoutAllTiles() {
+        layoutZoneChromeViews()
         for tile in canvasState.tiles {
             layoutTile(tile)
         }
@@ -234,6 +280,7 @@ final class CanvasNSView: NSView {
         guard let view = tileViews[tile.id] else { return }
         let worldFrame = activeZone.map { CanvasEngine.worldFrame(tile: tile, in: $0) } ?? tile.frame
         let rect = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport)
+        view.isHidden = activeZone?.collapsed == true
         view.frame = rect
         view.bounds = NSRect(x: 0, y: 0, width: tile.frame.width, height: tile.frame.height)
         view.tile = tile
@@ -572,6 +619,109 @@ final class CanvasNSView: NSView {
         return artifact
     }
 
+    static func runMultiZoneRenderSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let alphaProjectId = UUID(uuidString: "00000000-0000-0000-0000-000000004801")!
+        let betaProjectId = UUID(uuidString: "00000000-0000-0000-0000-000000004802")!
+        let gammaProjectId = UUID(uuidString: "00000000-0000-0000-0000-000000004803")!
+        let alphaZoneId = UUID(uuidString: "00000000-0000-0000-0000-000000004811")!
+        let betaZoneId = UUID(uuidString: "00000000-0000-0000-0000-000000004812")!
+        let gammaZoneId = UUID(uuidString: "00000000-0000-0000-0000-000000004813")!
+        let tileId = UUID(uuidString: "00000000-0000-0000-0000-000000004821")!
+        let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
+        let alpha = ZonePlacement(zoneId: alphaZoneId, projectId: alphaProjectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 640, height: 420), color: "blue", collapsed: false, hydrationPolicy: .automatic)
+        let beta = ZonePlacement(zoneId: betaZoneId, projectId: betaProjectId, origin: ZonePoint(x: 760, y: 0), size: ZoneSize(width: 640, height: 420), color: "mint", collapsed: false, hydrationPolicy: .automatic)
+        let gamma = ZonePlacement(zoneId: gammaZoneId, projectId: gammaProjectId, origin: ZonePoint(x: 1520, y: 0), size: ZoneSize(width: 640, height: 90), color: "purple", collapsed: true, hydrationPolicy: .automatic)
+        let tile = Tile(id: tileId, kind: .note, title: "alpha", frame: TileFrame(x: 40, y: 52, width: 180, height: 120), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: viewport, tiles: [tile], groups: [], lastActiveTileId: nil),
+            activeZone: alpha,
+            zoneRenderModels: [
+                ZoneRenderModel(placement: alpha, displayName: "Alpha"),
+                ZoneRenderModel(placement: beta, displayName: "Beta"),
+                ZoneRenderModel(placement: gamma, displayName: "Gamma")
+            ]
+        )
+        canvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+        canvas.layoutSubtreeIfNeeded()
+
+        let alphaTileFrame = canvas.tileView(for: tileId)?.frame
+        let expectedAlphaTileFrame = CanvasEngine.tileScreenFrame(CanvasEngine.worldFrame(tile: tile, in: alpha), viewport: viewport)
+        try expect(alphaTileFrame == expectedAlphaTileFrame, "expanded zone tile should render at zone origin + tile frame")
+        try expect(canvas.tileId(at: CGPoint(x: 50, y: 60)) == tileId, "expanded zone hit-test should reach tile")
+
+        let betaSnap = try expectSnapshot(canvas.zoneChromeSnapshot(for: betaZoneId), "missing beta chrome")
+        try expect(betaSnap.displayName == "Beta", "zone name should come from render model")
+        try expect(betaSnap.color == "mint", "zone color should be preserved")
+        try expect(betaSnap.frame == CanvasEngine.tileScreenFrame(CanvasEngine.zoneWorldFrame(beta), viewport: viewport), "beta chrome should use zone world frame")
+
+        let gammaSnap = try expectSnapshot(canvas.zoneChromeSnapshot(for: gammaZoneId), "missing gamma chrome")
+        try expect(gammaSnap.collapsed, "gamma should be marked collapsed")
+        try expect(canvas.zoneId(at: CGPoint(x: 1530, y: 10)) == gammaZoneId, "collapsed header should hit-test to zone")
+        try expect(canvas.hitTest(CGPoint(x: 770, y: 10)) === canvas, "static zone chrome should pass AppKit hits through to canvas")
+
+        let overlapBottom = ZonePlacement(zoneId: betaZoneId, projectId: betaProjectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 200, height: 200), color: "mint", collapsed: false, hydrationPolicy: .automatic)
+        let overlapTop = ZonePlacement(zoneId: gammaZoneId, projectId: gammaProjectId, origin: ZonePoint(x: 50, y: 50), size: ZoneSize(width: 200, height: 200), color: "purple", collapsed: false, hydrationPolicy: .automatic)
+        let overlapCanvas = CanvasNSView(
+            canvasState: CanvasState(viewport: viewport, tiles: [], groups: [], lastActiveTileId: nil),
+            activeZone: nil,
+            zoneRenderModels: [
+                ZoneRenderModel(placement: overlapBottom, displayName: "Bottom"),
+                ZoneRenderModel(placement: overlapTop, displayName: "Top")
+            ]
+        )
+        try expect(overlapCanvas.zoneId(at: CGPoint(x: 75, y: 75)) == gammaZoneId, "last render model should be semantic top zone")
+
+        let collapsedCanvas = CanvasNSView(
+            canvasState: CanvasState(viewport: viewport, tiles: [tile], groups: [], lastActiveTileId: nil),
+            activeZone: gamma,
+            zoneRenderModels: [ZoneRenderModel(placement: gamma, displayName: "Gamma")]
+        )
+        collapsedCanvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+        try expect(collapsedCanvas.tileId(at: CGPoint(x: 1560, y: 64)) == nil, "collapsed zone should suppress child hit-testing")
+        try expect(collapsedCanvas.zoneId(at: CGPoint(x: 1530, y: 10)) == gammaZoneId, "collapsed zone header should remain targetable")
+
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: fm.currentDirectoryPath)
+        let directory = root.appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("multi-zone-render-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "multi-zone-render",
+            "artifactKind": "geometry-snapshot",
+            "expandedTileFrame": rectDictionary(alphaTileFrame ?? .zero),
+            "expectedExpandedTileFrame": rectDictionary(expectedAlphaTileFrame),
+            "betaChromeFrame": rectDictionary(betaSnap.frame),
+            "gammaChromeFrame": rectDictionary(gammaSnap.frame),
+            "collapsedChildHitSuppressed": true,
+            "collapsedHeaderZoneId": gammaZoneId.uuidString,
+            "screenshots": "PENDING: deterministic geometry artifact only; no pixel screenshot captured by headless check"
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+
+        func expectSnapshot(_ snapshot: ZoneChromeNSView.Snapshot?, _ message: String) throws -> ZoneChromeNSView.Snapshot {
+            guard let snapshot else { throw CheckError.failed(message) }
+            return snapshot
+        }
+        func rectDictionary(_ rect: CGRect) -> [String: Double] {
+            ["x": rect.origin.x, "y": rect.origin.y, "width": rect.width, "height": rect.height]
+        }
+    }
+
     static func runTileWorldBoundsSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)
@@ -891,4 +1041,82 @@ final class CanvasNSView: NSView {
 @MainActor
 protocol CanvasNSViewDelegate: AnyObject {
     func canvasDidChange(_ canvas: CanvasNSView)
+}
+
+@MainActor
+final class ZoneChromeNSView: NSView {
+    struct Snapshot: Equatable {
+        var displayName: String
+        var color: String
+        var collapsed: Bool
+        var frame: CGRect
+        var headerRect: CGRect
+    }
+
+    private let model: CanvasNSView.ZoneRenderModel
+    private let headerHeight: CGFloat = 34
+
+    var snapshot: Snapshot {
+        Snapshot(
+            displayName: model.displayName,
+            color: model.placement.color,
+            collapsed: model.placement.collapsed,
+            frame: frame,
+            headerRect: headerRect
+        )
+    }
+
+    private var headerRect: CGRect {
+        CGRect(x: 0, y: 0, width: bounds.width, height: min(headerHeight, bounds.height))
+    }
+
+    override var isFlipped: Bool { true }
+
+    init(model: CanvasNSView.ZoneRenderModel) {
+        self.model = model
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.masksToBounds = false
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let accent = Self.color(named: model.placement.color)
+        let zoneRect = bounds.insetBy(dx: 1, dy: 1)
+        accent.withAlphaComponent(model.placement.collapsed ? 0.20 : 0.10).setFill()
+        zoneRect.fill()
+        accent.withAlphaComponent(0.75).setStroke()
+        let path = NSBezierPath(roundedRect: zoneRect, xRadius: 12, yRadius: 12)
+        path.lineWidth = 2
+        path.stroke()
+
+        accent.withAlphaComponent(0.24).setFill()
+        headerRect.fill()
+        let title = model.placement.collapsed ? "▸ \(model.displayName)" : model.displayName
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.88)
+        ]
+        title.draw(in: headerRect.insetBy(dx: 12, dy: 8), withAttributes: attributes)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    private static func color(named name: String) -> NSColor {
+        switch name.lowercased() {
+        case "mint": return NSColor.systemMint
+        case "blue": return NSColor.systemBlue
+        case "purple": return NSColor.systemPurple
+        case "orange": return NSColor.systemOrange
+        case "red": return NSColor.systemRed
+        case "yellow": return NSColor.systemYellow
+        default: return NSColor.systemTeal
+        }
+    }
 }
