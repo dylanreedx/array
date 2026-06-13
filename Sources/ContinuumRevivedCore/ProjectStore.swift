@@ -56,6 +56,14 @@ public struct ProjectStoreLayout: Sendable {
         notesDirectory.appendingPathComponent("\(id.uuidString).md", isDirectory: false)
     }
 
+    public var reviewsDirectory: URL {
+        stateRoot.appendingPathComponent("reviews", isDirectory: true)
+    }
+
+    public func reviewFile(id: UUID) -> URL {
+        reviewsDirectory.appendingPathComponent("\(id.uuidString).json", isDirectory: false)
+    }
+
     public var backupsDirectory: URL {
         stateRoot.appendingPathComponent("backups", isDirectory: true)
     }
@@ -255,6 +263,30 @@ public struct ProjectStore: Sendable {
             return nil
         }
         return String(data: data, encoding: .utf8)
+    }
+
+    // MARK: - Review Comments
+
+    public func saveReviewCommentState(_ state: ReviewCommentState) throws {
+        try FileManager.default.createDirectory(
+            at: layout.reviewsDirectory,
+            withIntermediateDirectories: true,
+            attributes: nil)
+        try writer.write(state, to: layout.reviewFile(id: state.reviewId))
+    }
+
+    public func loadReviewCommentState(reviewId: UUID) throws -> ReviewCommentState {
+        let state: ReviewCommentState = try writer.read(at: layout.reviewFile(id: reviewId))
+        try checkSchema(
+            state.schemaVersion,
+            supported: ReviewCommentState.currentSchemaVersion,
+            at: layout.reviewFile(id: reviewId))
+        return state
+    }
+
+    public func tryLoadReviewCommentState(reviewId: UUID) throws -> ReviewCommentState? {
+        do { return try loadReviewCommentState(reviewId: reviewId) }
+        catch AtomicWriterError.noValidBackup { return nil }
     }
 
     // MARK: - Schema gate

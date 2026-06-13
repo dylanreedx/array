@@ -159,6 +159,13 @@ do {
     expect(model.files[2].change == .added && model.files[2].oldPath == nil, "git diff parser should detect additions")
     expect(model.files[3].change == .binary && model.files[3].isBinary, "git diff parser should detect binary files")
 
+    let anchor = ReviewCommentAnchor.make(file: model.files[0], hunk: model.files[0].hunks[0], line: model.files[0].hunks[0].lines[2])
+    expect(anchor?.filePath == "new.txt" && anchor?.newLine == 2 && anchor?.oldLine == nil, "ReviewCommentAnchor should capture diff file and line coordinates")
+    let comment = ReviewComment(anchor: anchor!, body: "check this", createdAt: Date(timeIntervalSince1970: 1_700_000_000))
+    expect(comment.revalidated(against: model).status == .current, "ReviewComment should stay current when anchor is still present")
+    let drifted = GitDiffModel(files: [GitDiffFile(oldPath: nil, newPath: "new.txt", change: .modified, hunks: [])])
+    expect(comment.revalidated(against: drifted).status == .outdated, "ReviewComment should become outdated when anchor disappears")
+
     let malformed = GitDiffParser.parse("not a diff\n@@ malformed\n+still no crash")
     expect(malformed.files.isEmpty, "malformed diff output should not crash or invent files")
 }
@@ -1171,6 +1178,37 @@ do {
     try store.saveBrowserState(browser)
     let loadedBrowser = try store.loadBrowserState()
     expect(loadedBrowser == browser, "BrowserState round trip")
+
+    let reviewId = UUID(uuidString: "11111111-2222-4333-8444-555555555555")!
+    let reviewState = ReviewCommentState(
+        reviewId: reviewId,
+        comments: [ReviewComment(
+            id: UUID(uuidString: "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE")!,
+            anchor: ReviewCommentAnchor(filePath: "Sources/App.swift", oldLine: nil, newLine: 42, hunkHeader: "@@ -40,0 +42,1 @@"),
+            body: "needs a test",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_100),
+            resolved: false
+        )]
+    )
+    try store.saveReviewCommentState(reviewState)
+    let loadedReviewState = try store.loadReviewCommentState(reviewId: reviewId)
+    expect(loadedReviewState == reviewState, "ReviewCommentState round trip")
+    expect(
+        FileManager.default.fileExists(atPath: store.layout.stateRoot.appendingPathComponent("reviews/\(reviewId.uuidString).json").path),
+        "review comments persist project-locally under .continuum-revived/reviews/"
+    )
+    let missingReview = try store.tryLoadReviewCommentState(reviewId: UUID())
+    expect(missingReview == nil, "tryLoadReviewCommentState returns nil when no review file exists")
+    try store.saveReviewCommentState(ReviewCommentState(schemaVersion: ReviewCommentState.currentSchemaVersion + 99, reviewId: reviewId, comments: []))
+    do {
+        _ = try store.loadReviewCommentState(reviewId: reviewId)
+        expect(false, "ReviewCommentState future schema should be refused")
+    } catch ProjectStoreError.unknownFutureSchema(_, let version, let supported) {
+        expect(version == ReviewCommentState.currentSchemaVersion + 99, "ReviewCommentState future schema reports version")
+        expect(supported == ReviewCommentState.currentSchemaVersion, "ReviewCommentState future schema reports supported version")
+    } catch {
+        expect(false, "ReviewCommentState future schema should throw ProjectStoreError, got \(error)")
+    }
 
     // Resaving project should produce a backup under .continuum-revived/backups/
     let updated = Project(
