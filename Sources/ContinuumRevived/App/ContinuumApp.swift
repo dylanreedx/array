@@ -357,6 +357,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--diff-tile-check") {
+            do {
+                let artifact = try AppDelegate.runDiffTileSelfCheck()
+                print("ContinuumRevivedDiffTileChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--spawn-placement-check") {
             do {
                 _ = NSApplication.shared
@@ -850,6 +861,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     installInitialFileTreeTile(tile, in: canvasView, via: spawner)
                 case .ticketQueue:
                     installInitialTicketQueueTile(tile, in: canvasView)
+                case .diffReview:
+                    installInitialDiffReviewTile(tile, in: canvasView)
                 }
             }
 
@@ -1102,6 +1115,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         case .ticketQueue:
             break
+        case .diffReview:
+            if let reviewId = tile.metadata.reviewId,
+               let projectStore {
+                try? FileManager.default.removeItem(at: projectStore.layout.reviewFile(id: reviewId))
+            }
         }
 
         canvasView.removeTile(id: id)
@@ -1260,6 +1278,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasView.install(tileView: TicketQueueTileNSView(tile: tile, dispatchHandler: { [weak self] row in
             self?.dispatchAgent(for: row)
         }), for: tile)
+    }
+
+    private func installInitialDiffReviewTile(_ tile: Tile, in canvasView: CanvasNSView) {
+        canvasView.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
     }
 
     private func dispatchAgent(for row: LinearTicketQueueRow) {
@@ -1728,6 +1750,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             openFileFromPalette()
         case .openFileTree:
             spawnFileTreeFromPalette()
+        case .newDiffReview:
+            spawnDiffReviewFromPalette()
         case let .switchProject(projectId):
             switchProjectAndRelaunch(projectId: projectId)
         case let .addProjectToCanvas(projectId):
@@ -1935,6 +1959,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             fputs("TileSpawner.spawnFile rejected empty file path\n", stderr)
         case let .failure(error):
             fputs("TileSpawner.spawnFile failed: \(error)\n", stderr)
+        }
+    }
+
+    private func spawnDiffReviewFromPalette() {
+        guard let canvasView,
+              let projectStore else { return }
+        let reviewId = UUID()
+        var canvasState = canvasView.canvasState
+        let tile = Self.materializeDiffReviewTile(in: &canvasState, reviewId: reviewId)
+        let reviewState = ReviewCommentState(reviewId: reviewId, comments: [])
+        do {
+            try projectStore.saveReviewCommentState(reviewState)
+            canvasView.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+            try projectStore.saveCanvas(canvasView.canvasState)
+            focusSpawnedTile(tile.id)
+        } catch {
+            fputs("spawnDiffReviewFromPalette failed: \(error)\n", stderr)
         }
     }
 
@@ -2219,6 +2260,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             runtimeRef: nil,
             metadata: TileMetadata(linearTeamKey: config.teamKey, linearTeamId: config.teamId, linearQuery: config.query)
         ))
+    }
+
+    private static func materializeDiffReviewTile(in canvasState: inout CanvasState, reviewId: UUID = UUID()) -> Tile {
+        let tile = Tile(
+            id: UUID(),
+            kind: .diffReview,
+            title: "Diff Review",
+            frame: TileFrame(x: 120, y: 120, width: 720, height: 520),
+            zIndex: (canvasState.tiles.map(\.zIndex).max() ?? 0) + 1,
+            runtimeRef: nil,
+            metadata: TileMetadata(reviewId: reviewId, diffSource: "workingTreeVsHEAD")
+        )
+        canvasState.tiles.append(tile)
+        return tile
     }
 
     private static func seedSmokeTestTiles(in projectStore: ProjectStore, projectRoot: URL) throws -> [Tile] {
@@ -4983,6 +5038,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             success: true
         )
     }
+    static func runDiffTileSelfCheck() throws -> URL {
+        let reviewId = UUID()
+        var materialized = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil)
+        let tile = Self.materializeDiffReviewTile(in: &materialized, reviewId: reviewId)
+        guard materialized.tiles.count == 1,
+              tile.kind == .diffReview,
+              tile.metadata.reviewId == reviewId,
+              tile.metadata.diffSource == "workingTreeVsHEAD" else {
+            throw NSError(domain: "DiffTileCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: "diff review tile did not materialize with review metadata"])
+        }
+
+        let projectRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("continuum-diff-tile-check-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        try "one\n".write(to: projectRoot.appendingPathComponent("sample.txt"), atomically: true, encoding: .utf8)
+        try Self.runProcess("/usr/bin/git", ["init"], cwd: projectRoot)
+        try Self.runProcess("/usr/bin/git", ["config", "user.email", "continuum@example.invalid"], cwd: projectRoot)
+        try Self.runProcess("/usr/bin/git", ["config", "user.name", "Continuum QA"], cwd: projectRoot)
+        try Self.runProcess("/usr/bin/git", ["add", "sample.txt"], cwd: projectRoot)
+        try Self.runProcess("/usr/bin/git", ["commit", "-m", "baseline"], cwd: projectRoot)
+        try "one\ntwo\n".write(to: projectRoot.appendingPathComponent("sample.txt"), atomically: true, encoding: .utf8)
+
+        let diff = try GitDiffEngine().diff(repositoryURL: projectRoot, source: .workingTreeVsHEAD)
+        guard diff.files.contains(where: { ($0.newPath == "sample.txt" || $0.oldPath == "sample.txt") && !$0.hunks.isEmpty }) else {
+            throw NSError(domain: "DiffTileCheck", code: 2, userInfo: [NSLocalizedDescriptionKey: "GitDiffEngine did not parse fixture diff"])
+        }
+
+        let store = ProjectStore(projectRoot: projectRoot)
+        try store.saveCanvas(materialized)
+        let now = Date()
+        let anchor = ReviewCommentAnchor(filePath: "sample.txt", oldLine: nil, newLine: 2, hunkHeader: diff.files[0].hunks[0].header)
+        let comment = ReviewComment(id: UUID(), anchor: anchor, body: "check comment", createdAt: now, resolved: false, status: .current)
+        try store.saveReviewCommentState(ReviewCommentState(reviewId: reviewId, comments: [comment]))
+
+        let restored = try store.loadCanvas()
+        let restoredReview = try store.loadReviewCommentState(reviewId: reviewId)
+        guard restored.tiles.first?.kind == .diffReview,
+              restored.tiles.first?.metadata.reviewId == reviewId,
+              restoredReview.comments.first?.body == "check comment",
+              FileManager.default.fileExists(atPath: store.layout.reviewFile(id: reviewId).path) else {
+            throw NSError(domain: "DiffTileCheck", code: 3, userInfo: [NSLocalizedDescriptionKey: "diff review tile or review sidecar did not persist"])
+        }
+
+        try FileManager.default.removeItem(at: store.layout.reviewFile(id: reviewId))
+        guard !FileManager.default.fileExists(atPath: store.layout.reviewFile(id: reviewId).path) else {
+            throw NSError(domain: "DiffTileCheck", code: 4, userInfo: [NSLocalizedDescriptionKey: "review sidecar cleanup failed"])
+        }
+
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let dir = URL(fileURLWithPath: "qa-runs/diff-tile-\(timestamp)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let artifact = dir.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "tileId": tile.id.uuidString,
+            "kind": tile.kind.rawValue,
+            "reviewId": reviewId.uuidString,
+            "diffFiles": diff.files.map { $0.newPath ?? $0.oldPath ?? "" },
+            "persistedComments": restoredReview.comments.count,
+            "reviewSidecarRemoved": true,
+            "status": "passed"
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    private static func runProcess(_ executable: String, _ arguments: [String], cwd: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.currentDirectoryURL = cwd
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "DiffTileCheck", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: "process failed: \(executable) \(arguments.joined(separator: " "))"])
+        }
+    }
+
     static func runTicketQueueTileSelfCheck() throws -> URL {
         var materialized = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil)
         Self.materializeTicketQueueTile(in: &materialized, config: LinearTicketQueueConfig(teamKey: "CON", teamId: "9d6655c7-35cb-47ef-9b24-d0342700691d", query: "state:Todo"))

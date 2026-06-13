@@ -62,6 +62,7 @@ run_app_check .build/debug/continuum-revived --spawn-placement-check
 run_app_check .build/debug/continuum-revived --spawn-rate-limit-check
 run_app_check .build/debug/continuum-revived --file-tree-boot-persistence-check
 run_app_check .build/debug/continuum-revived --ticket-queue-tile-check
+run_app_check .build/debug/continuum-revived --diff-tile-check
 run_app_check .build/debug/continuum-revived --file-tree-hardening-check
 run_app_check .build/debug/continuum-revived --viewport-sanitize-check
 run_app_check .build/debug/continuum-revived --project-lock-check

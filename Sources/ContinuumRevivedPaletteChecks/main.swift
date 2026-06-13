@@ -45,14 +45,15 @@ let rows = LaunchPaletteModel.makeRows(profiles: [
     profile(id: "shell", displayName: "Shell"),
     profile(id: "claude", displayName: "Claude Code")
 ])
-expect(rows.map(\.displayName) == ["Shell", "Claude Code", "New Note", "New Browser", "Open File...", "Open File Tree...", "New Workspace…"], "palette appends note/browser/file/file-tree/workspace actions after profiles")
+expect(rows.map(\.displayName) == ["Shell", "Claude Code", "New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "New Workspace…"], "palette appends note/browser/file/file-tree/diff/workspace actions after profiles")
 expect(LaunchPaletteModel.filterRows(rows, query: "note").map(\.displayName) == ["New Note"], "note query matches New Note")
-expect(LaunchPaletteModel.filterRows(rows, query: "new").map(\.displayName) == ["New Note", "New Browser", "New Workspace…"], "new query matches New actions")
+expect(LaunchPaletteModel.filterRows(rows, query: "new").map(\.displayName) == ["New Note", "New Browser", "New Diff Review", "New Workspace…"], "new query matches New actions")
 expect(LaunchPaletteModel.filterRows(rows, query: "browser").map(\.displayName) == ["New Browser"], "browser query matches New Browser")
 expect(LaunchPaletteModel.filterRows(rows, query: "open file").map(\.displayName) == ["Open File...", "Open File Tree..."], "open file query matches file actions")
 expect(LaunchPaletteModel.filterRows(rows, query: "tree").map(\.displayName) == ["Open File Tree..."], "tree query matches Open File Tree")
 expect(LaunchPaletteModel.filterRows(rows, query: "file tree").map(\.displayName) == ["Open File Tree..."], "file tree query matches Open File Tree")
 expect(LaunchPaletteModel.filterRows(rows, query: "open file tree").map(\.displayName) == ["Open File Tree..."], "open file tree query matches Open File Tree")
+expect(LaunchPaletteModel.filterRows(rows, query: "diff").map(\.displayName) == ["New Diff Review"], "diff query matches New Diff Review")
 expect(LaunchPaletteModel.filterRows(rows, query: "claude").map(\.displayName) == ["Claude Code"], "profile query still matches profiles")
 expect(LaunchPaletteModel.filterRows(rows, query: "example.com").map(\.displayName) == ["Open \"https://example.com\"…"], "url-ish query shows normalized Open URL row")
 expect(LaunchPaletteModel.filterRows(rows, query: "web.dev").first?.displayName == "Open \"https://web.dev\"…", "URL row is default before fuzzy browser matches")
@@ -72,7 +73,7 @@ let projectRows = LaunchPaletteModel.makeRows(
         availability: .available
     )]
 )
-expect(projectRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "New Workspace…", "Add Work Project to Canvas"], "palette appends add-project rows")
+expect(projectRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "New Workspace…", "Add Work Project to Canvas"], "palette appends add-project rows")
 expect(LaunchPaletteModel.filterRows(projectRows, query: "add work").map(\.displayName) == ["Add Work Project to Canvas"], "add-project row filters by add token and project name")
 expect(projectRows.last?.isSelectable == true, "available add-project row is selectable")
 
@@ -87,7 +88,7 @@ let workspaceRows = LaunchPaletteModel.makeRows(
         updatedAt: Date(timeIntervalSince1970: 2_000)
     )]
 )
-expect(workspaceRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "New Workspace…", "Switch to Client Work Workspace", "Rename Client Work Workspace…", "Delete Client Work Workspace…"], "palette appends workspace rows")
+expect(workspaceRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "New Workspace…", "Switch to Client Work Workspace", "Rename Client Work Workspace…", "Delete Client Work Workspace…"], "palette appends workspace rows")
 expect(LaunchPaletteModel.filterRows(workspaceRows, query: "switch client").map(\.displayName) == ["Switch to Client Work Workspace"], "workspace row filters by switch token and workspace name")
 expect(LaunchPaletteModel.filterRows(workspaceRows, query: "new workspace").map(\.displayName) == ["New Workspace…"], "new-workspace action filters by workspace tokens")
 let emptyWorkspaceRows = LaunchPaletteModel.makeRows(
@@ -100,7 +101,7 @@ let emptyWorkspaceRows = LaunchPaletteModel.makeRows(
         updatedAt: Date(timeIntervalSince1970: 2_100)
     )]
 )
-expect(emptyWorkspaceRows[5].isSelectable == false, "empty workspace switch rows are not selectable")
+expect(emptyWorkspaceRows[6].isSelectable == false, "empty workspace switch rows are not selectable")
 
 let missingRows = LaunchPaletteModel.makeRows(profiles: [
     profile(id: "shell", displayName: "Shell", detail: "zsh not found", isSelectable: false),

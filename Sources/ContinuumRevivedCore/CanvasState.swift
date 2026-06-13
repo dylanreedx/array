@@ -71,6 +71,7 @@ public enum TileKind: String, Codable, Equatable, Sendable {
     case file
     case fileTree
     case ticketQueue
+    case diffReview
 }
 
 public struct TileFrame: Codable, Equatable, Sendable {
@@ -114,6 +115,10 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     public var linearTeamKey: String?
     public var linearTeamId: String?
     public var linearQuery: String?
+    public var reviewId: UUID?
+    public var diffSource: String?
+    public var baseBranch: String?
+    public var branch: String?
 
     public init(
         launchProfileId: String? = nil,
@@ -124,7 +129,11 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         browserProfileId: UUID? = nil,
         linearTeamKey: String? = nil,
         linearTeamId: String? = nil,
-        linearQuery: String? = nil
+        linearQuery: String? = nil,
+        reviewId: UUID? = nil,
+        diffSource: String? = nil,
+        baseBranch: String? = nil,
+        branch: String? = nil
     ) {
         self.launchProfileId = launchProfileId
         self.projectRelativeCwd = projectRelativeCwd
@@ -135,6 +144,10 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         self.linearTeamKey = linearTeamKey
         self.linearTeamId = linearTeamId
         self.linearQuery = linearQuery
+        self.reviewId = reviewId
+        self.diffSource = diffSource
+        self.baseBranch = baseBranch
+        self.branch = branch
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -147,6 +160,10 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         case linearTeamKey
         case linearTeamId
         case linearQuery
+        case reviewId
+        case diffSource
+        case baseBranch
+        case branch
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -160,6 +177,10 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(linearTeamKey, forKey: .linearTeamKey)
         try container.encodeIfPresent(linearTeamId, forKey: .linearTeamId)
         try container.encodeIfPresent(linearQuery, forKey: .linearQuery)
+        try container.encodeIfPresent(reviewId, forKey: .reviewId)
+        try container.encodeIfPresent(diffSource, forKey: .diffSource)
+        try container.encodeIfPresent(baseBranch, forKey: .baseBranch)
+        try container.encodeIfPresent(branch, forKey: .branch)
     }
 }
 
