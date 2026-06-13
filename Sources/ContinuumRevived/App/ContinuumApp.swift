@@ -240,6 +240,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-profile-persistence-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try TileSpawner.runBrowserProfilePersistenceSelfCheck()
+                print("ContinuumRevivedBrowserProfilePersistenceChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--note-file-tile-spawn-check") {
             do {
                 _ = NSApplication.shared
@@ -713,7 +725,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 ghostty: ghostty,
                 browserEngine: browserEngine,
                 projectStore: projectStore,
-                project: project
+                project: project,
+                browserProfiles: registry.settings.browserProfiles
             )
             spawner.browserPersistenceHandler = { [weak self] in
                 self?.scheduleBrowserSave()

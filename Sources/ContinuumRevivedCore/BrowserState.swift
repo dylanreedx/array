@@ -18,6 +18,7 @@ public struct BrowserTile: Codable, Equatable, Sendable {
     public var url: String
     public var title: String
     public var storageGroupId: String
+    public var profileId: UUID
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -27,6 +28,7 @@ public struct BrowserTile: Codable, Equatable, Sendable {
         url: String,
         title: String,
         storageGroupId: String,
+        profileId: UUID = BrowserProfile.defaultProfileId,
         createdAt: Date,
         updatedAt: Date
     ) {
@@ -35,8 +37,25 @@ public struct BrowserTile: Codable, Equatable, Sendable {
         self.url = url
         self.title = title
         self.storageGroupId = storageGroupId
+        self.profileId = profileId
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, tileId, url, title, storageGroupId, profileId, createdAt, updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        tileId = try container.decode(UUID.self, forKey: .tileId)
+        url = try container.decode(String.self, forKey: .url)
+        title = try container.decode(String.self, forKey: .title)
+        storageGroupId = try container.decode(String.self, forKey: .storageGroupId)
+        profileId = try container.decodeIfPresent(UUID.self, forKey: .profileId) ?? BrowserProfile.defaultProfileId
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
     }
 }
 

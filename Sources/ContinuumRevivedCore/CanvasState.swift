@@ -109,19 +109,22 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     public var url: String?
     public var noteId: UUID?
     public var filePath: String?
+    public var browserProfileId: UUID?
 
     public init(
         launchProfileId: String? = nil,
         projectRelativeCwd: String? = nil,
         url: String? = nil,
         noteId: UUID? = nil,
-        filePath: String? = nil
+        filePath: String? = nil,
+        browserProfileId: UUID? = nil
     ) {
         self.launchProfileId = launchProfileId
         self.projectRelativeCwd = projectRelativeCwd
         self.url = url
         self.noteId = noteId
         self.filePath = filePath
+        self.browserProfileId = browserProfileId
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -130,6 +133,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         case url
         case noteId
         case filePath
+        case browserProfileId
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -139,6 +143,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(url, forKey: .url)
         try container.encodeIfPresent(noteId, forKey: .noteId)
         try container.encodeIfPresent(filePath, forKey: .filePath)
+        try container.encodeIfPresent(browserProfileId, forKey: .browserProfileId)
     }
 }
 

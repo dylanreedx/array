@@ -50,15 +50,30 @@ public struct ProjectSettings: Codable, Equatable, Sendable {
     public let restorePolicy: RestorePolicy
     public let browserStoragePolicy: BrowserStoragePolicy
     public let terminalClosePolicy: TerminalClosePolicy
+    public let defaultBrowserProfileId: UUID
 
     public init(
         restorePolicy: RestorePolicy,
         browserStoragePolicy: BrowserStoragePolicy,
-        terminalClosePolicy: TerminalClosePolicy
+        terminalClosePolicy: TerminalClosePolicy,
+        defaultBrowserProfileId: UUID = BrowserProfile.defaultProfileId
     ) {
         self.restorePolicy = restorePolicy
         self.browserStoragePolicy = browserStoragePolicy
         self.terminalClosePolicy = terminalClosePolicy
+        self.defaultBrowserProfileId = defaultBrowserProfileId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case restorePolicy, browserStoragePolicy, terminalClosePolicy, defaultBrowserProfileId
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        restorePolicy = try container.decode(RestorePolicy.self, forKey: .restorePolicy)
+        browserStoragePolicy = try container.decode(BrowserStoragePolicy.self, forKey: .browserStoragePolicy)
+        terminalClosePolicy = try container.decode(TerminalClosePolicy.self, forKey: .terminalClosePolicy)
+        defaultBrowserProfileId = try container.decodeIfPresent(UUID.self, forKey: .defaultBrowserProfileId) ?? BrowserProfile.defaultProfileId
     }
 }
 

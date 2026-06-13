@@ -2,6 +2,7 @@ import AppKit
 import ContinuumRevivedCore
 import ContinuumRevivedFileTree
 import Foundation
+import WebKit
 
 @MainActor
 final class TileSpawner {
@@ -29,6 +30,7 @@ final class TileSpawner {
     private let project: Project
     private let registry: LaunchProfileRegistry
     private let detector: ToolDetector
+    private let browserProfiles: [BrowserProfile]
 
     /// Called after every browser-tile state change (URL, title, loading, error)
     /// so the AppDelegate can schedule a debounced BrowserState save.
@@ -53,7 +55,8 @@ final class TileSpawner {
         projectStore: ProjectStore,
         project: Project,
         registry: LaunchProfileRegistry = LaunchProfileRegistry(),
-        detector: ToolDetector = .live
+        detector: ToolDetector = .live,
+        browserProfiles: [BrowserProfile] = [BrowserProfile.builtInDefault()]
     ) {
         self.canvasView = canvasView
         self.ghostty = ghostty
@@ -62,6 +65,7 @@ final class TileSpawner {
         self.project = project
         self.registry = registry
         self.detector = detector
+        self.browserProfiles = browserProfiles
         canvasView.onFileURLDrop = { [weak self] path, worldPoint in
             _ = self?.spawnFile(path: path, at: worldPoint)
         }
@@ -273,6 +277,11 @@ final class TileSpawner {
 
     private static var defaultBrowserURL: String { DefaultBrowserURL.current }
 
+    private func browserProfile(for id: UUID?) -> BrowserProfile {
+        let requested = id ?? project.settings.defaultBrowserProfileId
+        return browserProfiles.first(where: { $0.id == requested }) ?? BrowserProfile.builtInDefault()
+    }
+
     /// Spawns a live `WKWebView` browser tile. Defaults to the configured
     /// browser URL (`about:blank` unless overridden) if `url` is nil. Persists a BrowserTile entry into BrowserState alongside
     /// the canvas state. Returns the runtime so the caller can track it for
@@ -303,10 +312,11 @@ final class TileSpawner {
             frame: frame,
             zIndex: nextZ,
             runtimeRef: nil,
-            metadata: TileMetadata(url: urlString)
+            metadata: TileMetadata(url: urlString, browserProfileId: browserProfile(for: nil).id)
         )
 
-        let storageGroupId = BrowserState.storageGroupIdentifier(for: project)
+        let profile = browserProfile(for: tile.metadata.browserProfileId)
+        let storageGroupId = profile.dataStoreIdentifier
         let webView = browserEngine.makeWebView(storageGroupId: storageGroupId)
         let runtime = WKWebViewBrowserRuntime(
             id: UUID(),
@@ -328,6 +338,7 @@ final class TileSpawner {
                 url: urlString,
                 title: "",
                 storageGroupId: storageGroupId,
+                profileId: profile.id,
                 in: browserState
             )
             try projectStore.saveCanvas(canvasView.canvasState)
@@ -379,7 +390,8 @@ final class TileSpawner {
             return .invalidURL(urlString)
         }
 
-        let storageGroupId = persistedBrowserTile?.storageGroupId ?? BrowserState.storageGroupIdentifier(for: project)
+        let profile = browserProfile(for: persistedBrowserTile?.profileId ?? existing.metadata.browserProfileId)
+        let storageGroupId = persistedBrowserTile?.storageGroupId ?? profile.dataStoreIdentifier
         let webView = browserEngine.makeWebView(storageGroupId: storageGroupId)
         let runtime = WKWebViewBrowserRuntime(
             id: UUID(),
@@ -405,6 +417,7 @@ final class TileSpawner {
                 url: urlString,
                 title: persistedBrowserTile?.title ?? tile.title,
                 storageGroupId: storageGroupId,
+                profileId: profile.id,
                 in: browserState ?? BrowserState(tiles: [])
             )
             try projectStore.saveCanvas(canvasView.canvasState)
@@ -559,6 +572,7 @@ final class TileSpawner {
         url: String,
         title: String,
         storageGroupId: String,
+        profileId: UUID,
         in browserState: BrowserState? = nil
     ) throws {
         var state: BrowserState
@@ -572,6 +586,7 @@ final class TileSpawner {
             state.tiles[idx].url = url
             state.tiles[idx].title = title
             state.tiles[idx].storageGroupId = storageGroupId
+            state.tiles[idx].profileId = profileId
             state.tiles[idx].updatedAt = now
         } else {
             state.tiles.append(BrowserTile(
@@ -580,6 +595,7 @@ final class TileSpawner {
                 url: url,
                 title: title,
                 storageGroupId: storageGroupId,
+                profileId: profileId,
                 createdAt: now,
                 updatedAt: now
             ))
@@ -608,16 +624,139 @@ final class TileSpawner {
         guard let canvasView,
               let tile = canvasView.canvasState.tiles.first(where: { $0.id == runtime.tileId })
         else { return }
-        let storageGroupId = BrowserState.storageGroupIdentifier(for: project)
-        let persistedTitle = try loadBrowserStateIfAvailable()?.tiles.first(where: { $0.tileId == tile.id })?.title
+        let persistedTile = try loadBrowserStateIfAvailable()?.tiles.first(where: { $0.tileId == tile.id })
+        let profile = browserProfile(for: persistedTile?.profileId ?? tile.metadata.browserProfileId)
+        let storageGroupId = persistedTile?.storageGroupId ?? profile.dataStoreIdentifier
+        let persistedTitle = persistedTile?.title
         let title = runtime.title.isEmpty ? (persistedTitle ?? runtime.title) : runtime.title
         try upsertBrowserTile(
             runtimeId: runtime.id,
             tileId: tile.id,
             url: runtime.url,
             title: title,
-            storageGroupId: storageGroupId
+            storageGroupId: storageGroupId,
+            profileId: profile.id
         )
+    }
+
+    static func runBrowserProfilePersistenceSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let profileA = BrowserProfile(
+            id: UUID(),
+            name: "QA Profile A",
+            dataStoreIdentifier: UUID().uuidString,
+            createdAt: Date(timeIntervalSince1970: 1)
+        )
+        let profileB = BrowserProfile(
+            id: UUID(),
+            name: "QA Profile B",
+            dataStoreIdentifier: UUID().uuidString,
+            createdAt: Date(timeIntervalSince1970: 1)
+        )
+        let tileA = UUID()
+        let tileB = UUID()
+        let state = BrowserState(tiles: [
+            BrowserTile(id: UUID(), tileId: tileA, url: "https://example.test/a", title: "A", storageGroupId: profileA.dataStoreIdentifier, profileId: profileA.id, createdAt: Date(timeIntervalSince1970: 2), updatedAt: Date(timeIntervalSince1970: 3)),
+            BrowserTile(id: UUID(), tileId: tileB, url: "https://example.test/b", title: "B", storageGroupId: profileB.dataStoreIdentifier, profileId: profileB.id, createdAt: Date(timeIntervalSince1970: 4), updatedAt: Date(timeIntervalSince1970: 5))
+        ])
+        let data = try JSONCodec.makeEncoder().encode(state)
+        let decoded = try JSONCodec.makeDecoder().decode(BrowserState.self, from: data)
+        try expect(decoded.tiles.first(where: { $0.tileId == tileA })?.profileId == profileA.id, "profile A id round-trips")
+        try expect(decoded.tiles.first(where: { $0.tileId == tileB })?.profileId == profileB.id, "profile B id round-trips")
+        try expect(decoded.tiles.first(where: { $0.tileId == tileA })?.storageGroupId != decoded.tiles.first(where: { $0.tileId == tileB })?.storageGroupId, "profiles retain isolated WK data-store identifiers")
+
+        let legacy = """
+        {"id":"\(UUID().uuidString)","tileId":"\(UUID().uuidString)","url":"https://legacy.test","title":"Legacy","storageGroupId":"\(profileA.dataStoreIdentifier)","createdAt":"1970-01-01T00:00:00Z","updatedAt":"1970-01-01T00:00:00Z"}
+        """.data(using: .utf8)!
+        let legacyTile = try JSONCodec.makeDecoder().decode(BrowserTile.self, from: legacy)
+        try expect(legacyTile.profileId == BrowserProfile.defaultProfileId, "legacy BrowserTile without profileId decodes to Default")
+
+        func runLoopUntil(_ done: @autoclosure () -> Bool, timeout: TimeInterval = 5) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while !done(), Date() < deadline {
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            }
+            return done()
+        }
+        let fixtureBaseURL = FileManager.default.temporaryDirectory.appendingPathComponent("continuum-profile-check-origin", isDirectory: true)
+        try? FileManager.default.createDirectory(at: fixtureBaseURL, withIntermediateDirectories: true)
+        let fixtureURL = fixtureBaseURL.appendingPathComponent("index.html")
+        try "<html><body>profile fixture</body></html>".data(using: .utf8)!.write(to: fixtureURL, options: .atomic)
+        func loadFixture(_ webView: WKWebView) throws {
+            webView.loadFileURL(fixtureURL, allowingReadAccessTo: fixtureBaseURL)
+            try expect(runLoopUntil(!webView.isLoading), "fixture page loads")
+        }
+        func eval(_ js: String, in webView: WKWebView) throws -> Any? {
+            var done = false
+            var value: Any?
+            var evalError: Error?
+            webView.evaluateJavaScript(js) { result, error in
+                value = result
+                evalError = error
+                done = true
+            }
+            try expect(runLoopUntil(done), "JS evaluation completes for \(js)")
+            if let evalError { throw evalError }
+            return value
+        }
+
+        let dataStoreA = WKWebsiteDataStore(forIdentifier: UUID(uuidString: profileA.dataStoreIdentifier)!)
+        let dataStoreB = WKWebsiteDataStore(forIdentifier: UUID(uuidString: profileB.dataStoreIdentifier)!)
+        let configA1 = WKWebViewConfiguration()
+        configA1.websiteDataStore = dataStoreA
+        var webView: WKWebView? = WKWebView(frame: .zero, configuration: configA1)
+        try loadFixture(webView!)
+        _ = try eval("localStorage.setItem('continuumProfileCheck','profile-a'); localStorage.getItem('continuumProfileCheck')", in: webView!)
+        webView = nil
+
+        let configA2 = WKWebViewConfiguration()
+        configA2.websiteDataStore = dataStoreA
+        let restoredA = WKWebView(frame: .zero, configuration: configA2)
+        try loadFixture(restoredA)
+        let restoredValue = try eval("localStorage.getItem('continuumProfileCheck')", in: restoredA) as? String
+        try expect(restoredValue == "profile-a", "profile A localStorage persists across web view recreation")
+
+        let configB = WKWebViewConfiguration()
+        configB.websiteDataStore = dataStoreB
+        let isolatedB = WKWebView(frame: .zero, configuration: configB)
+        try loadFixture(isolatedB)
+        let isolatedValue = try eval("localStorage.getItem('continuumProfileCheck')", in: isolatedB) as? String
+        try expect(isolatedValue == nil, "profile B localStorage is isolated from profile A")
+
+        let manifest: [String: Any] = [
+            "check": "browser-profile-persistence",
+            "profileAId": profileA.id.uuidString,
+            "profileADataStoreIdentifier": profileA.dataStoreIdentifier,
+            "profileBId": profileB.id.uuidString,
+            "profileBDataStoreIdentifier": profileB.dataStoreIdentifier,
+            "profileIdsRoundTrip": true,
+            "dataStoresDistinct": true,
+            "legacyDefaultProfileFallback": true,
+            "profileALocalStorageAfterRecreate": restoredValue as Any,
+            "profileBLocalStorageValue": isolatedValue as Any,
+            "localStorageIsolationMeasured": isolatedValue == nil && restoredValue == "profile-a"
+        ]
+        let fileManager = FileManager.default
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("browser-profile-persistence", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
     }
 
     static func runBrowserRestoreStateSelfCheck() throws -> URL {
