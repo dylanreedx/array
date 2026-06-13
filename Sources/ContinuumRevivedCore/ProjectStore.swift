@@ -136,7 +136,7 @@ public struct ProjectStore: Sendable {
             supported: TerminalSessionDescriptor.currentSchemaVersion,
             at: layout.sessionFile(id: id)
         )
-        return descriptor
+        return descriptor.restoredForBoot()
     }
 
     public func deleteSession(id: UUID) throws {
@@ -163,7 +163,7 @@ public struct ProjectStore: Sendable {
                     supported: TerminalSessionDescriptor.currentSchemaVersion,
                     at: entry
                 )
-                sessions.append(descriptor)
+                sessions.append(descriptor.restoredForBoot())
             } catch {
                 // Skip unreadable session files; surface higher-level recovery
                 // through the project's UI when we wire that up.

@@ -15,6 +15,7 @@ public struct TerminalSessionDescriptor: Codable, Equatable, Sendable {
     public let createdAt: Date
     public var lastStartedAt: Date
     public var lastExit: TerminalLastExit?
+    public var agentDescriptor: AgentDescriptor?
 
     public init(
         schemaVersion: Int = TerminalSessionDescriptor.currentSchemaVersion,
@@ -28,7 +29,8 @@ public struct TerminalSessionDescriptor: Codable, Equatable, Sendable {
         title: String,
         createdAt: Date,
         lastStartedAt: Date,
-        lastExit: TerminalLastExit?
+        lastExit: TerminalLastExit?,
+        agentDescriptor: AgentDescriptor? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.id = id
@@ -42,6 +44,43 @@ public struct TerminalSessionDescriptor: Codable, Equatable, Sendable {
         self.createdAt = createdAt
         self.lastStartedAt = lastStartedAt
         self.lastExit = lastExit
+        self.agentDescriptor = agentDescriptor
+    }
+
+    public func restoredForBoot() -> TerminalSessionDescriptor {
+        var restored = self
+        restored.agentDescriptor = agentDescriptor?.restoredForBoot()
+        return restored
+    }
+}
+
+public enum AgentStatus: String, Codable, Equatable, Sendable {
+    case configuring
+    case working
+    case idle
+    case needsAttention
+    case done
+    case stale
+}
+
+public struct AgentDescriptor: Codable, Equatable, Sendable {
+    public var agentKind: String
+    public var worktreePath: String?
+    public var status: AgentStatus
+    public var statusUpdatedAt: Date
+
+    public init(agentKind: String, worktreePath: String?, status: AgentStatus, statusUpdatedAt: Date) {
+        self.agentKind = agentKind
+        self.worktreePath = worktreePath
+        self.status = status
+        self.statusUpdatedAt = statusUpdatedAt
+    }
+
+    public func restoredForBoot(now: Date = Date()) -> AgentDescriptor {
+        var restored = self
+        restored.status = .stale
+        restored.statusUpdatedAt = now
+        return restored
     }
 }
 

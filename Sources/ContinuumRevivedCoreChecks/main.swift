@@ -275,6 +275,56 @@ do {
     let exitedData = try JSONCodec.makeEncoder().encode(withExit)
     let exitedDecoded = try JSONCodec.makeDecoder().decode(TerminalSessionDescriptor.self, from: exitedData)
     expect(exitedDecoded == withExit, "TerminalSessionDescriptor with exit round trip")
+
+    let agentUpdatedAt = Date(timeIntervalSince1970: 1_700_001_000)
+    let agentDescriptor = AgentDescriptor(
+        agentKind: "claude",
+        worktreePath: "/tmp/x",
+        status: .working,
+        statusUpdatedAt: agentUpdatedAt
+    )
+    let agentSession = TerminalSessionDescriptor(
+        id: descriptor.id,
+        tileId: descriptor.tileId,
+        launchProfileId: descriptor.launchProfileId,
+        command: descriptor.command,
+        args: descriptor.args,
+        cwd: descriptor.cwd,
+        env: descriptor.env,
+        title: descriptor.title,
+        createdAt: descriptor.createdAt,
+        lastStartedAt: descriptor.lastStartedAt,
+        lastExit: nil,
+        agentDescriptor: agentDescriptor
+    )
+    let agentData = try JSONCodec.makeEncoder().encode(agentSession)
+    let agentDecoded = try JSONCodec.makeDecoder().decode(TerminalSessionDescriptor.self, from: agentData)
+    expect(agentDecoded == agentSession, "TerminalSessionDescriptor agent descriptor round trip")
+
+    let agentlessJSON = """
+    {
+      "schemaVersion": 1,
+      "id": "55555555-5555-5555-5555-555555555555",
+      "tileId": "66666666-6666-6666-6666-666666666666",
+      "launchProfileId": "shell",
+      "command": "/bin/zsh",
+      "args": [],
+      "cwd": "/tmp/x",
+      "env": {},
+      "title": "Shell",
+      "createdAt": "2023-11-14T22:13:20Z",
+      "lastStartedAt": "2023-11-14T22:21:40Z"
+    }
+    """.data(using: .utf8)!
+    let agentlessDecoded = try JSONCodec.makeDecoder().decode(TerminalSessionDescriptor.self, from: agentlessJSON)
+    expect(agentlessDecoded.agentDescriptor == nil, "TerminalSessionDescriptor tolerates agent-less sessions")
+
+    let restoreClock = Date(timeIntervalSince1970: 1_700_002_000)
+    let restored = agentSession.restoredForBoot()
+    expect(restored.agentDescriptor?.status == .stale, "agent descriptor restores as stale on boot")
+    let restoredDescriptor = agentDescriptor.restoredForBoot(now: restoreClock)
+    expect(restoredDescriptor.status == .stale, "agent descriptor stale restoration status")
+    expect(restoredDescriptor.statusUpdatedAt == restoreClock, "agent descriptor stale restoration timestamp")
 }
 
 // MARK: - DefaultBrowserURL
@@ -529,7 +579,13 @@ do {
         title: "Claude",
         createdAt: Date(timeIntervalSince1970: 1_700_000_500),
         lastStartedAt: Date(timeIntervalSince1970: 1_700_000_500),
-        lastExit: nil
+        lastExit: nil,
+        agentDescriptor: AgentDescriptor(
+            agentKind: "claude",
+            worktreePath: scratch.path,
+            status: .working,
+            statusUpdatedAt: Date(timeIntervalSince1970: 1_700_000_600)
+        )
     )
     try store.saveSession(s1)
     try store.saveSession(s2)
@@ -537,6 +593,9 @@ do {
     expect(sessions.count == 2, "listSessions returns saved sessions, got \(sessions.count)")
     let sessionIds = Set(sessions.map(\.id))
     expect(sessionIds == [s1.id, s2.id], "listSessions returns correct ids")
+    expect(sessions.first(where: { $0.id == s2.id })?.agentDescriptor?.status == .stale, "listSessions restores agent sessions as stale")
+    let loadedAgentSession = try store.loadSession(id: s2.id)
+    expect(loadedAgentSession.agentDescriptor?.status == .stale, "loadSession restores agent sessions as stale")
 
     try store.deleteSession(id: s1.id)
     let afterDelete = try store.listSessions()
