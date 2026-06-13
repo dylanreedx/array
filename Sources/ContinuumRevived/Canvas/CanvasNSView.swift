@@ -56,7 +56,7 @@ final class CanvasNSView: NSView {
     /// Active single-zone placement for stage-2 integration. Tile frames remain
     /// persisted zone-local; layout/hit-testing consume world frames through
     /// CanvasEngine. With the default origin (0,0), this is behavior-neutral.
-    fileprivate let activeZone: ZonePlacement?
+    let activeZone: ZonePlacement?
     fileprivate let zoneRenderModels: [ZoneRenderModel]
     private var tileViews: [UUID: TileNSView] = [:]
     private var zoneChromeViews: [UUID: ZoneChromeNSView] = [:]

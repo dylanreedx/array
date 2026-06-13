@@ -1268,8 +1268,17 @@ final class TileSpawner {
         )
         let store = ProjectStore(projectRoot: tempRoot)
         try store.saveProject(project)
-        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
-        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        let activeZone = ZonePlacement(
+            zoneId: UUID(),
+            projectId: project.id,
+            origin: ZonePoint(x: 1000, y: 500),
+            size: ZoneSize(width: 1800, height: 900),
+            color: "#6E8BFF",
+            collapsed: false,
+            hydrationPolicy: .automatic
+        )
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 900, y: 400, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas(), activeZone: activeZone)
         canvas.setFrameSize(CGSize(width: 1800, height: 900))
         let browserEngine = BrowserEngineContext()
         defer { browserEngine.shutdown() }
@@ -1285,6 +1294,12 @@ final class TileSpawner {
         let tiles = canvas.canvasState.tiles.filter { spawnedIds.contains($0.id) }
         try expect(tiles.count == 4, "spawn-placement check should find all 4 spawned tiles in canvas state, got \(tiles.count)")
         let rects = tiles.map { CGRect(x: $0.frame.x, y: $0.frame.y, width: $0.frame.width, height: $0.frame.height) }
+        for rect in rects {
+            try expect(rect.minX >= 0 && rect.minY >= 0, "spawned tile frame should be zone-local, not world-offset: \(rect)")
+            try expect(rect.maxX <= activeZone.size.width && rect.maxY <= activeZone.size.height, "spawned tile frame should fit inside active zone bounds: \(rect)")
+            let worldRect = rect.offsetBy(dx: activeZone.origin.x, dy: activeZone.origin.y)
+            try expect(worldRect.minX >= activeZone.origin.x && worldRect.minY >= activeZone.origin.y, "rendered world frame should land inside active zone: \(worldRect)")
+        }
         for i in rects.indices {
             for j in rects.indices where j > i {
                 try expect(!rects[i].intersects(rects[j]), "spawned tile frames should not intersect: \(rects[i]) vs \(rects[j])")
@@ -1294,6 +1309,7 @@ final class TileSpawner {
         let manifest: [String: Any] = [
             "check": "spawn-placement",
             "tempProjectRoot": tempRoot.path,
+            "activeZone": ["originX": activeZone.origin.x, "originY": activeZone.origin.y, "width": activeZone.size.width, "height": activeZone.size.height],
             "frames": tiles.map { ["id": $0.id.uuidString, "x": $0.frame.x, "y": $0.frame.y, "width": $0.frame.width, "height": $0.frame.height] }
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
@@ -1855,10 +1871,27 @@ final class TileSpawner {
                 height: Double(size.height)
             )
         }
+        var placementViewport = canvasView.viewport
+        var placementVisibleSize = canvasView.bounds.size
+        if let activeZone = canvasView.activeZone {
+            let zoom = canvasView.viewport.zoom.isFinite && canvasView.viewport.zoom > 0 ? canvasView.viewport.zoom : 1
+            let localX = canvasView.viewport.x - activeZone.origin.x
+            let localY = canvasView.viewport.y - activeZone.origin.y
+            let maxOriginX = max(0, activeZone.size.width - Double(size.width))
+            let maxOriginY = max(0, activeZone.size.height - Double(size.height))
+            let clampedX = min(max(localX, 0), maxOriginX)
+            let clampedY = min(max(localY, 0), maxOriginY)
+            let visibleWidth = max(Double(canvasView.bounds.width) / zoom, Double(size.width))
+            let visibleHeight = max(Double(canvasView.bounds.height) / zoom, Double(size.height))
+            let boundedVisibleWidth = min(visibleWidth, max(Double(size.width), activeZone.size.width - clampedX))
+            let boundedVisibleHeight = min(visibleHeight, max(Double(size.height), activeZone.size.height - clampedY))
+            placementViewport = CanvasViewport(x: clampedX, y: clampedY, zoom: zoom)
+            placementVisibleSize = CGSize(width: boundedVisibleWidth * zoom, height: boundedVisibleHeight * zoom)
+        }
         return CanvasEngine.placementFrame(
             size: size,
-            viewport: canvasView.viewport,
-            visibleSize: canvasView.bounds.size,
+            viewport: placementViewport,
+            visibleSize: placementVisibleSize,
             existing: canvasView.canvasState.tiles.map(\.frame)
         )
     }
