@@ -228,6 +228,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-lru-budget-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runBrowserLRUBudgetSelfCheck()
+                print("ContinuumRevivedBrowserLRUBudgetChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--file-tree-boot-persistence-check") {
             do {
                 _ = NSApplication.shared
@@ -560,6 +572,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private let focusBroker = FocusBroker()
     private var qaPerf: QAPerf?
     private var launchStartTime: CFTimeInterval?
+    private lazy var browserRuntimeBudget = BrowserRuntimeBudget(maxLive: BrowserRuntimeBudget.resolveMaxLive())
     private var hotkeyMonitor: Any?
     private var tileFocusMonitor: Any?
     private var canvasScrollMonitor: Any?
@@ -657,6 +670,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.tileSpawner = spawner
             zoneRuntimeController.onBrowserRuntimeHydrated = { [weak self] runtime in
                 self?.wireContentProcessTerminationHandler(runtime)
+                self?.registerBrowserRuntimeForBudget(runtime)
+                self?.enforceBrowserRuntimeBudget()
             }
             zoneRuntimeController.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
             canvasView.configureEmptyStateActions(CanvasEmptyStateActions(
@@ -985,6 +1000,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case let .restarted(runtime):
             wireContentProcessTerminationHandler(runtime)
             browserRuntimes.append(runtime)
+            registerBrowserRuntimeForBudget(runtime)
+            enforceBrowserRuntimeBudget()
         case let .invalidURL(url):
             installBrowserRestartPlaceholder(
                 for: tile,
@@ -1033,6 +1050,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case let .restarted(runtime):
             wireContentProcessTerminationHandler(runtime)
             browserRuntimes.append(runtime)
+            registerBrowserRuntimeForBudget(runtime)
+            enforceBrowserRuntimeBudget()
         case let .invalidURL(url):
             fputs("Browser restart: invalid URL '\(url)'\n", stderr)
         case .tileNotFound:
@@ -1040,6 +1059,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case let .failure(error):
             fputs("Browser restart failed: \(error)\n", stderr)
         }
+    }
+
+    private func registerBrowserRuntimeForBudget(_ runtime: WKWebViewBrowserRuntime) {
+        browserRuntimeBudget.registerLive(tileId: runtime.tileId)
+    }
+
+    private func enforceBrowserRuntimeBudget() {
+        guard let spawner = tileSpawner else { return }
+        let protected = canvasView?.canvasState.lastActiveTileId.map { Set([$0]) } ?? []
+        let liveTileIds = browserRuntimes.map(\.tileId)
+        let evictTileIds = browserRuntimeBudget.evictionCandidates(liveTileIds: liveTileIds, protectedTileIds: protected)
+        for tileId in evictTileIds {
+            guard let runtime = browserRuntimes.first(where: { $0.tileId == tileId }) else { continue }
+            do {
+                try spawner.installBrowserSnapshotTile(runtime: runtime, snapshotImage: Self.browserBudgetSnapshotImage())
+                browserRuntimes.removeAll { $0.id == runtime.id }
+                browserRuntimeBudget.unregister(tileId: tileId)
+            } catch {
+                fputs("Browser budget eviction failed for tile \(tileId): \(error)\n", stderr)
+            }
+        }
+    }
+
+    private static func browserBudgetSnapshotImage() -> NSImage {
+        let image = NSImage(size: NSSize(width: 80, height: 60))
+        image.lockFocus()
+        NSColor.windowBackgroundColor.setFill()
+        NSRect(x: 0, y: 0, width: 80, height: 60).fill()
+        image.unlockFocus()
+        return image
     }
 
     private func installInitialNoteTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
@@ -1094,7 +1143,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
             guard let self, let canvas = self.canvasView else { return event }
             guard let window = canvas.window, event.window === window else { return event }
+            let pointInCanvas = canvas.convert(event.locationInWindow, from: nil)
+            let clickedTileId = canvas.tileId(at: pointInCanvas)
             Self.routeTileClickFocus(at: event.locationInWindow, in: canvas, focusBroker: self.focusBroker)
+            if let clickedTileId,
+               canvas.canvasState.tiles.contains(where: { $0.id == clickedTileId && $0.kind == .browser }) {
+                self.browserRuntimeBudget.registerLive(tileId: clickedTileId)
+            }
             return event
         }
         self.tileFocusMonitor = monitor
@@ -1270,6 +1325,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             wireContentProcessTerminationHandler(runtime)
             browserRuntimes.append(runtime)
             focusSpawnedTile(runtime.tileId)
+            registerBrowserRuntimeForBudget(runtime)
+            enforceBrowserRuntimeBudget()
         case let .invalidURL(url):
             fputs("TileSpawner.spawnBrowser invalid URL: \(url)\n", stderr)
         case let .failure(error):
@@ -3020,6 +3077,99 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.smokeTestExitCode = emptyStateWasInstalled && emptyStateContentMatched && emptyStateWasRemoved ? 0 : 2
             window.performClose(nil)
         }
+    }
+
+    static func runBrowserLRUBudgetSelfCheck() throws -> URL {
+        struct CheckError: Error, CustomStringConvertible { let description: String }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError(description: message) }
+        }
+        let a = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let b = UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!
+        let c = UUID(uuidString: "cccccccc-cccc-cccc-cccc-cccccccccccc")!
+        let d = UUID(uuidString: "dddddddd-dddd-dddd-dddd-dddddddddddd")!
+        var budget = BrowserRuntimeBudget(maxLive: 2)
+        budget.registerLive(tileId: a)
+        budget.registerLive(tileId: b)
+        budget.registerLive(tileId: c)
+        let firstEviction = budget.evictionCandidates(liveTileIds: [a, b, c], protectedTileIds: [a])
+        try expect(firstEviction == [b], "focused oldest browser must be skipped; next LRU should evict")
+        budget.unregister(tileId: b)
+        budget.registerLive(tileId: a)
+        budget.registerLive(tileId: d)
+        let secondEviction = budget.evictionCandidates(liveTileIds: [a, c, d], protectedTileIds: [d])
+        try expect(secondEviction == [c], "rehydrating/touching a browser should protect it from immediate LRU eviction")
+
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("continuum-browser-lru-budget-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let project = Project(
+            id: UUID(uuidString: "46464646-4646-4646-4646-464646464646")!,
+            name: "browser-lru-budget-check",
+            rootPath: dir.path,
+            createdAt: Date(),
+            updatedAt: Date(),
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
+        )
+        let store = ProjectStore(projectRoot: dir)
+        try store.saveProject(project)
+        let tiles = [a, b, c].enumerated().map { index, id in
+            Tile(
+                id: id,
+                kind: .browser,
+                title: "Budget browser \(index)",
+                frame: TileFrame(x: Double(index) * 40, y: Double(index) * 40, width: 640, height: 420),
+                zIndex: index,
+                runtimeRef: nil,
+                metadata: TileMetadata(url: "data:text/html;charset=utf-8,<title>budget-\(index)</title>")
+            )
+        }
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: tiles, groups: [], lastActiveTileId: a))
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+        let spawner = TileSpawner(canvasView: canvas, ghostty: nil, browserEngine: browserEngine, projectStore: store, project: project)
+        let controller = ZoneRuntimeController(projectRoot: dir, projectStore: store, project: project)
+        controller.attachUI(canvasView: canvas, tileSpawner: spawner, focusBroker: FocusBroker())
+        for tile in tiles {
+            switch spawner.restartBrowserTile(tileId: tile.id) {
+            case let .restarted(runtime):
+                controller.browserRuntimes.append(runtime)
+            case let .invalidURL(url):
+                throw CheckError(description: "fixture browser URL rejected: \(url)")
+            case .tileNotFound:
+                throw CheckError(description: "fixture browser missing: \(tile.id)")
+            case let .failure(error):
+                throw CheckError(description: "fixture browser restart failed: \(error)")
+            }
+        }
+        try controller.setTier(.snapshot, allowDehydratingFocusedZone: true)
+        var integrationBudget = BrowserRuntimeBudget(maxLive: 2)
+        controller.onBrowserRuntimeHydrated = { runtime in
+            integrationBudget.registerLive(tileId: runtime.tileId)
+            let evictIds = integrationBudget.evictionCandidates(
+                liveTileIds: controller.browserRuntimes.map(\.tileId),
+                protectedTileIds: Set([canvas.canvasState.lastActiveTileId].compactMap { $0 })
+            )
+            for evictId in evictIds {
+                guard let evictRuntime = controller.browserRuntimes.first(where: { $0.tileId == evictId }) else { continue }
+                try? spawner.installBrowserSnapshotTile(runtime: evictRuntime, snapshotImage: AppDelegate.browserBudgetSnapshotImage())
+                controller.browserRuntimes.removeAll { $0.id == evictRuntime.id }
+                integrationBudget.unregister(tileId: evictId)
+            }
+        }
+        try controller.setTier(.live)
+        let liveAfterHydration = controller.browserRuntimes.map(\.tileId)
+        let snapshotTileIds = canvas.canvasState.tiles.filter { $0.kind == .browser && $0.runtimeRef == nil }.map(\.id)
+        try expect(liveAfterHydration.count == 2, "hydration budget should cap live browsers at 2")
+        try expect(liveAfterHydration.contains(a), "focused browser should survive over-budget hydration")
+        try expect(snapshotTileIds.count == 1, "one browser should be evicted back to snapshot")
+
+        let artifact = dir.appendingPathComponent("browser-lru-budget-check.txt")
+        try "firstEviction=\(firstEviction.map(\.uuidString))\nsecondEviction=\(secondEviction.map(\.uuidString))\nliveAfterHydration=\(liveAfterHydration.map(\.uuidString))\nsnapshotTileIds=\(snapshotTileIds.map(\.uuidString))\nmaxLive=2\n".write(to: artifact, atomically: true, encoding: .utf8)
+        return artifact
     }
 
     static func runViewportSanitizeSelfCheck() throws -> URL {

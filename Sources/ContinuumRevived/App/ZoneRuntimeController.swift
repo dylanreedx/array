@@ -159,8 +159,8 @@ final class ZoneRuntimeController {
         for tileId in browserTileIds {
             switch tileSpawner.restartBrowserTile(tileId: tileId) {
             case let .restarted(runtime):
-                onBrowserRuntimeHydrated?(runtime)
                 browserRuntimes.append(runtime)
+                onBrowserRuntimeHydrated?(runtime)
             case let outcome:
                 throw HydrationLifecycleError.browserRehydrateFailed(tileId, outcome)
             }

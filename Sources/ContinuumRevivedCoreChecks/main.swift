@@ -2600,4 +2600,20 @@ do {
     expect(screenFrame.origin.x.isFinite && screenFrame.origin.y.isFinite && screenFrame.width.isFinite && screenFrame.height.isFinite, "huge finite geometry produces finite screen frame")
 }
 
+do {
+    let a = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+    let b = UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!
+    let c = UUID(uuidString: "cccccccc-cccc-cccc-cccc-cccccccccccc")!
+    var budget = BrowserRuntimeBudget(maxLive: 2)
+    budget.registerLive(tileId: a)
+    budget.registerLive(tileId: b)
+    budget.registerLive(tileId: c)
+    expect(budget.evictionCandidates(liveTileIds: [a, b, c], protectedTileIds: []).map(\.uuidString) == [a.uuidString], "browser budget evicts least-recent live tile over cap")
+    budget.unregister(tileId: a)
+    budget.registerLive(tileId: b)
+    expect(budget.evictionCandidates(liveTileIds: [b, c], protectedTileIds: [b]).isEmpty, "browser budget stays within cap after eviction")
+    let evictWithFocus = budget.evictionCandidates(liveTileIds: [a, b, c], protectedTileIds: [a])
+    expect(evictWithFocus == [c], "browser budget skips focused/protected browser when choosing eviction")
+}
+
 print("ContinuumRevivedCoreChecks passed")
