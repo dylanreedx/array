@@ -311,6 +311,19 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--ghostty-headless-surface-spike") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try GhosttyTerminalView.runHeadlessSurfaceSpike()
+                print("GhosttyHeadlessSurfaceSpike artifact: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         let application = NSApplication.shared
         let delegate = AppDelegate()
         Self.delegate = delegate

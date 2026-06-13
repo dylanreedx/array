@@ -519,6 +519,83 @@ final class GhosttyTerminalView: NSView {
         return log
     }
 
+    struct HeadlessSurfaceSample {
+        let elapsedSeconds: Int
+        let residentKb: Int
+        let surfacesAlive: Int
+        let firstSurfaceExited: Bool
+        let firstSurfaceTextBytes: Int
+    }
+
+    static func runHeadlessSurfaceSpike() throws -> URL {
+        let started = Date()
+        let context = try GhosttyRuntimeContext()
+        defer { context.shutdown() }
+
+        let cwd = FileManager.default.currentDirectoryPath
+        var views: [GhosttyTerminalView] = []
+        for index in 0..<10 {
+            let view = GhosttyTerminalView(
+                ghosttyApp: try context.app,
+                launchProfile: LaunchProfile(command: "/usr/bin/yes", arguments: [], cwd: cwd, title: "Hidden Ghostty spike \(index + 1)"),
+                statusChanged: { _ in }
+            )
+            view.isHidden = true
+            view.setFrameSize(NSSize(width: 900, height: 600))
+            view.updateSurfaceSize()
+            views.append(view)
+        }
+
+        var samples: [HeadlessSurfaceSample] = []
+        for second in 0...60 {
+            for _ in 0..<4 {
+                ghostty_app_tick(try context.app)
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.25))
+            }
+            let firstSurface = views.first?.surface
+            let exited = firstSurface.map { ghostty_surface_process_exited($0) } ?? true
+            let visibleText = views.first?.visibleText() ?? ""
+            samples.append(HeadlessSurfaceSample(
+                elapsedSeconds: second,
+                residentKb: currentResidentKilobytes(),
+                surfacesAlive: views.filter { $0.surface != nil }.count,
+                firstSurfaceExited: exited,
+                firstSurfaceTextBytes: visibleText.utf8.count
+            ))
+        }
+
+        for view in views {
+            view.requestClose(force: true)
+        }
+
+        let runId = ISO8601DateFormatter().string(from: started).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: "qa-runs/ghostty-headless-surface-spike-\(runId)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let log = directory.appendingPathComponent("hidden-surfaces.log")
+        var lines = ["elapsed_seconds,resident_kb,surfaces_alive,first_surface_exited,first_surface_text_bytes"]
+        lines.append(contentsOf: samples.map { sample in
+            "\(sample.elapsedSeconds),\(sample.residentKb),\(sample.surfacesAlive),\(sample.firstSurfaceExited),\(sample.firstSurfaceTextBytes)"
+        })
+        try lines.joined(separator: "\n").appending("\n").write(to: log, atomically: true, encoding: .utf8)
+        return log
+    }
+
+    private static func currentResidentKilobytes() -> Int {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/ps")
+        task.arguments = ["-o", "rss=", "-p", String(ProcessInfo.processInfo.processIdentifier)]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        do {
+            try task.run()
+            task.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8).flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? -1
+        } catch {
+            return -1
+        }
+    }
+
     enum ZoomScaleSpikeError: Error {
         case surfaceMissing
     }
