@@ -217,10 +217,12 @@ Shape:
 }
 ```
 
-MVP browser storage policy:
+Browser profile storage policy:
 
-- Default to per-project WKWebsiteDataStore isolation when feasible.
-- If full custom isolation is too costly initially, document the limitation and keep the model ready for storage groups.
+- Browser profiles are app-local persistent `WKWebsiteDataStore` identities, not Chrome/Safari profile import.
+- The central registry owns the profile list so profiles span projects.
+- A built-in `Default` profile is bootstrapped idempotently on first use; its `dataStoreIdentifier` is a stable UUID string passed to `WKWebsiteDataStore(forIdentifier:)`.
+- Existing browser tile `storageGroupId` values remain a compatibility field for already-persisted tiles.
 
 ## Notes Model
 
@@ -269,7 +271,16 @@ Rules:
   "settings": {
     "preferredEditor": "auto",
     "zoomModifier": "command",
-    "openLastProjectOnLaunch": true
+    "openLastProjectOnLaunch": true,
+    "browserProfiles": [
+      {
+        "id": "B0000000-0000-4000-8000-000000000001",
+        "name": "Default",
+        "dataStoreIdentifier": "B0000000-0000-4000-8000-000000000002",
+        "createdAt": "1970-01-01T00:00:00Z"
+      }
+    ],
+    "defaultBrowserProfileId": "B0000000-0000-4000-8000-000000000001"
   }
 }
 ```

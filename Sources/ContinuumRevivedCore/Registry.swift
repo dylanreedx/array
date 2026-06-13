@@ -156,19 +156,122 @@ public struct ProjectEntry: Codable, Equatable, Sendable {
     }
 }
 
+public struct BrowserProfile: Codable, Equatable, Sendable {
+    public static let defaultProfileId = UUID(uuidString: "B0000000-0000-4000-8000-000000000001")!
+    public static let defaultDataStoreIdentifier = UUID(uuidString: "B0000000-0000-4000-8000-000000000002")!.uuidString
+    public static let defaultCreatedAt = Date(timeIntervalSince1970: 0)
+
+    public let id: UUID
+    public var name: String
+    public var dataStoreIdentifier: String
+    public let createdAt: Date
+
+    public init(id: UUID, name: String, dataStoreIdentifier: String, createdAt: Date) {
+        self.id = id
+        self.name = name
+        self.dataStoreIdentifier = dataStoreIdentifier
+        self.createdAt = createdAt
+    }
+
+    public static func builtInDefault() -> BrowserProfile {
+        BrowserProfile(
+            id: defaultProfileId,
+            name: "Default",
+            dataStoreIdentifier: defaultDataStoreIdentifier,
+            createdAt: defaultCreatedAt
+        )
+    }
+}
+
 public struct RegistrySettings: Codable, Equatable, Sendable {
     public var preferredEditor: EditorPreference
     public var zoomModifier: ZoomModifier
     public var openLastProjectOnLaunch: Bool
+    public var browserProfiles: [BrowserProfile]
+    public var defaultBrowserProfileId: UUID
 
     public init(
         preferredEditor: EditorPreference,
         zoomModifier: ZoomModifier,
-        openLastProjectOnLaunch: Bool
+        openLastProjectOnLaunch: Bool,
+        browserProfiles: [BrowserProfile] = [BrowserProfile.builtInDefault()],
+        defaultBrowserProfileId: UUID = BrowserProfile.defaultProfileId
     ) {
         self.preferredEditor = preferredEditor
         self.zoomModifier = zoomModifier
         self.openLastProjectOnLaunch = openLastProjectOnLaunch
+        self.browserProfiles = RegistrySettings.normalizedBrowserProfiles(browserProfiles)
+        if self.browserProfiles.contains(where: { $0.id == defaultBrowserProfileId }) {
+            self.defaultBrowserProfileId = defaultBrowserProfileId
+        } else {
+            self.defaultBrowserProfileId = BrowserProfile.defaultProfileId
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case preferredEditor, zoomModifier, openLastProjectOnLaunch, browserProfiles, defaultBrowserProfileId
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        preferredEditor = try container.decode(EditorPreference.self, forKey: .preferredEditor)
+        zoomModifier = try container.decode(ZoomModifier.self, forKey: .zoomModifier)
+        openLastProjectOnLaunch = try container.decode(Bool.self, forKey: .openLastProjectOnLaunch)
+        browserProfiles = RegistrySettings.normalizedBrowserProfiles(
+            try container.decodeIfPresent([BrowserProfile].self, forKey: .browserProfiles) ?? []
+        )
+        let decodedDefaultId = try container.decodeIfPresent(UUID.self, forKey: .defaultBrowserProfileId)
+        if let decodedDefaultId, browserProfiles.contains(where: { $0.id == decodedDefaultId }) {
+            defaultBrowserProfileId = decodedDefaultId
+        } else {
+            defaultBrowserProfileId = BrowserProfile.defaultProfileId
+        }
+    }
+
+    @discardableResult
+    public mutating func upsertBrowserProfile(_ profile: BrowserProfile) -> Bool {
+        guard profile.id != BrowserProfile.defaultProfileId,
+              UUID(uuidString: profile.dataStoreIdentifier) != nil else {
+            return false
+        }
+        if let index = browserProfiles.firstIndex(where: { $0.id == profile.id }) {
+            browserProfiles[index] = profile
+        } else {
+            browserProfiles.append(profile)
+        }
+        return true
+    }
+
+    @discardableResult
+    public mutating func deleteBrowserProfile(id: UUID) -> Bool {
+        guard id != BrowserProfile.defaultProfileId,
+              let index = browserProfiles.firstIndex(where: { $0.id == id }) else {
+            return false
+        }
+        browserProfiles.remove(at: index)
+        if defaultBrowserProfileId == id {
+            defaultBrowserProfileId = BrowserProfile.defaultProfileId
+        }
+        return true
+    }
+
+    @discardableResult
+    public mutating func setDefaultBrowserProfile(id: UUID) -> Bool {
+        guard browserProfiles.contains(where: { $0.id == id }) else { return false }
+        defaultBrowserProfileId = id
+        return true
+    }
+
+    private static func normalizedBrowserProfiles(_ profiles: [BrowserProfile]) -> [BrowserProfile] {
+        var normalized = profiles.filter { profile in
+            profile.id == BrowserProfile.defaultProfileId || UUID(uuidString: profile.dataStoreIdentifier) != nil
+        }
+        if let defaultIndex = normalized.firstIndex(where: { $0.id == BrowserProfile.defaultProfileId }) {
+            normalized[defaultIndex] = BrowserProfile.builtInDefault()
+        } else {
+            normalized.insert(BrowserProfile.builtInDefault(), at: 0)
+        }
+        return normalized
     }
 }
 
