@@ -5,12 +5,14 @@ public struct LaunchProfileSpec: Equatable, Sendable {
     public let displayName: String
     public let kind: Kind
     public let title: String
+    public let agentKind: String?
 
-    public init(id: String, displayName: String, kind: Kind, title: String) {
+    public init(id: String, displayName: String, kind: Kind, title: String, agentKind: String? = nil) {
         self.id = id
         self.displayName = displayName
         self.kind = kind
         self.title = title
+        self.agentKind = agentKind
     }
 
     public enum Kind: Equatable, Sendable {

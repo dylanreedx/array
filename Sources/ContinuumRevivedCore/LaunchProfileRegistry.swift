@@ -61,15 +61,17 @@ public struct LaunchProfileRegistry: Sendable {
         ),
         LaunchProfileSpec(
             id: "claude",
-            displayName: "Claude Code",
+            displayName: "New Claude Agent",
             kind: .tool(executableName: "claude", args: []),
-            title: "Claude"
+            title: "Agent · Claude",
+            agentKind: "claude"
         ),
         LaunchProfileSpec(
             id: "codex",
-            displayName: "Codex",
+            displayName: "New Codex Agent",
             kind: .tool(executableName: "codex", args: []),
-            title: "Codex"
+            title: "Agent · Codex",
+            agentKind: "codex"
         ),
         LaunchProfileSpec(
             id: "nvim",

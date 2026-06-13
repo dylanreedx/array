@@ -140,7 +140,8 @@ final class TileSpawner {
             title: profile.title,
             createdAt: now,
             lastStartedAt: now,
-            lastExit: nil
+            lastExit: nil,
+            agentDescriptor: agentDescriptor(for: spec, at: now)
         )
         do {
             try projectStore.saveSession(descriptor)
@@ -149,6 +150,16 @@ final class TileSpawner {
             return .failure(error)
         }
         return .spawned(runtime)
+    }
+
+    private func agentDescriptor(for spec: LaunchProfileSpec, at now: Date) -> AgentDescriptor? {
+        guard let agentKind = spec.agentKind else { return nil }
+        return AgentDescriptor(
+            agentKind: agentKind,
+            worktreePath: project.rootPath,
+            status: .configuring,
+            statusUpdatedAt: now
+        )
     }
 
     enum RestartOutcome {
@@ -212,7 +223,8 @@ final class TileSpawner {
             title: profile.title,
             createdAt: now,
             lastStartedAt: now,
-            lastExit: nil
+            lastExit: nil,
+            agentDescriptor: agentDescriptor(for: spec, at: now)
         )
         do {
             try projectStore.saveSession(descriptor)
