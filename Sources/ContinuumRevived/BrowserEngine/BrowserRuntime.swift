@@ -16,6 +16,7 @@ protocol BrowserRuntime: AnyObject {
     var tileId: TileID { get }
     var url: String { get }
     var title: String { get }
+    var faviconURL: String? { get }
     var loadingState: BrowserLoadingState { get }
 
     var onStateChange: (() -> Void)? { get set }

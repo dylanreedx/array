@@ -30,8 +30,11 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
     private let forwardButton: NSButton
     private let reloadButton: NSButton
     private let profileMenuButton: NSButton
+    private let faviconLabel: NSTextField
     private let progressIndicator: NSProgressIndicator
     private let errorBanner: NSTextField
+    private var lastPersistedURL: String
+    private var lastPersistedTitle: String
 
     init(tile: Tile, runtime: any BrowserRuntime) {
         self.runtime = runtime
@@ -41,8 +44,11 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
         self.forwardButton = NSButton(title: "›", target: nil, action: nil)
         self.reloadButton = NSButton(title: "↻", target: nil, action: nil)
         self.profileMenuButton = NSButton(title: "⋯", target: nil, action: nil)
+        self.faviconLabel = NSTextField(labelWithString: "◌")
         self.progressIndicator = NSProgressIndicator()
         self.errorBanner = NSTextField(labelWithString: "")
+        self.lastPersistedURL = runtime.url
+        self.lastPersistedTitle = runtime.title
         super.init(tile: tile)
 
         let body = NSView()
@@ -78,12 +84,20 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
         urlField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         urlField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
+        faviconLabel.translatesAutoresizingMaskIntoConstraints = false
+        faviconLabel.font = .systemFont(ofSize: 13)
+        faviconLabel.textColor = .secondaryLabelColor
+        faviconLabel.toolTip = "Page icon"
+
         progressIndicator.translatesAutoresizingMaskIntoConstraints = false
-        progressIndicator.style = .spinning
+        progressIndicator.style = .bar
         progressIndicator.controlSize = .small
+        progressIndicator.minValue = 0
+        progressIndicator.maxValue = 1
+        progressIndicator.isIndeterminate = false
         progressIndicator.isDisplayedWhenStopped = false
 
-        let navRow = NSStackView(views: [backButton, forwardButton, reloadButton, urlField, progressIndicator, profileMenuButton])
+        let navRow = NSStackView(views: [backButton, forwardButton, reloadButton, faviconLabel, urlField, progressIndicator, profileMenuButton])
         navRow.orientation = .horizontal
         navRow.spacing = 4
         navRow.alignment = .centerY
@@ -124,8 +138,13 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
         hostView.attach(runtime: runtime)
 
         runtime.onStateChange = { [weak self] in
-            self?.refresh()
-            self?.onAfterRefresh?()
+            guard let self else { return }
+            self.refresh()
+            if self.lastPersistedURL != self.runtime.url || self.lastPersistedTitle != self.runtime.title {
+                self.lastPersistedURL = self.runtime.url
+                self.lastPersistedTitle = self.runtime.title
+                self.onAfterRefresh?()
+            }
         }
         refresh()
     }
@@ -149,16 +168,26 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
         if urlField.currentEditor() == nil {
             urlField.stringValue = runtime.url
         }
+        let displayTitle = runtime.title.isEmpty ? tile.title : runtime.title
+        if tile.title != displayTitle {
+            tile.title = displayTitle
+            sync(tile: tile)
+        }
+        faviconLabel.stringValue = runtime.faviconURL == nil ? "◌" : "●"
+        faviconLabel.toolTip = runtime.faviconURL ?? "No page icon detected"
         switch runtime.loadingState {
         case .idle:
-            progressIndicator.stopAnimation(nil)
+            progressIndicator.doubleValue = 0
+            progressIndicator.isHidden = true
             errorBanner.isHidden = true
             errorBanner.stringValue = ""
-        case .loading:
-            progressIndicator.startAnimation(nil)
+        case let .loading(progress):
+            progressIndicator.doubleValue = min(max(progress, 0), 1)
+            progressIndicator.isHidden = false
             errorBanner.isHidden = true
         case let .failed(message):
-            progressIndicator.stopAnimation(nil)
+            progressIndicator.doubleValue = 0
+            progressIndicator.isHidden = true
             errorBanner.stringValue = message
             errorBanner.isHidden = false
         }
@@ -226,6 +255,9 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
     }
 
     var chromeURLStringForQA: String { urlField.stringValue }
+    var chromeTitleForQA: String { chromeSnapshot?.title ?? "" }
+    var chromeFaviconTooltipForQA: String? { faviconLabel.toolTip }
+    var chromeProgressForQA: (hidden: Bool, value: Double) { (progressIndicator.isHidden, progressIndicator.doubleValue) }
 
     @discardableResult
     func performURLFieldCommandForQA(_ commandSelector: Selector) -> Bool {
@@ -247,7 +279,16 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
             if !condition() { throw CheckError.failed(message) }
         }
 
-        let dataPage = "data:text/html,<html><body><input id='qa' autofocus value='ready'></body></html>"
+        func waitUntil(_ timeout: TimeInterval = 3, _ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if condition() { return true }
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            }
+            return condition()
+        }
+
+        let dataPage = "data:text/html,<html><head><title>continuum-browser-polish</title><link rel='icon' href='data:image/png;base64,iVBORw0KGgo='></head><body><input id='qa' autofocus value='ready'></body></html>"
         let tileId = TileID()
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
@@ -311,6 +352,11 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
             "Return command should be handled"
         )
         try expect(runtime.url == dataPage, "Return should load typed data: URL through real WKWebView runtime")
+        try expect(browserTile.chromeProgressForQA.hidden == false, "loading progress should be visible immediately after navigation starts")
+        try expect(waitUntil { runtime.title == "continuum-browser-polish" }, "runtime should observe page title")
+        try expect(waitUntil { browserTile.chromeTitleForQA.contains("continuum-browser-polish") }, "browser chrome should mirror page title")
+        try expect(waitUntil { browserTile.chromeFaviconTooltipForQA?.hasPrefix("data:image/png") == true }, "browser chrome should expose detected favicon URL")
+        try expect(waitUntil { browserTile.chromeProgressForQA.hidden }, "loading progress should hide after navigation finishes")
         try expect(runtime.isSemanticContentResponder(window.firstResponder), "Return should leave real WKWebView content focused")
         try expect(window.firstResponder !== browserTile.hostView, "Return must not focus plain BrowserHostView")
         try expect(webView === window.firstResponder || runtime.isSemanticContentResponder(window.firstResponder), "Return first responder must be WKWebView or descendant")

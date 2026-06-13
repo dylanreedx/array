@@ -123,6 +123,7 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
 
     private(set) var url: String
     private(set) var title: String
+    private(set) var faviconURL: String?
     private(set) var loadingState: BrowserLoadingState = .idle
 
     var onStateChange: (() -> Void)?
@@ -137,6 +138,7 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
 
     private var didNotifyContentProcessTerminated = false
     private var isTerminated = false
+    private var faviconRequestGeneration = 0
 
     let webView: WKWebView
     private weak var hostView: BrowserHostView?
@@ -207,6 +209,32 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         })
     }
 
+    private func refreshFaviconURL(for expectedURL: String) {
+        faviconRequestGeneration += 1
+        let generation = faviconRequestGeneration
+        let script = """
+        (() => {
+          const links = Array.from(document.querySelectorAll('link[rel]'));
+          const icon = links.find(link => /(^|\\s)(icon|shortcut icon|apple-touch-icon)(\\s|$)/i.test(link.rel));
+          if (icon && icon.href) { return icon.href; }
+          if ((location.protocol === 'http:' || location.protocol === 'https:') && location.origin && location.origin !== 'null') {
+            return location.origin + '/favicon.ico';
+          }
+          return null;
+        })();
+        """
+        webView.evaluateJavaScript(script) { [weak self] result, _ in
+            Task { @MainActor in
+                guard let self, self.faviconRequestGeneration == generation, self.url == expectedURL else { return }
+                let next = (result as? String).flatMap { $0.isEmpty ? nil : $0 }
+                if self.faviconURL != next {
+                    self.faviconURL = next
+                    self.onStateChange?()
+                }
+            }
+        }
+    }
+
     func attach(to hostView: BrowserHostView) {
         self.hostView = hostView
         hostView.reservedShortcutHandler = reservedShortcutHandler
@@ -232,6 +260,8 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
             return
         }
         self.url = urlString
+        faviconRequestGeneration += 1
+        faviconURL = nil
         loadingState = .loading(progress: 0)
         onStateChange?()
         webView.load(URLRequest(url: url))
@@ -284,6 +314,7 @@ extension WKWebViewBrowserRuntime: WKNavigationDelegate {
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         Task { @MainActor in
             self.loadingState = .idle
+            self.refreshFaviconURL(for: self.url)
             self.onStateChange?()
         }
     }
