@@ -36,6 +36,50 @@ public enum CanvasEngine {
         )
     }
 
+    // MARK: - Zone-local ↔ world conversion
+
+    public static func zoneLocalToWorld(_ point: CGPoint, zoneOrigin: ZonePoint) -> CGPoint {
+        CGPoint(x: Double(point.x) + zoneOrigin.x, y: Double(point.y) + zoneOrigin.y)
+    }
+
+    public static func worldToZoneLocal(_ point: CGPoint, zoneOrigin: ZonePoint) -> CGPoint {
+        CGPoint(x: Double(point.x) - zoneOrigin.x, y: Double(point.y) - zoneOrigin.y)
+    }
+
+    public static func zoneLocalToWorld(_ frame: TileFrame, zoneOrigin: ZonePoint) -> TileFrame {
+        TileFrame(
+            x: frame.x + zoneOrigin.x,
+            y: frame.y + zoneOrigin.y,
+            width: frame.width,
+            height: frame.height
+        )
+    }
+
+    public static func worldToZoneLocal(_ frame: TileFrame, zoneOrigin: ZonePoint) -> TileFrame {
+        TileFrame(
+            x: frame.x - zoneOrigin.x,
+            y: frame.y - zoneOrigin.y,
+            width: frame.width,
+            height: frame.height
+        )
+    }
+
+    public static func worldFrame(tile: Tile, in zone: ZonePlacement) -> TileFrame {
+        zoneLocalToWorld(tile.frame, zoneOrigin: zone.origin)
+    }
+
+    public static func worldFrame(frame: TileFrame, in zone: ZonePlacement) -> TileFrame {
+        zoneLocalToWorld(frame, zoneOrigin: zone.origin)
+    }
+
+    public static func zoneLocalPoint(world point: CGPoint, zone: ZonePlacement) -> CGPoint {
+        worldToZoneLocal(point, zoneOrigin: zone.origin)
+    }
+
+    public static func zoneWorldFrame(_ zone: ZonePlacement) -> TileFrame {
+        TileFrame(x: zone.origin.x, y: zone.origin.y, width: zone.size.width, height: zone.size.height)
+    }
+
     // MARK: - Zoom
 
     public static let defaultZoomRange: ClosedRange<Double> = 0.1 ... 4.0
@@ -59,6 +103,16 @@ public enum CanvasEngine {
 
     // MARK: - Hit testing
 
+    public struct ZoneHit: Equatable, Sendable {
+        public let zoneId: UUID
+        public let tile: Tile
+
+        public init(zoneId: UUID, tile: Tile) {
+            self.zoneId = zoneId
+            self.tile = tile
+        }
+    }
+
     /// Topmost tile (by zIndex) whose frame contains the converted world point.
     public static func hitTest(
         screenPoint: CGPoint,
@@ -66,15 +120,39 @@ public enum CanvasEngine {
         tiles: [Tile]
     ) -> Tile? {
         let world = screenToWorld(screenPoint, viewport: viewport)
-        return tiles
+        return hitTest(worldPoint: world, tiles: tiles)
+    }
+
+    public static func hitTest(worldPoint: CGPoint, tiles: [Tile]) -> Tile? {
+        tiles
             .sorted { $0.zIndex > $1.zIndex }
             .first { tile in
-                let f = tile.frame
-                return Double(world.x) >= f.x
-                    && Double(world.x) <= f.x + f.width
-                    && Double(world.y) >= f.y
-                    && Double(world.y) <= f.y + f.height
+                contains(worldPoint, in: tile.frame)
             }
+    }
+
+    public static func hitTest(
+        worldPoint: CGPoint,
+        zones: [NavigationZone],
+        tilesByZone: [UUID: [Tile]]
+    ) -> ZoneHit? {
+        zones
+            .sorted { $0.zIndex > $1.zIndex }
+            .lazy
+            .compactMap { zone -> ZoneHit? in
+                guard contains(worldPoint, in: zone.frame) else { return nil }
+                let localPoint = worldToZoneLocal(worldPoint, zoneOrigin: ZonePoint(x: zone.frame.x, y: zone.frame.y))
+                guard let tile = hitTest(worldPoint: localPoint, tiles: tilesByZone[zone.id] ?? []) else { return nil }
+                return ZoneHit(zoneId: zone.id, tile: tile)
+            }
+            .first
+    }
+
+    private static func contains(_ point: CGPoint, in frame: TileFrame) -> Bool {
+        Double(point.x) >= frame.x
+            && Double(point.x) <= frame.x + frame.width
+            && Double(point.y) >= frame.y
+            && Double(point.y) <= frame.y + frame.height
     }
 
     // MARK: - Defaults and minimums per tile kind

@@ -1430,6 +1430,53 @@ do {
     expect(screen == CGPoint(x: 200, y: 200), "Zoom scales screen size proportionally, got \(screen)")
 }
 
+// MARK: - CanvasEngine: zone-local/world conversion
+
+do {
+    let origin = ZonePoint(x: 0, y: 0)
+    let localPoint = CGPoint(x: 25, y: 50)
+    let localFrame = TileFrame(x: 10, y: 20, width: 300, height: 200)
+    expect(CanvasEngine.zoneLocalToWorld(localPoint, zoneOrigin: origin) == localPoint, "Zone transform identity point at origin")
+    expect(CanvasEngine.zoneLocalToWorld(localFrame, zoneOrigin: origin) == localFrame, "Zone transform identity frame at origin")
+}
+
+do {
+    let origin = ZonePoint(x: 100, y: 200)
+    let localPoint = CGPoint(x: 10, y: 20)
+    let worldPoint = CanvasEngine.zoneLocalToWorld(localPoint, zoneOrigin: origin)
+    expect(worldPoint == CGPoint(x: 110, y: 220), "Zone-local point translates by zone origin, got \(worldPoint)")
+    expect(CanvasEngine.worldToZoneLocal(worldPoint, zoneOrigin: origin) == localPoint, "World point converts back to zone-local")
+
+    let localFrame = TileFrame(x: 10, y: 20, width: 300, height: 200)
+    let worldFrame = CanvasEngine.zoneLocalToWorld(localFrame, zoneOrigin: origin)
+    expect(worldFrame == TileFrame(x: 110, y: 220, width: 300, height: 200), "Zone-local frame translates origin and preserves size, got \(worldFrame)")
+    expect(CanvasEngine.worldToZoneLocal(worldFrame, zoneOrigin: origin) == localFrame, "World frame converts back to zone-local")
+}
+
+do {
+    let origin = ZonePoint(x: -12.5, y: 7.25)
+    let localPoint = CGPoint(x: 4.5, y: -9.75)
+    let worldPoint = CanvasEngine.zoneLocalToWorld(localPoint, zoneOrigin: origin)
+    expect(approximatelyEqual(worldPoint, CGPoint(x: -8, y: -2.5)), "Zone transform supports negative/fractional origins, got \(worldPoint)")
+    expect(approximatelyEqual(CanvasEngine.worldToZoneLocal(worldPoint, zoneOrigin: origin), localPoint), "Negative/fractional zone transform round-trips")
+}
+
+do {
+    let zone = ZonePlacement(
+        zoneId: UUID(uuidString: "00000000-0000-0000-0000-000000000301")!,
+        projectId: UUID(uuidString: "00000000-0000-0000-0000-000000000302")!,
+        origin: ZonePoint(x: 500, y: -100),
+        size: ZoneSize(width: 640, height: 480),
+        color: "#abcdef",
+        collapsed: false,
+        hydrationPolicy: .automatic
+    )
+    let tile = Tile(id: UUID(), kind: .note, title: "note", frame: TileFrame(x: 20, y: 30, width: 200, height: 120), zIndex: 0, runtimeRef: nil, metadata: TileMetadata())
+    expect(CanvasEngine.worldFrame(tile: tile, in: zone) == TileFrame(x: 520, y: -70, width: 200, height: 120), "worldFrame(tile:in:) applies placement origin")
+    expect(CanvasEngine.zoneWorldFrame(zone) == TileFrame(x: 500, y: -100, width: 640, height: 480), "zoneWorldFrame uses placement origin and size")
+    expect(CanvasEngine.zoneLocalPoint(world: CGPoint(x: 525, y: -65), zone: zone) == CGPoint(x: 25, y: 35), "zoneLocalPoint(world:zone:) subtracts placement origin")
+}
+
 // MARK: - CanvasEngine: cursor-anchored zoom keeps world point fixed
 
 do {
@@ -1485,6 +1532,24 @@ do {
     expect(CanvasEngine.hitTest(screenPoint: CGPoint(x: 250, y: 250), viewport: v, tiles: [lower, upper])?.id == upper.id, "Hit only-in-upper returns upper")
     expect(CanvasEngine.hitTest(screenPoint: CGPoint(x: 150, y: 150), viewport: v, tiles: [lower, upper])?.id == upper.id, "Overlap returns higher zIndex")
     expect(CanvasEngine.hitTest(screenPoint: CGPoint(x: 500, y: 500), viewport: v, tiles: [lower, upper]) == nil, "Outside all tiles returns nil")
+}
+
+// MARK: - CanvasEngine: zone-aware hit testing
+
+do {
+    let zoneA = CanvasEngine.NavigationZone(id: UUID(uuidString: "00000000-0000-0000-0000-000000000401")!, frame: TileFrame(x: 0, y: 0, width: 400, height: 300), zIndex: 0)
+    let zoneB = CanvasEngine.NavigationZone(id: UUID(uuidString: "00000000-0000-0000-0000-000000000402")!, frame: TileFrame(x: 300, y: 0, width: 400, height: 300), zIndex: 1)
+    let tileA = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000403")!, kind: .terminal, title: "a", frame: TileFrame(x: 50, y: 50, width: 100, height: 100), zIndex: 0, runtimeRef: nil, metadata: TileMetadata())
+    let tileBLower = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000404")!, kind: .terminal, title: "b-low", frame: TileFrame(x: 50, y: 50, width: 120, height: 120), zIndex: 0, runtimeRef: nil, metadata: TileMetadata())
+    let tileBUpper = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000405")!, kind: .terminal, title: "b-high", frame: TileFrame(x: 80, y: 80, width: 120, height: 120), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+
+    let translatedHit = CanvasEngine.hitTest(worldPoint: CGPoint(x: 360, y: 60), zones: [zoneA, zoneB], tilesByZone: [zoneA.id: [tileA], zoneB.id: [tileBLower, tileBUpper]])
+    expect(translatedHit?.zoneId == zoneB.id && translatedHit?.tile.id == tileBLower.id, "Zone hit test subtracts translated zone origin before tile hit")
+
+    let overlapHit = CanvasEngine.hitTest(worldPoint: CGPoint(x: 390, y: 90), zones: [zoneA, zoneB], tilesByZone: [zoneA.id: [tileA], zoneB.id: [tileBLower, tileBUpper]])
+    expect(overlapHit?.zoneId == zoneB.id && overlapHit?.tile.id == tileBUpper.id, "Zone hit test respects zone z-order then tile z-order")
+
+    expect(CanvasEngine.hitTest(worldPoint: CGPoint(x: 10, y: 10), zones: [zoneA, zoneB], tilesByZone: [zoneA.id: [tileA], zoneB.id: [tileBLower]]) == nil, "Zone hit test returns nil when point is in zone body but no tile")
 }
 
 // MARK: - CanvasEngine: directional navigation
