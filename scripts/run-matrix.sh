@@ -48,6 +48,7 @@ run_app_check .build/debug/continuum-revived --bring-to-front-focus-check
 run_app_check .build/debug/continuum-revived --note-click-focus-check
 run_app_check .build/debug/continuum-revived --browser-restore-state-check
 run_app_check .build/debug/continuum-revived --note-file-tile-spawn-check
+run_app_check .build/debug/continuum-revived --zone-hydration-lifecycle-check
 run_app_check .build/debug/continuum-revived --spawn-placement-check
 run_app_check .build/debug/continuum-revived --file-tree-boot-persistence-check
 run_app_check .build/debug/continuum-revived --file-tree-hardening-check

@@ -216,6 +216,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--zone-hydration-lifecycle-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try ZoneRuntimeController.runHydrationLifecycleSelfCheck()
+                print("ContinuumRevivedZoneHydrationLifecycleChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--file-tree-boot-persistence-check") {
             do {
                 _ = NSApplication.shared
@@ -643,6 +655,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self?.handleReservedShortcut(event) ?? false
             }
             self.tileSpawner = spawner
+            zoneRuntimeController.onBrowserRuntimeHydrated = { [weak self] runtime in
+                self?.wireContentProcessTerminationHandler(runtime)
+            }
             zoneRuntimeController.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
             canvasView.configureEmptyStateActions(CanvasEmptyStateActions(
                 spawnClaude: { [weak self] in
