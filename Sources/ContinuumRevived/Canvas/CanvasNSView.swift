@@ -436,6 +436,142 @@ final class CanvasNSView: NSView {
         return artifact
     }
 
+    static func runSingleZoneCompatSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: fm.currentDirectoryPath)
+        let tempRoot = root
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("single-zone-compat-\(UUID().uuidString)", isDirectory: true)
+        let projectRoot = tempRoot.appendingPathComponent("project", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("app-support", isDirectory: true)
+        try fm.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+
+        let projectId = UUID(uuidString: "00000000-0000-0000-0000-000000003901")!
+        let workspaceId = UUID(uuidString: "00000000-0000-0000-0000-000000003902")!
+        let zoneId = UUID(uuidString: "00000000-0000-0000-0000-000000003903")!
+        let firstId = UUID(uuidString: "00000000-0000-0000-0000-000000003911")!
+        let topId = UUID(uuidString: "00000000-0000-0000-0000-000000003912")!
+        let outsideId = UUID(uuidString: "00000000-0000-0000-0000-000000003913")!
+        let now = Date(timeIntervalSince1970: 39)
+        let project = Project(
+            id: projectId,
+            name: "Single Zone Compat Fixture",
+            rootPath: projectRoot.path,
+            createdAt: now,
+            updatedAt: now,
+            defaultLaunchProfileId: "system-shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning
+            )
+        )
+        let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
+        let preZoneTiles = [
+            Tile(id: firstId, kind: .note, title: "legacy-low", frame: TileFrame(x: 40, y: 50, width: 220, height: 140), zIndex: 1, runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: topId, kind: .note, title: "legacy-top", frame: TileFrame(x: 100, y: 90, width: 220, height: 140), zIndex: 9, runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: outsideId, kind: .file, title: "legacy-outside", frame: TileFrame(x: 420, y: 80, width: 160, height: 120), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        ]
+        let preZoneCanvas = CanvasState(viewport: viewport, tiles: preZoneTiles, groups: [], lastActiveTileId: topId)
+        let projectStore = ProjectStore(projectRoot: projectRoot)
+        try projectStore.saveProject(project)
+        try projectStore.saveCanvas(preZoneCanvas)
+        let seededCanvasBytes = try Data(contentsOf: projectStore.layout.canvasFile)
+
+        var registry = Registry.empty()
+        let migration = DefaultWorkspaceMigration()
+        let actualWorkspaceId = try migration.ensureDefaultWorkspace(
+            for: project,
+            registry: &registry,
+            applicationSupportDirectory: appSupport,
+            now: now,
+            workspaceId: workspaceId,
+            zoneId: zoneId
+        )
+        let workspace = try WorkspaceStore(workspaceId: actualWorkspaceId, applicationSupportDirectory: appSupport).load()
+        try expect(actualWorkspaceId == workspaceId, "expected deterministic default workspace id")
+        try expect(registry.lastActiveWorkspaceId == workspaceId, "registry should point at synthesized workspace")
+        try expect(registry.lastActiveProjectId == projectId, "registry should preserve active project")
+        try expect(workspace.zones.count == 1, "workspace should contain exactly one zone")
+        guard let zone = workspace.zones.first else { throw CheckError.failed("missing synthesized zone") }
+        try expect(zone.zoneId == zoneId, "expected deterministic single zone id")
+        try expect(zone.projectId == projectId, "zone should reference project id")
+        try expect(zone.origin == ZonePoint(x: 0, y: 0), "single-zone compatibility requires origin 0,0")
+        try expect(workspace.zoneZOrder == [zoneId], "zone z-order should contain only the single zone")
+        try expect(workspace.lastActiveZoneId == zoneId, "single zone should be active")
+
+        let loadedCanvas = try projectStore.loadCanvas()
+        let canvas = CanvasNSView(canvasState: loadedCanvas, activeZone: zone)
+        for tile in preZoneTiles {
+            canvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+        }
+        var frameMatches: [String: Bool] = [:]
+        for tile in preZoneTiles {
+            let expected = CanvasEngine.tileScreenFrame(tile.frame, viewport: viewport)
+            let actual = canvas.tileView(for: tile.id)?.frame
+            frameMatches[tile.id.uuidString] = actual == expected
+            try expect(actual == expected, "world frame should equal pre-zone frame for \(tile.title); expected \(expected), got \(String(describing: actual))")
+        }
+
+        let hitPoint = CGPoint(x: 130, y: 110)
+        let legacyHit = CanvasEngine.hitTest(screenPoint: hitPoint, viewport: viewport, tiles: preZoneTiles)?.id
+        let zoneHit = CanvasEngine.hitTest(
+            worldPoint: CanvasEngine.screenToWorld(hitPoint, viewport: viewport),
+            zones: [CanvasEngine.NavigationZone(id: zone.zoneId, frame: CanvasEngine.zoneWorldFrame(zone), zIndex: 0)],
+            tilesByZone: [zone.zoneId: preZoneTiles]
+        )?.tile.id
+        let canvasHit = canvas.tileId(at: hitPoint)
+        try expect(legacyHit == topId, "legacy hit-test should target top overlapping tile")
+        try expect(zoneHit == legacyHit, "zone-aware hit-test should match legacy hit-test")
+        try expect(canvasHit == legacyHit, "CanvasNSView hit-test should match legacy hit-test")
+
+        let controller = ZoneRuntimeController(projectRoot: projectRoot, projectStore: projectStore, project: project)
+        controller.canvasView = canvas
+        controller.flushCanvasSave()
+        let roundTripBytes = try Data(contentsOf: projectStore.layout.canvasFile)
+        _ = try projectStore.loadCanvas()
+        try expect(roundTripBytes == seededCanvasBytes, "project canvas.json should byte-match after single-zone round trip")
+
+        let directory = tempRoot.appendingPathComponent("artifact", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "single-zone-compat",
+            "projectRoot": projectRoot.path,
+            "appSupport": appSupport.path,
+            "projectCanvasPath": projectStore.layout.canvasFile.path,
+            "workspaceCanvasPath": WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport).layout.canvasFile.path,
+            "workspaceId": workspaceId.uuidString,
+            "zoneId": zoneId.uuidString,
+            "zoneOrigin": ["x": zone.origin.x, "y": zone.origin.y],
+            "tileIds": preZoneTiles.map { $0.id.uuidString },
+            "frameMatches": frameMatches,
+            "hitPoint": ["x": hitPoint.x, "y": hitPoint.y],
+            "legacyHitId": legacyHit?.uuidString as Any,
+            "zoneHitId": zoneHit?.uuidString as Any,
+            "canvasHitId": canvasHit?.uuidString as Any,
+            "projectCanvasByteCountBefore": seededCanvasBytes.count,
+            "projectCanvasByteCountAfter": roundTripBytes.count,
+            "projectCanvasByteIdentical": roundTripBytes == seededCanvasBytes
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
     static func runTileWorldBoundsSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)
