@@ -120,6 +120,116 @@ do {
     expect(decoded.linearTicketQueue == configured.linearTicketQueue, "project entry round-trips ticket queue config")
 }
 
+// MARK: - Git diff engine
+
+do {
+    let diff = """
+    diff --git a/old.txt b/new.txt
+    similarity index 88%
+    rename from old.txt
+    rename to new.txt
+    --- a/old.txt
+    +++ b/new.txt
+    @@ -1,2 +1,3 @@
+     same
+    -old
+    +new
+    +added
+    diff --git a/deleted.txt b/deleted.txt
+    deleted file mode 100644
+    --- a/deleted.txt
+    +++ /dev/null
+    @@ -1 +0,0 @@
+    -gone
+    diff --git a/created.txt b/created.txt
+    new file mode 100644
+    --- /dev/null
+    +++ b/created.txt
+    @@ -0,0 +1 @@
+    +born
+    diff --git a/image.bin b/image.bin
+    Binary files a/image.bin and b/image.bin differ
+    """
+    let model = GitDiffParser.parse(diff)
+    expect(model.files.count == 4, "git diff parser should parse multiple file records")
+    expect(model.files[0].change == .renamed && model.files[0].oldPath == "old.txt" && model.files[0].newPath == "new.txt", "git diff parser should detect renames")
+    expect(model.files[0].hunks[0].lines.map(\.kind) == [.context, .deletion, .addition, .addition], "git diff parser should classify hunk lines")
+    expect(model.files[0].hunks[0].lines[1].oldLine == 2 && model.files[0].hunks[0].lines[2].newLine == 2, "git diff parser should assign old/new line numbers")
+    expect(model.files[1].change == .deleted && model.files[1].newPath == nil, "git diff parser should detect deletes")
+    expect(model.files[2].change == .added && model.files[2].oldPath == nil, "git diff parser should detect additions")
+    expect(model.files[3].change == .binary && model.files[3].isBinary, "git diff parser should detect binary files")
+
+    let malformed = GitDiffParser.parse("not a diff\n@@ malformed\n+still no crash")
+    expect(malformed.files.isEmpty, "malformed diff output should not crash or invent files")
+}
+
+do {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("continuum-gitdiff-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    func run(_ args: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = args
+        process.currentDirectoryURL = root
+        try process.run(); process.waitUntilExit()
+        expect(process.terminationStatus == 0, "git \(args.joined(separator: " ")) should succeed")
+    }
+    try run(["init"])
+    try run(["config", "user.email", "checks@example.invalid"])
+    try run(["config", "user.name", "Checks"])
+    try "one\n".write(to: root.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+    try run(["add", "."])
+    try run(["commit", "-m", "initial"])
+    try "one\ntwo\n".write(to: root.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+    try "born\n".write(to: root.appendingPathComponent("created.txt"), atomically: true, encoding: .utf8)
+    try FileManager.default.removeItem(at: root.appendingPathComponent("a.txt"))
+    try "gone\n".write(to: root.appendingPathComponent("deleted.txt"), atomically: true, encoding: .utf8)
+    try run(["add", "."])
+    try run(["commit", "-m", "second"])
+    try run(["checkout", "-b", "feature/diff-check"])
+    try "branch-only\n".write(to: root.appendingPathComponent("branch.txt"), atomically: true, encoding: .utf8)
+    try run(["add", "branch.txt"])
+    try run(["commit", "-m", "branch change"])
+    try run(["checkout", "main"])
+
+    let branchModel = try GitDiffEngine(configuration: .init(timeoutSeconds: 5, maxOutputBytes: 20_000)).diff(repositoryURL: root, source: .branchVsBase(branch: "feature/diff-check", base: "main"))
+    expect(branchModel.files.contains(where: { $0.change == .added && $0.newPath == "branch.txt" }), "git diff engine should diff branch vs base")
+
+    try FileManager.default.moveItem(at: root.appendingPathComponent("created.txt"), to: root.appendingPathComponent("renamed.txt"))
+    try "fresh\nagain\n".write(to: root.appendingPathComponent("added.txt"), atomically: true, encoding: .utf8)
+    try FileManager.default.removeItem(at: root.appendingPathComponent("deleted.txt"))
+    try Data([0, 1, 2, 3, 255, 0, 4]).write(to: root.appendingPathComponent("blob.bin"))
+    try run(["add", "renamed.txt", "added.txt", "deleted.txt", "blob.bin"])
+
+    let engine = GitDiffEngine(configuration: .init(timeoutSeconds: 5, maxOutputBytes: 20_000))
+    let model = try engine.diff(repositoryURL: root, source: .workingTreeVsHEAD)
+    expect(model.files.contains(where: { $0.change == .added && $0.newPath == "added.txt" }), "git diff engine should include staged added files")
+    expect(model.files.contains(where: { $0.change == .deleted && $0.oldPath == "deleted.txt" }), "git diff engine should include staged deleted files")
+    expect(model.files.contains(where: { $0.change == .renamed && $0.oldPath == "created.txt" && $0.newPath == "renamed.txt" }), "git diff engine should include staged renamed files")
+    expect(model.files.contains(where: { $0.change == .binary && $0.newPath == "blob.bin" }), "git diff engine should include real binary files")
+    expect(model.files.first(where: { $0.newPath == "added.txt" })?.hunks.flatMap(\.lines).contains(where: { $0.kind == .addition && $0.text == "again" }) == true, "git diff engine should parse hunk additions from a real repo")
+
+    do {
+        _ = try GitDiffEngine(configuration: .init(timeoutSeconds: 5, maxOutputBytes: 1)).diff(repositoryURL: root, source: .workingTreeVsHEAD)
+        expect(false, "git diff engine should enforce output cap")
+    } catch GitDiffEngine.DiffError.outputTooLarge(limit: 1) {
+    } catch {
+        expect(false, "git diff engine should throw outputTooLarge, got \(error)")
+    }
+
+    let slowGit = root.appendingPathComponent("slow-git.sh")
+    try "#!/bin/sh\nsleep 2\n".write(to: slowGit, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: slowGit.path)
+    do {
+        _ = try GitDiffEngine(configuration: .init(timeoutSeconds: 0.05, maxOutputBytes: 20_000), gitExecutableURL: slowGit).diff(repositoryURL: root, source: .workingTreeVsHEAD)
+        expect(false, "git diff engine should enforce timeout")
+    } catch GitDiffEngine.DiffError.timedOut {
+    } catch {
+        expect(false, "git diff engine should throw timedOut, got \(error)")
+    }
+}
+
 // MARK: - Focus model
 
 do {
