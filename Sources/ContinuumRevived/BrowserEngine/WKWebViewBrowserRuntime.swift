@@ -9,6 +9,7 @@ protocol BrowserUIDialogPresenting: AnyObject {
     func presentJavaScriptConfirm(message: String, window: NSWindow?, completion: @escaping (Bool) -> Void)
     func presentJavaScriptPrompt(prompt: String, defaultText: String?, window: NSWindow?, completion: @escaping (String?) -> Void)
     func presentOpenPanel(allowsMultipleSelection: Bool, allowsDirectories: Bool, window: NSWindow?, completion: @escaping ([URL]?) -> Void)
+    func presentDownloadSavePanel(suggestedFilename: String, window: NSWindow?, completion: @escaping (URL?) -> Void)
 }
 
 @MainActor
@@ -56,6 +57,20 @@ final class AppKitBrowserUIDialogPresenter: BrowserUIDialogPresenting {
         }
     }
 
+    func presentDownloadSavePanel(suggestedFilename: String, window: NSWindow?, completion: @escaping (URL?) -> Void) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = suggestedFilename
+        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        let finish: (NSApplication.ModalResponse) -> Void = { response in
+            completion(response == .OK ? panel.url : nil)
+        }
+        if let window {
+            panel.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            finish(panel.runModal())
+        }
+    }
+
     private func run(alert: NSAlert, window: NSWindow?, completion: @escaping (NSApplication.ModalResponse) -> Void) {
         if let window {
             alert.beginSheetModal(for: window, completionHandler: completion)
@@ -81,11 +96,13 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
     var onContentProcessTerminated: ((BrowserRuntimeID) -> Void)?
 
     private var didNotifyContentProcessTerminated = false
+    private var isTerminated = false
 
     let webView: WKWebView
     private weak var hostView: BrowserHostView?
     private let uiDialogPresenter: BrowserUIDialogPresenting
     private var observers: [NSKeyValueObservation] = []
+    private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
     var reservedShortcutHandler: ((NSEvent) -> Bool)? {
         didSet { hostView?.reservedShortcutHandler = reservedShortcutHandler }
     }
@@ -142,7 +159,7 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         observers.append(webView.observe(\.isLoading, options: [.new]) { [weak self] _, _ in
             Task { @MainActor in
                 guard let self else { return }
-                if !self.webView.isLoading, case .loading = self.loadingState {
+                if !self.webView.isLoading, case .loading = self.loadingState, self.activeDownloads.isEmpty {
                     self.loadingState = .idle
                     self.onStateChange?()
                 }
@@ -210,7 +227,9 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         // Order matters: stop loads, drop observers, drop delegates, remove view.
         // Inverting the order risks KVO/delegate callbacks firing into a
         // half-torn-down runtime.
+        isTerminated = true
         webView.stopLoading()
+        cancelActiveDownloads()
         observers.forEach { $0.invalidate() }
         observers.removeAll()
         webView.navigationDelegate = nil
@@ -253,6 +272,83 @@ extension WKWebViewBrowserRuntime: WKNavigationDelegate {
             self.onStateChange?()
             self.onContentProcessTerminated?(self.id)
         }
+    }
+
+    @available(macOS 11.3, *)
+    nonisolated func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+        MainActor.assumeIsolated { self.beginDownload(download) }
+    }
+
+    @available(macOS 11.3, *)
+    nonisolated func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+        MainActor.assumeIsolated { self.beginDownload(download) }
+    }
+
+    @available(macOS 11.3, *)
+    nonisolated func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
+        Task { @MainActor in
+            if navigationResponse.response.suggestedFilename != nil, !navigationResponse.canShowMIMEType {
+                decisionHandler(.download)
+            } else {
+                decisionHandler(.allow)
+            }
+        }
+    }
+}
+
+@available(macOS 11.3, *)
+extension WKWebViewBrowserRuntime: WKDownloadDelegate {
+    func beginDownload(_ download: WKDownload) {
+        guard !isTerminated else { return }
+        activeDownloads[ObjectIdentifier(download)] = download
+        download.delegate = self
+        loadingState = .loading(progress: 0)
+        onStateChange?()
+    }
+
+    func webView(_ webView: WKWebView, start download: WKDownload) {
+        beginDownload(download)
+    }
+
+    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping @MainActor @Sendable (URL?) -> Void) {
+        handleDownloadDestination(suggestedFilename: suggestedFilename, completion: completionHandler)
+    }
+
+    func downloadDidFinish(_ download: WKDownload) {
+        activeDownloads.removeValue(forKey: ObjectIdentifier(download))
+        loadingState = activeDownloads.isEmpty ? .idle : .loading(progress: 0)
+        onStateChange?()
+    }
+
+    func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+        activeDownloads.removeValue(forKey: ObjectIdentifier(download))
+        loadingState = .failed(message: error.localizedDescription)
+        onStateChange?()
+    }
+}
+
+extension WKWebViewBrowserRuntime {
+    func cancelActiveDownloads() {
+        if #available(macOS 11.3, *) {
+            for download in activeDownloads.values {
+                download.cancel { _ in }
+                download.delegate = nil
+            }
+        }
+        activeDownloads.removeAll()
+    }
+
+    func handleDownloadDestination(suggestedFilename: String, completion: @escaping (URL?) -> Void) {
+        uiDialogPresenter.presentDownloadSavePanel(suggestedFilename: Self.sanitizedDownloadFilename(suggestedFilename), window: dialogWindow) { url in
+            completion(url)
+        }
+    }
+
+    static func sanitizedDownloadFilename(_ suggestedFilename: String) -> String {
+        let trimmed = suggestedFilename.trimmingCharacters(in: .whitespacesAndNewlines)
+        let invalid = CharacterSet(charactersIn: "/:").union(.controlCharacters)
+        let sanitized = trimmed.components(separatedBy: invalid).filter { !$0.isEmpty }.joined(separator: "-")
+        return sanitized.isEmpty ? "download" : sanitized
     }
 }
 
@@ -329,6 +425,11 @@ extension WKWebViewBrowserRuntime {
                 calls.append(Call(kind: "open", message: "", windowMatched: window === expectedWindow, allowsMultipleSelection: allowsMultipleSelection, allowsDirectories: allowsDirectories))
                 completion([URL(fileURLWithPath: "/tmp/continuum-upload.txt")])
             }
+            var downloadDirectory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            func presentDownloadSavePanel(suggestedFilename: String, window: NSWindow?, completion: @escaping (URL?) -> Void) {
+                calls.append(Call(kind: "download", message: suggestedFilename, windowMatched: window === expectedWindow, allowsMultipleSelection: false, allowsDirectories: false))
+                completion(downloadDirectory.appendingPathComponent(suggestedFilename))
+            }
         }
 
         enum CheckError: Error, CustomStringConvertible {
@@ -369,11 +470,36 @@ extension WKWebViewBrowserRuntime {
         runtime.handleOpenPanel(allowsMultipleSelection: true, allowsDirectories: true) { urls = $0 }
         try expect(urls?.map(\.lastPathComponent) == ["continuum-upload.txt"], "open panel should forward selected URLs")
 
+        var downloadURL: URL?
+        runtime.handleDownloadDestination(suggestedFilename: "reports/quarterly:one.txt") { downloadURL = $0 }
+        try expect(downloadURL?.lastPathComponent == "reports-quarterly-one.txt", "download destination handler should receive a safe suggested filename")
+        try expect(Self.sanitizedDownloadFilename("/:") == "download", "download filename sanitizer should fall back when stripping invalid characters empties the name")
+
         try expect(fake.calls == [
             .init(kind: "alert", message: "hello", windowMatched: true, allowsMultipleSelection: false, allowsDirectories: false),
             .init(kind: "confirm", message: "continue?", windowMatched: true, allowsMultipleSelection: false, allowsDirectories: false),
             .init(kind: "prompt", message: "name|Dylan", windowMatched: true, allowsMultipleSelection: false, allowsDirectories: false),
-            .init(kind: "open", message: "", windowMatched: true, allowsMultipleSelection: true, allowsDirectories: true)
-        ], "delegate calls should preserve kind, payload, window anchor, and open-panel flags")
+            .init(kind: "open", message: "", windowMatched: true, allowsMultipleSelection: true, allowsDirectories: true),
+            .init(kind: "download", message: "reports-quarterly-one.txt", windowMatched: true, allowsMultipleSelection: false, allowsDirectories: false)
+        ], "delegate calls should preserve kind, payload, window anchor, and open-panel/download flags")
+
+        fake.calls.removeAll()
+        fake.downloadDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("continuum-download-check-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fake.downloadDirectory, withIntermediateDirectories: true)
+        let html = """
+        <html><body><a id='download' download='fixture.txt' href='data:text/plain;charset=utf-8,continuum-download-check'>download</a></body></html>
+        """
+        webView.loadHTMLString(html, baseURL: nil)
+        let loadDeadline = Date().addingTimeInterval(5)
+        while webView.isLoading && Date() < loadDeadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        webView.evaluateJavaScript("document.getElementById('download').click()")
+        let downloadDeadline = Date().addingTimeInterval(5)
+        while Date() < downloadDeadline {
+            if fake.calls.contains(where: { $0.kind == "download" && $0.message == "fixture.txt" }) { break }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        try expect(fake.calls.contains(where: { $0.kind == "download" && $0.message == "fixture.txt" && $0.windowMatched }), "actual WKWebView download click should request a save destination through the presenter")
     }
 }
