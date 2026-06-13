@@ -196,6 +196,10 @@ final class GhosttyTerminalRuntime: TerminalRuntime {
         defer { context.shutdown() }
 
         let host = TerminalHostView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 900, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = host
+        window.orderFront(nil)
+        defer { window.close() }
         let runtime = GhosttyTerminalRuntime(
             title: "Terminal snapshot check",
             launchProfile: LaunchProfile(command: "/bin/sh", arguments: [], cwd: FileManager.default.currentDirectoryPath, title: "Terminal snapshot check"),
@@ -264,6 +268,85 @@ final class GhosttyTerminalRuntime: TerminalRuntime {
             code: 2,
             userInfo: [NSLocalizedDescriptionKey: "terminal snapshot check timed out"]
         )
+    }
+
+    static func runStrayWindowAuditSelfCheck() throws -> URL {
+        struct WindowSample {
+            let label: String
+            let windows: [[String: Any]]
+        }
+
+        func ownedWindows() -> [[String: Any]] {
+            let pid = Int(ProcessInfo.processInfo.processIdentifier)
+            let info = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+            return info.filter { ($0[kCGWindowOwnerPID as String] as? Int) == pid }.map { window in
+                var out: [String: Any] = [:]
+                out["windowNumber"] = window[kCGWindowNumber as String]
+                out["name"] = window[kCGWindowName as String] as? String ?? ""
+                out["layer"] = window[kCGWindowLayer as String]
+                out["alpha"] = window[kCGWindowAlpha as String]
+                out["bounds"] = window[kCGWindowBounds as String]
+                return out
+            }
+        }
+
+        func pump(_ context: GhosttyRuntimeContext, seconds: TimeInterval = 0.3) throws {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline {
+                ghostty_app_tick(try context.app)
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+            }
+        }
+
+        let context = try GhosttyRuntimeContext()
+        defer { context.shutdown() }
+        var samples: [WindowSample] = [WindowSample(label: "baseline", windows: ownedWindows())]
+
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 900, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        let host = TerminalHostView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        window.contentView = host
+        window.orderFront(nil)
+        try pump(context)
+        samples.append(WindowSample(label: "mainWindow", windows: ownedWindows()))
+
+        let profile = try ShellLaunchResolver().resolveShell(cwd: FileManager.default.temporaryDirectory.path)
+        let runtime = GhosttyTerminalRuntime(title: "stray-window-audit", launchProfile: profile, ghostty: context)
+        host.attach(runtime: runtime)
+        try pump(context)
+        samples.append(WindowSample(label: "terminalAttached", windows: ownedWindows()))
+
+        runtime.terminate(policy: .force)
+        host.detachRuntime()
+        window.close()
+        try pump(context)
+        samples.append(WindowSample(label: "closed", windows: ownedWindows()))
+
+        let baselineCount = samples[0].windows.count
+        let mainCount = samples[1].windows.count
+        let attachedCount = samples[2].windows.count
+        let terminalDelta = attachedCount - mainCount
+        guard terminalDelta == 0 else {
+            throw NSError(domain: "ContinuumRevivedStrayWindowAuditCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: "terminal attach added \(terminalDelta) process-owned CG windows (baseline=\(baselineCount), main=\(mainCount), attached=\(attachedCount))"])
+        }
+
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("stray-window-audit", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "check": "stray-window-audit",
+            "baselineCount": baselineCount,
+            "mainWindowCount": mainCount,
+            "terminalAttachedCount": attachedCount,
+            "terminalDelta": terminalDelta,
+            "samples": samples.map { ["label": $0.label, "windows": $0.windows] },
+        ]
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
     }
 }
 

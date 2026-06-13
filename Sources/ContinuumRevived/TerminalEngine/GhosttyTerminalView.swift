@@ -5,6 +5,7 @@ import GhosttyKit
 
 @MainActor
 final class GhosttyTerminalView: NSView {
+    private let ghosttyApp: ghostty_app_t
     private let launchProfile: LaunchProfile
     private let statusChanged: (TerminalStatus) -> Void
     private(set) var surface: ghostty_surface_t?
@@ -22,13 +23,13 @@ final class GhosttyTerminalView: NSView {
         reservedShortcutHandler: ((NSEvent) -> Bool)? = nil,
         statusChanged: @escaping (TerminalStatus) -> Void
     ) {
+        self.ghosttyApp = ghosttyApp
         self.launchProfile = launchProfile
         self.statusChanged = statusChanged
         self.reservedShortcutHandler = reservedShortcutHandler
         super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
 
         statusChanged(.configuring)
-        createSurface(app: ghosttyApp)
     }
 
     required init?(coder: NSCoder) {
@@ -37,6 +38,9 @@ final class GhosttyTerminalView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if window != nil, surface == nil {
+            createSurface(app: ghosttyApp)
+        }
         updateSurfaceSize()
         window?.makeFirstResponder(self)
     }
