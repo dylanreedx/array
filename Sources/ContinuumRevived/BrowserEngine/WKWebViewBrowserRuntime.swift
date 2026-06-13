@@ -131,6 +131,10 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
     /// Fires at most once per runtime instance. Always called on MainActor.
     var onContentProcessTerminated: ((BrowserRuntimeID) -> Void)?
 
+    /// Called for target=_blank/window.open requests. Return the newly spawned
+    /// WKWebView so WebKit can continue the navigation with its supplied configuration.
+    var onNewWindowRequest: ((URLRequest, WKWebViewConfiguration, WKNavigationAction, WKWindowFeatures) -> WKWebView?)?
+
     private var didNotifyContentProcessTerminated = false
     private var isTerminated = false
 
@@ -473,6 +477,11 @@ extension WKWebViewBrowserRuntime: WKUIDelegate {
             completion: completionHandler
         )
     }
+
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        guard navigationAction.targetFrame == nil else { return nil }
+        return onNewWindowRequest?(navigationAction.request, configuration, navigationAction, windowFeatures)
+    }
 }
 
 extension WKWebViewBrowserRuntime {
@@ -642,5 +651,30 @@ extension WKWebViewBrowserRuntime {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
         }
         try expect(fake.calls.contains(where: { $0.kind == "download" && $0.message == "fixture.txt" && $0.windowMatched }), "actual WKWebView download click should request a save destination through the presenter")
+
+        var newWindowURL: String?
+        var returnedWebView: WKWebView?
+        runtime.onNewWindowRequest = { request, configuration, _, _ in
+            newWindowURL = request.url?.absoluteString
+            let child = WKWebView(frame: .zero, configuration: configuration)
+            returnedWebView = child
+            return child
+        }
+        let popupHTML = """
+        <html><body><a id='blank' target='_blank' href='data:text/html;charset=utf-8,target-blank-ok'>blank</a></body></html>
+        """
+        webView.loadHTMLString(popupHTML, baseURL: URL(string: "https://continuum.test/"))
+        let popupLoadDeadline = Date().addingTimeInterval(5)
+        while webView.isLoading && Date() < popupLoadDeadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        webView.evaluateJavaScript("document.getElementById('blank').click()")
+        let popupDeadline = Date().addingTimeInterval(5)
+        while Date() < popupDeadline {
+            if newWindowURL != nil { break }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        try expect(newWindowURL?.contains("target-blank-ok") == true, "target=_blank should route through the new-window request seam with the requested URL")
+        try expect(returnedWebView != nil, "new-window request seam should return the spawned child WKWebView")
     }
 }

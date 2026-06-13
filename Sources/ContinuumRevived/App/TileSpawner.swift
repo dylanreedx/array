@@ -367,7 +367,7 @@ final class TileSpawner {
             webView: webView,
             initialURL: urlString
         )
-        runtime.reservedShortcutHandler = reservedShortcutHandler
+        configureBrowserRuntime(runtime, profileId: profile.id)
         tile.runtimeRef = RuntimeRef(kind: .browserTile, id: runtime.id)
 
         let view = BrowserTileNSView(tile: tile, runtime: runtime)
@@ -392,6 +392,84 @@ final class TileSpawner {
 
         runtime.loadURL(urlString)
         return .spawned(runtime)
+    }
+
+    private func configureBrowserRuntime(_ runtime: WKWebViewBrowserRuntime, profileId: UUID) {
+        runtime.reservedShortcutHandler = reservedShortcutHandler
+        runtime.onNewWindowRequest = { [weak self, weak runtime] request, configuration, _, _ in
+            guard let self, let opener = runtime else { return nil }
+            return self.spawnBrowserForNewWindow(request: request, configuration: configuration, openerTileId: opener.tileId, profileId: profileId)
+        }
+    }
+
+    private func spawnBrowserForNewWindow(request: URLRequest, configuration: WKWebViewConfiguration, openerTileId: UUID, profileId: UUID) -> WKWebView? {
+        guard let canvasView else { return nil }
+        let urlString = request.url?.absoluteString ?? Self.defaultBrowserURL
+        guard URL(string: urlString) != nil else { return nil }
+        let browserState: BrowserState
+        do {
+            browserState = try loadBrowserStateIfAvailable() ?? BrowserState(tiles: [])
+        } catch {
+            fputs("TileSpawner target=_blank BrowserState load failed: \(error)\n", stderr)
+            return nil
+        }
+
+        let openerFrame = canvasView.canvasState.tiles.first(where: { $0.id == openerTileId })?.frame
+        let placementPoint: CGPoint?
+        if let openerFrame {
+            placementPoint = CGPoint(x: openerFrame.x + openerFrame.width + 24, y: openerFrame.y + 24)
+        } else {
+            placementPoint = nil
+        }
+        let frame = makePlacement(
+            worldPoint: placementPoint,
+            size: CanvasEngine.defaultFrame(for: .browser),
+            in: canvasView
+        )
+        let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
+        let profile = browserProfile(for: profileId)
+        var tile = Tile(
+            id: UUID(),
+            kind: .browser,
+            title: "Browser",
+            frame: frame,
+            zIndex: nextZ,
+            runtimeRef: nil,
+            metadata: TileMetadata(url: urlString, browserProfileId: profile.id)
+        )
+
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let runtime = WKWebViewBrowserRuntime(
+            id: UUID(),
+            tileId: tile.id,
+            webView: webView,
+            initialURL: urlString
+        )
+        configureBrowserRuntime(runtime, profileId: profile.id)
+        tile.runtimeRef = RuntimeRef(kind: .browserTile, id: runtime.id)
+
+        let view = BrowserTileNSView(tile: tile, runtime: runtime)
+        view.onAfterRefresh = { [weak self] in self?.browserPersistenceHandler?() }
+        configureBrowserProfileMenu(view, tileId: tile.id)
+        canvasView.install(tileView: view, for: tile)
+
+        do {
+            try upsertBrowserTile(
+                runtimeId: runtime.id,
+                tileId: tile.id,
+                url: urlString,
+                title: "",
+                storageGroupId: profile.dataStoreIdentifier,
+                profileId: profile.id,
+                in: browserState
+            )
+            try projectStore.saveCanvas(canvasView.canvasState)
+        } catch {
+            fputs("TileSpawner target=_blank persistence failed: \(error)\n", stderr)
+            canvasView.removeTile(id: tile.id)
+            return nil
+        }
+        return webView
     }
 
     func installBrowserSnapshotTile(runtime: WKWebViewBrowserRuntime, snapshotImage: NSImage) throws {
@@ -443,7 +521,7 @@ final class TileSpawner {
             webView: webView,
             initialURL: urlString
         )
-        runtime.reservedShortcutHandler = reservedShortcutHandler
+        configureBrowserRuntime(runtime, profileId: profile.id)
         var tile = existing
         tile.runtimeRef = RuntimeRef(kind: .browserTile, id: runtime.id)
         if let persistedTitle = persistedBrowserTile?.title, !persistedTitle.isEmpty {
@@ -507,7 +585,7 @@ final class TileSpawner {
             webView: webView,
             initialURL: urlString
         )
-        runtime.reservedShortcutHandler = reservedShortcutHandler
+        configureBrowserRuntime(runtime, profileId: selectedProfile.id)
 
         var tile = existing
         tile.runtimeRef = RuntimeRef(kind: .browserTile, id: runtime.id)
@@ -749,6 +827,84 @@ final class TileSpawner {
             storageGroupId: storageGroupId,
             profileId: profile.id
         )
+    }
+
+    static func runBrowserTargetBlankSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { if case let .failed(message) = self { return message }; return "failed" }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-browser-target-blank-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        let profile = BrowserProfile(
+            id: UUID(uuidString: "00000000-0000-0000-0000-0000000074AA")!,
+            name: "Popup Profile",
+            dataStoreIdentifier: "00000000-0000-0000-0000-0000000074AB",
+            createdAt: Date(timeIntervalSince1970: 74)
+        )
+        let project = Project(
+            id: UUID(uuidString: "00000000-0000-0000-0000-0000000074FF")!,
+            name: "browser-target-blank-check",
+            rootPath: tempRoot.path,
+            createdAt: Date(timeIntervalSince1970: 74),
+            updatedAt: Date(timeIntervalSince1970: 74),
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning,
+                defaultBrowserProfileId: profile.id
+            )
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        let spawner = TileSpawner(
+            canvasView: canvas,
+            ghostty: nil,
+            browserEngine: BrowserEngineContext(),
+            projectStore: store,
+            project: project,
+            browserProfiles: [profile]
+        )
+
+        let opener: WKWebViewBrowserRuntime
+        switch spawner.spawnBrowser(url: "data:text/html;charset=utf-8,opener") {
+        case let .spawned(runtime): opener = runtime
+        case let .invalidURL(url): throw CheckError.failed("opener spawn invalid URL \(url)")
+        case let .failure(error): throw error
+        }
+        try expect(canvas.canvasState.tiles.count == 1, "opener spawn should create one browser tile")
+        let request = URLRequest(url: URL(string: "data:text/html;charset=utf-8,target-blank-child")!)
+        let returned = opener.onNewWindowRequest?(request, WKWebViewConfiguration(), WKNavigationAction(), WKWindowFeatures())
+        try expect(returned != nil, "target blank seam should return the spawned child WKWebView")
+        try expect(canvas.canvasState.tiles.count == 2, "target blank should create a second browser tile")
+        let childTile = canvas.canvasState.tiles.first { $0.id != opener.tileId }
+        try expect(childTile?.kind == .browser, "target blank child should be a browser tile")
+        try expect(childTile?.metadata.browserProfileId == profile.id, "target blank child should inherit opener profile metadata")
+        let browserState = try store.loadBrowserState()
+        let childBrowserState = browserState.tiles.first { $0.tileId == childTile?.id }
+        try expect(childBrowserState?.profileId == profile.id, "target blank child should persist opener profile id")
+        try expect(childBrowserState?.storageGroupId == profile.dataStoreIdentifier, "target blank child should persist opener storage group")
+        try expect(childBrowserState?.url.contains("target-blank-child") == true, "target blank child should persist requested URL")
+
+        let artifactDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs/browser-target-blank-\(Int(Date().timeIntervalSince1970))", isDirectory: true)
+        try fileManager.createDirectory(at: artifactDir, withIntermediateDirectories: true)
+        let artifact = artifactDir.appendingPathComponent("manifest.json")
+        let payload = """
+        {"check":"browser-target-blank","tileCount":\(canvas.canvasState.tiles.count),"profileId":"\(profile.id.uuidString)","storageGroupId":"\(profile.dataStoreIdentifier)","childURL":"\(childBrowserState?.url ?? "")"}
+        """
+        try payload.write(to: artifact, atomically: true, encoding: .utf8)
+        return artifact
     }
 
     static func runBrowserProfilePersistenceSelfCheck() throws -> URL {
