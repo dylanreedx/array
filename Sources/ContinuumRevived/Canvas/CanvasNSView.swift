@@ -32,6 +32,7 @@ final class CanvasNSView: NSView {
         var placement: ZonePlacement
         var displayName: String
         var agentStatusRollup: AgentStatusRollup = .empty
+        var lockBadgeText: String?
     }
 
     struct AgentStatusRollup: Equatable {
@@ -223,6 +224,9 @@ final class CanvasNSView: NSView {
     }
 
     var navZoneRenderModels: [ZoneRenderModel] { zoneRenderModels }
+    var zoneChromeLockBadgeTexts: [String?] {
+        zoneRenderModels.compactMap { zoneChromeViews[$0.placement.zoneId]?.snapshot.lockBadgeText }
+    }
 
     func fitZoneToViewport(zoneId: UUID) -> CanvasViewport? {
         guard let model = zoneRenderModels.first(where: { $0.placement.zoneId == zoneId }) else { return nil }
@@ -1204,6 +1208,7 @@ final class ZoneChromeNSView: NSView {
         var frame: CGRect
         var headerRect: CGRect
         var agentRollupText: String?
+        var lockBadgeText: String?
     }
 
     private let model: CanvasNSView.ZoneRenderModel
@@ -1216,7 +1221,8 @@ final class ZoneChromeNSView: NSView {
             collapsed: model.placement.collapsed,
             frame: frame,
             headerRect: headerRect,
-            agentRollupText: model.agentStatusRollup.displayText
+            agentRollupText: model.agentStatusRollup.displayText,
+            lockBadgeText: model.lockBadgeText
         )
     }
 
@@ -1257,19 +1263,21 @@ final class ZoneChromeNSView: NSView {
         ]
         title.draw(in: headerRect.insetBy(dx: 12, dy: 8), withAttributes: attributes)
 
-        if let rollup = model.agentStatusRollup.displayText {
-            let rollupAttributes: [NSAttributedString.Key: Any] = [
+        let trailingText = model.lockBadgeText ?? model.agentStatusRollup.displayText
+        if let trailingText {
+            let trailingAttributes: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: 11, weight: .medium),
-                .foregroundColor: NSColor.white.withAlphaComponent(0.70)
+                .foregroundColor: NSColor.white.withAlphaComponent(model.lockBadgeText == nil ? 0.70 : 0.88),
+                .backgroundColor: model.lockBadgeText == nil ? NSColor.clear : NSColor.systemOrange.withAlphaComponent(0.35)
             ]
-            let rollupSize = (rollup as NSString).size(withAttributes: rollupAttributes)
-            let rollupRect = CGRect(
-                x: max(12, headerRect.maxX - rollupSize.width - 12),
+            let trailingSize = (trailingText as NSString).size(withAttributes: trailingAttributes)
+            let trailingRect = CGRect(
+                x: max(12, headerRect.maxX - trailingSize.width - 12),
                 y: 9,
-                width: rollupSize.width,
+                width: trailingSize.width,
                 height: 16
             )
-            rollup.draw(in: rollupRect, withAttributes: rollupAttributes)
+            trailingText.draw(in: trailingRect, withAttributes: trailingAttributes)
         }
     }
 

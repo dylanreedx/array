@@ -3920,6 +3920,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory.appendingPathComponent("continuum-project-lock-\(UUID().uuidString)", isDirectory: true)
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        let seedController = try ZoneRuntimeController(root: root, acquireLock: false)
+        let seedProjectId = seedController.project.id
+        seedController.close()
+
         let lock = ProjectLock(root: root)
         try lock.acquire()
 
@@ -3943,6 +3947,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let lockedProbe = try runProbe()
         try expect(lockedProbe.code == 1, "probe should fail while parent holds lock; got \(lockedProbe.code) stdout=\(lockedProbe.stdout) stderr=\(lockedProbe.stderr)")
+
+        let degradedController = try ZoneRuntimeController(root: root, acquireLock: true, degradeOnLockFailure: true)
+        try expect(degradedController.project.id == seedProjectId, "degraded controller should load existing project without replacing identity")
+        try expect(degradedController.hydrationTier == .cold, "locked zone should be forced cold; got \(degradedController.hydrationTier)")
+        try expect(degradedController.lockDegradation?.lockFile.path == lock.lockFile.path, "locked zone should expose lock-file degradation state")
+        try expect(degradedController.lockDegradation?.badgeText == "locked elsewhere", "locked zone should expose chrome badge text")
+        try degradedController.setTier(.live, allowDehydratingFocusedZone: true)
+        try expect(degradedController.hydrationTier == .cold, "locked zone should remain cold when live hydration is requested")
+        let lockedRetry = try degradedController.retryProjectLock()
+        try expect(!lockedRetry, "retry should not acquire while external lock is still held")
+
+        let lockedPlacement = ZonePlacement(
+            zoneId: UUID(),
+            projectId: degradedController.project.id,
+            origin: ZonePoint(x: 0, y: 0),
+            size: ZoneSize(width: 240, height: 140),
+            color: "orange",
+            collapsed: false,
+            hydrationPolicy: .automatic
+        )
+        let lockedZoneView = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil), zoneRenderModels: [
+            CanvasNSView.ZoneRenderModel(placement: lockedPlacement, displayName: degradedController.project.name, lockBadgeText: degradedController.lockDegradation?.badgeText)
+        ])
+        lockedZoneView.layoutSubtreeIfNeeded()
+        let lockedBadgeText = lockedZoneView.zoneChromeLockBadgeTexts.first ?? nil
+        try expect(lockedBadgeText == "locked elsewhere", "zone chrome should expose locked badge; got \(String(describing: lockedBadgeText))")
 
         let inheritedFdGuard = Process()
         inheritedFdGuard.executableURL = URL(fileURLWithPath: "/bin/sleep")
@@ -3968,6 +3998,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(!childOpenFiles.contains(lock.lockFile.path), "child process inherited project lock fd: \(childOpenFiles)")
 
         lock.release()
+        let unlockedRetry = try degradedController.retryProjectLock()
+        try expect(unlockedRetry, "retry should acquire after external lock release")
+        try expect(degradedController.lockDegradation == nil, "retry should clear lock degradation after acquiring lock")
+        degradedController.close()
+
+        let unlockedController = try ZoneRuntimeController(root: root)
+        try expect(unlockedController.hydrationTier == .live, "unlocked zone should open live after retry/reopen; got \(unlockedController.hydrationTier)")
+        unlockedController.close()
+
         let unlockedProbe = try runProbe()
         try expect(unlockedProbe.code == 0, "probe should acquire after release while a child process remains alive; got \(unlockedProbe.code) stdout=\(unlockedProbe.stdout) stderr=\(unlockedProbe.stderr)")
 
@@ -3984,6 +4023,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "lockedProbeExit": lockedProbe.code,
             "lockedProbeStdout": lockedProbe.stdout,
             "lockedProbeStderr": lockedProbe.stderr,
+            "degradedControllerTierWhileLocked": "cold",
+            "degradedControllerBadgeText": lockedBadgeText ?? NSNull(),
+            "retryWhileLockedAcquired": lockedRetry,
+            "retryAfterReleaseAcquired": unlockedRetry,
+            "degradationClearedAfterRetry": degradedController.lockDegradation == nil,
             "unlockedProbeExit": unlockedProbe.code,
             "unlockedProbeStdout": unlockedProbe.stdout,
             "unlockedProbeStderr": unlockedProbe.stderr,

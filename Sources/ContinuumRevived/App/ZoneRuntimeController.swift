@@ -27,9 +27,15 @@ final class ZoneRuntimeController {
     private var isNoteDirty = false
     private var isFileTreeDirty = false
 
-    private let projectLock: ProjectLock?
+    private var projectLock: ProjectLock?
     private var isClosed = false
     private(set) var hydrationTier: HydrationTier = .live
+    private(set) var lockDegradation: LockDegradation?
+
+    struct LockDegradation: Equatable {
+        var lockFile: URL
+        var badgeText: String { "locked elsewhere" }
+    }
 
     enum HydrationLifecycleError: Error, CustomStringConvertible {
         case controllerClosed
@@ -51,12 +57,22 @@ final class ZoneRuntimeController {
         }
     }
 
-    init(root projectRoot: URL, acquireLock: Bool = true) throws {
+    convenience init(root projectRoot: URL, acquireLock: Bool = true) throws {
+        try self.init(root: projectRoot, acquireLock: acquireLock, degradeOnLockFailure: false)
+    }
+
+    init(root projectRoot: URL, acquireLock: Bool = true, degradeOnLockFailure: Bool) throws {
         self.projectRoot = projectRoot
         if acquireLock {
-            let projectLock = ProjectLock(root: projectRoot)
-            try projectLock.acquire()
-            self.projectLock = projectLock
+            let candidateLock = ProjectLock(root: projectRoot)
+            do {
+                try candidateLock.acquire()
+                self.projectLock = candidateLock
+            } catch let ProjectLockError.alreadyLocked(lockFile) where degradeOnLockFailure {
+                self.projectLock = nil
+                self.lockDegradation = LockDegradation(lockFile: lockFile)
+                self.hydrationTier = .cold
+            }
         } else {
             self.projectLock = nil
         }
@@ -64,8 +80,12 @@ final class ZoneRuntimeController {
         let projectStore = ProjectStore(projectRoot: projectRoot)
         self.projectStore = projectStore
 
-        pruneExitedSessions(in: projectStore)
-        self.project = try Self.loadOrCreateProject(in: projectStore, projectRoot: projectRoot)
+        if lockDegradation == nil {
+            pruneExitedSessions(in: projectStore)
+            self.project = try Self.loadOrCreateProject(in: projectStore, projectRoot: projectRoot)
+        } else {
+            self.project = try projectStore.loadProject()
+        }
     }
 
     init(projectRoot: URL, projectStore: ProjectStore, project: Project) {
@@ -126,6 +146,10 @@ final class ZoneRuntimeController {
         snapshotImageProvider: (WKWebViewBrowserRuntime) -> NSImage = { _ in ZoneRuntimeController.placeholderSnapshotImage() }
     ) throws {
         guard !isClosed else { throw HydrationLifecycleError.controllerClosed }
+        if lockDegradation != nil {
+            hydrationTier = .cold
+            return
+        }
         guard targetTier != hydrationTier else { return }
 
         switch targetTier {
@@ -158,7 +182,26 @@ final class ZoneRuntimeController {
         }
     }
 
+    func retryProjectLock() throws -> Bool {
+        guard !isClosed else { throw HydrationLifecycleError.controllerClosed }
+        guard lockDegradation != nil else { return true }
+        let candidateLock = ProjectLock(root: projectRoot)
+        do {
+            try candidateLock.acquire()
+            projectLock = candidateLock
+            lockDegradation = nil
+            return true
+        } catch ProjectLockError.alreadyLocked {
+            hydrationTier = .cold
+            return false
+        }
+    }
+
     private func hydrateToLive() throws {
+        if lockDegradation != nil {
+            hydrationTier = .cold
+            return
+        }
         guard let canvasView, let tileSpawner else { throw HydrationLifecycleError.uiUnavailable }
         let browserTileIds = canvasView.canvasState.tiles
             .filter { $0.kind == .browser && $0.runtimeRef == nil }
