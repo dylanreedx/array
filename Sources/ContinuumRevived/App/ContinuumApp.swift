@@ -499,10 +499,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         set { zoneRuntimeController?.fileTreeViews = newValue }
     }
     private var canvasView: CanvasNSView?
-    private var saveTimer: Timer?
-    private var browserSaveTimer: Timer?
-    private var noteSaveTimer: Timer?
-    private var fileTreeSaveTimer: Timer?
     private let smokeTestEnabled = ProcessInfo.processInfo.environment["CONTINUUM_SMOKE_TEST"] == "1"
     private var smokeTestExitCode: Int32?
     private var zoneRuntimeController: ZoneRuntimeController?
@@ -588,6 +584,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.ghostty = ghostty
             self.browserEngine = browserEngine
             self.canvasView = canvasView
+            zoneRuntimeController.canvasView = canvasView
             focusBroker.activationFallbackSurfaces = { [weak self] in
                 var fallbacks: [FocusSurfaceID] = []
                 if let targetId = self?.canvasView?.canvasState.lastActiveTileId {
@@ -620,6 +617,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self?.handleReservedShortcut(event) ?? false
             }
             self.tileSpawner = spawner
+            zoneRuntimeController.tileSpawner = spawner
             canvasView.configureEmptyStateActions(CanvasEmptyStateActions(
                 spawnClaude: { [weak self] in
                     self?.spawnTerminalFromProfile("claude")
@@ -1279,10 +1277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 fputs("Switch Project failed: unknown project \(projectId)\n", stderr)
                 return
             }
-            flushCanvasSave()
-            flushBrowserSave()
-            flushNoteSave()
-            flushFileTreeSave()
+            zoneRuntimeController?.flushPendingSaves()
             try registryStore.save(registry)
             relaunchApplication(projectRoot: projectRoot)
         } catch {
@@ -1398,16 +1393,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func windowWillClose(_ notification: Notification) {
-        zoneRuntimeController?.close(
-            flushPendingWrites: { [self] in
-                // Flush any pending saves so the close-leg observation catches the
-                // most recent in-memory state.
-                flushCanvasSave()
-                flushBrowserSave()
-                flushNoteSave()
-                flushFileTreeSave()
-            }
-        )
+        zoneRuntimeController?.close()
 
         if let monitor = hotkeyMonitor {
             NSEvent.removeMonitor(monitor)
@@ -1462,69 +1448,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     // MARK: - CanvasNSViewDelegate
 
     func canvasDidChange(_ canvas: CanvasNSView) {
-        // Coalesce drag-rate writes: schedule a save 200ms after the last
-        // change. flushCanvasSave() runs immediately if we need to observe
-        // the latest state (smoke test, close path).
-        saveTimer?.invalidate()
-        saveTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.flushCanvasSave() }
-        }
+        zoneRuntimeController?.scheduleCanvasSave()
     }
 
     private func scheduleBrowserSave() {
-        // Browser url/title changes coalesce identically to canvas drags.
-        browserSaveTimer?.invalidate()
-        browserSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.flushBrowserSave() }
-        }
-    }
-
-    private func flushBrowserSave() {
-        browserSaveTimer?.invalidate()
-        browserSaveTimer = nil
-        guard let spawner = tileSpawner else { return }
-        for runtime in browserRuntimes {
-            spawner.writeBrowserTileSnapshot(for: runtime)
-        }
+        zoneRuntimeController?.scheduleBrowserSave()
     }
 
     private func scheduleNoteSave() {
-        noteSaveTimer?.invalidate()
-        noteSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.flushNoteSave() }
-        }
-    }
-
-    private func flushNoteSave() {
-        noteSaveTimer?.invalidate()
-        noteSaveTimer = nil
-        guard let spawner = tileSpawner else { return }
-        for view in noteViews.values {
-            spawner.writeNoteSnapshot(noteId: view.noteId, tileId: view.tile.id, text: view.textView.string)
-        }
+        zoneRuntimeController?.scheduleNoteSave()
     }
 
     private func scheduleFileTreeSave() {
-        fileTreeSaveTimer?.invalidate()
-        fileTreeSaveTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.flushFileTreeSave() }
-        }
-    }
-
-    private func flushFileTreeSave() {
-        fileTreeSaveTimer?.invalidate()
-        fileTreeSaveTimer = nil
-        guard let spawner = tileSpawner else { return }
-        for view in fileTreeViews.values {
-            spawner.writeFileTreeTileSnapshot(for: view)
-        }
+        zoneRuntimeController?.scheduleFileTreeSave()
     }
 
     private func flushCanvasSave() {
-        saveTimer?.invalidate()
-        saveTimer = nil
-        guard let projectStore, let canvasView else { return }
-        try? projectStore.saveCanvas(canvasView.canvasState)
+        zoneRuntimeController?.flushCanvasSave()
+    }
+
+    private func flushBrowserSave() {
+        zoneRuntimeController?.flushBrowserSave()
+    }
+
+    private func flushNoteSave() {
+        zoneRuntimeController?.flushNoteSave()
+    }
+
+    private func flushFileTreeSave() {
+        zoneRuntimeController?.flushFileTreeSave()
     }
 
     // MARK: - Persistence helpers
