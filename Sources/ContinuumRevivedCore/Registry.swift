@@ -89,6 +89,54 @@ public struct Registry: Codable, Equatable, Sendable {
         projects[idx].missing = false
         return true
     }
+
+    @discardableResult
+    public mutating func createWorkspace(id: UUID = UUID(), name: String, now: Date) -> WorkspaceEntry {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let entry = WorkspaceEntry(
+            id: id,
+            name: trimmed.isEmpty ? "Untitled Workspace" : trimmed,
+            projectIds: [],
+            createdAt: now,
+            updatedAt: now
+        )
+        workspaces.append(entry)
+        lastActiveWorkspaceId = id
+        return entry
+    }
+
+    @discardableResult
+    public mutating func renameWorkspace(id: UUID, name: String, now: Date) -> Bool {
+        guard let idx = workspaces.firstIndex(where: { $0.id == id }) else { return false }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        workspaces[idx].name = trimmed
+        workspaces[idx].updatedAt = now
+        return true
+    }
+
+    @discardableResult
+    public mutating func deleteWorkspace(id: UUID, replacementId: UUID? = nil, now: Date) -> Bool {
+        guard let idx = workspaces.firstIndex(where: { $0.id == id }) else { return false }
+        guard workspaces.count > 1 else { return false }
+        let replacement = replacementId.flatMap { wanted in workspaces.contains(where: { $0.id == wanted && $0.id != id }) ? wanted : nil }
+            ?? workspaces.first(where: { $0.id != id })?.id
+        guard let replacement else { return false }
+
+        let removedProjectIds = Set(workspaces[idx].projectIds)
+        workspaces.remove(at: idx)
+        let replacementProjectIds = workspaces.first(where: { $0.id == replacement })?.projectIds ?? []
+        for workspaceIdx in workspaces.indices where workspaces[workspaceIdx].id == replacement {
+            workspaces[workspaceIdx].updatedAt = now
+        }
+        if lastActiveWorkspaceId == id {
+            lastActiveWorkspaceId = replacement
+        }
+        if let activeProjectId = lastActiveProjectId, removedProjectIds.contains(activeProjectId) {
+            lastActiveProjectId = replacementProjectIds.first
+        }
+        return true
+    }
 }
 
 public struct WorkspaceEntry: Codable, Equatable, Sendable {

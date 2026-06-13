@@ -45,9 +45,9 @@ let rows = LaunchPaletteModel.makeRows(profiles: [
     profile(id: "shell", displayName: "Shell"),
     profile(id: "claude", displayName: "Claude Code")
 ])
-expect(rows.map(\.displayName) == ["Shell", "Claude Code", "New Note", "New Browser", "Open File...", "Open File Tree..."], "palette appends note/browser/file/file-tree actions after profiles")
+expect(rows.map(\.displayName) == ["Shell", "Claude Code", "New Note", "New Browser", "Open File...", "Open File Tree...", "New Workspace…"], "palette appends note/browser/file/file-tree/workspace actions after profiles")
 expect(LaunchPaletteModel.filterRows(rows, query: "note").map(\.displayName) == ["New Note"], "note query matches New Note")
-expect(LaunchPaletteModel.filterRows(rows, query: "new").map(\.displayName) == ["New Note", "New Browser"], "new query matches New actions")
+expect(LaunchPaletteModel.filterRows(rows, query: "new").map(\.displayName) == ["New Note", "New Browser", "New Workspace…"], "new query matches New actions")
 expect(LaunchPaletteModel.filterRows(rows, query: "browser").map(\.displayName) == ["New Browser"], "browser query matches New Browser")
 expect(LaunchPaletteModel.filterRows(rows, query: "open file").map(\.displayName) == ["Open File...", "Open File Tree..."], "open file query matches file actions")
 expect(LaunchPaletteModel.filterRows(rows, query: "tree").map(\.displayName) == ["Open File Tree..."], "tree query matches Open File Tree")
@@ -72,9 +72,35 @@ let projectRows = LaunchPaletteModel.makeRows(
         availability: .available
     )]
 )
-expect(projectRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "Add Work Project to Canvas"], "palette appends add-project rows")
+expect(projectRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "New Workspace…", "Add Work Project to Canvas"], "palette appends add-project rows")
 expect(LaunchPaletteModel.filterRows(projectRows, query: "add work").map(\.displayName) == ["Add Work Project to Canvas"], "add-project row filters by add token and project name")
 expect(projectRows.last?.isSelectable == true, "available add-project row is selectable")
+
+let workspaceId = UUID(uuidString: "00000000-0000-0000-0000-000000000154")!
+let workspaceRows = LaunchPaletteModel.makeRows(
+    profiles: [],
+    workspaces: [WorkspaceEntry(
+        id: workspaceId,
+        name: "Client Work",
+        projectIds: [switchProjectId],
+        createdAt: Date(timeIntervalSince1970: 2_000),
+        updatedAt: Date(timeIntervalSince1970: 2_000)
+    )]
+)
+expect(workspaceRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "New Workspace…", "Switch to Client Work Workspace", "Rename Client Work Workspace…", "Delete Client Work Workspace…"], "palette appends workspace rows")
+expect(LaunchPaletteModel.filterRows(workspaceRows, query: "switch client").map(\.displayName) == ["Switch to Client Work Workspace"], "workspace row filters by switch token and workspace name")
+expect(LaunchPaletteModel.filterRows(workspaceRows, query: "new workspace").map(\.displayName) == ["New Workspace…"], "new-workspace action filters by workspace tokens")
+let emptyWorkspaceRows = LaunchPaletteModel.makeRows(
+    profiles: [],
+    workspaces: [WorkspaceEntry(
+        id: UUID(uuidString: "00000000-0000-0000-0000-000000000155")!,
+        name: "Empty",
+        projectIds: [],
+        createdAt: Date(timeIntervalSince1970: 2_100),
+        updatedAt: Date(timeIntervalSince1970: 2_100)
+    )]
+)
+expect(emptyWorkspaceRows[5].isSelectable == false, "empty workspace switch rows are not selectable")
 
 let missingRows = LaunchPaletteModel.makeRows(profiles: [
     profile(id: "shell", displayName: "Shell", detail: "zsh not found", isSelectable: false),
@@ -86,6 +112,7 @@ expect(missingRows[2].isSelectable, "New Note action row is selectable")
 expect(missingRows[3].isSelectable, "New Browser action row is selectable")
 expect(missingRows[4].isSelectable, "Open File action row is selectable")
 expect(missingRows[5].isSelectable, "Open File Tree action row is selectable")
+expect(missingRows[6].isSelectable, "New Workspace action row is selectable")
 
 expect(LaunchPaletteModel.urlCandidate(from: "example.com") == "https://example.com", "bare domain defaults to https")
 expect(LaunchPaletteModel.urlCandidate(from: "localhost:3000") == "http://localhost:3000", "localhost defaults to http")

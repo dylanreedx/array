@@ -69,4 +69,8 @@ public struct WorkspaceStore: Sendable {
             return nil
         }
     }
+
+    public func deleteDocument() throws {
+        try FileManager.default.removeItem(at: layout.workspaceDirectory)
+    }
 }

@@ -19,8 +19,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private weak var previousFirstResponder: NSResponder?
     private weak var previousFirstResponderWindow: NSWindow?
 
-    func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = []) {
-        self.rows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)), projects: projects)
+    func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = []) {
+        self.rows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)), projects: projects, workspaces: workspaces)
         self.filtered = rows
         guard let hostView = host.contentView else { return }
         let wasVisible = isVisible
@@ -125,6 +125,13 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         case let .action(action): return action.displayName
         case let .profile(profile): return profile.displayName
         case let .project(project): return "Switch to \(project.name)"
+        case let .workspace(workspace): return "Switch to \(workspace.name) Workspace"
+        case let .workspaceAction(action, workspace):
+            switch action {
+            case .renameWorkspace: return "Rename \(workspace.name) Workspace…"
+            case .deleteWorkspace: return "Delete \(workspace.name) Workspace…"
+            default: return action.displayName
+            }
         }
     }
 
@@ -518,6 +525,12 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         case let .project(project):
             text.stringValue = "Switch to \(project.name) — \(project.rootPath)"
             text.textColor = project.isSelectable ? .labelColor : .secondaryLabelColor
+        case let .workspace(workspace):
+            text.stringValue = "Switch to \(workspace.name) Workspace — \(workspace.projectIds.count) project(s)"
+            text.textColor = workspace.projectIds.isEmpty ? .secondaryLabelColor : .labelColor
+        case let .workspaceAction(action, workspace):
+            text.stringValue = "\(action.displayName) \(workspace.name)"
+            text.textColor = .labelColor
         }
         return cell
     }
@@ -581,6 +594,16 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
                 return
             }
             onSelectAction?(.addProjectToCanvas(project.id))
+            close(restoreFocus: true)
+        case let .workspace(workspace):
+            guard !workspace.projectIds.isEmpty else {
+                NSSound.beep()
+                return
+            }
+            onSelectAction?(.switchWorkspace(workspace.id))
+            close(restoreFocus: true)
+        case let .workspaceAction(action, _):
+            onSelectAction?(action)
             close(restoreFocus: true)
         }
     }

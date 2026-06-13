@@ -1124,6 +1124,24 @@ do {
     let data = try JSONCodec.makeEncoder().encode(registry)
     let decoded = try JSONCodec.makeDecoder().decode(Registry.self, from: data)
     expect(decoded == registry, "Registry round trip")
+
+    var mutable = registry
+    let created = mutable.createWorkspace(
+        id: UUID(uuidString: "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB")!,
+        name: "  Work  ",
+        now: Date(timeIntervalSince1970: 1_700_001_000)
+    )
+    expect(created.name == "Work", "Registry.createWorkspace trims names")
+    expect(mutable.lastActiveWorkspaceId == created.id, "Registry.createWorkspace selects the new workspace")
+    expect(mutable.renameWorkspace(id: created.id, name: "  Client  ", now: Date(timeIntervalSince1970: 1_700_001_500)), "Registry.renameWorkspace updates existing workspace")
+    expect(mutable.workspaces.first(where: { $0.id == created.id })?.name == "Client", "Registry.renameWorkspace stores trimmed name")
+    expect(!mutable.renameWorkspace(id: created.id, name: "   ", now: Date()), "Registry.renameWorkspace rejects blank names")
+    expect(mutable.deleteWorkspace(id: workspaceId, replacementId: created.id, now: Date(timeIntervalSince1970: 1_700_002_000)), "Registry.deleteWorkspace removes non-last workspace")
+    expect(!mutable.workspaces.contains(where: { $0.id == workspaceId }), "Registry.deleteWorkspace removes the registry entry")
+    expect(mutable.lastActiveWorkspaceId == created.id, "Registry.deleteWorkspace reassigns last active workspace")
+    expect(mutable.lastActiveProjectId == nil, "Registry.deleteWorkspace clears active project when deleted workspace has no replacement project")
+    expect(mutable.projects.first(where: { $0.id == projectId })?.workspaceId == workspaceId, "Registry.deleteWorkspace leaves project entries untouched")
+    expect(!mutable.deleteWorkspace(id: created.id, now: Date()), "Registry.deleteWorkspace refuses to delete the last workspace")
 }
 
 // MARK: - Browser profile registry settings

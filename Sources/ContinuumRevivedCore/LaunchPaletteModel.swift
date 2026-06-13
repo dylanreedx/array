@@ -8,6 +8,10 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case openURL(String)
     case switchProject(UUID)
     case addProjectToCanvas(UUID)
+    case newWorkspace
+    case renameWorkspace(UUID)
+    case deleteWorkspace(UUID)
+    case switchWorkspace(UUID)
 
     public var displayName: String {
         switch self {
@@ -25,6 +29,14 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "Switch Project…"
         case .addProjectToCanvas:
             return "Add Project to Canvas…"
+        case .newWorkspace:
+            return "New Workspace…"
+        case .renameWorkspace:
+            return "Rename Workspace…"
+        case .deleteWorkspace:
+            return "Delete Workspace…"
+        case .switchWorkspace:
+            return "Switch Workspace…"
         }
     }
 
@@ -44,6 +56,14 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["switch", "project"]
         case .addProjectToCanvas:
             return ["add", "project", "canvas", "zone"]
+        case .newWorkspace:
+            return ["new", "workspace", "canvas"]
+        case .renameWorkspace:
+            return ["rename", "workspace", "canvas"]
+        case .deleteWorkspace:
+            return ["delete", "workspace", "canvas"]
+        case .switchWorkspace:
+            return ["switch", "workspace", "canvas"]
         }
     }
 }
@@ -66,12 +86,21 @@ public enum LaunchPaletteRow: Equatable, Sendable {
     case profile(LaunchPaletteProfileRow)
     case action(LaunchPaletteAction)
     case project(ProjectPickerRow)
+    case workspace(WorkspaceEntry)
+    case workspaceAction(LaunchPaletteAction, WorkspaceEntry)
 
     public var displayName: String {
         switch self {
         case let .profile(profile): return profile.displayName
         case let .action(action): return action.displayName
         case let .project(project): return "Add \(project.name) to Canvas"
+        case let .workspace(workspace): return "Switch to \(workspace.name) Workspace"
+        case let .workspaceAction(action, workspace):
+            switch action {
+            case .renameWorkspace: return "Rename \(workspace.name) Workspace…"
+            case .deleteWorkspace: return "Delete \(workspace.name) Workspace…"
+            default: return action.displayName
+            }
         }
     }
 
@@ -80,6 +109,8 @@ public enum LaunchPaletteRow: Equatable, Sendable {
         case let .profile(profile): return profile.isSelectable
         case .action: return true
         case let .project(project): return project.isSelectable
+        case let .workspace(workspace): return !workspace.projectIds.isEmpty
+        case .workspaceAction: return true
         }
     }
 
@@ -102,18 +133,33 @@ public enum LaunchPaletteRow: Equatable, Sendable {
             let haystacks = ["add project canvas zone", "switch project", project.name, project.rootPath, project.id.uuidString].map { $0.lowercased() }
             let queryTokens = query.split(separator: " ").map(String.init)
             return queryTokens.allSatisfy { token in haystacks.contains { $0.contains(token) } }
+        case let .workspace(workspace):
+            let haystacks = ["switch workspace canvas", workspace.name, workspace.id.uuidString].map { $0.lowercased() }
+            let queryTokens = query.split(separator: " ").map(String.init)
+            return queryTokens.allSatisfy { token in haystacks.contains { $0.contains(token) } }
+        case let .workspaceAction(action, workspace):
+            let haystacks = [action.displayName, workspace.name, workspace.id.uuidString].map { $0.lowercased() }
+            let queryTokens = query.split(separator: " ").map(String.init)
+            return queryTokens.allSatisfy { token in haystacks.contains { $0.contains(token) } }
         }
     }
 }
 
 public enum LaunchPaletteModel {
-    public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = []) -> [LaunchPaletteRow] {
+    public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = []) -> [LaunchPaletteRow] {
         profiles.map(LaunchPaletteRow.profile) + [
             .action(.newNote),
             .action(.newBrowser),
             .action(.openFile),
-            .action(.openFileTree)
-        ] + projects.map(LaunchPaletteRow.project)
+            .action(.openFileTree),
+            .action(.newWorkspace)
+        ] + workspaces.flatMap { workspace in
+            [
+                LaunchPaletteRow.workspace(workspace),
+                LaunchPaletteRow.workspaceAction(.renameWorkspace(workspace.id), workspace),
+                LaunchPaletteRow.workspaceAction(.deleteWorkspace(workspace.id), workspace)
+            ]
+        } + projects.map(LaunchPaletteRow.project)
     }
 
     public static func filterRows(_ rows: [LaunchPaletteRow], query: String) -> [LaunchPaletteRow] {

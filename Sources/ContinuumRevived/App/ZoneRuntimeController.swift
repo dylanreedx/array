@@ -184,15 +184,15 @@ final class ZoneRuntimeController {
         return image
     }
 
-    func paletteRows(registryStore: RegistryStore?) -> (profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow]) {
+    func paletteRows(registryStore: RegistryStore?) -> (profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow], workspaces: [WorkspaceEntry]) {
         let profiles = tileSpawner?.annotatedProfiles() ?? []
         guard let registryStore,
               let registry = try? registryStore.loadOrEmpty() else {
-            return (profiles, [])
+            return (profiles, [], [])
         }
         let projects = ProjectPickerModel.makeRows(registry: registry)
             .filter { $0.id != project.id }
-        return (profiles, projects)
+        return (profiles, projects, registry.workspaces)
     }
 
     func scheduleCanvasSave() {

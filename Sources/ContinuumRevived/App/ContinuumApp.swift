@@ -1548,7 +1548,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             focusBroker.openModal(.palette)
         }
         let rows = zoneRuntimeController.paletteRows(registryStore: registryStore)
-        palette.show(near: host, profiles: rows.profiles, projects: rows.projects)
+        palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces)
     }
 
     private func makeProfilePalette() -> LaunchProfilePalette {
@@ -1632,6 +1632,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             switchProjectAndRelaunch(projectId: projectId)
         case let .addProjectToCanvas(projectId):
             addProjectZone(projectId: projectId)
+        case .newWorkspace:
+            createWorkspaceAndRelaunch(name: "Untitled Workspace")
+        case let .renameWorkspace(workspaceId):
+            renameWorkspace(workspaceId: workspaceId, name: "Renamed Workspace")
+        case let .deleteWorkspace(workspaceId):
+            deleteWorkspaceAndRelaunch(workspaceId: workspaceId)
+        case let .switchWorkspace(workspaceId):
+            switchWorkspaceAndRelaunch(workspaceId: workspaceId)
+        }
+    }
+
+    private func createWorkspaceAndRelaunch(name: String) {
+        guard let registryStore else { return }
+        do {
+            var registry = try registryStore.loadOrEmpty()
+            let workspace = registry.createWorkspace(name: name, now: Date())
+            let appSupport = WorkspaceStore.defaultApplicationSupportDirectory()
+            try WorkspaceStore(workspaceId: workspace.id, applicationSupportDirectory: appSupport).save(
+                WorkspaceDocument(
+                    viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                    zones: [],
+                    zoneZOrder: [],
+                    lastActiveZoneId: nil
+                )
+            )
+            zoneRuntimeController?.flushPendingSaves()
+            try registryStore.save(registry)
+        } catch {
+            fputs("Create Workspace failed: \(error)\n", stderr)
+        }
+    }
+
+    private func renameWorkspace(workspaceId: UUID, name: String) {
+        guard let registryStore else { return }
+        do {
+            var registry = try registryStore.loadOrEmpty()
+            guard registry.renameWorkspace(id: workspaceId, name: name, now: Date()) else { return }
+            try registryStore.save(registry)
+        } catch {
+            fputs("Rename Workspace failed: \(error)\n", stderr)
+        }
+    }
+
+    private func deleteWorkspaceAndRelaunch(workspaceId: UUID) {
+        guard let registryStore else { return }
+        do {
+            var registry = try registryStore.loadOrEmpty()
+            guard registry.deleteWorkspace(id: workspaceId, now: Date()) else { return }
+            let appSupport = WorkspaceStore.defaultApplicationSupportDirectory()
+            let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
+            if FileManager.default.fileExists(atPath: store.layout.workspaceDirectory.path) {
+                try store.deleteDocument()
+            }
+            zoneRuntimeController?.flushPendingSaves()
+            try registryStore.save(registry)
+            if let nextWorkspaceId = registry.lastActiveWorkspaceId {
+                switchWorkspaceAndRelaunch(workspaceId: nextWorkspaceId)
+            }
+        } catch {
+            fputs("Delete Workspace failed: \(error)\n", stderr)
+        }
+    }
+
+    private func switchWorkspaceAndRelaunch(workspaceId: UUID) {
+        guard let registryStore else { return }
+        do {
+            var registry = try registryStore.loadOrEmpty()
+            guard let workspace = registry.workspaces.first(where: { $0.id == workspaceId }) else { return }
+            guard let projectEntry = workspace.projectIds.compactMap({ projectId in registry.projects.first(where: { $0.id == projectId }) }).first else {
+                fputs("Switch Workspace failed: workspace has no project to launch\n", stderr)
+                return
+            }
+            registry.lastActiveWorkspaceId = workspaceId
+            registry.lastActiveProjectId = projectEntry.id
+            zoneRuntimeController?.flushPendingSaves()
+            try registryStore.save(registry)
+            relaunchApplication(projectRoot: URL(fileURLWithPath: projectEntry.rootPath))
+        } catch {
+            fputs("Switch Workspace failed: \(error)\n", stderr)
         }
     }
 
