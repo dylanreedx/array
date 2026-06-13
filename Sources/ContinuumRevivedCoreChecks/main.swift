@@ -48,6 +48,8 @@ do {
     expect(ReservedShortcut.classify(keyCode: 21, modifiers: .command) == .spawnProfile(4), "Cmd-4 should classify as spawn profile 4")
     expect(ReservedShortcut.classify(keyCode: 40, modifiers: [.command, .shift]) == nil, "Cmd-Shift-K should not classify as a reserved shortcut")
     expect(ReservedShortcut.classify(keyCode: 40, modifiers: []) == nil, "plain K should not classify as a reserved shortcut")
+    expect(ReservedShortcut.classify(keyCode: 49, modifiers: .control) == .navModeLeader, "Ctrl-Space should classify as nav mode leader")
+    expect(ReservedShortcut.classify(keyCode: 49, modifiers: []) == nil, "plain Space should not classify as a reserved shortcut")
     expect(ReservedShortcut.classify(keyCode: 53, modifiers: []) == nil, "plain Escape should not classify as a reserved shortcut")
 }
 

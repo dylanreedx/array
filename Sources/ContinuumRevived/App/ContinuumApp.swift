@@ -108,6 +108,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--nav-mode-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runNavModeSelfCheck()
+                print("ContinuumRevivedNavModeChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--palette-browser-spawn-check") {
             do {
                 _ = NSApplication.shared
@@ -1261,7 +1273,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func handleHotkey(_ event: NSEvent) -> Bool {
+        if focusBroker.activeSurface == .modal(.navMode) {
+            if event.keyCode == 53 || focusBroker.reservedShortcut(for: event) == .navModeLeader {
+                focusBroker.closeModal(.navMode)
+            }
+            return true
+        }
+
         if profilePalette?.handleKeyEvent(event) == true {
+            return true
+        }
+
+        let shortcut = focusBroker.reservedShortcut(for: event)
+        if shortcut == .navModeLeader {
+            focusBroker.openModal(.navMode)
             return true
         }
 
@@ -1306,6 +1331,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return true
         case .spawnProfile(4):
             spawnTerminalFromProfile("nvim")
+            return true
+        case .navModeLeader:
+            focusBroker.openModal(.navMode)
             return true
         case .spawnProfile:
             return false
@@ -3896,6 +3924,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "lastActiveTileId": canvas.canvasState.lastActiveTileId?.uuidString ?? "nil",
         ]
         let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runNavModeSelfCheck() throws -> URL {
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() {
+                throw NSError(domain: "ContinuumRevivedNavModeChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+            }
+        }
+
+        final class ProbeAdapter: FocusSurfaceAdapter {
+            let focusSurfaceID: FocusSurfaceID
+            let focusSurfaceKind: FocusSurfaceKind
+            var acquireReasons: [FocusRequest] = []
+            var releaseReasons: [FocusRequest] = []
+
+            init(id: FocusSurfaceID, kind: FocusSurfaceKind) {
+                self.focusSurfaceID = id
+                self.focusSurfaceKind = kind
+            }
+
+            func acquireFocus(reason: FocusRequest) -> Bool {
+                acquireReasons.append(reason)
+                return true
+            }
+
+            func releaseFocus(reason: FocusRequest) {
+                releaseReasons.append(reason)
+            }
+
+            func canHandleReservedShortcut(_ shortcut: ReservedShortcut) -> Bool { false }
+        }
+
+        try expect(ReservedShortcut.classify(keyCode: 49, modifiers: .control) == .navModeLeader, "Ctrl-Space should classify as nav-mode leader")
+
+        let broker = FocusBroker()
+        let canvas = ProbeAdapter(id: .canvas, kind: .canvas)
+        broker.register(canvas)
+        try expect(broker.requestFocus(.canvas, reason: .userClick), "setup canvas focus failed")
+        broker.openModal(.navMode)
+        try expect(broker.activeSurface == .modal(.navMode), "leader should open nav-mode modal")
+        try expect(!broker.shouldSurfaceReceive(.palette, surface: .canvas), "nav mode should capture reserved keys away from canvas/tile surfaces")
+        broker.closeModal(.navMode)
+        try expect(broker.activeSurface == .canvas, "closing nav mode should restore the prior first responder surface")
+        try expect(canvas.acquireReasons.suffix(1) == [.modalDismissed], "nav mode close should reacquire snapshot with modalDismissed; reasons=\(canvas.acquireReasons)")
+
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("nav-mode", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "nav-mode",
+            "leaderKeyCode": 49,
+            "leaderModifiers": "control",
+            "capturedWhileActive": true,
+            "restoredSurface": "canvas",
+        ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)
         return artifact

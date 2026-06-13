@@ -5,6 +5,7 @@ public typealias FocusTileID = UUID
 public enum FocusModalKind: String, Codable, Equatable, Hashable, Sendable {
     case palette
     case settings
+    case navMode
 }
 
 public enum FocusSurfaceID: Codable, Equatable, Hashable, Sendable {
@@ -54,11 +55,15 @@ public struct FocusKeyModifiers: OptionSet, Equatable, Hashable, Sendable {
 public enum ReservedShortcut: Equatable, Hashable, Sendable {
     case palette
     case spawnProfile(Int)
+    case navModeLeader
 
     /// Classifies app-reserved shortcuts from hardware key codes. The caller
     /// passes platform modifier state translated into `FocusKeyModifiers` so
     /// this pure model stays independent of AppKit.
     public static func classify(keyCode: UInt16, modifiers: FocusKeyModifiers) -> ReservedShortcut? {
+        if modifiers == .control, keyCode == 49 {
+            return .navModeLeader // Space
+        }
         guard modifiers == .command else { return nil }
         switch keyCode {
         case 40: return .palette // K
