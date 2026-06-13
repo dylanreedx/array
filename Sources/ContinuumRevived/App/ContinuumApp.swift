@@ -694,7 +694,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let registryStore = RegistryStore(applicationSupportDirectory: appSupportDir)
             let registry = try registryStore.loadOrEmpty()
             let projectRoot = try Self.resolveProjectRoot(smokeTest: smokeTestEnabled, registry: registry)
-            let zoneRuntimeController = try ZoneRuntimeController(root: projectRoot)
+            let zoneRuntimeController = try presentLockContentionUXIfNeeded(projectRoot: projectRoot, registry: registry)
             self.zoneRuntimeController = zoneRuntimeController
             self.registryStore = registryStore
 
@@ -1859,6 +1859,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     // MARK: - Persistence helpers
+
+    private func presentLockContentionUXIfNeeded(projectRoot: URL, registry: Registry) throws -> ZoneRuntimeController {
+        var candidate = projectRoot
+        while true {
+            do {
+                return try ZoneRuntimeController(root: candidate)
+            } catch let ProjectLockError.alreadyLocked(lockFile) {
+                switch presentProjectLockAlert(lockFile: lockFile) {
+                case .chooseAnotherProject:
+                    let request = ProjectLaunchCoordinator.PickerRequest(
+                        reason: .noUsableProject,
+                        rows: ProjectPickerModel.makeRows(registry: registry)
+                    )
+                    let picker = ProjectPickerPanel(request: request)
+                    guard let selected = picker.runModal() else {
+                        NSApp.terminate(nil)
+                        throw CocoaError(.userCancelled)
+                    }
+                    candidate = selected
+                case .openAnyway:
+                    return try ZoneRuntimeController(root: candidate, acquireLock: false)
+                case .quit:
+                    NSApp.terminate(nil)
+                    throw CocoaError(.userCancelled)
+                }
+            }
+        }
+    }
+
+    private enum ProjectLockAlertChoice {
+        case chooseAnotherProject
+        case openAnyway
+        case quit
+    }
+
+    private func presentProjectLockAlert(lockFile: URL) -> ProjectLockAlertChoice {
+        let config = ProjectLockPolicy.alertConfiguration(lockFile: lockFile)
+        let alert = NSAlert()
+        alert.messageText = config.message
+        alert.informativeText = config.informative
+        alert.alertStyle = .warning
+        for title in config.buttonTitles {
+            alert.addButton(withTitle: title)
+        }
+        if config.buttonTitles.indices.contains(config.defaultButtonIndex) {
+            alert.buttons[config.defaultButtonIndex].keyEquivalent = "\r"
+        }
+        let response = alert.runModal()
+        switch response {
+        case .alertFirstButtonReturn:
+            return .chooseAnotherProject
+        case .alertSecondButtonReturn:
+            return .openAnyway
+        default:
+            return .quit
+        }
+    }
 
     private static func resolveProjectRoot(smokeTest: Bool, registry: Registry) throws -> URL {
         if smokeTest, ProcessInfo.processInfo.environment["CONTINUUM_PROJECT_ROOT"] == nil {

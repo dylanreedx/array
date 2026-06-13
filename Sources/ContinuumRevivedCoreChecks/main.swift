@@ -135,6 +135,20 @@ do {
     expect(ReservedShortcut.classify(keyCode: 53, modifiers: []) == nil, "plain Escape should not classify as a reserved shortcut")
 }
 
+// MARK: - Project lock policy
+
+do {
+    let lockFile = URL(fileURLWithPath: "/tmp/continuum-project/.continuum-revived/lock")
+    let config = ProjectLockPolicy.alertConfiguration(lockFile: lockFile)
+    expect(config.message == "This project is already open in another Continuum window.", "project lock alert message")
+    expect(config.informative.contains(lockFile.path), "project lock alert cites lock file")
+    expect(config.informative.contains("Open Anyway proceeds without the project lock"), "project lock alert explains unsafe bypass")
+    expect(config.buttonTitles == ["Choose Another Project", "Open Anyway", "Quit"], "project lock buttons order")
+    expect(config.defaultButtonIndex == 0, "Choose Another Project should be the default")
+    expect(config.openAnywayIndex == 1, "Open Anyway should be the second button")
+    expect(config.quitIndex == 2, "Quit should be the third button")
+}
+
 // MARK: - Delete confirmation policy
 
 var deletePolicyDefaultsFailures: [String] = []

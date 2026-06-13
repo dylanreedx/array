@@ -51,11 +51,15 @@ final class ZoneRuntimeController {
         }
     }
 
-    init(root projectRoot: URL) throws {
+    init(root projectRoot: URL, acquireLock: Bool = true) throws {
         self.projectRoot = projectRoot
-        let projectLock = ProjectLock(root: projectRoot)
-        try projectLock.acquire()
-        self.projectLock = projectLock
+        if acquireLock {
+            let projectLock = ProjectLock(root: projectRoot)
+            try projectLock.acquire()
+            self.projectLock = projectLock
+        } else {
+            self.projectLock = nil
+        }
 
         let projectStore = ProjectStore(projectRoot: projectRoot)
         self.projectStore = projectStore
