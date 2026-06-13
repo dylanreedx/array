@@ -4,7 +4,7 @@ import Foundation
 import GhosttyKit
 
 @MainActor
-final class GhosttyTerminalRuntime: TerminalRuntime {
+final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
     let id: TerminalSessionID
     let tileId: TileID
     let title: String
@@ -140,6 +140,18 @@ final class GhosttyTerminalRuntime: TerminalRuntime {
 
     func visibleText() -> String {
         terminalView?.visibleText() ?? ""
+    }
+
+    var readVisibleText: String {
+        visibleText()
+    }
+
+    func sendReturn() {
+        sendInput(Data("\n".utf8))
+    }
+
+    func sendInsertedText(_ text: String) -> Bool {
+        dispatchInsertedText(text)
     }
 
     func scrollDirectly(deltaX: Double = 0, deltaY: Double) {

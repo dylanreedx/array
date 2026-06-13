@@ -357,6 +357,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--agent-input-check") {
+            do {
+                let artifact = try AppDelegate.runAgentInputSelfCheck()
+                print("ContinuumRevivedAgentInputChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--diff-tile-check") {
             do {
                 let artifact = try AppDelegate.runDiffTileSelfCheck()
@@ -5304,6 +5315,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try Data(contentsOf: store.layout.canvasFile).write(to: dir.appendingPathComponent("canvas.json"))
         let observedText = (renderedTexts + emptyTexts).map { $0.replacingOccurrences(of: "\"", with: "'") }.joined(separator: " | ")
         try "{\"tileId\":\"\(tileId.uuidString)\",\"kind\":\"ticketQueue\",\"teamKey\":\"CON\",\"renderedRows\":[\"CON-130\"],\"emptyState\":\"No Linear API key configured\",\"observedText\":\"\(observedText)\",\"status\":\"passed\"}\n".write(to: artifact, atomically: true, encoding: .utf8)
+        return artifact
+    }
+
+    static func runAgentInputSelfCheck() throws -> URL {
+        final class RecordingEndpoint: AgentTileTextEndpoint {
+            var inserted: [String] = []
+            var returns = 0
+            var shouldAccept = true
+            var readVisibleText: String { (inserted + Array(repeating: "<return>", count: returns)).joined(separator: "|") }
+
+            func sendInsertedText(_ text: String) -> Bool {
+                inserted.append(text)
+                return shouldAccept
+            }
+
+            func sendReturn() {
+                returns += 1
+            }
+        }
+
+        let now = Date(timeIntervalSince1970: 1_234)
+        let idle = AgentDescriptor(agentKind: "claude", worktreePath: "/tmp/project", status: .idle, statusUpdatedAt: now)
+        let needsAttention = AgentDescriptor(agentKind: "codex", worktreePath: "/tmp/project", status: .needsAttention, statusUpdatedAt: now)
+        let working = AgentDescriptor(agentKind: "claude", worktreePath: "/tmp/project", status: .working, statusUpdatedAt: now)
+
+        let endpoint = RecordingEndpoint()
+        let visible = try AgentTileInput.send(prompt: "fix CON-85", descriptor: idle, to: endpoint)
+        guard endpoint.inserted == ["fix CON-85"], endpoint.returns == 1, visible.contains("fix CON-85") else {
+            throw NSError(domain: "AgentInputCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: "idle agent prompt was not inserted followed by Return"])
+        }
+
+        let needsEndpoint = RecordingEndpoint()
+        _ = try AgentTileInput.send(prompt: "please review", descriptor: needsAttention, to: needsEndpoint)
+        guard needsEndpoint.inserted == ["please review"], needsEndpoint.returns == 1 else {
+            throw NSError(domain: "AgentInputCheck", code: 2, userInfo: [NSLocalizedDescriptionKey: "needsAttention agent was not accepted"])
+        }
+
+        let busyEndpoint = RecordingEndpoint()
+        do {
+            _ = try AgentTileInput.send(prompt: "do not inject", descriptor: working, to: busyEndpoint)
+            throw NSError(domain: "AgentInputCheck", code: 3, userInfo: [NSLocalizedDescriptionKey: "working agent accepted a prompt"])
+        } catch AgentTileInputError.busy(.working) {
+            // expected
+        }
+        guard busyEndpoint.inserted.isEmpty, busyEndpoint.returns == 0 else {
+            throw NSError(domain: "AgentInputCheck", code: 4, userInfo: [NSLocalizedDescriptionKey: "working refusal still wrote to endpoint"])
+        }
+
+        do {
+            _ = try AgentTileInput.send(prompt: "no target", descriptor: nil, to: RecordingEndpoint())
+            throw NSError(domain: "AgentInputCheck", code: 7, userInfo: [NSLocalizedDescriptionKey: "non-agent target accepted a prompt"])
+        } catch AgentTileInputError.notAnAgent {
+            // expected
+        }
+
+        let failingEndpoint = RecordingEndpoint()
+        failingEndpoint.shouldAccept = false
+        do {
+            _ = try AgentTileInput.send(prompt: "will fail", descriptor: idle, to: failingEndpoint)
+            throw NSError(domain: "AgentInputCheck", code: 5, userInfo: [NSLocalizedDescriptionKey: "failed insertion was reported as success"])
+        } catch AgentTileInputError.insertionFailed {
+            // expected
+        }
+        guard failingEndpoint.inserted == ["will fail"], failingEndpoint.returns == 0 else {
+            throw NSError(domain: "AgentInputCheck", code: 6, userInfo: [NSLocalizedDescriptionKey: "failed insertion should not send Return"])
+        }
+
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let dir = URL(fileURLWithPath: "qa-runs/agent-input-\(timestamp)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let artifact = dir.appendingPathComponent("manifest.json")
+        let json = """
+        {"check":"agent-input","acceptedStatuses":["idle","needsAttention"],"refusedStatuses":["working"],"insertedPrompt":"fix CON-85","returnCount":1,"status":"passed"}
+
+        """
+        try json.write(to: artifact, atomically: true, encoding: .utf8)
         return artifact
     }
 
