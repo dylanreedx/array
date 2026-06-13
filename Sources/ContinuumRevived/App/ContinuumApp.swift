@@ -1446,7 +1446,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return
         }
 
-        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        let rawKey = event.charactersIgnoringModifiers ?? ""
+        let key = rawKey.lowercased()
         if let ordinal = Int(key), (1...9).contains(ordinal) {
             jumpToZoneOrdinal(ordinal)
             return
@@ -1467,6 +1468,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return
         }
 
+        if key == "a" {
+            if rawKey == "A" || event.modifierFlags.contains(.shift) {
+                cycleNavAgent(status: .needsAttention)
+            } else {
+                cycleNavAgent(status: nil)
+            }
+            return
+        }
+
         if let direction = TileArrangement.Direction.fromKey(key) {
             moveNavSelection(direction: direction)
             return
@@ -1475,6 +1485,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if key == "x", let selectedTileId = canvasView?.canvasState.lastActiveTileId {
             closeNavMode()
             deleteTile(id: selectedTileId)
+        }
+    }
+
+    private func cycleNavAgent(status: AgentStatus?) {
+        guard let canvasView else { return }
+        let agentTileIds = currentAgentTileIds(status: status)
+        guard !agentTileIds.isEmpty else { return }
+        let selectedTileId = canvasView.canvasState.lastActiveTileId
+        let nextId: UUID
+        if let selectedTileId, let index = agentTileIds.firstIndex(of: selectedTileId) {
+            nextId = agentTileIds[(index + 1) % agentTileIds.count]
+        } else {
+            nextId = agentTileIds[0]
+        }
+        canvasView.markActive(tileId: nextId)
+    }
+
+    private func currentAgentTileIds(status: AgentStatus?) -> [UUID] {
+        guard let canvasView else { return [] }
+        let currentTerminalTiles = canvasView.canvasState.tiles
+            .filter { $0.kind == .terminal }
+            .sorted { lhs, rhs in
+                if lhs.zIndex != rhs.zIndex { return lhs.zIndex < rhs.zIndex }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+        let currentTerminalTileIds = Set(currentTerminalTiles.map(\.id))
+        let agentSessions = ((try? projectStore?.listSessions()) ?? [])
+            .filter { currentTerminalTileIds.contains($0.tileId) && $0.agentDescriptor != nil }
+        var agentStatusByTileId: [UUID: AgentStatus] = [:]
+        for session in agentSessions {
+            guard agentStatusByTileId[session.tileId] == nil,
+                  let agentStatus = canvasView.agentStatus(for: session.tileId) ?? session.agentDescriptor?.status else { continue }
+            agentStatusByTileId[session.tileId] = agentStatus
+        }
+        return currentTerminalTiles.compactMap { tile in
+            guard let agentStatus = agentStatusByTileId[tile.id] else { return nil }
+            if let status, agentStatus != status { return nil }
+            return tile.id
         }
     }
 
@@ -4532,6 +4580,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         let navApp = AppDelegate()
         navApp.canvasView = overlayCanvas
+        let now = Date()
+        let tempProjectRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("continuum-nav-agent-check-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempProjectRoot, withIntermediateDirectories: true)
+        let tempStore = ProjectStore(projectRoot: tempProjectRoot)
+        let tempProject = Project(
+            name: "Nav Agent Check",
+            rootPath: tempProjectRoot.path,
+            createdAt: now,
+            updatedAt: now,
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
+        )
+        navApp.zoneRuntimeController = ZoneRuntimeController(projectRoot: tempProjectRoot, projectStore: tempStore, project: tempProject)
+        let agentTileA = UUID(uuidString: "00000000-0000-0000-0000-000000000067")!
+        let agentTileB = UUID(uuidString: "00000000-0000-0000-0000-000000000068")!
+        let plainTerminalTile = UUID(uuidString: "00000000-0000-0000-0000-000000000069")!
+        let orphanAgentTile = UUID(uuidString: "00000000-0000-0000-0000-000000000070")!
+        let agentTiles = [
+            Tile(id: agentTileA, kind: .terminal, title: "Agent A", frame: TileFrame(x: 420, y: 44, width: 140, height: 90), zIndex: 4, runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: agentTileB, kind: .terminal, title: "Agent B", frame: TileFrame(x: 580, y: 44, width: 140, height: 90), zIndex: 5, runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: plainTerminalTile, kind: .terminal, title: "Plain", frame: TileFrame(x: 740, y: 44, width: 140, height: 90), zIndex: 6, runtimeRef: nil, metadata: TileMetadata())
+        ]
+        for tile in agentTiles {
+            let view = TileNSView(tile: tile)
+            if tile.id == agentTileA { view.agentStatus = .working }
+            if tile.id == agentTileB { view.agentStatus = .needsAttention }
+            overlayCanvas.install(tileView: view, for: tile)
+        }
+        try tempStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: agentTileA, launchProfileId: "claude", command: "/bin/zsh", args: [], cwd: tempProjectRoot.path, env: [:], title: "Agent A", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: "claude", worktreePath: tempProjectRoot.path, status: .working, statusUpdatedAt: now)))
+        try tempStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: agentTileB, launchProfileId: "codex", command: "/bin/zsh", args: [], cwd: tempProjectRoot.path, env: [:], title: "Agent B", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: "codex", worktreePath: tempProjectRoot.path, status: .needsAttention, statusUpdatedAt: now)))
+        try tempStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: orphanAgentTile, launchProfileId: "old", command: "/bin/zsh", args: [], cwd: tempProjectRoot.path, env: [:], title: "Orphan", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: "claude", worktreePath: tempProjectRoot.path, status: .needsAttention, statusUpdatedAt: now)))
+        overlayCanvas.markActive(tileId: selectedTileId)
+        navApp.openNavMode()
+        navApp.handleNavModeKey(keyEvent("a", keyCode: 0))
+        try expect(overlayCanvas.canvasState.lastActiveTileId == agentTileA, "nav a should select first current agent tile; selected=\(String(describing: overlayCanvas.canvasState.lastActiveTileId))")
+        navApp.handleNavModeKey(keyEvent("a", keyCode: 0))
+        try expect(overlayCanvas.canvasState.lastActiveTileId == agentTileB, "nav a should cycle to next current agent tile and skip non-agent terminals/orphans; selected=\(String(describing: overlayCanvas.canvasState.lastActiveTileId))")
+        overlayCanvas.markActive(tileId: selectedTileId)
+        navApp.handleNavModeKey(keyEvent("A", keyCode: 0))
+        try expect(overlayCanvas.canvasState.lastActiveTileId == agentTileB, "nav A should select current needs-attention agent tile; selected=\(String(describing: overlayCanvas.canvasState.lastActiveTileId))")
+        overlayCanvas.markActive(tileId: selectedTileId)
         let selectedProbe = ProbeAdapter(id: .tile(rightTileId), kind: .note)
         let downProbe = ProbeAdapter(id: .tile(downTileId), kind: .note)
         navApp.focusBroker.register(selectedProbe)

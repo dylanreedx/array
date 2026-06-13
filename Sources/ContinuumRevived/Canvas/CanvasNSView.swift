@@ -112,6 +112,10 @@ final class CanvasNSView: NSView {
 
     // MARK: - Tile management
 
+    func agentStatus(for tileId: UUID) -> AgentStatus? {
+        tileViews[tileId]?.agentStatus
+    }
+
     func install(tileView: TileNSView, for tile: Tile) {
         // Replacing an existing tile (e.g. restart placeholder → live terminal)
         // must remove the old NSView; otherwise the prior view stays on top
@@ -1292,7 +1296,7 @@ final class ZoneChromeNSView: NSView {
 
 @MainActor
 private final class NavModeOverlayNSView: NSView {
-    static let hintLine = "hjkl move · 1-9 zone · z/w pick · ⏎ focus · esc exit"
+    static let hintLine = "hjkl move · a agents · A needs you · 1-9 zone · z/w pick · ⏎ focus · esc exit"
 
     private weak var canvas: CanvasNSView?
     private let badgeSize = CGSize(width: 24, height: 24)
