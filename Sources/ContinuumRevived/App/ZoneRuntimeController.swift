@@ -7,6 +7,11 @@ final class ZoneRuntimeController {
     let projectStore: ProjectStore
     private(set) var project: Project
 
+    var runtimes: [GhosttyTerminalRuntime] = []
+    var browserRuntimes: [WKWebViewBrowserRuntime] = []
+    var noteViews: [UUID: NoteTileNSView] = [:]
+    var fileTreeViews: [UUID: FileTreeTileNSView] = [:]
+
     private let projectLock: ProjectLock?
     private var isClosed = false
 
@@ -30,14 +35,14 @@ final class ZoneRuntimeController {
         self.projectLock = nil
     }
 
-    func close(flushPendingWrites: () -> Void, terminalRuntimes: [GhosttyTerminalRuntime]) {
+    func close(flushPendingWrites: () -> Void) {
         guard !isClosed else { return }
         isClosed = true
 
         flushPendingWrites()
 
         let now = Date()
-        for runtime in terminalRuntimes {
+        for runtime in runtimes {
             if var descriptor = try? projectStore.loadSession(id: runtime.id) {
                 descriptor.lastExit = TerminalLastExit(exitCode: nil, signal: nil, at: now)
                 try? projectStore.saveSession(descriptor)

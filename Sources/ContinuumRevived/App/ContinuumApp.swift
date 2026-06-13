@@ -482,10 +482,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var window: NSWindow?
     private var ghostty: GhosttyRuntimeContext?
     private var browserEngine: BrowserEngineContext?
-    private var runtimes: [GhosttyTerminalRuntime] = []
-    private var browserRuntimes: [WKWebViewBrowserRuntime] = []
-    private var noteViews: [UUID: NoteTileNSView] = [:]
-    private var fileTreeViews: [UUID: FileTreeTileNSView] = [:]
+    private var runtimes: [GhosttyTerminalRuntime] {
+        get { zoneRuntimeController?.runtimes ?? [] }
+        set { zoneRuntimeController?.runtimes = newValue }
+    }
+    private var browserRuntimes: [WKWebViewBrowserRuntime] {
+        get { zoneRuntimeController?.browserRuntimes ?? [] }
+        set { zoneRuntimeController?.browserRuntimes = newValue }
+    }
+    private var noteViews: [UUID: NoteTileNSView] {
+        get { zoneRuntimeController?.noteViews ?? [:] }
+        set { zoneRuntimeController?.noteViews = newValue }
+    }
+    private var fileTreeViews: [UUID: FileTreeTileNSView] {
+        get { zoneRuntimeController?.fileTreeViews ?? [:] }
+        set { zoneRuntimeController?.fileTreeViews = newValue }
+    }
     private var canvasView: CanvasNSView?
     private var saveTimer: Timer?
     private var browserSaveTimer: Timer?
@@ -1394,10 +1406,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 flushBrowserSave()
                 flushNoteSave()
                 flushFileTreeSave()
-            },
-            terminalRuntimes: runtimes
+            }
         )
-        zoneRuntimeController = nil
 
         if let monitor = hotkeyMonitor {
             NSEvent.removeMonitor(monitor)
@@ -1442,6 +1452,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         ghostty = nil
         browserEngine?.shutdown()
         browserEngine = nil
+        zoneRuntimeController = nil
         if let exitCode = smokeTestExitCode {
             Foundation.exit(exitCode)
         }
