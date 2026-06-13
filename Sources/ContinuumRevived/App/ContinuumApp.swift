@@ -632,6 +632,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         set { zoneRuntimeController?.fileTreeViews = newValue }
     }
     private var canvasView: CanvasNSView?
+    private var navSelectedZoneId: UUID?
     private let smokeTestEnabled = ProcessInfo.processInfo.environment["CONTINUUM_SMOKE_TEST"] == "1"
     private var smokeTestExitCode: Int32?
     private var zoneRuntimeController: ZoneRuntimeController?
@@ -1322,11 +1323,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func openNavMode() {
         focusBroker.openModal(.navMode)
+        navSelectedZoneId = canvasView?.navZoneRenderModels.first?.placement.zoneId
         canvasView?.setNavModeOverlayVisible(true)
     }
 
     private func closeNavMode() {
         focusBroker.closeModal(.navMode)
+        navSelectedZoneId = nil
         canvasView?.setNavModeOverlayVisible(false)
     }
 
@@ -1347,6 +1350,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        if let ordinal = Int(key), (1...9).contains(ordinal) {
+            jumpToZoneOrdinal(ordinal)
+            return
+        }
+
+        if event.keyCode == 48 {
+            jumpToZoneByOrder(delta: event.modifierFlags.contains(.shift) ? -1 : 1)
+            return
+        }
+
+        if key == "n" {
+            jumpToZoneByOrder(delta: 1)
+            return
+        }
+
+        if key == "p" {
+            jumpToZoneByOrder(delta: -1)
+            return
+        }
+
         if let direction = TileArrangement.Direction.fromKey(key) {
             moveNavSelection(direction: direction)
             return
@@ -1367,6 +1390,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 tiles: canvasView.canvasState.tiles
               ) else { return }
         canvasView.markActive(tileId: nextTileId)
+    }
+
+    private func jumpToZoneOrdinal(_ ordinal: Int) {
+        guard let canvasView else { return }
+        let index = ordinal - 1
+        guard canvasView.navZoneRenderModels.indices.contains(index) else { return }
+        fitNavZone(canvasView.navZoneRenderModels[index].placement.zoneId)
+    }
+
+    private func jumpToZoneByOrder(delta: Int) {
+        guard let canvasView else { return }
+        let models = canvasView.navZoneRenderModels
+        guard !models.isEmpty else { return }
+        let currentId = navSelectedZoneId ?? models.first?.placement.zoneId
+        let currentIndex = currentId.flatMap { id in models.firstIndex { $0.placement.zoneId == id } } ?? 0
+        let nextIndex = currentIndex + delta
+        guard models.indices.contains(nextIndex) else { return }
+        fitNavZone(models[nextIndex].placement.zoneId)
+    }
+
+    private func fitNavZone(_ zoneId: UUID) {
+        guard let viewport = canvasView?.fitZoneToViewport(zoneId: zoneId) else { return }
+        navSelectedZoneId = zoneId
+        canvasView?.setViewport(viewport)
     }
 
     private func handleReservedShortcut(_ event: NSEvent) -> Bool {
@@ -4045,7 +4092,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let zoneB = ZonePlacement(
             zoneId: UUID(uuidString: "00000000-0000-0000-0000-000000000643")!,
             projectId: UUID(uuidString: "00000000-0000-0000-0000-000000000644")!,
-            origin: ZonePoint(x: 460, y: 80),
+            origin: ZonePoint(x: 80, y: 360),
             size: ZoneSize(width: 320, height: 220),
             color: "purple",
             collapsed: false,
@@ -4116,6 +4163,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         navApp.openNavMode()
         navApp.handleNavModeKey(keyEvent("j", keyCode: 38))
         try expect(overlayCanvas.canvasState.lastActiveTileId == downTileId, "nav j key path should update selected tile; selected=\(String(describing: overlayCanvas.canvasState.lastActiveTileId))")
+        let expectedZoneBViewport = CanvasEngine.fit(
+            worldRect: CGRect(x: zoneB.origin.x, y: zoneB.origin.y, width: zoneB.size.width, height: zoneB.size.height),
+            viewportSize: overlayCanvas.bounds.size
+        )
+        navApp.handleNavModeKey(keyEvent("2", keyCode: 19))
+        try expect(overlayCanvas.canvasState.viewport == expectedZoneBViewport, "nav ordinal 2 should fit zone B; viewport=\(overlayCanvas.canvasState.viewport) expected=\(expectedZoneBViewport)")
+        let expectedZoneAViewport = CanvasEngine.fit(
+            worldRect: CGRect(x: zoneA.origin.x, y: zoneA.origin.y, width: zoneA.size.width, height: zoneA.size.height),
+            viewportSize: overlayCanvas.bounds.size
+        )
+        navApp.handleNavModeKey(keyEvent("1", keyCode: 18))
+        try expect(overlayCanvas.canvasState.viewport == expectedZoneAViewport, "nav ordinal 1 should fit zone A; viewport=\(overlayCanvas.canvasState.viewport) expected=\(expectedZoneAViewport)")
+        navApp.handleNavModeKey(keyEvent("n", keyCode: 45))
+        try expect(overlayCanvas.canvasState.viewport == expectedZoneBViewport, "nav n should jump to the next zone by ordinal order; viewport=\(overlayCanvas.canvasState.viewport) expected=\(expectedZoneBViewport)")
+        navApp.handleNavModeKey(keyEvent("p", keyCode: 35))
+        try expect(overlayCanvas.canvasState.viewport == expectedZoneAViewport, "nav p should jump to the previous zone by ordinal order; viewport=\(overlayCanvas.canvasState.viewport) expected=\(expectedZoneAViewport)")
+        navApp.handleNavModeKey(keyEvent("\t", keyCode: 48))
+        try expect(overlayCanvas.canvasState.viewport == expectedZoneBViewport, "nav Tab should jump to the next zone by ordinal order; viewport=\(overlayCanvas.canvasState.viewport) expected=\(expectedZoneBViewport)")
         overlayCanvas.setNavModeOverlayVisible(false)
         try expect(!overlayCanvas.navModeOverlayQASnapshot().isInstalled, "nav mode overlay should uninstall when nav mode closes")
 

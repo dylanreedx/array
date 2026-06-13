@@ -203,6 +203,17 @@ final class CanvasNSView: NSView {
         delegate?.canvasDidChange(self)
     }
 
+    var navZoneRenderModels: [ZoneRenderModel] { zoneRenderModels }
+
+    func fitZoneToViewport(zoneId: UUID) -> CanvasViewport? {
+        guard let model = zoneRenderModels.first(where: { $0.placement.zoneId == zoneId }) else { return nil }
+        let frame = CanvasEngine.zoneWorldFrame(model.placement)
+        return CanvasEngine.fit(
+            worldRect: CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height),
+            viewportSize: bounds.size
+        )
+    }
+
     /// Returns the topmost tile id at a screen-space point according to the
     /// semantic canvas model, not AppKit subview insertion order.
     func tileId(at screenPoint: CGPoint) -> UUID? {
