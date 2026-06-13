@@ -72,9 +72,9 @@ let projectRows = LaunchPaletteModel.makeRows(
         availability: .available
     )]
 )
-expect(projectRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "Switch to Work Project"], "palette appends switch-project rows")
-expect(LaunchPaletteModel.filterRows(projectRows, query: "switch work").map(\.displayName) == ["Switch to Work Project"], "switch-project row filters by switch token and project name")
-expect(projectRows.last?.isSelectable == true, "available switch-project row is selectable")
+expect(projectRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "Add Work Project to Canvas"], "palette appends add-project rows")
+expect(LaunchPaletteModel.filterRows(projectRows, query: "add work").map(\.displayName) == ["Add Work Project to Canvas"], "add-project row filters by add token and project name")
+expect(projectRows.last?.isSelectable == true, "available add-project row is selectable")
 
 let missingRows = LaunchPaletteModel.makeRows(profiles: [
     profile(id: "shell", displayName: "Shell", detail: "zsh not found", isSelectable: false),

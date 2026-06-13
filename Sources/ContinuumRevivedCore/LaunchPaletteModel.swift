@@ -7,6 +7,7 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case openFileTree
     case openURL(String)
     case switchProject(UUID)
+    case addProjectToCanvas(UUID)
 
     public var displayName: String {
         switch self {
@@ -22,6 +23,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "Open \"\(url)\"…"
         case .switchProject:
             return "Switch Project…"
+        case .addProjectToCanvas:
+            return "Add Project to Canvas…"
         }
     }
 
@@ -39,6 +42,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["open", "url", "browser", "web"]
         case .switchProject:
             return ["switch", "project"]
+        case .addProjectToCanvas:
+            return ["add", "project", "canvas", "zone"]
         }
     }
 }
@@ -66,7 +71,7 @@ public enum LaunchPaletteRow: Equatable, Sendable {
         switch self {
         case let .profile(profile): return profile.displayName
         case let .action(action): return action.displayName
-        case let .project(project): return "Switch to \(project.name)"
+        case let .project(project): return "Add \(project.name) to Canvas"
         }
     }
 
@@ -94,7 +99,7 @@ public enum LaunchPaletteRow: Equatable, Sendable {
                 action.filterTokens.contains { token in queryToken.contains(token) || token.contains(queryToken) }
             }
         case let .project(project):
-            let haystacks = ["switch project", project.name, project.rootPath, project.id.uuidString].map { $0.lowercased() }
+            let haystacks = ["add project canvas zone", "switch project", project.name, project.rootPath, project.id.uuidString].map { $0.lowercased() }
             let queryTokens = query.split(separator: " ").map(String.init)
             return queryTokens.allSatisfy { token in haystacks.contains { $0.contains(token) } }
         }

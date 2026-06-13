@@ -580,7 +580,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
                 NSSound.beep()
                 return
             }
-            onSelectAction?(.switchProject(project.id))
+            onSelectAction?(.addProjectToCanvas(project.id))
             close(restoreFocus: true)
         }
     }

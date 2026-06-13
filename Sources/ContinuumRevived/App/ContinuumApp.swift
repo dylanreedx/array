@@ -240,6 +240,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--add-zone-check") {
+            do {
+                let artifact = try AppDelegate.runAddZoneSelfCheck()
+                print("ContinuumRevivedAddZoneChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-lru-budget-check") {
             do {
                 _ = NSApplication.shared
@@ -1364,6 +1375,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawnFileTreeFromPalette()
         case let .switchProject(projectId):
             switchProjectAndRelaunch(projectId: projectId)
+        case let .addProjectToCanvas(projectId):
+            addProjectZone(projectId: projectId)
+        }
+    }
+
+    private func addProjectZone(projectId: UUID) {
+        guard let registryStore else { return }
+        do {
+            var registry = try registryStore.loadOrEmpty()
+            guard let projectEntry = registry.projects.first(where: { $0.id == projectId }) else {
+                fputs("Add Project to Canvas failed: unknown project \(projectId)\n", stderr)
+                return
+            }
+            let workspaceId = activeProject.flatMap { active in registry.projects.first(where: { $0.id == active.id })?.workspaceId }
+                ?? registry.lastActiveWorkspaceId
+                ?? projectEntry.workspaceId
+            guard let workspaceId else {
+                fputs("Add Project to Canvas failed: no active workspace\n", stderr)
+                return
+            }
+            let appSupport = registryStore.registryFile.deletingLastPathComponent()
+            let workspaceStore = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
+            var document = try workspaceStore.load()
+            if document.zones.contains(where: { $0.projectId == projectId }) {
+                document.lastActiveZoneId = document.zones.first(where: { $0.projectId == projectId })?.zoneId
+            } else {
+                _ = document.appendProjectZone(projectId: projectId)
+            }
+            for index in registry.workspaces.indices where registry.workspaces[index].id != workspaceId {
+                registry.workspaces[index].projectIds.removeAll { $0 == projectId }
+            }
+            if let workspaceIndex = registry.workspaces.firstIndex(where: { $0.id == workspaceId }) {
+                if !registry.workspaces[workspaceIndex].projectIds.contains(projectId) {
+                    registry.workspaces[workspaceIndex].projectIds.append(projectId)
+                }
+                registry.workspaces[workspaceIndex].updatedAt = Date()
+            }
+            if let projectIndex = registry.projects.firstIndex(where: { $0.id == projectId }) {
+                registry.projects[projectIndex].workspaceId = workspaceId
+            }
+            zoneRuntimeController?.flushPendingSaves()
+            try workspaceStore.save(document)
+            try registryStore.save(registry)
+            fputs("Added project zone for \(projectEntry.name) (\(projectId))\n", stderr)
+        } catch {
+            fputs("Add Project to Canvas failed: \(error)\n", stderr)
         }
     }
 
@@ -1781,6 +1838,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private static func mainWindowTitle(for project: Project) -> String {
         "\(project.name) — Continuum"
+    }
+
+    static func runAddZoneSelfCheck() throws -> URL {
+        struct CheckFailure: Error, CustomStringConvertible { let description: String }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckFailure(description: message) }
+        }
+
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("continuum-add-zone-check-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+
+        let workspaceId = UUID(uuidString: "00000000-0000-0000-0000-000000004700")!
+        let projectA = UUID(uuidString: "00000000-0000-0000-0000-000000004701")!
+        let projectB = UUID(uuidString: "00000000-0000-0000-0000-000000004702")!
+        let zoneA = UUID(uuidString: "00000000-0000-0000-0000-0000000047A1")!
+        let zoneB = UUID(uuidString: "00000000-0000-0000-0000-0000000047B2")!
+        var document = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [ZonePlacement(
+                zoneId: zoneA,
+                projectId: projectA,
+                origin: ZonePoint(x: 0, y: 0),
+                size: ZoneSize(width: 1000, height: 700),
+                color: "blue",
+                collapsed: false,
+                hydrationPolicy: .automatic
+            )],
+            zoneZOrder: [zoneA],
+            lastActiveZoneId: zoneA
+        )
+        let inserted = document.appendProjectZone(
+            projectId: projectB,
+            zoneId: zoneB,
+            defaultSize: ZoneSize(width: 900, height: 600),
+            gap: 80,
+            color: "mint"
+        )
+        try expect(inserted.projectId == projectB, "inserted zone references project B")
+        try expect(inserted.origin == ZonePoint(x: 1080, y: 0), "inserted zone lands to the right with gap")
+        try expect(document.zones.count == 2, "workspace has two zones")
+        try expect(document.zoneZOrder == [zoneA, zoneB], "new zone appended to z-order")
+        try expect(document.lastActiveZoneId == zoneB, "new zone becomes active")
+
+        let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
+        try store.save(document)
+        let reloaded = try store.load()
+        try expect(reloaded == document, "workspace add-zone document round trips")
+        try expect(reloaded.zones[0].projectId == projectA, "existing project zone preserved")
+        try expect(reloaded.zones[1].projectId == projectB, "new project zone persisted")
+        return store.layout.canvasFile
     }
 
     static func runProjectRootResolutionSelfCheck() throws {
