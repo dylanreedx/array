@@ -240,6 +240,108 @@ do {
     expect(!json.contains("\"url\""), "Tile metadata omits unset optional fields")
 }
 
+// MARK: - WorkspaceDocument round trip
+
+do {
+    let zoneA = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+    let zoneB = UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!
+    let projectA = UUID(uuidString: "11111111-aaaa-4444-8888-111111111111")!
+    let projectB = UUID(uuidString: "22222222-bbbb-4444-8888-222222222222")!
+    let workspace = WorkspaceDocument(
+        viewport: CanvasViewport(x: -120, y: 80, zoom: 0.75),
+        zones: [
+            ZonePlacement(
+                zoneId: zoneA,
+                projectId: projectA,
+                origin: ZonePoint(x: 0, y: 0),
+                size: ZoneSize(width: 1600, height: 1000),
+                color: "blue",
+                collapsed: false,
+                hydrationPolicy: .automatic
+            ),
+            ZonePlacement(
+                zoneId: zoneB,
+                projectId: projectB,
+                origin: ZonePoint(x: 1800, y: 0),
+                size: ZoneSize(width: 1400, height: 900),
+                color: "orange",
+                collapsed: true,
+                hydrationPolicy: .pinnedLive
+            )
+        ],
+        zoneZOrder: [zoneA, zoneB],
+        lastActiveZoneId: zoneB
+    )
+    let data = try JSONCodec.makeEncoder().encode(workspace)
+    let decoded = try JSONCodec.makeDecoder().decode(WorkspaceDocument.self, from: data)
+    expect(decoded == workspace, "WorkspaceDocument round trip")
+    expect(decoded.schemaVersion == WorkspaceDocument.currentSchemaVersion, "WorkspaceDocument schema version preserved")
+    let json = String(data: data, encoding: .utf8) ?? ""
+    expect(json.contains("\"schemaVersion\":1"), "WorkspaceDocument encodes schemaVersion as 1")
+    expect(json.contains("\"hydrationPolicy\":\"automatic\""), "WorkspaceDocument encodes automatic hydration policy")
+    expect(json.contains("\"hydrationPolicy\":\"pinnedLive\""), "WorkspaceDocument encodes pinned-live hydration policy")
+}
+
+// MARK: - WorkspaceDocument fixture and schema checks
+
+do {
+    for policy in ZoneHydrationPolicy.allCases {
+        let data = try JSONCodec.makeEncoder().encode(policy)
+        let decoded = try JSONCodec.makeDecoder().decode(ZoneHydrationPolicy.self, from: data)
+        expect(decoded == policy, "ZoneHydrationPolicy round trips \(policy.rawValue)")
+    }
+
+    let fixture = """
+    {
+      "schemaVersion": 1,
+      "viewport": { "x": 12.5, "y": -4.25, "zoom": 1.25 },
+      "zones": [
+        {
+          "zoneId": "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC",
+          "projectId": "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD",
+          "origin": { "x": 320, "y": 240 },
+          "size": { "width": 1280, "height": 720 },
+          "color": "mint",
+          "collapsed": false,
+          "hydrationPolicy": "automatic"
+        }
+      ],
+      "zoneZOrder": ["CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC"],
+      "lastActiveZoneId": "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC"
+    }
+    """
+    let decoded = try JSONCodec.makeDecoder().decode(WorkspaceDocument.self, from: Data(fixture.utf8))
+    expect(decoded.schemaVersion == 1, "WorkspaceDocument fixture schema version")
+    expect(decoded.viewport == CanvasViewport(x: 12.5, y: -4.25, zoom: 1.25), "WorkspaceDocument fixture viewport")
+    expect(decoded.zones.count == 1, "WorkspaceDocument fixture zone count")
+    let zone = decoded.zones[0]
+    expect(zone.zoneId.uuidString == "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC", "WorkspaceDocument fixture zoneId")
+    expect(zone.projectId.uuidString == "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD", "WorkspaceDocument fixture projectId")
+    expect(zone.origin == ZonePoint(x: 320, y: 240), "WorkspaceDocument fixture origin")
+    expect(zone.size == ZoneSize(width: 1280, height: 720), "WorkspaceDocument fixture size")
+    expect(zone.color == "mint", "WorkspaceDocument fixture color")
+    expect(zone.collapsed == false, "WorkspaceDocument fixture collapsed")
+    expect(zone.hydrationPolicy == .automatic, "WorkspaceDocument fixture hydration policy")
+    expect(decoded.zoneZOrder == [zone.zoneId], "WorkspaceDocument fixture z-order")
+    expect(decoded.lastActiveZoneId == zone.zoneId, "WorkspaceDocument fixture last active zone")
+
+    let future = WorkspaceDocument(
+        schemaVersion: WorkspaceDocument.currentSchemaVersion + 1,
+        viewport: decoded.viewport,
+        zones: decoded.zones,
+        zoneZOrder: decoded.zoneZOrder,
+        lastActiveZoneId: decoded.lastActiveZoneId
+    )
+    do {
+        try future.validateSchema(at: URL(fileURLWithPath: "/tmp/workspaces/future/canvas.json"))
+        expect(false, "WorkspaceDocument future schema should be refused")
+    } catch ProjectStoreError.unknownFutureSchema(let path, let version, let supported) {
+        expect(path == "/tmp/workspaces/future/canvas.json", "WorkspaceDocument future schema reports path")
+        expect(version == WorkspaceDocument.currentSchemaVersion + 1, "WorkspaceDocument future schema reports version")
+        expect(supported == WorkspaceDocument.currentSchemaVersion, "WorkspaceDocument future schema reports supported version")
+    }
+}
+
 // MARK: - TerminalSessionDescriptor round trip
 
 do {
