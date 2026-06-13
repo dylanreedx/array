@@ -8,6 +8,12 @@ import Foundation
 /// edges is a resize affordance.
 @MainActor
 class TileNSView: NSView {
+    struct ChromeSnapshot: Equatable {
+        var title: String
+        var agentStatus: AgentStatus?
+        var agentStatusLabel: String?
+    }
+
     static let titleBarHeight: CGFloat = 24
     static let resizeMargin: CGFloat = 8
     static let cornerHoverSize: CGFloat = 16
@@ -15,8 +21,14 @@ class TileNSView: NSView {
 
     weak var canvas: CanvasNSView?
     var tile: Tile {
-        didSet { titleBar?.needsDisplay = true }
+        didSet { titleBar?.tile = tile }
     }
+
+    var agentStatus: AgentStatus? {
+        didSet { titleBar?.agentStatus = agentStatus }
+    }
+
+    var chromeSnapshot: ChromeSnapshot? { titleBar?.snapshot }
 
     /// Invoked when the user clicks the title bar's × button. The app sets
     /// this to its tile-delete orchestrator at install time.
@@ -33,6 +45,7 @@ class TileNSView: NSView {
 
     init(tile: Tile) {
         self.tile = tile
+        self.agentStatus = nil
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor(white: 0.10, alpha: 1.0).cgColor
@@ -41,7 +54,7 @@ class TileNSView: NSView {
         layer?.cornerRadius = 6
         layer?.masksToBounds = true
 
-        let bar = TitleBarView(tile: tile)
+        let bar = TitleBarView(tile: tile, agentStatus: agentStatus)
         bar.translatesAutoresizingMaskIntoConstraints = false
         bar.onCloseRequested = { [weak self] in self?.onClose?() }
         addSubview(bar)
@@ -266,12 +279,22 @@ class TileNSView: NSView {
 @MainActor
 private final class TitleBarView: NSView {
     var tile: Tile { didSet { needsDisplay = true } }
+    var agentStatus: AgentStatus? { didSet { needsDisplay = true } }
     var onCloseRequested: (() -> Void)?
+
+    var snapshot: TileNSView.ChromeSnapshot {
+        TileNSView.ChromeSnapshot(
+            title: "\(tile.kind.rawValue.capitalized) · \(tile.title)",
+            agentStatus: agentStatus,
+            agentStatusLabel: agentStatus.map(Self.label(for:))
+        )
+    }
 
     private let closeButton: NSButton
 
-    init(tile: Tile) {
+    init(tile: Tile, agentStatus: AgentStatus? = nil) {
         self.tile = tile
+        self.agentStatus = agentStatus
         let btn = NSButton()
         // Plain `xmark` (not `xmark.circle.fill`) is a monochrome SF symbol
         // that respects contentTintColor — the filled multicolor variant
@@ -347,6 +370,10 @@ private final class TitleBarView: NSView {
         let title = "\(tile.kind.rawValue.capitalized) · \(tile.title)" as NSString
         title.draw(at: NSPoint(x: 8, y: 5), withAttributes: attrs)
 
+        if let agentStatus {
+            drawAgentStatus(agentStatus)
+        }
+
         // Three-dot drag handle indicator, shifted left of the × close button.
         let dot = NSColor(white: 0.55, alpha: 1.0)
         let radius: CGFloat = 1.5
@@ -364,6 +391,45 @@ private final class TitleBarView: NSView {
         // chrome from body and reinforces the "this is a header" read.
         NSColor(white: 0.28, alpha: 1.0).setFill()
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+    }
+
+    private func drawAgentStatus(_ status: AgentStatus) {
+        let label = Self.label(for: status)
+        let color = Self.color(for: status)
+        let textAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.82)
+        ]
+        let textSize = (label as NSString).size(withAttributes: textAttributes)
+        let pillWidth = textSize.width + 18
+        let pillRect = NSRect(x: max(8, bounds.width - 58 - pillWidth), y: 4, width: pillWidth, height: 16)
+        color.withAlphaComponent(0.16).setFill()
+        NSBezierPath(roundedRect: pillRect, xRadius: 8, yRadius: 8).fill()
+        color.setFill()
+        NSBezierPath(ovalIn: NSRect(x: pillRect.minX + 6, y: pillRect.midY - 3, width: 6, height: 6)).fill()
+        label.draw(at: NSPoint(x: pillRect.minX + 15, y: pillRect.minY + 2), withAttributes: textAttributes)
+    }
+
+    private static func label(for status: AgentStatus) -> String {
+        switch status {
+        case .configuring: return "configuring"
+        case .working: return "working"
+        case .idle: return "idle"
+        case .needsAttention: return "needs you"
+        case .done: return "done"
+        case .stale: return "stale"
+        }
+    }
+
+    private static func color(for status: AgentStatus) -> NSColor {
+        switch status {
+        case .needsAttention: return .systemOrange
+        case .working: return .systemBlue
+        case .done: return .systemGreen
+        case .stale: return .systemGray
+        case .idle: return .systemTeal
+        case .configuring: return .systemPurple
+        }
     }
 }
 

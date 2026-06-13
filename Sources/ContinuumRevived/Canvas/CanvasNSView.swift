@@ -31,6 +31,25 @@ final class CanvasNSView: NSView {
     struct ZoneRenderModel: Equatable {
         var placement: ZonePlacement
         var displayName: String
+        var agentStatusRollup: AgentStatusRollup = .empty
+    }
+
+    struct AgentStatusRollup: Equatable {
+        var working: Int = 0
+        var needsAttention: Int = 0
+        var done: Int = 0
+        var stale: Int = 0
+
+        static let empty = AgentStatusRollup()
+
+        var displayText: String? {
+            var parts: [String] = []
+            if working > 0 { parts.append("\(working) working") }
+            if needsAttention > 0 { parts.append("\(needsAttention) needs you") }
+            if done > 0 { parts.append("\(done) done") }
+            if stale > 0 { parts.append("\(stale) stale") }
+            return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        }
     }
 
     private(set) var canvasState: CanvasState
@@ -240,6 +259,10 @@ final class CanvasNSView: NSView {
 
     func zoneChromeSnapshot(for zoneId: UUID) -> ZoneChromeNSView.Snapshot? {
         zoneChromeViews[zoneId]?.snapshot
+    }
+
+    func tileChromeSnapshot(for tileId: UUID) -> TileNSView.ChromeSnapshot? {
+        tileViews[tileId]?.chromeSnapshot
     }
 
     struct NavModeOverlayQASnapshot: Equatable {
@@ -782,6 +805,75 @@ final class CanvasNSView: NSView {
         }
     }
 
+    static func runAgentStatusBadgeSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let projectId = UUID(uuidString: "00000000-0000-0000-0000-000000008301")!
+        let zoneId = UUID(uuidString: "00000000-0000-0000-0000-000000008311")!
+        let workingTileId = UUID(uuidString: "00000000-0000-0000-0000-000000008321")!
+        let needsTileId = UUID(uuidString: "00000000-0000-0000-0000-000000008322")!
+        let plainTileId = UUID(uuidString: "00000000-0000-0000-0000-000000008323")!
+        let zone = ZonePlacement(zoneId: zoneId, projectId: projectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 760, height: 480), color: "blue", collapsed: false, hydrationPolicy: .automatic)
+        let working = Tile(id: workingTileId, kind: .terminal, title: "Agent · Claude", frame: TileFrame(x: 32, y: 52, width: 220, height: 140), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let needs = Tile(id: needsTileId, kind: .terminal, title: "Agent · Codex", frame: TileFrame(x: 280, y: 52, width: 220, height: 140), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let plain = Tile(id: plainTileId, kind: .terminal, title: "Shell", frame: TileFrame(x: 528, y: 52, width: 180, height: 140), zIndex: 3, runtimeRef: nil, metadata: TileMetadata())
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [working, needs, plain], groups: [], lastActiveTileId: nil),
+            activeZone: zone,
+            zoneRenderModels: [
+                ZoneRenderModel(placement: zone, displayName: "Agents", agentStatusRollup: AgentStatusRollup(working: 1, needsAttention: 1, done: 0, stale: 0))
+            ]
+        )
+        let workingView = DescriptorTileNSView(tile: working)
+        workingView.agentStatus = .working
+        canvas.install(tileView: workingView, for: working)
+        let needsView = DescriptorTileNSView(tile: needs)
+        needsView.agentStatus = .needsAttention
+        canvas.install(tileView: needsView, for: needs)
+        canvas.install(tileView: DescriptorTileNSView(tile: plain), for: plain)
+        canvas.layoutSubtreeIfNeeded()
+
+        let workingChrome = canvas.tileChromeSnapshot(for: workingTileId)
+        let needsChrome = canvas.tileChromeSnapshot(for: needsTileId)
+        let plainChrome = canvas.tileChromeSnapshot(for: plainTileId)
+        let zoneChrome = canvas.zoneChromeSnapshot(for: zoneId)
+        try expect(workingChrome?.agentStatus == .working, "working agent tile should expose working badge state")
+        try expect(workingChrome?.agentStatusLabel == "working", "working agent tile should expose working label")
+        try expect(needsChrome?.agentStatus == .needsAttention, "needs-attention agent tile should expose needs-attention badge state")
+        try expect(needsChrome?.agentStatusLabel == "needs you", "needs-attention agent tile should expose needs-you label")
+        try expect(plainChrome?.agentStatus == nil, "non-agent terminal should not expose an agent badge")
+        try expect(zoneChrome?.agentRollupText == "1 working · 1 needs you", "zone header should expose aggregate agent counts")
+        try expect(canvas.hitTest(CGPoint(x: 10, y: 10)) === canvas, "zone chrome remains pass-through")
+
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: fm.currentDirectoryPath)
+        let directory = root.appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("agent-status-badge-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "agent-status-badge",
+            "workingTileStatus": workingChrome?.agentStatusLabel as Any,
+            "needsAttentionTileStatus": needsChrome?.agentStatusLabel as Any,
+            "plainTileHasBadge": plainChrome?.agentStatus != nil,
+            "zoneRollup": zoneChrome?.agentRollupText as Any,
+            "screenshots": "PENDING: deterministic chrome snapshots only; no pixel screenshot captured by headless check"
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
     static func runTileWorldBoundsSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)
@@ -1111,6 +1203,7 @@ final class ZoneChromeNSView: NSView {
         var collapsed: Bool
         var frame: CGRect
         var headerRect: CGRect
+        var agentRollupText: String?
     }
 
     private let model: CanvasNSView.ZoneRenderModel
@@ -1122,7 +1215,8 @@ final class ZoneChromeNSView: NSView {
             color: model.placement.color,
             collapsed: model.placement.collapsed,
             frame: frame,
-            headerRect: headerRect
+            headerRect: headerRect,
+            agentRollupText: model.agentStatusRollup.displayText
         )
     }
 
@@ -1162,6 +1256,21 @@ final class ZoneChromeNSView: NSView {
             .foregroundColor: NSColor.white.withAlphaComponent(0.88)
         ]
         title.draw(in: headerRect.insetBy(dx: 12, dy: 8), withAttributes: attributes)
+
+        if let rollup = model.agentStatusRollup.displayText {
+            let rollupAttributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                .foregroundColor: NSColor.white.withAlphaComponent(0.70)
+            ]
+            let rollupSize = (rollup as NSString).size(withAttributes: rollupAttributes)
+            let rollupRect = CGRect(
+                x: max(12, headerRect.maxX - rollupSize.width - 12),
+                y: 9,
+                width: rollupSize.width,
+                height: 16
+            )
+            rollup.draw(in: rollupRect, withAttributes: rollupAttributes)
+        }
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {

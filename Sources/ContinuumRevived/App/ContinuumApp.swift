@@ -192,6 +192,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--agent-status-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runAgentStatusBadgeSelfCheck()
+                print("ContinuumRevivedAgentStatusChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--tile-world-bounds-check") {
             do {
                 _ = NSApplication.shared
@@ -2019,7 +2031,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try store.save(registry)
     }
 
-    private static func loadActiveZoneRenderModels(from store: RegistryStore) throws -> [CanvasNSView.ZoneRenderModel] {
+    static func loadActiveZoneRenderModels(from store: RegistryStore) throws -> [CanvasNSView.ZoneRenderModel] {
         let registry = try store.loadOrEmpty()
         let projectWorkspaceId = registry.lastActiveProjectId.flatMap { activeProjectId in
             registry.projects.first(where: { $0.id == activeProjectId })?.workspaceId
@@ -2038,9 +2050,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return lhs.zoneId.uuidString < rhs.zoneId.uuidString
         }
         return orderedZones.map { zone in
-            let name = registry.projects.first(where: { $0.id == zone.projectId })?.name ?? "Project"
-            return CanvasNSView.ZoneRenderModel(placement: zone, displayName: name)
+            let projectEntry = registry.projects.first(where: { $0.id == zone.projectId })
+            let name = projectEntry?.name ?? "Project"
+            let rollup = projectEntry.map(Self.agentStatusRollup(for:)) ?? .empty
+            return CanvasNSView.ZoneRenderModel(placement: zone, displayName: name, agentStatusRollup: rollup)
         }
+    }
+
+    private static func agentStatusRollup(for projectEntry: ProjectEntry) -> CanvasNSView.AgentStatusRollup {
+        let store = ProjectStore(projectRoot: URL(fileURLWithPath: projectEntry.rootPath, isDirectory: true))
+        let sessions = (try? store.listSessions()) ?? []
+        let currentTerminalTileIds = Set(((try? store.tryLoadCanvas()) ?? nil)?.tiles.compactMap { tile in
+            tile.kind == .terminal ? tile.id : nil
+        } ?? [])
+        let currentSessions = sessions.filter { currentTerminalTileIds.contains($0.tileId) }
+        return agentStatusRollup(from: currentSessions.compactMap { $0.agentDescriptor?.status })
+    }
+
+    private static func agentStatusRollup(from statuses: [AgentStatus]) -> CanvasNSView.AgentStatusRollup {
+        var rollup = CanvasNSView.AgentStatusRollup.empty
+        for status in statuses {
+            switch status {
+            case .working: rollup.working += 1
+            case .needsAttention: rollup.needsAttention += 1
+            case .done: rollup.done += 1
+            case .stale: rollup.stale += 1
+            case .configuring, .idle: break
+            }
+        }
+        return rollup
+    }
+
+    static func runAgentStatusBadgeSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let artifact = try CanvasNSView.runAgentStatusBadgeSelfCheck()
+        let fm = FileManager.default
+        let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("continuum-agent-status-production-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        let projectRoot = tempRoot.appendingPathComponent("Project", isDirectory: true)
+        try fm.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+
+        let projectId = UUID(uuidString: "00000000-0000-0000-0000-000000008341")!
+        let workspaceId = UUID(uuidString: "00000000-0000-0000-0000-000000008342")!
+        let zoneId = UUID(uuidString: "00000000-0000-0000-0000-000000008343")!
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        let projectEntry = ProjectEntry(id: projectId, name: "Agent Project", rootPath: projectRoot.path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false)
+        let registry = Registry(
+            lastActiveWorkspaceId: workspaceId,
+            lastActiveProjectId: projectId,
+            workspaces: [WorkspaceEntry(id: workspaceId, name: "Default", projectIds: [projectId], createdAt: now, updatedAt: now)],
+            projects: [projectEntry],
+            settings: RegistrySettings(preferredEditor: .auto, zoomModifier: .command, openLastProjectOnLaunch: true)
+        )
+        try RegistryStore(applicationSupportDirectory: appSupport).save(registry)
+        let zone = ZonePlacement(zoneId: zoneId, projectId: projectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 600, height: 400), color: "blue", collapsed: false, hydrationPolicy: .automatic)
+        try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport).save(
+            WorkspaceDocument(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), zones: [zone], zoneZOrder: [zoneId], lastActiveZoneId: zoneId)
+        )
+        let store = ProjectStore(projectRoot: projectRoot)
+        let workingTileId = UUID(uuidString: "00000000-0000-0000-0000-000000008344")!
+        let needsTileId = UUID(uuidString: "00000000-0000-0000-0000-000000008345")!
+        let orphanTileId = UUID(uuidString: "00000000-0000-0000-0000-000000008346")!
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [
+            Tile(id: workingTileId, kind: .terminal, title: "Agent · Claude", frame: TileFrame(x: 0, y: 0, width: 200, height: 120), zIndex: 1, runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: needsTileId, kind: .terminal, title: "Agent · Codex", frame: TileFrame(x: 220, y: 0, width: 200, height: 120), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        ], groups: [], lastActiveTileId: workingTileId))
+        try store.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: workingTileId, launchProfileId: "claude", command: "/bin/zsh", args: [], cwd: projectRoot.path, env: [:], title: "Agent · Claude", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: "claude", worktreePath: projectRoot.path, status: .working, statusUpdatedAt: now)))
+        try store.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: needsTileId, launchProfileId: "codex", command: "/bin/zsh", args: [], cwd: projectRoot.path, env: [:], title: "Agent · Codex", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: "codex", worktreePath: projectRoot.path, status: .needsAttention, statusUpdatedAt: now)))
+        try store.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: orphanTileId, launchProfileId: "old", command: "/bin/zsh", args: [], cwd: projectRoot.path, env: [:], title: "Old Agent", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: "claude", worktreePath: projectRoot.path, status: .done, statusUpdatedAt: now)))
+
+        let models = try loadActiveZoneRenderModels(from: RegistryStore(applicationSupportDirectory: appSupport))
+        try expect(models.count == 1, "production zone render model should load")
+        try expect(models[0].agentStatusRollup.displayText == "2 stale", "production zone render model should derive rollup from current restored project sessions only")
+        return artifact
     }
 
     private static func mainWindowTitle(for project: Project) -> String {

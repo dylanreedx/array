@@ -129,10 +129,12 @@ final class TileSpawner {
         runtime.reservedShortcutHandler = reservedShortcutHandler
         tile.runtimeRef = RuntimeRef(kind: .terminalSession, id: runtime.id)
 
+        let now = Date()
+        let agentDescriptor = agentDescriptor(for: spec, at: now)
         let view = TerminalTileNSView(tile: tile, runtime: runtime)
+        view.agentStatus = agentDescriptor?.status
         canvasView.install(tileView: view, for: tile)
 
-        let now = Date()
         let descriptor = TerminalSessionDescriptor(
             id: runtime.id,
             tileId: tile.id,
@@ -145,7 +147,7 @@ final class TileSpawner {
             createdAt: now,
             lastStartedAt: now,
             lastExit: nil,
-            agentDescriptor: agentDescriptor(for: spec, at: now)
+            agentDescriptor: agentDescriptor
         )
         do {
             try projectStore.saveSession(descriptor)
@@ -212,10 +214,12 @@ final class TileSpawner {
         var tile = existing
         tile.runtimeRef = RuntimeRef(kind: .terminalSession, id: runtime.id)
         tile.title = profile.title
+        let now = Date()
+        let agentDescriptor = agentDescriptor(for: spec, at: now)
         let view = TerminalTileNSView(tile: tile, runtime: runtime)
+        view.agentStatus = agentDescriptor?.status
         canvasView.install(tileView: view, for: tile)
 
-        let now = Date()
         let descriptor = TerminalSessionDescriptor(
             id: runtime.id,
             tileId: tile.id,
@@ -228,7 +232,7 @@ final class TileSpawner {
             createdAt: now,
             lastStartedAt: now,
             lastExit: nil,
-            agentDescriptor: agentDescriptor(for: spec, at: now)
+            agentDescriptor: agentDescriptor
         )
         do {
             try projectStore.saveSession(descriptor)
