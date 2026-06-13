@@ -358,6 +358,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--spawn-rate-limit-check") {
+            do {
+                let artifact = try AppDelegate.runSpawnRateLimitSelfCheck()
+                print("ContinuumRevivedSpawnRateLimitChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--file-tree-hardening-check") {
             do {
                 _ = NSApplication.shared
@@ -681,6 +692,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var qaPerf: QAPerf?
     private var launchStartTime: CFTimeInterval?
     private lazy var browserRuntimeBudget = BrowserRuntimeBudget(maxLive: BrowserRuntimeBudget.resolveMaxLive())
+    private lazy var terminalSpawnAdmission = TerminalSpawnAdmission(maxLive: TerminalSpawnAdmission.resolveMaxLive())
     private var hotkeyMonitor: Any?
     private var passThroughNavModeLeaderEvent: NSEvent?
     private var tileFocusMonitor: Any?
@@ -790,10 +802,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             zoneRuntimeController.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
             canvasView.configureEmptyStateActions(CanvasEmptyStateActions(
                 spawnClaude: { [weak self] in
-                    self?.spawnTerminalFromProfile("claude")
+                    self?.spawnTerminalFromProfile("claude", trigger: "empty-state:claude")
                 },
                 spawnShell: { [weak self] in
-                    self?.spawnTerminalFromProfile("shell")
+                    self?.spawnTerminalFromProfile("shell", trigger: "empty-state:shell")
                 },
                 spawnBrowser: { [weak self] in
                     self?.spawnBrowserDefault()
@@ -1532,16 +1544,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             openProfilePalette()
             return true
         case .spawnProfile(1):
-            spawnTerminalFromProfile("claude")
+            spawnTerminalFromProfile("claude", trigger: "hotkey:cmd-1")
             return true
         case .spawnProfile(2):
-            spawnTerminalFromProfile("shell")
+            spawnTerminalFromProfile("shell", trigger: "hotkey:cmd-2")
             return true
         case .spawnProfile(3):
             spawnBrowserDefault()
             return true
         case .spawnProfile(4):
-            spawnTerminalFromProfile("nvim")
+            spawnTerminalFromProfile("nvim", trigger: "hotkey:cmd-4")
             return true
         case .navModeLeader:
             openNavMode()
@@ -1567,7 +1579,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func makeProfilePalette() -> LaunchProfilePalette {
         let palette = LaunchProfilePalette()
         palette.onSelectProfile = { [weak self] profileId in
-            self?.spawnTerminalFromProfile(profileId)
+            self?.spawnTerminalFromProfile(profileId, trigger: "palette:\(profileId)")
         }
         palette.onSelectAction = { [weak self] action in
             self?.performPaletteAction(action)
@@ -1589,8 +1601,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         focusSpawnedTile(runtime.tileId)
     }
 
-    private func spawnTerminalFromProfile(_ profileId: String) {
+    private func liveTerminalRuntimeCount() -> Int {
+        runtimes.filter { runtime in
+            switch runtime.status {
+            case .configuring, .running:
+                return true
+            case .exited, .error:
+                return false
+            }
+        }.count
+    }
+
+    private func spawnTerminalFromProfile(_ profileId: String, trigger: String? = nil) {
         guard let spawner = tileSpawner else { return }
+        let admissionTrigger = trigger ?? "profile:\(profileId)"
+        if let refusal = terminalSpawnAdmission.admit(trigger: admissionTrigger, liveCount: liveTerminalRuntimeCount()) {
+            fputs("\(refusal.message)\n", stderr)
+            return
+        }
         switch spawner.spawnTerminal(profileId: profileId) {
         case let .spawned(runtime):
             installSpawnedTerminal(runtime)
@@ -4849,6 +4877,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try Data(contentsOf: store.layout.canvasFile).write(to: dir.appendingPathComponent("canvas.json"))
         let observedText = (renderedTexts + emptyTexts).map { $0.replacingOccurrences(of: "\"", with: "'") }.joined(separator: " | ")
         try "{\"tileId\":\"\(tileId.uuidString)\",\"kind\":\"ticketQueue\",\"teamKey\":\"CON\",\"renderedRows\":[\"CON-130\"],\"emptyState\":\"No Linear API key configured\",\"observedText\":\"\(observedText)\",\"status\":\"passed\"}\n".write(to: artifact, atomically: true, encoding: .utf8)
+        return artifact
+    }
+
+    static func runSpawnRateLimitSelfCheck() throws -> URL {
+        struct CheckError: Error, CustomStringConvertible {
+            let description: String
+            init(_ description: String) { self.description = description }
+        }
+
+        let base = Date(timeIntervalSince1970: 1_000)
+        var admission = TerminalSpawnAdmission(maxLive: 2, debounceWindow: 0.300)
+
+        guard admission.admit(trigger: "hotkey:cmd-1", liveCount: 0, now: base) == nil else {
+            throw CheckError("first spawn request should be admitted")
+        }
+        guard case let .rateLimited(trigger, retryAfter)? = admission.admit(trigger: "hotkey:cmd-1", liveCount: 1, now: base.addingTimeInterval(0.100)),
+              trigger == "hotkey:cmd-1",
+              retryAfter > 0.19 && retryAfter < 0.21 else {
+            throw CheckError("same trigger inside 300ms was not rate-limited with measured retryAfter")
+        }
+        guard admission.admit(trigger: "palette:claude", liveCount: 1, now: base.addingTimeInterval(0.100)) == nil else {
+            throw CheckError("different trigger inside 300ms should be admitted")
+        }
+        guard admission.admit(trigger: "hotkey:cmd-1", liveCount: 1, now: base.addingTimeInterval(0.301)) == nil else {
+            throw CheckError("same trigger after 300ms should be admitted")
+        }
+        guard case let .liveRuntimeCapReached(maxLive, liveCount)? = admission.admit(trigger: "hotkey:cmd-4", liveCount: 2, now: base.addingTimeInterval(1.0)),
+              maxLive == 2,
+              liveCount == 2 else {
+            throw CheckError("live runtime cap did not refuse at 2/2")
+        }
+        guard TerminalSpawnAdmission().maxLive == TerminalSpawnAdmission.defaultMaxLive else {
+            throw CheckError("default terminal live cap changed unexpectedly")
+        }
+
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let dir = URL(fileURLWithPath: "qa-runs/spawn-rate-limit-\(timestamp)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let artifact = dir.appendingPathComponent("manifest.json")
+        let json = """
+        {"check":"spawn-rate-limit","debounceWindow":0.3,"defaultMaxLive":\(TerminalSpawnAdmission.defaultMaxLive),"capScenario":{"maxLive":2,"liveCount":2,"refused":true},"status":"passed"}
+
+        """
+        try json.write(to: artifact, atomically: true, encoding: .utf8)
         return artifact
     }
 
