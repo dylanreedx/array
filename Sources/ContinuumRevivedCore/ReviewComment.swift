@@ -16,6 +16,32 @@ public struct ReviewCommentState: Equatable, Codable, Sendable {
         self.reviewId = reviewId
         self.comments = comments
     }
+
+    public func addingComment(id: UUID = UUID(), anchor: ReviewCommentAnchor, body: String, createdAt: Date = Date()) -> ReviewCommentState {
+        var copy = self
+        copy.comments.append(ReviewComment(id: id, anchor: anchor, body: body, createdAt: createdAt, resolved: false, status: .current))
+        return copy
+    }
+
+    public func editingComment(id: UUID, body: String) -> ReviewCommentState {
+        var copy = self
+        guard let index = copy.comments.firstIndex(where: { $0.id == id }) else { return copy }
+        copy.comments[index].body = body
+        return copy
+    }
+
+    public func settingResolved(id: UUID, resolved: Bool) -> ReviewCommentState {
+        var copy = self
+        guard let index = copy.comments.firstIndex(where: { $0.id == id }) else { return copy }
+        copy.comments[index].resolved = resolved
+        return copy
+    }
+
+    public func revalidated(against diff: GitDiffModel) -> ReviewCommentState {
+        var copy = self
+        copy.comments = comments.map { $0.revalidated(against: diff) }
+        return copy
+    }
 }
 
 public struct ReviewComment: Equatable, Codable, Sendable {
@@ -51,7 +77,7 @@ public struct ReviewComment: Equatable, Codable, Sendable {
     }
 }
 
-public struct ReviewCommentAnchor: Equatable, Codable, Sendable {
+public struct ReviewCommentAnchor: Equatable, Hashable, Codable, Sendable {
     public var filePath: String
     public var oldLine: Int?
     public var newLine: Int?

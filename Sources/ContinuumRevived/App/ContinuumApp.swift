@@ -1343,7 +1343,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func installInitialDiffReviewTile(_ tile: Tile, in canvasView: CanvasNSView) {
-        if let activeProject {
+        if let activeProject, let projectStore, let reviewId = tile.metadata.reviewId {
+            let reviewState = (try? projectStore.tryLoadReviewCommentState(reviewId: reviewId)) ?? ReviewCommentState(reviewId: reviewId, comments: [])
+            canvasView.install(tileView: DiffReviewTileNSView(tile: tile, repositoryURL: URL(fileURLWithPath: activeProject.rootPath, isDirectory: true), reviewState: reviewState, onReviewStateChanged: { state in
+                try? projectStore.saveReviewCommentState(state)
+            }), for: tile)
+        } else if let activeProject {
             canvasView.install(tileView: DiffReviewTileNSView(tile: tile, repositoryURL: URL(fileURLWithPath: activeProject.rootPath, isDirectory: true)), for: tile)
         } else {
             canvasView.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
@@ -2143,7 +2148,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let reviewState = ReviewCommentState(reviewId: reviewId, comments: [])
         do {
             try projectStore.saveReviewCommentState(reviewState)
-            canvasView.install(tileView: DiffReviewTileNSView(tile: tile, repositoryURL: URL(fileURLWithPath: activeProject.rootPath, isDirectory: true)), for: tile)
+            canvasView.install(tileView: DiffReviewTileNSView(tile: tile, repositoryURL: URL(fileURLWithPath: activeProject.rootPath, isDirectory: true), reviewState: reviewState, onReviewStateChanged: { state in
+                try? projectStore.saveReviewCommentState(state)
+            }), for: tile)
             try projectStore.saveCanvas(canvasView.canvasState)
             focusSpawnedTile(tile.id)
         } catch {
@@ -5278,7 +5285,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             throw NSError(domain: "DiffTileCheck", code: 2, userInfo: [NSLocalizedDescriptionKey: "GitDiffEngine did not parse fixture diff"])
         }
 
-        let diffView = DiffReviewTileNSView(tile: tile, model: diff)
+        let initialReviewState = ReviewCommentState(reviewId: reviewId, comments: [])
+        var savedReviewState = initialReviewState
+        let diffView = DiffReviewTileNSView(tile: tile, model: diff, reviewState: initialReviewState, onReviewStateChanged: { state in
+            savedReviewState = state
+        })
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 420), styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = diffView
         diffView.frame = window.contentView?.bounds ?? .zero
@@ -5293,14 +5304,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try store.saveCanvas(materialized)
         let now = Date()
         let anchor = ReviewCommentAnchor(filePath: "sample.txt", oldLine: nil, newLine: 2, hunkHeader: diff.files[0].hunks[0].header)
-        let comment = ReviewComment(id: UUID(), anchor: anchor, body: "check comment", createdAt: now, resolved: false, status: .current)
-        try store.saveReviewCommentState(ReviewCommentState(reviewId: reviewId, comments: [comment]))
+        let commentId = UUID()
+        guard diffView.addComment(anchor: anchor, body: "check comment", id: commentId, createdAt: now)?.comments.count == 1,
+              diffView.textView.string.contains("💬 [open] check comment"),
+              diffView.editComment(id: commentId, body: "edited comment")?.comments.first?.body == "edited comment",
+              diffView.textView.string.contains("💬 [open] edited comment"),
+              diffView.setCommentResolved(id: commentId, resolved: true)?.comments.first?.resolved == true,
+              diffView.textView.string.contains("💬 [resolved] edited comment"),
+              savedReviewState.comments.first?.resolved == true else {
+            throw NSError(domain: "DiffTileCheck", code: 6, userInfo: [NSLocalizedDescriptionKey: "diff review comment UI add/edit/resolve seam failed"])
+        }
+        try store.saveReviewCommentState(savedReviewState)
 
         let restored = try store.loadCanvas()
         let restoredReview = try store.loadReviewCommentState(reviewId: reviewId)
         guard restored.tiles.first?.kind == .diffReview,
               restored.tiles.first?.metadata.reviewId == reviewId,
-              restoredReview.comments.first?.body == "check comment",
+              restoredReview.comments.first?.body == "edited comment",
+              restoredReview.comments.first?.resolved == true,
               FileManager.default.fileExists(atPath: store.layout.reviewFile(id: reviewId).path) else {
             throw NSError(domain: "DiffTileCheck", code: 3, userInfo: [NSLocalizedDescriptionKey: "diff review tile or review sidecar did not persist"])
         }
@@ -5329,6 +5350,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "diffViewEvidence": diffViewEvidence.description,
             "screenshot": screenshot.path,
             "persistedComments": restoredReview.comments.count,
+            "commentUISelfCheck": "add/edit/resolve rendered and persisted",
             "reviewSidecarRemoved": true,
             "status": "passed"
         ]

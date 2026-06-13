@@ -2,42 +2,21 @@ import AppKit
 import ContinuumRevivedCore
 import Foundation
 
-/// Read-only hunk/file renderer for a diff review tile.
+/// Hunk/file renderer for a diff review tile, including inline review-comment blocks.
 @MainActor
 final class DiffReviewTileNSView: TileNSView {
     private(set) var textView: NSTextView
     private let scrollView: NSScrollView
+    private var model: GitDiffModel?
+    private var reviewState: ReviewCommentState?
+    private var onReviewStateChanged: ((ReviewCommentState) -> Void)?
 
-    init(tile: Tile, repositoryURL: URL, source: GitDiffEngine.Source = .workingTreeVsHEAD) {
-        let tv = NSTextView()
-        tv.isEditable = false
-        tv.isSelectable = true
-        tv.isRichText = true
-        tv.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        tv.backgroundColor = NSColor(white: 0.10, alpha: 1.0)
-        tv.textColor = NSColor(white: 0.90, alpha: 1.0)
-        tv.isAutomaticQuoteSubstitutionEnabled = false
-        tv.isAutomaticDashSubstitutionEnabled = false
-        tv.isAutomaticSpellingCorrectionEnabled = false
-        tv.textContainerInset = NSSize(width: 8, height: 8)
-        tv.minSize = NSSize(width: 0, height: 0)
-        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        tv.isVerticallyResizable = true
-        tv.isHorizontallyResizable = true
-        tv.autoresizingMask = [.width]
-        tv.textContainer?.widthTracksTextView = false
-        tv.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        tv.textContainer?.lineBreakMode = .byClipping
-
-        let sv = NSScrollView()
-        sv.hasVerticalScroller = true
-        sv.hasHorizontalScroller = true
-        sv.autohidesScrollers = true
-        sv.drawsBackground = false
-        sv.documentView = tv
-
+    init(tile: Tile, repositoryURL: URL, source: GitDiffEngine.Source = .workingTreeVsHEAD, reviewState: ReviewCommentState? = nil, onReviewStateChanged: ((ReviewCommentState) -> Void)? = nil) {
+        let (tv, sv) = Self.makeTextViews()
         self.textView = tv
         self.scrollView = sv
+        self.reviewState = reviewState
+        self.onReviewStateChanged = onReviewStateChanged
         super.init(tile: tile)
         setContentView(sv)
 
@@ -49,31 +28,12 @@ final class DiffReviewTileNSView: TileNSView {
         }
     }
 
-    init(tile: Tile, model: GitDiffModel) {
-        let tv = NSTextView()
-        tv.isEditable = false
-        tv.isSelectable = true
-        tv.isRichText = true
-        tv.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        tv.backgroundColor = NSColor(white: 0.10, alpha: 1.0)
-        tv.textColor = NSColor(white: 0.90, alpha: 1.0)
-        tv.textContainerInset = NSSize(width: 8, height: 8)
-        tv.minSize = NSSize(width: 0, height: 0)
-        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        tv.isVerticallyResizable = true
-        tv.isHorizontallyResizable = true
-        tv.autoresizingMask = [.width]
-        tv.textContainer?.widthTracksTextView = false
-        tv.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        tv.textContainer?.lineBreakMode = .byClipping
-        let sv = NSScrollView()
-        sv.hasVerticalScroller = true
-        sv.hasHorizontalScroller = true
-        sv.autohidesScrollers = true
-        sv.drawsBackground = false
-        sv.documentView = tv
+    init(tile: Tile, model: GitDiffModel, reviewState: ReviewCommentState? = nil, onReviewStateChanged: ((ReviewCommentState) -> Void)? = nil) {
+        let (tv, sv) = Self.makeTextViews()
         self.textView = tv
         self.scrollView = sv
+        self.reviewState = reviewState
+        self.onReviewStateChanged = onReviewStateChanged
         super.init(tile: tile)
         setContentView(sv)
         apply(model)
@@ -88,11 +48,43 @@ final class DiffReviewTileNSView: TileNSView {
     }
 
     func apply(_ model: GitDiffModel) {
+        self.model = model
         if model.files.isEmpty {
             textView.string = "No changes"
             return
         }
-        textView.textStorage?.setAttributedString(Self.render(model))
+        if let reviewState { self.reviewState = reviewState.revalidated(against: model) }
+        textView.textStorage?.setAttributedString(Self.render(model, comments: reviewState?.comments ?? []))
+    }
+
+    @discardableResult
+    func addComment(anchor: ReviewCommentAnchor, body: String, id: UUID = UUID(), createdAt: Date = Date()) -> ReviewCommentState? {
+        guard var state = reviewState else { return nil }
+        state = state.addingComment(id: id, anchor: anchor, body: body, createdAt: createdAt)
+        setReviewState(state)
+        return state
+    }
+
+    @discardableResult
+    func editComment(id: UUID, body: String) -> ReviewCommentState? {
+        guard var state = reviewState else { return nil }
+        state = state.editingComment(id: id, body: body)
+        setReviewState(state)
+        return state
+    }
+
+    @discardableResult
+    func setCommentResolved(id: UUID, resolved: Bool) -> ReviewCommentState? {
+        guard var state = reviewState else { return nil }
+        state = state.settingResolved(id: id, resolved: resolved)
+        setReviewState(state)
+        return state
+    }
+
+    private func setReviewState(_ state: ReviewCommentState) {
+        reviewState = state
+        onReviewStateChanged?(state)
+        if let model { textView.textStorage?.setAttributedString(Self.render(model, comments: state.comments)) }
     }
 
     struct VisibilityEvidence: CustomStringConvertible {
@@ -132,7 +124,37 @@ final class DiffReviewTileNSView: TileNSView {
 
     private func showMessage(_ message: String) { textView.string = message }
 
-    private static func render(_ model: GitDiffModel) -> NSAttributedString {
+    private static func makeTextViews() -> (NSTextView, NSScrollView) {
+        let tv = NSTextView()
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.isRichText = true
+        tv.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.backgroundColor = NSColor(white: 0.10, alpha: 1.0)
+        tv.textColor = NSColor(white: 0.90, alpha: 1.0)
+        tv.isAutomaticQuoteSubstitutionEnabled = false
+        tv.isAutomaticDashSubstitutionEnabled = false
+        tv.isAutomaticSpellingCorrectionEnabled = false
+        tv.textContainerInset = NSSize(width: 8, height: 8)
+        tv.minSize = NSSize(width: 0, height: 0)
+        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        tv.isVerticallyResizable = true
+        tv.isHorizontallyResizable = true
+        tv.autoresizingMask = [.width]
+        tv.textContainer?.widthTracksTextView = false
+        tv.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        tv.textContainer?.lineBreakMode = .byClipping
+
+        let sv = NSScrollView()
+        sv.hasVerticalScroller = true
+        sv.hasHorizontalScroller = true
+        sv.autohidesScrollers = true
+        sv.drawsBackground = false
+        sv.documentView = tv
+        return (tv, sv)
+    }
+
+    private static func render(_ model: GitDiffModel, comments: [ReviewComment] = []) -> NSAttributedString {
         let out = NSMutableAttributedString()
         let base: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular), .foregroundColor: NSColor(white: 0.90, alpha: 1.0)]
         func append(_ text: String, color: NSColor, background: NSColor? = nil) {
@@ -141,6 +163,7 @@ final class DiffReviewTileNSView: TileNSView {
             if let background { attrs[.backgroundColor] = background }
             out.append(NSAttributedString(string: text, attributes: attrs))
         }
+        let commentsByAnchor = Dictionary(grouping: comments, by: { $0.anchor })
         for file in model.files {
             let path = file.newPath ?? file.oldPath ?? "(unknown)"
             append("diff -- \(path) [\(file.change.rawValue)]\n", color: NSColor.systemBlue)
@@ -153,6 +176,12 @@ final class DiffReviewTileNSView: TileNSView {
                     case .deletion: append("-\(line.text)\n", color: NSColor.systemRed, background: NSColor.systemRed.withAlphaComponent(0.10))
                     case .metadata: append("\(line.text)\n", color: NSColor.systemOrange)
                     case .context: append(" \(line.text)\n", color: NSColor(white: 0.82, alpha: 1.0))
+                    }
+                    guard let anchor = ReviewCommentAnchor.make(file: file, hunk: hunk, line: line), let lineComments = commentsByAnchor[anchor] else { continue }
+                    for comment in lineComments.sorted(by: { $0.createdAt < $1.createdAt }) {
+                        let state = comment.resolved ? "resolved" : "open"
+                        let drift = comment.status == .outdated ? " · outdated" : ""
+                        append("    💬 [\(state)\(drift)] \(comment.body)\n", color: comment.resolved ? NSColor.systemGray : NSColor.controlAccentColor, background: NSColor.controlAccentColor.withAlphaComponent(0.08))
                     }
                 }
             }

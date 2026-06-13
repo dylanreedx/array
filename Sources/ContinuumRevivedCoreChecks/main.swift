@@ -1193,6 +1193,22 @@ do {
     try store.saveReviewCommentState(reviewState)
     let loadedReviewState = try store.loadReviewCommentState(reviewId: reviewId)
     expect(loadedReviewState == reviewState, "ReviewCommentState round trip")
+    let editedReviewState = reviewState
+        .addingComment(
+            id: UUID(uuidString: "BBBBBBBB-CCCC-4DDD-8EEE-FFFFFFFFFFFF")!,
+            anchor: ReviewCommentAnchor(filePath: "Sources/App.swift", oldLine: nil, newLine: 43, hunkHeader: "@@ -40,0 +42,2 @@"),
+            body: "second note",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_200)
+        )
+        .editingComment(id: UUID(uuidString: "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE")!, body: "needs an assertion")
+        .settingResolved(id: UUID(uuidString: "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE")!, resolved: true)
+    expect(editedReviewState.comments.count == 2, "ReviewCommentState addingComment appends comments")
+    expect(editedReviewState.comments.first?.body == "needs an assertion", "ReviewCommentState editingComment changes body in place")
+    expect(editedReviewState.comments.first?.resolved == true, "ReviewCommentState settingResolved toggles resolved state")
+    let currentDiff = GitDiffModel(files: [GitDiffFile(oldPath: "Sources/App.swift", newPath: "Sources/App.swift", change: .modified, hunks: [GitDiffHunk(oldStart: 40, oldCount: 0, newStart: 42, newCount: 2, header: "@@ -40,0 +42,2 @@", lines: [GitDiffLine(kind: .addition, text: "let x = 1", oldLine: nil, newLine: 42), GitDiffLine(kind: .addition, text: "let y = 2", oldLine: nil, newLine: 43)])])])
+    expect(editedReviewState.revalidated(against: currentDiff).comments.allSatisfy { $0.status == .current }, "ReviewCommentState revalidation keeps present anchors current")
+    let driftedDiff = GitDiffModel(files: [GitDiffFile(oldPath: "Sources/App.swift", newPath: "Sources/App.swift", change: .modified, hunks: [GitDiffHunk(oldStart: 40, oldCount: 0, newStart: 99, newCount: 1, header: "@@ -40,0 +99,1 @@", lines: [GitDiffLine(kind: .addition, text: "moved", oldLine: nil, newLine: 99)])])])
+    expect(editedReviewState.revalidated(against: driftedDiff).comments.allSatisfy { $0.status == .outdated }, "ReviewCommentState revalidation marks missing anchors outdated")
     expect(
         FileManager.default.fileExists(atPath: store.layout.stateRoot.appendingPathComponent("reviews/\(reviewId.uuidString).json").path),
         "review comments persist project-locally under .continuum-revived/reviews/"
