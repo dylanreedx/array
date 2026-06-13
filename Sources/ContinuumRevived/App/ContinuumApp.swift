@@ -1527,6 +1527,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return
         }
 
+        if key == "z" {
+            closeNavMode()
+            openProfilePalette(initialQuery: "zone")
+            return
+        }
+
+        if key == "w" {
+            closeNavMode()
+            openProfilePalette(initialQuery: "switch workspace")
+            return
+        }
+
         if key == "a" {
             if rawKey == "A" || event.modifierFlags.contains(.shift) {
                 cycleNavAgent(status: .needsAttention)
@@ -1670,7 +1682,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private func openProfilePalette() {
+    private func openProfilePalette(initialQuery: String = "") {
         guard let zoneRuntimeController,
               let host = window else { return }
         let palette = profilePalette ?? makeProfilePalette()
@@ -1680,7 +1692,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             focusBroker.openModal(.palette)
         }
         let rows = zoneRuntimeController.paletteRows(registryStore: registryStore)
-        palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces)
+        palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces, initialQuery: initialQuery)
     }
 
     private func makeProfilePalette() -> LaunchProfilePalette {
@@ -2916,6 +2928,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(ProjectLaunchCoordinator.selectWorkspace(id: emptyWorkspace, from: request) == nil, "empty workspace picker row is not selectable")
         let rows = LaunchPaletteModel.makeRows(profiles: [], projects: ProjectPickerModel.makeRows(registry: registry, fileSystem: probes), workspaces: registry.workspaces)
         try expect(rows.contains(where: { if case let .workspace(workspace) = $0 { return workspace.id == workspaceB }; return false }), "palette exposes switch workspace row")
+        let workspaceFilterRows = LaunchPaletteModel.filterRows(rows, query: "review workspace")
+        try expect(workspaceFilterRows.first == .workspace(registry.workspaces[1]), "palette workspace picker filters to the review workspace row; rows=\(workspaceFilterRows.map(\.displayName))")
+        let zoneFilterRows = LaunchPaletteModel.filterRows(rows, query: "beta zone")
+        try expect(zoneFilterRows.first == .project(ProjectPickerModel.makeRows(registry: registry, fileSystem: probes)[1]), "palette zone picker filters to the Beta add-project row; rows=\(zoneFilterRows.map(\.displayName))")
+        let emptyWorkspaceRows = LaunchPaletteModel.filterRows(rows, query: "empty workspace")
+        try expect(emptyWorkspaceRows.first?.isSelectable == false, "empty workspace picker row should remain unselectable")
         let titleProject = Project(id: projectA, name: "Alpha", rootPath: "/tmp/continuum-ws-alpha", createdAt: now, updatedAt: now, defaultLaunchProfileId: "shell", editorPreference: .auto, settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning))
         try expect(mainWindowTitle(for: titleProject, registry: registry) == "Main Canvas — Continuum", "window title uses active workspace name")
 
@@ -4925,6 +4943,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(overlayCanvas.canvasState.viewport == expectedZoneAViewport, "nav p should jump to the previous zone by ordinal order; viewport=\(overlayCanvas.canvasState.viewport) expected=\(expectedZoneAViewport)")
         navApp.handleNavModeKey(keyEvent("\t", keyCode: 48))
         try expect(overlayCanvas.canvasState.viewport == expectedZoneBViewport, "nav Tab should jump to the next zone by ordinal order; viewport=\(overlayCanvas.canvasState.viewport) expected=\(expectedZoneBViewport)")
+
+        let paletteHost = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700), styleMask: [], backing: .buffered, defer: false)
+        paletteHost.contentView = NSView(frame: paletteHost.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 900, height: 700))
+        navApp.window = paletteHost
+        let registrySupport = tempProjectRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        let registryStore = RegistryStore(applicationSupportDirectory: registrySupport)
+        var navRegistry = Registry.empty()
+        let reviewProject = UUID(uuidString: "00000000-0000-0000-0000-000000000063")!
+        let defaultWorkspace = UUID(uuidString: "00000000-0000-0000-0000-000000000064")!
+        let reviewWorkspace = UUID(uuidString: "00000000-0000-0000-0000-000000000066")!
+        navRegistry.projects = [
+            ProjectEntry(id: tempProject.id, name: tempProject.name, rootPath: tempProjectRoot.path, workspaceId: defaultWorkspace, lastOpenedAt: now, pinned: false),
+            ProjectEntry(id: reviewProject, name: "Review Zone", rootPath: tempProjectRoot.appendingPathComponent("review-zone").path, workspaceId: reviewWorkspace, lastOpenedAt: now, pinned: false)
+        ]
+        navRegistry.workspaces = [
+            WorkspaceEntry(id: defaultWorkspace, name: "Main Canvas", projectIds: [tempProject.id], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: reviewWorkspace, name: "Review Canvas", projectIds: [reviewProject], createdAt: now, updatedAt: now)
+        ]
+        try registryStore.save(navRegistry)
+        navApp.registryStore = registryStore
+
+        navApp.openNavMode()
+        navApp.handleNavModeKey(keyEvent("w", keyCode: 13))
+        try expect(navApp.focusBroker.activeSurface == .modal(.palette), "nav w should hand off from nav mode to the palette modal")
+        try expect(navApp.profilePalette?.searchTextForQA == "switch workspace", "nav w should prefill the workspace picker query; query=\(navApp.profilePalette?.searchTextForQA ?? "nil")")
+        try expect(navApp.profilePalette?.selectedDisplayNameForQA == "Switch to Main Canvas Workspace", "nav w should select a switch-workspace row, not New Workspace; selected=\(navApp.profilePalette?.selectedDisplayNameForQA ?? "nil")")
+        navApp.profilePalette?.close()
+
+        navApp.openNavMode()
+        navApp.handleNavModeKey(keyEvent("z", keyCode: 6))
+        try expect(navApp.focusBroker.activeSurface == .modal(.palette), "nav z should hand off from nav mode to the palette modal")
+        try expect(navApp.profilePalette?.searchTextForQA == "zone", "nav z should prefill the zone picker query; query=\(navApp.profilePalette?.searchTextForQA ?? "nil")")
+        try expect(navApp.profilePalette?.selectedDisplayNameForQA?.contains("Review Zone") == true, "nav z should select a zone-filtered project row; selected=\(navApp.profilePalette?.selectedDisplayNameForQA ?? "nil")")
+        navApp.profilePalette?.close()
+
         overlayCanvas.setNavModeOverlayVisible(false)
         try expect(!overlayCanvas.navModeOverlayQASnapshot().isInstalled, "nav mode overlay should uninstall when nav mode closes")
 

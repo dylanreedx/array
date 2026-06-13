@@ -19,9 +19,9 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private weak var previousFirstResponder: NSResponder?
     private weak var previousFirstResponderWindow: NSWindow?
 
-    func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = []) {
+    func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], initialQuery: String = "") {
         self.rows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)), projects: projects, workspaces: workspaces)
-        self.filtered = rows
+        self.filtered = initialQuery.isEmpty ? rows : LaunchPaletteModel.filterRows(rows, query: initialQuery)
         guard let hostView = host.contentView else { return }
         let wasVisible = isVisible
         let paletteView = ensurePaletteView()
@@ -32,7 +32,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             paletteView.removeFromSuperview()
             hostView.addSubview(paletteView)
         }
-        searchField?.stringValue = ""
+        searchField?.stringValue = initialQuery
         tableView?.reloadData()
 
         let size = NSSize(width: 480, height: 320)
