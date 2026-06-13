@@ -2895,4 +2895,81 @@ do {
     expect(evictWithFocus == [c], "browser budget skips focused/protected browser when choosing eviction")
 }
 
+// MARK: - Conductor queue reader
+
+do {
+    let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("continuum-conductor-reader-\(UUID().uuidString)", isDirectory: true)
+    let conductorDir = tempRoot.appendingPathComponent(".conductor", isDirectory: true)
+    try FileManager.default.createDirectory(at: conductorDir, withIntermediateDirectories: true)
+
+    let missing = try ConductorQueueReader().read(projectRoot: tempRoot)
+    expect(missing.tasks.isEmpty, "ConductorQueueReader treats a missing db as an empty queue")
+
+    let dbURL = conductorDir.appendingPathComponent("conductor.db")
+    let schema = """
+    create table projects (
+      id text primary key,
+      name text not null unique,
+      project_type text not null,
+      workspace_path text,
+      depends_on text,
+      ready_threshold integer not null default 30,
+      created_at integer default (unixepoch())
+    );
+    create table tasks (
+      id text primary key,
+      project_id text references projects(id),
+      category text not null,
+      phase integer not null,
+      description text not null,
+      steps text,
+      depends_on text,
+      status text not null default 'pending',
+      priority integer not null default 0,
+      attempt_count integer not null default 0,
+      last_error text,
+      updated_at integer default (unixepoch()),
+      session_id text,
+      commit_hash text,
+      archive_reason text,
+      current_phase text
+    );
+    insert into projects (id, name, project_type) values ('project-a', 'continuum-revived', 'swift');
+    insert into tasks (id, project_id, category, phase, description, status, priority, attempt_count, updated_at)
+      values ('task-low', 'project-a', 'qa', 2, 'low priority pending task', 'pending', 1, 0, 20);
+    insert into tasks (id, project_id, category, phase, description, status, priority, attempt_count, updated_at)
+      values ('task-high', 'project-a', 'impl', 1, 'high priority pending task', 'pending', 5, 2, 10);
+    insert into tasks (id, project_id, category, phase, description, status, priority, attempt_count, updated_at)
+      values ('task-done', 'project-a', 'docs', 3, 'completed task', 'done', 9, 1, 5);
+    """
+    let create = Process()
+    create.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+    create.arguments = [dbURL.path, schema]
+    try create.run()
+    create.waitUntilExit()
+    expect(create.terminationStatus == 0, "sqlite fixture database created")
+
+    let snapshot = try ConductorQueueReader().read(projectRoot: tempRoot)
+    expect(snapshot.tasks.map(\.id) == ["task-high", "task-low", "task-done"], "ConductorQueueReader sorts by status, priority, updated time, id")
+    expect(snapshot.tasks.first?.projectName == "continuum-revived", "ConductorQueueReader joins project names")
+    expect(snapshot.tasks.first?.attemptCount == 2, "ConductorQueueReader preserves attempt_count")
+    expect(snapshot.tasks.first?.phase == 1, "ConductorQueueReader preserves phase")
+
+    let longDescription = String(repeating: "large queue payload ", count: 400)
+    let largeInsert = (0..<40).map { index in
+        "insert into tasks (id, project_id, category, phase, description, status, priority, attempt_count, updated_at) values ('large-\(index)', 'project-a', 'qa', 4, '\(longDescription)', 'pending', 0, 0, \(100 + index));"
+    }.joined(separator: "\n")
+    let large = Process()
+    large.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+    large.arguments = [dbURL.path, largeInsert]
+    try large.run()
+    large.waitUntilExit()
+    expect(large.terminationStatus == 0, "large sqlite fixture rows created")
+    let largeSnapshot = try ConductorQueueReader().read(projectRoot: tempRoot)
+    expect(largeSnapshot.tasks.count == 43, "ConductorQueueReader drains sqlite output larger than a pipe-sized smoke fixture")
+    expect(largeSnapshot.tasks.contains(where: { $0.id == "large-39" && $0.description == longDescription }), "ConductorQueueReader preserves large task descriptions")
+
+    try? FileManager.default.removeItem(at: tempRoot)
+}
+
 print("ContinuumRevivedCoreChecks passed")
