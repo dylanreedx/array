@@ -18,10 +18,18 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
     /// debounced persistence handler so URL/title changes flow into BrowserState.
     var onAfterRefresh: (() -> Void)?
 
+    var browserProfilesProvider: (() -> [BrowserProfile])?
+    var activeBrowserProfileProvider: (() -> UUID)?
+    var onSwitchBrowserProfile: ((UUID) -> Void)?
+    var onCreateBrowserProfile: (() -> Void)?
+    var onRenameBrowserProfile: ((UUID) -> Void)?
+    var onDeleteBrowserProfile: ((UUID) -> Void)?
+
     private let urlField: NSTextField
     private let backButton: NSButton
     private let forwardButton: NSButton
     private let reloadButton: NSButton
+    private let profileMenuButton: NSButton
     private let progressIndicator: NSProgressIndicator
     private let errorBanner: NSTextField
 
@@ -32,6 +40,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
         self.backButton = NSButton(title: "‹", target: nil, action: nil)
         self.forwardButton = NSButton(title: "›", target: nil, action: nil)
         self.reloadButton = NSButton(title: "↻", target: nil, action: nil)
+        self.profileMenuButton = NSButton(title: "⋯", target: nil, action: nil)
         self.progressIndicator = NSProgressIndicator()
         self.errorBanner = NSTextField(labelWithString: "")
         super.init(tile: tile)
@@ -55,6 +64,12 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
         reloadButton.bezelStyle = .rounded
         reloadButton.translatesAutoresizingMaskIntoConstraints = false
 
+        profileMenuButton.target = self
+        profileMenuButton.action = #selector(showProfileMenu(_:))
+        profileMenuButton.bezelStyle = .rounded
+        profileMenuButton.toolTip = "Browser profiles"
+        profileMenuButton.translatesAutoresizingMaskIntoConstraints = false
+
         urlField.delegate = self
         urlField.translatesAutoresizingMaskIntoConstraints = false
         urlField.placeholderString = "URL"
@@ -68,7 +83,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
         progressIndicator.controlSize = .small
         progressIndicator.isDisplayedWhenStopped = false
 
-        let navRow = NSStackView(views: [backButton, forwardButton, reloadButton, urlField, progressIndicator])
+        let navRow = NSStackView(views: [backButton, forwardButton, reloadButton, urlField, progressIndicator, profileMenuButton])
         navRow.orientation = .horizontal
         navRow.spacing = 4
         navRow.alignment = .centerY
@@ -153,6 +168,55 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
     @objc private func handleForward(_ sender: Any?) { runtime.goForward() }
     @objc private func handleReload(_ sender: Any?) { runtime.reload() }
 
+    @objc private func showProfileMenu(_ sender: NSButton) {
+        profileMenuForQA().popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 2), in: sender)
+    }
+
+    func profileMenuForQA() -> NSMenu {
+        let profiles = browserProfilesProvider?() ?? [BrowserProfile.builtInDefault()]
+        let activeId = activeBrowserProfileProvider?() ?? BrowserProfile.defaultProfileId
+        let menu = NSMenu()
+        for profile in profiles.sorted(by: { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }) {
+            let item = NSMenuItem(title: profile.name, action: #selector(selectBrowserProfile(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = profile.id
+            item.state = profile.id == activeId ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let create = NSMenuItem(title: "Create Profile…", action: #selector(createBrowserProfile(_:)), keyEquivalent: "")
+        create.target = self
+        menu.addItem(create)
+        if activeId != BrowserProfile.defaultProfileId {
+            let rename = NSMenuItem(title: "Rename Current Profile…", action: #selector(renameBrowserProfile(_:)), keyEquivalent: "")
+            rename.target = self
+            rename.representedObject = activeId
+            menu.addItem(rename)
+            let delete = NSMenuItem(title: "Delete Current Profile…", action: #selector(deleteBrowserProfile(_:)), keyEquivalent: "")
+            delete.target = self
+            delete.representedObject = activeId
+            menu.addItem(delete)
+        }
+        return menu
+    }
+
+    @objc private func selectBrowserProfile(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        onSwitchBrowserProfile?(id)
+    }
+
+    @objc private func createBrowserProfile(_ sender: NSMenuItem) { onCreateBrowserProfile?() }
+
+    @objc private func renameBrowserProfile(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        onRenameBrowserProfile?(id)
+    }
+
+    @objc private func deleteBrowserProfile(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        onDeleteBrowserProfile?(id)
+    }
+
     private func focusBrowserContent() {
         runtime.focus()
     }
@@ -200,6 +264,33 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
         )
         let browserTile = BrowserTileNSView(tile: tile, runtime: runtime)
         browserTile.frame = NSRect(x: 0, y: 0, width: 640, height: 420)
+
+        let customProfile = BrowserProfile(id: UUID(), name: "QA Custom", dataStoreIdentifier: UUID().uuidString, createdAt: Date())
+        var activeProfileId = customProfile.id
+        var switchedProfileId: UUID?
+        var createRequested = false
+        var renamedProfileId: UUID?
+        var deletedProfileId: UUID?
+        browserTile.browserProfilesProvider = { [BrowserProfile.builtInDefault(), customProfile] }
+        browserTile.activeBrowserProfileProvider = { activeProfileId }
+        browserTile.onSwitchBrowserProfile = { switchedProfileId = $0; activeProfileId = $0 }
+        browserTile.onCreateBrowserProfile = { createRequested = true }
+        browserTile.onRenameBrowserProfile = { renamedProfileId = $0 }
+        browserTile.onDeleteBrowserProfile = { deletedProfileId = $0 }
+        let profileMenu = browserTile.profileMenuForQA()
+        try expect(profileMenu.items.contains(where: { $0.title == "QA Custom" && $0.state == .on }), "profile menu marks active custom profile")
+        try expect(profileMenu.items.contains(where: { $0.title == "Default" }), "profile menu includes Default")
+        try expect(profileMenu.items.contains(where: { $0.title == "Create Profile…" }), "profile menu includes create action")
+        try expect(profileMenu.items.contains(where: { $0.title == "Rename Current Profile…" }), "profile menu includes rename action for custom active profile")
+        try expect(profileMenu.items.contains(where: { $0.title == "Delete Current Profile…" }), "profile menu includes delete action for custom active profile")
+        if let defaultItem = profileMenu.items.first(where: { $0.title == "Default" }) { browserTile.selectBrowserProfile(defaultItem) }
+        try expect(switchedProfileId == BrowserProfile.defaultProfileId, "profile menu switch callback carries selected profile id")
+        if let createItem = profileMenu.items.first(where: { $0.title == "Create Profile…" }) { browserTile.createBrowserProfile(createItem) }
+        try expect(createRequested, "profile menu create callback fires")
+        if let renameItem = profileMenu.items.first(where: { $0.title == "Rename Current Profile…" }) { browserTile.renameBrowserProfile(renameItem) }
+        try expect(renamedProfileId == customProfile.id, "profile menu rename callback carries active custom profile id")
+        if let deleteItem = profileMenu.items.first(where: { $0.title == "Delete Current Profile…" }) { browserTile.deleteBrowserProfile(deleteItem) }
+        try expect(deletedProfileId == customProfile.id, "profile menu delete callback carries active custom profile id")
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),

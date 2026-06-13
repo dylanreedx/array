@@ -30,7 +30,14 @@ final class TileSpawner {
     private let project: Project
     private let registry: LaunchProfileRegistry
     private let detector: ToolDetector
-    private let browserProfiles: [BrowserProfile]
+    private var browserProfiles: [BrowserProfile]
+
+    /// Dynamic source used by browser tile profile menus after registry edits.
+    var browserProfileMenuProvider: (() -> [BrowserProfile])?
+    var browserProfileSwitchHandler: ((UUID, UUID) -> Void)?
+    var browserProfileCreateHandler: ((UUID) -> Void)?
+    var browserProfileRenameHandler: ((UUID, UUID) -> Void)?
+    var browserProfileDeleteHandler: ((UUID, UUID) -> Void)?
 
     /// Called after every browser-tile state change (URL, title, loading, error)
     /// so the AppDelegate can schedule a debounced BrowserState save.
@@ -279,11 +286,43 @@ final class TileSpawner {
         case failure(Error)
     }
 
+    enum BrowserProfileSwitchOutcome {
+        case switched(oldRuntimeId: UUID?, newRuntime: WKWebViewBrowserRuntime)
+        case unknownProfile(UUID)
+        case invalidURL(String)
+        case tileNotFound
+        case failure(Error)
+    }
+
     private static var defaultBrowserURL: String { DefaultBrowserURL.current }
+
+    func updateBrowserProfiles(_ profiles: [BrowserProfile]) {
+        browserProfiles = RegistrySettings.normalizedBrowserProfilesForApp(profiles)
+    }
+
+    private func availableBrowserProfiles() -> [BrowserProfile] {
+        RegistrySettings.normalizedBrowserProfilesForApp(browserProfileMenuProvider?() ?? browserProfiles)
+    }
 
     private func browserProfile(for id: UUID?) -> BrowserProfile {
         let requested = id ?? project.settings.defaultBrowserProfileId
-        return browserProfiles.first(where: { $0.id == requested }) ?? BrowserProfile.builtInDefault()
+        return availableBrowserProfiles().first(where: { $0.id == requested }) ?? BrowserProfile.builtInDefault()
+    }
+
+    private func activeBrowserProfileId(for tileId: UUID) -> UUID {
+        if let persisted = try? loadBrowserStateIfAvailable()?.tiles.first(where: { $0.tileId == tileId }) {
+            return browserProfile(for: persisted.profileId).id
+        }
+        return browserProfile(for: canvasView?.canvasState.tiles.first(where: { $0.id == tileId })?.metadata.browserProfileId).id
+    }
+
+    private func configureBrowserProfileMenu(_ view: BrowserTileNSView, tileId: UUID) {
+        view.browserProfilesProvider = { [weak self] in self?.availableBrowserProfiles() ?? [BrowserProfile.builtInDefault()] }
+        view.activeBrowserProfileProvider = { [weak self] in self?.activeBrowserProfileId(for: tileId) ?? BrowserProfile.defaultProfileId }
+        view.onSwitchBrowserProfile = { [weak self] profileId in self?.browserProfileSwitchHandler?(tileId, profileId) }
+        view.onCreateBrowserProfile = { [weak self] in self?.browserProfileCreateHandler?(tileId) }
+        view.onRenameBrowserProfile = { [weak self] profileId in self?.browserProfileRenameHandler?(tileId, profileId) }
+        view.onDeleteBrowserProfile = { [weak self] profileId in self?.browserProfileDeleteHandler?(tileId, profileId) }
     }
 
     /// Spawns a live `WKWebView` browser tile. Defaults to the configured
@@ -333,6 +372,7 @@ final class TileSpawner {
 
         let view = BrowserTileNSView(tile: tile, runtime: runtime)
         view.onAfterRefresh = { [weak self] in self?.browserPersistenceHandler?() }
+        configureBrowserProfileMenu(view, tileId: tile.id)
         canvasView.install(tileView: view, for: tile)
 
         do {
@@ -412,6 +452,7 @@ final class TileSpawner {
 
         let view = BrowserTileNSView(tile: tile, runtime: runtime)
         view.onAfterRefresh = { [weak self] in self?.browserPersistenceHandler?() }
+        configureBrowserProfileMenu(view, tileId: tile.id)
         canvasView.install(tileView: view, for: tile)
 
         do {
@@ -431,6 +472,73 @@ final class TileSpawner {
 
         runtime.loadURL(urlString)
         return .restarted(runtime)
+    }
+
+    /// Switches one browser tile to a different persisted profile by replacing
+    /// its WKWebView/runtime. WebKit data stores are construction-time state,
+    /// so profile changes cannot be applied in place.
+    func switchBrowserTileProfile(tileId: UUID, profileId: UUID) -> BrowserProfileSwitchOutcome {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        guard let existing = canvasView.canvasState.tiles.first(where: { $0.id == tileId }) else {
+            return .tileNotFound
+        }
+        guard let selectedProfile = availableBrowserProfiles().first(where: { $0.id == profileId }) else {
+            return .unknownProfile(profileId)
+        }
+
+        let oldBrowserView = canvasView.tileView(for: tileId) as? BrowserTileNSView
+        let oldRuntime = oldBrowserView?.runtime
+        let browserState: BrowserState?
+        let persistedBrowserTile: BrowserTile?
+        do {
+            browserState = try loadBrowserStateIfAvailable()
+            persistedBrowserTile = browserState?.tiles.first(where: { $0.tileId == tileId })
+        } catch {
+            return .failure(error)
+        }
+        let urlString = oldRuntime?.url ?? persistedBrowserTile?.url ?? existing.metadata.url ?? Self.defaultBrowserURL
+        guard URL(string: urlString) != nil else { return .invalidURL(urlString) }
+        let title = oldRuntime?.title.isEmpty == false ? (oldRuntime?.title ?? existing.title) : (persistedBrowserTile?.title ?? existing.title)
+
+        let webView = browserEngine.makeWebView(storageGroupId: selectedProfile.dataStoreIdentifier)
+        let runtime = WKWebViewBrowserRuntime(
+            id: UUID(),
+            tileId: existing.id,
+            webView: webView,
+            initialURL: urlString
+        )
+        runtime.reservedShortcutHandler = reservedShortcutHandler
+
+        var tile = existing
+        tile.runtimeRef = RuntimeRef(kind: .browserTile, id: runtime.id)
+        tile.title = title.isEmpty ? existing.title : title
+        tile.metadata.url = urlString
+        tile.metadata.browserProfileId = selectedProfile.id
+
+        let view = BrowserTileNSView(tile: tile, runtime: runtime)
+        view.onAfterRefresh = { [weak self] in self?.browserPersistenceHandler?() }
+        configureBrowserProfileMenu(view, tileId: tile.id)
+        canvasView.install(tileView: view, for: tile)
+
+        do {
+            try upsertBrowserTile(
+                runtimeId: runtime.id,
+                tileId: tile.id,
+                url: urlString,
+                title: title,
+                storageGroupId: selectedProfile.dataStoreIdentifier,
+                profileId: selectedProfile.id,
+                in: browserState ?? BrowserState(tiles: [])
+            )
+            try projectStore.saveCanvas(canvasView.canvasState)
+        } catch {
+            return .failure(error)
+        }
+
+        oldRuntime?.onStateChange = nil
+        oldRuntime?.terminate(policy: .requestClose)
+        runtime.loadURL(urlString)
+        return .switched(oldRuntimeId: oldRuntime?.id, newRuntime: runtime)
     }
 
     // MARK: - Note tiles
@@ -686,6 +794,64 @@ final class TileSpawner {
         let legacyTile = try JSONCodec.makeDecoder().decode(BrowserTile.self, from: legacy)
         try expect(legacyTile.profileId == BrowserProfile.defaultProfileId, "legacy BrowserTile without profileId decodes to Default")
 
+        let registryRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuum-browser-profile-registry-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: registryRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: registryRoot) }
+        let registryStore = RegistryStore(applicationSupportDirectory: registryRoot, retainedBackups: 1)
+        var registry = Registry.empty()
+        guard let createdProfile = BrowserProfilePersistenceActions.createProfile(
+            named: "QA Created",
+            in: &registry,
+            now: Date(timeIntervalSince1970: 20)
+        ) else {
+            throw CheckError.failed("profile create helper accepts custom profile")
+        }
+        try registryStore.save(registry)
+        var persistedRegistry = try registryStore.loadOrEmpty()
+        try expect(persistedRegistry.settings.browserProfiles.contains(where: { $0.id == createdProfile.id && $0.name == "QA Created" }), "created profile persists to registry store")
+        try expect(BrowserProfilePersistenceActions.renameProfile(id: createdProfile.id, to: "QA Created Renamed", in: &persistedRegistry), "profile rename helper accepts custom profile")
+        try registryStore.save(persistedRegistry)
+        persistedRegistry = try registryStore.loadOrEmpty()
+        try expect(persistedRegistry.settings.browserProfiles.first(where: { $0.id == createdProfile.id })?.name == "QA Created Renamed", "renamed profile persists to registry store")
+
+        let deletedProfile = BrowserProfilePersistenceActions.makeProfile(
+            name: "QA Deleted",
+            id: UUID(),
+            dataStoreIdentifier: UUID().uuidString,
+            createdAt: Date(timeIntervalSince1970: 21)
+        )
+        try expect(persistedRegistry.settings.upsertBrowserProfile(deletedProfile), "delete fixture profile is present before delete")
+        let rewriteTileId = UUID()
+        let rewriteCanvasOnlyTileId = UUID()
+        let deleteRewriteURLString = "https://profile-delete-rewrite.test/"
+        var rewriteBrowserState: BrowserState? = BrowserState(tiles: [
+            BrowserTile(id: UUID(), tileId: rewriteTileId, url: deleteRewriteURLString, title: "Deleted Profile Tile", storageGroupId: deletedProfile.dataStoreIdentifier, profileId: deletedProfile.id, createdAt: Date(timeIntervalSince1970: 22), updatedAt: Date(timeIntervalSince1970: 22))
+        ])
+        var rewriteCanvasState: CanvasState? = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [
+            Tile(id: rewriteTileId, kind: .browser, title: "Deleted Profile Tile", frame: TileFrame(x: 0, y: 0, width: 800, height: 600), zIndex: 0, runtimeRef: nil, metadata: TileMetadata(url: deleteRewriteURLString, browserProfileId: deletedProfile.id)),
+            Tile(id: rewriteCanvasOnlyTileId, kind: .browser, title: "Canvas Only", frame: TileFrame(x: 10, y: 10, width: 800, height: 600), zIndex: 1, runtimeRef: nil, metadata: TileMetadata(url: deleteRewriteURLString, browserProfileId: deletedProfile.id))
+        ], groups: [], lastActiveTileId: rewriteTileId)
+        let deleteRewrite = BrowserProfilePersistenceActions.deleteProfile(
+            id: deletedProfile.id,
+            in: &persistedRegistry,
+            browserState: &rewriteBrowserState,
+            canvasState: &rewriteCanvasState,
+            now: Date(timeIntervalSince1970: 23)
+        )
+        try expect(deleteRewrite.registryDeleted, "profile delete helper removes custom profile")
+        try registryStore.save(persistedRegistry)
+        persistedRegistry = try registryStore.loadOrEmpty()
+        try expect(!persistedRegistry.settings.browserProfiles.contains(where: { $0.id == deletedProfile.id }), "deleted profile is absent after registry store reload")
+        try expect(rewriteBrowserState?.tiles.first(where: { $0.tileId == rewriteTileId })?.profileId == BrowserProfile.defaultProfileId, "delete rewrite falls persisted browser tile back to Default profile")
+        try expect(rewriteBrowserState?.tiles.first(where: { $0.tileId == rewriteTileId })?.storageGroupId == BrowserProfile.defaultDataStoreIdentifier, "delete rewrite falls persisted browser tile storage group back to Default")
+        try expect(rewriteCanvasState?.tiles.first(where: { $0.id == rewriteTileId })?.metadata.browserProfileId == BrowserProfile.defaultProfileId, "delete rewrite falls canvas browser tile back to Default profile")
+        try expect(rewriteCanvasState?.tiles.first(where: { $0.id == rewriteCanvasOnlyTileId })?.metadata.browserProfileId == BrowserProfile.defaultProfileId, "delete rewrite covers canvas-only existing browser tile")
+        var defaultDeleteBrowserState: BrowserState? = nil
+        var defaultDeleteCanvasState: CanvasState? = nil
+        let defaultDelete = BrowserProfilePersistenceActions.deleteProfile(id: BrowserProfile.defaultProfileId, in: &persistedRegistry, browserState: &defaultDeleteBrowserState, canvasState: &defaultDeleteCanvasState)
+        try expect(!defaultDelete.registryDeleted, "profile delete refuses Default")
+
         func runLoopUntil(_ done: @autoclosure () -> Bool, timeout: TimeInterval = 5) -> Bool {
             let deadline = Date().addingTimeInterval(timeout)
             while !done(), Date() < deadline {
@@ -738,6 +904,78 @@ final class TileSpawner {
         let isolatedValue = try eval("localStorage.getItem('continuumProfileCheck')", in: isolatedB) as? String
         try expect(isolatedValue == nil, "profile B localStorage is isolated from profile A")
 
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuum-browser-profile-switch-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        let now = Date(timeIntervalSince1970: 10)
+        let project = Project(
+            id: UUID(),
+            name: "browser-profile-switch-check",
+            rootPath: tempRoot.path,
+            createdAt: now,
+            updatedAt: now,
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning
+            )
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        let switchTileId = UUID()
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [
+            Tile(
+                id: switchTileId,
+                kind: .browser,
+                title: "Browser",
+                frame: TileFrame(x: 0, y: 0, width: 800, height: 600),
+                zIndex: 0,
+                runtimeRef: nil,
+                metadata: TileMetadata(url: fixtureURL.absoluteString, browserProfileId: profileA.id)
+            )
+        ], groups: [], lastActiveTileId: switchTileId))
+        try store.saveBrowserState(BrowserState(tiles: [
+            BrowserTile(id: UUID(), tileId: switchTileId, url: fixtureURL.absoluteString, title: "Browser", storageGroupId: profileA.dataStoreIdentifier, profileId: profileA.id, createdAt: now, updatedAt: now)
+        ]))
+        let switchCanvas = CanvasNSView(canvasState: try store.loadCanvas())
+        let switchEngine = BrowserEngineContext()
+        defer { switchEngine.shutdown() }
+        let spawner = TileSpawner(
+            canvasView: switchCanvas,
+            ghostty: nil,
+            browserEngine: switchEngine,
+            projectStore: store,
+            project: project,
+            browserProfiles: [profileA, profileB]
+        )
+        let restarted: WKWebViewBrowserRuntime
+        switch spawner.restartBrowserTile(tileId: switchTileId) {
+        case let .restarted(runtime): restarted = runtime
+        case let .invalidURL(url): throw CheckError.failed("app seam rejected fixture URL: \(url)")
+        case .tileNotFound: throw CheckError.failed("app seam tile missing before switch")
+        case let .failure(error): throw error
+        }
+        let oldRuntimeId = restarted.id
+        var switchRuntimeReplaced = false
+        switch spawner.switchBrowserTileProfile(tileId: switchTileId, profileId: profileB.id) {
+        case let .switched(oldRuntimeId: oldId, newRuntime):
+            try expect(oldId == oldRuntimeId, "profile switch reports replaced runtime id")
+            switchRuntimeReplaced = newRuntime.id != oldRuntimeId
+            try expect(switchRuntimeReplaced, "profile switch creates a new runtime")
+            newRuntime.terminate(policy: .requestClose)
+        case let .unknownProfile(id): throw CheckError.failed("app seam unknown profile: \(id)")
+        case let .invalidURL(url): throw CheckError.failed("app seam rejected switch URL: \(url)")
+        case .tileNotFound: throw CheckError.failed("app seam tile missing during switch")
+        case let .failure(error): throw error
+        }
+        let switchedTile = try store.loadBrowserState().tiles.first(where: { $0.tileId == switchTileId })
+        try expect(switchedTile?.profileId == profileB.id, "app seam persists selected profile id")
+        try expect(switchedTile?.storageGroupId == profileB.dataStoreIdentifier, "app seam persists selected storage group")
+        try expect(switchCanvas.canvasState.tiles.first(where: { $0.id == switchTileId })?.metadata.browserProfileId == profileB.id, "app seam updates canvas metadata profile id")
+
         let manifest: [String: Any] = [
             "check": "browser-profile-persistence",
             "profileAId": profileA.id.uuidString,
@@ -747,9 +985,20 @@ final class TileSpawner {
             "profileIdsRoundTrip": true,
             "dataStoresDistinct": true,
             "legacyDefaultProfileFallback": true,
+            "profileCreatePersistedId": createdProfile.id.uuidString,
+            "profileRenamePersistedName": persistedRegistry.settings.browserProfiles.first(where: { $0.id == createdProfile.id })?.name as Any,
+            "profileDeleteRegistryAbsent": !persistedRegistry.settings.browserProfiles.contains(where: { $0.id == deletedProfile.id }),
+            "profileDeleteBrowserTilesRewritten": deleteRewrite.browserTileIdsRewritten.map(\.uuidString),
+            "profileDeleteCanvasTilesRewritten": deleteRewrite.canvasTileIdsRewritten.map(\.uuidString),
+            "profileDeleteBrowserFallbackProfileId": rewriteBrowserState?.tiles.first(where: { $0.tileId == rewriteTileId })?.profileId.uuidString as Any,
+            "profileDeleteBrowserFallbackStorageGroupId": rewriteBrowserState?.tiles.first(where: { $0.tileId == rewriteTileId })?.storageGroupId as Any,
+            "profileDeleteCanvasOnlyFallbackProfileId": rewriteCanvasState?.tiles.first(where: { $0.id == rewriteCanvasOnlyTileId })?.metadata.browserProfileId?.uuidString as Any,
             "profileALocalStorageAfterRecreate": restoredValue as Any,
             "profileBLocalStorageValue": isolatedValue as Any,
-            "localStorageIsolationMeasured": isolatedValue == nil && restoredValue == "profile-a"
+            "localStorageIsolationMeasured": isolatedValue == nil && restoredValue == "profile-a",
+            "appProfileSwitchRuntimeReplaced": switchRuntimeReplaced,
+            "appProfileSwitchPersistedProfileId": switchedTile?.profileId.uuidString as Any,
+            "appProfileSwitchPersistedStorageGroupId": switchedTile?.storageGroupId as Any
         ]
         let fileManager = FileManager.default
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")

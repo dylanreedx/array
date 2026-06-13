@@ -816,6 +816,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawner.reservedShortcutHandler = { [weak self] event in
                 self?.handleReservedShortcut(event) ?? false
             }
+            spawner.browserProfileMenuProvider = { [weak self] in
+                (try? self?.registryStore?.loadOrEmpty().settings.browserProfiles) ?? registry.settings.browserProfiles
+            }
+            spawner.browserProfileSwitchHandler = { [weak self] tileId, profileId in
+                self?.switchBrowserTileProfile(tileId: tileId, profileId: profileId)
+            }
+            spawner.browserProfileCreateHandler = { [weak self] tileId in
+                self?.createBrowserProfile(for: tileId)
+            }
+            spawner.browserProfileRenameHandler = { [weak self] tileId, profileId in
+                self?.renameBrowserProfile(tileId: tileId, profileId: profileId)
+            }
+            spawner.browserProfileDeleteHandler = { [weak self] tileId, profileId in
+                self?.deleteBrowserProfile(tileId: tileId, profileId: profileId)
+            }
             self.tileSpawner = spawner
             zoneRuntimeController.onBrowserRuntimeHydrated = { [weak self] runtime in
                 self?.wireContentProcessTerminationHandler(runtime)
@@ -1732,6 +1747,99 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case let .failure(error):
             fputs("TileSpawner.spawnBrowser failed: \(error)\n", stderr)
         }
+    }
+
+    private func switchBrowserTileProfile(tileId: UUID, profileId: UUID) {
+        guard let spawner = tileSpawner else { return }
+        switch spawner.switchBrowserTileProfile(tileId: tileId, profileId: profileId) {
+        case let .switched(oldRuntimeId, runtime):
+            if let oldRuntimeId { browserRuntimes.removeAll { $0.id == oldRuntimeId } }
+            wireContentProcessTerminationHandler(runtime)
+            browserRuntimes.append(runtime)
+            registerBrowserRuntimeForBudget(runtime)
+            enforceBrowserRuntimeBudget()
+            focusSpawnedTile(runtime.tileId)
+        case let .unknownProfile(id):
+            fputs("Browser profile switch failed: unknown profile \(id)\n", stderr)
+        case let .invalidURL(url):
+            fputs("Browser profile switch failed: invalid URL \(url)\n", stderr)
+        case .tileNotFound:
+            fputs("Browser profile switch failed: tile not found \(tileId)\n", stderr)
+        case let .failure(error):
+            fputs("Browser profile switch failed: \(error)\n", stderr)
+        }
+    }
+
+    private func createBrowserProfile(for tileId: UUID) {
+        guard let name = promptForBrowserProfileName(title: "Create Browser Profile", defaultValue: "New Profile") else { return }
+        guard let registryStore else { return }
+        do {
+            var registry = try registryStore.loadOrEmpty()
+            guard let profile = BrowserProfilePersistenceActions.createProfile(named: name, in: &registry) else { return }
+            try registryStore.save(registry)
+            tileSpawner?.updateBrowserProfiles(registry.settings.browserProfiles)
+            switchBrowserTileProfile(tileId: tileId, profileId: profile.id)
+        } catch {
+            fputs("Create Browser Profile failed: \(error)\n", stderr)
+        }
+    }
+
+    private func renameBrowserProfile(tileId: UUID, profileId: UUID) {
+        guard profileId != BrowserProfile.defaultProfileId, let registryStore else { return }
+        do {
+            var registry = try registryStore.loadOrEmpty()
+            guard let existing = registry.settings.browserProfiles.first(where: { $0.id == profileId }) else { return }
+            guard let name = promptForBrowserProfileName(title: "Rename Browser Profile", defaultValue: existing.name) else { return }
+            guard BrowserProfilePersistenceActions.renameProfile(id: profileId, to: name, in: &registry) else { return }
+            try registryStore.save(registry)
+            tileSpawner?.updateBrowserProfiles(registry.settings.browserProfiles)
+        } catch {
+            fputs("Rename Browser Profile failed: \(error)\n", stderr)
+        }
+    }
+
+    private func deleteBrowserProfile(tileId: UUID, profileId: UUID) {
+        guard profileId != BrowserProfile.defaultProfileId, let registryStore else { return }
+        let alert = NSAlert()
+        alert.messageText = "Delete Browser Profile?"
+        alert.informativeText = "Tiles using this profile will switch to Default. WebKit data for the deleted profile is not removed."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            var registry = try registryStore.loadOrEmpty()
+            var browserState = try projectStore?.loadBrowserState()
+            var canvasState = canvasView?.canvasState
+            let rewrite = BrowserProfilePersistenceActions.deleteProfile(id: profileId, in: &registry, browserState: &browserState, canvasState: &canvasState)
+            guard rewrite.registryDeleted else { return }
+            try registryStore.save(registry)
+            if let browserState { try projectStore?.saveBrowserState(browserState) }
+            if let canvasState {
+                for tile in canvasState.tiles { canvasView?.updateTile(tile) }
+                try projectStore?.saveCanvas(canvasState)
+            }
+            tileSpawner?.updateBrowserProfiles(registry.settings.browserProfiles)
+            let idsToSwitch = rewrite.affectedTileIds.isEmpty ? [tileId] : rewrite.affectedTileIds
+            for affectedTileId in idsToSwitch {
+                switchBrowserTileProfile(tileId: affectedTileId, profileId: BrowserProfile.defaultProfileId)
+            }
+        } catch {
+            fputs("Delete Browser Profile failed: \(error)\n", stderr)
+        }
+    }
+
+
+    private func promptForBrowserProfileName(title: String, defaultValue: String) -> String? {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(string: defaultValue)
+        field.frame = NSRect(x: 0, y: 0, width: 260, height: 24)
+        alert.accessoryView = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let trimmed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func openProjectInEditor() {

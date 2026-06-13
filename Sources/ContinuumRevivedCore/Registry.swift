@@ -252,7 +252,7 @@ public struct RegistrySettings: Codable, Equatable, Sendable {
         self.preferredEditor = preferredEditor
         self.zoomModifier = zoomModifier
         self.openLastProjectOnLaunch = openLastProjectOnLaunch
-        self.browserProfiles = RegistrySettings.normalizedBrowserProfiles(browserProfiles)
+        self.browserProfiles = RegistrySettings.normalizedBrowserProfilesForApp(browserProfiles)
         if self.browserProfiles.contains(where: { $0.id == defaultBrowserProfileId }) {
             self.defaultBrowserProfileId = defaultBrowserProfileId
         } else {
@@ -269,7 +269,7 @@ public struct RegistrySettings: Codable, Equatable, Sendable {
         preferredEditor = try container.decode(EditorPreference.self, forKey: .preferredEditor)
         zoomModifier = try container.decode(ZoomModifier.self, forKey: .zoomModifier)
         openLastProjectOnLaunch = try container.decode(Bool.self, forKey: .openLastProjectOnLaunch)
-        browserProfiles = RegistrySettings.normalizedBrowserProfiles(
+        browserProfiles = RegistrySettings.normalizedBrowserProfilesForApp(
             try container.decodeIfPresent([BrowserProfile].self, forKey: .browserProfiles) ?? []
         )
         let decodedDefaultId = try container.decodeIfPresent(UUID.self, forKey: .defaultBrowserProfileId)
@@ -314,7 +314,7 @@ public struct RegistrySettings: Codable, Equatable, Sendable {
         return true
     }
 
-    private static func normalizedBrowserProfiles(_ profiles: [BrowserProfile]) -> [BrowserProfile] {
+    public static func normalizedBrowserProfilesForApp(_ profiles: [BrowserProfile]) -> [BrowserProfile] {
         var normalized = profiles.filter { profile in
             profile.id == BrowserProfile.defaultProfileId || UUID(uuidString: profile.dataStoreIdentifier) != nil
         }
