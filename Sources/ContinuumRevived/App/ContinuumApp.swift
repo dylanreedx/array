@@ -1287,10 +1287,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func handleHotkey(_ event: NSEvent) -> Bool {
         if focusBroker.activeSurface == .modal(.navMode) {
-            if event.keyCode == 53 || focusBroker.reservedShortcut(for: event) == .navModeLeader {
-                focusBroker.closeModal(.navMode)
-                canvasView?.setNavModeOverlayVisible(false)
-            }
+            handleNavModeKey(event)
             return true
         }
 
@@ -1300,8 +1297,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let shortcut = focusBroker.reservedShortcut(for: event)
         if shortcut == .navModeLeader {
-            focusBroker.openModal(.navMode)
-            canvasView?.setNavModeOverlayVisible(true)
+            openNavMode()
             return true
         }
 
@@ -1322,6 +1318,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         return handleReservedShortcut(event)
+    }
+
+    private func openNavMode() {
+        focusBroker.openModal(.navMode)
+        canvasView?.setNavModeOverlayVisible(true)
+    }
+
+    private func closeNavMode() {
+        focusBroker.closeModal(.navMode)
+        canvasView?.setNavModeOverlayVisible(false)
+    }
+
+    private func handleNavModeKey(_ event: NSEvent) {
+        if event.keyCode == 53 || focusBroker.reservedShortcut(for: event) == .navModeLeader {
+            closeNavMode()
+            return
+        }
+
+        if event.keyCode == 36 {
+            guard let selectedTileId = canvasView?.canvasState.lastActiveTileId else {
+                closeNavMode()
+                return
+            }
+            closeNavMode()
+            _ = focusBroker.requestFocus(.tile(selectedTileId), reason: .modalDismissed)
+            return
+        }
+
+        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        if let direction = TileArrangement.Direction.fromKey(key) {
+            moveNavSelection(direction: direction)
+            return
+        }
+
+        if key == "x", let selectedTileId = canvasView?.canvasState.lastActiveTileId {
+            closeNavMode()
+            deleteTile(id: selectedTileId)
+        }
+    }
+
+    private func moveNavSelection(direction: TileArrangement.Direction) {
+        guard let canvasView,
+              let selectedTileId = canvasView.canvasState.lastActiveTileId,
+              let nextTileId = CanvasEngine.nearestTile(
+                from: selectedTileId,
+                direction: direction,
+                tiles: canvasView.canvasState.tiles
+              ) else { return }
+        canvasView.markActive(tileId: nextTileId)
     }
 
     private func handleReservedShortcut(_ event: NSEvent) -> Bool {
@@ -1348,7 +1393,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawnTerminalFromProfile("nvim")
             return true
         case .navModeLeader:
-            focusBroker.openModal(.navMode)
+            openNavMode()
             return true
         case .spawnProfile:
             return false
@@ -4006,10 +4051,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             collapsed: false,
             hydrationPolicy: .automatic
         )
+        let rightTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000065")!
+        let downTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000066")!
         let overlayCanvas = CanvasNSView(
             canvasState: CanvasState(
                 viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-                tiles: [Tile(id: selectedTileId, kind: .note, title: "Selected", frame: TileFrame(x: 24, y: 44, width: 140, height: 90), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())],
+                tiles: [
+                    Tile(id: selectedTileId, kind: .note, title: "Selected", frame: TileFrame(x: 24, y: 44, width: 140, height: 90), zIndex: 1, runtimeRef: nil, metadata: TileMetadata()),
+                    Tile(id: rightTileId, kind: .note, title: "Right", frame: TileFrame(x: 220, y: 44, width: 140, height: 90), zIndex: 2, runtimeRef: nil, metadata: TileMetadata()),
+                    Tile(id: downTileId, kind: .note, title: "Down", frame: TileFrame(x: 24, y: 180, width: 140, height: 90), zIndex: 3, runtimeRef: nil, metadata: TileMetadata()),
+                ],
                 groups: [],
                 lastActiveTileId: selectedTileId
             ),
@@ -4028,6 +4079,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(openOverlay.zoneBadgeCount == 2, "nav mode overlay should render one ordinal badge per zone")
         try expect(openOverlay.hitTestPassesThrough, "nav mode overlay should not intercept mouse events")
         try expect(openOverlay.hintLine.contains("hjkl move") && openOverlay.hintLine.contains("esc exit"), "nav mode overlay should expose key hints")
+        let selectedRight = CanvasEngine.nearestTile(from: selectedTileId, direction: .right, tiles: overlayCanvas.canvasState.tiles)
+        try expect(selectedRight == rightTileId, "nav mode l should select nearest tile to the right; got \(String(describing: selectedRight))")
+        let selectedDown = CanvasEngine.nearestTile(from: selectedTileId, direction: .down, tiles: overlayCanvas.canvasState.tiles)
+        try expect(selectedDown == downTileId, "nav mode j should select nearest tile below; got \(String(describing: selectedDown))")
+        func keyEvent(_ key: String, keyCode: UInt16) -> NSEvent {
+            NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                characters: key,
+                charactersIgnoringModifiers: key,
+                isARepeat: false,
+                keyCode: keyCode
+            )!
+        }
+        let navApp = AppDelegate()
+        navApp.canvasView = overlayCanvas
+        let selectedProbe = ProbeAdapter(id: .tile(rightTileId), kind: .note)
+        let downProbe = ProbeAdapter(id: .tile(downTileId), kind: .note)
+        navApp.focusBroker.register(selectedProbe)
+        navApp.focusBroker.register(downProbe)
+        navApp.openNavMode()
+        navApp.handleNavModeKey(keyEvent("l", keyCode: 37))
+        try expect(overlayCanvas.canvasState.lastActiveTileId == rightTileId, "nav l key path should update selected tile; selected=\(String(describing: overlayCanvas.canvasState.lastActiveTileId))")
+        navApp.handleNavModeKey(keyEvent("\r", keyCode: 36))
+        try expect(navApp.focusBroker.activeSurface == .tile(rightTileId), "Return key path should focus selected tile; active=\(String(describing: navApp.focusBroker.activeSurface))")
+        try expect(selectedProbe.acquireReasons.contains(.modalDismissed), "Return key path should use modalDismissed focus reason; reasons=\(selectedProbe.acquireReasons)")
+        navApp.openNavMode()
+        navApp.handleNavModeKey(keyEvent("x", keyCode: 7))
+        try expect(!overlayCanvas.canvasState.tiles.contains(where: { $0.id == rightTileId }), "nav x key path should remove the selected tile through deleteTile")
+        overlayCanvas.markActive(tileId: selectedTileId)
+        navApp.openNavMode()
+        navApp.handleNavModeKey(keyEvent("j", keyCode: 38))
+        try expect(overlayCanvas.canvasState.lastActiveTileId == downTileId, "nav j key path should update selected tile; selected=\(String(describing: overlayCanvas.canvasState.lastActiveTileId))")
         overlayCanvas.setNavModeOverlayVisible(false)
         try expect(!overlayCanvas.navModeOverlayQASnapshot().isInstalled, "nav mode overlay should uninstall when nav mode closes")
 
@@ -4055,6 +4143,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "navOverlayZoneBadgeCount": openOverlay.zoneBadgeCount,
             "navOverlayHitTestPassesThrough": openOverlay.hitTestPassesThrough,
             "navOverlayHintLine": openOverlay.hintLine,
+            "hjklRightSelection": selectedRight?.uuidString ?? "nil",
+            "hjklDownSelection": selectedDown?.uuidString ?? "nil",
+            "returnToFocusReason": selectedProbe.acquireReasons.map(\.rawValue),
+            "xDeleteRemovedTile": !overlayCanvas.canvasState.tiles.contains(where: { $0.id == rightTileId }),
             "navOverlayScreenshot": screenshot.path,
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
