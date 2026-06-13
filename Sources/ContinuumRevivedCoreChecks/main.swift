@@ -2764,6 +2764,81 @@ do {
     expect(missingSnapshot.finalMarkdown == nil, "RunArtifactsReader tolerates missing final.md")
 }
 
+// MARK: - RunArtifactsWatcher debounced updates
+
+do {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("continuum-run-artifacts-watcher-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: root) }
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+
+    let watcher = RunArtifactsWatcher(
+        rootURL: root,
+        config: RunArtifactsWatcherConfig(debounceInterval: 0.5, maxReadsPerSecond: 2, pollInterval: 0.1)
+    )
+    let t0 = Date(timeIntervalSince1970: 1_000)
+    expect(watcher.scanForTesting(now: t0) == nil, "RunArtifactsWatcher tolerates a missing/empty agent-runs root without updates")
+
+    let runA = root.appendingPathComponent("run-a", isDirectory: true)
+    try fm.createDirectory(at: runA, withIntermediateDirectories: true)
+    try "{\"id\":\"run-a\",\"role\":\"qa-reviewer\",\"status\":\"running\"}".write(to: runA.appendingPathComponent("run.json"), atomically: true, encoding: .utf8)
+    try "{\"ts\":\"1\",\"type\":\"started\"}\n".write(to: runA.appendingPathComponent("events.jsonl"), atomically: true, encoding: .utf8)
+    expect(watcher.scanForTesting(now: t0.addingTimeInterval(0.1)) == nil, "RunArtifactsWatcher debounces new run-dir events")
+    let firstUpdate = watcher.scanForTesting(now: t0.addingTimeInterval(0.7))
+    expect(firstUpdate?.snapshots["run-a"]?.run.status == .running, "RunArtifactsWatcher emits a snapshot after debounce")
+    expect(firstUpdate?.snapshots["run-a"]?.events.events.count == 1, "RunArtifactsWatcher reads changed run events")
+
+    try "{\"ts\":\"1\",\"type\":\"started\"}\n{\"ts\":\"2\",\"type\":\"message\"}\n".write(to: runA.appendingPathComponent("events.jsonl"), atomically: true, encoding: .utf8)
+    try "{\"id\":\"run-a\",\"role\":\"qa-reviewer\",\"status\":\"done\"}".write(to: runA.appendingPathComponent("run.json"), atomically: true, encoding: .utf8)
+    expect(watcher.scanForTesting(now: t0.addingTimeInterval(0.8)) == nil, "RunArtifactsWatcher coalesces burst writes during debounce")
+    let secondUpdate = watcher.scanForTesting(now: t0.addingTimeInterval(1.4))
+    expect(secondUpdate?.snapshots["run-a"]?.run.status == .done, "RunArtifactsWatcher emits latest run.json after coalesced writes")
+    expect(secondUpdate?.snapshots["run-a"]?.events.events.count == 2, "RunArtifactsWatcher emits latest events after coalesced writes")
+
+    let cappedRoot = root.appendingPathComponent("capped", isDirectory: true)
+    try fm.createDirectory(at: cappedRoot, withIntermediateDirectories: true)
+    for runId in ["run-b", "run-c"] {
+        let run = cappedRoot.appendingPathComponent(runId, isDirectory: true)
+        try fm.createDirectory(at: run, withIntermediateDirectories: true)
+        try "{\"id\":\"\(runId)\",\"role\":\"code-scout\",\"status\":\"running\"}".write(to: run.appendingPathComponent("run.json"), atomically: true, encoding: .utf8)
+    }
+    let cappedWatcher = RunArtifactsWatcher(
+        rootURL: cappedRoot,
+        config: RunArtifactsWatcherConfig(debounceInterval: 0.5, maxReadsPerSecond: 1, pollInterval: 0.1)
+    )
+    expect(cappedWatcher.scanForTesting(now: t0) == nil, "RunArtifactsWatcher read-cap fixture starts inside debounce")
+    let cappedFirst = cappedWatcher.scanForTesting(now: t0.addingTimeInterval(0.6))
+    expect(cappedFirst?.snapshots.count == 1, "RunArtifactsWatcher reads only the configured number of dirty runs per second")
+    let cappedLimited = cappedWatcher.scanForTesting(now: t0.addingTimeInterval(0.8))
+    expect(cappedLimited == nil, "RunArtifactsWatcher keeps overflow dirty runs queued while the read window is exhausted")
+    let cappedAfterWindow = cappedWatcher.scanForTesting(now: t0.addingTimeInterval(1.7))
+    expect(cappedAfterWindow?.snapshots.count == 1, "RunArtifactsWatcher drains overflow dirty runs after the read window resets")
+
+    let liveRoot = root.appendingPathComponent("live", isDirectory: true)
+    let liveRun = liveRoot.appendingPathComponent("run-live", isDirectory: true)
+    try fm.createDirectory(at: liveRun, withIntermediateDirectories: true)
+    try "{\"id\":\"run-live\",\"role\":\"implementer\",\"status\":\"running\"}".write(to: liveRun.appendingPathComponent("run.json"), atomically: true, encoding: .utf8)
+    try "{\"ts\":\"1\",\"type\":\"started\"}\n".write(to: liveRun.appendingPathComponent("events.jsonl"), atomically: true, encoding: .utf8)
+    let liveWatcher = RunArtifactsWatcher(
+        rootURL: liveRoot,
+        config: RunArtifactsWatcherConfig(debounceInterval: 0.15, maxReadsPerSecond: 4, pollInterval: 0.05)
+    )
+    let semaphore = DispatchSemaphore(value: 0)
+    final class WatcherBox: @unchecked Sendable { var update: RunArtifactsWatcherUpdate? }
+    let box = WatcherBox()
+    liveWatcher.start { update in
+        if update.snapshots["run-live"]?.events.events.count == 2 {
+            box.update = update
+            semaphore.signal()
+        }
+    }
+    try "{\"ts\":\"1\",\"type\":\"started\"}\n{\"ts\":\"2\",\"type\":\"append\"}\n".write(to: liveRun.appendingPathComponent("events.jsonl"), atomically: true, encoding: .utf8)
+    let waitResult = semaphore.wait(timeout: .now() + 2.0)
+    liveWatcher.stop()
+    expect(waitResult == .success, "RunArtifactsWatcher start() observes an appended events.jsonl within the live-update budget")
+    expect(box.update?.snapshots["run-live"]?.events.events.map(\.type) == ["started", "append"], "RunArtifactsWatcher live callback emits the appended event snapshot")
+}
+
 // MARK: - Canvas sanitation
 
 do {
