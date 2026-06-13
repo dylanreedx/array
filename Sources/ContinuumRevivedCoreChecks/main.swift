@@ -38,6 +38,39 @@ do {
     expect(state.status == .error(message: "spawn failed"), "state should mark errors")
 }
 
+// MARK: - Agent status engine
+
+do {
+    let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+    var engine = AgentStatusEngine(initialStatus: .configuring, now: t0, configuration: .init(workingHysteresis: 5, staleTimeout: 30))
+    expect(engine.ingest(.outputActivity, at: t0.addingTimeInterval(1)) == .working, "output cadence should infer working")
+    expect(engine.ingest(.promptObserved, at: t0.addingTimeInterval(2)) == .working, "working-to-idle should respect hysteresis")
+    expect(engine.tick(at: t0.addingTimeInterval(8)) == .idle, "idle should apply after hysteresis")
+    expect(engine.ingest(.terminalTitle("Claude needs attention"), at: t0.addingTimeInterval(9)) == .needsAttention, "title inference should surface needs-attention")
+    expect(engine.ingest(.explicit(.working), at: t0.addingTimeInterval(10)) == .working, "explicit signal should take precedence over title inference")
+    expect(engine.ingest(.terminalTitle("Claude done"), at: t0.addingTimeInterval(11)) == .working, "title inference should not override explicit status")
+    expect(engine.tick(at: t0.addingTimeInterval(100)) == .working, "explicit status should not stale without an explicit stale signal")
+}
+
+do {
+    let t0 = Date(timeIntervalSince1970: 1_800_001_000)
+    var engine = AgentStatusEngine(initialStatus: .configuring, now: t0, configuration: .init(workingHysteresis: 0, staleTimeout: 10))
+    expect(engine.ingest(.terminalTitle("codex running"), at: t0.addingTimeInterval(1)) == .working, "title running should infer working")
+    expect(engine.tick(at: t0.addingTimeInterval(12)) == .stale, "inferred status should become stale after timeout")
+    expect(engine.ingest(.terminalTitle("unrecognized"), at: t0.addingTimeInterval(13)) == .stale, "unknown title should not revive a stale inferred status")
+    expect(AgentStatusEngine.statusInferred(fromTitle: "agent ready") == .idle, "ready title maps to idle")
+    expect(AgentStatusEngine.statusInferred(fromTitle: "unrecognized") == nil, "unknown title should not invent status")
+}
+
+do {
+    let t0 = Date(timeIntervalSince1970: 1_800_002_000)
+    var engine = AgentStatusEngine(initialStatus: .configuring, now: t0, configuration: .init(workingHysteresis: 5, staleTimeout: 30))
+    expect(engine.ingest(.outputActivity, at: t0.addingTimeInterval(1)) == .working, "output should start working status")
+    expect(engine.ingest(.promptObserved, at: t0.addingTimeInterval(2)) == .working, "prompt should enter hysteresis")
+    expect(engine.ingest(.terminalTitle("unrecognized"), at: t0.addingTimeInterval(4)) == .working, "unknown title should not change status during hysteresis")
+    expect(engine.tick(at: t0.addingTimeInterval(8)) == .idle, "unknown title should not prolong working-to-idle hysteresis")
+}
+
 // MARK: - Focus model
 
 do {
