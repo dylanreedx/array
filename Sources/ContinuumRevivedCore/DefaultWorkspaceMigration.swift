@@ -83,9 +83,6 @@ public struct DefaultWorkspaceMigration: Sendable {
     }
 
     private func attach(projectId: UUID, toWorkspace workspaceId: UUID, registry: inout Registry, updatedAt: Date) {
-        for index in registry.workspaces.indices where registry.workspaces[index].id != workspaceId {
-            registry.workspaces[index].projectIds.removeAll { $0 == projectId }
-        }
         if let workspaceIndex = registry.workspaces.firstIndex(where: { $0.id == workspaceId }) {
             if !registry.workspaces[workspaceIndex].projectIds.contains(projectId) {
                 registry.workspaces[workspaceIndex].projectIds.append(projectId)

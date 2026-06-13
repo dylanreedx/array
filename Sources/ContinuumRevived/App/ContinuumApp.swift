@@ -1837,9 +1837,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             } else {
                 _ = document.appendProjectZone(projectId: projectId)
             }
-            for index in registry.workspaces.indices where registry.workspaces[index].id != workspaceId {
-                registry.workspaces[index].projectIds.removeAll { $0 == projectId }
-            }
             if let workspaceIndex = registry.workspaces.firstIndex(where: { $0.id == workspaceId }) {
                 if !registry.workspaces[workspaceIndex].projectIds.contains(projectId) {
                     registry.workspaces[workspaceIndex].projectIds.append(projectId)
@@ -2339,10 +2336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     static func loadActiveZoneRenderModels(from store: RegistryStore) throws -> [CanvasNSView.ZoneRenderModel] {
         let registry = try store.loadOrEmpty()
-        let projectWorkspaceId = registry.lastActiveProjectId.flatMap { activeProjectId in
-            registry.projects.first(where: { $0.id == activeProjectId })?.workspaceId
-        }
-        guard let workspaceId = projectWorkspaceId ?? registry.lastActiveWorkspaceId else { return [] }
+        guard let workspaceId = registry.lastActiveWorkspaceId else { return [] }
         let workspaceStore = WorkspaceStore(
             workspaceId: workspaceId,
             applicationSupportDirectory: store.registryFile.deletingLastPathComponent()
@@ -2750,6 +2744,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(rows.contains(where: { if case let .workspace(workspace) = $0 { return workspace.id == workspaceB }; return false }), "palette exposes switch workspace row")
         let titleProject = Project(id: projectA, name: "Alpha", rootPath: "/tmp/continuum-ws-alpha", createdAt: now, updatedAt: now, defaultLaunchProfileId: "shell", editorPreference: .auto, settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning))
         try expect(mainWindowTitle(for: titleProject, registry: registry) == "Main Canvas — Continuum", "window title uses active workspace name")
+
+        registry.projects = [ProjectEntry(id: projectA, name: "Alpha", rootPath: "/tmp/continuum-ws-alpha", workspaceId: workspaceA, lastOpenedAt: now, pinned: false)]
+        registry.workspaces = [
+            WorkspaceEntry(id: workspaceA, name: "Main Canvas", projectIds: [projectA], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: workspaceB, name: "Review Canvas", projectIds: [projectA], createdAt: now, updatedAt: now)
+        ]
+        registry.lastActiveProjectId = projectA
+        registry.lastActiveWorkspaceId = workspaceB
+        let appSupport = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("continuum-workspace-switch-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: appSupport) }
+        let zoneA = UUID(uuidString: "00000000-0000-0000-0000-000000005A0A")!
+        let zoneB = UUID(uuidString: "00000000-0000-0000-0000-000000005B0B")!
+        try WorkspaceStore(workspaceId: workspaceA, applicationSupportDirectory: appSupport).save(WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [ZonePlacement(zoneId: zoneA, projectId: projectA, origin: ZonePoint(x: 10, y: 20), size: ZoneSize(width: 640, height: 480), color: "blue", collapsed: false, hydrationPolicy: .automatic)],
+            zoneZOrder: [zoneA],
+            lastActiveZoneId: zoneA
+        ))
+        try WorkspaceStore(workspaceId: workspaceB, applicationSupportDirectory: appSupport).save(WorkspaceDocument(
+            viewport: CanvasViewport(x: 50, y: 60, zoom: 1),
+            zones: [ZonePlacement(zoneId: zoneB, projectId: projectA, origin: ZonePoint(x: 300, y: 400), size: ZoneSize(width: 800, height: 600), color: "purple", collapsed: false, hydrationPolicy: .automatic)],
+            zoneZOrder: [zoneB],
+            lastActiveZoneId: zoneB
+        ))
+        let sharedStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try sharedStore.save(registry)
+        let sharedModels = try loadActiveZoneRenderModels(from: sharedStore)
+        try expect(registry.workspaces.allSatisfy { $0.projectIds == [projectA] }, "same project remains attached to both workspaces")
+        try expect(sharedModels.map { $0.placement.zoneId } == [zoneB], "active workspace render uses selected workspace placement")
+        try expect(sharedModels.first?.placement.origin == ZonePoint(x: 300, y: 400), "active workspace preserves selected workspace layout")
     }
 
     private func presentFatalError(_ error: Error) {

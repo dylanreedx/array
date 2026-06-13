@@ -992,7 +992,7 @@ do {
     )
     expect(preservedWorkspaceId == workspaceA, "DefaultWorkspaceMigration honors the registry last-active workspace")
     expect(existingRegistry.workspaces.first(where: { $0.id == workspaceA })?.projectIds == [projectId], "DefaultWorkspaceMigration attaches project to last active workspace")
-    expect(existingRegistry.workspaces.first(where: { $0.id == workspaceB })?.projectIds.contains(projectId) == false, "DefaultWorkspaceMigration removes project from stale assigned workspace")
+    expect(existingRegistry.workspaces.first(where: { $0.id == workspaceB })?.projectIds.contains(projectId) == true, "DefaultWorkspaceMigration preserves shared workspace membership")
     expect(existingRegistry.projects.first?.workspaceId == workspaceA, "DefaultWorkspaceMigration updates project entry workspace assignment")
 }
 
