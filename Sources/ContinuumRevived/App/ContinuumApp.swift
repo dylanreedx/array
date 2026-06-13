@@ -493,10 +493,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var fileTreeSaveTimer: Timer?
     private let smokeTestEnabled = ProcessInfo.processInfo.environment["CONTINUUM_SMOKE_TEST"] == "1"
     private var smokeTestExitCode: Int32?
-    private var projectStore: ProjectStore?
+    private var zoneRuntimeController: ZoneRuntimeController?
+    private var projectStore: ProjectStore? { zoneRuntimeController?.projectStore }
+    private var activeProject: Project? { zoneRuntimeController?.project }
     private var registryStore: RegistryStore?
-    private var projectLock: ProjectLock?
-    private var activeProject: Project?
     private var tileSpawner: TileSpawner?
     private var profilePalette: LaunchProfilePalette?
     private let focusBroker = FocusBroker()
@@ -528,17 +528,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let registryStore = RegistryStore(applicationSupportDirectory: appSupportDir)
             let registry = try registryStore.loadOrEmpty()
             let projectRoot = try Self.resolveProjectRoot(smokeTest: smokeTestEnabled, registry: registry)
-            let projectLock = ProjectLock(root: projectRoot)
-            try projectLock.acquire()
-            self.projectLock = projectLock
-            let projectStore = ProjectStore(projectRoot: projectRoot)
-            self.projectStore = projectStore
+            let zoneRuntimeController = try ZoneRuntimeController(root: projectRoot)
+            self.zoneRuntimeController = zoneRuntimeController
             self.registryStore = registryStore
 
-            pruneExitedSessions(in: projectStore)
-
-            let project = try Self.loadOrCreateProject(in: projectStore, projectRoot: projectRoot)
-            self.activeProject = project
+            let projectStore = zoneRuntimeController.projectStore
+            let project = zoneRuntimeController.project
             try Self.recordProjectInRegistry(project: project, in: registryStore)
 
             let ghostty = try GhosttyRuntimeContext()
@@ -1391,25 +1386,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func windowWillClose(_ notification: Notification) {
-        // Flush any pending saves so the close-leg observation catches the
-        // most recent in-memory state.
-        flushCanvasSave()
-        flushBrowserSave()
-        flushNoteSave()
-        flushFileTreeSave()
-
-        // Mark each terminal session as exited before we tear down its runtime.
-        // We don't know the exit code from this side (Ghostty owns the PTY), so
-        // record a clean close — the user closed the window.
-        if let projectStore {
-            let now = Date()
-            for runtime in runtimes {
-                if var descriptor = try? projectStore.loadSession(id: runtime.id) {
-                    descriptor.lastExit = TerminalLastExit(exitCode: nil, signal: nil, at: now)
-                    try? projectStore.saveSession(descriptor)
-                }
-            }
-        }
+        zoneRuntimeController?.close(
+            flushPendingWrites: { [self] in
+                // Flush any pending saves so the close-leg observation catches the
+                // most recent in-memory state.
+                flushCanvasSave()
+                flushBrowserSave()
+                flushNoteSave()
+                flushFileTreeSave()
+            },
+            terminalRuntimes: runtimes
+        )
+        zoneRuntimeController = nil
 
         if let monitor = hotkeyMonitor {
             NSEvent.removeMonitor(monitor)
@@ -1454,8 +1442,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         ghostty = nil
         browserEngine?.shutdown()
         browserEngine = nil
-        projectLock?.release()
-        projectLock = nil
         if let exitCode = smokeTestExitCode {
             Foundation.exit(exitCode)
         }
@@ -3340,8 +3326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let delegate = AppDelegate()
         delegate.canvasView = canvas
         delegate.browserEngine = browserEngine
-        delegate.projectStore = store
-        delegate.activeProject = project
+        delegate.zoneRuntimeController = ZoneRuntimeController(projectRoot: tempRoot, projectStore: store, project: project)
         delegate.tileSpawner = TileSpawner(
             canvasView: canvas,
             ghostty: nil,
@@ -3426,8 +3411,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let browserEngine = BrowserEngineContext()
         delegate.canvasView = canvas
         delegate.browserEngine = browserEngine
-        delegate.projectStore = store
-        delegate.activeProject = project
+        delegate.zoneRuntimeController = ZoneRuntimeController(projectRoot: tempRoot, projectStore: store, project: project)
         canvas.focusBroker = delegate.focusBroker
         delegate.tileSpawner = TileSpawner(
             canvasView: canvas,
