@@ -1289,6 +1289,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if focusBroker.activeSurface == .modal(.navMode) {
             if event.keyCode == 53 || focusBroker.reservedShortcut(for: event) == .navModeLeader {
                 focusBroker.closeModal(.navMode)
+                canvasView?.setNavModeOverlayVisible(false)
             }
             return true
         }
@@ -1300,6 +1301,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let shortcut = focusBroker.reservedShortcut(for: event)
         if shortcut == .navModeLeader {
             focusBroker.openModal(.navMode)
+            canvasView?.setNavModeOverlayVisible(true)
             return true
         }
 
@@ -3985,12 +3987,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(broker.activeSurface == .canvas, "closing nav mode should restore the prior first responder surface")
         try expect(canvas.acquireReasons.suffix(1) == [.modalDismissed], "nav mode close should reacquire snapshot with modalDismissed; reasons=\(canvas.acquireReasons)")
 
+        let selectedTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000064")!
+        let zoneA = ZonePlacement(
+            zoneId: UUID(uuidString: "00000000-0000-0000-0000-000000000641")!,
+            projectId: UUID(uuidString: "00000000-0000-0000-0000-000000000642")!,
+            origin: ZonePoint(x: 40, y: 40),
+            size: ZoneSize(width: 360, height: 260),
+            color: "blue",
+            collapsed: false,
+            hydrationPolicy: .automatic
+        )
+        let zoneB = ZonePlacement(
+            zoneId: UUID(uuidString: "00000000-0000-0000-0000-000000000643")!,
+            projectId: UUID(uuidString: "00000000-0000-0000-0000-000000000644")!,
+            origin: ZonePoint(x: 460, y: 80),
+            size: ZoneSize(width: 320, height: 220),
+            color: "purple",
+            collapsed: false,
+            hydrationPolicy: .automatic
+        )
+        let overlayCanvas = CanvasNSView(
+            canvasState: CanvasState(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                tiles: [Tile(id: selectedTileId, kind: .note, title: "Selected", frame: TileFrame(x: 24, y: 44, width: 140, height: 90), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())],
+                groups: [],
+                lastActiveTileId: selectedTileId
+            ),
+            activeZone: zoneA,
+            zoneRenderModels: [
+                CanvasNSView.ZoneRenderModel(placement: zoneA, displayName: "Alpha"),
+                CanvasNSView.ZoneRenderModel(placement: zoneB, displayName: "Beta")
+            ]
+        )
+        overlayCanvas.frame = CGRect(x: 0, y: 0, width: 900, height: 520)
+        overlayCanvas.setNavModeOverlayVisible(true)
+        let openOverlay = overlayCanvas.navModeOverlayQASnapshot()
+        try expect(openOverlay.isInstalled, "nav mode overlay should install when nav mode opens")
+        try expect(openOverlay.frame == overlayCanvas.bounds, "nav mode overlay should cover canvas bounds; frame=\(openOverlay.frame) bounds=\(overlayCanvas.bounds)")
+        try expect(openOverlay.selectedTileId == selectedTileId, "nav mode overlay should expose selected tile id")
+        try expect(openOverlay.zoneBadgeCount == 2, "nav mode overlay should render one ordinal badge per zone")
+        try expect(openOverlay.hitTestPassesThrough, "nav mode overlay should not intercept mouse events")
+        try expect(openOverlay.hintLine.contains("hjkl move") && openOverlay.hintLine.contains("esc exit"), "nav mode overlay should expose key hints")
+        overlayCanvas.setNavModeOverlayVisible(false)
+        try expect(!overlayCanvas.navModeOverlayQASnapshot().isInstalled, "nav mode overlay should uninstall when nav mode closes")
+
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("nav-mode", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        overlayCanvas.setNavModeOverlayVisible(true)
+        let screenshot = directory.appendingPathComponent("nav-overlay.png")
+        if let rep = overlayCanvas.bitmapImageRepForCachingDisplay(in: overlayCanvas.bounds) {
+            overlayCanvas.cacheDisplay(in: overlayCanvas.bounds, to: rep)
+            try rep.representation(using: .png, properties: [:])?.write(to: screenshot)
+        }
         let artifact = directory.appendingPathComponent("manifest.json")
         let manifest: [String: Any] = [
             "check": "nav-mode",
@@ -3998,6 +4050,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "leaderModifiers": "control",
             "capturedWhileActive": true,
             "restoredSurface": "canvas",
+            "navOverlayInstalled": openOverlay.isInstalled,
+            "navOverlaySelectedTileId": selectedTileId.uuidString,
+            "navOverlayZoneBadgeCount": openOverlay.zoneBadgeCount,
+            "navOverlayHitTestPassesThrough": openOverlay.hitTestPassesThrough,
+            "navOverlayHintLine": openOverlay.hintLine,
+            "navOverlayScreenshot": screenshot.path,
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)

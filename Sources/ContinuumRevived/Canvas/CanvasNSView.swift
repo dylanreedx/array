@@ -37,10 +37,11 @@ final class CanvasNSView: NSView {
     /// Active single-zone placement for stage-2 integration. Tile frames remain
     /// persisted zone-local; layout/hit-testing consume world frames through
     /// CanvasEngine. With the default origin (0,0), this is behavior-neutral.
-    private let activeZone: ZonePlacement?
-    private let zoneRenderModels: [ZoneRenderModel]
+    fileprivate let activeZone: ZonePlacement?
+    fileprivate let zoneRenderModels: [ZoneRenderModel]
     private var tileViews: [UUID: TileNSView] = [:]
     private var zoneChromeViews: [UUID: ZoneChromeNSView] = [:]
+    private var navModeOverlayView: NavModeOverlayNSView?
     private var emptyStateView: CanvasEmptyStateNSView?
     private var emptyStateActions: CanvasEmptyStateActions?
     private var emptyStateProjectPath: String?
@@ -230,6 +231,36 @@ final class CanvasNSView: NSView {
         zoneChromeViews[zoneId]?.snapshot
     }
 
+    struct NavModeOverlayQASnapshot: Equatable {
+        var isInstalled: Bool
+        var frame: CGRect
+        var selectedTileId: UUID?
+        var zoneBadgeCount: Int
+        var hitTestPassesThrough: Bool
+        var hintLine: String
+    }
+
+    func setNavModeOverlayVisible(_ visible: Bool) {
+        if visible {
+            installNavModeOverlayIfNeeded()
+        } else {
+            navModeOverlayView?.removeFromSuperview()
+            navModeOverlayView = nil
+        }
+    }
+
+    func navModeOverlayQASnapshot() -> NavModeOverlayQASnapshot {
+        let probePoint = CGPoint(x: bounds.midX, y: bounds.midY)
+        return NavModeOverlayQASnapshot(
+            isInstalled: navModeOverlayView != nil,
+            frame: navModeOverlayView?.frame ?? .zero,
+            selectedTileId: navModeOverlayView?.selectedTileId,
+            zoneBadgeCount: navModeOverlayView?.zoneBadgeCount ?? 0,
+            hitTestPassesThrough: navModeOverlayView?.hitTest(probePoint) == nil,
+            hintLine: NavModeOverlayNSView.hintLine
+        )
+    }
+
     var viewport: CanvasViewport { canvasState.viewport }
 
     func emptyStateQASnapshot() -> CanvasEmptyStateNSView.QASnapshot? {
@@ -267,6 +298,7 @@ final class CanvasNSView: NSView {
         super.setFrameSize(newSize)
         layoutAllTiles()
         layoutEmptyState()
+        layoutNavModeOverlay()
     }
 
     private func layoutAllTiles() {
@@ -274,6 +306,7 @@ final class CanvasNSView: NSView {
         for tile in canvasState.tiles {
             layoutTile(tile)
         }
+        navModeOverlayView?.needsDisplay = true
     }
 
     private func layoutTile(_ tile: Tile) {
@@ -312,6 +345,22 @@ final class CanvasNSView: NSView {
 
     private func layoutEmptyState() {
         emptyStateView?.frame = bounds
+    }
+
+    private func installNavModeOverlayIfNeeded() {
+        guard navModeOverlayView == nil else {
+            navModeOverlayView?.needsDisplay = true
+            return
+        }
+        let overlay = NavModeOverlayNSView(canvas: self)
+        navModeOverlayView = overlay
+        addSubview(overlay, positioned: .above, relativeTo: nil)
+        layoutNavModeOverlay()
+    }
+
+    private func layoutNavModeOverlay() {
+        navModeOverlayView?.frame = bounds
+        navModeOverlayView?.needsDisplay = true
     }
 
     // MARK: - Pan / zoom gestures
@@ -1118,5 +1167,99 @@ final class ZoneChromeNSView: NSView {
         case "yellow": return NSColor.systemYellow
         default: return NSColor.systemTeal
         }
+    }
+}
+
+@MainActor
+private final class NavModeOverlayNSView: NSView {
+    static let hintLine = "hjkl move · 1-9 zone · z/w pick · ⏎ focus · esc exit"
+
+    private weak var canvas: CanvasNSView?
+    private let badgeSize = CGSize(width: 24, height: 24)
+
+    var selectedTileId: UUID? { canvas?.canvasState.lastActiveTileId }
+    var zoneBadgeCount: Int { canvas?.zoneRenderModels.count ?? 0 }
+
+    override var isFlipped: Bool { true }
+
+    init(canvas: CanvasNSView) {
+        self.canvas = canvas
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.masksToBounds = false
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let canvas else { return }
+
+        NSColor.black.withAlphaComponent(0.25).setFill()
+        bounds.fill()
+
+        drawSelectionRing(in: canvas)
+        drawZoneBadges(in: canvas)
+        drawHintLine()
+    }
+
+    private func drawSelectionRing(in canvas: CanvasNSView) {
+        guard
+            let selectedTileId,
+            let tile = canvas.canvasState.tiles.first(where: { $0.id == selectedTileId })
+        else { return }
+
+        let worldFrame = canvas.activeZone.map { CanvasEngine.worldFrame(tile: tile, in: $0) } ?? tile.frame
+        let screenFrame = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvas.canvasState.viewport).insetBy(dx: -4, dy: -4)
+        let path = NSBezierPath(roundedRect: screenFrame, xRadius: 12, yRadius: 12)
+        NSColor.controlAccentColor.withAlphaComponent(0.95).setStroke()
+        path.lineWidth = 3
+        path.stroke()
+    }
+
+    private func drawZoneBadges(in canvas: CanvasNSView) {
+        for (index, model) in canvas.zoneRenderModels.enumerated() {
+            let zoneFrame = CanvasEngine.tileScreenFrame(CanvasEngine.zoneWorldFrame(model.placement), viewport: canvas.canvasState.viewport)
+            let rect = CGRect(x: zoneFrame.minX + 10, y: zoneFrame.minY + 8, width: badgeSize.width, height: badgeSize.height)
+            let badgePath = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
+            NSColor.controlAccentColor.withAlphaComponent(0.90).setFill()
+            badgePath.fill()
+            let text = String(index + 1)
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .bold),
+                .foregroundColor: NSColor.white
+            ]
+            let size = text.size(withAttributes: attributes)
+            text.draw(
+                at: CGPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2),
+                withAttributes: attributes
+            )
+        }
+    }
+
+    private func drawHintLine() {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.92)
+        ]
+        let text = Self.hintLine
+        let size = text.size(withAttributes: attributes)
+        let padding = CGSize(width: 14, height: 8)
+        let rect = CGRect(
+            x: bounds.midX - (size.width + padding.width * 2) / 2,
+            y: max(12, bounds.maxY - size.height - padding.height * 2 - 18),
+            width: size.width + padding.width * 2,
+            height: size.height + padding.height * 2
+        )
+        let background = NSBezierPath(roundedRect: rect, xRadius: 12, yRadius: 12)
+        NSColor.black.withAlphaComponent(0.62).setFill()
+        background.fill()
+        text.draw(at: CGPoint(x: rect.minX + padding.width, y: rect.minY + padding.height), withAttributes: attributes)
     }
 }
