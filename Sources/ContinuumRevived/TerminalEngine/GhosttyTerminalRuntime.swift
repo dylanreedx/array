@@ -85,6 +85,24 @@ final class GhosttyTerminalRuntime: TerminalRuntime {
         hostView = nil
     }
 
+    func dehydrateForSnapshot() {
+        guard let terminalView else { return }
+        blur()
+        terminalView.isHidden = true
+        terminalView.setSnapshotOccluded(true)
+    }
+
+    func rehydrateFromSnapshot() {
+        guard let terminalView else { return }
+        terminalView.isHidden = false
+        terminalView.setSnapshotOccluded(false)
+        terminalView.updateSurfaceSize()
+    }
+
+    var isProcessExitedForSnapshotCheck: Bool {
+        terminalView?.isProcessExited() ?? true
+    }
+
     func focus() {
         guard let terminalView else { return }
         terminalView.window?.makeFirstResponder(terminalView)
@@ -170,6 +188,82 @@ final class GhosttyTerminalRuntime: TerminalRuntime {
         )
         guard let event else { return }
         terminalView.flagsChanged(with: event)
+    }
+
+    static func runSnapshotTierSelfCheck() throws -> URL {
+        let started = Date()
+        let context = try GhosttyRuntimeContext()
+        defer { context.shutdown() }
+
+        let host = TerminalHostView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        let runtime = GhosttyTerminalRuntime(
+            title: "Terminal snapshot check",
+            launchProfile: LaunchProfile(command: "/bin/sh", arguments: [], cwd: FileManager.default.currentDirectoryPath, title: "Terminal snapshot check"),
+            ghostty: context
+        )
+        let sessionId = runtime.id
+        host.attach(runtime: runtime)
+        host.layoutSubtreeIfNeeded()
+        runtime.sendInput(Data("printf 'con44-ready\\n'\n".utf8))
+        try tick(context: context, timeout: 4.0) { runtime.visibleText().contains("con44-ready") }
+
+        runtime.dehydrateForSnapshot()
+        try tick(context: context, seconds: 0.5)
+        let aliveWhileSnapshotted = !runtime.isProcessExitedForSnapshotCheck
+        let sameIdWhileSnapshotted = runtime.id == sessionId
+
+        runtime.rehydrateFromSnapshot()
+        runtime.sendInput(Data("printf 'con44-input-ok\\n'\n".utf8))
+        try tick(context: context, timeout: 4.0) { runtime.visibleText().contains("con44-input-ok") }
+        let sameIdAfterRehydrate = runtime.id == sessionId
+        let inputWorked = runtime.visibleText().contains("con44-input-ok")
+
+        runtime.terminate(policy: .force)
+        host.detachRuntime()
+
+        guard aliveWhileSnapshotted, sameIdWhileSnapshotted, sameIdAfterRehydrate, inputWorked else {
+            throw NSError(
+                domain: "ContinuumRevivedTerminalSnapshotTierCheck",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "terminal snapshot check failed: alive=\(aliveWhileSnapshotted), sameSnapshot=\(sameIdWhileSnapshotted), sameRehydrate=\(sameIdAfterRehydrate), input=\(inputWorked)"]
+            )
+        }
+
+        let runId = ISO8601DateFormatter().string(from: started).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: "qa-runs/terminal-snapshot-tier-\(runId)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let log = directory.appendingPathComponent("terminal-snapshot-tier.log")
+        let lines = [
+            "session_id=\(sessionId)",
+            "alive_while_snapshotted=\(aliveWhileSnapshotted)",
+            "same_id_while_snapshotted=\(sameIdWhileSnapshotted)",
+            "same_id_after_rehydrate=\(sameIdAfterRehydrate)",
+            "input_after_rehydrate=\(inputWorked)"
+        ]
+        try lines.joined(separator: "\n").appending("\n").write(to: log, atomically: true, encoding: .utf8)
+        return log
+    }
+
+    private static func tick(context: GhosttyRuntimeContext, seconds: TimeInterval) throws {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            ghostty_app_tick(try context.app)
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+    }
+
+    private static func tick(context: GhosttyRuntimeContext, timeout: TimeInterval, until condition: () -> Bool) throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            ghostty_app_tick(try context.app)
+            if condition() { return }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        throw NSError(
+            domain: "ContinuumRevivedTerminalSnapshotTierCheck",
+            code: 2,
+            userInfo: [NSLocalizedDescriptionKey: "terminal snapshot check timed out"]
+        )
     }
 }
 

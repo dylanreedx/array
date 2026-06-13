@@ -55,6 +55,7 @@ run_app_check .build/debug/continuum-revived --viewport-sanitize-check
 run_app_check .build/debug/continuum-revived --project-lock-check
 run_app_check .build/debug/continuum-revived --project-root-resolution-check
 run_app_check .build/debug/continuum-revived --project-picker-resolution-check
+run_app_check .build/debug/continuum-revived --terminal-snapshot-tier-check
 run scripts/check-app-bundle.sh --configuration debug
 run scripts/check-root-docs.sh
 run git diff --check

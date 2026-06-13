@@ -336,6 +336,19 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--terminal-snapshot-tier-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try GhosttyTerminalRuntime.runSnapshotTierSelfCheck()
+                print("ContinuumRevivedTerminalSnapshotTierChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         let application = NSApplication.shared
         let delegate = AppDelegate()
         Self.delegate = delegate

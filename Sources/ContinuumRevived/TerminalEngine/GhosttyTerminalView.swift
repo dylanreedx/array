@@ -309,6 +309,16 @@ final class GhosttyTerminalView: NSView {
         ghostty_surface_set_focus(surface, focused)
     }
 
+    func setSnapshotOccluded(_ occluded: Bool) {
+        guard let surface else { return }
+        ghostty_surface_set_occlusion(surface, occluded)
+    }
+
+    func isProcessExited() -> Bool {
+        guard let surface else { return true }
+        return ghostty_surface_process_exited(surface)
+    }
+
     func setSurfacePixelSize(_ size: CGSize) {
         guard let surface else { return }
         ghostty_surface_set_size(surface, UInt32(size.width), UInt32(size.height))

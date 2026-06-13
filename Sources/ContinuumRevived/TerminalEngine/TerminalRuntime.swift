@@ -19,6 +19,8 @@ protocol TerminalRuntime: AnyObject {
 
     func attach(to hostView: TerminalHostView)
     func detach()
+    func dehydrateForSnapshot()
+    func rehydrateFromSnapshot()
     func focus()
     func blur()
     func resize(cols: Int, rows: Int, pixelSize: CGSize)
@@ -47,5 +49,13 @@ final class TerminalHostView: NSView {
     func detachRuntime() {
         runtime?.detach()
         runtime = nil
+    }
+
+    func dehydrateRuntimeForSnapshot() {
+        runtime?.dehydrateForSnapshot()
+    }
+
+    func rehydrateRuntimeFromSnapshot() {
+        runtime?.rehydrateFromSnapshot()
     }
 }
