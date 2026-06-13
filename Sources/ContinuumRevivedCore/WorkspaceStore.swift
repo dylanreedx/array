@@ -1,0 +1,72 @@
+import Foundation
+
+public struct WorkspaceStoreLayout: Sendable {
+    public let applicationSupportDirectory: URL
+    public let workspaceId: UUID
+
+    public init(applicationSupportDirectory: URL, workspaceId: UUID) {
+        self.applicationSupportDirectory = applicationSupportDirectory
+        self.workspaceId = workspaceId
+    }
+
+    public var workspacesDirectory: URL {
+        applicationSupportDirectory.appendingPathComponent("workspaces", isDirectory: true)
+    }
+
+    public var workspaceDirectory: URL {
+        workspacesDirectory.appendingPathComponent(workspaceId.uuidString, isDirectory: true)
+    }
+
+    public var canvasFile: URL {
+        workspaceDirectory.appendingPathComponent("canvas.json", isDirectory: false)
+    }
+
+    public var backupsDirectory: URL {
+        workspaceDirectory.appendingPathComponent("backups", isDirectory: true)
+    }
+}
+
+public struct WorkspaceStore: Sendable {
+    public let layout: WorkspaceStoreLayout
+    private let writer: AtomicWriter
+
+    public init(
+        workspaceId: UUID,
+        applicationSupportDirectory: URL? = nil,
+        retainedBackups: Int = 3
+    ) {
+        let baseDir = applicationSupportDirectory ?? Self.defaultApplicationSupportDirectory()
+        let layout = WorkspaceStoreLayout(applicationSupportDirectory: baseDir, workspaceId: workspaceId)
+        self.layout = layout
+        self.writer = AtomicWriter(
+            backupsDirectory: layout.backupsDirectory,
+            retainedBackups: retainedBackups
+        )
+    }
+
+    public static func defaultApplicationSupportDirectory() -> URL {
+        if let override = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"],
+           !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        return RegistryStore.defaultApplicationSupportDirectory()
+    }
+
+    public func save(_ document: WorkspaceDocument) throws {
+        try writer.write(document, to: layout.canvasFile)
+    }
+
+    public func load() throws -> WorkspaceDocument {
+        let document: WorkspaceDocument = try writer.read(at: layout.canvasFile)
+        try document.validateSchema(at: layout.canvasFile)
+        return document
+    }
+
+    public func tryLoad() throws -> WorkspaceDocument? {
+        do {
+            return try load()
+        } catch AtomicWriterError.noValidBackup {
+            return nil
+        }
+    }
+}

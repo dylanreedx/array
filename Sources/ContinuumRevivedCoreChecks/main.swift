@@ -535,6 +535,80 @@ do {
     expect(!attemptedHugeRead, "FilePreview returns too-large for sparse >2GB files before attempting Data read")
 }
 
+// MARK: - WorkspaceStore
+
+do {
+    let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-workspace-store-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: scratch) }
+
+    let workspaceId = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+    let zoneId = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+    let projectId = UUID(uuidString: "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC")!
+    let store = WorkspaceStore(
+        workspaceId: workspaceId,
+        applicationSupportDirectory: scratch,
+        retainedBackups: 2
+    )
+    let v1 = WorkspaceDocument(
+        viewport: CanvasViewport(x: 10, y: 20, zoom: 1.5),
+        zones: [ZonePlacement(
+            zoneId: zoneId,
+            projectId: projectId,
+            origin: ZonePoint(x: 0, y: 0),
+            size: ZoneSize(width: 800, height: 600),
+            color: "blue",
+            collapsed: false,
+            hydrationPolicy: .automatic
+        )],
+        zoneZOrder: [zoneId],
+        lastActiveZoneId: zoneId
+    )
+    try store.save(v1)
+    let loadedV1 = try store.load()
+    expect(loadedV1 == v1, "WorkspaceStore round trip returns saved document")
+    expect(
+        store.layout.canvasFile.path.hasSuffix("workspaces/\(workspaceId.uuidString)/canvas.json"),
+        "WorkspaceStore uses App Support workspaces/<workspaceId>/canvas.json layout"
+    )
+    expect(
+        FileManager.default.fileExists(atPath: store.layout.canvasFile.path),
+        "WorkspaceStore creates canvas.json under the workspace directory"
+    )
+
+    var v2 = v1
+    v2.viewport = CanvasViewport(x: -12, y: 4, zoom: 0.75)
+    try store.save(v2)
+    let loadedV2 = try store.load()
+    expect(loadedV2 == v2, "WorkspaceStore advances to the second saved document")
+
+    try Data("not json".utf8).write(to: store.layout.canvasFile)
+    let recovered = try store.load()
+    expect(recovered == v1, "WorkspaceStore recovers the newest valid backup after main-file corruption")
+
+    let missingStore = WorkspaceStore(workspaceId: UUID(), applicationSupportDirectory: scratch)
+    let missing = try missingStore.tryLoad()
+    expect(missing == nil, "WorkspaceStore.tryLoad returns nil for missing workspace document")
+
+    let future = WorkspaceDocument(
+        schemaVersion: WorkspaceDocument.currentSchemaVersion + 1,
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        zones: [],
+        zoneZOrder: [],
+        lastActiveZoneId: nil
+    )
+    try JSONCodec.makeEncoder().encode(future).write(to: store.layout.canvasFile)
+    do {
+        _ = try store.load()
+        expect(false, "WorkspaceStore refuses future workspace schema")
+    } catch ProjectStoreError.unknownFutureSchema(let path, let version, let supported) {
+        expect(path == store.layout.canvasFile.path, "WorkspaceStore future schema reports path")
+        expect(version == WorkspaceDocument.currentSchemaVersion + 1, "WorkspaceStore future schema reports version")
+        expect(supported == WorkspaceDocument.currentSchemaVersion, "WorkspaceStore future schema reports supported version")
+    }
+}
+
 // MARK: - AtomicWriter
 
 do {
