@@ -20,5 +20,16 @@
       "limit": 5242880,
       "unit": "bytes"
     }
+  },
+  "methodology": {
+    "recordedAt": "2026-06-13",
+    "machine": "Dylan local Mac via CON-111 perf harness",
+    "rule": "ceilings are measured local values with headroom; app runtime reports are produced by scripts/run-perf-ceilings.sh under qa-runs/<run>/perf",
+    "metrics": {
+      "launch-time": "QAPerf launch-time from smoke/perf flows",
+      "drag-latency-p95": "canvas-drag-resize flow p95 samples",
+      "memory-at-10-tiles": "terminal-stress-10 resident memory delta after spawning 10 terminals",
+      "palette-leak-delta": "palette-leak-check resident memory delta"
+    }
   }
 }
