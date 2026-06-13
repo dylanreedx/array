@@ -669,6 +669,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var launchStartTime: CFTimeInterval?
     private lazy var browserRuntimeBudget = BrowserRuntimeBudget(maxLive: BrowserRuntimeBudget.resolveMaxLive())
     private var hotkeyMonitor: Any?
+    private var passThroughNavModeLeaderEvent: NSEvent?
     private var tileFocusMonitor: Any?
     private var canvasScrollMonitor: Any?
     private var canvasMagnifyMonitor: Any?
@@ -1329,6 +1330,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         pointTargetsScrollableTileContent(event.locationInWindow, in: window)
     }
 
+    private func focusedResponderIsTerminalSurface() -> Bool {
+        guard let view = window?.firstResponder as? NSView else { return false }
+        return view.hasAncestor(ofType: GhosttyTerminalView.self)
+            || view.hasAncestor(ofType: TerminalHostView.self)
+    }
+
     private func pointTargetsScrollableTileContent(_ locationInWindow: NSPoint, in window: NSWindow) -> Bool {
         guard let contentView = window.contentView else { return false }
         let pointInContent = contentView.convert(locationInWindow, from: nil)
@@ -1343,6 +1350,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func handleHotkey(_ event: NSEvent) -> Bool {
         if focusBroker.activeSurface == .modal(.navMode) {
+            let shortcut = focusBroker.reservedShortcut(for: event)
+            if NavLeaderDecision.decide(
+                shortcut: shortcut,
+                navModeActive: true,
+                eventOriginatedInFocusedSurface: focusedResponderIsTerminalSurface()
+            ) == .closeNavModeAndPassThroughLiteral {
+                closeNavMode()
+                passThroughNavModeLeaderEvent = event
+                return false
+            }
             handleNavModeKey(event)
             return true
         }
@@ -1473,6 +1490,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func handleReservedShortcut(_ event: NSEvent) -> Bool {
         guard let shortcut = focusBroker.reservedShortcut(for: event) else { return false }
+        if shortcut == .navModeLeader, passThroughNavModeLeaderEvent === event {
+            passThroughNavModeLeaderEvent = nil
+            return false
+        }
+        switch NavLeaderDecision.decide(
+            shortcut: shortcut,
+            navModeActive: focusBroker.activeSurface == .modal(.navMode),
+            eventOriginatedInFocusedSurface: true
+        ) {
+        case .closeNavModeAndPassThroughLiteral:
+            closeNavMode()
+            return false
+        case .closeNavMode:
+            closeNavMode()
+            return true
+        case .openNavMode, .ignore:
+            break
+        }
+
         if let activeSurface = focusBroker.activeSurface,
            focusBroker.shouldSurfaceReceive(shortcut, surface: activeSurface) {
             return false
@@ -4281,6 +4317,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         try expect(ReservedShortcut.classify(keyCode: 49, modifiers: .control) == .navModeLeader, "Ctrl-Space should classify as nav-mode leader")
+        try expect(
+            NavLeaderDecision.decide(shortcut: .navModeLeader, navModeActive: false, eventOriginatedInFocusedSurface: true) == .openNavMode,
+            "first leader should open nav mode"
+        )
+        try expect(
+            NavLeaderDecision.decide(shortcut: .navModeLeader, navModeActive: true, eventOriginatedInFocusedSurface: false) == .closeNavMode,
+            "global second leader should close nav mode"
+        )
+        try expect(
+            NavLeaderDecision.decide(shortcut: .navModeLeader, navModeActive: true, eventOriginatedInFocusedSurface: true) == .closeNavModeAndPassThroughLiteral,
+            "focused-surface second leader should close nav mode and pass the literal chord through"
+        )
+        try expect(
+            NavLeaderDecision.decide(shortcut: .palette, navModeActive: true, eventOriginatedInFocusedSurface: true) == .ignore,
+            "non-leader reserved shortcuts should not use leader passthrough logic"
+        )
 
         let broker = FocusBroker()
         let canvas = ProbeAdapter(id: .canvas, kind: .canvas)

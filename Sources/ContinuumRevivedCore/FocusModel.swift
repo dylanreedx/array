@@ -76,3 +76,18 @@ public enum ReservedShortcut: Equatable, Hashable, Sendable {
         }
     }
 }
+
+public enum NavLeaderDecision: Equatable, Sendable {
+    case openNavMode
+    case closeNavMode
+    case closeNavModeAndPassThroughLiteral
+    case ignore
+
+    public static func decide(shortcut: ReservedShortcut?, navModeActive: Bool, eventOriginatedInFocusedSurface: Bool) -> NavLeaderDecision {
+        guard shortcut == .navModeLeader else { return .ignore }
+        if navModeActive {
+            return eventOriginatedInFocusedSurface ? .closeNavModeAndPassThroughLiteral : .closeNavMode
+        }
+        return .openNavMode
+    }
+}
