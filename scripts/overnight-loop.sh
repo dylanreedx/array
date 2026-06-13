@@ -14,6 +14,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 MAX_ITER="${MAX_ITER:-40}"
+MAX_SOFT_FAIL="${MAX_SOFT_FAIL:-10}"   # quota/provider/empty retries before halt; 10*45min rides out a 5h Codex window
 PROMPT_FILE="scripts/overnight-master-prompt.md"
 STOP_FILE="STOP"
 BACKUP_DIR="${BACKUP_DIR:-$HOME/continuum-backups}"
@@ -46,18 +47,18 @@ for i in $(seq 1 "$MAX_ITER"); do
   echo "[loop] rc=$rc token='${token:-none}' (log: $OUT)"
   tail -3 "$OUT" | sed 's/^/[master] /'
 
-  if grep -qiE 'usage limit|has-credits: false|status code 429' "$OUT"; then
+  # Soft failures = quota/provider exhaustion (expected; self-heals when the
+  # Codex window resets). Covers in-log 429s, the master's own
+  # `LOOP: STOP provider-failure`, and empty output (master pi process 429'd
+  # → no token). All back off QUOTA_SLEEP and retry; halt only after
+  # MAX_SOFT_FAIL so the loop can ride out a full quota window unattended.
+  if grep -qiE 'usage limit|has-credits: false|status code 429' "$OUT" \
+     || [[ "$token" == "LOOP: STOP provider-failure"* ]] \
+     || [ -z "$token" ]; then
     failures=$((failures + 1))
-    if [ "$failures" -ge 3 ]; then echo "[loop] 3 consecutive quota/provider failures; halting."; break; fi
-    echo "[loop] quota/provider failure #$failures — sleeping ${QUOTA_SLEEP}s"
+    if [ "$failures" -ge "$MAX_SOFT_FAIL" ]; then echo "[loop] $MAX_SOFT_FAIL consecutive quota/provider failures; halting (window likely won't reset soon)."; break; fi
+    echo "[loop] quota/provider failure #$failures/$MAX_SOFT_FAIL — sleeping ${QUOTA_SLEEP}s then retrying"
     sleep "$QUOTA_SLEEP"
-    continue
-  fi
-
-  if [ -z "$token" ]; then
-    failures=$((failures + 1))
-    if [ "$failures" -ge 3 ]; then echo "[loop] 3 iterations without LOOP token; halting."; break; fi
-    echo "[loop] no LOOP token (failure #$failures) — continuing"
     continue
   fi
 
