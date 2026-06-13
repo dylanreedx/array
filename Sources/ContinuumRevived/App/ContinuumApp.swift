@@ -1220,7 +1220,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func installInitialTicketQueueTile(_ tile: Tile, in canvasView: CanvasNSView) {
-        canvasView.install(tileView: TicketQueueTileNSView(tile: tile), for: tile)
+        canvasView.install(tileView: TicketQueueTileNSView(tile: tile, dispatchHandler: { [weak self] row in
+            self?.dispatchAgent(for: row)
+        }), for: tile)
+    }
+
+    private func dispatchAgent(for row: LinearTicketQueueRow) {
+        guard let spawner = tileSpawner else { return }
+        let activeProject = zoneRuntimeController?.project
+        let prompt = AgentKickoffPrompt.make(row: row, repoPath: activeProject?.rootPath ?? FileManager.default.currentDirectoryPath, projectName: activeProject?.name)
+        switch spawner.spawnTerminal(profileId: "claude") {
+        case let .spawned(runtime):
+            installSpawnedTerminal(runtime)
+            runtime.sendInput(Data((prompt + "\n").utf8))
+        case let .unknownProfile(id):
+            fputs("Ticket queue dispatch failed: unknown launch profile \(id)\n", stderr)
+        case let .missingCommand(executable):
+            fputs("Ticket queue dispatch failed: missing command \(executable)\n", stderr)
+        case let .notConfigured(profileId):
+            fputs("Ticket queue dispatch failed: profile not configured \(profileId)\n", stderr)
+        case let .failure(error):
+            fputs("Ticket queue dispatch failed: \(error)\n", stderr)
+        }
     }
 
     // MARK: - Hotkeys + spawning
@@ -1513,13 +1534,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         _ = focusBroker.requestFocus(.tile(tileId), reason: .tileSpawned)
     }
 
+    private func installSpawnedTerminal(_ runtime: GhosttyTerminalRuntime) {
+        wireRuntimeExitHandler(runtime)
+        runtimes.append(runtime)
+        focusSpawnedTile(runtime.tileId)
+    }
+
     private func spawnTerminalFromProfile(_ profileId: String) {
         guard let spawner = tileSpawner else { return }
         switch spawner.spawnTerminal(profileId: profileId) {
         case let .spawned(runtime):
-            wireRuntimeExitHandler(runtime)
-            runtimes.append(runtime)
-            focusSpawnedTile(runtime.tileId)
+            installSpawnedTerminal(runtime)
         case let .missingCommand(executable):
             presentMissingCommand(executable: executable, profileId: profileId)
         case let .notConfigured(id):
@@ -4591,6 +4616,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
               renderedTexts.contains(where: { $0.contains("CON-130") && $0.contains("High") && $0.contains("Todo") }) else {
             throw NSError(domain: "TicketQueueTileCheck", code: 2, userInfo: [NSLocalizedDescriptionKey: "ticket queue tile did not render fixture row text"])
         }
+        var dispatchedRows: [LinearTicketQueueRow] = []
+        let dispatchable = TicketQueueTileNSView(tile: restored.tiles[0], rows: rows, emptyStateMessage: nil) { row in
+            dispatchedRows.append(row)
+        }
+        guard let dispatchButton = Self.buttons(in: dispatchable).first(where: { $0.identifier?.rawValue == "CON-130" }) else {
+            throw NSError(domain: "TicketQueueTileCheck", code: 5, userInfo: [NSLocalizedDescriptionKey: "ticket queue row did not render a dispatch button"])
+        }
+        dispatchButton.performClick(nil)
+        let kickoffPrompt = AgentKickoffPrompt.make(row: rows[0], repoPath: projectRoot.path, projectName: "continuum-revived")
+        guard dispatchedRows.map(\.identifier) == ["CON-130"],
+              kickoffPrompt.contains("ticket `CON-130`"),
+              kickoffPrompt.contains("docs/21-agent-workflow.md"),
+              kickoffPrompt.contains("./scripts/run-matrix.sh") else {
+            throw NSError(domain: "TicketQueueTileCheck", code: 6, userInfo: [NSLocalizedDescriptionKey: "ticket queue dispatch seam did not produce the expected kickoff prompt"])
+        }
+
         let empty = TicketQueueTileNSView(tile: restored.tiles[0], rows: [], emptyStateMessage: "No Linear API key configured")
         let emptyTexts = Self.textFieldStrings(in: empty)
         guard empty.emptyStateMessage == "No Linear API key configured",
@@ -4615,6 +4656,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         for subview in view.subviews {
             result.append(contentsOf: textFieldStrings(in: subview))
+        }
+        return result
+    }
+
+    private static func buttons(in view: NSView) -> [NSButton] {
+        var result: [NSButton] = []
+        if let button = view as? NSButton {
+            result.append(button)
+        }
+        for subview in view.subviews {
+            result.append(contentsOf: buttons(in: subview))
         }
         return result
     }

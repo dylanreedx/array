@@ -86,6 +86,13 @@ do {
     expect(rows[0].priority == .high && rows[0].priority.displayName == "High", "priority 2 maps to High")
     expect(rows[1].labels == ["agent", "v1"], "labels decode and sort")
     expect(rows[2].state == "Todo" && rows[2].stateType == "unstarted", "state fields decode")
+
+    let prompt = AgentKickoffPrompt.make(row: rows[1], repoPath: "/tmp/continuum", projectName: "E11 — Agent Harness Bridge")
+    expect(prompt.contains("ticket `CON-131`"), "kickoff prompt names the ticket identifier")
+    expect(prompt.contains("Dispatch agent"), "kickoff prompt includes the ticket title")
+    expect(prompt.contains("Repo: /tmp/continuum (branch: main)"), "kickoff prompt includes the repo and branch")
+    expect(prompt.contains("docs/21-agent-workflow.md"), "kickoff prompt points agents at docs/21")
+    expect(prompt.contains("./scripts/run-matrix.sh"), "kickoff prompt includes the verification matrix")
 }
 
 do {
