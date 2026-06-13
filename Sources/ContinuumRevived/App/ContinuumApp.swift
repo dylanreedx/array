@@ -1974,6 +1974,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(!probedPaths.contains(cwdProbe), "resolver must not probe cwd")
         try expect(!probedPaths.contains(cwdProbe + "/.continuum-revived"), "resolver must not probe cwd continuum directory")
 
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent("continuum-workspace-resolution-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let projectId = UUID(uuidString: "00000000-0000-0000-0000-000000005701")!
+        let lastActiveWorkspaceId = UUID(uuidString: "00000000-0000-0000-0000-000000005702")!
+        let fallbackWorkspaceId = UUID(uuidString: "00000000-0000-0000-0000-000000005703")!
+        let createdAt = Date(timeIntervalSince1970: 1_800_000_570)
+        var workspaceRegistry = Registry.empty()
+        workspaceRegistry.projects = [ProjectEntry(id: projectId, name: "Workspace Project", rootPath: usablePath, workspaceId: nil, lastOpenedAt: createdAt, pinned: false)]
+        workspaceRegistry.workspaces = [
+            WorkspaceEntry(id: lastActiveWorkspaceId, name: "Last", projectIds: [], createdAt: createdAt, updatedAt: createdAt),
+            WorkspaceEntry(id: fallbackWorkspaceId, name: "Fallback", projectIds: [], createdAt: createdAt, updatedAt: createdAt)
+        ]
+        workspaceRegistry.lastActiveWorkspaceId = lastActiveWorkspaceId
+
+        func workspaceDocument(projectId: UUID, zoneId: UUID) -> WorkspaceDocument {
+            WorkspaceDocument(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                zones: [ZonePlacement(
+                    zoneId: zoneId,
+                    projectId: projectId,
+                    origin: ZonePoint(x: 0, y: 0),
+                    size: ZoneSize(width: 640, height: 480),
+                    color: "blue",
+                    collapsed: false,
+                    hydrationPolicy: .automatic
+                )],
+                zoneZOrder: [zoneId],
+                lastActiveZoneId: zoneId
+            )
+        }
+
+        let lastStore = WorkspaceStore(workspaceId: lastActiveWorkspaceId, applicationSupportDirectory: appSupport)
+        let fallbackStore = WorkspaceStore(workspaceId: fallbackWorkspaceId, applicationSupportDirectory: appSupport)
+        try lastStore.save(workspaceDocument(projectId: projectId, zoneId: UUID()))
+        try fallbackStore.save(workspaceDocument(projectId: projectId, zoneId: UUID()))
+
+        let resolver = DefaultWorkspaceMigration()
+        var activeRegistry = workspaceRegistry
+        let honoredId = try resolver.resolveExistingWorkspace(for: projectId, registry: &activeRegistry, applicationSupportDirectory: appSupport, updatedAt: createdAt)
+        try expect(honoredId == lastActiveWorkspaceId, "lastActiveWorkspaceId workspace is honored when its document loads")
+        try expect(activeRegistry.lastActiveWorkspaceId == lastActiveWorkspaceId, "last active workspace remains selected")
+
+        try FileManager.default.removeItem(at: lastStore.layout.canvasFile)
+        var fallbackRegistry = workspaceRegistry
+        fallbackRegistry.projects[0].workspaceId = lastActiveWorkspaceId
+        let fallbackId = try resolver.resolveExistingWorkspace(for: projectId, registry: &fallbackRegistry, applicationSupportDirectory: appSupport, updatedAt: createdAt)
+        try expect(fallbackId == fallbackWorkspaceId, "deleted last-active workspace doc falls back even when the project entry points at it")
+        try expect(fallbackRegistry.lastActiveWorkspaceId == fallbackWorkspaceId, "fallback workspace becomes last active")
+
+        try lastStore.save(workspaceDocument(projectId: projectId, zoneId: UUID()))
+        try lastStore.save(workspaceDocument(projectId: projectId, zoneId: UUID()))
+        try "{ corrupt json".data(using: .utf8)!.write(to: lastStore.layout.canvasFile)
+        var corruptRegistry = workspaceRegistry
+        let recoveredId = try resolver.resolveExistingWorkspace(for: projectId, registry: &corruptRegistry, applicationSupportDirectory: appSupport, updatedAt: createdAt)
+        try expect(recoveredId == lastActiveWorkspaceId, "corrupt last-active workspace recovers from AtomicWriter backup")
+
         if ProcessInfo.processInfo.environment["CONTINUUM_PROJECT_ROOT"] == nil {
             let smokeRoot = try resolveProjectRoot(smokeTest: true, registry: .empty())
             try expect(smokeRoot.lastPathComponent.hasPrefix("continuum-smoke-project-"), "smoke path still bypasses picker with temp root")

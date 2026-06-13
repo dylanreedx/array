@@ -17,25 +17,13 @@ public struct DefaultWorkspaceMigration: Sendable {
     ) throws -> UUID {
         registry.upsertProject(project, openedAt: now)
 
-        if let assignedWorkspaceId = registry.projects.first(where: { $0.id == project.id })?.workspaceId,
-           registry.workspaces.contains(where: { $0.id == assignedWorkspaceId }) {
-            attach(projectId: project.id, toWorkspace: assignedWorkspaceId, registry: &registry, updatedAt: now)
-            if registry.lastActiveWorkspaceId == nil {
-                registry.lastActiveWorkspaceId = assignedWorkspaceId
-            }
-            return assignedWorkspaceId
-        }
-
-        if let existingWorkspaceId = registry.lastActiveWorkspaceId,
-           registry.workspaces.contains(where: { $0.id == existingWorkspaceId }) {
-            attach(projectId: project.id, toWorkspace: existingWorkspaceId, registry: &registry, updatedAt: now)
+        if let existingWorkspaceId = try resolveExistingWorkspace(
+            for: project.id,
+            registry: &registry,
+            applicationSupportDirectory: applicationSupportDirectory,
+            updatedAt: now
+        ) {
             return existingWorkspaceId
-        }
-
-        if let existing = registry.workspaces.first {
-            registry.lastActiveWorkspaceId = existing.id
-            attach(projectId: project.id, toWorkspace: existing.id, registry: &registry, updatedAt: now)
-            return existing.id
         }
 
         let workspace = WorkspaceEntry(
@@ -69,6 +57,29 @@ public struct DefaultWorkspaceMigration: Sendable {
         }
 
         return workspaceId
+    }
+
+    public func resolveExistingWorkspace(
+        for projectId: UUID,
+        registry: inout Registry,
+        applicationSupportDirectory: URL,
+        updatedAt: Date = Date()
+    ) throws -> UUID? {
+        let projectWorkspaceId = registry.projects.first(where: { $0.id == projectId })?.workspaceId
+        let candidates = ([registry.lastActiveWorkspaceId, projectWorkspaceId].compactMap { $0 } + registry.workspaces.map(\.id))
+            .reduce(into: [UUID]()) { unique, id in
+                if !unique.contains(id) { unique.append(id) }
+            }
+
+        for candidate in candidates where registry.workspaces.contains(where: { $0.id == candidate }) {
+            let store = WorkspaceStore(workspaceId: candidate, applicationSupportDirectory: applicationSupportDirectory)
+            if try store.tryLoad() != nil {
+                registry.lastActiveWorkspaceId = candidate
+                attach(projectId: projectId, toWorkspace: candidate, registry: &registry, updatedAt: updatedAt)
+                return candidate
+            }
+        }
+        return nil
     }
 
     private func attach(projectId: UUID, toWorkspace workspaceId: UUID, registry: inout Registry, updatedAt: Date) {

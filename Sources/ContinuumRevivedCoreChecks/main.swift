@@ -753,6 +753,20 @@ do {
         )],
         settings: Registry.empty().settings
     )
+    let workspaceAZone = UUID(uuidString: "66666666-6666-6666-6666-666666666666")!
+    let workspaceBZone = UUID(uuidString: "77777777-7777-7777-7777-777777777777")!
+    try WorkspaceStore(workspaceId: workspaceA, applicationSupportDirectory: scratch).save(WorkspaceDocument(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        zones: [ZonePlacement(zoneId: workspaceAZone, projectId: projectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 100, height: 100), color: "blue", collapsed: false, hydrationPolicy: .automatic)],
+        zoneZOrder: [workspaceAZone],
+        lastActiveZoneId: workspaceAZone
+    ))
+    try WorkspaceStore(workspaceId: workspaceB, applicationSupportDirectory: scratch).save(WorkspaceDocument(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        zones: [ZonePlacement(zoneId: workspaceBZone, projectId: projectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 100, height: 100), color: "blue", collapsed: false, hydrationPolicy: .automatic)],
+        zoneZOrder: [workspaceBZone],
+        lastActiveZoneId: workspaceBZone
+    ))
     let preservedWorkspaceId = try migration.ensureDefaultWorkspace(
         for: project,
         registry: &existingRegistry,
@@ -761,10 +775,10 @@ do {
         workspaceId: UUID(),
         zoneId: UUID()
     )
-    expect(preservedWorkspaceId == workspaceB, "DefaultWorkspaceMigration preserves a project's assigned workspace")
-    expect(existingRegistry.workspaces.first(where: { $0.id == workspaceA })?.projectIds.contains(projectId) == false, "DefaultWorkspaceMigration does not duplicate project into last active workspace")
-    expect(existingRegistry.workspaces.first(where: { $0.id == workspaceB })?.projectIds == [projectId], "DefaultWorkspaceMigration keeps project in assigned workspace")
-    expect(existingRegistry.projects.first?.workspaceId == workspaceB, "DefaultWorkspaceMigration keeps project entry workspace assignment")
+    expect(preservedWorkspaceId == workspaceA, "DefaultWorkspaceMigration honors the registry last-active workspace")
+    expect(existingRegistry.workspaces.first(where: { $0.id == workspaceA })?.projectIds == [projectId], "DefaultWorkspaceMigration attaches project to last active workspace")
+    expect(existingRegistry.workspaces.first(where: { $0.id == workspaceB })?.projectIds.contains(projectId) == false, "DefaultWorkspaceMigration removes project from stale assigned workspace")
+    expect(existingRegistry.projects.first?.workspaceId == workspaceA, "DefaultWorkspaceMigration updates project entry workspace assignment")
 }
 
 // MARK: - AtomicWriter
