@@ -259,6 +259,98 @@ public enum CanvasEngine {
         CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
     }
 
+    // MARK: - Directional navigation
+
+    public struct NavigationZone: Equatable, Sendable {
+        public let id: UUID
+        public var frame: TileFrame
+        public var zIndex: Int
+
+        public init(id: UUID, frame: TileFrame, zIndex: Int = 0) {
+            self.id = id
+            self.frame = frame
+            self.zIndex = zIndex
+        }
+    }
+
+    public static func nearestTile(
+        from tileId: UUID,
+        direction: TileArrangement.Direction,
+        tiles: [Tile]
+    ) -> UUID? {
+        guard let origin = tiles.first(where: { $0.id == tileId }) else { return nil }
+        return nearestRect(
+            from: origin.id,
+            direction: direction,
+            items: tiles.map { NavigationItem(id: $0.id, rect: rect(for: $0.frame), zIndex: $0.zIndex) }
+        )
+    }
+
+    public static func nearestZone(
+        from zoneId: UUID,
+        direction: TileArrangement.Direction,
+        zones: [NavigationZone]
+    ) -> UUID? {
+        nearestRect(
+            from: zoneId,
+            direction: direction,
+            items: zones.map { NavigationItem(id: $0.id, rect: rect(for: $0.frame), zIndex: $0.zIndex) }
+        )
+    }
+
+    private struct NavigationItem {
+        let id: UUID
+        let rect: CGRect
+        let zIndex: Int
+    }
+
+    private static func nearestRect(
+        from originId: UUID,
+        direction: TileArrangement.Direction,
+        items: [NavigationItem]
+    ) -> UUID? {
+        guard let origin = items.first(where: { $0.id == originId }) else { return nil }
+        let originCenter = CGPoint(x: origin.rect.midX, y: origin.rect.midY)
+
+        return items
+            .filter { $0.id != originId }
+            .compactMap { item -> (item: NavigationItem, primary: CGFloat, orthogonal: CGFloat)? in
+                let center = CGPoint(x: item.rect.midX, y: item.rect.midY)
+                let dx = center.x - originCenter.x
+                let dy = center.y - originCenter.y
+                let primary: CGFloat
+                let orthogonal: CGFloat
+                switch direction {
+                case .up:
+                    guard dy < 0 else { return nil }
+                    primary = -dy
+                    orthogonal = abs(dx)
+                case .down:
+                    guard dy > 0 else { return nil }
+                    primary = dy
+                    orthogonal = abs(dx)
+                case .left:
+                    guard dx < 0 else { return nil }
+                    primary = -dx
+                    orthogonal = abs(dy)
+                case .right:
+                    guard dx > 0 else { return nil }
+                    primary = dx
+                    orthogonal = abs(dy)
+                }
+                return (item, primary, orthogonal)
+            }
+            .min { lhs, rhs in
+                let lhsScore = lhs.primary + 0.5 * lhs.orthogonal
+                let rhsScore = rhs.primary + 0.5 * rhs.orthogonal
+                if lhsScore != rhsScore { return lhsScore < rhsScore }
+                if lhs.primary != rhs.primary { return lhs.primary < rhs.primary }
+                if lhs.orthogonal != rhs.orthogonal { return lhs.orthogonal < rhs.orthogonal }
+                if lhs.item.zIndex != rhs.item.zIndex { return lhs.item.zIndex > rhs.item.zIndex }
+                return lhs.item.id.uuidString < rhs.item.id.uuidString
+            }?.item.id
+    }
+
     // MARK: - Drag and resize
 
     /// Move the tile by a screen-space delta. World-space delta is `screenDelta / zoom`.

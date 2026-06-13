@@ -1211,6 +1211,53 @@ do {
     expect(CanvasEngine.hitTest(screenPoint: CGPoint(x: 500, y: 500), viewport: v, tiles: [lower, upper]) == nil, "Outside all tiles returns nil")
 }
 
+// MARK: - CanvasEngine: directional navigation
+
+do {
+    func tile(_ suffix: String, _ x: Double, _ y: Double, z: Int = 0) -> Tile {
+        Tile(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000\(suffix)")!,
+            kind: .terminal,
+            title: suffix,
+            frame: TileFrame(x: x, y: y, width: 100, height: 100),
+            zIndex: z,
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+    }
+
+    let center = tile("001", 100, 100)
+    let up = tile("002", 100, -50)
+    let down = tile("003", 100, 250)
+    let left = tile("004", -50, 100)
+    let right = tile("005", 180, 100)
+    let diagonalRight = tile("006", 170, 0)
+    let tiles = [diagonalRight, down, right, center, left, up]
+
+    expect(CanvasEngine.nearestTile(from: center.id, direction: .up, tiles: tiles) == diagonalRight.id, "nearestTile up applies axis-weighted distance to directional candidates")
+    expect(CanvasEngine.nearestTile(from: center.id, direction: .down, tiles: tiles) == down.id, "nearestTile down returns below candidate")
+    expect(CanvasEngine.nearestTile(from: center.id, direction: .left, tiles: tiles) == left.id, "nearestTile left returns left candidate")
+    expect(CanvasEngine.nearestTile(from: center.id, direction: .right, tiles: tiles) == right.id, "nearestTile right prefers axis-near candidate over diagonal")
+    expect(CanvasEngine.nearestTile(from: up.id, direction: .up, tiles: tiles) == nil, "nearestTile returns nil when no candidate is in the half-plane")
+}
+
+do {
+    let origin = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000101")!, kind: .terminal, title: "origin", frame: TileFrame(x: 0, y: 0, width: 100, height: 100), zIndex: 0, runtimeRef: nil, metadata: TileMetadata())
+    let highZ = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000102")!, kind: .terminal, title: "high", frame: TileFrame(x: 200, y: 0, width: 100, height: 100), zIndex: 10, runtimeRef: nil, metadata: TileMetadata())
+    let lowZ = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000103")!, kind: .terminal, title: "low", frame: TileFrame(x: 200, y: 0, width: 100, height: 100), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+    expect(CanvasEngine.nearestTile(from: origin.id, direction: .right, tiles: [lowZ, origin, highZ]) == highZ.id, "nearestTile breaks equal geometry ties by higher zIndex")
+}
+
+do {
+    let origin = CanvasEngine.NavigationZone(id: UUID(uuidString: "00000000-0000-0000-0000-000000000201")!, frame: TileFrame(x: 0, y: 0, width: 400, height: 300), zIndex: 0)
+    let right = CanvasEngine.NavigationZone(id: UUID(uuidString: "00000000-0000-0000-0000-000000000202")!, frame: TileFrame(x: 600, y: 0, width: 400, height: 300), zIndex: 0)
+    let down = CanvasEngine.NavigationZone(id: UUID(uuidString: "00000000-0000-0000-0000-000000000203")!, frame: TileFrame(x: 0, y: 500, width: 400, height: 300), zIndex: 0)
+    let zones = [down, right, origin]
+    expect(CanvasEngine.nearestZone(from: origin.id, direction: .right, zones: zones) == right.id, "nearestZone returns right-hand zone")
+    expect(CanvasEngine.nearestZone(from: origin.id, direction: .down, zones: zones) == down.id, "nearestZone returns lower zone")
+    expect(CanvasEngine.nearestZone(from: right.id, direction: .right, zones: zones) == nil, "nearestZone nil with no directional candidate")
+}
+
 // MARK: - CanvasEngine: drag updates frame in world space
 
 do {
