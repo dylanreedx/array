@@ -278,6 +278,30 @@ do {
     expect(ReservedShortcut.classify(keyCode: 49, modifiers: .control) == .navModeLeader, "Ctrl-Space should classify as nav mode leader")
     expect(ReservedShortcut.classify(keyCode: 49, modifiers: []) == nil, "plain Space should not classify as a reserved shortcut")
     expect(ReservedShortcut.classify(keyCode: 53, modifiers: []) == nil, "plain Escape should not classify as a reserved shortcut")
+
+    let zoneA = UUID(uuidString: "00000000-0000-0000-0000-0000000000AA")!
+    let zoneB = UUID(uuidString: "00000000-0000-0000-0000-0000000000BB")!
+    let primary = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    let idleOld = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+    let idleNew = UUID(uuidString: "00000000-0000-0000-0000-000000000003")!
+    let needsAttention = UUID(uuidString: "00000000-0000-0000-0000-000000000004")!
+    let otherZone = UUID(uuidString: "00000000-0000-0000-0000-000000000005")!
+    let nonAgent = UUID(uuidString: "00000000-0000-0000-0000-000000000006")!
+    let base = Date(timeIntervalSinceReferenceDate: 1_000)
+    let pairingCandidates = [
+        FocusModePairingCandidate(tileId: idleOld, zoneId: zoneA, isAgent: true, status: .idle, lastActiveAt: base),
+        FocusModePairingCandidate(tileId: idleNew, zoneId: zoneA, isAgent: true, status: .idle, lastActiveAt: base.addingTimeInterval(10)),
+        FocusModePairingCandidate(tileId: needsAttention, zoneId: zoneA, isAgent: true, status: .needsAttention, lastActiveAt: base.addingTimeInterval(-10)),
+        FocusModePairingCandidate(tileId: otherZone, zoneId: zoneB, isAgent: true, status: .needsAttention, lastActiveAt: base.addingTimeInterval(100)),
+        FocusModePairingCandidate(tileId: nonAgent, zoneId: zoneA, isAgent: false, status: nil, lastActiveAt: base.addingTimeInterval(200)),
+    ]
+    expect(FocusModePairing.companionAgent(for: primary, primaryZoneId: zoneA, candidates: pairingCandidates) == needsAttention, "focus-mode pairing should prefer same-zone needs-attention agents")
+    expect(FocusModePairing.companionAgent(for: primary, primaryZoneId: zoneA, candidates: pairingCandidates.filter { $0.status != .needsAttention }) == idleNew, "focus-mode pairing should prefer most-recently-active same-zone agent within a status class")
+    expect(FocusModePairing.companionAgent(for: primary, primaryZoneId: zoneB, candidates: pairingCandidates) == otherZone, "focus-mode pairing should ignore agents outside the primary zone")
+    expect(FocusModePairing.companionAgent(for: primary, primaryZoneId: zoneA, candidates: pairingCandidates, manualOverride: idleOld) == idleOld, "focus-mode pairing should honor a valid session manual override")
+    expect(FocusModePairing.companionAgent(for: primary, primaryZoneId: zoneA, candidates: pairingCandidates, manualOverride: otherZone) == needsAttention, "focus-mode pairing should ignore wrong-zone manual overrides")
+    expect(FocusModePairing.companionAgent(for: primary, primaryZoneId: zoneA, candidates: pairingCandidates, manualOverride: nonAgent) == needsAttention, "focus-mode pairing should ignore non-agent manual overrides")
+    expect(FocusModePairing.companionAgent(for: primary, primaryZoneId: zoneA, candidates: []) == nil, "focus-mode pairing should return nil for single-pane mode when no same-zone agent exists")
 }
 
 // MARK: - Project lock policy

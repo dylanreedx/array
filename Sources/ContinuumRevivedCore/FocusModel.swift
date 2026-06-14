@@ -94,3 +94,54 @@ public enum NavLeaderDecision: Equatable, Sendable {
         return .openNavMode
     }
 }
+
+public struct FocusModePairingCandidate: Equatable, Sendable {
+    public var tileId: FocusTileID
+    public var zoneId: UUID
+    public var isAgent: Bool
+    public var status: AgentStatus?
+    public var lastActiveAt: Date?
+
+    public init(tileId: FocusTileID, zoneId: UUID, isAgent: Bool, status: AgentStatus?, lastActiveAt: Date?) {
+        self.tileId = tileId
+        self.zoneId = zoneId
+        self.isAgent = isAgent
+        self.status = status
+        self.lastActiveAt = lastActiveAt
+    }
+}
+
+public enum FocusModePairing {
+    public static func companionAgent(
+        for primaryTileId: FocusTileID,
+        primaryZoneId: UUID,
+        candidates: [FocusModePairingCandidate],
+        manualOverride: FocusTileID? = nil
+    ) -> FocusTileID? {
+        let eligible = candidates.filter { candidate in
+            candidate.tileId != primaryTileId && candidate.zoneId == primaryZoneId && candidate.isAgent
+        }
+
+        if let manualOverride,
+           eligible.contains(where: { $0.tileId == manualOverride }) {
+            return manualOverride
+        }
+
+        return eligible.sorted { lhs, rhs in
+            let lhsNeedsAttention = lhs.status == .needsAttention
+            let rhsNeedsAttention = rhs.status == .needsAttention
+            if lhsNeedsAttention != rhsNeedsAttention { return lhsNeedsAttention }
+
+            switch (lhs.lastActiveAt, rhs.lastActiveAt) {
+            case let (lhsDate?, rhsDate?) where lhsDate != rhsDate:
+                return lhsDate > rhsDate
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                return lhs.tileId.uuidString < rhs.tileId.uuidString
+            }
+        }.first?.tileId
+    }
+}

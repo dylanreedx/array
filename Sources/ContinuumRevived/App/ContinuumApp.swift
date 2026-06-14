@@ -450,6 +450,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--focus-mode-check") {
+            do {
+                let artifact = try AppDelegate.runFocusModeSelfCheck()
+                print("ContinuumRevivedFocusModeChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--spawn-rate-limit-check") {
             do {
                 let artifact = try AppDelegate.runSpawnRateLimitSelfCheck()
@@ -5905,6 +5916,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let artifact = dir.appendingPathComponent("manifest.json")
         let json = """
         {"check":"agent-input","acceptedStatuses":["idle","needsAttention"],"refusedStatuses":["working"],"insertedPrompt":"flyback review prompt with Sources/App.swift new:42","returnCount":1,"status":"passed"}
+
+        """
+        try json.write(to: artifact, atomically: true, encoding: .utf8)
+        return artifact
+    }
+
+    static func runFocusModeSelfCheck() throws -> URL {
+        struct CheckError: Error, CustomStringConvertible {
+            let description: String
+            init(_ description: String) { self.description = description }
+        }
+
+        let zone = UUID(uuidString: "10000000-0000-0000-0000-000000000001")!
+        let primary = UUID(uuidString: "10000000-0000-0000-0000-000000000002")!
+        let agentA = UUID(uuidString: "10000000-0000-0000-0000-000000000003")!
+        let agentB = UUID(uuidString: "10000000-0000-0000-0000-000000000004")!
+        let base = Date(timeIntervalSince1970: 1_000)
+        let candidates = [
+            FocusModePairingCandidate(tileId: agentA, zoneId: zone, isAgent: true, status: .needsAttention, lastActiveAt: base),
+            FocusModePairingCandidate(tileId: agentB, zoneId: zone, isAgent: true, status: .idle, lastActiveAt: base.addingTimeInterval(60)),
+        ]
+        guard FocusModePairing.companionAgent(for: primary, primaryZoneId: zone, candidates: candidates) == agentA else {
+            throw CheckError("focus-mode heuristic did not choose needsAttention agent")
+        }
+        guard FocusModePairing.companionAgent(for: primary, primaryZoneId: zone, candidates: candidates, manualOverride: agentB) == agentB else {
+            throw CheckError("focus-mode session override did not choose requested same-zone agent")
+        }
+        guard FocusModePairing.companionAgent(for: primary, primaryZoneId: zone, candidates: candidates.filter { $0.tileId != agentB }, manualOverride: agentB) == agentA else {
+            throw CheckError("focus-mode invalidated override did not fall back to heuristic")
+        }
+
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let dir = URL(fileURLWithPath: "qa-runs/focus-mode-\(timestamp)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let artifact = dir.appendingPathComponent("manifest.json")
+        let json = """
+        {"check":"focus-mode","primaryTileId":"\(primary.uuidString)","heuristicCompanion":"\(agentA.uuidString)","manualOverrideCompanion":"\(agentB.uuidString)","overrideScope":"session-only model seam","status":"passed"}
 
         """
         try json.write(to: artifact, atomically: true, encoding: .utf8)
