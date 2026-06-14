@@ -95,7 +95,7 @@ keybind chord-capture editor.
 - Browser ⌘F/⌘L/⌘R/⌘[/⌘]; note ⌘E export (save panel). Extend browser self-check.
 
 ### A5 — marching-ants focus border (docs/27 staging 6) · DOGFOOD
-- **Status: TODO** · deps: A1
+- **Status: DONE (3647acf)** · deps: A1
 - `CAShapeLayer` dashed stroke + infinite `lineDashPhase` anim on scope tile;
   screen-space constant; installed on focus, removed on blur.
 - **Check:** assert layer+animation install/remove on scope change; `VisualSnapshot`
@@ -157,3 +157,6 @@ _(filled in as DOGFOOD tasks land — what to eyeball when you're back)_
 - **Keybind editing (A7):** in the Keybindings tab, click Edit on a binding →
   press a new chord → it shows the new chord + applies live (try a nav-mode key
   or the leader); Reset restores default; binding `⌘K`/`⌘,` is refused.
+- **Focus border (A5):** click a tile → a subtle dashed "marching ants" border
+  animates around it; click another tile → border moves; click empty canvas →
+  border clears. Does it read well at different zoom levels? Too subtle/loud?
