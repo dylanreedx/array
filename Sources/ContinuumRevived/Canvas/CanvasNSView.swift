@@ -63,6 +63,7 @@ final class CanvasNSView: NSView {
     private let showsZoneChrome: Bool
     private var zoneChromeViews: [UUID: ZoneChromeNSView] = [:]
     private var navModeOverlayView: NavModeOverlayNSView?
+    var navModeHintLine = NavKeymap.default.hintLine
     private var emptyStateView: CanvasEmptyStateNSView?
     private var emptyStateActions: CanvasEmptyStateActions?
     private var emptyStateProjectPath: String?
@@ -314,7 +315,7 @@ final class CanvasNSView: NSView {
             selectedTileId: navModeOverlayView?.selectedTileId,
             zoneBadgeCount: navModeOverlayView?.zoneBadgeCount ?? 0,
             hitTestPassesThrough: navModeOverlayView?.hitTest(probePoint) == nil,
-            hintLine: NavModeOverlayNSView.hintLine
+            hintLine: navModeOverlayView?.hintLine ?? navModeHintLine
         )
     }
 
@@ -1335,13 +1336,12 @@ final class ZoneChromeNSView: NSView {
 
 @MainActor
 private final class NavModeOverlayNSView: NSView {
-    static let hintLine = "hjkl move · a agents · A needs you · 1-9 zone · z/w pick · ⏎ focus · esc exit"
-
     private weak var canvas: CanvasNSView?
     private let badgeSize = CGSize(width: 24, height: 24)
 
     var selectedTileId: UUID? { canvas?.canvasState.lastActiveTileId }
     var zoneBadgeCount: Int { canvas?.zoneRenderModels.count ?? 0 }
+    var hintLine: String { canvas?.navModeHintLine ?? NavKeymap.default.hintLine }
 
     override var isFlipped: Bool { true }
 
@@ -1411,7 +1411,7 @@ private final class NavModeOverlayNSView: NSView {
             .font: NSFont.systemFont(ofSize: 13, weight: .medium),
             .foregroundColor: NSColor.white.withAlphaComponent(0.92)
         ]
-        let text = Self.hintLine
+        let text = hintLine
         let size = text.size(withAttributes: attributes)
         let padding = CGSize(width: 14, height: 8)
         let rect = CGRect(

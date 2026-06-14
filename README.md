@@ -68,6 +68,20 @@ scripts/make-app-bundle.sh --configuration debug --output /tmp/ContinuumRevived.
 
 Bundle verification writes logs under `qa-runs/<timestamp>/app-bundle/` unless `--output-dir` is supplied.
 
+## Nav-mode keymap defaults
+
+Continuum reads nav-mode key overrides from `UserDefaults` keys under `continuum.keymap.*` at startup. Example for the bundled app domain:
+
+```bash
+defaults write com.continuum.revived continuum.keymap.leader control+g
+defaults write com.continuum.revived continuum.keymap.up i
+defaults write com.continuum.revived continuum.keymap.down m
+defaults write com.continuum.revived continuum.keymap.left b
+defaults write com.continuum.revived continuum.keymap.right r
+```
+
+Other single-character bindings: `nextZone`, `previousZone`, `zonePicker`, `workspacePicker`, `agentCycle`, `agentNeedsAttention`, `focusMode`, `deleteTile`. Unbundled `swift run` launches may use the executable's defaults domain rather than `com.continuum.revived`.
+
 ## QA artifacts
 
 External QA flows live in `qa/` and are documented in `qa/README.md`. One-time setup:

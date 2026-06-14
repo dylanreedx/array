@@ -793,6 +793,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var tileSpawner: TileSpawner?
     private var profilePalette: LaunchProfilePalette?
     private let focusBroker = FocusBroker()
+    private var navKeymap: NavKeymap = .default
     private var qaPerf: QAPerf?
     private var launchStartTime: CFTimeInterval?
     private lazy var browserRuntimeBudget = BrowserRuntimeBudget(maxLive: BrowserRuntimeBudget.resolveMaxLive())
@@ -820,6 +821,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func applicationDidFinishLaunching(_ notification: Notification) {
         launchStartTime = QAPerf.timestamp()
         qaPerf = QAPerf()
+        navKeymap = NavKeymap.resolve()
+        focusBroker.navKeymap = navKeymap
         do {
             let appSupportDir = Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
             let registryStore = RegistryStore(applicationSupportDirectory: appSupportDir)
@@ -1671,6 +1674,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func openNavMode() {
         focusBroker.openModal(.navMode)
         navSelectedZoneId = canvasView?.navZoneRenderModels.first?.placement.zoneId
+        canvasView?.navModeHintLine = navKeymap.hintLine
         canvasView?.setNavModeOverlayVisible(true)
     }
 
@@ -1689,7 +1693,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let rawKey = event.charactersIgnoringModifiers ?? ""
         let key = rawKey.lowercased()
 
-        if key == "f" {
+        if navKeymap.keyMatches(rawKey, navKeymap.focusMode) {
             let selectedTileId = canvasView?.canvasState.lastActiveTileId
             closeNavMode()
             if let selectedTileId {
@@ -1718,43 +1722,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return
         }
 
-        if key == "n" {
+        if navKeymap.keyMatches(rawKey, navKeymap.nextZone) {
             jumpToZoneByOrder(delta: 1)
             return
         }
 
-        if key == "p" {
+        if navKeymap.keyMatches(rawKey, navKeymap.previousZone) {
             jumpToZoneByOrder(delta: -1)
             return
         }
 
-        if key == "z" {
+        if navKeymap.keyMatches(rawKey, navKeymap.zonePicker) {
             closeNavMode()
             openProfilePalette(initialQuery: "zone")
             return
         }
 
-        if key == "w" {
+        if navKeymap.keyMatches(rawKey, navKeymap.workspacePicker) {
             closeNavMode()
             openProfilePalette(initialQuery: "switch workspace")
             return
         }
 
-        if key == "a" {
-            if rawKey == "A" || event.modifierFlags.contains(.shift) {
-                cycleNavAgent(status: .needsAttention)
-            } else {
-                cycleNavAgent(status: nil)
-            }
+        if navKeymap.keyMatches(rawKey, navKeymap.agentNeedsAttention) {
+            cycleNavAgent(status: .needsAttention)
             return
         }
 
-        if let direction = TileArrangement.Direction.fromKey(key) {
+        if navKeymap.keyMatches(rawKey, navKeymap.agentCycle) {
+            cycleNavAgent(status: nil)
+            return
+        }
+
+        if let direction = TileArrangement.Direction.fromKey(key, keymap: navKeymap) {
             moveNavSelection(direction: direction)
             return
         }
 
-        if key == "x", let selectedTileId = canvasView?.canvasState.lastActiveTileId {
+        if navKeymap.keyMatches(rawKey, navKeymap.deleteTile), let selectedTileId = canvasView?.canvasState.lastActiveTileId {
             closeNavMode()
             deleteTile(id: selectedTileId)
         }
@@ -5395,6 +5400,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         navApp.openNavMode()
         navApp.handleNavModeKey(keyEvent("j", keyCode: 38))
         try expect(overlayCanvas.canvasState.lastActiveTileId == downTileId, "nav j key path should update selected tile; selected=\(String(describing: overlayCanvas.canvasState.lastActiveTileId))")
+        overlayCanvas.markActive(tileId: selectedTileId)
+        navApp.navKeymap = NavKeymap(
+            leader: KeyChord(keyCode: 5, modifiers: .control),
+            up: "i", down: "m", left: "b", right: "r",
+            nextZone: "u", previousZone: "y", zonePicker: "c", workspacePicker: "v",
+            agentCycle: "e", agentNeedsAttention: "E", focusMode: "g", deleteTile: "q"
+        )
+        navApp.focusBroker.navKeymap = navApp.navKeymap
+        try expect(ReservedShortcut.classify(keyCode: 5, modifiers: .control, keymap: navApp.navKeymap) == .navModeLeader, "nav-mode check should exercise a remapped leader fixture")
+        navApp.openNavMode()
+        let remappedOverlayHintLine = overlayCanvas.navModeOverlayQASnapshot().hintLine
+        try expect(remappedOverlayHintLine.contains("bmir move"), "remapped overlay hint should reflect the active keymap; hint=\(remappedOverlayHintLine)")
+        navApp.handleNavModeKey(keyEvent("m", keyCode: 46))
+        let remappedSelection = overlayCanvas.canvasState.lastActiveTileId
+        try expect(remappedSelection == downTileId, "remapped nav m key path should update selected tile; selected=\(String(describing: overlayCanvas.canvasState.lastActiveTileId))")
+        navApp.navKeymap = .default
+        navApp.focusBroker.navKeymap = .default
         let expectedZoneBViewport = CanvasEngine.fit(
             worldRect: CGRect(x: zoneB.origin.x, y: zoneB.origin.y, width: zoneB.size.width, height: zoneB.size.height),
             viewportSize: overlayCanvas.bounds.size
@@ -5468,6 +5490,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "check": "nav-mode",
             "leaderKeyCode": 49,
             "leaderModifiers": "control",
+            "remappedLeaderKeyCode": 5,
+            "remappedLeaderModifiers": "control",
+            "remappedDownKey": "m",
+            "remappedSelection": remappedSelection?.uuidString ?? "nil",
+            "remappedOverlayHintLine": remappedOverlayHintLine,
             "capturedWhileActive": true,
             "restoredSurface": "canvas",
             "navOverlayInstalled": openOverlay.isInstalled,

@@ -9,14 +9,8 @@ public enum TileArrangement {
         case left
         case right
 
-        public static func fromKey(_ key: String) -> Direction? {
-            switch key.lowercased() {
-            case "arrowup", "up", "k": return .up
-            case "arrowdown", "down", "j": return .down
-            case "arrowleft", "left", "h": return .left
-            case "arrowright", "right", "l": return .right
-            default: return nil
-            }
+        public static func fromKey(_ key: String, keymap: NavKeymap = .default) -> Direction? {
+            keymap.direction(for: key)
         }
     }
 

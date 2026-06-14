@@ -17,6 +17,7 @@ final class FocusBroker {
     private var modalSnapshots: [FocusModalKind: FocusSurfaceID?] = [:]
     private var tileSpawnedDuringModal = false
 
+    var navKeymap: NavKeymap = .default
     private(set) var activeSurface: FocusSurfaceID?
     var onAcceptedTileFocus: ((UUID) -> Void)?
     var activationFallbackSurfaces: (() -> [FocusSurfaceID])?
@@ -112,7 +113,7 @@ final class FocusBroker {
     }
 
     func reservedShortcut(for event: NSEvent) -> ReservedShortcut? {
-        ReservedShortcut.classify(keyCode: event.keyCode, modifiers: FocusKeyModifiers(event.modifierFlags))
+        ReservedShortcut.classify(keyCode: event.keyCode, modifiers: FocusKeyModifiers(event.modifierFlags), keymap: navKeymap)
     }
 
     func shouldSurfaceReceive(_ shortcut: ReservedShortcut, surface: FocusSurfaceID) -> Bool {

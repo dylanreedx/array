@@ -279,6 +279,25 @@ do {
     expect(ReservedShortcut.classify(keyCode: 49, modifiers: []) == nil, "plain Space should not classify as a reserved shortcut")
     expect(ReservedShortcut.classify(keyCode: 53, modifiers: []) == nil, "plain Escape should not classify as a reserved shortcut")
 
+    let suiteName = "NavKeymapChecks-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    defaults.set("control+g", forKey: "continuum.keymap.leader")
+    defaults.set("i", forKey: "continuum.keymap.up")
+    defaults.set("m", forKey: "continuum.keymap.down")
+    defaults.set("b", forKey: "continuum.keymap.left")
+    defaults.set("r", forKey: "continuum.keymap.right")
+    let remapped = NavKeymap.resolve(defaults: defaults, warn: { _ in })
+    expect(ReservedShortcut.classify(keyCode: 5, modifiers: .control, keymap: remapped) == .navModeLeader, "remapped Ctrl-G should classify as nav mode leader")
+    expect(ReservedShortcut.classify(keyCode: 49, modifiers: .control, keymap: remapped) == nil, "default Ctrl-Space should not classify after leader remap")
+    expect(TileArrangement.Direction.fromKey("i", keymap: remapped) == .up, "remapped i maps up")
+    expect(TileArrangement.Direction.fromKey("h", keymap: remapped) == nil, "old h mapping is not active after remap")
+    defaults.set("bad+space", forKey: "continuum.keymap.leader")
+    var warnings: [String] = []
+    let fallback = NavKeymap.resolve(defaults: defaults, warn: { warnings.append($0) })
+    expect(fallback.leader == NavKeymap.default.leader, "invalid leader falls back to default")
+    expect(!warnings.isEmpty, "invalid keymap entries should warn")
+
     let zoneA = UUID(uuidString: "00000000-0000-0000-0000-0000000000AA")!
     let zoneB = UUID(uuidString: "00000000-0000-0000-0000-0000000000BB")!
     let primary = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!

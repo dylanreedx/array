@@ -66,9 +66,9 @@ public enum ReservedShortcut: Equatable, Hashable, Sendable {
     /// Classifies app-reserved shortcuts from hardware key codes. The caller
     /// passes platform modifier state translated into `FocusKeyModifiers` so
     /// this pure model stays independent of AppKit.
-    public static func classify(keyCode: UInt16, modifiers: FocusKeyModifiers) -> ReservedShortcut? {
-        if modifiers == .control, keyCode == 49 {
-            return .navModeLeader // Space
+    public static func classify(keyCode: UInt16, modifiers: FocusKeyModifiers, keymap: NavKeymap = .default) -> ReservedShortcut? {
+        if modifiers == keymap.leader.modifiers, keyCode == keymap.leader.keyCode {
+            return .navModeLeader
         }
         guard modifiers == .command else { return nil }
         switch keyCode {
