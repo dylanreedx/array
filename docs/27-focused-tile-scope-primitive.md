@@ -69,6 +69,11 @@ general scope-resolution mechanism, not a browser special-case.
 The monitor (`handleReservedShortcut`) becomes `resolve → execute`, replacing
 the scattered `if canHandleReservedShortcut` checks.
 
+**Settings via `⌘,`:** `⌘,` is in the inviolable set, so it opens
+`.modal(.settings)` from any scope. The extensible settings system (docs/24) is
+the surface that edits this primitive's `TileActionCatalog` alongside globals
+and `NavKeymap` — one unified, extensible binding model.
+
 ## Actions in v1 (YAGNI; catalog makes more trivial later)
 
 Universal (any focused tile), chords chosen to never collide with typing:

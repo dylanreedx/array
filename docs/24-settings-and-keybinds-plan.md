@@ -1,82 +1,89 @@
-# Settings / Configure Page + Keybind Editor — Plan
+# Settings / Configure Page — Extensible Settings System (+ Keybind Editor)
 
-Status: design 2026-06-14. Goal: a Settings/Guide surface where a user can
-SEE every shortcut, SEE what the app can do, and EDIT keybinds — with real
-persistence and live reload. Backs the long-standing DD-018 ("settings have
-no surface"). No Linear ticket yet (issue-limit); this doc is the backlog.
+Status: design 2026-06-14 (re-scoped with Dylan to an *extensible* settings
+system, not a keybind-only panel). Goal: a Settings surface, opened by `⌘,`
+from any scope, where a user can SEE/EDIT keybinds AND other preferences — and
+where a future dev or agent can add a new pref or whole section by appending
+one declarative descriptor, no UI work. Backs DD-018 ("settings have no
+surface"). Pairs with docs/27 (focus-scope primitive supplies the inviolable
+`⌘,` and the `TileActionCatalog`/`ShortcutCatalog`). Verification per
+`verification-doctrine`; visual gate per docs/26.
 
-## Current state (audited)
+## Current state (audited 2026-06-14)
 
 **Two key layers.** (1) Global reserved chords via a pre-dispatch local
-`NSEvent` monitor → `handleHotkey` (ContinuumApp.swift:1535). (2) Nav-mode
-single keys, live only while nav mode is open → `handleNavModeKey` (~:1702).
+`NSEvent` monitor → `handleHotkey`/`handleReservedShortcut` (ContinuumApp.swift
+~:1535/:1921). (2) Nav-mode single keys → `handleNavModeKey` (~:1702).
 
-### Layer 1 — global reserved (always live)
 | Chord | Action | Defined |
 |---|---|---|
-| Cmd-F | Toggle Focus Mode | FocusModel.swift:75 / dispatch :1948 |
-| Cmd-K | Launch palette | :76 / :1955 |
-| Cmd-1/2/3/4 | Spawn claude / shell / browser / nvim | :77-80 / :1958-1969 (profile map hardcoded) |
-| Leader (default Ctrl-Space) | Open/close Nav Mode | NavKeymap.swift:45 / FocusModel:70 |
-| Cmd-Backspace | Delete active tile (canvas focused) | :1679 (hardcoded) |
-| Escape | Close focus/nav mode | :1638/:1703 |
+| Cmd-F | Focus Mode (being migrated to browser-find in tile scope, docs/27) | FocusModel.swift:75 |
+| Cmd-K | Launch palette | :76 |
+| Cmd-1/2/3/4 | Spawn claude / shell / browser / nvim | :77-80 |
+| Leader (Ctrl-Space) | Nav Mode | NavKeymap leader |
 
-### Layer 2 — nav mode (modal)
-h/j/k/l move · n/p next/prev zone · z zone picker · w workspace picker ·
-a agent cycle · A needs-attention · f focus mode · x delete · 1-9 zone ordinal ·
-0 fit all · Tab/Shift-Tab zone · Return focus+exit · Esc/leader exit.
-(NavKeymap.swift:44-49 defaults; handlers ContinuumApp.swift:1702-1786.)
+- `NavKeymap` (CON-67, Done): leader + 12 nav bindings; `resolve(defaults:)`
+  reads `continuum.keymap.*` overrides. **No write path, no live reload, no UI.**
+- `FocusModalKind.settings` / `FocusSurfaceID.settings` declared but **UNUSED** —
+  a ready seam (`focusBroker.openModal(.settings)`).
+- `ProjectPickerPanel.swift` (NSPanel + table + filter, dark/monospaced,
+  keyboard-first) = the cleanest template to copy.
+- `LaunchProfilePalette.handleKeyEvent` REJECTS modifier chords — do NOT reuse
+  for chord capture; write a fresh capture view.
+- **No `Settings…` / `⌘,` menu item exists.**
+- Existing prefs with NO UI (the DD-018 gap): `DefaultBrowserURL`,
+  `DeleteConfirmPolicy`, `ZoneChromeFeature` (now default-on, 22f2c65),
+  `continuum.tileGap`.
 
-### Menu accelerators (CON-113)
-Cmd-H, Cmd-Opt-H, Cmd-Q, Cmd-Z/Shift-Z, Cmd-X/C/V, Cmd-A. **No Cmd-, /
-Preferences.** No Cmd-0 or Cmd-\ globals (zoom is gesture-only; "0=fit" is
-nav-mode-only). `TileArrangement.nudge/throwDestination` exist in Core but are
-NOT bound to any key yet.
+## Architecture — extensible by construction
 
-### How configurable today (CON-67, Done)
-- `NavKeymap` (Core) holds leader + 12 nav bindings; `NavKeymap.resolve(defaults:)`
-  reads overrides from UserDefaults prefix **`continuum.keymap.`**; invalid →
-  default + stderr warn; partial maps merge. Wired at boot (:822-823).
-- **Gaps:** leader parsing accepts only `space`/`g`; global Cmd-K/F/1-4 are
-  hardcoded in `ReservedShortcut.classify` (NOT in the keymap); nav 1-9/0/Tab/
-  Return are hardcoded; **no write path** (set via `defaults write` only); **no
-  live reload** (resolve runs once at boot); **no UI**.
+**Core — declarative schema (the extensibility engine, pure + testable):**
+- `SettingsField` — typed descriptor bound to a UserDefaults key: `.toggle`,
+  `.text`, `.choice(options)`, `.shortcuts(catalog)`; carries label, default,
+  validation, get/set.
+- `SettingsSection { id, title, [SettingsField] }`.
+- `SettingsSchema.sections() -> [SettingsSection]` — the ordered registry.
+- **Adding a pref = append one `SettingsField`; adding a section = append one
+  `SettingsSection`.** No renderer changes. That is the extensibility contract.
+- `SettingsSchemaChecks`: every field key/default round-trips through
+  UserDefaults; every existing pref is represented; no duplicate keys.
 
-### Settings scaffolding
-- No settings window exists. `FocusModalKind.settings` / `FocusSurfaceID.settings`
-  are declared but UNUSED — a ready seam (`focusBroker.openModal(.settings)`).
-- `ProjectPickerPanel.swift` (NSPanel + NSTableView + filter, dark/monospaced,
-  keyboard-first, runModal) is the cleanest template to copy.
-- `LaunchProfilePalette.handleKeyEvent` is search-text oriented and REJECTS
-  modifier chords — do NOT reuse for chord capture; write a fresh capture view.
+**App — generic renderer (written once):**
+- One NSPanel (from `ProjectPickerPanel`): a sidebar of section titles + a
+  detail pane that renders fields *generically by type* (toggle→`NSSwitch`,
+  text→`NSTextField`, choice→popup, shortcuts→chord-capture editor). New
+  sections render automatically — zero per-section UI.
+- `⌘,` is an **inviolable global** (docs/27) → `focusBroker.openModal(.settings)`
+  from any scope; plus a `Settings…` menu item (installMainMenu ~:620).
+- Live apply: writing a field persists to UserDefaults; keybind edits call the
+  NavKeymap/`TileActionCatalog` write path + refresh the live keymaps (no relaunch).
+
+**v1 sections:**
+- **Keybindings** — Guide (read-only `ShortcutCatalog`: globals + nav + tile
+  actions) + editable chord rows (NavKeymap + `TileActionCatalog` write paths).
+- **General** — existing hidden prefs as fields: default browser URL (text),
+  delete-confirm policy (choice), zone chrome (toggle), tile gap (number).
+- *Deferred (append later, no rework): theming/appearance, agent/harness config.*
 
 ## Build plan
 
-Tag [pure] = loop-buildable + CoreChecks; [appkit] = needs real-app verify.
+Tag [pure] = loop/agent-buildable + CoreChecks; [appkit] = real-app verify.
 
-| # | Step | Size | Tag | Check |
-|---|------|------|-----|-------|
-| K1 | Core: keymap **write path** (`NavKeymap.persist(to:)`, inverse of resolve) + broaden chord model (`KeyChord` with displayString + more keys for leader) | M | [pure] | extend `NavKeymapChecks`: round-trip `resolve(persist(map))==map`, chord display |
-| K2 | Core: `ShortcutCatalog` — every binding (global + nav + hardcoded) with chord, action label, configurable y/n. Single source for the guide. | S | [pure] | new catalog-exhaustiveness check (covers each ReservedShortcut + NavKeymap field) |
-| K3 | AppKit: Settings/Guide **NSPanel shell** (copy ProjectPickerPanel) — two sections: **Guide** (read-only ShortcutCatalog table) + **Keybindings** (editable list). `Settings…` menu item (Cmd-,) in installMainMenu (:620); open via `focusBroker.openModal(.settings)`. | M | [appkit] | new `--settings-panel-check`: installs/tears down once; Cmd-, menu item present; guide rows == catalog count |
-| K4 | AppKit: **chord-capture field** (fresh NSView overriding keyDown/performKeyEquivalent → KeyChord) + apply: `persist` (K1) + live update `navKeymap`/`focusBroker.navKeymap` (:822-823) + refresh nav hint line. Live reload, no relaunch. | M | [appkit] | new `--keybind-edit-check`: capture → lands in UserDefaults → broker reflects new leader → hint line updates |
-| K5 | (optional) Make global Cmd-K/F/1-4 remappable: data-drive `ReservedShortcut.classify` from a keymap table so the editor can rebind them too. | S | [pure] | extend classify check |
+| # | Step | Tag | Check |
+|---|------|-----|-------|
+| S1 | `NavKeymap.persist` write path (inverse of `resolve`) + `KeyChord` display/parse broadening; `TileActionCatalog` write path (docs/27) | [pure] | extend `NavKeymapChecks`: `resolve(persist(map))==map` |
+| S2 | `ShortcutCatalog` — every binding (global + nav + tile) with chord, label, configurable y/n; single source for the Guide | [pure] | catalog-exhaustiveness check |
+| S3 | `SettingsField`/`SettingsSection`/`SettingsSchema` + `SettingsSchemaChecks` (the engine) | [pure] | schema round-trip + existing-prefs-represented |
+| S4 | Generic NSPanel renderer (sidebar + type-driven detail) + `⌘,` inviolable open + `Settings…` menu | [appkit] | `--settings-panel-check` (installs/tears down; ⌘, opens; sections==schema) + visual snapshot (docs/26) |
+| S5 | Field renderers incl. fresh chord-capture view + live apply; wire General section to existing prefs | [appkit] | `--keybind-edit-check` (capture→UserDefaults→broker reflects→hint updates) |
 
-Sequence: K1→K2 [pure, loop] then K3→K4 [appkit, me-verified]. K5 optional.
-
-## Page design (what the user sees)
-
-A keyboard-first panel (dark/monospaced, matches palette/picker), two tabs:
-- **Guide** — grouped read-only list of every shortcut + a short "what this
-  does" line; the onboarding/reference surface.
-- **Keybindings** — editable rows (action · current chord · default); click a
-  row → "press new chord" capture → apply live; "reset to default" per row.
-Reuse: NavKeymap model (K1), ShortcutCatalog (K2), the dead `.settings` modal
-kind, FocusBroker modal snapshot/restore, ProjectPickerPanel layout.
+Sequence: S1→S2→S3 [pure, agent/loop] then S4→S5 [appkit, agent-built + me-verified].
 
 ## Key files
-FocusModel.swift (:5-18 settings seam, :60-83 classify) · NavKeymap.swift
-(model + resolve; add persist + catalog) · ContinuumApp.swift (:620 menu,
-:822-823 keymap wiring, :1955-1969 hardcoded dispatch) · ProjectPickerPanel.swift
-(template) · FocusBroker.swift (:77-90 modal, :116 keymap-threaded classify) ·
-ContinuumRevivedCoreChecks/main.swift (NavKeymapChecks ~:282) · docs/16 DD-018.
+
+FocusModel.swift (`.settings` seam, classify) · NavKeymap.swift (add persist) ·
+new `SettingsSchema.swift`/`SettingsField.swift` (Core) · `TileActionCatalog`/
+`ShortcutCatalog` (docs/27) · ContinuumApp.swift (:620 menu, monitor/dispatch) ·
+ProjectPickerPanel.swift (template) · FocusBroker.swift (modal snapshot/restore,
+inviolable `⌘,`) · ContinuumRevivedCoreChecks (NavKeymapChecks, new schema
+checks) · docs/16 DD-018 · docs/27 (focus-scope primitive) · docs/26 (visual gate).
