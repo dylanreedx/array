@@ -347,6 +347,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--reserved-dispatch-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runReservedDispatchSelfCheck()
+                print("ContinuumRevivedReservedDispatchChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-restore-state-check") {
             do {
                 _ = NSApplication.shared
@@ -1999,51 +2011,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             break
         }
 
-        if let activeSurface = focusBroker.activeSurface,
-           focusBroker.shouldSurfaceReceive(shortcut, surface: activeSurface) {
-            return false
+        // The scattered `shouldSurfaceReceive` guards and the per-shortcut switch
+        // are unified into one pure decision (docs/27 staging 3). `resolve`'s
+        // inviolable-global ordering subsumes the old guards, and a focused tile's
+        // catalog claim (e.g. browser Cmd-F) replaces the P0 special-case
+        // responder-walk guard — that claim resolves to `.tileAction`, whose
+        // executor (A2: passthrough stub) returns false so the event still reaches
+        // the tile's own key path (BrowserHostView.performKeyEquivalent → find bar).
+        let scope = reservedDispatchScope()
+        let focusedKind: TileKind?
+        if case let .tile(tileId) = scope {
+            focusedKind = canvasView?.canvasState.tiles.first(where: { $0.id == tileId })?.kind
+        } else {
+            focusedKind = nil
         }
 
-        // `activeSurface` only tracks tiles whose title bar was clicked; a click
-        // inside a WKWebView focuses web content without registering the tile,
-        // so resolve the owning tile from the live first responder too. Without
-        // this, Cmd-F in a focused browser opens Focus Mode instead of the find
-        // bar (the P0 grey-screen).
-        if let responderTileId = TileNSView.enclosingTileId(of: window?.firstResponder),
-           focusBroker.shouldSurfaceReceive(shortcut, surface: .tile(responderTileId)) {
-            return false
-        }
-
-        switch shortcut {
-        case .focusMode:
-            if focusModeSession == nil, let selectedTileId = canvasView?.canvasState.lastActiveTileId {
-                openFocusMode(primaryTileId: selectedTileId)
-            } else {
-                closeFocusMode()
+        switch FocusDispatch.resolve(
+            keyCode: event.keyCode,
+            modifiers: FocusKeyModifiers(modifierFlags: event.modifierFlags),
+            scope: scope,
+            focusedKind: focusedKind,
+            navKeymap: navKeymap
+        ) {
+        case let .global(shortcut):
+            switch shortcut {
+            case .focusMode:
+                if focusModeSession == nil, let selectedTileId = canvasView?.canvasState.lastActiveTileId {
+                    openFocusMode(primaryTileId: selectedTileId)
+                } else {
+                    closeFocusMode()
+                }
+                return true
+            case .palette:
+                openProfilePalette()
+                return true
+            case .spawnProfile(1):
+                spawnTerminalFromProfile("claude", trigger: "hotkey:cmd-1")
+                return true
+            case .spawnProfile(2):
+                spawnTerminalFromProfile("shell", trigger: "hotkey:cmd-2")
+                return true
+            case .spawnProfile(3):
+                spawnBrowserDefault()
+                return true
+            case .spawnProfile(4):
+                spawnTerminalFromProfile("nvim", trigger: "hotkey:cmd-4")
+                return true
+            case .navModeLeader:
+                openNavMode()
+                return true
+            case .settings:
+                toggleSettingsPanel()
+                return true
+            case .spawnProfile:
+                return false
             }
-            return true
-        case .palette:
-            openProfilePalette()
-            return true
-        case .spawnProfile(1):
-            spawnTerminalFromProfile("claude", trigger: "hotkey:cmd-1")
-            return true
-        case .spawnProfile(2):
-            spawnTerminalFromProfile("shell", trigger: "hotkey:cmd-2")
-            return true
-        case .spawnProfile(3):
-            spawnBrowserDefault()
-            return true
-        case .spawnProfile(4):
-            spawnTerminalFromProfile("nvim", trigger: "hotkey:cmd-4")
-            return true
-        case .navModeLeader:
-            openNavMode()
-            return true
-        case .settings:
-            toggleSettingsPanel()
-            return true
-        case .spawnProfile:
+        case let .tileAction(action):
+            return Self.executeTileAction(action)
+        case .passThrough:
+            return false
+        }
+    }
+
+    /// The focus scope for reserved-shortcut dispatch. Prefers an authoritative
+    /// tile `activeSurface` (A1), but falls back to the owning tile of the live
+    /// first responder when the scope is not a tile — so a Cmd-F while web content
+    /// is focused still resolves to the browser tile even if `activeSurface` is
+    /// stale. This subsumes both removed guards (active-surface + P0 responder-walk).
+    private func reservedDispatchScope() -> FocusSurfaceID {
+        if case .tile = focusBroker.activeSurface {
+            return focusBroker.activeSurface!
+        }
+        if let responderTileId = TileNSView.enclosingTileId(of: window?.firstResponder) {
+            return .tile(responderTileId)
+        }
+        return focusBroker.activeSurface ?? .canvas
+    }
+
+    /// Executes a resolved tile-local action. A2 stubs every action to
+    /// passthrough (`false`): returning false means the event is NOT consumed by
+    /// the monitor, so a focused tile's own key path still receives it (preserving
+    /// the P0 browser-find behavior without the special-case guard). Static + pure
+    /// so `--reserved-dispatch-check` drives the exact A2 consumption contract.
+    static func executeTileAction(_ action: TileAction) -> Bool {
+        switch action {
+        case .resizeToPreset, .nudge, .throwToNeighbor:
+            // TODO(A3): sizing presets (TileGeometry) + positioning (TileArrangement).
+            return false
+        case .browserFind, .browserFocusURL, .browserReload, .browserBack, .browserForward, .noteExport:
+            // TODO(A4): browser find/url/reload/nav + note export executors.
             return false
         }
     }
@@ -6287,6 +6343,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         """
         try json.write(to: artifact, atomically: true, encoding: .utf8)
+        return artifact
+    }
+
+    /// Drives the exact `handleReservedShortcut` decision path (A2): the real
+    /// `FocusDispatch.resolve` resolver plus the real consumption contract
+    /// (`.global`→consumed except spawn-default, `.tileAction`→`executeTileAction`,
+    /// `.passThrough`→not-consumed). Asserts the P0 preservation — Cmd-F in a
+    /// focused browser resolves to `.tileAction(.browserFind)` and is NOT consumed,
+    /// so the event passes through to the browser's own find — without the deleted
+    /// special-case guard. Also pins the canvas globals and inviolables.
+    static func runReservedDispatchSelfCheck() throws -> URL {
+        struct CheckError: Error, CustomStringConvertible {
+            let description: String
+            init(_ description: String) { self.description = description }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError(message) }
+        }
+
+        let keymap = NavKeymap.default
+        let defaults = UserDefaults(suiteName: "reserved-dispatch-check-\(UUID().uuidString)")!
+        let browserId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B1")!
+
+        // Mirrors `handleReservedShortcut`'s resolution→consumed mapping exactly,
+        // calling the real `AppDelegate.executeTileAction` for the tile branch.
+        func consumes(_ resolution: FocusDispatchResolution) -> Bool {
+            switch resolution {
+            case let .global(shortcut):
+                if case .spawnProfile(let n) = shortcut, !(1...4).contains(n) { return false }
+                return true
+            case let .tileAction(action):
+                return AppDelegate.executeTileAction(action)
+            case .passThrough:
+                return false
+            }
+        }
+
+        func resolve(keyCode: UInt16, modifiers: FocusKeyModifiers, scope: FocusSurfaceID, focusedKind: TileKind?) -> FocusDispatchResolution {
+            FocusDispatch.resolve(keyCode: keyCode, modifiers: modifiers, scope: scope, focusedKind: focusedKind, navKeymap: keymap, defaults: defaults)
+        }
+
+        // 1) Cmd-F with a focused browser → .tileAction(.browserFind), NOT consumed
+        //    (A2 passthrough). This is the P0: the find event reaches the browser.
+        let browserFind = resolve(keyCode: 3, modifiers: .command, scope: .tile(browserId), focusedKind: .browser)
+        try expect(browserFind == .tileAction(.browserFind), "Cmd-F in browser scope should resolve to .tileAction(.browserFind); got \(browserFind)")
+        try expect(consumes(browserFind) == false, "Cmd-F in browser must NOT be consumed by the monitor (A2 passthrough preserves the find bar); consumed=\(consumes(browserFind))")
+
+        // 2) Cmd-F with canvas scope → .global(.focusMode), consumed (handled).
+        let canvasFind = resolve(keyCode: 3, modifiers: .command, scope: .canvas, focusedKind: nil)
+        try expect(canvasFind == .global(.focusMode), "Cmd-F in canvas scope should resolve to .global(.focusMode); got \(canvasFind)")
+        try expect(consumes(canvasFind) == true, "Cmd-F in canvas must be consumed (opens Focus Mode); consumed=\(consumes(canvasFind))")
+
+        // 3) Inviolable globals resolve to .global from every scope, even a
+        //    browser tile that might otherwise claim them — and are consumed.
+        let paletteFromBrowser = resolve(keyCode: 40, modifiers: .command, scope: .tile(browserId), focusedKind: .browser)
+        try expect(paletteFromBrowser == .global(.palette), "Cmd-K must always resolve to .global(.palette) even in browser scope; got \(paletteFromBrowser)")
+        try expect(consumes(paletteFromBrowser) == true, "Cmd-K (palette) must be consumed")
+        let settingsFromBrowser = resolve(keyCode: 43, modifiers: .command, scope: .tile(browserId), focusedKind: .browser)
+        try expect(settingsFromBrowser == .global(.settings), "Cmd-, must always resolve to .global(.settings) even in browser scope; got \(settingsFromBrowser)")
+        try expect(consumes(settingsFromBrowser) == true, "Cmd-, (settings) must be consumed")
+        let leaderFromBrowser = resolve(keyCode: keymap.leader.keyCode, modifiers: keymap.leader.modifiers, scope: .tile(browserId), focusedKind: .browser)
+        try expect(leaderFromBrowser == .global(.navModeLeader), "leader must always resolve to .global(.navModeLeader) even in browser scope; got \(leaderFromBrowser)")
+        try expect(consumes(leaderFromBrowser) == true, "leader (open nav mode) must be consumed")
+
+        // 4) Canvas-scope global passes through cleanly: Cmd-K/Cmd-, from canvas.
+        try expect(resolve(keyCode: 40, modifiers: .command, scope: .canvas, focusedKind: nil) == .global(.palette), "Cmd-K from canvas → .global(.palette)")
+        try expect(resolve(keyCode: 43, modifiers: .command, scope: .canvas, focusedKind: nil) == .global(.settings), "Cmd-, from canvas → .global(.settings)")
+
+        let manifest: [String: Any] = [
+            "check": "reserved-dispatch",
+            "browserId": browserId.uuidString,
+            "browserFindResolution": String(describing: browserFind),
+            "browserFindConsumed": consumes(browserFind),
+            "canvasFindResolution": String(describing: canvasFind),
+            "canvasFindConsumed": consumes(canvasFind),
+            "paletteFromBrowserResolution": String(describing: paletteFromBrowser),
+            "settingsFromBrowserResolution": String(describing: settingsFromBrowser),
+            "leaderFromBrowserResolution": String(describing: leaderFromBrowser),
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("reserved-dispatch", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
         return artifact
     }
 
