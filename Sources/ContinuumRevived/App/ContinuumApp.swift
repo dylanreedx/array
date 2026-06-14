@@ -1727,6 +1727,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return
         }
 
+        if key == "0" {
+            fitAllNavZones()
+            return
+        }
+
         if let ordinal = Int(key), (1...9).contains(ordinal) {
             jumpToZoneOrdinal(ordinal)
             return
@@ -1904,6 +1909,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func fitNavZone(_ zoneId: UUID) {
         guard let viewport = canvasView?.fitZoneToViewport(zoneId: zoneId) else { return }
         navSelectedZoneId = zoneId
+        canvasView?.setViewport(viewport)
+    }
+
+    private func fitAllNavZones() {
+        guard let viewport = canvasView?.fitAllToViewport() else { return }
+        navSelectedZoneId = nil
         canvasView?.setViewport(viewport)
     }
 
@@ -2223,6 +2234,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawnFileTreeFromPalette()
         case .newDiffReview:
             spawnDiffReviewFromPalette()
+        case .fitCanvasToAll:
+            if let viewport = canvasView?.fitAllToViewport() {
+                canvasView?.setViewport(viewport)
+            }
         case let .switchProject(projectId):
             switchProjectAndRelaunch(projectId: projectId)
         case let .addProjectToCanvas(projectId):
@@ -5453,6 +5468,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(overlayCanvas.canvasState.viewport == expectedZoneAViewport, "nav p should jump to the previous zone by ordinal order; viewport=\(overlayCanvas.canvasState.viewport) expected=\(expectedZoneAViewport)")
         navApp.handleNavModeKey(keyEvent("\t", keyCode: 48))
         try expect(overlayCanvas.canvasState.viewport == expectedZoneBViewport, "nav Tab should jump to the next zone by ordinal order; viewport=\(overlayCanvas.canvasState.viewport) expected=\(expectedZoneBViewport)")
+        let expectedFitAllViewport = CanvasEngine.fit(
+            worldRect: CGRect(x: zoneA.origin.x, y: zoneA.origin.y, width: zoneA.size.width, height: zoneA.size.height)
+                .union(CGRect(x: zoneB.origin.x, y: zoneB.origin.y, width: zoneB.size.width, height: zoneB.size.height)),
+            viewportSize: overlayCanvas.bounds.size
+        )
+        navApp.handleNavModeKey(keyEvent("0", keyCode: 29))
+        try expect(overlayCanvas.canvasState.viewport == expectedFitAllViewport, "nav 0 should fit all zones; viewport=\(overlayCanvas.canvasState.viewport) expected=\(expectedFitAllViewport)")
+        overlayCanvas.setViewport(CanvasViewport(x: 123, y: 456, zoom: 0.5))
+        navApp.performPaletteAction(.fitCanvasToAll)
+        try expect(overlayCanvas.canvasState.viewport == expectedFitAllViewport, "palette Fit Canvas to All action should fit all zones; viewport=\(overlayCanvas.canvasState.viewport) expected=\(expectedFitAllViewport)")
 
         let paletteHost = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700), styleMask: [], backing: .buffered, defer: false)
         paletteHost.contentView = NSView(frame: paletteHost.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 900, height: 700))

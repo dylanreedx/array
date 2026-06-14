@@ -6,6 +6,7 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case openFile
     case openFileTree
     case newDiffReview
+    case fitCanvasToAll
     case openURL(String)
     case switchProject(UUID)
     case addProjectToCanvas(UUID)
@@ -27,6 +28,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "Open File Tree..."
         case .newDiffReview:
             return "New Diff Review"
+        case .fitCanvasToAll:
+            return "Fit Canvas to All"
         case let .openURL(url):
             return "Open \"\(url)\"…"
         case .switchProject:
@@ -58,6 +61,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["open", "file", "tree"]
         case .newDiffReview:
             return ["new", "diff", "review", "git"]
+        case .fitCanvasToAll:
+            return ["fit", "zoom", "all", "canvas"]
         case .openURL:
             return ["open", "url", "browser", "web"]
         case .switchProject:
@@ -171,6 +176,7 @@ public enum LaunchPaletteModel {
             .action(.openFile),
             .action(.openFileTree),
             .action(.newDiffReview),
+            .action(.fitCanvasToAll),
             .action(.newWorkspace)
         ] + harnessRoles.map { LaunchPaletteRow.action(.spawnHarnessRole($0)) } + workspaces.flatMap { workspace in
             [

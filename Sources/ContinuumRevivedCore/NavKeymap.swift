@@ -49,7 +49,7 @@ public struct NavKeymap: Equatable, Sendable {
     )
 
     public var hintLine: String {
-        "\(left)\(down)\(up)\(right) move · \(agentCycle) agents · \(agentNeedsAttention) needs you · 1-9 zone · \(zonePicker)/\(workspacePicker) pick · ⏎ focus · esc exit"
+        "\(left)\(down)\(up)\(right) move · \(agentCycle) agents · \(agentNeedsAttention) needs you · 1-9 zone · 0 fit all · \(zonePicker)/\(workspacePicker) pick · ⏎ focus · esc exit"
     }
 
     public func direction(for key: String) -> TileArrangement.Direction? {

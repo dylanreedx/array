@@ -240,6 +240,8 @@ final class CanvasNSView: NSView {
     func setViewport(_ viewport: CanvasViewport) {
         canvasState.viewport = viewport
         layoutAllTiles()
+        discardCursorRects()
+        window?.invalidateCursorRects(for: self)
         delegate?.canvasDidChange(self)
     }
 
@@ -256,6 +258,56 @@ final class CanvasNSView: NSView {
             worldRect: CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height),
             viewportSize: bounds.size
         )
+    }
+
+    func fitAllToViewport() -> CanvasViewport? {
+        if let zoneBounds = zoneWorldBounds(), zoneBounds.width > 0, zoneBounds.height > 0 {
+            return CanvasEngine.fit(worldRect: zoneBounds, viewportSize: bounds.size)
+        }
+        guard let tileBounds = CanvasEngine.finiteTileBounds(canvasState.tiles), tileBounds.width > 0, tileBounds.height > 0 else { return nil }
+        return CanvasEngine.fit(worldRect: tileBounds, viewportSize: bounds.size)
+    }
+
+    @discardableResult
+    func qaDoubleClickZoneHeaderOrBackground(at screenPoint: CGPoint) -> CanvasViewport? {
+        if let zoneId = zoneHeaderZoneId(at: screenPoint), let viewport = fitZoneToViewport(zoneId: zoneId) {
+            setViewport(viewport)
+            return viewport
+        }
+        if tileId(at: screenPoint) == nil, let viewport = fitAllToViewport() {
+            setViewport(viewport)
+            return viewport
+        }
+        return nil
+    }
+
+    func qaZoneHeaderCursorRectCount() -> Int {
+        zoneRenderModels.filter { zoneHeaderScreenRect(for: $0.placement) != nil }.count
+    }
+
+    private func zoneWorldBounds() -> CGRect? {
+        let rects = zoneRenderModels.map { Self.cgRect(from: CanvasEngine.zoneWorldFrame($0.placement)) }
+            .filter { $0.origin.x.isFinite && $0.origin.y.isFinite && $0.width.isFinite && $0.height.isFinite && $0.width > 0 && $0.height > 0 }
+        guard var bounds = rects.first else { return nil }
+        for rect in rects.dropFirst() { bounds = bounds.union(rect) }
+        return bounds
+    }
+
+    private func zoneHeaderZoneId(at screenPoint: CGPoint) -> UUID? {
+        zoneRenderModels.reversed().first { model in
+            guard let header = zoneHeaderScreenRect(for: model.placement) else { return false }
+            return header.contains(screenPoint)
+        }?.placement.zoneId
+    }
+
+    private func zoneHeaderScreenRect(for placement: ZonePlacement) -> CGRect? {
+        let frame = CanvasEngine.tileScreenFrame(CanvasEngine.zoneWorldFrame(placement), viewport: canvasState.viewport)
+        guard frame.width > 0, frame.height > 0 else { return nil }
+        return CGRect(x: frame.minX, y: frame.minY, width: frame.width, height: min(32, frame.height))
+    }
+
+    private static func cgRect(from frame: TileFrame) -> CGRect {
+        CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
     }
 
     /// Returns the topmost tile id at a screen-space point according to the
@@ -472,10 +524,23 @@ final class CanvasNSView: NSView {
             spaceDragLastWindowPoint = event.locationInWindow
             return
         }
+        let point = convert(event.locationInWindow, from: nil)
+        if event.clickCount >= 2, qaDoubleClickZoneHeaderOrBackground(at: point) != nil {
+            return
+        }
         // Click on canvas background — deselect.
         canvasState.lastActiveTileId = nil
         delegate?.canvasDidChange(self)
         window?.makeFirstResponder(self)
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        for model in zoneRenderModels {
+            if let rect = zoneHeaderScreenRect(for: model.placement) {
+                addCursorRect(rect, cursor: .pointingHand)
+            }
+        }
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -786,6 +851,16 @@ final class CanvasNSView: NSView {
         try expect(canvas.zoneId(at: CGPoint(x: 1530, y: 10)) == gammaZoneId, "collapsed header should hit-test to zone")
         try expect(canvas.hitTest(CGPoint(x: 770, y: 10)) === canvas, "static zone chrome should pass AppKit hits through to canvas")
 
+        let expectedFitAll = CanvasEngine.fit(worldRect: Self.cgRect(from: CanvasEngine.zoneWorldFrame(alpha)).union(Self.cgRect(from: CanvasEngine.zoneWorldFrame(beta))).union(Self.cgRect(from: CanvasEngine.zoneWorldFrame(gamma))), viewportSize: canvas.bounds.size)
+        let fitAll = try expectViewport(canvas.fitAllToViewport(), "fit-all viewport should be available for multi-zone canvas")
+        try expect(viewportsNearlyEqual(fitAll, expectedFitAll), "fit-all should frame the union of all zones")
+        let headerFit = try expectViewport(canvas.qaDoubleClickZoneHeaderOrBackground(at: CGPoint(x: 770, y: 10)), "double-clicking a zone header should fit that zone")
+        try expect(viewportsNearlyEqual(headerFit, CanvasEngine.fit(worldRect: Self.cgRect(from: CanvasEngine.zoneWorldFrame(beta)), viewportSize: canvas.bounds.size)), "header double-click should fit the clicked zone")
+        canvas.setViewport(viewport)
+        let backgroundFit = try expectViewport(canvas.qaDoubleClickZoneHeaderOrBackground(at: CGPoint(x: 2300, y: 500)), "double-clicking canvas background should fit all zones")
+        try expect(viewportsNearlyEqual(backgroundFit, expectedFitAll), "background double-click should fit all zones")
+        try expect(canvas.qaZoneHeaderCursorRectCount() == 3, "zone headers should expose cursor affordance rects")
+
         let overlapBottom = ZonePlacement(zoneId: betaZoneId, projectId: betaProjectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 200, height: 200), color: "mint", collapsed: false, hydrationPolicy: .automatic)
         let overlapTop = ZonePlacement(zoneId: gammaZoneId, projectId: gammaProjectId, origin: ZonePoint(x: 50, y: 50), size: ZoneSize(width: 200, height: 200), color: "purple", collapsed: false, hydrationPolicy: .automatic)
         let overlapCanvas = CanvasNSView(
@@ -833,6 +908,10 @@ final class CanvasNSView: NSView {
             "expectedExpandedTileFrame": rectDictionary(expectedAlphaTileFrame),
             "betaChromeFrame": rectDictionary(betaSnap.frame),
             "gammaChromeFrame": rectDictionary(gammaSnap.frame),
+            "fitAllViewport": viewportDictionary(fitAll),
+            "headerDoubleClickViewport": viewportDictionary(headerFit),
+            "backgroundDoubleClickViewport": viewportDictionary(backgroundFit),
+            "zoneHeaderCursorRectCount": canvas.qaZoneHeaderCursorRectCount(),
             "collapsedChildHitSuppressed": true,
             "collapsedHeaderZoneId": gammaZoneId.uuidString,
             "zoneChromeScreenshot": screenshot.path,
@@ -846,8 +925,18 @@ final class CanvasNSView: NSView {
             guard let snapshot else { throw CheckError.failed(message) }
             return snapshot
         }
+        func expectViewport(_ viewport: CanvasViewport?, _ message: String) throws -> CanvasViewport {
+            guard let viewport else { throw CheckError.failed(message) }
+            return viewport
+        }
+        func viewportsNearlyEqual(_ lhs: CanvasViewport, _ rhs: CanvasViewport) -> Bool {
+            abs(lhs.x - rhs.x) < 0.0001 && abs(lhs.y - rhs.y) < 0.0001 && abs(lhs.zoom - rhs.zoom) < 0.0001
+        }
         func rectDictionary(_ rect: CGRect) -> [String: Double] {
             ["x": rect.origin.x, "y": rect.origin.y, "width": rect.width, "height": rect.height]
+        }
+        func viewportDictionary(_ viewport: CanvasViewport) -> [String: Double] {
+            ["x": viewport.x, "y": viewport.y, "zoom": viewport.zoom]
         }
     }
 
