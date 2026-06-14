@@ -241,6 +241,10 @@ final class CanvasNSView: NSView {
         delegate?.canvasDidChange(self)
     }
 
+    func restoreTileSubviewOrder() {
+        reorderTileSubviewsByZIndex()
+    }
+
     var navZoneRenderModels: [ZoneRenderModel] { zoneRenderModels }
 
     func fitZoneToViewport(zoneId: UUID) -> CanvasViewport? {

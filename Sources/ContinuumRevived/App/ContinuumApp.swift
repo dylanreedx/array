@@ -783,6 +783,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
     private var canvasView: CanvasNSView?
     private var navSelectedZoneId: UUID?
+    private var focusModeSession: FocusModeSession?
     private let smokeTestEnabled = ProcessInfo.processInfo.environment["CONTINUUM_SMOKE_TEST"] == "1"
     private var smokeTestExitCode: Int32?
     private var zoneRuntimeController: ZoneRuntimeController?
@@ -1398,7 +1399,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func enforceBrowserRuntimeBudget() {
         guard let spawner = tileSpawner else { return }
-        let protected = canvasView?.canvasState.lastActiveTileId.map { Set([$0]) } ?? []
+        var protected = canvasView?.canvasState.lastActiveTileId.map { Set([$0]) } ?? []
+        if let focusModeSession {
+            protected.formUnion(focusModeSession.protectedTileIds)
+        }
         let liveTileIds = browserRuntimes.map(\.tileId)
         let evictTileIds = browserRuntimeBudget.evictionCandidates(liveTileIds: liveTileIds, protectedTileIds: protected)
         for tileId in evictTileIds {
@@ -1522,6 +1526,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func installTileFocusMonitor() {
         let monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
             guard let self, let canvas = self.canvasView else { return event }
+            guard self.focusModeSession == nil else { return event }
             guard let window = canvas.window, event.window === window else { return event }
             let pointInCanvas = canvas.convert(event.locationInWindow, from: nil)
             let clickedTileId = canvas.tileId(at: pointInCanvas)
@@ -1599,6 +1604,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func handleHotkey(_ event: NSEvent) -> Bool {
+        if focusBroker.activeSurface == .modal(.focusMode) {
+            if event.keyCode == 53 {
+                closeFocusMode()
+                return true
+            }
+            return handleReservedShortcut(event)
+        }
+
         if focusBroker.activeSurface == .modal(.navMode) {
             let shortcut = focusBroker.reservedShortcut(for: event)
             if NavLeaderDecision.decide(
@@ -1661,6 +1674,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return
         }
 
+        let rawKey = event.charactersIgnoringModifiers ?? ""
+        let key = rawKey.lowercased()
+
+        if key == "f" {
+            let selectedTileId = canvasView?.canvasState.lastActiveTileId
+            closeNavMode()
+            if let selectedTileId {
+                openFocusMode(primaryTileId: selectedTileId)
+            }
+            return
+        }
+
         if event.keyCode == 36 {
             guard let selectedTileId = canvasView?.canvasState.lastActiveTileId else {
                 closeNavMode()
@@ -1671,8 +1696,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return
         }
 
-        let rawKey = event.charactersIgnoringModifiers ?? ""
-        let key = rawKey.lowercased()
         if let ordinal = Int(key), (1...9).contains(ordinal) {
             jumpToZoneOrdinal(ordinal)
             return
@@ -1879,6 +1902,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         switch shortcut {
+        case .focusMode:
+            if focusModeSession == nil, let selectedTileId = canvasView?.canvasState.lastActiveTileId {
+                openFocusMode(primaryTileId: selectedTileId)
+            } else {
+                closeFocusMode()
+            }
+            return true
         case .palette:
             openProfilePalette()
             return true
@@ -1900,6 +1930,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case .spawnProfile:
             return false
         }
+    }
+
+    private func openFocusMode(primaryTileId: UUID) {
+        guard focusModeSession == nil, let canvasView, let contentView = window?.contentView else { return }
+        guard let primaryView = canvasView.tileView(for: primaryTileId) else { return }
+        let companionId = focusModeCompanionAgent(for: primaryTileId)
+        let companionView = companionId.flatMap { canvasView.tileView(for: $0) }
+        let session = FocusModeSession(
+            primaryTileId: primaryTileId,
+            companionTileId: companionId,
+            savedViewport: canvasView.canvasState.viewport,
+            savedTiles: canvasView.canvasState.tiles,
+            savedLastActiveTileId: canvasView.canvasState.lastActiveTileId,
+            canvasView: canvasView,
+            primaryView: primaryView,
+            companionView: companionView
+        )
+        focusModeSession = session
+        focusBroker.openModal(.focusMode)
+        canvasView.isHidden = true
+        contentView.addSubview(session.overlay)
+        session.overlay.frame = contentView.bounds
+        session.overlay.autoresizingMask = [.width, .height]
+        enforceBrowserRuntimeBudget()
+    }
+
+    private func closeFocusMode() {
+        guard let session = focusModeSession else { return }
+        focusBroker.closeModal(.focusMode)
+        session.restore()
+        focusModeSession = nil
+        canvasView?.isHidden = false
+    }
+
+    private func focusModeCompanionAgent(for primaryTileId: UUID) -> UUID? {
+        guard let canvasView else { return nil }
+        let primaryZoneId = canvasView.activeZone?.zoneId ?? canvasView.navZoneRenderModels.first?.placement.zoneId ?? UUID()
+        let currentTerminalTileIds = Set(canvasView.canvasState.tiles.filter { $0.kind == .terminal }.map(\.id))
+        let sessions = (try? projectStore?.listSessions()) ?? []
+        let agentTileIds = Set(sessions.filter { currentTerminalTileIds.contains($0.tileId) && $0.agentDescriptor != nil }.map(\.tileId))
+        let candidates = canvasView.canvasState.tiles.map { tile in
+            FocusModePairingCandidate(
+                tileId: tile.id,
+                zoneId: primaryZoneId,
+                isAgent: agentTileIds.contains(tile.id),
+                status: canvasView.agentStatus(for: tile.id) ?? sessions.first(where: { $0.tileId == tile.id })?.agentDescriptor?.status,
+                lastActiveAt: tile.id == canvasView.canvasState.lastActiveTileId ? Date() : nil
+            )
+        }
+        return FocusModePairing.companionAgent(for: primaryTileId, primaryZoneId: primaryZoneId, candidates: candidates)
     }
 
     private func openProfilePalette(initialQuery: String = "") {
@@ -5946,13 +6026,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard FocusModePairing.companionAgent(for: primary, primaryZoneId: zone, candidates: candidates.filter { $0.tileId != agentB }, manualOverride: agentB) == agentA else {
             throw CheckError("focus-mode invalidated override did not fall back to heuristic")
         }
+        guard ReservedShortcut.classify(keyCode: 3, modifiers: .command) == .focusMode else {
+            throw CheckError("Cmd-F should classify as focus-mode shortcut")
+        }
+        guard FocusSurfaceID.modal(.focusMode) == .modal(.focusMode) else {
+            throw CheckError("focus mode modal surface should be representable")
+        }
+
+        let primaryTile = Tile(id: primary, kind: .note, title: "Primary", frame: TileFrame(x: 10, y: 10, width: 200, height: 120), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let agentTile = Tile(id: agentA, kind: .terminal, title: "Agent", frame: TileFrame(x: 260, y: 10, width: 200, height: 120), zIndex: 0, runtimeRef: nil, metadata: TileMetadata())
+        let savedState = CanvasState(viewport: CanvasViewport(x: 12, y: 34, zoom: 1.25), tiles: [primaryTile, agentTile], groups: [], lastActiveTileId: primary)
+        let canvas = CanvasNSView(canvasState: savedState)
+        let primaryView = TileNSView(tile: primaryTile)
+        let agentView = TileNSView(tile: agentTile)
+        canvas.install(tileView: primaryView, for: primaryTile)
+        canvas.install(tileView: agentView, for: agentTile)
+        let session = FocusModeSession(
+            primaryTileId: primary,
+            companionTileId: agentA,
+            savedViewport: savedState.viewport,
+            savedTiles: savedState.tiles,
+            savedLastActiveTileId: savedState.lastActiveTileId,
+            canvasView: canvas,
+            primaryView: primaryView,
+            companionView: agentView
+        )
+        guard session.protectedTileIds == [primary, agentA] else {
+            throw CheckError("focus-mode protected ids did not include both panes")
+        }
+        guard primaryView.superview !== canvas, agentView.superview !== canvas else {
+            throw CheckError("focus-mode session did not reparent pane views")
+        }
+        canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 0.5))
+        canvas.updateTile(Tile(id: primary, kind: .note, title: "Primary", frame: TileFrame(x: 999, y: 999, width: 100, height: 100), zIndex: 99, runtimeRef: nil, metadata: TileMetadata()))
+        session.restore()
+        guard canvas.canvasState.viewport == savedState.viewport,
+              canvas.canvasState.tiles == savedState.tiles,
+              canvas.canvasState.lastActiveTileId == savedState.lastActiveTileId else {
+            throw CheckError("focus-mode restore did not return canvas state exactly")
+        }
+        guard primaryView.superview === canvas, agentView.superview === canvas else {
+            throw CheckError("focus-mode restore did not return pane views to canvas")
+        }
 
         let timestamp = String(Int(Date().timeIntervalSince1970))
         let dir = URL(fileURLWithPath: "qa-runs/focus-mode-\(timestamp)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let artifact = dir.appendingPathComponent("manifest.json")
         let json = """
-        {"check":"focus-mode","primaryTileId":"\(primary.uuidString)","heuristicCompanion":"\(agentA.uuidString)","manualOverrideCompanion":"\(agentB.uuidString)","overrideScope":"session-only model seam","status":"passed"}
+        {"check":"focus-mode","primaryTileId":"\(primary.uuidString)","heuristicCompanion":"\(agentA.uuidString)","manualOverrideCompanion":"\(agentB.uuidString)","shortcut":"cmd-f","modalKind":"focusMode","restoreStateExact":true,"protectedPaneCount":2,"overrideScope":"session-only model seam","status":"passed"}
 
         """
         try json.write(to: artifact, atomically: true, encoding: .utf8)
@@ -6023,6 +6145,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             result.append(contentsOf: buttons(in: subview))
         }
         return result
+    }
+}
+
+@MainActor
+private final class FocusModeSession {
+    let primaryTileId: UUID
+    let companionTileId: UUID?
+    let savedViewport: CanvasViewport
+    let savedTiles: [Tile]
+    let savedLastActiveTileId: UUID?
+    let overlay = NSView(frame: .zero)
+    private weak var canvasView: CanvasNSView?
+    private let splitView = NSSplitView(frame: .zero)
+    private let primaryPane = NSView(frame: .zero)
+    private let companionPane = NSView(frame: .zero)
+    private weak var primaryView: TileNSView?
+    private weak var companionView: TileNSView?
+
+    var protectedTileIds: Set<UUID> {
+        var ids: Set<UUID> = [primaryTileId]
+        if let companionTileId { ids.insert(companionTileId) }
+        return ids
+    }
+
+    init(
+        primaryTileId: UUID,
+        companionTileId: UUID?,
+        savedViewport: CanvasViewport,
+        savedTiles: [Tile],
+        savedLastActiveTileId: UUID?,
+        canvasView: CanvasNSView,
+        primaryView: TileNSView,
+        companionView: TileNSView?
+    ) {
+        self.primaryTileId = primaryTileId
+        self.companionTileId = companionTileId
+        self.savedViewport = savedViewport
+        self.savedTiles = savedTiles
+        self.savedLastActiveTileId = savedLastActiveTileId
+        self.canvasView = canvasView
+        self.primaryView = primaryView
+        self.companionView = companionView
+        overlay.wantsLayer = true
+        overlay.layer?.backgroundColor = NSColor.black.cgColor
+        splitView.isVertical = true
+        splitView.dividerStyle = .thin
+        splitView.autoresizingMask = [.width, .height]
+        splitView.frame = overlay.bounds
+        overlay.addSubview(splitView)
+        splitView.addArrangedSubview(primaryPane)
+        if companionView != nil {
+            splitView.addArrangedSubview(companionPane)
+        }
+        install(primaryView, in: primaryPane)
+        if let companionView {
+            install(companionView, in: companionPane)
+        }
+    }
+
+    func restore() {
+        overlay.removeFromSuperview()
+        guard let canvasView else { return }
+        if let primaryView {
+            canvasView.addSubview(primaryView)
+        }
+        if let companionView {
+            canvasView.addSubview(companionView)
+        }
+        canvasView.setViewport(savedViewport)
+        for tile in savedTiles {
+            canvasView.updateTile(tile)
+        }
+        if let savedLastActiveTileId {
+            canvasView.markActive(tileId: savedLastActiveTileId)
+        }
+        canvasView.restoreTileSubviewOrder()
+    }
+
+    private func install(_ tileView: TileNSView, in pane: NSView) {
+        tileView.removeFromSuperview()
+        pane.addSubview(tileView)
+        tileView.frame = pane.bounds
+        tileView.autoresizingMask = [.width, .height]
     }
 }
 

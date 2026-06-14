@@ -6,6 +6,7 @@ public enum FocusModalKind: String, Codable, Equatable, Hashable, Sendable {
     case palette
     case settings
     case navMode
+    case focusMode
 }
 
 public enum FocusSurfaceID: Codable, Equatable, Hashable, Sendable {
@@ -60,6 +61,7 @@ public enum ReservedShortcut: Equatable, Hashable, Sendable {
     case palette
     case spawnProfile(Int)
     case navModeLeader
+    case focusMode
 
     /// Classifies app-reserved shortcuts from hardware key codes. The caller
     /// passes platform modifier state translated into `FocusKeyModifiers` so
@@ -70,6 +72,7 @@ public enum ReservedShortcut: Equatable, Hashable, Sendable {
         }
         guard modifiers == .command else { return nil }
         switch keyCode {
+        case 3: return .focusMode // F
         case 40: return .palette // K
         case 18: return .spawnProfile(1)
         case 19: return .spawnProfile(2)
