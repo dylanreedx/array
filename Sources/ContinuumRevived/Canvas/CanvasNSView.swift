@@ -900,6 +900,8 @@ final class CanvasNSView: NSView {
         try png.write(to: screenshot, options: .atomic)
         let screenshotBytes = try Data(contentsOf: screenshot).count
         try expect(screenshotBytes > 0, "zone chrome screenshot should be non-empty")
+        let chromePixels = VisualSnapshot.metrics(of: rep)
+        try expect(!chromePixels.isBlank, "zone chrome render must not be blank/uniform (the grey-screen guard) — got \(chromePixels.distinctSampledColors) distinct sampled colors at \(chromePixels.width)x\(chromePixels.height)")
         let artifact = directory.appendingPathComponent("manifest.json")
         let manifest: [String: Any] = [
             "check": "multi-zone-render",

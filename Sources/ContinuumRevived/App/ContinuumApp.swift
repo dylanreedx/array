@@ -5537,6 +5537,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let rep = overlayCanvas.bitmapImageRepForCachingDisplay(in: overlayCanvas.bounds) {
             overlayCanvas.cacheDisplay(in: overlayCanvas.bounds, to: rep)
             try rep.representation(using: .png, properties: [:])?.write(to: screenshot)
+            let pixels = VisualSnapshot.metrics(of: rep)
+            guard !pixels.isBlank else {
+                throw NSError(domain: "NavModeCheck", code: 10, userInfo: [NSLocalizedDescriptionKey: "nav-mode overlay render is blank/uniform (grey-screen guard): \(pixels.distinctSampledColors) sampled colors at \(pixels.width)x\(pixels.height)"])
+            }
         }
         let artifact = directory.appendingPathComponent("manifest.json")
         let manifest: [String: Any] = [
@@ -5854,6 +5858,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             diffView.cacheDisplay(in: diffView.bounds, to: bitmap)
             if let png = bitmap.representation(using: .png, properties: [:]) {
                 try png.write(to: screenshot, options: .atomic)
+            }
+            let pixels = VisualSnapshot.metrics(of: bitmap)
+            guard !pixels.isBlank else {
+                throw NSError(domain: "DiffTileCheck", code: 10, userInfo: [NSLocalizedDescriptionKey: "diff review tile render is blank/uniform (grey-screen guard): \(pixels.distinctSampledColors) sampled colors at \(pixels.width)x\(pixels.height)"])
             }
         }
         let artifact = dir.appendingPathComponent("manifest.json")
