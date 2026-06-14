@@ -111,7 +111,11 @@ keybind chord-capture editor.
   sections == schema; Tier-1 visual snapshot non-degenerate. matrix green.
 
 ### A7 — field renderers + chord capture + General section (docs/24 S5) · DOGFOOD
-- **Status: TODO** · deps: F2, F4, A6
+- **Status: DONE (72d1e2f)** · deps: F2, F4, A6 · **SETTINGS PAGE COMPLETE (A6+A7)**
+- Gated: matrix green incl. `--keybind-edit-check` (nav/leader/tile rebind +
+  reset + inviolable-collision rejection); `--settings-panel-check` + 4 focus
+  checks stay green. `KeybindEditor` (pure routing) reviewed. General editing
+  (A6) untouched.
 - Type renderers (toggle/text/choice/shortcuts); fresh chord-capture view; live apply
   (persist + refresh live keymaps, no relaunch); wire General to the existing prefs.
 - **Check:** `--keybind-edit-check` — capture → UserDefaults → broker reflects new
@@ -147,3 +151,6 @@ _(filled in as DOGFOOD tasks land — what to eyeball when you're back)_
   default URL / tile gap → quit & relaunch → values persisted. Keybindings tab:
   shows the full shortcut guide (Global / Nav Mode / per tile kind). Does the
   panel look right (dark/monospaced, readable, sized ok)?
+- **Keybind editing (A7):** in the Keybindings tab, click Edit on a binding →
+  press a new chord → it shows the new chord + applies live (try a nav-mode key
+  or the leader); Reset restores default; binding `⌘K`/`⌘,` is refused.
