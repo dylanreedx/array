@@ -356,17 +356,30 @@ class TileNSView: NSView {
     }
 
     private func resizeEdge(at point: CGPoint) -> ResizeEdge? {
+        // `point`/`bounds` are in world units (the tile view's bounds is set to
+        // the world tile size; AppKit scales bounds→frame by the zoom). The edge
+        // band `m` is `resizeMargin/zoom`, i.e. a constant 8 *screen* px.
         let m = resizeMarginInLocalCoordinates
+        // Corners get a wider band than edges so they're reliably grabbable
+        // (an `m×m` corner is a near-impossible ~8px target, smaller when zoomed
+        // out). Match the visual `cornerHoverSize` hover region (world units) so
+        // what the user sees they can grab, with a screen-space floor of `2*m`
+        // (twice the edge band) so the corner never collapses at low zoom.
+        let c = max(TileNSView.cornerHoverSize, 2 * m)
         let nearLeft = point.x <= m
         let nearRight = point.x >= bounds.width - m
         let nearTop = point.y <= m
         let nearBottom = point.y >= bounds.height - m
+        let nearLeftCorner = point.x <= c
+        let nearRightCorner = point.x >= bounds.width - c
+        let nearTopCorner = point.y <= c
+        let nearBottomCorner = point.y >= bounds.height - c
 
         switch (nearTop, nearBottom, nearLeft, nearRight) {
-        case (true, _, true, _):  return .topLeft
-        case (true, _, _, true):  return .topRight
-        case (_, true, true, _):  return .bottomLeft
-        case (_, true, _, true):  return .bottomRight
+        case _ where nearTopCorner && nearLeftCorner:     return .topLeft
+        case _ where nearTopCorner && nearRightCorner:    return .topRight
+        case _ where nearBottomCorner && nearLeftCorner:  return .bottomLeft
+        case _ where nearBottomCorner && nearRightCorner: return .bottomRight
         case (true, _, _, _):     return .top
         case (_, true, _, _):     return .bottom
         case (_, _, true, _):     return .left

@@ -1094,21 +1094,46 @@ final class CanvasNSView: NSView {
         var frames: [String: [String: Double]] = [:]
         var bounds: [String: [String: Double]] = [:]
         var edgePasses: [String: Bool] = [:]
+        var cornerPasses: [String: Bool] = [:]
         for zoom in zooms {
             canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
             tileView.layoutSubtreeIfNeeded()
             frames[String(zoom)] = ["width": tileView.frame.width, "height": tileView.frame.height]
             bounds[String(zoom)] = ["width": tileView.bounds.width, "height": tileView.bounds.height]
+            // Bands mirror TileNSView.resizeEdge: edge band `m` is a constant
+            // 8 screen px (in world units); corner band `c` matches the visual
+            // cornerHoverSize with a `2*m` screen-space floor. Probe points are
+            // derived from the bounds + bands (not magic per-zoom constants).
             let m = TileNSView.resizeMargin / CGFloat(zoom)
+            let c = max(TileNSView.cornerHoverSize, 2 * m)
+            let w = tileView.bounds.width
+            let h = tileView.bounds.height
+            // Edge mid-points: x/y far from any corner so only the edge applies.
             let left = tileView.qaResizeEdge(at: CGPoint(x: max(0.25, m / 2), y: tileView.bounds.midY)) == .left
-            let right = tileView.qaResizeEdge(at: CGPoint(x: tileView.bounds.width - max(0.25, m / 2), y: tileView.bounds.midY)) == .right
+            let right = tileView.qaResizeEdge(at: CGPoint(x: w - max(0.25, m / 2), y: tileView.bounds.midY)) == .right
+            let top = tileView.qaResizeEdge(at: CGPoint(x: tileView.bounds.midX, y: max(0.25, m / 2))) == .top
+            let bottom = tileView.qaResizeEdge(at: CGPoint(x: tileView.bounds.midX, y: h - max(0.25, m / 2))) == .bottom
             let center = tileView.qaResizeEdge(at: CGPoint(x: tileView.bounds.midX, y: tileView.bounds.midY)) == nil
-            edgePasses[String(zoom)] = left && right && center
+            edgePasses[String(zoom)] = left && right && top && bottom && center
+            // Corner probe at offset `off` is strictly inside (m, c] on BOTH
+            // axes: the OLD m-only hit-test would miss it (returns nil — neither
+            // edge band reached) but the new corner band catches it. This proves
+            // the fix, not just that corners-at-the-vertex work.
+            let off = (m + c) / 2
+            let topLeft = tileView.qaResizeEdge(at: CGPoint(x: off, y: off)) == .topLeft
+            let topRight = tileView.qaResizeEdge(at: CGPoint(x: w - off, y: off)) == .topRight
+            let bottomLeft = tileView.qaResizeEdge(at: CGPoint(x: off, y: h - off)) == .bottomLeft
+            let bottomRight = tileView.qaResizeEdge(at: CGPoint(x: w - off, y: h - off)) == .bottomRight
+            // Guard the premise: `off` must be beyond the edge band so this is a
+            // genuine "old logic would miss" probe.
+            try expect(off > m, "corner probe offset \(off) must exceed edge band \(m) at zoom \(zoom)")
+            cornerPasses[String(zoom)] = topLeft && topRight && bottomLeft && bottomRight
             try expect(tileView.bounds.size == CGSize(width: tile.frame.width, height: tile.frame.height), "bounds should remain world-sized at zoom \(zoom)")
         }
 
         try expect(tileView.probe.setFrameSizeCalls == 0, "content setFrameSize calls during zoom should be zero, got \(tileView.probe.setFrameSizeCalls) sizes=\(tileView.probe.observedSizes)")
         try expect(edgePasses.values.allSatisfy { $0 }, "resize-edge hit tests failed: \(edgePasses)")
+        try expect(cornerPasses.values.allSatisfy { $0 }, "resize-corner hit tests failed: \(cornerPasses)")
 
         let manifest: [String: Any] = [
             "check": "tile-world-bounds",
@@ -1118,7 +1143,8 @@ final class CanvasNSView: NSView {
             "bounds": bounds,
             "contentSetFrameSizeCallsAfterInstall": callsAfterInstall,
             "contentSetFrameSizeCallsDuringZoom": tileView.probe.setFrameSizeCalls,
-            "resizeEdgePasses": edgePasses
+            "resizeEdgePasses": edgePasses,
+            "resizeCornerPasses": cornerPasses
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
