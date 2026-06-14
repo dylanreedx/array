@@ -95,6 +95,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--settings-panel-check") {
+            do {
+                _ = NSApplication.shared
+                try SettingsPanel.runSelfCheck()
+                print("ContinuumRevivedSettingsPanelChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-url-focus-check") {
             do {
                 _ = NSApplication.shared
@@ -625,6 +637,8 @@ enum ContinuumApp {
         let appMenu = NSMenu(title: appName)
         appMenu.addItem(NSMenuItem(title: "About \(appName)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""))
         appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(NSMenuItem(title: "Settings…", action: #selector(AppDelegate.openSettingsFromMenu(_:)), keyEquivalent: ","))
+        appMenu.addItem(NSMenuItem.separator())
 
         let servicesItem = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
         let servicesMenu = NSMenu(title: "Services")
@@ -804,6 +818,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var registryStore: RegistryStore?
     private var tileSpawner: TileSpawner?
     private var profilePalette: LaunchProfilePalette?
+    private var settingsPanel: SettingsPanel?
     private let focusBroker = FocusBroker()
     private var navKeymap: NavKeymap = .default
     private var qaPerf: QAPerf?
@@ -1981,8 +1996,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             openNavMode()
             return true
         case .settings:
-            // Settings panel + `⌘,` open are wired in A6 (docs/27); no-op for now.
-            return false
+            toggleSettingsPanel()
+            return true
         case .spawnProfile:
             return false
         }
@@ -2072,6 +2087,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self?.profilePalette = nil
         }
         return palette
+    }
+
+    @objc func openSettingsFromMenu(_ sender: Any?) {
+        // The menu item always opens (never toggles) so re-selecting it brings
+        // the panel forward rather than dismissing it.
+        let panel = settingsPanel ?? makeSettingsPanel()
+        if !panel.isVisible {
+            focusBroker.openModal(.settings)
+        }
+        settingsPanel = panel
+        panel.show(near: window)
+    }
+
+    private func toggleSettingsPanel() {
+        let panel = settingsPanel ?? makeSettingsPanel()
+        settingsPanel = panel
+        if panel.isVisible {
+            panel.close()
+        } else {
+            focusBroker.openModal(.settings)
+            panel.show(near: window)
+        }
+    }
+
+    private func makeSettingsPanel() -> SettingsPanel {
+        let panel = SettingsPanel()
+        panel.onClose = { [weak self] in
+            self?.focusBroker.closeModal(.settings)
+            self?.settingsPanel = nil
+        }
+        return panel
     }
 
     private func focusSpawnedTile(_ tileId: UUID) {
@@ -2593,6 +2639,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         profilePalette?.close()
         profilePalette = nil
+        settingsPanel?.close()
+        settingsPanel = nil
 
         // Browsers tear down first: WKWebView's process pool teardown is
         // independent of GhosttyKit's. Inverting the order risks WebKit KVO
