@@ -60,6 +60,7 @@ final class CanvasNSView: NSView {
     let activeZone: ZonePlacement?
     fileprivate let zoneRenderModels: [ZoneRenderModel]
     private var tileViews: [UUID: TileNSView] = [:]
+    private let showsZoneChrome: Bool
     private var zoneChromeViews: [UUID: ZoneChromeNSView] = [:]
     private var navModeOverlayView: NavModeOverlayNSView?
     private var emptyStateView: CanvasEmptyStateNSView?
@@ -73,9 +74,15 @@ final class CanvasNSView: NSView {
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
-    init(canvasState: CanvasState, activeZone: ZonePlacement? = nil, zoneRenderModels: [ZoneRenderModel] = []) {
+    init(
+        canvasState: CanvasState,
+        activeZone: ZonePlacement? = nil,
+        zoneRenderModels: [ZoneRenderModel] = [],
+        showsZoneChrome: Bool = ZoneChromeFeature.current
+    ) {
         self.canvasState = canvasState
         self.activeZone = activeZone
+        self.showsZoneChrome = showsZoneChrome
         if zoneRenderModels.isEmpty, let activeZone {
             self.zoneRenderModels = [ZoneRenderModel(placement: activeZone, displayName: "Project")]
         } else {
@@ -85,7 +92,9 @@ final class CanvasNSView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.withAlphaComponent(0.92).cgColor
         registerForDraggedTypes([.fileURL])
-        installZoneChromeViews()
+        if showsZoneChrome {
+            installZoneChromeViews()
+        }
         updateEmptyStateVisibility()
     }
 
@@ -94,6 +103,7 @@ final class CanvasNSView: NSView {
     }
 
     private func installZoneChromeViews() {
+        guard showsZoneChrome else { return }
         for model in zoneRenderModels {
             let view = ZoneChromeNSView(model: model)
             zoneChromeViews[model.placement.zoneId] = view
@@ -103,6 +113,7 @@ final class CanvasNSView: NSView {
     }
 
     private func layoutZoneChromeViews() {
+        guard showsZoneChrome else { return }
         for model in zoneRenderModels {
             guard let view = zoneChromeViews[model.placement.zoneId] else { continue }
             let worldFrame = CanvasEngine.zoneWorldFrame(model.placement)
@@ -742,7 +753,8 @@ final class CanvasNSView: NSView {
                 ZoneRenderModel(placement: alpha, displayName: "Alpha"),
                 ZoneRenderModel(placement: beta, displayName: "Beta"),
                 ZoneRenderModel(placement: gamma, displayName: "Gamma")
-            ]
+            ],
+            showsZoneChrome: true
         )
         canvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
         canvas.layoutSubtreeIfNeeded()
@@ -770,14 +782,16 @@ final class CanvasNSView: NSView {
             zoneRenderModels: [
                 ZoneRenderModel(placement: overlapBottom, displayName: "Bottom"),
                 ZoneRenderModel(placement: overlapTop, displayName: "Top")
-            ]
+            ],
+            showsZoneChrome: true
         )
         try expect(overlapCanvas.zoneId(at: CGPoint(x: 75, y: 75)) == gammaZoneId, "last render model should be semantic top zone")
 
         let collapsedCanvas = CanvasNSView(
             canvasState: CanvasState(viewport: viewport, tiles: [tile], groups: [], lastActiveTileId: nil),
             activeZone: gamma,
-            zoneRenderModels: [ZoneRenderModel(placement: gamma, displayName: "Gamma")]
+            zoneRenderModels: [ZoneRenderModel(placement: gamma, displayName: "Gamma")],
+            showsZoneChrome: true
         )
         collapsedCanvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
         try expect(collapsedCanvas.tileId(at: CGPoint(x: 1560, y: 64)) == nil, "collapsed zone should suppress child hit-testing")
@@ -788,6 +802,17 @@ final class CanvasNSView: NSView {
         let directory = root.appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent("multi-zone-render-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let screenshot = directory.appendingPathComponent("zone-chrome-enabled.png")
+        guard let rep = canvas.bitmapImageRepForCachingDisplay(in: canvas.bounds) else {
+            throw CheckError.failed("zone chrome screenshot bitmap rep was not created")
+        }
+        canvas.cacheDisplay(in: canvas.bounds, to: rep)
+        guard let png = rep.representation(using: .png, properties: [:]), !png.isEmpty else {
+            throw CheckError.failed("zone chrome screenshot PNG data was empty")
+        }
+        try png.write(to: screenshot, options: .atomic)
+        let screenshotBytes = try Data(contentsOf: screenshot).count
+        try expect(screenshotBytes > 0, "zone chrome screenshot should be non-empty")
         let artifact = directory.appendingPathComponent("manifest.json")
         let manifest: [String: Any] = [
             "check": "multi-zone-render",
@@ -798,7 +823,8 @@ final class CanvasNSView: NSView {
             "gammaChromeFrame": rectDictionary(gammaSnap.frame),
             "collapsedChildHitSuppressed": true,
             "collapsedHeaderZoneId": gammaZoneId.uuidString,
-            "screenshots": "PENDING: deterministic geometry artifact only; no pixel screenshot captured by headless check"
+            "zoneChromeScreenshot": screenshot.path,
+            "screenshots": [screenshot.path]
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)
@@ -840,7 +866,8 @@ final class CanvasNSView: NSView {
             activeZone: zone,
             zoneRenderModels: [
                 ZoneRenderModel(placement: zone, displayName: "Agents", agentStatusRollup: AgentStatusRollup(working: 1, needsAttention: 1, done: 0, stale: 0))
-            ]
+            ],
+            showsZoneChrome: true
         )
         let workingView = DescriptorTileNSView(tile: working)
         workingView.agentStatus = .working

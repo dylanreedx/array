@@ -880,6 +880,31 @@ do {
     expect(invalidLegacyStandard.string(forKey: DefaultBrowserURL.userDefaultsKey) == nil, "DefaultBrowserURL does not migrate invalid legacy value")
 }
 
+// MARK: - ZoneChromeFeature
+
+do {
+    let unsetStandard = UserDefaults(suiteName: "continuum-zone-chrome-unset-\(UUID().uuidString)")!
+    let unset = ZoneChromeFeature.resolvedFromDefaults(standardDefaults: unsetStandard, legacyDefaults: nil)
+    expect(unset == ZoneChromeFeatureResolution(isEnabled: false, source: .fallbackDefault), "ZoneChromeFeature is disabled by default")
+
+    let enabledStandard = UserDefaults(suiteName: "continuum-zone-chrome-enabled-\(UUID().uuidString)")!
+    enabledStandard.set(true, forKey: ZoneChromeFeature.userDefaultsKey)
+    let enabled = ZoneChromeFeature.resolvedFromDefaults(standardDefaults: enabledStandard, legacyDefaults: nil)
+    expect(enabled == ZoneChromeFeatureResolution(isEnabled: true, source: .standardDomain), "ZoneChromeFeature accepts standard enabled value")
+
+    let disabledStandard = UserDefaults(suiteName: "continuum-zone-chrome-disabled-\(UUID().uuidString)")!
+    disabledStandard.set(false, forKey: ZoneChromeFeature.userDefaultsKey)
+    let disabled = ZoneChromeFeature.resolvedFromDefaults(standardDefaults: disabledStandard, legacyDefaults: nil)
+    expect(disabled == ZoneChromeFeatureResolution(isEnabled: false, source: .standardDomain), "ZoneChromeFeature accepts standard disabled value")
+
+    let legacyStandard = UserDefaults(suiteName: "continuum-zone-chrome-legacy-standard-\(UUID().uuidString)")!
+    let legacyDefaults = UserDefaults(suiteName: "continuum-zone-chrome-legacy-\(UUID().uuidString)")!
+    legacyDefaults.set(true, forKey: ZoneChromeFeature.userDefaultsKey)
+    let legacy = ZoneChromeFeature.resolvedFromDefaults(standardDefaults: legacyStandard, legacyDefaults: legacyDefaults)
+    expect(legacy == ZoneChromeFeatureResolution(isEnabled: true, source: .legacyDomainMigrated), "ZoneChromeFeature migrates legacy value")
+    expect(legacyStandard.bool(forKey: ZoneChromeFeature.userDefaultsKey), "ZoneChromeFeature writes migrated legacy value")
+}
+
 // MARK: - BrowserState round trip
 
 do {
