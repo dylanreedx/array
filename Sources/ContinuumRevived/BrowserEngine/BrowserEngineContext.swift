@@ -40,7 +40,9 @@ final class BrowserEngineContext {
         configuration.websiteDataStore = dataStore(for: storageGroupId)
         configuration.preferences.isFraudulentWebsiteWarningEnabled = false
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-        return WKWebView(frame: .zero, configuration: configuration)
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.isInspectable = true
+        return webView
     }
 
     /// Drops the data-store cache. Called after every browser runtime has

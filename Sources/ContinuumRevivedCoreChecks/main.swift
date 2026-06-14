@@ -928,7 +928,7 @@ do {
 do {
     let unsetStandard = UserDefaults(suiteName: "continuum-zone-chrome-unset-\(UUID().uuidString)")!
     let unset = ZoneChromeFeature.resolvedFromDefaults(standardDefaults: unsetStandard, legacyDefaults: nil)
-    expect(unset == ZoneChromeFeatureResolution(isEnabled: false, source: .fallbackDefault), "ZoneChromeFeature is disabled by default")
+    expect(unset == ZoneChromeFeatureResolution(isEnabled: true, source: .fallbackDefault), "ZoneChromeFeature is enabled by default")
 
     let enabledStandard = UserDefaults(suiteName: "continuum-zone-chrome-enabled-\(UUID().uuidString)")!
     enabledStandard.set(true, forKey: ZoneChromeFeature.userDefaultsKey)
