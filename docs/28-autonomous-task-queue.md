@@ -24,7 +24,7 @@ can pass while the user-facing path is dead is the WRONG check.
 ## Foundation — `[pure]`, fully loop-safe
 
 ### F1 — TileAction + TileActionCatalog + FocusDispatch (docs/27 §Architecture, staging 1)
-- **Status: TODO** · deps: none
+- **Status: DONE (84a285f)** · deps: none
 - New Core: `TileAction.swift` (`TileAction`, `TileSizePreset`, `TileChord` — reuse
   `KeyChord` if it exists), `TileActionCatalog.swift` (`actions(for: TileKind) ->
   [TileChord: TileAction]`, defaults in code, override via `continuum.tileKeymap.*`),
