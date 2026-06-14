@@ -921,3 +921,20 @@ Consequences:
 - The deterministic model boundary is fixture JSON → queue rows in Core; app checks use seeded metadata/stubs, not live Linear.
 - Offline/no-key is a normal empty state, not a startup error.
 - Dispatching agents, editing tickets, and OAuth remain follow-up work.
+
+## ADR-0026: In-Process Multi-Controller Runtime
+
+**Status:** Accepted
+**Date:** 2026-06-14
+
+Context: The app runs a single live `ZoneRuntimeController`. CON-48 landed the multi-zone renderer but only one zone's tiles are live; `addProjectZone` persists a placement without a runtime; workspace/project switching is relaunch-only; `CanvasNSView`'s zone fields are immutable at init. This blocks CON-53/51/50. Per-tile hydrate/dehydrate already works on a single controller — the gap is N controllers + a swappable canvas + cross-zone orchestration. Full plan: docs/23-multi-controller-runtime-plan.md.
+
+Decision: Introduce a `WorkspaceRuntime` orchestrator (the AppDelegate holds it in place of the single controller) owning a `ZoneRuntimeRegistry` (one `ZoneRuntimeController` **per projectId**, ref-counted and shared across workspaces), the global `BrowserRuntimeBudget`, and a pure `ZoneHydrationOrchestrator`. `CanvasNSView` becomes a mutable set of `ZoneLayer`s swappable in place. `switchWorkspace(to:)` replaces relaunch-based switching (dehydrate+flush per ADR-0018 → swap document → reuse/create controllers per projectId → hydrate visible → broker focus recovery). Built as a 9-step behavior-neutral sequence (S0–S9), each matrix-green; S3 (mutable canvas) and S7 (in-process swap) require human real-app verification.
+
+Sub-decisions: **D1** identity = projectId, one zone per project per workspace (no duplicate zones). **D2** z-order per-zone within `zoneZOrder` zone painting. **D3** the live budget caps WKWebViews only in v1 (PTYs live while their zone is Live; cross-zone PTY budget deferred). **D4** on switch, offscreen shared-project zones demote to Snapshot, not always-warm.
+
+Consequences:
+- `ZoneRuntimeController` stays per-project and near-unchanged; CON-58 shared-controller sharing falls out of ref-counting for free.
+- CanvasEngine stays pure; existing `--single-zone-compat-check` / `--multi-zone-render-check` / hit-test / focus checks are the regression net at every step.
+- Supersedes the relaunch-only switching path (`switch*AndRelaunch`); `relaunchApplication` survives only as the lock "Open Anyway" fallback.
+- Unblocks CON-53 (S7), CON-51 (S1/S8), CON-50 (S9, merging branch `wip/con-50-zone-lock-degradation`).
