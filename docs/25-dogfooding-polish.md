@@ -7,6 +7,12 @@ So 124 tickets read "Done" while the app feels hollow. This doc is the
 "wire it up / make it feel real" backlog. No Linear tickets yet (issue-limit) —
 this is the durable list. Tag [pure]=loop-buildable, [appkit]=me-verified.
 
+**Progress (2026-06-14, me-orchestrated):** ✅ P0 Cmd+F fixed (852c1db).
+✅ wiring win #1 zone chrome default-on (22f2c65). ✅ wiring win #3 browser
+`isInspectable` (22f2c65). Remaining: P1 resize-corner / drag-grab /
+new-workspace; wins #2 (agent-status feed), #4 (orphan spawns), #5 (find
+count), #6 (profile policy).
+
 ## Capability reality (audited)
 
 | Capability | Status | Note |
@@ -20,11 +26,23 @@ this is the durable list. Tag [pure]=loop-buildable, [appkit]=me-verified.
 
 ## Bugs (root cause + fix, with file:line)
 
-### P0 — Cmd+F greys the whole screen
+### P0 — Cmd+F greys the whole screen — ✅ FIXED (852c1db)
 Cmd+F is double-bound: Focus Mode (FocusModel.swift:75) AND browser find bar.
 The pre-dispatch monitor (ContinuumApp.swift:1535) lets Focus Mode win unless
-`focusBroker.activeSurface` is exactly the focused browser tile — and
-`onAcceptedTileFocus` is never wired in production, so activeSurface drifts.
+`focusBroker.activeSurface` is exactly the focused browser tile.
+**Corrected root cause (the `onAcceptedTileFocus` theory was wrong):**
+`activeSurface` is set directly by `requestFocus`, not by that callback. The
+real gap is that a tile only registers focus in `TileNSView.mouseUp` (line
+~207) and only for *title-bar* clicks; a click inside a WKWebView focuses web
+content and never reaches it, so `activeSurface` stays stale and the monitor's
+pass-through gate misses. **Fix shipped:** `TileNSView.enclosingTileId(of:)`
+resolves the owning tile from the *live first responder*; the monitor yields
+the shortcut when that tile claims it (only browser tiles claim `.focusMode`).
+The zero-sized-overlay (b)/(c) sub-theories were NOT confirmed — Focus Mode
+renders fine for normal tiles, so the overlay was left untouched.
+**Follow-up (separate, riskier):** web-content clicks still don't update
+`activeSurface`, which likely starves agent-status/other activeSurface
+consumers — register browser focus on web-content interaction later.
 `openFocusMode` (:1978-2000) hides the canvas and overlays a **zero-sized
 black** split pane (overlay frame set AFTER addSubview; panes unsized) = grey.
 The self-check passed because it calls the find path directly, bypassing the
@@ -66,7 +84,7 @@ A fresh workspace has none → unswitchable.
 
 ## Wiring gaps (the "make it feel real" wins, ranked by impact-per-effort)
 
-1. **Flip zone chrome on.** `ZoneChromeFeature` default false → true (and/or a
+1. ✅ **DONE (22f2c65). Flip zone chrome on.** `ZoneChromeFeature` default false → true (and/or a
    toggle). Unhides zone headers + per-zone agent rollup + QA pass/fail badges
    — ALL already computed each launch (ContinuumApp.swift:2947-2953) and thrown
    away. One-line, highest visible payoff. [appkit-ish] · `--multi-zone-render-check`.
@@ -74,7 +92,7 @@ A fresh workspace has none → unswitchable.
    + a `tick()` timer → `updateAgentStatus`. Badges currently lie. Engine is
    built; only the feed is missing. (Best after docs/23 status routing / or use
    title-change events directly.) [appkit] · status-transition check.
-3. **Browser devtools = one line.** `webView.isInspectable = true` at
+3. ✅ **DONE (22f2c65). Browser devtools = one line.** `webView.isInspectable = true` at
    `BrowserEngineContext.swift:37` (makeWebView) → the real Safari Web Inspector
    (elements, console, **network tab**) attaches via Safari's Develop menu.
    Matches the project's own spec (browser-tile-polish:61). In-tile network
