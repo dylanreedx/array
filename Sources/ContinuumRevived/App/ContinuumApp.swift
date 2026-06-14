@@ -323,6 +323,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--run-artifacts-tile-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try TileSpawner.runRunArtifactsTileSelfCheck()
+                print("ContinuumRevivedRunArtifactsTileChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-hydration-lifecycle-check") {
             do {
                 _ = NSApplication.shared
@@ -929,6 +941,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     installInitialTicketQueueTile(tile, in: canvasView)
                 case .diffReview:
                     installInitialDiffReviewTile(tile, in: canvasView)
+                case .runArtifacts:
+                    installInitialRunArtifactsTile(tile, in: canvasView, via: spawner)
                 }
             }
 
@@ -1187,6 +1201,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                let projectStore {
                 try? FileManager.default.removeItem(at: projectStore.layout.reviewFile(id: reviewId))
             }
+        case .runArtifacts:
+            // Run artifact viewer tiles are read-only; retain the run directory.
+            break
         }
 
         canvasView.removeTile(id: id)
@@ -1327,6 +1344,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func installInitialFileTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
         spawner.installFileTile(tile, in: canvasView)
+    }
+
+    private func installInitialRunArtifactsTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
+        spawner.installRunArtifactsTile(tile, in: canvasView)
     }
 
     private func installInitialFileTreeTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {

@@ -72,6 +72,7 @@ public enum TileKind: String, Codable, Equatable, Sendable {
     case fileTree
     case ticketQueue
     case diffReview
+    case runArtifacts
 }
 
 public struct TileFrame: Codable, Equatable, Sendable {

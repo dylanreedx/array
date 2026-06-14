@@ -777,6 +777,44 @@ final class TileSpawner {
         canvasView.install(tileView: view, for: tile)
     }
 
+    /// Spawns a read-only run artifacts viewer tile and persists the canvas state.
+    func spawnRunArtifacts(runDirectoryPath: String, title: String? = nil, at worldPoint: CGPoint? = nil) -> FileOutcome {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        let trimmedPath = runDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty else { return .invalidPath }
+
+        let frame = makePlacement(
+            worldPoint: worldPoint,
+            size: CanvasEngine.defaultFrame(for: .runArtifacts),
+            in: canvasView
+        )
+        let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
+        let tile = Tile(
+            id: UUID(),
+            kind: .runArtifacts,
+            title: title ?? "Run: \(URL(fileURLWithPath: trimmedPath).lastPathComponent)",
+            frame: frame,
+            zIndex: nextZ,
+            runtimeRef: nil,
+            metadata: TileMetadata(filePath: trimmedPath)
+        )
+        let view = RunArtifactsTileNSView(tile: tile)
+        canvasView.install(tileView: view, for: tile)
+
+        do {
+            try projectStore.saveCanvas(canvasView.canvasState)
+        } catch {
+            return .failure(error)
+        }
+        return .spawned(tileId: tile.id)
+    }
+
+    /// Installs a run artifacts viewer tile for an existing `Tile` during canvas restore.
+    func installRunArtifactsTile(_ tile: Tile, in canvasView: CanvasNSView) {
+        let view = RunArtifactsTileNSView(tile: tile)
+        canvasView.install(tileView: view, for: tile)
+    }
+
     /// Upserts a BrowserTile entry into BrowserState by tileId so multiple
     /// browser tiles in the same project don't clobber each other.
     private func upsertBrowserTile(
@@ -1663,6 +1701,97 @@ final class TileSpawner {
         try expect(fileTile?.kind == .file, "canvas should persist file tile")
         try expect(fileTile?.metadata.filePath == sampleFile.path, "file tile metadata should persist selected path")
         try expect(fileView.textView.string == "file tile ok", "FileTileNSView should load UTF-8 preview text")
+
+        return artifact
+    }
+
+    static func runRunArtifactsTileSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-run-artifacts-tile-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        let runDir = tempRoot.appendingPathComponent("code-scout-fixture", isDirectory: true)
+        try fileManager.createDirectory(at: runDir, withIntermediateDirectories: true)
+        try Data("{\"id\":\"code-scout-fixture\",\"role\":\"code-scout\",\"status\":\"done\",\"task\":\"inspect CON-92\",\"cwd\":\"/tmp/project\",\"createdAt\":\"2026-06-13T00:00:00Z\",\"updatedAt\":\"2026-06-13T00:01:00Z\"}".utf8).write(to: runDir.appendingPathComponent("run.json"))
+        try Data("{\"ts\":\"2026-06-13T00:00:30Z\",\"type\":\"message\"}\nnot-json\n".utf8).write(to: runDir.appendingPathComponent("events.jsonl"))
+        try Data("# Final\nCON-92 fixture final output\n".utf8).write(to: runDir.appendingPathComponent("final.md"))
+
+        let project = Project(
+            id: UUID(),
+            name: "run-artifacts-tile-check",
+            rootPath: tempRoot.path,
+            createdAt: Date(),
+            updatedAt: Date(),
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+        let spawner = TileSpawner(canvasView: canvas, ghostty: nil, browserEngine: browserEngine, projectStore: store, project: project)
+
+        let tileId: UUID
+        switch spawner.spawnRunArtifacts(runDirectoryPath: runDir.path) {
+        case let .spawned(createdTileId): tileId = createdTileId
+        case .invalidPath: throw CheckError.failed("spawnRunArtifacts rejected valid path")
+        case let .failure(error): throw CheckError.failed("spawnRunArtifacts failed: \(error)")
+        }
+        guard let view = canvas.tileView(for: tileId) as? RunArtifactsTileNSView else {
+            throw CheckError.failed("spawnRunArtifacts did not install RunArtifactsTileNSView")
+        }
+        let canvasOnDisk = try store.loadCanvas()
+        let tile = canvasOnDisk.tiles.first(where: { $0.id == tileId })
+        let rendered = view.textView.string
+
+        let restoredCanvas = CanvasNSView(canvasState: canvasOnDisk)
+        guard let tile else { throw CheckError.failed("canvas should persist runArtifacts tile") }
+        spawner.installRunArtifactsTile(tile, in: restoredCanvas)
+        let restoredView = restoredCanvas.tileView(for: tileId) as? RunArtifactsTileNSView
+
+        let manifest: [String: Any] = [
+            "check": "run-artifacts-tile",
+            "tempProjectRoot": tempRoot.path,
+            "runDirectory": runDir.path,
+            "tileId": tileId.uuidString,
+            "renderedText": rendered,
+            "canvasTileKinds": canvasOnDisk.tiles.map { $0.kind.rawValue },
+            "restoredViewInstalled": restoredView != nil
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("run-artifacts-tile", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+
+        try expect(tile.kind == .runArtifacts, "canvas should persist runArtifacts tile")
+        try expect(tile.metadata.filePath == runDir.path, "runArtifacts tile metadata should persist run dir path")
+        try expect(rendered.contains("Run ID: code-scout-fixture"), "viewer should render run id")
+        try expect(rendered.contains("Status: done"), "viewer should render status")
+        try expect(rendered.contains("inspect CON-92"), "viewer should render task")
+        try expect(rendered.contains("Events: 1 parsed, 1 bad"), "viewer should render event summary")
+        try expect(rendered.contains("CON-92 fixture final output"), "viewer should render final.md")
+        try expect(view.textView.isEditable == false && view.textView.isSelectable, "viewer text must be read-only and selectable")
+        try expect(restoredView != nil, "boot-restore install should recreate RunArtifactsTileNSView")
 
         return artifact
     }

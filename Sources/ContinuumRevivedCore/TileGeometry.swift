@@ -47,6 +47,8 @@ public enum TileGeometry {
             return TilePreset(defaultSize: CGSize(width: 520, height: 480), aspect: .free, sizeQuantum: nil)
         case .diffReview:
             return TilePreset(defaultSize: CGSize(width: 720, height: 520), aspect: .free, sizeQuantum: nil)
+        case .runArtifacts:
+            return TilePreset(defaultSize: CGSize(width: 640, height: 520), aspect: .free, sizeQuantum: nil)
         }
     }
 
@@ -66,6 +68,8 @@ public enum TileGeometry {
             return CGSize(width: 320, height: 240)
         case .diffReview:
             return CGSize(width: 360, height: 260)
+        case .runArtifacts:
+            return CGSize(width: 320, height: 240)
         }
     }
 
