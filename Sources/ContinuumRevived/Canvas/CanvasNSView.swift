@@ -324,6 +324,10 @@ final class CanvasNSView: NSView {
         emptyStateView?.qaSnapshot()
     }
 
+    func qaPressEmptyStateButton(titled title: String) -> Bool {
+        emptyStateView?.qaPressButton(titled: title) ?? false
+    }
+
     private func reorderTileSubviewsByZIndex() {
         let ordering = NSMutableDictionary()
         for (index, tile) in canvasState.tiles.enumerated() {

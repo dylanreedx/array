@@ -2,21 +2,47 @@ import AppKit
 
 @MainActor
 struct CanvasEmptyStateActions {
+    struct RecentProject {
+        let title: String
+        let action: () -> Void
+    }
+
     let spawnClaude: () -> Void
     let spawnShell: () -> Void
     let spawnBrowser: () -> Void
     let openInEditor: () -> Void
+    let addProjectToCanvas: (() -> Void)?
+    let recentProjects: [RecentProject]
+
+    init(
+        spawnClaude: @escaping () -> Void,
+        spawnShell: @escaping () -> Void,
+        spawnBrowser: @escaping () -> Void,
+        openInEditor: @escaping () -> Void,
+        addProjectToCanvas: (() -> Void)? = nil,
+        recentProjects: [RecentProject] = []
+    ) {
+        self.spawnClaude = spawnClaude
+        self.spawnShell = spawnShell
+        self.spawnBrowser = spawnBrowser
+        self.openInEditor = openInEditor
+        self.addProjectToCanvas = addProjectToCanvas
+        self.recentProjects = recentProjects
+    }
 }
 
 @MainActor
 final class CanvasEmptyStateNSView: NSView {
-    var actions: CanvasEmptyStateActions?
+    var actions: CanvasEmptyStateActions? {
+        didSet { rebuildStack() }
+    }
     var projectPath: String? {
         didSet { projectPathLabel.stringValue = projectPath ?? "" }
     }
 
     private let stack = NSStackView()
     private let projectPathLabel = NSTextField(labelWithString: "")
+    private var recentProjectButtons: [NSButton] = []
 
     init(actions: CanvasEmptyStateActions?, projectPath: String? = nil) {
         self.actions = actions
@@ -62,11 +88,21 @@ final class CanvasEmptyStateNSView: NSView {
         stack.spacing = 24
         stack.translatesAutoresizingMaskIntoConstraints = true
         addSubview(stack)
+        rebuildStack()
+    }
 
+    private func rebuildStack() {
+        guard stack.superview != nil else { return }
+        recentProjectButtons = []
+        for view in stack.arrangedSubviews {
+            stack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
         stack.addArrangedSubview(makeIdentityGroup())
         stack.addArrangedSubview(makePaletteHint())
         stack.addArrangedSubview(makeActionGroup())
         stack.addArrangedSubview(makeFooter())
+        needsLayout = true
     }
 
     private func makeIdentityGroup() -> NSView {
@@ -132,6 +168,15 @@ final class CanvasEmptyStateNSView: NSView {
         group.alignment = .centerX
         group.spacing = 8
         group.translatesAutoresizingMaskIntoConstraints = false
+        if actions?.addProjectToCanvas != nil || !(actions?.recentProjects.isEmpty ?? true) {
+            group.addArrangedSubview(makeButton(title: "Add Project to Canvas", action: #selector(addProjectToCanvas)))
+            for (index, project) in (actions?.recentProjects ?? []).prefix(3).enumerated() {
+                let button = makeButton(title: "Recent: \(project.title)", action: #selector(openRecentProject(_:)))
+                button.tag = index
+                recentProjectButtons.append(button)
+                group.addArrangedSubview(button)
+            }
+        }
         group.addArrangedSubview(makeButton(title: "New Claude Terminal   ⌘1", action: #selector(spawnClaude)))
         group.addArrangedSubview(makeButton(title: "New Shell Terminal    ⌘2", action: #selector(spawnShell)))
         group.addArrangedSubview(makeButton(title: "New Browser           ⌘3", action: #selector(spawnBrowser)))
@@ -176,6 +221,12 @@ final class CanvasEmptyStateNSView: NSView {
         )
     }
 
+    func qaPressButton(titled title: String) -> Bool {
+        guard let button = collectSubviews(of: self, as: NSButton.self).first(where: { $0.title == title }) else { return false }
+        button.performClick(nil)
+        return true
+    }
+
     private func collectSubviews<T: NSView>(of view: NSView, as type: T.Type) -> [T] {
         view.subviews.flatMap { subview -> [T] in
             var matches: [T] = []
@@ -199,5 +250,20 @@ final class CanvasEmptyStateNSView: NSView {
 
     @objc private func openInEditor() {
         actions?.openInEditor()
+    }
+
+    @objc private func addProjectToCanvas() {
+        actions?.addProjectToCanvas?()
+    }
+
+    @objc private func openRecentProject(_ sender: NSButton) {
+        guard let project = actions?.recentProjects[safe: sender.tag] else { return }
+        project.action()
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
