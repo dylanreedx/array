@@ -30,6 +30,10 @@ class TileNSView: NSView {
 
     var chromeSnapshot: ChromeSnapshot? { titleBar?.snapshot }
 
+    func setTitleBarAccessory(_ accessory: NSView?) {
+        titleBar?.setAccessory(accessory)
+    }
+
     /// Invoked when the user clicks the title bar's × button. The app sets
     /// this to its tile-delete orchestrator at install time.
     var onClose: (() -> Void)?
@@ -284,6 +288,7 @@ private final class TitleBarView: NSView {
     var agentStatus: AgentStatus? { didSet { needsDisplay = true } }
     var onCloseRequested: (() -> Void)?
     var onStopRunRequested: (() -> Void)?
+    private var accessoryView: NSView?
 
     var snapshot: TileNSView.ChromeSnapshot {
         TileNSView.ChromeSnapshot(
@@ -329,6 +334,20 @@ private final class TitleBarView: NSView {
         ])
     }
 
+    func setAccessory(_ accessory: NSView?) {
+        accessoryView?.removeFromSuperview()
+        accessoryView = accessory
+        guard let accessory else { return }
+        accessory.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(accessory)
+        NSLayoutConstraint.activate([
+            accessory.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -34),
+            accessory.centerYAnchor.constraint(equalTo: centerYAnchor),
+            accessory.widthAnchor.constraint(greaterThanOrEqualToConstant: 160),
+            accessory.heightAnchor.constraint(equalToConstant: 18)
+        ])
+    }
+
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
     }
@@ -345,6 +364,10 @@ private final class TitleBarView: NSView {
         guard bounds.contains(point) else { return nil }
         if closeButton.frame.contains(point) {
             return closeButton
+        }
+        if let accessoryView {
+            let accessoryPoint = convert(point, to: accessoryView)
+            if let hit = accessoryView.hitTest(accessoryPoint) { return hit }
         }
         return self
     }

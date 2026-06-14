@@ -8,8 +8,12 @@ final class DiffReviewTileNSView: TileNSView {
     private(set) var textView: NSTextView
     private let scrollView: NSScrollView
     private let sendCommentsToAgent: (() -> Void)?
+    private let repositoryURL: URL?
+    private var sourceSelection: DiffReviewSource
+    private var sourcePicker: NSPopUpButton?
+    var onSourceChanged: ((Tile) -> Void)?
 
-    init(tile: Tile, repositoryURL: URL, source: GitDiffEngine.Source = .workingTreeVsHEAD, sendCommentsToAgent: (() -> Void)? = nil) {
+    init(tile: Tile, repositoryURL: URL, source: DiffReviewSource? = nil, sendCommentsToAgent: (() -> Void)? = nil) {
         let tv = NSTextView()
         tv.isEditable = false
         tv.isSelectable = true
@@ -40,16 +44,13 @@ final class DiffReviewTileNSView: TileNSView {
         self.textView = tv
         self.scrollView = sv
         self.sendCommentsToAgent = sendCommentsToAgent
+        self.repositoryURL = repositoryURL
+        self.sourceSelection = source ?? DiffReviewSource(metadata: tile.metadata)
         super.init(tile: tile)
         setContentView(sv)
         installFlybackMenuIfNeeded()
-
-        do {
-            let model = try GitDiffEngine().diff(repositoryURL: repositoryURL, source: source)
-            apply(model)
-        } catch {
-            showMessage("Unable to load diff: \(error)")
-        }
+        installSourcePicker()
+        reloadDiff()
     }
 
     init(tile: Tile, model: GitDiffModel, sendCommentsToAgent: (() -> Void)? = nil) {
@@ -78,6 +79,8 @@ final class DiffReviewTileNSView: TileNSView {
         self.textView = tv
         self.scrollView = sv
         self.sendCommentsToAgent = sendCommentsToAgent
+        self.repositoryURL = nil
+        self.sourceSelection = DiffReviewSource(metadata: tile.metadata)
         super.init(tile: tile)
         setContentView(sv)
         installFlybackMenuIfNeeded()
@@ -94,6 +97,19 @@ final class DiffReviewTileNSView: TileNSView {
 
     func triggerSendCommentsToAgentForQA() { sendCommentsToAgent?() }
 
+    func selectSourceForQA(_ source: DiffReviewSource) {
+        applySourceSelection(source)
+    }
+
+    func selectSourcePickerItemForQA(title: String) -> Bool {
+        guard let sourcePicker, let item = sourcePicker.item(withTitle: title) else { return false }
+        sourcePicker.select(item)
+        sourcePickerChanged(sourcePicker)
+        return true
+    }
+
+    var selectedSourceDescription: String { sourceSelection.displayName }
+
     private func installFlybackMenuIfNeeded() {
         guard sendCommentsToAgent != nil else { return }
         let menu = NSMenu()
@@ -104,6 +120,126 @@ final class DiffReviewTileNSView: TileNSView {
     }
 
     @objc private func sendCommentsToAgentMenuItem(_ sender: Any?) { sendCommentsToAgent?() }
+
+    private func installSourcePicker() {
+        guard repositoryURL != nil else { return }
+        let picker = NSPopUpButton(frame: .zero, pullsDown: false)
+        picker.controlSize = .small
+        picker.font = NSFont.systemFont(ofSize: 11)
+        picker.addItem(withTitle: "Working tree vs HEAD")
+        picker.lastItem?.representedObject = DiffReviewSourceKind.workingTreeVsHEAD.rawValue
+        for branch in branchNames() where branch != defaultBaseBranch() {
+            let base = sourceSelection.baseBranch ?? defaultBaseBranch() ?? "main"
+            picker.addItem(withTitle: "Branch \(branch) vs \(base)")
+            picker.lastItem?.representedObject = "\(DiffReviewSourceKind.branchVsBase.rawValue)|\(branch)|\(base)"
+        }
+        picker.addItem(withTitle: "This worktree branch vs base")
+        picker.lastItem?.representedObject = DiffReviewSourceKind.worktreeVsBase.rawValue
+        picker.target = self
+        picker.action = #selector(sourcePickerChanged(_:))
+        if sourceSelection.kind == .workingTreeVsHEAD {
+            picker.selectItem(withTitle: "Working tree vs HEAD")
+        } else if sourceSelection.kind == .branchVsBase, let branch = sourceSelection.branch, let base = sourceSelection.baseBranch {
+            picker.selectItem(withTitle: "Branch \(branch) vs \(base)")
+        } else {
+            picker.selectItem(withTitle: "This worktree branch vs base")
+        }
+        self.sourcePicker = picker
+        setTitleBarAccessory(picker)
+    }
+
+    @objc private func sourcePickerChanged(_ sender: NSPopUpButton) {
+        guard let raw = sender.selectedItem?.representedObject as? String else { return }
+        let parts = raw.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        guard let kind = DiffReviewSourceKind(rawValue: parts[0]) else { return }
+        let resolved: DiffReviewSource
+        if kind == .branchVsBase, parts.count == 3 {
+            resolved = DiffReviewSource(kind: .branchVsBase, branch: parts[1], baseBranch: parts[2])
+        } else {
+            resolved = resolvedSource(kind: kind)
+        }
+        applySourceSelection(resolved)
+    }
+
+    private func resolvedSource(kind: DiffReviewSourceKind) -> DiffReviewSource {
+        switch kind {
+        case .workingTreeVsHEAD:
+            return DiffReviewSource(kind: .workingTreeVsHEAD)
+        case .branchVsBase:
+            let branch = sourceSelection.branch ?? currentBranch() ?? "HEAD"
+            let base = sourceSelection.baseBranch ?? defaultBaseBranch() ?? "main"
+            return DiffReviewSource(kind: .branchVsBase, branch: branch, baseBranch: base)
+        case .worktreeVsBase:
+            let base = sourceSelection.baseBranch ?? defaultBaseBranch() ?? "main"
+            return DiffReviewSource(kind: .worktreeVsBase, branch: currentBranch(), baseBranch: base)
+        }
+    }
+
+    private func applySourceSelection(_ source: DiffReviewSource) {
+        sourceSelection = source
+        var updated = tile
+        updated.metadata = source.applying(to: updated.metadata)
+        tile = updated
+        onSourceChanged?(updated)
+        reloadDiff()
+    }
+
+    private func reloadDiff() {
+        guard let repositoryURL else { return }
+        do {
+            let model = try GitDiffEngine().diff(repositoryURL: repositoryURL, source: try sourceSelection.gitSource(repositoryURL: repositoryURL, currentBranchResolver: Self.currentBranch))
+            apply(model)
+        } catch {
+            showMessage("Unable to load diff: \(error)")
+        }
+    }
+
+    private func currentBranch() -> String? {
+        try? Self.currentBranch(repositoryURL: repositoryURL!)
+    }
+
+    private static func currentBranch(repositoryURL: URL) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["branch", "--show-current"]
+        process.currentDirectoryURL = repositoryURL
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let branch = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return branch.isEmpty ? "HEAD" : branch
+    }
+
+    private func branchNames() -> [String] {
+        guard let repositoryURL else { return [] }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["branch", "--format=%(refname:short)"]
+        process.currentDirectoryURL = repositoryURL
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return (String(data: data, encoding: .utf8) ?? "").split(separator: "\n").map(String.init).filter { !$0.isEmpty }.sorted()
+        } catch {
+            return []
+        }
+    }
+
+    private func defaultBaseBranch() -> String? {
+        guard let repositoryURL else { return nil }
+        let candidates = ["main", "master"]
+        for candidate in candidates where (try? GitDiffEngine().diff(repositoryURL: repositoryURL, source: .branchVsBase(branch: currentBranch() ?? "HEAD", base: candidate))) != nil {
+            return candidate
+        }
+        return nil
+    }
 
     func apply(_ model: GitDiffModel) {
         if model.files.isEmpty {

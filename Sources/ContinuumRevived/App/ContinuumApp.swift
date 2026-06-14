@@ -1200,7 +1200,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 NSSound.beep()
                 return
             }
-            _ = try sendReviewCommentsToAgent(reviewTileId: reviewTileId, targetAgentTileId: target, diffSourceDescription: "working tree vs HEAD")
+            let sourceDescription = canvasView?.canvasState.tiles.first(where: { $0.id == reviewTileId }).map { DiffReviewSource(metadata: $0.metadata).displayName } ?? "working tree vs HEAD"
+            _ = try sendReviewCommentsToAgent(reviewTileId: reviewTileId, targetAgentTileId: target, diffSourceDescription: sourceDescription)
         } catch {
             fputs("sendReviewCommentsFromMenu failed: \(error)\n", stderr)
             NSSound.beep()
@@ -1499,9 +1500,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func installInitialDiffReviewTile(_ tile: Tile, in canvasView: CanvasNSView) {
         if let activeProject {
             let root = URL(fileURLWithPath: activeProject.rootPath, isDirectory: true)
-            canvasView.install(tileView: DiffReviewTileNSView(tile: tile, repositoryURL: root, sendCommentsToAgent: { [weak self] in
+            let diffView = DiffReviewTileNSView(tile: tile, repositoryURL: root, sendCommentsToAgent: { [weak self] in
                 self?.sendReviewCommentsFromMenu(reviewTileId: tile.id)
-            }), for: tile)
+            })
+            diffView.onSourceChanged = { [weak canvasView] updated in canvasView?.updateTile(updated) }
+            canvasView.install(tileView: diffView, for: tile)
         } else {
             canvasView.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
         }
@@ -2480,9 +2483,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         do {
             try projectStore.saveReviewCommentState(reviewState)
             let root = URL(fileURLWithPath: activeProject.rootPath, isDirectory: true)
-            canvasView.install(tileView: DiffReviewTileNSView(tile: tile, repositoryURL: root, sendCommentsToAgent: { [weak self] in
+            let diffView = DiffReviewTileNSView(tile: tile, repositoryURL: root, sendCommentsToAgent: { [weak self] in
                 self?.sendReviewCommentsFromMenu(reviewTileId: tile.id)
-            }), for: tile)
+            })
+            diffView.onSourceChanged = { [weak canvasView] updated in canvasView?.updateTile(updated) }
+            canvasView.install(tileView: diffView, for: tile)
             try projectStore.saveCanvas(canvasView.canvasState)
             focusSpawnedTile(tile.id)
         } catch {
@@ -5740,6 +5745,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try Self.runProcess("/usr/bin/git", ["config", "user.name", "Continuum QA"], cwd: projectRoot)
         try Self.runProcess("/usr/bin/git", ["add", "sample.txt"], cwd: projectRoot)
         try Self.runProcess("/usr/bin/git", ["commit", "-m", "baseline"], cwd: projectRoot)
+        try Self.runProcess("/usr/bin/git", ["branch", "-M", "main"], cwd: projectRoot)
+        try Self.runProcess("/usr/bin/git", ["checkout", "-b", "feature"], cwd: projectRoot)
+        try "one\nfeature branch\n".write(to: projectRoot.appendingPathComponent("sample.txt"), atomically: true, encoding: .utf8)
+        try Self.runProcess("/usr/bin/git", ["add", "sample.txt"], cwd: projectRoot)
+        try Self.runProcess("/usr/bin/git", ["commit", "-m", "feature"], cwd: projectRoot)
+        try Self.runProcess("/usr/bin/git", ["checkout", "main"], cwd: projectRoot)
         try "one\ntwo\n".write(to: projectRoot.appendingPathComponent("sample.txt"), atomically: true, encoding: .utf8)
 
         let diff = try GitDiffEngine().diff(repositoryURL: projectRoot, source: .workingTreeVsHEAD)
@@ -5758,6 +5769,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             throw NSError(domain: "DiffTileCheck", code: 5, userInfo: [NSLocalizedDescriptionKey: "diff review tile did not render visible read-only diff text: \(diffViewEvidence)"])
         }
 
+        let branchView = DiffReviewTileNSView(tile: tile, repositoryURL: projectRoot)
+        branchView.onSourceChanged = { updated in
+            if let idx = materialized.tiles.firstIndex(where: { $0.id == updated.id }) { materialized.tiles[idx] = updated }
+        }
+        guard branchView.selectSourcePickerItemForQA(title: "Branch feature vs main") else {
+            throw NSError(domain: "DiffTileCheck", code: 7, userInfo: [NSLocalizedDescriptionKey: "branch source picker item was not available"])
+        }
+        branchView.frame = window.contentView?.bounds ?? .zero
+        window.contentView = branchView
+        window.layoutIfNeeded()
+        let branchEvidence = branchView.visibilityEvidence(containing: "+feature branch")
+        guard branchEvidence.ok,
+              branchView.tile.metadata.diffSource == "branchVsBase",
+              branchView.tile.metadata.baseBranch == "main",
+              branchView.tile.metadata.branch == "feature" else {
+            throw NSError(domain: "DiffTileCheck", code: 6, userInfo: [NSLocalizedDescriptionKey: "branch diff source did not render or persist metadata: \(branchEvidence)"])
+        }
+
         let store = ProjectStore(projectRoot: projectRoot)
         try store.saveCanvas(materialized)
         let now = Date()
@@ -5769,6 +5798,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let restoredReview = try store.loadReviewCommentState(reviewId: reviewId)
         guard restored.tiles.first?.kind == .diffReview,
               restored.tiles.first?.metadata.reviewId == reviewId,
+              restored.tiles.first?.metadata.diffSource == "branchVsBase",
+              restored.tiles.first?.metadata.baseBranch == "main",
+              restored.tiles.first?.metadata.branch == "feature",
               restoredReview.comments.first?.body == "check comment",
               FileManager.default.fileExists(atPath: store.layout.reviewFile(id: reviewId).path) else {
             throw NSError(domain: "DiffTileCheck", code: 3, userInfo: [NSLocalizedDescriptionKey: "diff review tile or review sidecar did not persist"])
@@ -5796,6 +5828,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "reviewId": reviewId.uuidString,
             "diffFiles": diff.files.map { $0.newPath ?? $0.oldPath ?? "" },
             "diffViewEvidence": diffViewEvidence.description,
+            "branchDiffViewEvidence": branchEvidence.description,
+            "branchDiffSource": branchView.tile.metadata.diffSource ?? "",
+            "branchDiffBase": branchView.tile.metadata.baseBranch ?? "",
+            "branchDiffBranch": branchView.tile.metadata.branch ?? "",
             "screenshot": screenshot.path,
             "persistedComments": restoredReview.comments.count,
             "reviewSidecarRemoved": true,
