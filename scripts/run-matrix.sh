@@ -4,6 +4,34 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT_DIR"
 
+FAST=0
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    --fast)
+      FAST=1
+      shift
+      ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: scripts/run-matrix.sh [--fast]
+
+Runs the project verification matrix. --fast skips the slower packaging bundle
+probe and keeps the build/check/app-flag/git hygiene gates used by the opt-in
+pre-commit hook.
+USAGE
+      exit 0
+      ;;
+    *)
+      echo "run-matrix: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+fi
+if [[ $# -gt 0 ]]; then
+  echo "run-matrix: unexpected extra arguments: $*" >&2
+  exit 2
+fi
+
 run() {
   printf '\n==> %s\n' "$*"
   "$@"
@@ -78,8 +106,16 @@ run_app_check .build/debug/continuum-revived --project-root-resolution-check
 run_app_check .build/debug/continuum-revived --project-picker-resolution-check
 run_app_check .build/debug/continuum-revived --terminal-snapshot-tier-check
 run_app_check .build/debug/continuum-revived --stray-window-audit-check
-run scripts/check-app-bundle.sh --configuration debug
+if [[ "$FAST" -eq 0 ]]; then
+  run scripts/check-app-bundle.sh --configuration debug
+else
+  printf '\n==> skipping scripts/check-app-bundle.sh --configuration debug (--fast)\n'
+fi
 run scripts/check-root-docs.sh
 run git diff --check
 
-printf '\nMatrix passed.\n'
+if [[ "$FAST" -eq 1 ]]; then
+  printf '\nFast matrix passed.\n'
+else
+  printf '\nMatrix passed.\n'
+fi

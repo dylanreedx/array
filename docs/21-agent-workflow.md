@@ -79,6 +79,9 @@ comment and move it to *Blocked* rather than guessing.
 
 Repo: /Users/dylan/Documents/personal/continuum-revived (branch: main)
 
+Optional local guardrail: run `scripts/install-hooks.sh` once per checkout to
+install the opt-in pre-commit hook (`run-matrix.sh --fast`).
+
 Orient (15 min, in order): docs/20-product-vision.md →
 docs/21-agent-workflow.md (this file; it is binding) →
 docs/15-repo-audit-2026-06-10.md §5 → your epic's tickets in Linear.
