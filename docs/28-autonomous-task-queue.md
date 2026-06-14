@@ -133,7 +133,7 @@ keybind chord-capture editor.
   `.bottom/.top/.bottomLeft/.bottomRight/.topLeft/.topRight` at zoom 0.5/1/2.
 
 ### P2 — drag-grab screen-space floor · DOGFOOD
-- **Status: TODO** · deps: none
+- **Status: DONE (0f84caa)** · deps: none
 - Floor the title-bar move-grab in screen space (`max(24, minPx/zoom)`,
   TileNSView ~:170/:17); mirror in `resetCursorRects`.
 
@@ -169,3 +169,6 @@ _(filled in as DOGFOOD tasks land — what to eyeball when you're back)_
   Confirm `⌘F`-in-browser still works (now via the action, not passthrough).
 - **Resize corners (P1):** zoom out, then drag a tile's bottom/any corner to
   resize — the corner should be grabbable (was a dead ~8px target before).
+- **Drag when zoomed out (P2):** zoom out, drag a tile by its top strip — it
+  should move (grab floored to ~28px; was ~7px at 0.3 zoom). Title buttons +
+  edge-resize still work.
