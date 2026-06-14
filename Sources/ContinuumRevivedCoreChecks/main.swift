@@ -3574,4 +3574,87 @@ do {
     try? FileManager.default.removeItem(at: tempRoot)
 }
 
+// MARK: - Settings schema engine
+
+do {
+    let sections = SettingsSchema.sections()
+    let allFields = sections.flatMap(\.fields)
+
+    // Structural invariants: non-empty ids/labels/titles, no duplicate keys.
+    for section in sections {
+        expect(!section.id.isEmpty, "settings section id must be non-empty")
+        expect(!section.title.isEmpty, "settings section title must be non-empty")
+        for field in section.fields {
+            expect(!field.label.isEmpty, "settings field label must be non-empty")
+        }
+    }
+    let fieldKeys = allFields.compactMap(\.key)
+    expect(Set(fieldKeys).count == fieldKeys.count, "settings field keys must be unique across all sections")
+
+    // Existing prefs represented: the schema must bind each of these exact keys.
+    let expectedKeys: Set<String> = [
+        ZoneChromeFeature.userDefaultsKey,
+        DeleteConfirmPolicy.userDefaultsKey,
+        DefaultBrowserURL.userDefaultsKey,
+        TileGapResolver.userDefaultsKey,
+    ]
+    expect(expectedKeys.isSubset(of: Set(fieldKeys)), "settings schema must represent every existing pref key")
+
+    // The Keybindings section renders the ShortcutCatalog via a .shortcuts field.
+    expect(allFields.contains { if case .shortcuts = $0 { return true } else { return false } }, "settings schema must include a .shortcuts field")
+
+    // Per-field UserDefaults behavior in an isolated suite. A suite still reads
+    // the global domain as a fallback, so scrub the schema keys there for the
+    // "empty defaults" assertions (mirrors the delete-policy check above), then
+    // restore on exit.
+    let suiteName = "SettingsSchemaChecks-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    let schemaGlobalDomain = UserDefaults.globalDomain
+    let originalSchemaGlobalDomain = UserDefaults.standard.persistentDomain(forName: schemaGlobalDomain) ?? [:]
+    defer {
+        UserDefaults.standard.setPersistentDomain(originalSchemaGlobalDomain, forName: schemaGlobalDomain)
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+    var scrubbedSchemaGlobalDomain = originalSchemaGlobalDomain
+    for key in fieldKeys { scrubbedSchemaGlobalDomain.removeValue(forKey: key) }
+    UserDefaults.standard.setPersistentDomain(scrubbedSchemaGlobalDomain, forName: schemaGlobalDomain)
+    defaults.removePersistentDomain(forName: suiteName)
+
+    for field in allFields {
+        switch field {
+        case .shortcuts:
+            expect(field.currentValue(in: defaults) == nil, ".shortcuts field has no bound value")
+        case .toggle(_, _, let fallback):
+            expect(field.currentValue(in: defaults) == .bool(fallback), "toggle currentValue on empty defaults is its declared default")
+            field.setValue(.bool(!fallback), in: defaults)
+            expect(field.currentValue(in: defaults) == .bool(!fallback), "toggle round-trips through setValue/currentValue")
+        case .text(_, _, let fallback):
+            expect(field.currentValue(in: defaults) == .string(fallback), "text currentValue on empty defaults is its declared default")
+            field.setValue(.string("\(fallback)-edited"), in: defaults)
+            expect(field.currentValue(in: defaults) == .string("\(fallback)-edited"), "text round-trips through setValue/currentValue")
+        case .choice(let key, _, let options, let fallback):
+            expect(field.currentValue(in: defaults) == .string(fallback), "choice currentValue on empty defaults is its declared default")
+            let valid = options.first { $0 != fallback } ?? fallback
+            field.setValue(.string(valid), in: defaults)
+            expect(field.currentValue(in: defaults) == .string(valid), "choice round-trips a valid option")
+            field.setValue(.string("not-a-valid-option"), in: defaults)
+            expect(field.currentValue(in: defaults) == .string(fallback), "choice rejects an invalid value, falling back to default")
+            expect(defaults.string(forKey: key) == fallback, "choice persists the fallback when given an invalid value")
+        }
+    }
+
+    // The zone-chrome toggle, written through the schema, is observed by the real
+    // resolver in the same isolated suite.
+    let chromeSuiteName = "SettingsSchemaChecks-chrome-\(UUID().uuidString)"
+    let chromeDefaults = UserDefaults(suiteName: chromeSuiteName)!
+    defer { chromeDefaults.removePersistentDomain(forName: chromeSuiteName) }
+    chromeDefaults.removePersistentDomain(forName: chromeSuiteName)
+    let chromeField = allFields.first { $0.key == ZoneChromeFeature.userDefaultsKey }!
+    chromeField.setValue(.bool(false), in: chromeDefaults)
+    expect(
+        ZoneChromeFeature.resolvedFromDefaults(standardDefaults: chromeDefaults, legacyDefaults: nil).isEnabled == false,
+        "zone-chrome field written through the schema is observed by ZoneChromeFeature.resolvedFromDefaults"
+    )
+}
+
 print("ContinuumRevivedCoreChecks passed")

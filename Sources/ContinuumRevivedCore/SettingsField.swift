@@ -1,0 +1,100 @@
+import Foundation
+
+/// A typed, UserDefaults-bound preference descriptor. Adding a new preference to
+/// the settings surface is a one-line `SettingsField` in `SettingsSchema` — the
+/// generic renderer (docs/24 S4/S5) draws each field by its `kind`, so no UI
+/// surgery is needed. Each non-`.shortcuts` field carries the EXACT UserDefaults
+/// key of the existing resolver it drives (e.g. the zone-chrome toggle writes
+/// `continuum.zoneChrome.enabled`, which `ZoneChromeFeature` already reads).
+public enum SettingsField: Equatable, Sendable {
+    /// A boolean preference (rendered as a switch).
+    case toggle(key: String, label: String, default: Bool)
+    /// A free-text preference (rendered as a text field).
+    case text(key: String, label: String, default: String)
+    /// A fixed-options preference (rendered as a popup). `setValue` rejects any
+    /// value not in `options`, falling back to `default`.
+    case choice(key: String, label: String, options: [String], default: String)
+    /// The keybindings editor/guide, which renders `ShortcutCatalog` rather than
+    /// binding a single key.
+    case shortcuts(label: String)
+
+    /// The UserDefaults key this field reads/writes, or `nil` for `.shortcuts`.
+    public var key: String? {
+        switch self {
+        case .toggle(let key, _, _): return key
+        case .text(let key, _, _): return key
+        case .choice(let key, _, _, _): return key
+        case .shortcuts: return nil
+        }
+    }
+
+    /// The human-readable label for this field.
+    public var label: String {
+        switch self {
+        case .toggle(_, let label, _): return label
+        case .text(_, let label, _): return label
+        case .choice(_, let label, _, _): return label
+        case .shortcuts(let label): return label
+        }
+    }
+
+    /// The current value (typed) for this field, or its declared default when the
+    /// key is absent. `nil` for `.shortcuts`.
+    public func currentValue(in defaults: UserDefaults) -> SettingsValue? {
+        switch self {
+        case .toggle(let key, _, let fallback):
+            guard defaults.object(forKey: key) != nil else { return .bool(fallback) }
+            return .bool(defaults.bool(forKey: key))
+        case .text(let key, _, let fallback):
+            return .string(defaults.string(forKey: key) ?? fallback)
+        case .choice(let key, _, let options, let fallback):
+            let raw = defaults.string(forKey: key)
+            if let raw, options.contains(raw) { return .string(raw) }
+            return .string(fallback)
+        case .shortcuts:
+            return nil
+        }
+    }
+
+    /// Persists `value` to UserDefaults. A `.choice` value outside `options`, or a
+    /// value whose type does not match the field, falls back to the declared
+    /// default. No-op for `.shortcuts`.
+    public func setValue(_ value: SettingsValue, in defaults: UserDefaults) {
+        switch self {
+        case .toggle(let key, _, let fallback):
+            guard case .bool(let flag) = value else { defaults.set(fallback, forKey: key); return }
+            defaults.set(flag, forKey: key)
+        case .text(let key, _, let fallback):
+            guard case .string(let text) = value else { defaults.set(fallback, forKey: key); return }
+            defaults.set(text, forKey: key)
+        case .choice(let key, _, let options, let fallback):
+            guard case .string(let raw) = value, options.contains(raw) else {
+                defaults.set(fallback, forKey: key)
+                return
+            }
+            defaults.set(raw, forKey: key)
+        case .shortcuts:
+            break
+        }
+    }
+}
+
+/// A typed value carried by a `SettingsField` (toggle → bool, text/choice →
+/// string).
+public enum SettingsValue: Equatable, Sendable {
+    case bool(Bool)
+    case string(String)
+}
+
+/// An ordered group of fields shown together in the settings surface.
+public struct SettingsSection: Equatable, Sendable {
+    public let id: String
+    public let title: String
+    public let fields: [SettingsField]
+
+    public init(id: String, title: String, fields: [SettingsField]) {
+        self.id = id
+        self.title = title
+        self.fields = fields
+    }
+}
