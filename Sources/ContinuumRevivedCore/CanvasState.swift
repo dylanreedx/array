@@ -71,6 +71,7 @@ public enum TileKind: String, Codable, Equatable, Sendable {
     case file
     case fileTree
     case ticketQueue
+    case conductorQueue
     case diffReview
     case runArtifacts
 }

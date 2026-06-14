@@ -405,6 +405,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--conductor-queue-tile-check") {
+            do {
+                let artifact = try AppDelegate.runConductorQueueTileSelfCheck()
+                print("ContinuumRevivedConductorQueueTileChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--agent-input-check") {
             do {
                 let artifact = try AppDelegate.runAgentInputSelfCheck()
@@ -939,6 +950,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     installInitialFileTreeTile(tile, in: canvasView, via: spawner)
                 case .ticketQueue:
                     installInitialTicketQueueTile(tile, in: canvasView)
+                case .conductorQueue:
+                    installInitialConductorQueueTile(tile, in: canvasView)
                 case .diffReview:
                     installInitialDiffReviewTile(tile, in: canvasView)
                 case .runArtifacts:
@@ -1196,6 +1209,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         case .ticketQueue:
             break
+        case .conductorQueue:
+            break
         case .diffReview:
             if let reviewId = tile.metadata.reviewId,
                let projectStore {
@@ -1367,6 +1382,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasView.install(tileView: TicketQueueTileNSView(tile: tile, dispatchHandler: { [weak self] row in
             self?.dispatchAgent(for: row)
         }), for: tile)
+    }
+
+    private func installInitialConductorQueueTile(_ tile: Tile, in canvasView: CanvasNSView) {
+        if let activeProject {
+            let root = URL(fileURLWithPath: activeProject.rootPath, isDirectory: true)
+            canvasView.install(tileView: ConductorQueueTileNSView(tile: tile, projectRoot: root), for: tile)
+        } else {
+            canvasView.install(tileView: ConductorQueueTileNSView(tile: tile, snapshot: ConductorQueueSnapshot(tasks: [])), for: tile)
+        }
     }
 
     private func installInitialDiffReviewTile(_ tile: Tile, in canvasView: CanvasNSView) {
@@ -5550,6 +5574,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let observedText = (renderedTexts + emptyTexts).map { $0.replacingOccurrences(of: "\"", with: "'") }.joined(separator: " | ")
         try "{\"tileId\":\"\(tileId.uuidString)\",\"kind\":\"ticketQueue\",\"teamKey\":\"CON\",\"renderedRows\":[\"CON-130\"],\"emptyState\":\"No Linear API key configured\",\"observedText\":\"\(observedText)\",\"status\":\"passed\"}\n".write(to: artifact, atomically: true, encoding: .utf8)
         return artifact
+    }
+
+    static func runConductorQueueTileSelfCheck() throws -> URL {
+        let tileId = UUID(uuidString: "A9300000-0000-4000-8000-000000000093")!
+        let projectRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("continuum-conductor-queue-check-\(UUID().uuidString)", isDirectory: true)
+        let conductorDir = projectRoot.appendingPathComponent(".conductor", isDirectory: true)
+        try FileManager.default.createDirectory(at: conductorDir, withIntermediateDirectories: true)
+        let db = conductorDir.appendingPathComponent("conductor.db")
+        let sql = """
+        CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+        CREATE TABLE tasks (id TEXT PRIMARY KEY, project_id TEXT, category TEXT NOT NULL, phase INTEGER NOT NULL, description TEXT NOT NULL, status TEXT NOT NULL, priority INTEGER NOT NULL, attempt_count INTEGER NOT NULL, updated_at INTEGER);
+        INSERT INTO projects (id, name) VALUES ('p1', 'continuum-revived');
+        INSERT INTO tasks (id, project_id, category, phase, description, status, priority, attempt_count, updated_at) VALUES ('task-alpha', 'p1', 'feature', 2, 'Queue tile fixture', 'pending', 9, 1, 100);
+        INSERT INTO tasks (id, project_id, category, phase, description, status, priority, attempt_count, updated_at) VALUES ('task-beta', 'p1', 'qa', 3, 'Done fixture', 'done', 2, 0, 200);
+        """
+        try runSQLiteSQL(sql, databaseURL: db)
+        _ = try ConductorQueueReader().read(projectRoot: projectRoot)
+        let tile = Tile(id: tileId, kind: .conductorQueue, title: "Conductor Queue", frame: TileFrame(x: 40, y: 60, width: 520, height: 480), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let state = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile], groups: [], lastActiveTileId: tileId)
+        let store = ProjectStore(projectRoot: projectRoot)
+        try store.saveCanvas(state)
+        let restored = try store.loadCanvas()
+        guard restored.tiles.first?.kind == .conductorQueue else {
+            throw NSError(domain: "ConductorQueueTileCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: "conductor queue tile did not persist through ProjectStore"])
+        }
+        let rendered = ConductorQueueTileNSView(tile: tile, projectRoot: projectRoot, startTimer: false)
+        let renderedTexts = Self.textFieldStrings(in: rendered)
+        guard rendered.renderedTaskIds == ["task-alpha", "task-beta"],
+              renderedTexts.contains(where: { $0.contains("task-alpha") && $0.contains("pending") && $0.contains("p9") && $0.contains("continuum-revived") }),
+              renderedTexts.contains(where: { $0.contains("task-beta") && $0.contains("done") }) else {
+            throw NSError(domain: "ConductorQueueTileCheck", code: 2, userInfo: [NSLocalizedDescriptionKey: "conductor queue tile did not render fixture task rows"])
+        }
+        try runSQLiteSQL("UPDATE tasks SET status='running', priority=10 WHERE id='task-alpha';", databaseURL: db)
+        rendered.refreshNow()
+        let updatedText = Self.textFieldStrings(in: rendered).joined(separator: " | ")
+        guard updatedText.contains("task-alpha · running · p10") else {
+            throw NSError(domain: "ConductorQueueTileCheck", code: 3, userInfo: [NSLocalizedDescriptionKey: "conductor queue tile refresh did not render db update"])
+        }
+        let warning = ConductorQueueTileNSView(tile: tile, snapshot: ConductorQueueSnapshot(tasks: [], warnings: ["fixture warning"]))
+        guard warning.warningMessages == ["fixture warning"],
+              Self.textFieldStrings(in: warning).contains(where: { $0.contains("Conductor queue unavailable") && $0.contains("fixture warning") }) else {
+            throw NSError(domain: "ConductorQueueTileCheck", code: 5, userInfo: [NSLocalizedDescriptionKey: "conductor queue warning state did not render distinctly"])
+        }
+        let empty = ConductorQueueTileNSView(tile: tile, snapshot: ConductorQueueSnapshot(tasks: []))
+        guard empty.emptyStateMessage == "No conductor tasks",
+              Self.textFieldStrings(in: empty).contains("No conductor tasks") else {
+            throw NSError(domain: "ConductorQueueTileCheck", code: 4, userInfo: [NSLocalizedDescriptionKey: "conductor queue empty state did not render"])
+        }
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let dir = URL(fileURLWithPath: "qa-runs/conductor-queue-tile-\(timestamp)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let artifact = dir.appendingPathComponent("manifest.json")
+        try Data(contentsOf: store.layout.canvasFile).write(to: dir.appendingPathComponent("canvas.json"))
+        let manifest: [String: Any] = ["tileId": tileId.uuidString, "kind": "conductorQueue", "renderedTasks": rendered.renderedTaskIds, "updatedText": updatedText, "emptyState": "No conductor tasks", "status": "passed"]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    private static func runSQLiteSQL(_ sql: String, databaseURL: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [databaseURL.path]
+        let input = Pipe()
+        process.standardInput = input
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        input.fileHandleForWriting.write(Data(sql.utf8))
+        try? input.fileHandleForWriting.close()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "ConductorQueueTileCheck", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: "sqlite3 fixture setup failed"])
+        }
     }
 
     static func runAgentInputSelfCheck() throws -> URL {

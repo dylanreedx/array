@@ -24,6 +24,7 @@ public enum FocusSurfaceKind: String, Codable, Equatable, Hashable, Sendable {
     case file
     case fileTree
     case ticketQueue
+    case conductorQueue
     case diffReview
     case runArtifacts
     case palette
