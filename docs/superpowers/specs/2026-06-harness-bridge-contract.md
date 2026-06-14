@@ -27,6 +27,20 @@ Required fields for readers:
 
 Optional/version-tolerant fields observed: `startedAt`, `endedAt`, `model`, `reasoning`, `tools`, `tmux`, `parentRunId`, `chainStep`, and `pid`. Missing optional fields must not fail rendering; process termination details such as `exitCode` and `signal` are observed on `events.jsonl` `finished` events.
 
+### `control.json`
+
+Continuum-spawned runs MUST be launched in their own process group before execing the harness command and MUST write `.pi/agent-runs/<runId>/control.json` atomically before exec. This is the kill/cleanup handle; consumers must never infer a kill target by process search.
+
+Required fields:
+
+- `runId` string: equals the directory name and the descriptor binding; kill controls must reject mismatches.
+- `processGroupId` integer: positive PGID used for `kill(-processGroupId, SIGTERM)` and, after the grace period, `SIGKILL` if the group still exists.
+
+Optional fields:
+
+- `pid` integer: process id of the group leader at wrapper startup, useful for diagnostics only.
+- `createdAt` ISO-8601 string.
+
 ### `events.jsonl`
 
 UTF-8 JSON Lines. Each line is an event object. Required common fields:

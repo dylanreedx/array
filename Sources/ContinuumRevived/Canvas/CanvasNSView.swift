@@ -14,6 +14,7 @@ final class CanvasNSView: NSView {
     /// wires every installed tile's `onClose` to call this, so the app sets
     /// this once at startup rather than at every TileSpawner install site.
     var onTileCloseRequested: ((UUID) -> Void)?
+    var onTileStopRunRequested: ((UUID) -> Void)?
     weak var focusBroker: FocusBroker? {
         didSet {
             guard oldValue !== focusBroker else { return }
@@ -129,6 +130,9 @@ final class CanvasNSView: NSView {
         let tileId = tile.id
         tileView.onClose = { [weak self] in
             self?.onTileCloseRequested?(tileId)
+        }
+        tileView.onStopRun = { [weak self] in
+            self?.onTileStopRunRequested?(tileId)
         }
         addSubview(tileView)
         focusBroker?.register(tileView)

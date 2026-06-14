@@ -1,5 +1,6 @@
 import ContinuumRevivedCore
 import CoreGraphics
+import Darwin
 import Foundation
 
 func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
@@ -777,8 +778,60 @@ do {
         runId: runId
     )
     expect(profile.command == "/usr/bin/env", "HarnessRoleRunBuilder routes through env pi command")
-    expect(profile.arguments == ["CONTINUUM_HARNESS_RUN_ID=\(runId)", "pi", "--mode", "json", "-p", "--no-session", "--model", "openai-codex/gpt-5.5", "--thinking", "medium", "--tools", "read, bash", "--system-prompt", qaPath, "Review CON-94"], "HarnessRoleRunBuilder builds documented pi role invocation without executing it")
+    expect(profile.arguments.prefix(4).elementsEqual(["CONTINUUM_HARNESS_RUN_ID=\(runId)", "python3", "-c", HarnessRoleRunBuilder.processGroupControlScript(runId: runId)]), "HarnessRoleRunBuilder wraps pi in a process-group control script")
+    expect(Array(profile.arguments.dropFirst(4)) == ["pi", "--mode", "json", "-p", "--no-session", "--model", "openai-codex/gpt-5.5", "--thinking", "medium", "--tools", "read, bash", "--system-prompt", qaPath, "Review CON-94"], "HarnessRoleRunBuilder builds documented pi role invocation without executing it")
     expect(profile.cwd == "/repo", "HarnessRoleRunBuilder binds cwd to project root")
+    expect(profile.arguments[3].contains("os.setsid()") && profile.arguments[3].contains("control.json"), "HarnessRoleRunBuilder persists a process-group kill handle before exec")
+    let controlDir = temp.appendingPathComponent("control-run")
+    try FileManager.default.createDirectory(at: controlDir, withIntermediateDirectories: true)
+    try "{\"runId\":\"\(runId)\",\"processGroupId\":12345,\"pid\":12345}".write(to: controlDir.appendingPathComponent("control.json"), atomically: true, encoding: .utf8)
+    let handle = try HarnessRunControl.readHandle(runDirectory: controlDir, expectedRunId: runId)
+    expect(handle == HarnessRunControlHandle(runId: runId, processGroupId: 12345, pid: 12345), "HarnessRunControl reads the persisted process-group handle")
+    try "{\"runId\":\"other\",\"processGroupId\":12345}".write(to: controlDir.appendingPathComponent("control.json"), atomically: true, encoding: .utf8)
+    do {
+        _ = try HarnessRunControl.readHandle(runDirectory: controlDir, expectedRunId: runId)
+        expect(false, "HarnessRunControl rejects stale run ids")
+    } catch HarnessRunControlError.runIdMismatch(let expected, let actual) {
+        expect(expected == runId && actual == "other", "HarnessRunControl reports run id mismatch")
+    }
+    for invalidPGID in ["1.5", "2147483648", "\"12345\""] {
+        try "{\"runId\":\"\(runId)\",\"processGroupId\":\(invalidPGID)}".write(to: controlDir.appendingPathComponent("control.json"), atomically: true, encoding: .utf8)
+        do {
+            _ = try HarnessRunControl.readHandle(runDirectory: controlDir, expectedRunId: runId)
+            expect(false, "HarnessRunControl rejects invalid processGroupId \(invalidPGID)")
+        } catch HarnessRunControlError.malformedControlFile {}
+    }
+
+    let treeRunId = "tree-kill-check"
+    let treeDir = temp.appendingPathComponent(".pi/agent-runs/\(treeRunId)")
+    let childPidFile = treeDir.appendingPathComponent("child.pid")
+    let treeProcess = Process()
+    treeProcess.currentDirectoryURL = temp
+    treeProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    treeProcess.arguments = ["python3", "-c", """
+import json, os, pathlib, subprocess, sys, time
+run_id='\(treeRunId)'
+pid=os.fork()
+if pid:
+    sys.exit(0)
+os.setsid()
+root=pathlib.Path('.pi/agent-runs')/run_id
+root.mkdir(parents=True, exist_ok=True)
+child=subprocess.Popen(['sleep','30'])
+(root/'child.pid').write_text(str(child.pid), encoding='utf-8')
+(root/'control.json').write_text(json.dumps({'runId':run_id,'processGroupId':os.getpgrp(),'pid':os.getpid()}), encoding='utf-8')
+time.sleep(30)
+"""]
+    try treeProcess.run()
+    let deadline = Date().addingTimeInterval(5)
+    while !FileManager.default.fileExists(atPath: childPidFile.path), Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+    let treeHandle = try HarnessRunControl.readHandle(runDirectory: treeDir, expectedRunId: treeRunId)
+    let childPid = Int32((try String(contentsOf: childPidFile, encoding: .utf8)).trimmingCharacters(in: .whitespacesAndNewlines))!
+    try HarnessRunControl.terminateProcessGroup(treeHandle, graceSeconds: 0.1)
+    treeProcess.waitUntilExit()
+    expect(kill(treeHandle.pid!, 0) == -1 && errno == ESRCH, "HarnessRunControl kills the run process-group leader")
+    expect(kill(childPid, 0) == -1 && errno == ESRCH, "HarnessRunControl kills the sleeping child process in the group")
+
     let descriptor = AgentDescriptor.configuring(agentKind: "qa-reviewer", worktreePath: "/repo", now: Date(timeIntervalSince1970: 1_765_584_000), runId: runId)
     expect(descriptor.runId == runId, "AgentDescriptor configuring seam binds harness run id")
 }

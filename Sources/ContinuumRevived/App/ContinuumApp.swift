@@ -862,6 +862,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             canvasView.onTileCloseRequested = { [weak self] tileId in
                 self?.deleteTile(id: tileId)
             }
+            canvasView.onTileStopRunRequested = { [weak self] tileId in
+                self?.stopHarnessRun(tileId: tileId)
+            }
 
             self.ghostty = ghostty
             self.browserEngine = browserEngine
@@ -1695,6 +1698,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             deliverNeedsAttentionNotification(count: count)
         }
         lastNeedsAttentionCount = count
+    }
+
+    private func stopHarnessRun(tileId: UUID) {
+        guard let session = (try? projectStore?.listSessions())??.first(where: { $0.tileId == tileId }),
+              let runId = session.agentDescriptor?.runId,
+              let projectRoot = activeProject?.rootPath else { return }
+        let runDirectory = URL(fileURLWithPath: projectRoot, isDirectory: true)
+            .appendingPathComponent(".pi/agent-runs/\(runId)", isDirectory: true)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                let handle = try HarnessRunControl.readHandle(runDirectory: runDirectory, expectedRunId: runId)
+                try HarnessRunControl.terminateProcessGroup(handle)
+                DispatchQueue.main.async {
+                    self?.updateAgentStatus(tileId: tileId, status: .done)
+                }
+            } catch {
+                fputs("Stop run failed for \(runId): \(error)\n", stderr)
+            }
+        }
     }
 
     private func updateAgentStatus(tileId: UUID, status: AgentStatus, now: Date = Date()) {

@@ -81,22 +81,37 @@ public enum HarnessRoleRunBuilder {
     }
 
     public static func buildLaunchProfile(role: HarnessRole, prompt: String, projectRoot: String, runId: String) -> LaunchProfile {
-        var arguments = [
-            "CONTINUUM_HARNESS_RUN_ID=\(runId)",
+        var piArguments = [
             "pi",
             "--mode", "json",
             "-p",
             "--no-session"
         ]
-        if let model = role.model { arguments += ["--model", model] }
-        if let reasoning = role.reasoning { arguments += ["--thinking", reasoning] }
-        if let tools = role.tools { arguments += ["--tools", tools] }
-        arguments += ["--system-prompt", role.promptPath, prompt]
+        if let model = role.model { piArguments += ["--model", model] }
+        if let reasoning = role.reasoning { piArguments += ["--thinking", reasoning] }
+        if let tools = role.tools { piArguments += ["--tools", tools] }
+        piArguments += ["--system-prompt", role.promptPath, prompt]
+        let controlScript = processGroupControlScript(runId: runId)
         return LaunchProfile(
             command: "/usr/bin/env",
-            arguments: arguments,
+            arguments: ["CONTINUUM_HARNESS_RUN_ID=\(runId)", "python3", "-c", controlScript] + piArguments,
             cwd: projectRoot,
             title: "Agent · \(role.displayName)"
         )
+    }
+
+    public static func processGroupControlScript(runId: String) -> String {
+        """
+        import json, os, pathlib, sys, time
+        run_id = \(String(reflecting: runId))
+        os.setsid()
+        root = pathlib.Path.cwd() / '.pi' / 'agent-runs' / run_id
+        root.mkdir(parents=True, exist_ok=True)
+        control = {'runId': run_id, 'processGroupId': os.getpgrp(), 'pid': os.getpid(), 'createdAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
+        tmp = root / 'control.json.tmp'
+        tmp.write_text(json.dumps(control, sort_keys=True), encoding='utf-8')
+        os.replace(tmp, root / 'control.json')
+        os.execvp(sys.argv[1], sys.argv[1:])
+        """
     }
 }

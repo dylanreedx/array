@@ -33,6 +33,7 @@ class TileNSView: NSView {
     /// Invoked when the user clicks the title bar's × button. The app sets
     /// this to its tile-delete orchestrator at install time.
     var onClose: (() -> Void)?
+    var onStopRun: (() -> Void)?
 
     private var titleBar: TitleBarView?
     private var cornerOverlay: CornerOverlayView?
@@ -57,6 +58,7 @@ class TileNSView: NSView {
         let bar = TitleBarView(tile: tile, agentStatus: agentStatus)
         bar.translatesAutoresizingMaskIntoConstraints = false
         bar.onCloseRequested = { [weak self] in self?.onClose?() }
+        bar.onStopRunRequested = { [weak self] in self?.onStopRun?() }
         addSubview(bar)
         NSLayoutConstraint.activate([
             bar.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -281,6 +283,7 @@ private final class TitleBarView: NSView {
     var tile: Tile { didSet { needsDisplay = true } }
     var agentStatus: AgentStatus? { didSet { needsDisplay = true } }
     var onCloseRequested: (() -> Void)?
+    var onStopRunRequested: (() -> Void)?
 
     var snapshot: TileNSView.ChromeSnapshot {
         TileNSView.ChromeSnapshot(
@@ -358,8 +361,24 @@ private final class TitleBarView: NSView {
         superview?.mouseUp(with: event)
     }
 
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu(title: "Tile")
+        let stop = NSMenuItem(title: "Stop run", action: #selector(handleStopRun(_:)), keyEquivalent: "")
+        stop.target = self
+        menu.addItem(stop)
+        menu.addItem(NSMenuItem.separator())
+        let close = NSMenuItem(title: "Close tile", action: #selector(handleClose(_:)), keyEquivalent: "")
+        close.target = self
+        menu.addItem(close)
+        return menu
+    }
+
     @objc private func handleClose(_ sender: Any?) {
         onCloseRequested?()
+    }
+
+    @objc private func handleStopRun(_ sender: Any?) {
+        onStopRunRequested?()
     }
 
     override func draw(_ dirtyRect: NSRect) {

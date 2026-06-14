@@ -392,6 +392,17 @@ final class GhosttyTerminalView: NSView {
         }
     }
 
+    private static func commandLine(for launchProfile: LaunchProfile) -> String {
+        ([launchProfile.command] + launchProfile.arguments).map(shellQuote).joined(separator: " ")
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        guard !value.isEmpty else { return "''" }
+        let safe = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_+-./:=,@%")
+        if value.unicodeScalars.allSatisfy({ safe.contains($0) }) { return value }
+        return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     private func createSurface(app: ghostty_app_t) {
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
         var config = ghostty_surface_config_new()
@@ -408,8 +419,9 @@ final class GhosttyTerminalView: NSView {
         config.wait_after_command = false
         config.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
 
+        let commandLine = Self.commandLine(for: launchProfile)
         launchProfile.cwd.withCString { cwdPointer in
-            launchProfile.command.withCString { commandPointer in
+            commandLine.withCString { commandPointer in
                 config.working_directory = cwdPointer
                 config.command = commandPointer
                 surface = ghostty_surface_new(app, &config)
