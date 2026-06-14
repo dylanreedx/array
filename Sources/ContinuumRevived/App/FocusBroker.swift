@@ -20,6 +20,11 @@ final class FocusBroker {
     var navKeymap: NavKeymap = .default
     private(set) var activeSurface: FocusSurfaceID?
     var onAcceptedTileFocus: ((UUID) -> Void)?
+    /// Fires whenever scope settles on the canvas (i.e. leaves all tiles).
+    /// Mirrors `onAcceptedTileFocus`; lets the canvas clear the focus border
+    /// when the scope is no longer a tile (`onAcceptedTileFocus` covers the
+    /// tile→tile transition, this covers tile→canvas).
+    var onAcceptedCanvasScope: (() -> Void)?
     var activationFallbackSurfaces: (() -> [FocusSurfaceID])?
 
     func register(_ adapter: FocusSurfaceAdapter) {
@@ -43,10 +48,13 @@ final class FocusBroker {
             activeSurface = id
             if case let .tile(tileId) = id {
                 onAcceptedTileFocus?(tileId)
+            } else {
+                onAcceptedCanvasScope?()
             }
             return
         }
         activeSurface = id
+        onAcceptedCanvasScope?()
     }
 
     @discardableResult
@@ -57,6 +65,7 @@ final class FocusBroker {
 
         if case .modal = id {
             activeSurface = id
+            onAcceptedCanvasScope?()
             return true
         }
 
@@ -70,6 +79,8 @@ final class FocusBroker {
         activeSurface = id
         if case let .tile(tileId) = id {
             onAcceptedTileFocus?(tileId)
+        } else {
+            onAcceptedCanvasScope?()
         }
         return true
     }

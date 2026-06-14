@@ -104,6 +104,11 @@ final class ZoneRuntimeController {
         focusBroker.onAcceptedTileFocus = { [weak self] tileId in
             self?.canvasView?.markActive(tileId: tileId)
         }
+        // Scope leaving all tiles (canvas/modal) clears the marching-ants
+        // border; the tile→tile transition is covered by markActive above.
+        focusBroker.onAcceptedCanvasScope = { [weak self] in
+            self?.canvasView?.clearFocusBorder()
+        }
         focusBroker.activationFallbackSurfaces = { [weak self] in
             guard let self else { return [] }
             var fallbacks: [FocusSurfaceID] = []
@@ -121,6 +126,7 @@ final class ZoneRuntimeController {
     func detachUI() {
         canvasView?.detachFocusBroker()
         focusBroker?.onAcceptedTileFocus = nil
+        focusBroker?.onAcceptedCanvasScope = nil
         focusBroker?.activationFallbackSurfaces = nil
         focusBroker = nil
         canvasView = nil

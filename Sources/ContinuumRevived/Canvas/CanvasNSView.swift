@@ -205,13 +205,42 @@ final class CanvasNSView: NSView {
         if canvasState.lastActiveTileId == id {
             canvasState.lastActiveTileId = nil
         }
+        if borderedTileId == id {
+            borderedTileId = nil
+        }
         updateEmptyStateVisibility()
         delegate?.canvasDidChange(self)
     }
 
     func markActive(tileId: UUID) {
         canvasState.lastActiveTileId = tileId
+        updateFocusBorder(borderedTileId: tileId)
         delegate?.canvasDidChange(self)
+    }
+
+    /// Tile currently wearing the marching-ants focus border. Exactly one tile
+    /// is bordered at a time; nil when scope is canvas/modal.
+    private(set) var borderedTileId: UUID?
+
+    /// Drive the marching-ants border so the single `targetId` tile (or none)
+    /// is bordered, clearing any previously-bordered tile. Lockstep entry point
+    /// from `markActive` (tile became scope) and `clearFocusBorder` (scope left
+    /// all tiles via the FocusBroker canvas/modal hook).
+    private func updateFocusBorder(borderedTileId targetId: UUID?) {
+        guard borderedTileId != targetId else { return }
+        if let previous = borderedTileId {
+            tileViews[previous]?.setFocused(false)
+        }
+        borderedTileId = targetId
+        if let targetId {
+            tileViews[targetId]?.setFocused(true)
+        }
+    }
+
+    /// Clear the focus border when scope leaves all tiles (scope→canvas/modal).
+    /// Wired to `FocusBroker.onAcceptedCanvasScope`.
+    func clearFocusBorder() {
+        updateFocusBorder(borderedTileId: nil)
     }
 
     func bringToFront(tileId: UUID) {
@@ -1415,6 +1444,118 @@ final class CanvasNSView: NSView {
             .appendingPathComponent("focus-scope-dispatch", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// Drives the production click→focus router for a 2-tile canvas and asserts
+    /// the marching-ants border tracks the focus scope: exactly one tile is
+    /// bordered, the border moves A→B on focus change, and clears entirely when
+    /// scope leaves all tiles (focus → canvas background). Then renders the
+    /// focused tile offscreen with the dash phase frozen and asserts the chrome
+    /// is non-degenerate (Tier-1 visual gate, docs/26). Wiring mirrors
+    /// `ZoneRuntimeController.attachUI` (lockstep + canvas-scope hooks).
+    static func runFocusBorderSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let tileAId = UUID(uuidString: "00000000-0000-0000-0000-0000000005A1")!
+        let tileBId = UUID(uuidString: "00000000-0000-0000-0000-0000000005B2")!
+        let tileA = Tile(id: tileAId, kind: .note, title: "BORDER_A", frame: TileFrame(x: 60, y: 60, width: 280, height: 200), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: tileBId, kind: .note, title: "BORDER_B", frame: TileFrame(x: 420, y: 60, width: 280, height: 200), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: viewport, tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
+        let focusBroker = FocusBroker()
+        canvas.focusBroker = focusBroker
+        // Lockstep + canvas-scope clear — mirrors ZoneRuntimeController.attachUI.
+        focusBroker.onAcceptedTileFocus = { [weak canvas] id in canvas?.markActive(tileId: id) }
+        focusBroker.onAcceptedCanvasScope = { [weak canvas] in canvas?.clearFocusBorder() }
+        canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 360)
+
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+
+        let viewA = DescriptorTileNSView(tile: tileA)
+        let viewB = DescriptorTileNSView(tile: tileB)
+        canvas.install(tileView: viewA, for: tileA)
+        canvas.install(tileView: viewB, for: tileB)
+        canvas.layoutSubtreeIfNeeded()
+
+        let titleAPoint = viewA.convert(NSPoint(x: viewA.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil)
+        let titleBPoint = viewB.convert(NSPoint(x: viewB.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil)
+
+        // 1) Focus A → A bordered, B not.
+        AppDelegate.routeTileClickFocus(at: titleAPoint, in: canvas, focusBroker: focusBroker)
+        try expect(viewA.qaFocusBorderActive, "focusing A should install + animate A's marching-ants border")
+        try expect(!viewB.qaFocusBorderActive, "B must not be bordered while A is focused")
+        try expect(canvas.borderedTileId == tileAId, "canvas should track A as the single bordered tile")
+
+        // 2) Focus B → B bordered, A cleared (exactly one bordered).
+        AppDelegate.routeTileClickFocus(at: titleBPoint, in: canvas, focusBroker: focusBroker)
+        try expect(viewB.qaFocusBorderActive, "focusing B should install + animate B's marching-ants border")
+        try expect(!viewA.qaFocusBorderActive, "A's border must be removed when focus moves to B")
+        try expect(canvas.borderedTileId == tileBId, "canvas should track B as the single bordered tile")
+
+        // 3) Scope → canvas (background click) → neither tile bordered. Drive
+        //    the real background mouseDown first (it makes the canvas first
+        //    responder, clearing the tile responder) so the router resolves to
+        //    .canvas instead of falling back to the focused tile's responder.
+        let backgroundPoint = NSPoint(x: 770, y: 330)
+        try expect(canvas.tileId(at: canvas.convert(backgroundPoint, from: nil)) == nil, "precondition: background point must hit no tile")
+        guard let bgDown = NSEvent.mouseEvent(with: .leftMouseDown, location: backgroundPoint, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1) else {
+            throw CheckError.failed("could not create background mouseDown")
+        }
+        canvas.mouseDown(with: bgDown)
+        AppDelegate.routeTileClickFocus(at: backgroundPoint, in: canvas, focusBroker: focusBroker)
+        try expect(focusBroker.activeSurface == .canvas, "background click should set scope .canvas")
+        try expect(!viewA.qaFocusBorderActive && !viewB.qaFocusBorderActive, "no tile should be bordered when scope is canvas")
+        try expect(canvas.borderedTileId == nil, "canvas should track no bordered tile when scope is canvas")
+
+        // 4) Render the focused tile offscreen with the dash phase FROZEN and
+        //    assert the chrome is non-degenerate (grey-screen guard).
+        AppDelegate.routeTileClickFocus(at: titleAPoint, in: canvas, focusBroker: focusBroker)
+        try expect(viewA.qaFocusBorderActive, "precondition: A re-focused for snapshot")
+        viewA.qaFreezeFocusBorder(phase: 0)
+        canvas.layoutSubtreeIfNeeded()
+        guard let rep = viewA.bitmapImageRepForCachingDisplay(in: viewA.bounds) else {
+            throw CheckError.failed("focus-border snapshot bitmap rep was not created")
+        }
+        viewA.cacheDisplay(in: viewA.bounds, to: rep)
+        let metrics = VisualSnapshot.metrics(of: rep)
+        try expect(!metrics.isBlank, "focused tile render must not be blank/uniform — got \(metrics.distinctSampledColors) distinct sampled colors at \(metrics.width)x\(metrics.height)")
+
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: fm.currentDirectoryPath)
+        let directory = root.appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("focus-border-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let screenshot = directory.appendingPathComponent("focus-border-frozen.png")
+        if let png = rep.representation(using: .png, properties: [:]), !png.isEmpty {
+            try png.write(to: screenshot, options: .atomic)
+        }
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "focus-border",
+            "tileAId": tileAId.uuidString,
+            "tileBId": tileBId.uuidString,
+            "focusAScope": "A bordered, B not",
+            "focusBScope": "B bordered, A cleared",
+            "canvasScope": "neither bordered",
+            "frozenSnapshotDistinctColors": metrics.distinctSampledColors,
+            "frozenSnapshotSize": ["width": metrics.width, "height": metrics.height],
+            "frozenSnapshotIsBlank": metrics.isBlank,
+            "screenshots": [screenshot.path]
+        ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)
         return artifact

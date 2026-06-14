@@ -46,6 +46,17 @@ class TileNSView: NSView {
     private var dragLastWindowPoint: CGPoint = .zero
     private var mouseDraggedSinceDown = false
 
+    /// Marching-ants focus border. A `CAShapeLayer` strokes the tile's rounded
+    /// rect with a dashed pattern; a repeating `lineDashPhase` animation makes
+    /// the dashes travel around the perimeter. Installed only while the tile is
+    /// the focus scope. Sized in the view's own (backing) coordinates so the
+    /// stroke + dashes stay screen-space constant at any canvas zoom — the frame
+    /// of the view is what the canvas scales, never this layer's lineWidth.
+    private static let focusBorderDashPattern: [NSNumber] = [6, 4]
+    private static let focusBorderAnimationKey = "marchingAnts"
+    private var focusBorderLayer: CAShapeLayer?
+    private var isFocusBordered = false
+
     override var isFlipped: Bool { true }
 
     init(tile: Tile) {
@@ -114,6 +125,87 @@ class TileNSView: NSView {
     override func layout() {
         super.layout()
         layoutContentView()
+        layoutFocusBorder()
+    }
+
+    // MARK: - Marching-ants focus border
+
+    /// Install (or remove) the animated marching-ants border. Idempotent.
+    /// `setFocused(true)` adds the dashed stroke layer above the background but
+    /// below the corner overlay (so the corner brackets stay readable) and
+    /// attaches the looping `lineDashPhase` animation; `setFocused(false)`
+    /// removes both. GPU-composited, so the march costs no main-thread work.
+    func setFocused(_ focused: Bool) {
+        guard focused != isFocusBordered else { return }
+        isFocusBordered = focused
+        if focused {
+            installFocusBorderLayer()
+            startMarchingAntsAnimation()
+        } else {
+            focusBorderLayer?.removeFromSuperlayer()
+            focusBorderLayer = nil
+        }
+    }
+
+    private func installFocusBorderLayer() {
+        guard focusBorderLayer == nil, let hostLayer = layer else { return }
+        let shape = CAShapeLayer()
+        shape.fillColor = NSColor.clear.cgColor
+        // Subtle, low-opacity accent so the border reads as "focused" without
+        // shouting inside a dense dark canvas.
+        shape.strokeColor = NSColor.controlAccentColor.withAlphaComponent(0.7).cgColor
+        shape.lineWidth = 1.5
+        shape.lineDashPattern = Self.focusBorderDashPattern
+        // Added to the tile's own backing layer: it composites above the
+        // background/border fill but below every subview (title bar, content,
+        // corner overlay), so the L-bracket corners stay readable on top.
+        hostLayer.addSublayer(shape)
+        focusBorderLayer = shape
+        layoutFocusBorder()
+    }
+
+    private func layoutFocusBorder() {
+        guard let shape = focusBorderLayer else { return }
+        let cornerRadius = layer?.cornerRadius ?? 6
+        // Inset by half the line width so the stroke sits fully inside the tile
+        // bounds and lines up with the 1px static border / rounded corner.
+        let inset = shape.lineWidth / 2
+        let rect = bounds.insetBy(dx: inset, dy: inset)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shape.frame = bounds
+        shape.path = CGPath(roundedRect: rect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
+        CATransaction.commit()
+    }
+
+    private func startMarchingAntsAnimation() {
+        guard let shape = focusBorderLayer else { return }
+        let phase = Self.focusBorderDashPattern.reduce(0) { $0 + $1.doubleValue }
+        let animation = CABasicAnimation(keyPath: "lineDashPhase")
+        animation.fromValue = 0
+        animation.toValue = phase
+        animation.duration = 3.5
+        animation.repeatCount = .infinity
+        shape.add(animation, forKey: Self.focusBorderAnimationKey)
+    }
+
+    /// QA: true when the marching-ants border layer is installed AND its
+    /// looping animation is attached. Drives the `--focus-border-check`.
+    var qaFocusBorderActive: Bool {
+        guard let shape = focusBorderLayer, shape.superlayer != nil else { return false }
+        return shape.animation(forKey: Self.focusBorderAnimationKey) != nil
+    }
+
+    /// QA: freeze the marching motion so the border renders deterministically
+    /// for an offscreen snapshot. Removes the animation and pins a fixed dash
+    /// phase, leaving the dashed stroke statically visible.
+    func qaFreezeFocusBorder(phase: CGFloat = 0) {
+        guard let shape = focusBorderLayer else { return }
+        shape.removeAnimation(forKey: Self.focusBorderAnimationKey)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shape.lineDashPhase = phase
+        CATransaction.commit()
     }
 
     private func layoutContentView() {
