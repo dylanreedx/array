@@ -323,6 +323,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--focus-scope-dispatch-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try CanvasNSView.runFocusScopeDispatchSelfCheck()
+                print("ContinuumRevivedFocusScopeDispatchChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-restore-state-check") {
             do {
                 _ = NSApplication.shared
@@ -1155,7 +1167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             restartable: true,
             in: canvasView
         )
-        _ = focusBroker.requestFocus(.tile(tileId), reason: .runtimeExited)
+        focusBroker.enterScope(.tile(tileId), reason: .runtimeExited)
     }
 
     private func handleRuntimeExited(runtimeId: TerminalSessionID, exitCode: Int32?) {
@@ -1182,7 +1194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             statusText = "Shell exited"
         }
         installRestartPlaceholder(for: tile, statusText: statusText, restartable: true, in: canvasView)
-        _ = focusBroker.requestFocus(.tile(tileId), reason: .runtimeExited)
+        focusBroker.enterScope(.tile(tileId), reason: .runtimeExited)
     }
 
     private func recoverFocusAfterTileRemoval(deletedTileId: UUID, in canvasView: CanvasNSView) {
@@ -1605,15 +1617,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// are passed through so tile content keeps native trackpad scrolling.
     static func routeTileClickFocus(at windowPoint: NSPoint, in canvas: CanvasNSView, focusBroker: FocusBroker) {
         let pointInCanvas = canvas.convert(windowPoint, from: nil)
-        guard let tileId = canvas.tileId(at: pointInCanvas) else { return }
+        // Resolve the owning tile from the click point, falling back to the
+        // live first responder so clicks inside body content (WKWebView, note,
+        // terminal) that the semantic hit-test can't claim still set the tile
+        // scope. A click that hits no tile is the canvas background → .canvas.
+        let tileId = canvas.tileId(at: pointInCanvas)
+            ?? TileNSView.enclosingTileId(of: canvas.window?.firstResponder)
+        guard let tileId else {
+            focusBroker.enterScope(.canvas, reason: .userClick)
+            return
+        }
         let surface: FocusSurfaceID = .tile(tileId)
         if let firstResponder = canvas.window?.firstResponder as? NSView,
            let tileView = canvas.tileView(for: tileId),
            firstResponder.isDescendant(of: tileView) {
-            focusBroker.acceptExistingFocus(surface, reason: .userClick)
+            focusBroker.enterScope(surface, reason: .userClick, acceptingExisting: true)
             return
         }
-        _ = focusBroker.requestFocus(surface, reason: .userClick)
+        focusBroker.enterScope(surface, reason: .userClick)
     }
 
     private func installCanvasGestureMonitors() {
@@ -1750,7 +1771,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 return
             }
             closeNavMode()
-            _ = focusBroker.requestFocus(.tile(selectedTileId), reason: .modalDismissed)
+            focusBroker.enterScope(.tile(selectedTileId), reason: .modalDismissed)
             return
         }
 
@@ -2145,7 +2166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func focusSpawnedTile(_ tileId: UUID) {
-        _ = focusBroker.requestFocus(.tile(tileId), reason: .tileSpawned)
+        focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
     }
 
     private func installSpawnedTerminal(_ runtime: GhosttyTerminalRuntime) {

@@ -1303,6 +1303,123 @@ final class CanvasNSView: NSView {
         return artifact
     }
 
+    /// Drives the production click→focus router (`AppDelegate.routeTileClickFocus`,
+    /// the path the leftMouseUp monitor calls) for the three click regions that
+    /// must set scope — title bar, body/content, and empty background — plus an
+    /// A→B transition, and asserts `FocusBroker.activeSurface` is correct AND in
+    /// lockstep with `CanvasState.lastActiveTileId`. The lockstep hook is wired
+    /// exactly as production does in `ZoneRuntimeController.attachUI`.
+    static func runFocusScopeDispatchSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        final class ContentProbeView: NSView {
+            override var acceptsFirstResponder: Bool { true }
+        }
+
+        final class ProbeTileNSView: TileNSView {
+            let probe = ContentProbeView(frame: .zero)
+            override init(tile: Tile) {
+                super.init(tile: tile)
+                setContentView(probe)
+            }
+            required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+        }
+
+        let tileAId = UUID(uuidString: "00000000-0000-0000-0000-0000000007A1")!
+        let tileBId = UUID(uuidString: "00000000-0000-0000-0000-0000000007B2")!
+        let tileA = Tile(id: tileAId, kind: .note, title: "SCOPE_A", frame: TileFrame(x: 60, y: 60, width: 280, height: 200), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: tileBId, kind: .note, title: "SCOPE_B", frame: TileFrame(x: 420, y: 60, width: 280, height: 200), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: viewport, tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
+        let focusBroker = FocusBroker()
+        canvas.focusBroker = focusBroker
+        // Lockstep mechanism under test — mirrors ZoneRuntimeController.attachUI.
+        focusBroker.onAcceptedTileFocus = { [weak canvas] id in canvas?.markActive(tileId: id) }
+        canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 360)
+
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+
+        let viewA = ProbeTileNSView(tile: tileA)
+        let viewB = ProbeTileNSView(tile: tileB)
+        canvas.install(tileView: viewA, for: tileA)
+        canvas.install(tileView: viewB, for: tileB)
+        window.contentView?.layoutSubtreeIfNeeded()
+        canvas.layoutSubtreeIfNeeded()
+        viewA.layoutSubtreeIfNeeded()
+        viewB.layoutSubtreeIfNeeded()
+
+        // 1) Title-bar click on A → scope .tile(A), lockstep.
+        let titleAPoint = viewA.convert(NSPoint(x: viewA.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil)
+        AppDelegate.routeTileClickFocus(at: titleAPoint, in: canvas, focusBroker: focusBroker)
+        try expect(focusBroker.activeSurface == .tile(tileAId), "title-bar click should set scope .tile(A); activeSurface=\(String(describing: focusBroker.activeSurface))")
+        try expect(canvas.canvasState.lastActiveTileId == tileAId, "title-bar click must keep lastActiveTileId in lockstep with scope; lastActiveTileId=\(String(describing: canvas.canvasState.lastActiveTileId))")
+
+        // 2) Body/content click on A → scope .tile(A), lockstep. Make the
+        //    content view first responder (as a real body click would) so the
+        //    accepting-existing path runs; resolution comes from the click
+        //    point / enclosingTileId, never a stale activeSurface.
+        window.makeFirstResponder(viewA.probe)
+        let bodyAPoint = viewA.convert(NSPoint(x: viewA.bounds.midX, y: TileNSView.titleBarHeight + (viewA.bounds.height - TileNSView.titleBarHeight) / 2), to: nil)
+        let bodyResolvedTileId = canvas.tileId(at: canvas.convert(bodyAPoint, from: nil))
+            ?? TileNSView.enclosingTileId(of: window.firstResponder)
+        AppDelegate.routeTileClickFocus(at: bodyAPoint, in: canvas, focusBroker: focusBroker)
+        try expect(focusBroker.activeSurface == .tile(tileAId), "body/content click should set scope .tile(A); activeSurface=\(String(describing: focusBroker.activeSurface))")
+        try expect(canvas.canvasState.lastActiveTileId == tileAId, "body/content click must keep lastActiveTileId in lockstep; lastActiveTileId=\(String(describing: canvas.canvasState.lastActiveTileId))")
+
+        // 3) Empty-canvas background click → scope .canvas. Drive the real
+        //    background mouseDown (clears lastActiveTileId) then the router.
+        let backgroundPoint = NSPoint(x: 770, y: 330)
+        try expect(canvas.tileId(at: canvas.convert(backgroundPoint, from: nil)) == nil, "precondition: background point must hit no tile")
+        guard let bgDown = NSEvent.mouseEvent(with: .leftMouseDown, location: backgroundPoint, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1) else {
+            throw CheckError.failed("could not create background mouseDown")
+        }
+        canvas.mouseDown(with: bgDown)
+        AppDelegate.routeTileClickFocus(at: backgroundPoint, in: canvas, focusBroker: focusBroker)
+        try expect(focusBroker.activeSurface == .canvas, "empty-canvas background click should set scope .canvas; activeSurface=\(String(describing: focusBroker.activeSurface))")
+
+        // 4) Focus A then click B → scope is B, not A (no drift), lockstep.
+        AppDelegate.routeTileClickFocus(at: titleAPoint, in: canvas, focusBroker: focusBroker)
+        try expect(focusBroker.activeSurface == .tile(tileAId), "precondition: A focused before B click")
+        let titleBPoint = viewB.convert(NSPoint(x: viewB.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil)
+        AppDelegate.routeTileClickFocus(at: titleBPoint, in: canvas, focusBroker: focusBroker)
+        try expect(focusBroker.activeSurface == .tile(tileBId), "clicking B after A must move scope to B (no drift); activeSurface=\(String(describing: focusBroker.activeSurface))")
+        try expect(canvas.canvasState.lastActiveTileId == tileBId, "A→B click must keep lastActiveTileId in lockstep with scope B; lastActiveTileId=\(String(describing: canvas.canvasState.lastActiveTileId))")
+
+        let manifest: [String: Any] = [
+            "check": "focus-scope-dispatch",
+            "tileAId": tileAId.uuidString,
+            "tileBId": tileBId.uuidString,
+            "titleClickScope": "tile(A)",
+            "bodyClickResolvedTileId": bodyResolvedTileId?.uuidString as Any,
+            "bodyClickScope": "tile(A)",
+            "backgroundPoint": ["x": backgroundPoint.x, "y": backgroundPoint.y],
+            "backgroundClickScope": "canvas",
+            "transitionFinalScope": "tile(B)",
+            "transitionFinalLastActiveTileId": canvas.canvasState.lastActiveTileId?.uuidString as Any
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("focus-scope-dispatch", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
     // MARK: - File drops
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {

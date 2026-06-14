@@ -74,6 +74,23 @@ final class FocusBroker {
         return true
     }
 
+    /// The single funnel for entering a non-modal focus scope. Routes through
+    /// the existing `requestFocus`/`acceptExistingFocus` so `activeSurface` is
+    /// set exactly as before, and (via `onAcceptedTileFocus`, fired by both of
+    /// those for `.tile`) keeps `CanvasState.lastActiveTileId` in lockstep with
+    /// `activeSurface` so the scope and the visual/z-order selection can't
+    /// drift. `acceptingExisting` skips re-acquiring first responder when the
+    /// live responder is already inside the target tile (a content click that
+    /// must not steal focus back to the tile root). Modal handling is unchanged.
+    @discardableResult
+    func enterScope(_ scope: FocusSurfaceID, reason: FocusRequest, acceptingExisting: Bool = false) -> Bool {
+        if acceptingExisting {
+            acceptExistingFocus(scope, reason: reason)
+            return true
+        }
+        return requestFocus(scope, reason: reason)
+    }
+
     func openModal(_ kind: FocusModalKind) {
         modalSnapshots[kind] = activeSurface
         _ = requestFocus(.modal(kind), reason: .modalOpened)

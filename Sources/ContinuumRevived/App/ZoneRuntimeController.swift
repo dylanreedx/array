@@ -98,6 +98,12 @@ final class ZoneRuntimeController {
         self.tileSpawner = tileSpawner
         self.focusBroker = focusBroker
         canvasView.focusBroker = focusBroker
+        // Lockstep: every accepted tile focus (via requestFocus OR
+        // acceptExistingFocus, both fire this) marks the tile active on the
+        // canvas, so `activeSurface` and `lastActiveTileId` can never drift.
+        focusBroker.onAcceptedTileFocus = { [weak self] tileId in
+            self?.canvasView?.markActive(tileId: tileId)
+        }
         focusBroker.activationFallbackSurfaces = { [weak self] in
             guard let self else { return [] }
             var fallbacks: [FocusSurfaceID] = []
@@ -114,6 +120,7 @@ final class ZoneRuntimeController {
 
     func detachUI() {
         canvasView?.detachFocusBroker()
+        focusBroker?.onAcceptedTileFocus = nil
         focusBroker?.activationFallbackSurfaces = nil
         focusBroker = nil
         canvasView = nil

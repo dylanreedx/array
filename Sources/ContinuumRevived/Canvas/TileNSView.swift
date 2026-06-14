@@ -218,7 +218,7 @@ class TileNSView: NSView {
         mouseDraggedSinceDown = false
 
         if case .move = completedDragKind, wasClick {
-            _ = canvas?.focusBroker?.requestFocus(.tile(tile.id), reason: .userClick)
+            canvas?.focusBroker?.enterScope(.tile(tile.id), reason: .userClick)
             return
         }
 
