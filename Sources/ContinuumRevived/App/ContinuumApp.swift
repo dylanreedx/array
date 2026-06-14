@@ -1137,6 +1137,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// and snapshots are purged so the boot loop won't resurrect the tile next
     /// launch. Confirmation policy is read from `DeleteConfirmPolicy.current`
     /// which honors the `continuum.deleteConfirmPolicy` UserDefaults key.
+    enum ReviewFlybackError: Error, CustomStringConvertible {
+        case missingProjectStore
+        case missingReviewTile
+        case reviewTileHasNoReviewId
+        case missingTargetAgentSession
+        case missingLiveAgentEndpoint
+
+        var description: String {
+            switch self {
+            case .missingProjectStore: return "missing project store"
+            case .missingReviewTile: return "missing diff review tile"
+            case .reviewTileHasNoReviewId: return "diff review tile has no review id"
+            case .missingTargetAgentSession: return "target tile has no persisted agent session"
+            case .missingLiveAgentEndpoint: return "target agent tile is not live"
+            }
+        }
+    }
+
+    private func sendReviewCommentsFromMenu(reviewTileId: UUID) {
+        do {
+            guard let target = try firstEligibleAgentTileIdForReviewFlyback() else {
+                NSSound.beep()
+                return
+            }
+            _ = try sendReviewCommentsToAgent(reviewTileId: reviewTileId, targetAgentTileId: target, diffSourceDescription: "working tree vs HEAD")
+        } catch {
+            fputs("sendReviewCommentsFromMenu failed: \(error)\n", stderr)
+            NSSound.beep()
+        }
+    }
+
+    private func firstEligibleAgentTileIdForReviewFlyback() throws -> UUID? {
+        guard let projectStore else { throw ReviewFlybackError.missingProjectStore }
+        let sessions = try projectStore.listSessions()
+        return sessions.first { session in
+            guard var descriptor = session.agentDescriptor else { return false }
+            if let liveStatus = canvasView?.agentStatus(for: session.tileId) { descriptor.status = liveStatus }
+            guard AgentTileInput.canSend(to: descriptor.status) else { return false }
+            return runtimes.contains(where: { $0.tileId == session.tileId })
+        }?.tileId
+    }
+
+    @discardableResult
+    func sendReviewCommentsToAgent(reviewTileId: UUID, targetAgentTileId: UUID, diffSourceDescription: String) throws -> ReviewFlybackPrompt {
+        guard let projectStore else { throw ReviewFlybackError.missingProjectStore }
+        guard let reviewTile = canvasView?.canvasState.tiles.first(where: { $0.id == reviewTileId && $0.kind == .diffReview }) else { throw ReviewFlybackError.missingReviewTile }
+        guard let reviewId = reviewTile.metadata.reviewId else { throw ReviewFlybackError.reviewTileHasNoReviewId }
+        guard let session = try projectStore.listSessions().first(where: { $0.tileId == targetAgentTileId && $0.agentDescriptor != nil }) else { throw ReviewFlybackError.missingTargetAgentSession }
+        guard let runtime = runtimes.first(where: { $0.tileId == targetAgentTileId }) else { throw ReviewFlybackError.missingLiveAgentEndpoint }
+
+        var descriptor = session.agentDescriptor
+        if let liveStatus = canvasView?.agentStatus(for: targetAgentTileId) { descriptor?.status = liveStatus }
+        let state = try projectStore.loadReviewCommentState(reviewId: reviewId)
+        let prompt = ReviewFlybackPromptComposer.compose(state: state, diffSourceDescription: diffSourceDescription)
+        try AgentTileInput.send(prompt: prompt.text, descriptor: descriptor, to: runtime)
+        return prompt
+    }
+
     func deleteTile(id: UUID) {
         guard let canvasView else { return }
         guard let tile = canvasView.canvasState.tiles.first(where: { $0.id == id }) else { return }
@@ -1398,7 +1456,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func installInitialDiffReviewTile(_ tile: Tile, in canvasView: CanvasNSView) {
         if let activeProject {
-            canvasView.install(tileView: DiffReviewTileNSView(tile: tile, repositoryURL: URL(fileURLWithPath: activeProject.rootPath, isDirectory: true)), for: tile)
+            let root = URL(fileURLWithPath: activeProject.rootPath, isDirectory: true)
+            canvasView.install(tileView: DiffReviewTileNSView(tile: tile, repositoryURL: root, sendCommentsToAgent: { [weak self] in
+                self?.sendReviewCommentsFromMenu(reviewTileId: tile.id)
+            }), for: tile)
         } else {
             canvasView.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
         }
@@ -2298,7 +2359,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let reviewState = ReviewCommentState(reviewId: reviewId, comments: [])
         do {
             try projectStore.saveReviewCommentState(reviewState)
-            canvasView.install(tileView: DiffReviewTileNSView(tile: tile, repositoryURL: URL(fileURLWithPath: activeProject.rootPath, isDirectory: true)), for: tile)
+            let root = URL(fileURLWithPath: activeProject.rootPath, isDirectory: true)
+            canvasView.install(tileView: DiffReviewTileNSView(tile: tile, repositoryURL: root, sendCommentsToAgent: { [weak self] in
+                self?.sendReviewCommentsFromMenu(reviewTileId: tile.id)
+            }), for: tile)
             try projectStore.saveCanvas(canvasView.canvasState)
             focusSpawnedTile(tile.id)
         } catch {
@@ -5742,10 +5806,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let needsAttention = AgentDescriptor(agentKind: "codex", worktreePath: "/tmp/project", status: .needsAttention, statusUpdatedAt: now)
         let working = AgentDescriptor(agentKind: "claude", worktreePath: "/tmp/project", status: .working, statusUpdatedAt: now)
 
+        let reviewId = UUID(uuidString: "BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF")!
+        let flyback = ReviewFlybackPromptComposer.compose(
+            state: ReviewCommentState(reviewId: reviewId, comments: [ReviewComment(
+                anchor: ReviewCommentAnchor(filePath: "Sources/App.swift", oldLine: nil, newLine: 42, hunkHeader: "@@ -40,0 +42,1 @@"),
+                body: "Handle the nil runtime case before sending.",
+                createdAt: now
+            )]),
+            diffSourceDescription: "working tree vs HEAD"
+        )
+
         let endpoint = RecordingEndpoint()
-        let visible = try AgentTileInput.send(prompt: "fix CON-85", descriptor: idle, to: endpoint)
-        guard endpoint.inserted == ["fix CON-85"], endpoint.returns == 1, visible.contains("fix CON-85") else {
-            throw NSError(domain: "AgentInputCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: "idle agent prompt was not inserted followed by Return"])
+        let visible = try AgentTileInput.send(prompt: flyback.text, descriptor: idle, to: endpoint)
+        guard endpoint.inserted == [flyback.text], endpoint.returns == 1, visible.contains("Sources/App.swift (new:42)"), visible.contains("Handle the nil runtime case before sending.") else {
+            throw NSError(domain: "AgentInputCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: "flyback prompt was not inserted into idle agent followed by Return"])
+        }
+
+        let integrationRoot = FileManager.default.temporaryDirectory.appendingPathComponent("continuum-flyback-check-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: integrationRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: integrationRoot) }
+        let integrationStore = ProjectStore(projectRoot: integrationRoot)
+        let integrationReviewId = UUID()
+        let integrationTileId = UUID()
+        let integrationAgentTileId = UUID()
+        let busyAgentTileId = UUID()
+        try integrationStore.saveReviewCommentState(ReviewCommentState(reviewId: integrationReviewId, comments: [ReviewComment(
+            anchor: ReviewCommentAnchor(filePath: "Sources/Flyback.swift", oldLine: nil, newLine: 7, hunkHeader: "@@ -6,0 +7,1 @@"),
+            body: "Wire the persisted review into the agent handoff.",
+            createdAt: now
+        )]))
+        try integrationStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: busyAgentTileId, launchProfileId: "claude", command: "/bin/zsh", args: [], cwd: integrationRoot.path, env: [:], title: "Busy Agent", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: working))
+        try integrationStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: integrationAgentTileId, launchProfileId: "codex", command: "/bin/zsh", args: [], cwd: integrationRoot.path, env: [:], title: "Idle Agent", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: idle))
+        let integrationEndpoint = RecordingEndpoint()
+        let integrationTile = Tile(id: integrationTileId, kind: .diffReview, title: "Diff Review", frame: TileFrame(x: 0, y: 0, width: 320, height: 240), zIndex: 1, runtimeRef: nil, metadata: TileMetadata(reviewId: integrationReviewId, diffSource: "workingTreeVsHEAD"))
+        let integrationView = DiffReviewTileNSView(tile: integrationTile, model: GitDiffModel(files: []), sendCommentsToAgent: {
+            do {
+                let sessions = try integrationStore.listSessions()
+                guard let target = sessions.first(where: { $0.tileId == integrationAgentTileId }) else { return }
+                var descriptor = target.agentDescriptor
+                descriptor?.status = .idle // live canvas status overrides restored stale descriptors in production.
+                let state = try integrationStore.loadReviewCommentState(reviewId: integrationReviewId)
+                let composed = ReviewFlybackPromptComposer.compose(state: state, diffSourceDescription: "working tree vs HEAD")
+                _ = try AgentTileInput.send(prompt: composed.text, descriptor: descriptor, to: integrationEndpoint)
+            } catch {
+                integrationEndpoint.inserted.append("ERROR: \(error)")
+            }
+        })
+        guard integrationView.textView.menu?.item(withTitle: "Send Comments to Agent") != nil else {
+            throw NSError(domain: "AgentInputCheck", code: 8, userInfo: [NSLocalizedDescriptionKey: "diff review flyback menu item was not installed"])
+        }
+        integrationView.triggerSendCommentsToAgentForQA()
+        guard integrationEndpoint.inserted.count == 1,
+              integrationEndpoint.inserted[0].contains("Sources/Flyback.swift (new:7)"),
+              integrationEndpoint.inserted[0].contains("Wire the persisted review into the agent handoff."),
+              integrationEndpoint.returns == 1 else {
+            throw NSError(domain: "AgentInputCheck", code: 9, userInfo: [NSLocalizedDescriptionKey: "diff review flyback QA hook did not load persisted comments and send to eligible agent"])
         }
 
         let needsEndpoint = RecordingEndpoint()
@@ -5789,7 +5904,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let artifact = dir.appendingPathComponent("manifest.json")
         let json = """
-        {"check":"agent-input","acceptedStatuses":["idle","needsAttention"],"refusedStatuses":["working"],"insertedPrompt":"fix CON-85","returnCount":1,"status":"passed"}
+        {"check":"agent-input","acceptedStatuses":["idle","needsAttention"],"refusedStatuses":["working"],"insertedPrompt":"flyback review prompt with Sources/App.swift new:42","returnCount":1,"status":"passed"}
 
         """
         try json.write(to: artifact, atomically: true, encoding: .utf8)

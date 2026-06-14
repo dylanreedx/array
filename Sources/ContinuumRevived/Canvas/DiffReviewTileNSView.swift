@@ -7,8 +7,9 @@ import Foundation
 final class DiffReviewTileNSView: TileNSView {
     private(set) var textView: NSTextView
     private let scrollView: NSScrollView
+    private let sendCommentsToAgent: (() -> Void)?
 
-    init(tile: Tile, repositoryURL: URL, source: GitDiffEngine.Source = .workingTreeVsHEAD) {
+    init(tile: Tile, repositoryURL: URL, source: GitDiffEngine.Source = .workingTreeVsHEAD, sendCommentsToAgent: (() -> Void)? = nil) {
         let tv = NSTextView()
         tv.isEditable = false
         tv.isSelectable = true
@@ -38,8 +39,10 @@ final class DiffReviewTileNSView: TileNSView {
 
         self.textView = tv
         self.scrollView = sv
+        self.sendCommentsToAgent = sendCommentsToAgent
         super.init(tile: tile)
         setContentView(sv)
+        installFlybackMenuIfNeeded()
 
         do {
             let model = try GitDiffEngine().diff(repositoryURL: repositoryURL, source: source)
@@ -49,7 +52,7 @@ final class DiffReviewTileNSView: TileNSView {
         }
     }
 
-    init(tile: Tile, model: GitDiffModel) {
+    init(tile: Tile, model: GitDiffModel, sendCommentsToAgent: (() -> Void)? = nil) {
         let tv = NSTextView()
         tv.isEditable = false
         tv.isSelectable = true
@@ -74,8 +77,10 @@ final class DiffReviewTileNSView: TileNSView {
         sv.documentView = tv
         self.textView = tv
         self.scrollView = sv
+        self.sendCommentsToAgent = sendCommentsToAgent
         super.init(tile: tile)
         setContentView(sv)
+        installFlybackMenuIfNeeded()
         apply(model)
     }
 
@@ -86,6 +91,19 @@ final class DiffReviewTileNSView: TileNSView {
         window?.makeFirstResponder(textView)
         return true
     }
+
+    func triggerSendCommentsToAgentForQA() { sendCommentsToAgent?() }
+
+    private func installFlybackMenuIfNeeded() {
+        guard sendCommentsToAgent != nil else { return }
+        let menu = NSMenu()
+        let item = NSMenuItem(title: "Send Comments to Agent", action: #selector(sendCommentsToAgentMenuItem(_:)), keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+        textView.menu = menu
+    }
+
+    @objc private func sendCommentsToAgentMenuItem(_ sender: Any?) { sendCommentsToAgent?() }
 
     func apply(_ model: GitDiffModel) {
         if model.files.isEmpty {

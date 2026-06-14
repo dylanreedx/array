@@ -1,5 +1,61 @@
 import Foundation
 
+public struct ReviewFlybackPrompt: Equatable, Sendable {
+    public var text: String
+    public var includedCommentIds: [UUID]
+    public var excludedCommentIds: [UUID]
+
+    public init(text: String, includedCommentIds: [UUID], excludedCommentIds: [UUID]) {
+        self.text = text
+        self.includedCommentIds = includedCommentIds
+        self.excludedCommentIds = excludedCommentIds
+    }
+}
+
+public enum ReviewFlybackPromptComposer {
+    public static func compose(state: ReviewCommentState, diffSourceDescription: String, diff: GitDiffModel? = nil) -> ReviewFlybackPrompt {
+        let comments = state.comments.map { comment in
+            diff.map { comment.revalidated(against: $0) } ?? comment
+        }
+        let included = comments
+            .filter { !$0.resolved && $0.status == .current }
+            .sorted { lhs, rhs in
+                if lhs.anchor.filePath != rhs.anchor.filePath { return lhs.anchor.filePath < rhs.anchor.filePath }
+                let lhsLine = lhs.anchor.newLine ?? lhs.anchor.oldLine ?? 0
+                let rhsLine = rhs.anchor.newLine ?? rhs.anchor.oldLine ?? 0
+                if lhsLine != rhsLine { return lhsLine < rhsLine }
+                if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+        let excluded = comments.filter { $0.resolved || $0.status == .outdated }.map(\.id)
+
+        var lines: [String] = [
+            "Please address these unresolved review comments.",
+            "Review: \(state.reviewId.uuidString)",
+            "Diff source: \(diffSourceDescription)",
+            ""
+        ]
+        if included.isEmpty {
+            lines.append("No current unresolved comments to address.")
+        } else {
+            for (index, comment) in included.enumerated() {
+                let anchor = comment.anchor
+                let coordinate: String
+                switch (anchor.oldLine, anchor.newLine) {
+                case let (old?, new?): coordinate = "old:\(old) new:\(new)"
+                case let (old?, nil): coordinate = "old:\(old)"
+                case let (nil, new?): coordinate = "new:\(new)"
+                case (nil, nil): coordinate = "line:unknown"
+                }
+                lines.append("\(index + 1). \(anchor.filePath) (\(coordinate))")
+                lines.append("   Hunk: \(anchor.hunkHeader)")
+                lines.append("   Comment: \(comment.body.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+        }
+        return ReviewFlybackPrompt(text: lines.joined(separator: "\n"), includedCommentIds: included.map(\.id), excludedCommentIds: excluded)
+    }
+}
+
 public struct ReviewCommentState: Equatable, Codable, Sendable {
     public static let currentSchemaVersion = 1
 

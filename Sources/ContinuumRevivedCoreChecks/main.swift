@@ -182,6 +182,18 @@ do {
     let drifted = GitDiffModel(files: [GitDiffFile(oldPath: nil, newPath: "new.txt", change: .modified, hunks: [])])
     expect(comment.revalidated(against: drifted).status == .outdated, "ReviewComment should become outdated when anchor disappears")
 
+    let resolved = ReviewComment(anchor: anchor!, body: "already fixed", createdAt: Date(timeIntervalSince1970: 1_700_000_001), resolved: true)
+    let outdated = ReviewComment(anchor: ReviewCommentAnchor(filePath: "missing.txt", oldLine: nil, newLine: 99, hunkHeader: "@@ -0,0 +99,1 @@"), body: "old concern", createdAt: Date(timeIntervalSince1970: 1_700_000_002))
+    let state = ReviewCommentState(reviewId: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!, comments: [resolved, outdated, comment])
+    let prompt = ReviewFlybackPromptComposer.compose(state: state, diffSourceDescription: "working tree vs HEAD", diff: model)
+    expect(prompt.includedCommentIds == [comment.id], "flyback prompt includes only current unresolved comments")
+    expect(Set(prompt.excludedCommentIds) == Set([resolved.id, outdated.id]), "flyback prompt excludes resolved and outdated comments")
+    expect(prompt.text.contains("Please address these unresolved review comments."), "flyback prompt has an agent instruction")
+    expect(prompt.text.contains("Diff source: working tree vs HEAD"), "flyback prompt includes diff source")
+    expect(prompt.text.contains("new.txt (new:2)"), "flyback prompt includes file and line coordinates")
+    expect(prompt.text.contains("Comment: check this"), "flyback prompt includes comment body")
+    expect(!prompt.text.contains("already fixed") && !prompt.text.contains("old concern"), "flyback prompt omits excluded comment bodies")
+
     let malformed = GitDiffParser.parse("not a diff\n@@ malformed\n+still no crash")
     expect(malformed.files.isEmpty, "malformed diff output should not crash or invent files")
 }
