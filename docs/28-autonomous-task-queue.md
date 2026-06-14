@@ -50,7 +50,7 @@ can pass while the user-facing path is dead is the WRONG check.
   field, each `TileActionCatalog` entry. matrix green.
 
 ### F4 — SettingsSchema engine (docs/24 S3)
-- **Status: TODO** · deps: F3
+- **Status: DONE (7707ce7)** · deps: F3 · **FOUNDATION COMPLETE (F1–F4)**
 - `SettingsField` (`.toggle/.text/.choice/.shortcuts`), `SettingsSection`,
   `SettingsSchema.sections()`.
 - **Check:** `SettingsSchemaChecks` — every field key/default round-trips through
