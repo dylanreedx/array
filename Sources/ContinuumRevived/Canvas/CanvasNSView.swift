@@ -1158,6 +1158,135 @@ final class CanvasNSView: NSView {
         return artifact
     }
 
+    static func runTileDragGrabSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        // A tall tile so that even at the lowest test zoom the floored grab strip
+        // (~minScreenGrabPx/zoom world units) still leaves a real body region
+        // below it — otherwise the "body is not a move" probe is degenerate.
+        let tile = Tile(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000001134")!,
+            kind: .terminal,
+            title: "DRAG_GRAB_PROBE",
+            frame: TileFrame(x: 40, y: 30, width: 400, height: 1000),
+            zIndex: 1,
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile], groups: [], lastActiveTileId: nil))
+        canvas.frame = NSRect(x: 0, y: 0, width: 900, height: 700)
+        let tileView = TileNSView(tile: tile)
+        canvas.install(tileView: tileView, for: tile)
+        tileView.layoutSubtreeIfNeeded()
+
+        // Low zoom: the floored grab strip must exceed titleBarHeight so a point
+        // BELOW the drawn 24px bar but WITHIN the grab strip starts a move.
+        // Zoom 1: floor is inert relative to the bar, body stays non-move.
+        let zooms: [Double] = [1.0, 0.3, 0.1]
+        var grabHeights: [String: Double] = [:]
+        var stripIsMove: [String: Bool] = [:]
+        var stripRoutesToTile: [String: Bool] = [:]
+        var bodyIsMove: [String: Bool] = [:]
+        var titleBarIsMove: [String: Bool] = [:]
+        var topEdgeIsResize: [String: Bool] = [:]
+        for zoom in zooms {
+            canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
+            tileView.layoutSubtreeIfNeeded()
+            let grab = tileView.grabHeightInLocalCoordinates
+            grabHeights[String(zoom)] = grab
+            let midX = tileView.bounds.midX
+            // Resize band `m` is a constant 8 screen px in world units; at low zoom
+            // it can exceed titleBarHeight, so a move-only point must clear both the
+            // resize band AND the drawn bar (`floor`) while staying within `grab`.
+            let m = TileNSView.resizeMargin / CGFloat(zoom)
+            let titleH = TileNSView.titleBarHeight
+            let h = tileView.bounds.height
+            let floor = max(titleH, m)
+
+            // Move probe: midpoint of (floor, grab). At low zoom floor == m > titleH,
+            // so this point is BELOW the drawn 24px bar yet WITHIN the grab strip —
+            // exactly the click the old titleBarHeight-only logic dropped to body.
+            let stripY = (floor + grab) / 2
+            stripIsMove[String(zoom)] = tileView.qaDragKindIsMove(at: CGPoint(x: midX, y: stripY))
+            // Routing: the click must reach TileNSView (not body content) so
+            // mouseDown classifies it as .move. Proves the hitTest floor, not just
+            // the classifier.
+            stripRoutesToTile[String(zoom)] = (tileView.hitTest(CGPoint(x: midX, y: stripY)) === tileView)
+
+            // A point clearly in the body (below the grab strip, above the bottom
+            // resize band) is NOT a move.
+            let bodyY = (grab + (h - m)) / 2
+            bodyIsMove[String(zoom)] = tileView.qaDragKindIsMove(at: CGPoint(x: midX, y: bodyY))
+
+            // The very top edge band still resolves to a resize, not a move, so
+            // the floored strip never swallows the top resize ring.
+            topEdgeIsResize[String(zoom)] = (tileView.qaResizeEdge(at: CGPoint(x: midX, y: m / 2)) == .top)
+
+            // Zoom 1: a point inside the drawn title bar (below the top resize
+            // band) is a move — established behavior preserved. Captured inside the
+            // loop so the viewport is actually at this zoom.
+            if zoom == 1.0 {
+                titleBarIsMove["1.0"] = tileView.qaDragKindIsMove(at: CGPoint(x: midX, y: (m + titleH) / 2))
+            }
+
+            // Premise guards: the move probe is genuinely below the bar + within
+            // grab, and the body probe is genuinely below grab + a real region.
+            try expect(stripY > titleH && stripY < grab, "stripY \(stripY) must lie in (titleBarHeight, grabHeight) at zoom \(zoom)")
+            try expect(stripY > m, "stripY \(stripY) must clear the resize band \(m) at zoom \(zoom)")
+            try expect(bodyY > grab && bodyY < h - m, "bodyY \(bodyY) must lie in (grabHeight, h - resizeBand) at zoom \(zoom)")
+            if zoom < 1.0 {
+                try expect(grab > titleH, "grabHeight \(grab) must exceed titleBarHeight \(titleH) at zoom \(zoom)")
+            }
+        }
+
+        // Floor lifts the strip below the drawn bar into a move at low zoom...
+        try expect(stripIsMove["0.3"] == true, "zoom 0.3: point below titleBarHeight but within grabHeight should be a MOVE")
+        try expect(stripIsMove["0.1"] == true, "zoom 0.1: point below titleBarHeight but within grabHeight should be a MOVE")
+        // ...and the click actually routes to the tile view (hitTest floor).
+        try expect(stripRoutesToTile["0.3"] == true, "zoom 0.3: grab strip click should route to TileNSView, not body")
+        try expect(stripRoutesToTile["0.1"] == true, "zoom 0.1: grab strip click should route to TileNSView, not body")
+        // Body is never a move at any zoom.
+        try expect(bodyIsMove.values.allSatisfy { $0 == false }, "body clicks must not be a move: \(bodyIsMove)")
+        // Zoom 1 unchanged: drawn title bar is still a move.
+        try expect(titleBarIsMove["1.0"] == true, "zoom 1: drawn title-bar click must be a move")
+        // Top edge always a resize (ring preserved).
+        try expect(topEdgeIsResize.values.allSatisfy { $0 == true }, "top edge must remain a resize at every zoom: \(topEdgeIsResize)")
+
+        let manifest: [String: Any] = [
+            "check": "tile-drag-grab",
+            "worldSize": ["width": tile.frame.width, "height": tile.frame.height],
+            "titleBarHeight": TileNSView.titleBarHeight,
+            "minScreenGrabPx": TileNSView.minScreenGrabPx,
+            "zooms": zooms,
+            "grabHeights": grabHeights,
+            "stripIsMove": stripIsMove,
+            "stripRoutesToTile": stripRoutesToTile,
+            "bodyIsMove": bodyIsMove,
+            "titleBarIsMove": titleBarIsMove,
+            "topEdgeIsResize": topEdgeIsResize
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("tile-drag-grab", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
     static func runBringToFrontFocusSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)

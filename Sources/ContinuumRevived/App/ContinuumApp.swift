@@ -299,6 +299,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--tile-drag-grab-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try CanvasNSView.runTileDragGrabSelfCheck()
+                print("ContinuumRevivedTileDragGrabChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--bring-to-front-focus-check") {
             do {
                 _ = NSApplication.shared

@@ -18,6 +18,12 @@ class TileNSView: NSView {
     static let resizeMargin: CGFloat = 8
     static let cornerHoverSize: CGFloat = 16
     static let cornerBracketLength: CGFloat = 12
+    /// Screen-space floor for the move-grab strip. The drawn title bar is
+    /// `titleBarHeight` world units, so at low zoom its on-screen height
+    /// collapses (`24*zoom`px) and the move target becomes near-ungrabbable.
+    /// The move HIT region (not the drawn bar) is floored to at least this many
+    /// screen px regardless of zoom — see `grabHeightInLocalCoordinates`.
+    static let minScreenGrabPx: CGFloat = 28
 
     weak var canvas: CanvasNSView?
     var tile: Tile {
@@ -260,6 +266,20 @@ class TileNSView: NSView {
         if bounds.contains(point), resizeEdge(at: point) != nil {
             return self
         }
+        // Floored move-grab strip. The drawn TitleBarView subview is only
+        // `titleBarHeight` world units tall, so at low zoom its on-screen height
+        // collapses and clicks in the top strip fall through to body content.
+        // Claim the portion of the floored strip that lies BELOW the title bar
+        // subview so those clicks route to mouseDown → .move. The resize ring is
+        // already claimed above (resize wins on the top edge), and the title bar
+        // subview keeps its own [0, titleBarHeight] region (close/stop buttons +
+        // its own move-forwarding), so neither is stolen here.
+        if bounds.contains(point),
+           let titleBar,
+           point.y >= titleBar.frame.maxY,
+           point.y < grabHeightInLocalCoordinates {
+            return self
+        }
         return super.hitTest(point)
     }
 
@@ -273,11 +293,11 @@ class TileNSView: NSView {
             dragKind = .resize(edge)
             return
         }
-        if local.y < Self.titleBarHeight {
+        if local.y < grabHeightInLocalCoordinates {
             dragKind = .move
             return
         }
-        // Below the title bar: defer to subclass / content view.
+        // Below the grab strip: defer to subclass / content view.
         dragKind = .none
         super.mouseDown(with: event)
     }
@@ -325,7 +345,10 @@ class TileNSView: NSView {
     override func resetCursorRects() {
         super.resetCursorRects()
         let m = resizeMarginInLocalCoordinates
-        let titleH = Self.titleBarHeight
+        // Floor the open-hand cursor band to the grab strip (not the drawn 24-px
+        // title bar) so the move affordance matches the floored hit region at
+        // low zoom.
+        let titleH = grabHeightInLocalCoordinates
         let w = bounds.width
         let h = bounds.height
         guard w > 2 * m, h > titleH + m else { return }
@@ -351,8 +374,26 @@ class TileNSView: NSView {
         return Self.resizeMargin / CGFloat(zoom)
     }
 
+    /// Height (world units) of the move-grab strip from the tile's top edge.
+    /// Floored so the strip is never smaller than `minScreenGrabPx` on screen:
+    /// at low zoom the constant-px floor (`minScreenGrabPx/zoom` world units)
+    /// exceeds the drawn `titleBarHeight`, keeping the move target grabbable.
+    /// Mirrors `resizeMarginInLocalCoordinates`'s screen-px-in-world pattern.
+    var grabHeightInLocalCoordinates: CGFloat {
+        guard let zoom = canvas?.viewport.zoom, zoom.isFinite, zoom > 0 else { return Self.titleBarHeight }
+        return max(Self.titleBarHeight, Self.minScreenGrabPx / CGFloat(zoom))
+    }
+
     func qaResizeEdge(at point: CGPoint) -> ResizeEdge? {
         resizeEdge(at: point)
+    }
+
+    /// QA: resolve the drag classification for a local-coordinate point, using
+    /// the same precedence as `mouseDown` (resize ring wins, then the floored
+    /// move-grab strip, else body). Drives `--tile-drag-grab-check`.
+    func qaDragKindIsMove(at point: CGPoint) -> Bool {
+        if resizeEdge(at: point) != nil { return false }
+        return point.y < grabHeightInLocalCoordinates
     }
 
     private func resizeEdge(at point: CGPoint) -> ResizeEdge? {

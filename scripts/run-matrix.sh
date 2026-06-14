@@ -83,6 +83,7 @@ run_app_check .build/debug/continuum-revived --single-zone-compat-check
 run_app_check .build/debug/continuum-revived --multi-zone-render-check
 run_app_check .build/debug/continuum-revived --agent-status-check
 run_app_check .build/debug/continuum-revived --tile-world-bounds-check
+run_app_check .build/debug/continuum-revived --tile-drag-grab-check
 run_app_check .build/debug/continuum-revived --bring-to-front-focus-check
 run_app_check .build/debug/continuum-revived --note-click-focus-check
 run_app_check .build/debug/continuum-revived --focus-scope-dispatch-check
