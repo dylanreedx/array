@@ -59,6 +59,16 @@ can pass while the user-facing path is dead is the WRONG check.
 
 ## App wiring — `[appkit]`, me-gated
 
+**RE-SEQUENCED 2026-06-14:** Dylan's priority is a usable settings page with his
+prefs by morning. That does NOT need the focus-scope refactor — `⌘,` already
+classifies as `.settings` (F1) and reaches `handleReservedShortcut`, so opening
+the panel is a one-line wiring. So the order is now **A6 → A7** (settings, high
+value + additive/lower-risk) **then A1 → A2 → A3 → A4 → A5** (focus-scope
+hot-path, riskier, dogfood-dependent) **then P1–P3**. A6 wires `⌘,` minimally;
+A2 later replaces that with the unified `FocusDispatch`. A6 includes editable
+General fields (toggle/text/choice) so it's usable on its own; A7 adds the
+keybind chord-capture editor.
+
 ### A1 — FocusBroker.enterScope funnel + close scope drift (docs/27 staging 2) · DOGFOOD
 - **Status: TODO** · deps: F1
 - Single `enterScope(_:reason:)`; route ALL interactions through it: title bar, tile
