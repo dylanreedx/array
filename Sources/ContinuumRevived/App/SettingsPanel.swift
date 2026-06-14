@@ -12,11 +12,18 @@ import Foundation
 @MainActor
 final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     var onClose: (() -> Void)?
+    /// Live-apply hook: after a leader/nav rebind the panel persists the override
+    /// and hands the re-resolved `NavKeymap` back so the app can refresh its live
+    /// keymaps (no relaunch). The app should also update `navKeymap` here.
+    var onKeymapChanged: ((NavKeymap) -> Void)?
 
     static let rootAccessibilityIdentifier = "ContinuumSettingsPanelRoot"
 
     private let sections: [SettingsSection]
     private let defaults: UserDefaults
+    /// The current keymap, used to display nav/leader chords and as the base for
+    /// edits + collision classification. Persisted edits re-resolve into this.
+    private var navKeymap: NavKeymap
 
     private var panel: NSPanel?
     private var sidebar: NSTableView?
@@ -24,9 +31,10 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     private var selectedSectionIndex = 0
     private weak var previousKeyWindow: NSWindow?
 
-    init(sections: [SettingsSection] = SettingsSchema.sections(), defaults: UserDefaults = .standard) {
+    init(sections: [SettingsSection] = SettingsSchema.sections(), defaults: UserDefaults = .standard, navKeymap: NavKeymap = .resolve()) {
         self.sections = sections
         self.defaults = defaults
+        self.navKeymap = navKeymap
     }
 
     var isVisible: Bool { panel?.isVisible ?? false }
@@ -226,30 +234,167 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         group.alignment = .leading
         group.spacing = 8
         group.addArrangedSubview(labelView)
+        shortcutRowsById.removeAll()
+        editButtonToEntryId.removeAll()
+        resetButtonToEntryId.removeAll()
 
         let grouped = groupedShortcutEntries()
         for group_ in grouped {
             let groupTitle = label(group_.title, size: 11, weight: .semibold, color: .tertiaryLabelColor)
             group.addArrangedSubview(groupTitle)
             for entry in group_.entries {
-                let row = label("\(entry.label) … \(entry.chordDisplay)", size: 11, weight: .regular, color: .labelColor)
-                group.addArrangedSubview(row)
+                group.addArrangedSubview(shortcutEntryRow(for: entry))
             }
         }
         return group
     }
 
-    /// `ShortcutCatalog.entries()` grouped by layer (Global / Nav Mode / per tile
-    /// kind), preserving catalog order.
+    /// One catalog-entry row. Non-configurable rows are static text. Configurable
+    /// rows add an Edit button (→ chord capture) and a Reset button (→ clear the
+    /// override). The current chord is rendered from the panel's live keymap.
+    private func shortcutEntryRow(for entry: ShortcutCatalogEntry) -> NSView {
+        let nameLabel = label(entry.label, size: 11, weight: .regular, color: .labelColor)
+        nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let chordLabel = label(entry.chordDisplay, size: 11, weight: .regular, color: .secondaryLabelColor)
+        chordLabel.translatesAutoresizingMaskIntoConstraints = false
+        chordLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 64).isActive = true
+
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.addArrangedSubview(nameLabel)
+        row.addArrangedSubview(chordLabel)
+
+        guard entry.configurable, let target = entry.editTarget else {
+            return row
+        }
+
+        let editButton = NSButton(title: "Edit", target: self, action: #selector(beginEditingShortcut(_:)))
+        editButton.bezelStyle = .rounded
+        editButton.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        let resetButton = NSButton(title: "Reset", target: self, action: #selector(resetShortcut(_:)))
+        resetButton.bezelStyle = .rounded
+        resetButton.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        row.addArrangedSubview(editButton)
+        row.addArrangedSubview(resetButton)
+
+        let context = ShortcutRowContext(entry: entry, target: target, row: row, chordLabel: chordLabel,
+                                          editButton: editButton, resetButton: resetButton)
+        shortcutRowsById[entry.id] = context
+        editButtonToEntryId[ObjectIdentifier(editButton)] = entry.id
+        resetButtonToEntryId[ObjectIdentifier(resetButton)] = entry.id
+        return row
+    }
+
+    /// `ShortcutCatalog.entries(navKeymap:)` grouped by layer (Global / Nav Mode /
+    /// per tile kind), preserving catalog order. Threads the panel's live keymap
+    /// so nav/leader rows show their current (possibly edited) chord.
     private func groupedShortcutEntries() -> [(title: String, entries: [ShortcutCatalogEntry])] {
         var order: [String] = []
         var buckets: [String: [ShortcutCatalogEntry]] = [:]
-        for entry in ShortcutCatalog.entries() {
+        for entry in ShortcutCatalog.entries(navKeymap: navKeymap, defaults: defaults) {
             let title = layerTitle(entry.layer)
             if buckets[title] == nil { order.append(title) }
             buckets[title, default: []].append(entry)
         }
         return order.map { (title: $0, entries: buckets[$0] ?? []) }
+    }
+
+    // MARK: - Keybind editing (live)
+
+    /// Per-row live state needed to swap in the capture view and re-render the
+    /// chord after an edit.
+    private final class ShortcutRowContext {
+        let entry: ShortcutCatalogEntry
+        let target: KeybindEditTarget
+        let row: NSStackView
+        let chordLabel: NSTextField
+        let editButton: NSButton
+        let resetButton: NSButton
+        var captureView: ChordCaptureView?
+
+        init(entry: ShortcutCatalogEntry, target: KeybindEditTarget, row: NSStackView, chordLabel: NSTextField, editButton: NSButton, resetButton: NSButton) {
+            self.entry = entry
+            self.target = target
+            self.row = row
+            self.chordLabel = chordLabel
+            self.editButton = editButton
+            self.resetButton = resetButton
+        }
+    }
+
+    private var shortcutRowsById: [String: ShortcutRowContext] = [:]
+    private var editButtonToEntryId: [ObjectIdentifier: String] = [:]
+    private var resetButtonToEntryId: [ObjectIdentifier: String] = [:]
+
+    @objc private func beginEditingShortcut(_ sender: NSButton) {
+        guard let id = editButtonToEntryId[ObjectIdentifier(sender)], let context = shortcutRowsById[id] else { return }
+        beginCapture(in: context)
+    }
+
+    @objc private func resetShortcut(_ sender: NSButton) {
+        guard let id = resetButtonToEntryId[ObjectIdentifier(sender)], let context = shortcutRowsById[id] else { return }
+        if let resolved = KeybindEditor.reset(target: context.target, defaults: defaults) {
+            applyResolvedKeymap(resolved)
+        }
+        renderSelectedSection()
+    }
+
+    private func beginCapture(in context: ShortcutRowContext) {
+        let capture = ChordCaptureView()
+        context.captureView = capture
+        // Replace the chord label with the capture field while editing.
+        let row = context.row
+        let labelIndex = row.arrangedSubviews.firstIndex(of: context.chordLabel) ?? 1
+        context.chordLabel.isHidden = true
+        row.insertArrangedSubview(capture, at: labelIndex)
+        capture.onCapture = { [weak self] keyCode, modifiers, character in
+            self?.finishCapture(context, keyCode: keyCode, modifiers: modifiers, character: character)
+        }
+        capture.onCancel = { [weak self] in
+            self?.cancelCapture(context)
+        }
+        capture.beginCapture()
+    }
+
+    @discardableResult
+    private func finishCapture(_ context: ShortcutRowContext, keyCode: UInt16, modifiers: FocusKeyModifiers, character: String?) -> KeybindEditor.Result {
+        let result = KeybindEditor.apply(
+            target: context.target,
+            keyCode: keyCode,
+            modifiers: modifiers,
+            character: character,
+            currentNavKeymap: navKeymap,
+            defaults: defaults
+        )
+        switch result {
+        case .applied(let resolved):
+            if let resolved { applyResolvedKeymap(resolved) }
+            renderSelectedSection()
+        case .rejected:
+            // Surface gracefully: beep and leave the binding as it was, then
+            // restore the static row.
+            NSSound.beep()
+            cancelCapture(context)
+        }
+        return result
+    }
+
+    private func cancelCapture(_ context: ShortcutRowContext) {
+        if let capture = context.captureView {
+            context.row.removeArrangedSubview(capture)
+            capture.removeFromSuperview()
+            context.captureView = nil
+        }
+        context.chordLabel.isHidden = false
+        panel?.makeFirstResponder(nil)
+    }
+
+    /// Updates the panel's keymap and notifies the app to live-apply it.
+    private func applyResolvedKeymap(_ resolved: NavKeymap) {
+        navKeymap = resolved
+        onKeymapChanged?(resolved)
     }
 
     private func layerTitle(_ layer: ShortcutLayer) -> String {
@@ -345,6 +490,34 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     func firstToggleControlForQA() -> NSButton? {
         detailStack?.arrangedSubviews.compactMap { $0 as? NSButton }.first
     }
+
+    /// The chord text currently rendered for a catalog entry's row, or nil if the
+    /// row isn't rendered. Reads the live label (reflects post-edit re-render).
+    func renderedChordDisplayForQA(entryId: String) -> String? {
+        shortcutRowsById[entryId]?.chordLabel.stringValue
+    }
+
+    /// Drives the real edit path for an entry: opens capture, then feeds a
+    /// captured chord through `finishCapture` (the same closure the live capture
+    /// view fires). Requires the Keybindings section to be rendered. Returns the
+    /// `KeybindEditor.Result` so the check can assert applied vs. rejected.
+    @discardableResult
+    func simulateCaptureForQA(entryId: String, keyCode: UInt16, modifiers: FocusKeyModifiers, character: String?) -> KeybindEditor.Result? {
+        guard let context = shortcutRowsById[entryId] else { return nil }
+        beginCapture(in: context)
+        return finishCapture(context, keyCode: keyCode, modifiers: modifiers, character: character)
+    }
+
+    /// Drives the real reset path for an entry's row.
+    func resetForQA(entryId: String) {
+        guard let context = shortcutRowsById[entryId] else { return }
+        if let resolved = KeybindEditor.reset(target: context.target, defaults: defaults) {
+            applyResolvedKeymap(resolved)
+        }
+        renderSelectedSection()
+    }
+
+    var navKeymapForQA: NavKeymap { navKeymap }
 
     /// True when every field in the selected section produced at least one
     /// editable/displayable control of the kind its type demands (toggle →
@@ -475,6 +648,144 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         panel.close()
         if let panelWindowNumber, NSApp.windows.contains(where: { $0.windowNumber == panelWindowNumber && $0.isVisible }) {
             throw SettingsPanelSelfCheckError.leakedPanel
+        }
+    }
+
+    // MARK: - Self-check (docs/24 S5 — `--keybind-edit-check`)
+
+    enum KeybindEditSelfCheckError: Error, CustomStringConvertible {
+        case message(String)
+        var description: String {
+            switch self { case .message(let m): return m }
+        }
+    }
+
+    /// Drives the real keybind-edit path: capture → persist → re-resolve →
+    /// live-apply hook → row re-render. Uses an isolated suite and scrubs/
+    /// restores the global-domain `continuum.keymap.*`/`continuum.tileKeymap.*`
+    /// keys so a developer machine's overrides cannot leak into the suite's
+    /// search list.
+    static func runKeybindEditSelfCheck() throws {
+        func fail(_ m: String) -> KeybindEditSelfCheckError { .message(m) }
+
+        let suite = "continuum.keybindEdit.selfcheck.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            throw fail("could not create isolated UserDefaults suite")
+        }
+
+        // Scrub keymap overrides out of the global domain (which the suite
+        // inherits) and restore them on exit.
+        let globalDomainName = UserDefaults.globalDomain
+        let originalGlobalDomain = defaults.persistentDomain(forName: globalDomainName) ?? [:]
+        var scrubbed = originalGlobalDomain
+        for key in scrubbed.keys where key.hasPrefix("continuum.keymap.") || key.hasPrefix("continuum.tileKeymap.") {
+            scrubbed.removeValue(forKey: key)
+        }
+        defaults.setPersistentDomain(scrubbed, forName: globalDomainName)
+        defer {
+            defaults.setPersistentDomain(originalGlobalDomain, forName: globalDomainName)
+            defaults.removePersistentDomain(forName: suite)
+        }
+
+        let sections = SettingsSchema.sections()
+        let baseKeymap = NavKeymap.resolve(defaults: defaults, warn: { _ in })
+        let panel = SettingsPanel(sections: sections, defaults: defaults, navKeymap: baseKeymap)
+        var liveKeymap = baseKeymap
+        panel.onKeymapChanged = { liveKeymap = $0 }
+        panel.show(near: nil)
+
+        let keybindIndex = sections.firstIndex { $0.id == "keybindings" } ?? 0
+        panel.selectSectionForQA(keybindIndex)
+
+        // --- 1. Nav binding rebind: navMode.up "k" -> "i". ---
+        let originalUp = baseKeymap.up
+        guard panel.renderedChordDisplayForQA(entryId: "navMode.up") == originalUp else {
+            throw fail("nav row did not render the default chord (\(originalUp))")
+        }
+        // keyCode 34 is "i" on US layouts; the bare key carries character "i".
+        let navResult = panel.simulateCaptureForQA(entryId: "navMode.up", keyCode: 34, modifiers: [], character: "i")
+        guard case .applied? = navResult else {
+            throw fail("nav rebind was not applied: \(String(describing: navResult))")
+        }
+        // UserDefaults reflects the override.
+        guard NavKeymap.resolve(defaults: defaults, warn: { _ in }).up == "i" else {
+            throw fail("NavKeymap.resolve did not reflect the rebound up='i'")
+        }
+        // The live-apply hook produced the updated keymap.
+        guard liveKeymap.up == "i" else {
+            throw fail("live keymap hook did not reflect up='i' (was '\(liveKeymap.up)')")
+        }
+        // The row re-rendered the new chord display.
+        guard panel.renderedChordDisplayForQA(entryId: "navMode.up") == "i" else {
+            throw fail("nav row did not re-render the new chord display 'i'")
+        }
+
+        // --- 2. Reset restores the default. ---
+        panel.resetForQA(entryId: "navMode.up")
+        guard NavKeymap.resolve(defaults: defaults, warn: { _ in }).up == originalUp,
+              liveKeymap.up == originalUp,
+              panel.renderedChordDisplayForQA(entryId: "navMode.up") == originalUp else {
+            throw fail("reset did not restore nav up to default '\(originalUp)'")
+        }
+
+        // --- 3. Leader rebind is live + reflected, then reset. ---
+        let originalLeader = baseKeymap.leader
+        // Rebind leader to Ctrl+G (keyCode 5) — a non-inviolable chord.
+        let leaderResult = panel.simulateCaptureForQA(entryId: "global.navModeLeader", keyCode: 5, modifiers: [.control], character: "g")
+        guard case .applied? = leaderResult else {
+            throw fail("leader rebind was not applied: \(String(describing: leaderResult))")
+        }
+        let rebound = NavKeymap.resolve(defaults: defaults, warn: { _ in }).leader
+        guard rebound == KeyChord(keyCode: 5, modifiers: .control), liveKeymap.leader == rebound else {
+            throw fail("leader rebind not reflected/live (got \(rebound.displayString))")
+        }
+        guard panel.renderedChordDisplayForQA(entryId: "global.navModeLeader") == rebound.displayString else {
+            throw fail("leader row did not re-render the new chord display")
+        }
+        panel.resetForQA(entryId: "global.navModeLeader")
+        guard NavKeymap.resolve(defaults: defaults, warn: { _ in }).leader == originalLeader, liveKeymap.leader == originalLeader else {
+            throw fail("reset did not restore the leader to default")
+        }
+
+        // --- 4. Tile action rebind: browser find Cmd-F -> Cmd-Ctrl-F. ---
+        let cmdF = TileChord(keyCode: 3, modifiers: .command)
+        let cmdCtrlF = TileChord(keyCode: 3, modifiers: [.command, .control])
+        guard TileActionCatalog.actions(for: .browser, defaults: defaults, warn: { _ in })[cmdF] == .browserFind else {
+            throw fail("browser find did not default to Cmd-F before edit")
+        }
+        let tileResult = panel.simulateCaptureForQA(entryId: "tile.browser.browserFind", keyCode: 3, modifiers: [.command, .control], character: "f")
+        guard case .applied? = tileResult else {
+            throw fail("tile rebind was not applied: \(String(describing: tileResult))")
+        }
+        let browserMap = TileActionCatalog.actions(for: .browser, defaults: defaults, warn: { _ in })
+        guard browserMap[cmdCtrlF] == .browserFind, browserMap[cmdF] == nil else {
+            throw fail("TileActionCatalog did not reflect the browser find rebind to Cmd-Ctrl-F")
+        }
+        guard panel.renderedChordDisplayForQA(entryId: "tile.browser.browserFind") == cmdCtrlF.displayString else {
+            throw fail("tile row did not re-render the new chord display \(cmdCtrlF.displayString)")
+        }
+        // Reset restores Cmd-F.
+        panel.resetForQA(entryId: "tile.browser.browserFind")
+        guard TileActionCatalog.actions(for: .browser, defaults: defaults, warn: { _ in })[cmdF] == .browserFind else {
+            throw fail("reset did not restore browser find to Cmd-F")
+        }
+
+        // --- 5. Inviolable collision (Cmd-K) is rejected; binding unchanged. ---
+        let beforeFind = TileActionCatalog.actions(for: .browser, defaults: defaults, warn: { _ in })[cmdF]
+        let rejectResult = panel.simulateCaptureForQA(entryId: "tile.browser.browserFind", keyCode: 40, modifiers: [.command], character: "k")
+        guard case .rejected(.collidesWithInviolableGlobal(.palette))? = rejectResult else {
+            throw fail("Cmd-K bind should be rejected as an inviolable-global collision, got \(String(describing: rejectResult))")
+        }
+        let afterFind = TileActionCatalog.actions(for: .browser, defaults: defaults, warn: { _ in })[cmdF]
+        guard afterFind == beforeFind, afterFind == .browserFind else {
+            throw fail("rejected Cmd-K bind changed the browser find binding")
+        }
+
+        // Clean teardown.
+        let panelWindowNumber = panel.panelWindowNumberForQA
+        panel.close()
+        if let panelWindowNumber, NSApp.windows.contains(where: { $0.windowNumber == panelWindowNumber && $0.isVisible }) {
+            throw fail("settings panel window leaked after close")
         }
     }
 }

@@ -78,6 +78,13 @@ public enum TileActionCatalog {
         }
     }
 
+    /// The stable `continuum.tileKeymap.<name>` override name for `action` in
+    /// `kind`'s default catalog, or `nil` if the action is not claimed by that
+    /// kind. Used by the settings reset path to clear a single override key.
+    public static func overrideName(for action: TileAction, kind: TileKind) -> String? {
+        defaultActions(for: kind).name(for: action)
+    }
+
     // MARK: Chord parsing
 
     /// Parses a chord string like "cmd+ctrl+1" or "ctrl+opt+left".

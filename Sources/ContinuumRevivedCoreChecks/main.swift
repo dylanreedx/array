@@ -2641,10 +2641,16 @@ do {
     expect(globalEntries.count == reservedCases.count, "ShortcutCatalog: exactly one .global entry per ReservedShortcut case, got \(globalEntries.count)")
 
     // configurable policy: globals are hardcoded (false) except the nav leader,
-    // whose chord persists via NavKeymap (true).
+    // whose chord persists via NavKeymap (true). The leader carries the .leader
+    // edit target; the hardcoded globals carry none.
     for entry in globalEntries {
         let expectedConfigurable = entry.id == "global.navModeLeader"
         expect(entry.configurable == expectedConfigurable, "ShortcutCatalog: global \(entry.id) configurable should be \(expectedConfigurable)")
+        if entry.id == "global.navModeLeader" {
+            expect(entry.editTarget == .leader, "ShortcutCatalog: leader entry routes to .leader edit target")
+        } else {
+            expect(entry.editTarget == nil, "ShortcutCatalog: hardcoded global \(entry.id) has no edit target")
+        }
     }
 
     // Exhaustiveness: every NavKeymap binding field is represented by a .navMode
@@ -2660,6 +2666,8 @@ do {
     expect(navEntries.count == navFieldIds.count, "ShortcutCatalog: exactly one .navMode entry per NavKeymap field, got \(navEntries.count)")
     for entry in navEntries {
         expect(entry.configurable, "ShortcutCatalog: nav-mode \(entry.id) is configurable")
+        let expectedField = String(entry.id.dropFirst("navMode.".count))
+        expect(entry.editTarget == .navBinding(field: expectedField), "ShortcutCatalog: nav-mode \(entry.id) routes to .navBinding(\(expectedField))")
     }
 
     // Exhaustiveness: for each TileKind, the .tile(kind) entry count equals the
@@ -2672,6 +2680,11 @@ do {
         expect(tileCount == defaultCount, "ShortcutCatalog: \(kind) has \(tileCount) tile entries, expected \(defaultCount) from TileActionCatalog defaults")
         for entry in entries where entry.layer == .tile(kind) {
             expect(entry.configurable, "ShortcutCatalog: tile \(entry.id) is configurable")
+            if case .tileAction(let targetKind, _)? = entry.editTarget {
+                expect(targetKind == kind, "ShortcutCatalog: tile \(entry.id) routes to a .tileAction for \(kind)")
+            } else {
+                expect(false, "ShortcutCatalog: tile \(entry.id) must carry a .tileAction edit target")
+            }
         }
     }
 

@@ -66,6 +66,7 @@ run swift run ContinuumRevivedPerfChecks
 run_app_check .build/debug/continuum-revived --palette-duplicate-root-check
 run_app_check .build/debug/continuum-revived --palette-first-responder-restore-check
 run_app_check .build/debug/continuum-revived --settings-panel-check
+run_app_check .build/debug/continuum-revived --keybind-edit-check
 run_app_check .build/debug/continuum-revived --browser-url-focus-check
 run_app_check .build/debug/continuum-revived --browser-ui-delegate-check
 run_app_check .build/debug/continuum-revived --browser-element-context-check

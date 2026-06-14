@@ -7,22 +7,37 @@ public enum ShortcutLayer: Equatable, Sendable {
     case tile(TileKind)
 }
 
+/// Routes an edited row to the correct persist/live-apply path. A non-
+/// configurable global has no target (`nil`); configurable rows carry the write
+/// path their edit must take (docs/24 S5).
+public enum KeybindEditTarget: Equatable, Sendable {
+    /// The nav-mode leader chord (a `NavKeymap.leader` rebind).
+    case leader
+    /// A single-key nav-mode binding, by its `NavKeymap` field name (e.g. "up").
+    case navBinding(field: String)
+    /// A tile-local action's chord, by kind + action (a `TileActionCatalog` rebind).
+    case tileAction(kind: TileKind, action: TileAction)
+}
+
 /// One human-readable binding row for the settings Guide: a stable `id`, a
-/// concise `label`, the display chord, its `layer`, and whether a rebind path
-/// exists today (`configurable`).
+/// concise `label`, the display chord, its `layer`, whether a rebind path
+/// exists today (`configurable`), and — for configurable rows — the
+/// `editTarget` that routes an edit to the correct write path.
 public struct ShortcutCatalogEntry: Equatable, Sendable {
     public let id: String
     public let label: String
     public let chordDisplay: String
     public let layer: ShortcutLayer
     public let configurable: Bool
+    public let editTarget: KeybindEditTarget?
 
-    public init(id: String, label: String, chordDisplay: String, layer: ShortcutLayer, configurable: Bool) {
+    public init(id: String, label: String, chordDisplay: String, layer: ShortcutLayer, configurable: Bool, editTarget: KeybindEditTarget? = nil) {
         self.id = id
         self.label = label
         self.chordDisplay = chordDisplay
         self.layer = layer
         self.configurable = configurable
+        self.editTarget = editTarget
     }
 }
 
@@ -34,8 +49,12 @@ public struct ShortcutCatalogEntry: Equatable, Sendable {
 /// (true); nav-mode (NavKeymap) and tile actions (TileActionCatalog) both have
 /// write paths (true).
 public enum ShortcutCatalog {
-    public static func entries(navKeymap: NavKeymap = .default) -> [ShortcutCatalogEntry] {
-        globalEntries(navKeymap: navKeymap) + navModeEntries(navKeymap: navKeymap) + tileEntries()
+    /// `defaults` (when supplied) lets tile rows reflect persisted
+    /// `continuum.tileKeymap.*` overrides, so an edited row re-renders its new
+    /// chord. With `nil`, tile rows show the in-code default chords (the Guide /
+    /// exhaustiveness baseline).
+    public static func entries(navKeymap: NavKeymap = .default, defaults: UserDefaults? = nil) -> [ShortcutCatalogEntry] {
+        globalEntries(navKeymap: navKeymap) + navModeEntries(navKeymap: navKeymap) + tileEntries(defaults: defaults)
     }
 
     // MARK: Globals — one entry per ReservedShortcut.
@@ -55,7 +74,8 @@ public enum ShortcutCatalog {
             label: "Nav Mode",
             chordDisplay: navKeymap.leader.displayString,
             layer: .global,
-            configurable: true
+            configurable: true,
+            editTarget: .leader
         ))
         return entries
     }
@@ -104,41 +124,57 @@ public enum ShortcutCatalog {
     // MARK: Nav-mode — one entry per NavKeymap binding field.
 
     static func navModeEntries(navKeymap: NavKeymap) -> [ShortcutCatalogEntry] {
-        let fields: [(id: String, label: String, chord: String)] = [
-            ("navMode.up", "Move up", navKeymap.up),
-            ("navMode.down", "Move down", navKeymap.down),
-            ("navMode.left", "Move left", navKeymap.left),
-            ("navMode.right", "Move right", navKeymap.right),
-            ("navMode.nextZone", "Next zone", navKeymap.nextZone),
-            ("navMode.previousZone", "Previous zone", navKeymap.previousZone),
-            ("navMode.zonePicker", "Zone picker", navKeymap.zonePicker),
-            ("navMode.workspacePicker", "Workspace picker", navKeymap.workspacePicker),
-            ("navMode.agentCycle", "Cycle agents", navKeymap.agentCycle),
-            ("navMode.agentNeedsAttention", "Agent needs attention", navKeymap.agentNeedsAttention),
-            ("navMode.focusMode", "Focus mode", navKeymap.focusMode),
-            ("navMode.deleteTile", "Delete tile", navKeymap.deleteTile),
+        let fields: [(field: String, label: String, chord: String)] = [
+            ("up", "Move up", navKeymap.up),
+            ("down", "Move down", navKeymap.down),
+            ("left", "Move left", navKeymap.left),
+            ("right", "Move right", navKeymap.right),
+            ("nextZone", "Next zone", navKeymap.nextZone),
+            ("previousZone", "Previous zone", navKeymap.previousZone),
+            ("zonePicker", "Zone picker", navKeymap.zonePicker),
+            ("workspacePicker", "Workspace picker", navKeymap.workspacePicker),
+            ("agentCycle", "Cycle agents", navKeymap.agentCycle),
+            ("agentNeedsAttention", "Agent needs attention", navKeymap.agentNeedsAttention),
+            ("focusMode", "Focus mode", navKeymap.focusMode),
+            ("deleteTile", "Delete tile", navKeymap.deleteTile),
         ]
         return fields.map { field in
-            ShortcutCatalogEntry(id: field.id, label: field.label, chordDisplay: field.chord, layer: .navMode, configurable: true)
+            ShortcutCatalogEntry(
+                id: "navMode.\(field.field)",
+                label: field.label,
+                chordDisplay: field.chord,
+                layer: .navMode,
+                configurable: true,
+                editTarget: .navBinding(field: field.field)
+            )
         }
     }
 
     // MARK: Tile actions — one entry per TileActionCatalog default per kind.
 
-    static func tileEntries() -> [ShortcutCatalogEntry] {
-        // Read from an empty, isolated domain so the catalog reflects the
-        // in-code default chords, not any user override.
-        let emptyDefaults = UserDefaults(suiteName: "continuum.shortcutCatalog.defaults")!
-        emptyDefaults.removePersistentDomain(forName: "continuum.shortcutCatalog.defaults")
+    static func tileEntries(defaults: UserDefaults? = nil) -> [ShortcutCatalogEntry] {
+        // With no caller-supplied store, read from an empty, isolated domain so
+        // the catalog reflects the in-code default chords, not any user
+        // override. When a store is supplied (the live editor), reflect its
+        // persisted overrides so an edited row re-renders its new chord.
+        let store: UserDefaults
+        if let defaults {
+            store = defaults
+        } else {
+            let emptyDefaults = UserDefaults(suiteName: "continuum.shortcutCatalog.defaults")!
+            emptyDefaults.removePersistentDomain(forName: "continuum.shortcutCatalog.defaults")
+            store = emptyDefaults
+        }
         var entries: [ShortcutCatalogEntry] = []
         for kind in TileKind.allCases {
-            for (chord, action) in TileActionCatalog.actions(for: kind, defaults: emptyDefaults, warn: { _ in }) {
+            for (chord, action) in TileActionCatalog.actions(for: kind, defaults: store, warn: { _ in }) {
                 entries.append(ShortcutCatalogEntry(
                     id: "tile.\(kind.rawValue).\(actionId(action))",
                     label: actionLabel(action),
                     chordDisplay: chord.displayString,
                     layer: .tile(kind),
-                    configurable: true
+                    configurable: true,
+                    editTarget: .tileAction(kind: kind, action: action)
                 ))
             }
         }

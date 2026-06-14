@@ -107,6 +107,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--keybind-edit-check") {
+            do {
+                _ = NSApplication.shared
+                try SettingsPanel.runKeybindEditSelfCheck()
+                print("ContinuumRevivedKeybindEditChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-url-focus-check") {
             do {
                 _ = NSApplication.shared
@@ -2112,12 +2124,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func makeSettingsPanel() -> SettingsPanel {
-        let panel = SettingsPanel()
+        let panel = SettingsPanel(navKeymap: navKeymap)
         panel.onClose = { [weak self] in
             self?.focusBroker.closeModal(.settings)
             self?.settingsPanel = nil
         }
+        panel.onKeymapChanged = { [weak self] keymap in
+            self?.applyEditedNavKeymap(keymap)
+        }
         return panel
+    }
+
+    /// Live-applies a leader/nav rebind from the settings panel (no relaunch):
+    /// swaps the app's live keymap + the broker's copy, and refreshes the nav
+    /// hint line so an open nav overlay reflects the new bindings.
+    private func applyEditedNavKeymap(_ keymap: NavKeymap) {
+        navKeymap = keymap
+        focusBroker.navKeymap = keymap
+        canvasView?.navModeHintLine = keymap.hintLine
     }
 
     private func focusSpawnedTile(_ tileId: UUID) {
