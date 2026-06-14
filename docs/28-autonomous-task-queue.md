@@ -36,7 +36,7 @@ can pass while the user-facing path is dead is the WRONG check.
   `swift run ContinuumRevivedCoreChecks` + matrix green.
 
 ### F2 — NavKeymap write path + TileActionCatalog persist (docs/24 S1)
-- **Status: TODO** · deps: F1
+- **Status: DONE (f6caa3f)** · deps: F1
 - `NavKeymap.persist(to:)` (inverse of `resolve`); broaden `KeyChord` display/parse;
   `TileActionCatalog` write path.
 - **Check:** extend `NavKeymapChecks` — `resolve(persist(map)) == map`, chord display
@@ -117,6 +117,13 @@ can pass while the user-facing path is dead is the WRONG check.
 ### P3 — browser find match count
 - **Status: TODO** · deps: A4
 - Surface `WKFindResult` ("3 of 12" / not found) instead of discarding it.
+
+## Known flaky (handle, don't trust blindly)
+- **`HarnessRunControl` check in CoreChecks** intermittently crashes with
+  `HarnessRunControlError.missingControlFile` (Trace/BPT trap) — a race in its
+  temp-git setup, NOT caused by queue work. Seen once during F2 gate, green on
+  re-run. The gate re-runs the matrix on this signature. Hardening it is a
+  follow-up (P4) — important because an unattended Codex loop would false-STOP.
 
 ## Morning dogfood checklist (Dylan)
 _(filled in as DOGFOOD tasks land — what to eyeball when you're back)_
