@@ -3307,4 +3307,42 @@ do {
     try? FileManager.default.removeItem(at: tempRoot)
 }
 
+// MARK: - QA run manifest reader
+
+do {
+    let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("continuum-qa-manifest-\(UUID().uuidString)", isDirectory: true)
+    let oldRun = tempRoot.appendingPathComponent("qa-runs/old", isDirectory: true)
+    let latestRun = tempRoot.appendingPathComponent("qa-runs/latest", isDirectory: true)
+    let malformedRun = tempRoot.appendingPathComponent("qa-runs/malformed", isDirectory: true)
+    try FileManager.default.createDirectory(at: oldRun, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: latestRun, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: malformedRun, withIntermediateDirectories: true)
+    try "{not-json".write(to: malformedRun.appendingPathComponent("manifest.json"), atomically: true, encoding: .utf8)
+    try "{\"verdict\":\"passed\",\"check\":\"old-check\",\"extra\":true}".write(to: oldRun.appendingPathComponent("manifest.json"), atomically: true, encoding: .utf8)
+    try "{\"status\":\"passed\",\"check\":\"status-only\"}".write(to: latestRun.appendingPathComponent("manifest.json"), atomically: true, encoding: .utf8)
+    let oldDate = Date(timeIntervalSince1970: 100)
+    let latestDate = Date(timeIntervalSince1970: 200)
+    let malformedDate = Date(timeIntervalSince1970: 300)
+    try FileManager.default.setAttributes([.modificationDate: oldDate], ofItemAtPath: oldRun.appendingPathComponent("manifest.json").path)
+    try FileManager.default.setAttributes([.modificationDate: latestDate], ofItemAtPath: latestRun.appendingPathComponent("manifest.json").path)
+    try FileManager.default.setAttributes([.modificationDate: malformedDate], ofItemAtPath: malformedRun.appendingPathComponent("manifest.json").path)
+
+    guard let snapshot = QARunManifestReader.latest(projectRoot: tempRoot) else {
+        fputs("FAIL: latest QA manifest should be found\n", stderr)
+        Foundation.exit(1)
+    }
+    expect(snapshot.verdict == QAVerdict.unknown, "QARunManifestReader surfaces a newest malformed manifest as unknown instead of falling back stale")
+    expect(snapshot.check == nil, "QARunManifestReader leaves malformed manifest check empty")
+    expect(URL(fileURLWithPath: snapshot.runDirectoryPath).standardizedFileURL.path == malformedRun.standardizedFileURL.path, "QARunManifestReader reports the latest run directory")
+    expect(snapshot.tooltip.contains("unknown"), "QARunManifestReader tooltip includes unknown verdict")
+    try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 150)], ofItemAtPath: malformedRun.appendingPathComponent("manifest.json").path)
+    let statusSnapshot = QARunManifestReader.latest(projectRoot: tempRoot)
+    expect(statusSnapshot?.verdict == QAVerdict.passed, "QARunManifestReader falls back to status-only manifests")
+    expect(statusSnapshot?.check == "status-only", "QARunManifestReader preserves optional check")
+    expect(QAVerdict.normalize("success") == .passed, "QAVerdict normalizes success aliases")
+    expect(QAVerdict.normalize(nil) == .unknown, "QAVerdict treats missing verdict as unknown")
+
+    try? FileManager.default.removeItem(at: tempRoot)
+}
+
 print("ContinuumRevivedCoreChecks passed")

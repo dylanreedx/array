@@ -2928,7 +2928,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let projectEntry = registry.projects.first(where: { $0.id == zone.projectId })
             let name = projectEntry?.name ?? "Project"
             let rollup = projectEntry.map(Self.agentStatusRollup(for:)) ?? .empty
-            return CanvasNSView.ZoneRenderModel(placement: zone, displayName: name, agentStatusRollup: rollup)
+            let qaVerdict = projectEntry.flatMap { QARunManifestReader.latest(projectRoot: URL(fileURLWithPath: $0.rootPath, isDirectory: true)) }
+            return CanvasNSView.ZoneRenderModel(placement: zone, displayName: name, agentStatusRollup: rollup, qaVerdict: qaVerdict)
         }
     }
 

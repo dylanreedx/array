@@ -33,6 +33,7 @@ final class CanvasNSView: NSView {
         var placement: ZonePlacement
         var displayName: String
         var agentStatusRollup: AgentStatusRollup = .empty
+        var qaVerdict: QARunManifestSnapshot?
     }
 
     struct AgentStatusRollup: Equatable {
@@ -760,7 +761,7 @@ final class CanvasNSView: NSView {
             activeZone: alpha,
             zoneRenderModels: [
                 ZoneRenderModel(placement: alpha, displayName: "Alpha"),
-                ZoneRenderModel(placement: beta, displayName: "Beta"),
+                ZoneRenderModel(placement: beta, displayName: "Beta", qaVerdict: QARunManifestSnapshot(verdict: .passed, check: "matrix", manifestPath: "/tmp/qa/manifest.json", runDirectoryPath: "/tmp/qa", modifiedAt: Date(timeIntervalSince1970: 200))),
                 ZoneRenderModel(placement: gamma, displayName: "Gamma")
             ],
             showsZoneChrome: true
@@ -777,6 +778,8 @@ final class CanvasNSView: NSView {
         try expect(betaSnap.displayName == "Beta", "zone name should come from render model")
         try expect(betaSnap.color == "mint", "zone color should be preserved")
         try expect(betaSnap.frame == CanvasEngine.tileScreenFrame(CanvasEngine.zoneWorldFrame(beta), viewport: viewport), "beta chrome should use zone world frame")
+        try expect(betaSnap.qaVerdictGlyph == "✓", "zone chrome snapshot should expose QA verdict glyph")
+        try expect(betaSnap.qaVerdictTooltip?.contains("matrix: passed") == true, "zone chrome snapshot should expose QA verdict tooltip")
 
         let gammaSnap = try expectSnapshot(canvas.zoneChromeSnapshot(for: gammaZoneId), "missing gamma chrome")
         try expect(gammaSnap.collapsed, "gamma should be marked collapsed")
@@ -1248,6 +1251,8 @@ final class ZoneChromeNSView: NSView {
         var frame: CGRect
         var headerRect: CGRect
         var agentRollupText: String?
+        var qaVerdictGlyph: String?
+        var qaVerdictTooltip: String?
     }
 
     private let model: CanvasNSView.ZoneRenderModel
@@ -1260,7 +1265,9 @@ final class ZoneChromeNSView: NSView {
             collapsed: model.placement.collapsed,
             frame: frame,
             headerRect: headerRect,
-            agentRollupText: model.agentStatusRollup.displayText
+            agentRollupText: model.agentStatusRollup.displayText,
+            qaVerdictGlyph: model.qaVerdict?.verdict.glyph,
+            qaVerdictTooltip: model.qaVerdict?.tooltip
         )
     }
 
@@ -1301,6 +1308,22 @@ final class ZoneChromeNSView: NSView {
         ]
         title.draw(in: headerRect.insetBy(dx: 12, dy: 8), withAttributes: attributes)
 
+        var rightInset: CGFloat = 12
+        if let qaVerdict = model.qaVerdict {
+            let badgeAttributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 12, weight: .bold),
+                .foregroundColor: Self.qaColor(for: qaVerdict.verdict).withAlphaComponent(0.92)
+            ]
+            let glyph = qaVerdict.verdict.glyph
+            let badgeSize = (glyph as NSString).size(withAttributes: badgeAttributes)
+            let badgeRect = CGRect(x: headerRect.maxX - badgeSize.width - 12, y: 8, width: badgeSize.width, height: 16)
+            glyph.draw(in: badgeRect, withAttributes: badgeAttributes)
+            toolTip = qaVerdict.tooltip
+            rightInset += badgeSize.width + 10
+        } else {
+            toolTip = nil
+        }
+
         if let rollup = model.agentStatusRollup.displayText {
             let rollupAttributes: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: 11, weight: .medium),
@@ -1308,7 +1331,7 @@ final class ZoneChromeNSView: NSView {
             ]
             let rollupSize = (rollup as NSString).size(withAttributes: rollupAttributes)
             let rollupRect = CGRect(
-                x: max(12, headerRect.maxX - rollupSize.width - 12),
+                x: max(12, headerRect.maxX - rollupSize.width - rightInset),
                 y: 9,
                 width: rollupSize.width,
                 height: 16
@@ -1319,6 +1342,14 @@ final class ZoneChromeNSView: NSView {
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         nil
+    }
+
+    private static func qaColor(for verdict: QAVerdict) -> NSColor {
+        switch verdict {
+        case .passed: return NSColor.systemGreen
+        case .failed: return NSColor.systemRed
+        case .unknown: return NSColor.systemYellow
+        }
     }
 
     private static func color(named name: String) -> NSColor {
