@@ -6822,6 +6822,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(findConsumed == true, "browserFind on focused browser must be consumed; got \(findConsumed)")
         try expect(browserView.findBarVisibleForQA == true, "browserFind must show the find bar")
 
+        // --- Find-result indicator (P3): surface WKFindResult.matchFound as a
+        //     found/not-found hint. No "N of M" count — WKFindResult has no public
+        //     total. Driven via the spy runtime to avoid real-WKWebView timing.
+        runtime.findCorpus = "the quick brown fox jumps over the lazy dog"
+        try expect(browserView.findResultTextForQA.isEmpty, "find indicator should start clear; got \(browserView.findResultTextForQA.debugDescription)")
+        // A query absent from the page → "No matches".
+        browserView.performFindFieldCommandForQA(#selector(NSResponder.insertNewline(_:)), query: "zzznope")
+        let noMatchText = browserView.findResultTextForQA
+        try expect(noMatchText == "No matches", "a find with no match must show \"No matches\"; got \(noMatchText.debugDescription)")
+        // A successful query → indicator cleared (no count shown).
+        browserView.performFindFieldCommandForQA(#selector(NSResponder.insertNewline(_:)), query: "quick")
+        let matchText = browserView.findResultTextForQA
+        try expect(matchText.isEmpty, "a successful find must clear the indicator (no count shown); got \(matchText.debugDescription)")
+        // Re-trigger a no-match, then empty the query → indicator cleared.
+        browserView.performFindFieldCommandForQA(#selector(NSResponder.insertNewline(_:)), query: "zzznope")
+        try expect(browserView.findResultTextForQA == "No matches", "precondition: no-match indicator visible before clearing query")
+        browserView.setFindQueryForQA("")
+        try expect(browserView.findResultTextForQA.isEmpty, "emptying the find query must clear the indicator; got \(browserView.findResultTextForQA.debugDescription)")
+
         let focusURLConsumed = appDelegate.executeTileAction(.browserFocusURL)
         try expect(focusURLConsumed == true, "browserFocusURL on focused browser must be consumed; got \(focusURLConsumed)")
         try expect(browserView.urlFieldHasFocusForQA == true, "browserFocusURL must focus the URL field")
@@ -6864,6 +6883,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "goForwardCount": runtime.goForwardCount,
             "findConsumed": findConsumed,
             "findBarVisible": browserView.findBarVisibleForQA,
+            "findNoMatchText": noMatchText,
+            "findMatchClears": matchText.isEmpty,
             "focusURLConsumed": focusURLConsumed,
             "urlFieldHasFocus": browserView.urlFieldHasFocusForQA,
             "noteExportOnBrowser": noteExportOnBrowser,
@@ -7126,10 +7147,15 @@ private final class SpyBrowserRuntime: BrowserRuntime {
     let faviconURL: String? = nil
     let loadingState: BrowserLoadingState = .idle
     var onStateChange: (() -> Void)?
+    var onFindResult: ((Bool) -> Void)?
 
     private(set) var reloadCount = 0
     private(set) var goBackCount = 0
     private(set) var goForwardCount = 0
+
+    /// Stand-in page text: `find` reports `matchFound` when the query occurs here,
+    /// letting the check drive both found and not-found without a real WKWebView.
+    var findCorpus = ""
 
     init(tileId: TileID, initialURL: String) {
         self.tileId = tileId
@@ -7143,7 +7169,11 @@ private final class SpyBrowserRuntime: BrowserRuntime {
     func goForward() { goForwardCount += 1 }
     func reload() { reloadCount += 1 }
     func stop() {}
-    func find(_ query: String, direction: BrowserFindDirection) {}
+    func find(_ query: String, direction: BrowserFindDirection) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        onFindResult?(findCorpus.localizedCaseInsensitiveContains(trimmed))
+    }
     func focus() {}
     func blur() {}
     func isSemanticContentResponder(_ responder: NSResponder?) -> Bool { false }

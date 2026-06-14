@@ -138,6 +138,9 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
 
     var onStateChange: (() -> Void)?
 
+    /// Invoked after `find(_:direction:)` resolves with `WKFindResult.matchFound`.
+    var onFindResult: ((Bool) -> Void)?
+
     /// Invoked when the WKWebView content process terminates unexpectedly.
     /// Fires at most once per runtime instance. Always called on MainActor.
     var onContentProcessTerminated: ((BrowserRuntimeID) -> Void)?
@@ -269,7 +272,15 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         let configuration = WKFindConfiguration()
         configuration.backwards = direction == .backward
         configuration.wraps = true
-        webView.find(trimmed, configuration: configuration) { _ in }
+        // WKFindResult only exposes `matchFound: Bool` publicly — `numberOfMatches`
+        // is not part of the public API, so we can surface found/not-found but NOT
+        // a precise "N of M" count. A real count is deferred: it would require
+        // injecting JS to walk/highlight the DOM and tally matches.
+        webView.find(trimmed, configuration: configuration) { [weak self] result in
+            Task { @MainActor in
+                self?.onFindResult?(result.matchFound)
+            }
+        }
     }
 
     func loadURL(_ urlString: String) {

@@ -26,6 +26,12 @@ protocol BrowserRuntime: AnyObject {
 
     var onStateChange: (() -> Void)? { get set }
 
+    /// Fires after a `find(_:direction:)` completes with the WebKit result's
+    /// `matchFound`. `true` = at least one match; `false` = none. WebKit's public
+    /// `WKFindResult` exposes only `matchFound` (no count), so an "N of M" total
+    /// is not available here — see `WKWebViewBrowserRuntime.find`.
+    var onFindResult: ((Bool) -> Void)? { get set }
+
     func attach(to hostView: BrowserHostView)
     func detach()
     func loadURL(_ urlString: String)

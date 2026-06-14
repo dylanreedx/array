@@ -33,6 +33,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     private let faviconLabel: NSTextField
     private let progressIndicator: NSProgressIndicator
     private let findField: NSSearchField
+    private let findResultLabel: NSTextField
     private let findPreviousButton: NSButton
     private let findNextButton: NSButton
     private let findCloseButton: NSButton
@@ -53,6 +54,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         self.faviconLabel = NSTextField(labelWithString: "◌")
         self.progressIndicator = NSProgressIndicator()
         self.findField = NSSearchField()
+        self.findResultLabel = NSTextField(labelWithString: "")
         self.findPreviousButton = NSButton(title: "↑", target: nil, action: nil)
         self.findNextButton = NSButton(title: "↓", target: nil, action: nil)
         self.findCloseButton = NSButton(title: "×", target: nil, action: nil)
@@ -123,6 +125,15 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         findField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         findField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
+        // Shows "No matches" when a find returns no result; cleared on a match,
+        // an emptied query, or when the bar hides. WebKit's WKFindResult has no
+        // public count, so this is found/not-found only — no "N of M" (deferred).
+        findResultLabel.font = .systemFont(ofSize: 11)
+        findResultLabel.textColor = .secondaryLabelColor
+        findResultLabel.translatesAutoresizingMaskIntoConstraints = false
+        findResultLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        findResultLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+
         findPreviousButton.target = self
         findPreviousButton.action = #selector(handleFindPrevious(_:))
         findPreviousButton.bezelStyle = .rounded
@@ -141,7 +152,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         findCloseButton.toolTip = "Close find"
         findCloseButton.translatesAutoresizingMaskIntoConstraints = false
 
-        findRow.setViews([findField, findPreviousButton, findNextButton, findCloseButton], in: .leading)
+        findRow.setViews([findField, findResultLabel, findPreviousButton, findNextButton, findCloseButton], in: .leading)
         findRow.orientation = .horizontal
         findRow.spacing = 4
         findRow.alignment = .centerY
@@ -201,6 +212,9 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
                 self.lastPersistedTitle = self.runtime.title
                 self.onAfterRefresh?()
             }
+        }
+        runtime.onFindResult = { [weak self] matchFound in
+            self?.showFindResult(matchFound: matchFound)
         }
         refresh()
     }
@@ -305,11 +319,23 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     private func hideFindBar() {
         findRow.isHidden = true
         findRowHeightConstraint.constant = 0
+        clearFindResult()
         focusBrowserContent()
     }
 
     private func performFind(direction: BrowserFindDirection) {
         runtime.find(findField.stringValue, direction: direction)
+    }
+
+    /// Reflects the runtime's `WKFindResult.matchFound`: "No matches" when none,
+    /// cleared on a match. No "N of M" count — WKFindResult exposes no public
+    /// total (a real count is deferred; it needs injected JS to tally matches).
+    private func showFindResult(matchFound: Bool) {
+        findResultLabel.stringValue = matchFound ? "" : "No matches"
+    }
+
+    private func clearFindResult() {
+        findResultLabel.stringValue = ""
     }
 
     @objc private func showProfileMenu(_ sender: NSButton) {
@@ -376,6 +402,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     var findBarVisibleForQA: Bool { !findRow.isHidden }
     var findRowHeightForQA: CGFloat { findRowHeightConstraint.constant }
     var findFieldHasFocusForQA: Bool { window?.firstResponder === findField.currentEditor() || window?.firstResponder === findField }
+    var findResultTextForQA: String { findResultLabel.stringValue }
 
     @discardableResult
     func performURLFieldCommandForQA(_ commandSelector: Selector) -> Bool {
@@ -388,6 +415,13 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         showFindBar()
         findField.stringValue = query
         return control(findField, textView: NSTextView(), doCommandBy: commandSelector)
+    }
+
+    /// QA: mimic the user editing the find field, including the empty-query clear
+    /// path (`controlTextDidChange` does not fire on a direct `stringValue` set).
+    func setFindQueryForQA(_ query: String) {
+        findField.stringValue = query
+        controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: findField))
     }
 
     static func runURLFocusSelfCheck() throws {
@@ -541,6 +575,15 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     }
 
     // MARK: - NSTextFieldDelegate
+
+    func controlTextDidChange(_ notification: Notification) {
+        // Clear the no-match indicator the moment the find query is emptied so a
+        // stale "No matches" never lingers over a blank field.
+        guard notification.object as? NSSearchField === findField else { return }
+        if findField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            clearFindResult()
+        }
+    }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if control === findField {
