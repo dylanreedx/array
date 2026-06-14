@@ -128,7 +128,7 @@ keybind chord-capture editor.
 ## Polish — `[appkit]`, if time (docs/25 P1)
 
 ### P1 — resize corner band · DOGFOOD
-- **Status: TODO** · deps: none
+- **Status: DONE (4ea11c6)** · deps: none
 - Give corners a larger detection band; extend `--tile-world-bounds-check` to
   `.bottom/.top/.bottomLeft/.bottomRight/.topLeft/.topRight` at zoom 0.5/1/2.
 
@@ -167,3 +167,5 @@ _(filled in as DOGFOOD tasks land — what to eyeball when you're back)_
 - **Browser/note actions (A4):** focus a browser → `⌘F` find, `⌘R` reload,
   `⌘[`/`⌘]` back/forward, `⌘L` URL bar; focus a note → `⌘E` export (save panel).
   Confirm `⌘F`-in-browser still works (now via the action, not passthrough).
+- **Resize corners (P1):** zoom out, then drag a tile's bottom/any corner to
+  resize — the corner should be grabbable (was a dead ~8px target before).
