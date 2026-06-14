@@ -92,7 +92,7 @@ keybind chord-capture editor.
   (wire the landed `TileArrangement` math). Add `--tile-keyboard-action-check`.
 
 ### A4 — browser + note executors (docs/27 staging 5) · DOGFOOD
-- **Status: TODO** · deps: A2
+- **Status: DONE (d8bbebf)** · deps: A2 · **FOCUS-SCOPE PRIMITIVE + SETTINGS COMPLETE (docs/27 + docs/24)**
 - Browser ⌘F/⌘L/⌘R/⌘[/⌘]; note ⌘E export (save panel). Extend browser self-check.
 
 ### A5 — marching-ants focus border (docs/27 staging 6) · DOGFOOD
@@ -164,3 +164,6 @@ _(filled in as DOGFOOD tasks land — what to eyeball when you're back)_
 - **Tile actions (A3):** focus a tile → `⌘⌃1/2/3/0` resize (compact/default/
   large/fill); `⌃⌥`arrows nudge; `⌃⌥⌘`arrows throw toward a neighbor. Do the
   chords + the resize ladder feel right? (Defaults rebindable in Settings.)
+- **Browser/note actions (A4):** focus a browser → `⌘F` find, `⌘R` reload,
+  `⌘[`/`⌘]` back/forward, `⌘L` URL bar; focus a note → `⌘E` export (save panel).
+  Confirm `⌘F`-in-browser still works (now via the action, not passthrough).
