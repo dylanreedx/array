@@ -81,7 +81,8 @@ keybind chord-capture editor.
   background set `activeSurface` correctly; assert scope transitions. matrix green.
 
 ### A2 — monitor → FocusDispatch.resolve; remove P0 guard (docs/27 staging 3) · DOGFOOD
-- **Status: TODO** · deps: F1, A1
+- **Status: DONE (4f5605a)** · deps: F1, A1 · P0 doubly-preserved; 11 checks green;
+  new `--reserved-dispatch-check`. executeTileAction is a passthrough stub (A3/A4 fill it).
 - Replace `handleReservedShortcut` body with `resolve → execute`; delete the P0
   special-case browser guard (absorbed). `--browser-url-focus-check` still green.
 
