@@ -87,7 +87,7 @@ keybind chord-capture editor.
   special-case browser guard (absorbed). `--browser-url-focus-check` still green.
 
 ### A3 — sizing + positioning executors (docs/27 staging 4) · DOGFOOD
-- **Status: TODO** · deps: F1, A2
+- **Status: DONE (a6f1007)** · deps: F1, A2
 - `⌘⌃1/2/3/0` size presets (TileGeometry); `⌃⌥`/`⌃⌥⌘` arrows nudge/throw
   (wire the landed `TileArrangement` math). Add `--tile-keyboard-action-check`.
 
@@ -161,3 +161,6 @@ _(filled in as DOGFOOD tasks land — what to eyeball when you're back)_
 - **Focus border (A5):** click a tile → a subtle dashed "marching ants" border
   animates around it; click another tile → border moves; click empty canvas →
   border clears. Does it read well at different zoom levels? Too subtle/loud?
+- **Tile actions (A3):** focus a tile → `⌘⌃1/2/3/0` resize (compact/default/
+  large/fill); `⌃⌥`arrows nudge; `⌃⌥⌘`arrows throw toward a neighbor. Do the
+  chords + the resize ladder feel right? (Defaults rebindable in Settings.)
