@@ -17,12 +17,10 @@ quit_app_with_osascript
 sleep 0.8
 diagnostic_snapshot "$QA_RUN_DIR/diagnostics-after.txt"
 
-if comm -13 "$QA_RUN_DIR/diagnostics-before.txt" "$QA_RUN_DIR/diagnostics-after.txt" > "$QA_RUN_DIR/diagnostics-new.txt" && [[ ! -s "$QA_RUN_DIR/diagnostics-new.txt" ]]; then
-  append_event "diagnosticreports-clean" "pass" "" "no new DiagnosticReports entries after quit"
+if assert_flow "diagnosticreports-clean" "no new DiagnosticReports entries after quit" assert_no_new_diagnostics "$QA_RUN_DIR/diagnostics-before.txt" "$QA_RUN_DIR/diagnostics-after.txt" "$QA_RUN_DIR/diagnostics-new.txt"; then
   QA_APP_PID=""
   finish_flow pass
 else
-  append_event "diagnosticreports-clean" "fail" "" "new DiagnosticReports entries appeared after quit"
   QA_APP_PID=""
   finish_flow fail
 fi

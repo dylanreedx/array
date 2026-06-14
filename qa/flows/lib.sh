@@ -17,6 +17,7 @@ QA_RUN_DIR=""
 QA_MANIFEST_EVENTS=""
 QA_STARTED_AT=""
 QA_FINISHED=0
+QA_ASSERTIONS=0
 
 require_command() {
   local command_name="$1"
@@ -93,15 +94,45 @@ capture_step() {
   fi
 }
 
+assert_flow() {
+  local step="$1"
+  local notes="$2"
+  shift 2
+  if "$@"; then
+    QA_ASSERTIONS=$((QA_ASSERTIONS + 1))
+    append_event "$step" "pass" "" "$notes"
+  else
+    append_event "$step" "fail" "" "$notes"
+    return 1
+  fi
+}
+
+assert_file_nonempty() {
+  local path="$1"
+  [[ -s "$path" ]]
+}
+
+assert_app_window_present() {
+  window_bounds >/dev/null
+}
+
+assert_no_new_diagnostics() {
+  local before="$1"
+  local after="$2"
+  local output="$3"
+  comm -13 "$before" "$after" > "$output"
+  [[ ! -s "$output" ]]
+}
+
 write_manifest() {
   local status="$1"
   local finished_at
   finished_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  python3 - "$QA_FLOW_NAME" "$QA_STARTED_AT" "$finished_at" "$status" "$QA_MANIFEST_EVENTS" > "$QA_RUN_DIR/manifest.json" <<'PY'
+  python3 - "$QA_FLOW_NAME" "$QA_STARTED_AT" "$finished_at" "$status" "$QA_ASSERTIONS" "$QA_MANIFEST_EVENTS" > "$QA_RUN_DIR/manifest.json" <<'PY'
 import json
 import sys
 
-flow, started_at, finished_at, status, events_path = sys.argv[1:]
+flow, started_at, finished_at, status, assertions, events_path = sys.argv[1:]
 events = []
 with open(events_path, "r", encoding="utf-8") as handle:
     for line in handle:
@@ -114,6 +145,7 @@ json.dump(
         "startedAt": started_at,
         "finishedAt": finished_at,
         "status": status,
+        "assertions": int(assertions),
         "events": events,
     },
     sys.stdout,
@@ -126,6 +158,10 @@ PY
 
 finish_flow() {
   local status="$1"
+  if [[ "$status" == "pass" && "$QA_ASSERTIONS" -eq 0 ]]; then
+    append_event "assertion-contract" "fail" "" "flow attempted to pass without a positive machine assertion"
+    status="fail"
+  fi
   trap - ERR INT TERM
   QA_FINISHED=1
   write_manifest "$status"

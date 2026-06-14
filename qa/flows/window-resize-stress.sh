@@ -20,4 +20,8 @@ for width in 320 480 768 1024 1440 1920; do
   capture_step "window-width-${width}" "set bounds width ${width}"
 done
 
+final_bounds="$(window_bounds)"
+IFS=',' read -r _left _top final_width _height <<< "$final_bounds"
+assert_flow "final-window-width" "final window width ${final_width}px is at least 1800px after resize sweep" test "$final_width" -ge 1800
+
 finish_flow pass

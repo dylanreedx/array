@@ -65,6 +65,7 @@ Use `qa/reviewer-prompt.md` as the reviewer contract. It requires reviewers to r
 3. Call `begin_flow "<name>"`.
 4. Use `launch_continuum "<in-process-flow>"` when the app should seed a known state.
 5. Use `capture_step "<step>" "<notes>"` after each external action.
-6. End with `finish_flow pass` or `finish_flow fail`.
+6. Add at least one positive machine assertion with `assert_flow`; screenshots are evidence, not a pass condition. A flow that calls `finish_flow pass` with zero assertions is converted to failure.
+7. End with `finish_flow pass` or `finish_flow fail`.
 
-Run `node scripts/check-qa-flows.js` after adding a flow.
+Run `node scripts/check-qa-flows.js` after adding a flow. `qa/run-autonomous.sh --flow <name>` executes `qa/flows/<name>.sh` and fails for unknown or non-executable flows instead of silently running the default smoke.

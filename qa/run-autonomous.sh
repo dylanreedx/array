@@ -9,11 +9,19 @@ FLOW=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --scope)
-      SCOPE="${2:-changed}"
+      if [[ $# -lt 2 || "${2:-}" == --* ]]; then
+        echo "missing value for --scope" >&2
+        exit 2
+      fi
+      SCOPE="$2"
       shift 2
       ;;
     --flow)
-      FLOW="${2:-}"
+      if [[ $# -lt 2 || "${2:-}" == --* ]]; then
+        echo "missing value for --flow" >&2
+        exit 2
+      fi
+      FLOW="$2"
       shift 2
       ;;
     *)
@@ -88,7 +96,20 @@ run_gate "file-tree-checks" "checks/file-tree" swift run ContinuumRevivedFileTre
 run_gate "package-targets" "checks/package-targets" node scripts/check-package-targets.js
 run_gate "qa-flow-definitions" "checks/qa-flow-definitions" node scripts/check-qa-flows.js
 run_gate "diff-whitespace" "checks/diff-whitespace" git diff --check
-run_gate "smoke" "smoke/default" env CONTINUUM_SMOKE_TEST=1 .build/debug/continuum-revived
+if [[ -n "$FLOW" ]]; then
+  if [[ ! "$FLOW" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "Invalid QA flow name (expected basename with letters, digits, _ or -): $FLOW" >&2
+    exit 2
+  fi
+  FLOW_SCRIPT="qa/flows/${FLOW}.sh"
+  if [[ ! -x "$FLOW_SCRIPT" ]]; then
+    echo "Unknown or non-executable QA flow: $FLOW_SCRIPT" >&2
+    exit 2
+  fi
+  run_gate "qa-flow-${FLOW}" "flows/${FLOW}" "$FLOW_SCRIPT"
+else
+  run_gate "smoke" "smoke/default" env CONTINUUM_SMOKE_TEST=1 .build/debug/continuum-revived
+fi
 
 COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 VERDICT="passed"

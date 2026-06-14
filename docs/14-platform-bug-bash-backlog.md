@@ -43,7 +43,7 @@ Bad/stale coordinator-chatter runs to ignore for backlog purposes:
 | 15 | Global Cmd hotkeys steal browser/terminal/text-native shortcuts | major | confirmed/likely | shortcuts / focus | `ContinuumApp.swift`, focus policy | Matrix over note URL/WKWebView/terminal: synthesize Cmd-K/Cmd-1..4; assert reserved/pass-through policy. | M | Needs product policy |
 | 16 | Unbounded hotkey spawning can create unlimited runtimes/views | major | likely | canvas / perf | `ContinuumApp.swift`, `TileSpawner.swift` | Inject 200 spawn hotkeys; assert cap/rate limit or bounded memory/latency slope. | M | Policy needed: cap vs throttle |
 | 17 | Terminal/browser/file scroll QA only proves hit-test classification, not actual scrolling | major/minor | confirmed | QA / scroll | `ContinuumApp.swift`, `GhosttyTerminalView.swift`, `WKWebViewBrowserRuntime.swift` | Synthesize precise scroll over content; assert page `scrollY` or terminal scroll counter changes and canvas viewport does not. | M | QA harness before scroll fixes |
-| 18 | Autonomous QA flow selection and pass/fail semantics are false-positive prone | major | confirmed | QA | `qa/run-autonomous.sh`, `qa/flows/*.sh`, `ContinuumApp.swift`, `Package.swift` | `--flow X` must execute X; external/in-process flows emit JSON assertions and fail/skip, not unconditional pass; perf checks included. | L | Foundational |
+| 18 | Autonomous QA flow selection and pass/fail semantics are false-positive prone | major | partially mitigated | QA | `qa/run-autonomous.sh`, `qa/flows/*.sh`, `ContinuumApp.swift`, `Package.swift` | `--flow X` now executes external `qa/flows/X.sh` or fails; shell flows cannot pass with zero `assert_flow` assertions. Remaining: in-process flow JSON assertions and perf inclusion. | L | Foundational |
 | 19 | No true two-leg relaunch persistence smoke | major | confirmed | QA / persistence | `ContinuumApp.swift`, `qa/flows`, QA harness | Leg A mutates state/exits; Leg B relaunches same root and asserts browser URL, z-order, file-tree root, viewport/frame invariants. | L | Highest-value QA harness |
 | 20 | Git status probe output/timeout can hang or consume huge memory | major | likely | file-tree / git | `FileTreeGitStatusProbe.swift` | Fake `git` emits >100MB or ignores SIGTERM; assert output cap + hard kill within timeout+grace. | M | Perf/safety follow-up |
 
@@ -55,7 +55,7 @@ Bad/stale coordinator-chatter runs to ignore for backlog purposes:
 4. Fix hit-test/focus instability: bring-to-front reparenting and resize-zone stealing.
 5. File-tree correctness: search visibility, debounce flush, missing sidecar behavior.
 6. Perf/stress work: file-tree scale, unbounded spawns, git probe, long-line file preview.
-7. QA platform cleanup: enforce `--flow`, remove unconditional passes, include perf checks, add two-leg relaunch smoke.
+7. QA platform cleanup: external `--flow` and zero-assertion pass prevention landed; remaining work is real scroll-state assertions, in-process assertion JSON/perf coverage, and two-leg relaunch smoke.
 
 ## Parallelization plan
 

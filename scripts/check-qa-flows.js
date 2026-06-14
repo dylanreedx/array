@@ -17,18 +17,18 @@ const requiredExecutables = [
 
 const markerChecks = new Map([
   ["qa/setup.sh", ["brew install cliclick", "osascript", "screencapture", "Accessibility"]],
-  ["qa/README.md", ["qa-runs/<flow>-<timestamp>", "manifest.json", "qa/flows/lib.sh", "qa/reviewer-prompt.md", "qa/file-finding.sh"]],
+  ["qa/README.md", ["qa-runs/<flow>-<timestamp>", "manifest.json", "qa/flows/lib.sh", "qa/reviewer-prompt.md", "qa/file-finding.sh", "assert_flow"]],
   ["qa/reviewer-prompt.md", ["manifest.json", "docs/05-canvas-and-ux.md", "qa/expectations/<flow>.md", "qa/file-finding.sh", "verified-working"]],
   ["qa/file-finding.sh", ["--severity", "--summary", "--expected", "--observed", "--screenshot", "--flow", "--step", "fingerprint", "[qa-finding]"]],
   ["qa/expectations/cmdk-spam.md", ["cmdk-spam", "initial", "cmdk-spam-final", "verified-working"]],
   ["qa/expectations/drag-past-edge.md", ["drag-past-edge", "before-drag", "after-drag-past-edge", "verified-working"]],
   ["qa/expectations/window-resize-stress.md", ["window-resize-stress", "before-resize", "window-width-320", "window-width-1920", "verified-working"]],
   ["qa/expectations/quit-during-load.md", ["quit-during-load", "before-quit", "diagnosticreports-clean", "verified-working"]],
-  ["qa/flows/lib.sh", ["begin_flow", "capture_step", "write_manifest", "launch_continuum"]],
-  ["qa/flows/cmdk-spam.sh", ["CONTINUUM_QA_FLOW=palette-open-close", "cliclick", "capture_step"]],
-  ["qa/flows/drag-past-edge.sh", ["CONTINUUM_QA_FLOW=canvas-drag-resize", "cliclick", "drag"]],
-  ["qa/flows/window-resize-stress.sh", ["set bounds", "320", "1920", "capture_step"]],
-  ["qa/flows/quit-during-load.sh", ["CONTINUUM_QA_FLOW=cmd-3-browser", "DiagnosticReports", "quit"]],
+  ["qa/flows/lib.sh", ["begin_flow", "capture_step", "assert_flow", "QA_ASSERTIONS", "write_manifest", "launch_continuum"]],
+  ["qa/flows/cmdk-spam.sh", ["CONTINUUM_QA_FLOW=palette-open-close", "cliclick", "capture_step", "assert_flow"]],
+  ["qa/flows/drag-past-edge.sh", ["CONTINUUM_QA_FLOW=canvas-drag-resize", "cliclick", "drag", "assert_flow"]],
+  ["qa/flows/window-resize-stress.sh", ["set bounds", "320", "1920", "capture_step", "assert_flow"]],
+  ["qa/flows/quit-during-load.sh", ["CONTINUUM_QA_FLOW=cmd-3-browser", "DiagnosticReports", "quit", "assert_flow"]],
   ["Sources/ContinuumRevived/App/ContinuumApp.swift", ["palette.onClose", "QAPerf.residentMemoryBytes()", "palette-leak-cycle"]],
   ["Sources/ContinuumRevived/App/LaunchProfilePalette.swift", ["let search = NSTextField()", "func close()", "searchField?.delegate = nil", "tableView?.dataSource = nil", "paletteView?.removeFromSuperview()"]]
 ]);
