@@ -58,45 +58,31 @@ public enum TileActionCatalog {
         return map
     }
 
+    // MARK: Override write path
+
+    /// Inverse of the override read in `actions(for:defaults:)`: writes each
+    /// `chord` to the `continuum.tileKeymap.<name>` key for its action, where
+    /// `<name>` is the stable override name in `kind`'s default catalog. A
+    /// `chord.serialized` round-trips back through `parseChord`, so
+    /// `actions(for:kind:defaults:)` reflects the persisted override.
+    public static func persist(
+        _ overrides: [TileChord: TileAction],
+        for kind: TileKind,
+        to defaults: UserDefaults = .standard
+    ) {
+        let map = defaultActions(for: kind)
+        let prefix = "continuum.tileKeymap."
+        for (chord, action) in overrides {
+            guard let name = map.name(for: action) else { continue }
+            defaults.set(chord.serialized, forKey: prefix + name)
+        }
+    }
+
     // MARK: Chord parsing
 
     /// Parses a chord string like "cmd+ctrl+1" or "ctrl+opt+left".
     static func parseChord(_ value: String) -> TileChord? {
-        let parts = value.lowercased().split(separator: "+").map(String.init)
-        guard let key = parts.last else { return nil }
-        var modifiers: FocusKeyModifiers = []
-        for part in parts.dropLast() {
-            switch part {
-            case "cmd", "command": modifiers.insert(.command)
-            case "ctrl", "control": modifiers.insert(.control)
-            case "shift": modifiers.insert(.shift)
-            case "opt", "option", "alt": modifiers.insert(.option)
-            default: return nil
-            }
-        }
-        guard let keyCode = keyCode(forName: key) else { return nil }
-        return TileChord(keyCode: keyCode, modifiers: modifiers)
-    }
-
-    private static func keyCode(forName name: String) -> UInt16? {
-        switch name {
-        case "f": return 3
-        case "e": return 14
-        case "r": return 15
-        case "l": return 37
-        case "]", "rightbracket": return 30
-        case "[", "leftbracket": return 33
-        case ",", "comma": return 43
-        case "1": return 18
-        case "2": return 19
-        case "3": return 20
-        case "0": return 29
-        case "left", "arrowleft": return 123
-        case "right", "arrowright": return 124
-        case "down", "arrowdown": return 125
-        case "up", "arrowup": return 126
-        default: return nil
-        }
+        TileChord(parsing: value)
     }
 
     /// Ordered chord→action map keyed by stable override names so overrides can
@@ -123,8 +109,12 @@ public enum TileActionCatalog {
         }
 
         mutating func replaceChord(for action: TileAction, with chord: TileChord) {
-            guard let name = order.first(where: { byName[$0]?.action == action }) else { return }
+            guard let name = name(for: action) else { return }
             byName[name]?.chord = chord
+        }
+
+        func name(for action: TileAction) -> String? {
+            order.first(where: { byName[$0]?.action == action })
         }
 
         var entries: [TileChord: TileAction] {

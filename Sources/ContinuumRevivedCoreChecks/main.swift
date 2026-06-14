@@ -322,6 +322,48 @@ do {
     expect(FocusModePairing.companionAgent(for: primary, primaryZoneId: zoneA, candidates: pairingCandidates, manualOverride: otherZone) == needsAttention, "focus-mode pairing should ignore wrong-zone manual overrides")
     expect(FocusModePairing.companionAgent(for: primary, primaryZoneId: zoneA, candidates: pairingCandidates, manualOverride: nonAgent) == needsAttention, "focus-mode pairing should ignore non-agent manual overrides")
     expect(FocusModePairing.companionAgent(for: primary, primaryZoneId: zoneA, candidates: []) == nil, "focus-mode pairing should return nil for single-pane mode when no same-zone agent exists")
+
+    // KeyChord serialize/parse round-trip across a representative key spread.
+    let chordSamples: [KeyChord] = [
+        KeyChord(keyCode: 3, modifiers: [.command, .control]),   // ⌘⌃F
+        KeyChord(keyCode: 123, modifiers: [.control, .option]),  // ⌃⌥←
+        KeyChord(keyCode: 43, modifiers: .command),              // ⌘,
+        KeyChord(keyCode: 49, modifiers: []),                    // space
+        KeyChord(keyCode: 5, modifiers: .control),               // ⌃G (broadened leader key)
+    ]
+    for chord in chordSamples {
+        expect(KeyChord(parsing: chord.serialized) == chord, "KeyChord round-trips \(chord.serialized)")
+        expect(!chord.displayString.isEmpty, "KeyChord displayString is non-empty for \(chord.serialized)")
+    }
+
+    // NavKeymap.persist is the exact inverse of resolve: round-trip identity for
+    // the default keymap and a custom-remapped one.
+    let persistSuite = "NavKeymapPersistChecks-\(UUID().uuidString)"
+    let persistDefaults = UserDefaults(suiteName: persistSuite)!
+    defer { persistDefaults.removePersistentDomain(forName: persistSuite) }
+
+    NavKeymap.default.persist(to: persistDefaults)
+    expect(NavKeymap.resolve(defaults: persistDefaults, warn: { _ in }) == NavKeymap.default, "resolve(persist(default)) reconstructs the default keymap")
+
+    var custom = NavKeymap.default
+    custom.leader = KeyChord(keyCode: 5, modifiers: .control)
+    custom.up = "i"; custom.down = "m"; custom.left = "b"; custom.right = "r"
+    custom.deleteTile = "q"
+    custom.persist(to: persistDefaults)
+    expect(NavKeymap.resolve(defaults: persistDefaults, warn: { _ in }) == custom, "resolve(persist(custom)) reconstructs the custom keymap")
+
+    // TileActionCatalog.persist is the inverse of its override read: persisting an
+    // override for a kind is reflected by actions(); a different key is untouched.
+    let tilePersistSuite = "TileActionCatalogPersistChecks-\(UUID().uuidString)"
+    let tilePersistDefaults = UserDefaults(suiteName: tilePersistSuite)!
+    defer { tilePersistDefaults.removePersistentDomain(forName: tilePersistSuite) }
+
+    let reboundFind = TileChord(keyCode: 3, modifiers: [.command, .control])
+    TileActionCatalog.persist([reboundFind: .browserFind], for: .browser, to: tilePersistDefaults)
+    let persistedBrowser = TileActionCatalog.actions(for: .browser, defaults: tilePersistDefaults, warn: { _ in })
+    expect(persistedBrowser[reboundFind] == .browserFind, "TileActionCatalog.persist override is reflected by actions()")
+    expect(persistedBrowser[TileChord(keyCode: 3, modifiers: .command)] == nil, "TileActionCatalog.persist releases the old browserFind chord")
+    expect(persistedBrowser[TileChord(keyCode: 37, modifiers: .command)] == .browserFocusURL, "TileActionCatalog.persist leaves an untouched browser chord intact")
 }
 
 // MARK: - Project lock policy

@@ -42,6 +42,90 @@ public struct KeyChord: Equatable, Hashable, Sendable {
         default: return "key\(keyCode)"
         }
     }
+
+    // MARK: Chord <-> string serialization
+
+    /// Parses a chord string like "cmd+ctrl+f", "ctrl+opt+left", or "space".
+    /// Single shared parser for the leader, tile keymap overrides, and the
+    /// settings editor write path. Accepts letters, digits, arrows, brackets,
+    /// comma, and space, with the same modifier tokens `resolve` already reads.
+    public init?(parsing value: String) {
+        let parts = value.lowercased().split(separator: "+").map(String.init)
+        guard let key = parts.last else { return nil }
+        var modifiers: FocusKeyModifiers = []
+        for part in parts.dropLast() {
+            switch part {
+            case "cmd", "command": modifiers.insert(.command)
+            case "ctrl", "control": modifiers.insert(.control)
+            case "shift": modifiers.insert(.shift)
+            case "opt", "option", "alt": modifiers.insert(.option)
+            default: return nil
+            }
+        }
+        guard let keyCode = KeyChord.keyCode(forSerializedName: key) else { return nil }
+        self.init(keyCode: keyCode, modifiers: modifiers)
+    }
+
+    /// Round-trips with `init(parsing:)`: emits the modifier tokens then the
+    /// canonical key name in the lowercase "cmd+ctrl+f" form `resolve` reads.
+    public var serialized: String {
+        var parts: [String] = []
+        if modifiers.contains(.command) { parts.append("cmd") }
+        if modifiers.contains(.control) { parts.append("ctrl") }
+        if modifiers.contains(.option) { parts.append("opt") }
+        if modifiers.contains(.shift) { parts.append("shift") }
+        parts.append(KeyChord.serializedName(for: keyCode))
+        return parts.joined(separator: "+")
+    }
+
+    /// Canonical, parseable name for a key code. Inverse of `keyCode(forSerializedName:)`.
+    static func serializedName(for keyCode: UInt16) -> String {
+        switch keyCode {
+        case 3: return "f"
+        case 14: return "e"
+        case 15: return "r"
+        case 37: return "l"
+        case 30: return "]"
+        case 33: return "["
+        case 40: return "k"
+        case 43: return ","
+        case 18: return "1"
+        case 19: return "2"
+        case 20: return "3"
+        case 29: return "0"
+        case 123: return "left"
+        case 124: return "right"
+        case 125: return "down"
+        case 126: return "up"
+        case 49: return "space"
+        case 5: return "g"
+        default: return "key\(keyCode)"
+        }
+    }
+
+    static func keyCode(forSerializedName name: String) -> UInt16? {
+        switch name {
+        case "f": return 3
+        case "e": return 14
+        case "r": return 15
+        case "l": return 37
+        case "]", "rightbracket": return 30
+        case "[", "leftbracket": return 33
+        case ",", "comma": return 43
+        case "k": return 40
+        case "1": return 18
+        case "2": return 19
+        case "3": return 20
+        case "0": return 29
+        case "left", "arrowleft": return 123
+        case "right", "arrowright": return 124
+        case "down", "arrowdown": return 125
+        case "up", "arrowup": return 126
+        case "space": return 49
+        case "g": return 5
+        default: return nil
+        }
+    }
 }
 
 public struct NavKeymap: Equatable, Sendable {
@@ -123,26 +207,27 @@ public struct NavKeymap: Equatable, Sendable {
     }
 
     public static func parseLeaderChord(_ value: String) -> KeyChord? {
-        let parts = value.lowercased().split(separator: "+").map(String.init)
-        guard let key = parts.last else { return nil }
-        var modifiers: FocusKeyModifiers = []
-        for part in parts.dropLast() {
-            switch part {
-            case "cmd", "command": modifiers.insert(.command)
-            case "ctrl", "control": modifiers.insert(.control)
-            case "shift": modifiers.insert(.shift)
-            case "opt", "option", "alt": modifiers.insert(.option)
-            default: return nil
-            }
-        }
-        let keyCode: UInt16?
-        switch key {
-        case "space": keyCode = 49
-        case "g": keyCode = 5
-        default: keyCode = nil
-        }
-        guard let keyCode else { return nil }
-        return KeyChord(keyCode: keyCode, modifiers: modifiers)
+        KeyChord(parsing: value)
+    }
+
+    /// Exact inverse of `resolve`: writes every binding to the
+    /// `continuum.keymap.*` keys `resolve` reads so that
+    /// `resolve(defaults:)` after `persist(to:)` reconstructs an equal map.
+    public func persist(to defaults: UserDefaults = .standard) {
+        let prefix = "continuum.keymap."
+        defaults.set(leader.serialized, forKey: prefix + "leader")
+        defaults.set(up, forKey: prefix + "up")
+        defaults.set(down, forKey: prefix + "down")
+        defaults.set(left, forKey: prefix + "left")
+        defaults.set(right, forKey: prefix + "right")
+        defaults.set(nextZone, forKey: prefix + "nextZone")
+        defaults.set(previousZone, forKey: prefix + "previousZone")
+        defaults.set(zonePicker, forKey: prefix + "zonePicker")
+        defaults.set(workspacePicker, forKey: prefix + "workspacePicker")
+        defaults.set(agentCycle, forKey: prefix + "agentCycle")
+        defaults.set(agentNeedsAttention, forKey: prefix + "agentNeedsAttention")
+        defaults.set(focusMode, forKey: prefix + "focusMode")
+        defaults.set(deleteTile, forKey: prefix + "deleteTile")
     }
 }
 
