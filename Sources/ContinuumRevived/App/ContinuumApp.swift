@@ -119,6 +119,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-element-context-check") {
+            do {
+                _ = NSApplication.shared
+                try WKWebViewBrowserRuntime.runElementContextSelfCheck()
+                print("ContinuumRevivedBrowserElementContextChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-target-blank-check") {
             do {
                 _ = NSApplication.shared

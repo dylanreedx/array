@@ -3,6 +3,16 @@ import ContinuumRevivedCore
 import Foundation
 import WebKit
 
+enum BrowserElementContextCaptureError: Error, Equatable, CustomStringConvertible {
+    case elementNotFound(String)
+
+    var description: String {
+        switch self {
+        case let .elementNotFound(selector): return "no browser element matched selector \(selector)"
+        }
+    }
+}
+
 @MainActor
 protocol BrowserUIDialogPresenting: AnyObject {
     func presentJavaScriptAlert(message: String, window: NSWindow?, completion: @escaping () -> Void)
@@ -281,6 +291,76 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
     func reload() { webView.reload() }
     func stop() { webView.stopLoading() }
 
+    func captureElementContext(selector: String, completion: @escaping (Result<BrowserElementContext, Error>) -> Void) {
+        let selectorLiteral: String
+        do {
+            let data = try JSONSerialization.data(withJSONObject: [selector], options: [])
+            let encoded = String(data: data, encoding: .utf8) ?? "[\"\"]"
+            selectorLiteral = "(\(encoded))[0]"
+        } catch {
+            completion(.failure(error))
+            return
+        }
+        let script = """
+        (() => {
+          const element = document.querySelector(\(selectorLiteral));
+          if (!element) { return null; }
+          const rect = element.getBoundingClientRect();
+          const style = window.getComputedStyle(element);
+          function selectorPath(el) {
+            const parts = [];
+            while (el && el.nodeType === Node.ELEMENT_NODE && parts.length < 8) {
+              let part = el.localName;
+              if (el.id) { part += '#' + CSS.escape(el.id); parts.unshift(part); break; }
+              if (el.classList && el.classList.length) { part += '.' + Array.from(el.classList).slice(0, 2).map(CSS.escape).join('.'); }
+              const parent = el.parentElement;
+              if (parent) {
+                const siblings = Array.from(parent.children).filter(child => child.localName === el.localName);
+                if (siblings.length > 1) { part += ':nth-of-type(' + (siblings.indexOf(el) + 1) + ')'; }
+              }
+              parts.unshift(part);
+              el = parent;
+            }
+            return parts.join(' > ');
+          }
+          return {
+            pageURL: location.href,
+            pageTitle: document.title || '',
+            selectorPath: selectorPath(element),
+            outerHTMLExcerpt: (element.outerHTML || '').slice(0, 2000),
+            textExcerpt: (element.innerText || element.textContent || '').trim().slice(0, 1000),
+            computedStyleSummary: 'display=' + style.display + '; color=' + style.color + '; backgroundColor=' + style.backgroundColor + '; font=' + style.font,
+            boundingBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+          };
+        })();
+        """
+        webView.evaluateJavaScript(script) { result, error in
+            Task { @MainActor in
+                if let error { completion(.failure(error)); return }
+                guard let dictionary = result as? [String: Any],
+                      let box = dictionary["boundingBox"] as? [String: Any] else {
+                    completion(.failure(BrowserElementContextCaptureError.elementNotFound(selector)))
+                    return
+                }
+                let context = BrowserElementContext(
+                    pageURL: dictionary["pageURL"] as? String ?? "",
+                    pageTitle: dictionary["pageTitle"] as? String ?? "",
+                    selectorPath: dictionary["selectorPath"] as? String ?? selector,
+                    outerHTMLExcerpt: dictionary["outerHTMLExcerpt"] as? String ?? "",
+                    textExcerpt: dictionary["textExcerpt"] as? String ?? "",
+                    computedStyleSummary: dictionary["computedStyleSummary"] as? String ?? "",
+                    boundingBox: BrowserElementBoundingBox(
+                        x: (box["x"] as? NSNumber)?.doubleValue ?? 0,
+                        y: (box["y"] as? NSNumber)?.doubleValue ?? 0,
+                        width: (box["width"] as? NSNumber)?.doubleValue ?? 0,
+                        height: (box["height"] as? NSNumber)?.doubleValue ?? 0
+                    )
+                )
+                completion(.success(context))
+            }
+        }
+    }
+
     func focus() {
         webView.window?.makeFirstResponder(webView)
     }
@@ -525,6 +605,56 @@ extension WKWebViewBrowserRuntime: WKUIDelegate {
 }
 
 extension WKWebViewBrowserRuntime {
+    static func runElementContextSelfCheck() throws {
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw NSError(domain: "BrowserElementContextSelfCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
+        }
+
+        let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
+        let runtime = WKWebViewBrowserRuntime(tileId: TileID(), webView: webView, initialURL: "about:blank")
+        let html = """
+        <html><head><title>Picker Fixture</title><style>#target { color: rgb(255, 0, 0); background: rgb(0, 0, 255); }</style></head>
+        <body><main id="app"><button id="target" class="primary" data-action="save">Save changes</button></main></body></html>
+        """
+        webView.loadHTMLString(html, baseURL: URL(string: "https://fixture.test/form"))
+        let loadDeadline = Date().addingTimeInterval(5)
+        while webView.isLoading && Date() < loadDeadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+
+        var captureResult: Result<BrowserElementContext, Error>?
+        runtime.captureElementContext(selector: "#target") { result in captureResult = result }
+        let captureDeadline = Date().addingTimeInterval(5)
+        while captureResult == nil && Date() < captureDeadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        let context = try captureResult?.get() ?? { throw NSError(domain: "BrowserElementContextSelfCheck", code: 2, userInfo: [NSLocalizedDescriptionKey: "element capture timed out"]) }()
+        try expect(context.pageURL == "https://fixture.test/form", "capture should include page URL")
+        try expect(context.pageTitle == "Picker Fixture", "capture should include page title")
+        try expect(context.selectorPath == "button#target", "capture should derive a stable selector path")
+        try expect(context.outerHTMLExcerpt.contains("data-action=\"save\""), "capture should include outer HTML excerpt")
+        try expect(context.textExcerpt == "Save changes", "capture should include text excerpt")
+        try expect(context.computedStyleSummary.contains("display="), "capture should include computed style summary")
+        try expect(context.boundingBox.width > 0 && context.boundingBox.height > 0, "capture should include measured element bounds")
+        let prompt = BrowserElementPromptComposer.compose(context: context)
+        try expect(prompt.contains("Selector: button#target"), "prompt should include captured selector")
+        try expect(prompt.contains("Screenshot crop: PENDING"), "prompt should honestly mark screenshot pending for the deterministic seam")
+
+        webView.loadHTMLString("<html><body><span class=\"needs:escape\">Escaped class</span></body></html>", baseURL: URL(string: "https://fixture.test/escaped"))
+        let escapedLoadDeadline = Date().addingTimeInterval(5)
+        while webView.isLoading && Date() < escapedLoadDeadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        var escapedResult: Result<BrowserElementContext, Error>?
+        runtime.captureElementContext(selector: ".needs\\:escape") { result in escapedResult = result }
+        let escapedDeadline = Date().addingTimeInterval(5)
+        while escapedResult == nil && Date() < escapedDeadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        let escapedContext = try escapedResult?.get() ?? { throw NSError(domain: "BrowserElementContextSelfCheck", code: 3, userInfo: [NSLocalizedDescriptionKey: "escaped selector capture timed out"]) }()
+        try expect(escapedContext.textExcerpt == "Escaped class", "capture should preserve backslash-containing CSS selectors")
+    }
+
     static func runUIDelegateSelfCheck() throws {
         final class FakePresenter: BrowserUIDialogPresenting {
             struct Call: Equatable {
