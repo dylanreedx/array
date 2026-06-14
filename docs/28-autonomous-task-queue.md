@@ -70,7 +70,10 @@ General fields (toggle/text/choice) so it's usable on its own; A7 adds the
 keybind chord-capture editor.
 
 ### A1 — FocusBroker.enterScope funnel + close scope drift (docs/27 staging 2) · DOGFOOD
-- **Status: TODO** · deps: F1
+- **Status: DONE (a05f026)** · deps: F1 · scope now authoritative (background→.canvas,
+  content-click lockstep); 7 focus checks green + new --focus-scope-dispatch-check.
+- **NEXT ORDER: A5 (border, additive, only needs A1) → then A2 → A3 → A4** (the
+  dispatch migration + executors; A2 removes the P0 guard so it's gated hardest).
 - Single `enterScope(_:reason:)`; route ALL interactions through it: title bar, tile
   body / web content / note / terminal, canvas background, nav-mode commit, spawn/close.
   Keep `lastActiveTileId` in lockstep. Generalize the P0 responder-walk.
