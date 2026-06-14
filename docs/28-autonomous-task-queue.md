@@ -138,7 +138,19 @@ keybind chord-capture editor.
   TileNSView ~:170/:17); mirror in `resetCursorRects`.
 
 ### P3 — browser find match count
-- **Status: TODO** · deps: A4
+- **Status: DONE (cff53c2)** · deps: A4 · scoped to found/not-found (WKFindResult has
+  no public count; "N of M" deferred — needs injected JS).
+
+## ✅ QUEUE COMPLETE (2026-06-14 overnight, me-orchestrated + gated)
+All 14 units landed matrix-green and pushed: F1 84a285f · F2 f6caa3f · F3 f65c366
+· F4 7707ce7 · A6 df3f167 · A7 72d1e2f · A1 a05f026 · A5 3647acf · A2 4f5605a
+· A3 a6f1007 · A4 d8bbebf · P1 4ea11c6 · P2 0f84caa · P3 cff53c2. Focus-scope
+primitive (docs/27) + extensible settings system (docs/24) + the docs/25 polish
+bugs are all done. Each `[appkit]` unit was gated by me (independent matrix +
+diff review + the named check) before commit; DOGFOOD items below need Dylan's
+real-app pass. Loop never false-stopped on the flaky HarnessRunControl check
+(re-ran past it ~3×). Follow-ups left: harden that flaky check; in-app browser
+inspector open (no public WKWebView API — spike); find "N of M" (needs JS).
 - Surface `WKFindResult` ("3 of 12" / not found) instead of discarding it.
 
 ## Known flaky (handle, don't trust blindly)
@@ -172,3 +184,6 @@ _(filled in as DOGFOOD tasks land — what to eyeball when you're back)_
 - **Drag when zoomed out (P2):** zoom out, drag a tile by its top strip — it
   should move (grab floored to ~28px; was ~7px at 0.3 zoom). Title buttons +
   edge-resize still work.
+- **Browser find result (P3):** in a browser, `⌘F` and search for something
+  absent → find bar shows "No matches"; a real match clears it. (No "N of M"
+  count — WKWebView has no public API for it.)
