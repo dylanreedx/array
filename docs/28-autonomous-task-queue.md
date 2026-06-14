@@ -99,7 +99,12 @@ keybind chord-capture editor.
   with dash phase frozen (non-degenerate). matrix green.
 
 ### A6 — generic settings NSPanel + ⌘, open (docs/24 S4) · DOGFOOD
-- **Status: TODO** · deps: F3, F4, A2
+- **Status: DONE (df3f167)** · deps: F3, F4 (A2 dep relaxed; ⌘, wired minimally)
+- Gated: matrix green incl. `--settings-panel-check` (sections==schema, per-type
+  controls, toggle→UserDefaults round-trip, non-blank offscreen render); 4 focus
+  checks + menu-contract stay green. General fields editable + live; Keybindings
+  tab read-only (A7 adds editing). Live screenshot skipped (would touch real
+  workspace / needs screen-rec perms) — visual confirmation is on the checklist.
 - NSPanel from `ProjectPickerPanel`: sidebar of sections + type-driven detail pane.
   `⌘,` inviolable → `openModal(.settings)` from any scope; `Settings…` menu item.
 - **Check:** `--settings-panel-check` — installs/tears down; ⌘, opens; rendered
@@ -137,4 +142,8 @@ keybind chord-capture editor.
 
 ## Morning dogfood checklist (Dylan)
 _(filled in as DOGFOOD tasks land — what to eyeball when you're back)_
-- (pending)
+- **Settings (A6):** press `⌘,` → panel opens; `⌘,` again closes; `Settings…`
+  menu item works. General tab: flip Zone Chrome / change delete-confirm / edit
+  default URL / tile gap → quit & relaunch → values persisted. Keybindings tab:
+  shows the full shortcut guide (Global / Nav Mode / per tile kind). Does the
+  panel look right (dark/monospaced, readable, sized ok)?
