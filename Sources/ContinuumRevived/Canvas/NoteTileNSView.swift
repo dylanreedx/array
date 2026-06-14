@@ -62,6 +62,31 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
 
     func textDidChange(_ notification: Notification) { onTextChange?() }
 
+    // MARK: - Export (A4)
+
+    /// Pure export payload: the note body plus a suggested filename derived from
+    /// the tile title (sanitized, `.txt`). Testable without any save panel.
+    func exportContent() -> (text: String, suggestedFilename: String) {
+        let body = textView.string
+        let trimmedTitle = tile.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = trimmedTitle.isEmpty ? "note" : trimmedTitle
+        let sanitized = base
+            .components(separatedBy: CharacterSet(charactersIn: "/\\:"))
+            .joined(separator: "-")
+        return (body, "\(sanitized).txt")
+    }
+
+    /// `⌘E` — present a save panel seeded from `exportContent()` and write the
+    /// body on confirm. Thin AppKit shell over the pure payload; never invoked by
+    /// self-checks (would block the matrix on `runModal`).
+    func exportToFile() {
+        let content = exportContent()
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = content.suggestedFilename
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        try? content.text.write(to: url, atomically: true, encoding: .utf8)
+    }
+
     static func runNoteClickFocusSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)

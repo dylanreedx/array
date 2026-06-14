@@ -371,6 +371,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-note-action-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runBrowserNoteActionSelfCheck()
+                print("ContinuumRevivedBrowserNoteActionChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-restore-state-check") {
             do {
                 _ = NSApplication.shared
@@ -2116,16 +2128,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    /// Sizing/positioning are consumed by the monitor (return true); browser/note
-    /// actions stay passthrough (A4) so the focused tile's own key path receives
-    /// the event. Used by `--reserved-dispatch-check` to pin the consumption
-    /// contract without an `AppDelegate` instance.
+    /// Every tile action is now consumed by the monitor when the focused tile
+    /// matches (A4 wired browser/note executors onto the focused tile view). A
+    /// chord pressed when the focused tile does NOT match its kind still returns
+    /// false from `executeTileAction` (runtime passthrough), but the static
+    /// consumption contract — used by `--reserved-dispatch-check` without an
+    /// `AppDelegate` instance — treats all tile actions as non-passthrough.
     static func isPassthroughTileAction(_ action: TileAction) -> Bool {
         switch action {
-        case .resizeToPreset, .nudge, .throwToNeighbor:
+        case .resizeToPreset, .nudge, .throwToNeighbor,
+             .browserFind, .browserFocusURL, .browserReload, .browserBack, .browserForward, .noteExport:
             return false
-        case .browserFind, .browserFocusURL, .browserReload, .browserBack, .browserForward, .noteExport:
-            return true
         }
     }
 
@@ -2151,9 +2164,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 let others = self.otherTileFrames()
                 return TileArrangement.throwDestination(frame, direction: Self.arrangementDirection(direction), others: others, gap: gap)
             }
-        case .browserFind, .browserFocusURL, .browserReload, .browserBack, .browserForward, .noteExport:
-            // TODO(A4): browser find/url/reload/nav + note export executors.
-            return false
+        case .browserFind:
+            guard let browser = focusedTileView() as? BrowserTileNSView else { return false }
+            browser.performFindAction()
+            return true
+        case .browserFocusURL:
+            guard let browser = focusedTileView() as? BrowserTileNSView else { return false }
+            browser.focusURLField()
+            return true
+        case .browserReload:
+            guard let browser = focusedTileView() as? BrowserTileNSView else { return false }
+            browser.performReloadAction()
+            return true
+        case .browserBack:
+            guard let browser = focusedTileView() as? BrowserTileNSView else { return false }
+            browser.performBackAction()
+            return true
+        case .browserForward:
+            guard let browser = focusedTileView() as? BrowserTileNSView else { return false }
+            browser.performForwardAction()
+            return true
+        case .noteExport:
+            guard let note = focusedTileView() as? NoteTileNSView else { return false }
+            note.exportToFile()
+            return true
         }
     }
 
@@ -2171,6 +2205,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func focusedTile() -> Tile? {
         guard let canvasView, case let .tile(tileId) = reservedDispatchScope() else { return nil }
         return canvasView.canvasState.tiles.first(where: { $0.id == tileId })
+    }
+
+    /// The focused tile's live VIEW (not just its model) — the surface browser/
+    /// note executors act on. Resolves the same `reservedDispatchScope` `.tile(id)`
+    /// as `focusedTile()` through the canvas's tile-view accessor; nil when scope
+    /// is canvas/modal, no canvas exists, or the view isn't installed.
+    private func focusedTileView() -> TileNSView? {
+        guard let canvasView, case let .tile(tileId) = reservedDispatchScope() else { return nil }
+        return canvasView.tileView(for: tileId)
     }
 
     /// World frames of every tile except the focused one — input for throw math.
@@ -6471,10 +6514,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let browserId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B1")!
 
         // Mirrors `handleReservedShortcut`'s resolution→consumed mapping. The tile
-        // branch's consumption is now decided by the focused tile (A3): sizing/
-        // positioning consume, browser/note stay passthrough. This check only
-        // drives browser/note resolutions, whose passthrough contract is pinned by
-        // the static `isPassthroughTileAction` predicate (no instance/canvas needed).
+        // branch's consumption is pinned by the static `isPassthroughTileAction`
+        // predicate (no instance/canvas needed): post-A4 every tile action is
+        // non-passthrough (consumed when the focused tile matches its kind). This
+        // check drives the resolution + consumption contract; `--browser-note-action-check`
+        // drives the real executors against live tile views.
         func consumes(_ resolution: FocusDispatchResolution) -> Bool {
             switch resolution {
             case let .global(shortcut):
@@ -6491,11 +6535,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             FocusDispatch.resolve(keyCode: keyCode, modifiers: modifiers, scope: scope, focusedKind: focusedKind, navKeymap: keymap, defaults: defaults)
         }
 
-        // 1) Cmd-F with a focused browser → .tileAction(.browserFind), NOT consumed
-        //    (A2 passthrough). This is the P0: the find event reaches the browser.
+        // 1) Cmd-F with a focused browser → .tileAction(.browserFind), and now
+        //    CONSUMED (A4 wired the executor: the monitor shows the find bar via
+        //    the action). The find bar still appears — just through the action
+        //    instead of performKeyEquivalent. The independent `performKeyEquivalent`
+        //    fallback (`--browser-url-focus-check`) remains green.
         let browserFind = resolve(keyCode: 3, modifiers: .command, scope: .tile(browserId), focusedKind: .browser)
         try expect(browserFind == .tileAction(.browserFind), "Cmd-F in browser scope should resolve to .tileAction(.browserFind); got \(browserFind)")
-        try expect(consumes(browserFind) == false, "Cmd-F in browser must NOT be consumed by the monitor (A2 passthrough preserves the find bar); consumed=\(consumes(browserFind))")
+        try expect(consumes(browserFind) == true, "Cmd-F in browser must be consumed by the monitor (A4 executor shows the find bar); consumed=\(consumes(browserFind))")
 
         // 2) Cmd-F with canvas scope → .global(.focusMode), consumed (handled).
         let canvasFind = resolve(keyCode: 3, modifiers: .command, scope: .canvas, focusedKind: nil)
@@ -6681,6 +6728,144 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("tile-action", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// Drives the real A4 browser/note executors against live tile VIEWS (not just
+    /// models). Builds a canvas with a focused browser tile (backed by a spy
+    /// `BrowserRuntime` so reload/back/forward are observable without a heavy
+    /// WKWebView) and a focused note tile, focuses each through the production
+    /// click router, then calls `executeTileAction` and asserts the observable
+    /// effect. Never triggers a save panel (the note path tests `exportContent()`,
+    /// the pure payload — `runModal()` would hang the matrix).
+    static func runBrowserNoteActionSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let browserTileId = UUID(uuidString: "00000000-0000-0000-0000-0000000004B1")!
+        let noteTileId = UUID(uuidString: "00000000-0000-0000-0000-0000000004D2")!
+        let noteId = UUID(uuidString: "00000000-0000-0000-0000-0000000004ED")!
+        let browserFrame = TileFrame(x: 40, y: 40, width: 480, height: 320)
+        let noteFrame = TileFrame(x: 560, y: 40, width: 360, height: 240)
+        let browserTile = Tile(id: browserTileId, kind: .browser, title: "ACTION_BROWSER", frame: browserFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata(url: "https://example.test/start"))
+        let noteBody = "first line\nsecond line\nexport me"
+        let noteTile = Tile(id: noteTileId, kind: .note, title: "ACTION_NOTE", frame: noteFrame, zIndex: 2, runtimeRef: nil, metadata: TileMetadata(noteId: noteId))
+        let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: viewport, tiles: [browserTile, noteTile], groups: [], lastActiveTileId: nil))
+
+        let appDelegate = AppDelegate()
+        appDelegate.canvasView = canvas
+        let focusBroker = appDelegate.focusBroker
+        canvas.focusBroker = focusBroker
+        focusBroker.onAcceptedTileFocus = { [weak canvas] id in canvas?.markActive(tileId: id) }
+        canvas.frame = NSRect(x: 0, y: 0, width: 960, height: 400)
+
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+
+        let runtime = SpyBrowserRuntime(tileId: browserTileId, initialURL: "https://example.test/start")
+        let browserView = BrowserTileNSView(tile: browserTile, runtime: runtime)
+        let noteView = NoteTileNSView(tile: noteTile, noteId: noteId, initialBody: noteBody)
+        canvas.install(tileView: browserView, for: browserTile)
+        canvas.install(tileView: noteView, for: noteTile)
+        canvas.layoutSubtreeIfNeeded()
+        defer {
+            runtime.terminate(policy: .requestClose)
+            window.close()
+        }
+
+        func focusTile(_ view: TileNSView) {
+            let titlePoint = view.convert(NSPoint(x: view.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil)
+            AppDelegate.routeTileClickFocus(at: titlePoint, in: canvas, focusBroker: focusBroker)
+        }
+
+        // --- Browser tile focused: browser actions consumed + invoke runtime. ---
+        focusTile(browserView)
+        try expect(focusBroker.activeSurface == .tile(browserTileId), "precondition: browser focused; activeSurface=\(String(describing: focusBroker.activeSurface))")
+
+        let reloadConsumed = appDelegate.executeTileAction(.browserReload)
+        try expect(reloadConsumed == true, "browserReload on focused browser must be consumed; got \(reloadConsumed)")
+        try expect(runtime.reloadCount == 1, "browserReload must invoke runtime.reload() exactly once; got \(runtime.reloadCount)")
+
+        let backConsumed = appDelegate.executeTileAction(.browserBack)
+        try expect(backConsumed == true, "browserBack on focused browser must be consumed; got \(backConsumed)")
+        try expect(runtime.goBackCount == 1, "browserBack must invoke runtime.goBack() exactly once; got \(runtime.goBackCount)")
+
+        let forwardConsumed = appDelegate.executeTileAction(.browserForward)
+        try expect(forwardConsumed == true, "browserForward on focused browser must be consumed; got \(forwardConsumed)")
+        try expect(runtime.goForwardCount == 1, "browserForward must invoke runtime.goForward() exactly once; got \(runtime.goForwardCount)")
+
+        try expect(browserView.findBarVisibleForQA == false, "find bar should be hidden before browserFind")
+        let findConsumed = appDelegate.executeTileAction(.browserFind)
+        try expect(findConsumed == true, "browserFind on focused browser must be consumed; got \(findConsumed)")
+        try expect(browserView.findBarVisibleForQA == true, "browserFind must show the find bar")
+
+        let focusURLConsumed = appDelegate.executeTileAction(.browserFocusURL)
+        try expect(focusURLConsumed == true, "browserFocusURL on focused browser must be consumed; got \(focusURLConsumed)")
+        try expect(browserView.urlFieldHasFocusForQA == true, "browserFocusURL must focus the URL field")
+
+        // A NOTE action while the browser is focused → passthrough (false), no crash.
+        let noteExportOnBrowser = appDelegate.executeTileAction(.noteExport)
+        try expect(noteExportOnBrowser == false, "noteExport on a focused BROWSER must return false (passthrough); got \(noteExportOnBrowser)")
+
+        // --- Note tile focused: noteExport consumed; export payload == body. ---
+        focusTile(noteView)
+        try expect(focusBroker.activeSurface == .tile(noteTileId), "precondition: note focused; activeSurface=\(String(describing: focusBroker.activeSurface))")
+
+        let exportContent = noteView.exportContent()
+        try expect(exportContent.text == noteBody, "export content text must equal the note body; got \(exportContent.text.debugDescription)")
+        try expect(!exportContent.suggestedFilename.isEmpty, "export must suggest a non-empty filename; got \(exportContent.suggestedFilename.debugDescription)")
+
+        // A BROWSER action while the note is focused → passthrough (false), no crash,
+        // and the spy runtime is NOT touched (counts unchanged).
+        let reloadCountBefore = runtime.reloadCount
+        let browserReloadOnNote = appDelegate.executeTileAction(.browserReload)
+        try expect(browserReloadOnNote == false, "browserReload on a focused NOTE must return false (passthrough); got \(browserReloadOnNote)")
+        try expect(runtime.reloadCount == reloadCountBefore, "browser action on a note must not touch the browser runtime; reloadCount=\(runtime.reloadCount)")
+
+        // No focused tile (canvas scope) → browser/note actions passthrough.
+        focusBroker.enterScope(.canvas, reason: .userClick)
+        let findNoFocus = appDelegate.executeTileAction(.browserFind)
+        try expect(findNoFocus == false, "browserFind with no focused tile must return false (passthrough); got \(findNoFocus)")
+        let exportNoFocus = appDelegate.executeTileAction(.noteExport)
+        try expect(exportNoFocus == false, "noteExport with no focused tile must return false (passthrough); got \(exportNoFocus)")
+
+        let manifest: [String: Any] = [
+            "check": "browser-note-action",
+            "browserTileId": browserTileId.uuidString,
+            "noteTileId": noteTileId.uuidString,
+            "reloadConsumed": reloadConsumed,
+            "reloadCount": runtime.reloadCount,
+            "backConsumed": backConsumed,
+            "goBackCount": runtime.goBackCount,
+            "forwardConsumed": forwardConsumed,
+            "goForwardCount": runtime.goForwardCount,
+            "findConsumed": findConsumed,
+            "findBarVisible": browserView.findBarVisibleForQA,
+            "focusURLConsumed": focusURLConsumed,
+            "urlFieldHasFocus": browserView.urlFieldHasFocusForQA,
+            "noteExportOnBrowser": noteExportOnBrowser,
+            "exportText": exportContent.text,
+            "exportSuggestedFilename": exportContent.suggestedFilename,
+            "browserReloadOnNote": browserReloadOnNote,
+            "findNoFocus": findNoFocus,
+            "exportNoFocus": exportNoFocus,
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("browser-note-action", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
@@ -6915,6 +7100,42 @@ private final class FocusModeSession {
         tileView.frame = pane.bounds
         tileView.autoresizingMask = [.width, .height]
     }
+}
+
+/// Lightweight `BrowserRuntime` spy for `--browser-note-action-check`: records
+/// nav-method invocations so the A4 browser executors are observable without a
+/// real `WKWebView`. No WebKit, no I/O, no first-responder games.
+@MainActor
+private final class SpyBrowserRuntime: BrowserRuntime {
+    let id: BrowserRuntimeID = UUID()
+    let tileId: TileID
+    private(set) var url: String
+    let title: String = ""
+    let faviconURL: String? = nil
+    let loadingState: BrowserLoadingState = .idle
+    var onStateChange: (() -> Void)?
+
+    private(set) var reloadCount = 0
+    private(set) var goBackCount = 0
+    private(set) var goForwardCount = 0
+
+    init(tileId: TileID, initialURL: String) {
+        self.tileId = tileId
+        self.url = initialURL
+    }
+
+    func attach(to hostView: BrowserHostView) {}
+    func detach() {}
+    func loadURL(_ urlString: String) { url = urlString }
+    func goBack() { goBackCount += 1 }
+    func goForward() { goForwardCount += 1 }
+    func reload() { reloadCount += 1 }
+    func stop() {}
+    func find(_ query: String, direction: BrowserFindDirection) {}
+    func focus() {}
+    func blur() {}
+    func isSemanticContentResponder(_ responder: NSResponder?) -> Bool { false }
+    func terminate(policy: TerminationPolicy) {}
 }
 
 private extension NSView {

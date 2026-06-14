@@ -88,6 +88,7 @@ run_app_check .build/debug/continuum-revived --note-click-focus-check
 run_app_check .build/debug/continuum-revived --focus-scope-dispatch-check
 run_app_check .build/debug/continuum-revived --reserved-dispatch-check
 run_app_check .build/debug/continuum-revived --tile-action-check
+run_app_check .build/debug/continuum-revived --browser-note-action-check
 run_app_check .build/debug/continuum-revived --focus-border-check
 run_app_check .build/debug/continuum-revived --browser-restore-state-check
 run_app_check .build/debug/continuum-revived --browser-profile-persistence-check

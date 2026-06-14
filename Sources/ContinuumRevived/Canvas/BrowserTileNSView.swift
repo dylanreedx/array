@@ -269,10 +269,37 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     @objc private func handleFindNext(_ sender: Any?) { performFind(direction: .forward) }
     @objc private func handleFindClose(_ sender: Any?) { hideFindBar() }
 
-    private func showFindBar() {
+    func showFindBar() {
         findRowHeightConstraint.constant = 24
         findRow.isHidden = false
         window?.makeFirstResponder(findField)
+    }
+
+    // MARK: - Tile-action entry points (A4)
+    // Run the same code the toolbar buttons / URL field do, so a focused-tile
+    // chord (⌘F/⌘L/⌘R/⌘[/⌘]) executes through one path with the UI.
+
+    /// `⌘F` — reveal + focus the find bar.
+    func performFindAction() { showFindBar() }
+
+    /// `⌘R` — reload current page (mirrors the reload button).
+    func performReloadAction() { runtime.reload() }
+
+    /// `⌘[` — navigate back (mirrors the back button).
+    func performBackAction() { runtime.goBack() }
+
+    /// `⌘]` — navigate forward (mirrors the forward button).
+    func performForwardAction() { runtime.goForward() }
+
+    /// `⌘L` — focus + select the URL field for editing.
+    func focusURLField() {
+        window?.makeFirstResponder(urlField)
+        urlField.currentEditor()?.selectAll(nil)
+    }
+
+    /// QA: true while the URL field (or its field editor) holds first responder.
+    var urlFieldHasFocusForQA: Bool {
+        window?.firstResponder === urlField.currentEditor() || window?.firstResponder === urlField
     }
 
     private func hideFindBar() {
