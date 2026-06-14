@@ -99,8 +99,6 @@ final class TileSpawner {
     }
 
     func spawnTerminal(profileId: String, at worldPoint: CGPoint? = nil) -> Outcome {
-        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
-        guard let ghostty else { return .failure(SpawnError.canvasUnavailable) }
         guard let spec = registry.spec(for: profileId) else {
             return .unknownProfile(id: profileId)
         }
@@ -117,7 +115,39 @@ final class TileSpawner {
         case let .missing(name): return .missingCommand(executable: name)
         case let .notConfigured(id): return .notConfigured(profileId: id)
         }
+        let now = Date()
+        return spawnTerminal(
+            profile: profile,
+            launchProfileId: spec.id,
+            agentDescriptor: agentDescriptor(for: spec, projectRoot: projectRoot, at: now),
+            createdAt: now,
+            at: worldPoint
+        )
+    }
 
+    func spawnHarnessRoleRun(role: HarnessRole, prompt: String, at worldPoint: CGPoint? = nil) -> Outcome {
+        let projectRoot = terminalProjectRoot()
+        let now = Date()
+        let runId = HarnessRoleRunBuilder.makeRunId(roleId: role.id, now: now, suffix: UUID().uuidString)
+        let profile = HarnessRoleRunBuilder.buildLaunchProfile(role: role, prompt: prompt, projectRoot: projectRoot, runId: runId)
+        return spawnTerminal(
+            profile: profile,
+            launchProfileId: "harness:\(role.id)",
+            agentDescriptor: AgentDescriptor.configuring(agentKind: role.id, worktreePath: projectRoot, now: now, runId: runId),
+            createdAt: now,
+            at: worldPoint
+        )
+    }
+
+    private func spawnTerminal(
+        profile: LaunchProfile,
+        launchProfileId: String,
+        agentDescriptor: AgentDescriptor?,
+        createdAt now: Date,
+        at worldPoint: CGPoint?
+    ) -> Outcome {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        guard let ghostty else { return .failure(SpawnError.canvasUnavailable) }
         let frame = makePlacement(
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .terminal),
@@ -131,7 +161,7 @@ final class TileSpawner {
             frame: frame,
             zIndex: nextZ,
             runtimeRef: nil,
-            metadata: TileMetadata(launchProfileId: spec.id, projectRelativeCwd: ".")
+            metadata: TileMetadata(launchProfileId: launchProfileId, projectRelativeCwd: ".")
         )
         let runtime = GhosttyTerminalRuntime(
             id: UUID(),
@@ -143,19 +173,23 @@ final class TileSpawner {
         runtime.reservedShortcutHandler = reservedShortcutHandler
         tile.runtimeRef = RuntimeRef(kind: .terminalSession, id: runtime.id)
 
-        let now = Date()
-        let agentDescriptor = agentDescriptor(for: spec, projectRoot: projectRoot, at: now)
         let view = TerminalTileNSView(tile: tile, runtime: runtime)
         view.agentStatus = agentDescriptor?.status
         canvasView.install(tileView: view, for: tile)
 
-        let descriptor = Self.makeTerminalSessionDescriptor(
-            runtimeId: runtime.id,
+        let descriptor = TerminalSessionDescriptor(
+            id: runtime.id,
             tileId: tile.id,
-            spec: spec,
-            profile: profile,
-            projectRoot: projectRoot,
-            now: now
+            launchProfileId: launchProfileId,
+            command: profile.command,
+            args: profile.arguments,
+            cwd: profile.cwd,
+            env: [:],
+            title: profile.title,
+            createdAt: now,
+            lastStartedAt: now,
+            lastExit: nil,
+            agentDescriptor: agentDescriptor
         )
         do {
             try projectStore.saveSession(descriptor)

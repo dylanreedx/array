@@ -60,6 +60,14 @@ expect(LaunchPaletteModel.filterRows(rows, query: "web.dev").first?.displayName 
 expect(LaunchPaletteModel.filterRows(rows, query: "notebook.com").first?.displayName == "Open \"https://notebook.com\"…", "URL row is default before fuzzy note matches")
 expect(LaunchPaletteModel.filterRows(rows, query: "open.ai").first?.displayName == "Open \"https://open.ai\"…", "URL row is default before fuzzy open matches")
 
+let harnessRows = LaunchPaletteModel.makeRows(
+    profiles: [],
+    harnessRoles: [HarnessRole(id: "qa-reviewer", displayName: "QA Reviewer", promptPath: "/repo/.pi/agents/qa-reviewer.md")]
+)
+expect(harnessRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "New Workspace…", "Run QA Reviewer Agent…"], "palette appends harness role actions after built-in actions")
+expect(LaunchPaletteModel.filterRows(harnessRows, query: "run qa").map(\.displayName) == ["Run QA Reviewer Agent…"], "harness role row filters by run and role name")
+expect(harnessRows.last?.isSelectable == true, "harness role action row is selectable")
+
 let switchProjectId = UUID(uuidString: "00000000-0000-0000-0000-000000000129")!
 let projectRows = LaunchPaletteModel.makeRows(
     profiles: [],

@@ -13,6 +13,7 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case renameWorkspace(UUID)
     case deleteWorkspace(UUID)
     case switchWorkspace(UUID)
+    case spawnHarnessRole(HarnessRole)
 
     public var displayName: String {
         switch self {
@@ -40,6 +41,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "Delete Workspace…"
         case .switchWorkspace:
             return "Switch Workspace…"
+        case let .spawnHarnessRole(role):
+            return "Run \(role.displayName) Agent…"
         }
     }
 
@@ -69,6 +72,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["delete", "workspace", "canvas"]
         case .switchWorkspace:
             return ["switch", "workspace", "canvas"]
+        case let .spawnHarnessRole(role):
+            return ["run", "spawn", "agent", "harness", "role", role.id, role.displayName.lowercased()]
         }
     }
 }
@@ -159,7 +164,7 @@ public enum LaunchPaletteRow: Equatable, Sendable {
 }
 
 public enum LaunchPaletteModel {
-    public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = []) -> [LaunchPaletteRow] {
+    public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], harnessRoles: [HarnessRole] = []) -> [LaunchPaletteRow] {
         profiles.map(LaunchPaletteRow.profile) + [
             .action(.newNote),
             .action(.newBrowser),
@@ -167,7 +172,7 @@ public enum LaunchPaletteModel {
             .action(.openFileTree),
             .action(.newDiffReview),
             .action(.newWorkspace)
-        ] + workspaces.flatMap { workspace in
+        ] + harnessRoles.map { LaunchPaletteRow.action(.spawnHarnessRole($0)) } + workspaces.flatMap { workspace in
             [
                 LaunchPaletteRow.workspace(workspace),
                 LaunchPaletteRow.workspaceAction(.renameWorkspace(workspace.id), workspace),

@@ -1818,7 +1818,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             focusBroker.openModal(.palette)
         }
         let rows = zoneRuntimeController.paletteRows(registryStore: registryStore)
-        palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces, initialQuery: initialQuery)
+        palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces, harnessRoles: harnessRolesForActiveProject(), initialQuery: initialQuery)
+    }
+
+    private func harnessRolesForActiveProject() -> [HarnessRole] {
+        guard let rootPath = zoneRuntimeController?.project.rootPath else { return [] }
+        let agentsDirectory = URL(fileURLWithPath: rootPath, isDirectory: true).appendingPathComponent(".pi/agents", isDirectory: true)
+        let paths = ((try? FileManager.default.contentsOfDirectory(at: agentsDirectory, includingPropertiesForKeys: nil)) ?? [])
+            .map(\.path)
+        return HarnessRoleParser.parse(roleFilePaths: paths)
     }
 
     private func makeProfilePalette() -> LaunchProfilePalette {
@@ -2021,7 +2029,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             deleteWorkspaceAndRelaunch(workspaceId: workspaceId)
         case let .switchWorkspace(workspaceId):
             switchWorkspaceAndRelaunch(workspaceId: workspaceId)
+        case let .spawnHarnessRole(role):
+            spawnHarnessRoleFromPalette(role)
         }
+    }
+
+    private func spawnHarnessRoleFromPalette(_ role: HarnessRole) {
+        guard let prompt = promptForHarnessRoleTask(role: role) else { return }
+        guard let spawner = tileSpawner else { return }
+        let admissionTrigger = "palette:harness:\(role.id)"
+        if let refusal = terminalSpawnAdmission.admit(trigger: admissionTrigger, liveCount: liveTerminalRuntimeCount()) {
+            fputs("\(refusal.message)\n", stderr)
+            return
+        }
+        switch spawner.spawnHarnessRoleRun(role: role, prompt: prompt) {
+        case let .spawned(runtime):
+            installSpawnedTerminal(runtime)
+        case let .failure(error):
+            fputs("TileSpawner.spawnHarnessRoleRun failed: \(error)\n", stderr)
+        case let .missingCommand(executable):
+            presentMissingCommand(executable: executable, profileId: role.id)
+        case let .notConfigured(id):
+            presentMissingCommand(executable: id, profileId: id, kind: .notConfigured)
+        case let .unknownProfile(id):
+            fputs("Unknown harness role id: \(id)\n", stderr)
+        }
+    }
+
+    private func promptForHarnessRoleTask(role: HarnessRole) -> String? {
+        let alert = NSAlert()
+        alert.messageText = "Run \(role.displayName) Agent"
+        alert.informativeText = "Enter the prompt for the .pi/agents/\(role.id).md role."
+        alert.addButton(withTitle: "Run")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(string: "")
+        field.placeholderString = "Task prompt"
+        field.frame = NSRect(x: 0, y: 0, width: 360, height: 24)
+        alert.accessoryView = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let trimmed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func createWorkspaceAndRelaunch(name: String) {

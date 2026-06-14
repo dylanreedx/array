@@ -671,7 +671,8 @@ do {
         agentKind: "claude",
         worktreePath: "/tmp/x",
         status: .working,
-        statusUpdatedAt: agentUpdatedAt
+        statusUpdatedAt: agentUpdatedAt,
+        runId: "claude-20260613T000000Z-abc123"
     )
     let agentSession = TerminalSessionDescriptor(
         id: descriptor.id,
@@ -715,9 +716,71 @@ do {
     let restoredDescriptor = agentDescriptor.restoredForBoot(now: restoreClock)
     expect(restoredDescriptor.status == .stale, "agent descriptor stale restoration status")
     expect(restoredDescriptor.statusUpdatedAt == restoreClock, "agent descriptor stale restoration timestamp")
+    expect(restoredDescriptor.runId == "claude-20260613T000000Z-abc123", "agent descriptor stale restoration preserves run binding")
     let worktreeSpawnDescriptor = AgentDescriptor.configuring(agentKind: "claude", worktreePath: "/tmp/worktree-checkout", now: agentUpdatedAt)
     expect(worktreeSpawnDescriptor.worktreePath == "/tmp/worktree-checkout", "agent descriptor configuring seam preserves worktree path")
     expect(worktreeSpawnDescriptor.status == .configuring, "agent descriptor configuring seam starts configuring")
+
+    let legacyAgentJSON = """
+    {
+      "agentKind": "qa-reviewer",
+      "worktreePath": "/tmp/x",
+      "status": "working",
+      "statusUpdatedAt": "2023-11-14T22:30:00Z"
+    }
+    """.data(using: .utf8)!
+    let legacyAgentDescriptor = try JSONCodec.makeDecoder().decode(AgentDescriptor.self, from: legacyAgentJSON)
+    expect(legacyAgentDescriptor.runId == nil, "AgentDescriptor tolerates legacy descriptors without runId")
+}
+
+// MARK: - Harness role runs
+
+do {
+    let temp = FileManager.default.temporaryDirectory.appendingPathComponent("continuum-harness-role-check-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: temp.appendingPathComponent(".pi/agents"), withIntermediateDirectories: true)
+    let qaPath = temp.appendingPathComponent(".pi/agents/qa-reviewer.md").path
+    let codePath = temp.appendingPathComponent(".pi/agents/code-reviewer.md").path
+    try """
+    ---
+    name: qa-reviewer
+    description: QA reviewer
+    tools: read, bash
+    model: openai-codex/gpt-5.5
+    reasoning: medium
+    ---
+    Body
+    """.write(toFile: qaPath, atomically: true, encoding: .utf8)
+    try "# Code reviewer\n".write(toFile: codePath, atomically: true, encoding: .utf8)
+    let roles = HarnessRoleParser.parse(roleFilePaths: [
+        qaPath,
+        temp.appendingPathComponent(".pi/agents/.hidden.md").path,
+        temp.appendingPathComponent(".pi/agents/bad role.md").path,
+        temp.appendingPathComponent(".pi/agents/code-scout.txt").path,
+        codePath
+    ])
+    expect(roles.map(\.id) == ["code-reviewer", "qa-reviewer"], "HarnessRoleParser returns sorted valid markdown roles")
+    expect(roles.first?.displayName == "Code Reviewer", "HarnessRoleParser derives display names")
+    let qaRole = roles[1]
+    expect(qaRole.model == "openai-codex/gpt-5.5" && qaRole.reasoning == "medium" && qaRole.tools == "read, bash", "HarnessRoleParser reads documented frontmatter fields")
+
+    let runId = HarnessRoleRunBuilder.makeRunId(
+        roleId: "qa-reviewer",
+        now: Date(timeIntervalSince1970: 1_765_584_000),
+        suffix: "abc-123-extra"
+    )
+    expect(runId == "qa-reviewer-20251213T000000Z-abc123", "HarnessRoleRunBuilder makes deterministic run ids")
+
+    let profile = HarnessRoleRunBuilder.buildLaunchProfile(
+        role: qaRole,
+        prompt: "Review CON-94",
+        projectRoot: "/repo",
+        runId: runId
+    )
+    expect(profile.command == "/usr/bin/env", "HarnessRoleRunBuilder routes through env pi command")
+    expect(profile.arguments == ["CONTINUUM_HARNESS_RUN_ID=\(runId)", "pi", "--mode", "json", "-p", "--no-session", "--model", "openai-codex/gpt-5.5", "--thinking", "medium", "--tools", "read, bash", "--system-prompt", qaPath, "Review CON-94"], "HarnessRoleRunBuilder builds documented pi role invocation without executing it")
+    expect(profile.cwd == "/repo", "HarnessRoleRunBuilder binds cwd to project root")
+    let descriptor = AgentDescriptor.configuring(agentKind: "qa-reviewer", worktreePath: "/repo", now: Date(timeIntervalSince1970: 1_765_584_000), runId: runId)
+    expect(descriptor.runId == runId, "AgentDescriptor configuring seam binds harness run id")
 }
 
 // MARK: - DefaultBrowserURL

@@ -68,16 +68,18 @@ public struct AgentDescriptor: Codable, Equatable, Sendable {
     public var worktreePath: String?
     public var status: AgentStatus
     public var statusUpdatedAt: Date
+    public var runId: String?
 
-    public init(agentKind: String, worktreePath: String?, status: AgentStatus, statusUpdatedAt: Date) {
+    public init(agentKind: String, worktreePath: String?, status: AgentStatus, statusUpdatedAt: Date, runId: String? = nil) {
         self.agentKind = agentKind
         self.worktreePath = worktreePath
         self.status = status
         self.statusUpdatedAt = statusUpdatedAt
+        self.runId = runId
     }
 
-    public static func configuring(agentKind: String, worktreePath: String?, now: Date) -> AgentDescriptor {
-        AgentDescriptor(agentKind: agentKind, worktreePath: worktreePath, status: .configuring, statusUpdatedAt: now)
+    public static func configuring(agentKind: String, worktreePath: String?, now: Date, runId: String? = nil) -> AgentDescriptor {
+        AgentDescriptor(agentKind: agentKind, worktreePath: worktreePath, status: .configuring, statusUpdatedAt: now, runId: runId)
     }
 
     public func restoredForBoot(now: Date = Date()) -> AgentDescriptor {
