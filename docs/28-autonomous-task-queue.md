@@ -43,7 +43,7 @@ can pass while the user-facing path is dead is the WRONG check.
   round-trip. matrix green.
 
 ### F3 — ShortcutCatalog (docs/24 S2)
-- **Status: TODO** · deps: F1, F2
+- **Status: DONE (f65c366)** · deps: F1, F2
 - `ShortcutCatalog`: every binding (globals + nav + tile actions) with chord, label,
   configurable y/n. Single source for the Guide.
 - **Check:** catalog-exhaustiveness — covers each `ReservedShortcut`, each `NavKeymap`
