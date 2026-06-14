@@ -359,6 +359,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--tile-action-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runTileActionSelfCheck()
+                print("ContinuumRevivedTileActionChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-restore-state-check") {
             do {
                 _ = NSApplication.shared
@@ -2067,7 +2079,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 return false
             }
         case let .tileAction(action):
-            return Self.executeTileAction(action)
+            return executeTileAction(action)
         case .passThrough:
             return false
         }
@@ -2088,20 +2100,112 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return focusBroker.activeSurface ?? .canvas
     }
 
-    /// Executes a resolved tile-local action. A2 stubs every action to
-    /// passthrough (`false`): returning false means the event is NOT consumed by
-    /// the monitor, so a focused tile's own key path still receives it (preserving
-    /// the P0 browser-find behavior without the special-case guard). Static + pure
-    /// so `--reserved-dispatch-check` drives the exact A2 consumption contract.
-    static func executeTileAction(_ action: TileAction) -> Bool {
+    /// World-unit step for a single `⌃⌥`arrow nudge. Fine-grained so arrow taps
+    /// reposition precisely; throw (`⌃⌥⌘`) covers the large gap-adjacent moves.
+    static let tileNudgeStep: Double = 16
+
+    /// Resize ladder scale applied to a kind's base `TileGeometry.preset` size:
+    /// compact ≈ 0.7×, default = base, large ≈ 1.4×. `fillViewport` ignores the
+    /// ladder and sizes to the visible world rect (handled separately).
+    static func resizeScale(for preset: TileSizePreset) -> Double {
+        switch preset {
+        case .compact: return 0.7
+        case .default: return 1.0
+        case .large: return 1.4
+        case .fillViewport: return 1.0
+        }
+    }
+
+    /// Sizing/positioning are consumed by the monitor (return true); browser/note
+    /// actions stay passthrough (A4) so the focused tile's own key path receives
+    /// the event. Used by `--reserved-dispatch-check` to pin the consumption
+    /// contract without an `AppDelegate` instance.
+    static func isPassthroughTileAction(_ action: TileAction) -> Bool {
         switch action {
         case .resizeToPreset, .nudge, .throwToNeighbor:
-            // TODO(A3): sizing presets (TileGeometry) + positioning (TileArrangement).
             return false
+        case .browserFind, .browserFocusURL, .browserReload, .browserBack, .browserForward, .noteExport:
+            return true
+        }
+    }
+
+    /// Executes a resolved tile-local action against the FOCUSED tile (A3).
+    /// Resolves the scope's `.tile(id)` to its `Tile` in the live canvas model,
+    /// applies pure Core geometry (`TileGeometry` sizing / `TileArrangement`
+    /// positioning) in world coordinates, and commits via `canvasView.updateTile`.
+    /// Returns true when the action was applied (consumed by the monitor). With no
+    /// focused tile, or for browser/note actions (A4), returns false so the event
+    /// still reaches the focused tile's own key path (preserves P0 browser-find).
+    @discardableResult
+    func executeTileAction(_ action: TileAction) -> Bool {
+        switch action {
+        case let .resizeToPreset(preset):
+            return resizeFocusedTile(to: preset)
+        case let .nudge(direction):
+            return moveFocusedTile { frame, gap in
+                _ = gap
+                return TileArrangement.nudge(frame, direction: Self.arrangementDirection(direction), step: Self.tileNudgeStep)
+            }
+        case let .throwToNeighbor(direction):
+            return moveFocusedTile { frame, gap in
+                let others = self.otherTileFrames()
+                return TileArrangement.throwDestination(frame, direction: Self.arrangementDirection(direction), others: others, gap: gap)
+            }
         case .browserFind, .browserFocusURL, .browserReload, .browserBack, .browserForward, .noteExport:
             // TODO(A4): browser find/url/reload/nav + note export executors.
             return false
         }
+    }
+
+    private static func arrangementDirection(_ direction: TileActionDirection) -> TileArrangement.Direction {
+        switch direction {
+        case .up: return .up
+        case .down: return .down
+        case .left: return .left
+        case .right: return .right
+        }
+    }
+
+    /// The focused tile (from `reservedDispatchScope`'s `.tile(id)`) in the live
+    /// canvas model, or nil when scope is canvas/modal or no canvas exists.
+    private func focusedTile() -> Tile? {
+        guard let canvasView, case let .tile(tileId) = reservedDispatchScope() else { return nil }
+        return canvasView.canvasState.tiles.first(where: { $0.id == tileId })
+    }
+
+    /// World frames of every tile except the focused one — input for throw math.
+    private func otherTileFrames() -> [TileFrame] {
+        guard let canvasView, let focused = focusedTile() else { return [] }
+        return canvasView.canvasState.tiles
+            .filter { $0.id != focused.id }
+            .map { $0.frame }
+    }
+
+    /// Resize the focused tile to a preset. Keeps the tile's top-left origin
+    /// (matches drag/world convention) for the scale ladder; `fillViewport`
+    /// sets origin + size to the visible world rect.
+    private func resizeFocusedTile(to preset: TileSizePreset) -> Bool {
+        guard let canvasView, var tile = focusedTile() else { return false }
+        if preset == .fillViewport {
+            let visible = CanvasEngine.visibleWorldRect(viewport: canvasView.canvasState.viewport, visibleSize: canvasView.bounds.size)
+            tile.frame = TileFrame(x: Double(visible.minX), y: Double(visible.minY), width: Double(visible.width), height: Double(visible.height))
+        } else {
+            let base = TileGeometry.preset(for: tile.kind).defaultSize
+            let scale = Self.resizeScale(for: preset)
+            tile.frame = TileFrame(x: tile.frame.x, y: tile.frame.y, width: Double(base.width) * scale, height: Double(base.height) * scale)
+        }
+        canvasView.updateTile(tile)
+        return true
+    }
+
+    /// Apply a pure position transform (`transform(frame, gap) -> frame`) to the
+    /// focused tile and commit. Shared by nudge and throw.
+    private func moveFocusedTile(_ transform: (TileFrame, Double) -> TileFrame) -> Bool {
+        guard let canvasView, var tile = focusedTile() else { return false }
+        let gap = TileGapResolver.resolvedGap()
+        tile.frame = transform(tile.frame, gap)
+        canvasView.updateTile(tile)
+        return true
     }
 
     private func openFocusMode(primaryTileId: UUID) {
@@ -6366,15 +6470,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let defaults = UserDefaults(suiteName: "reserved-dispatch-check-\(UUID().uuidString)")!
         let browserId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B1")!
 
-        // Mirrors `handleReservedShortcut`'s resolution→consumed mapping exactly,
-        // calling the real `AppDelegate.executeTileAction` for the tile branch.
+        // Mirrors `handleReservedShortcut`'s resolution→consumed mapping. The tile
+        // branch's consumption is now decided by the focused tile (A3): sizing/
+        // positioning consume, browser/note stay passthrough. This check only
+        // drives browser/note resolutions, whose passthrough contract is pinned by
+        // the static `isPassthroughTileAction` predicate (no instance/canvas needed).
         func consumes(_ resolution: FocusDispatchResolution) -> Bool {
             switch resolution {
             case let .global(shortcut):
                 if case .spawnProfile(let n) = shortcut, !(1...4).contains(n) { return false }
                 return true
             case let .tileAction(action):
-                return AppDelegate.executeTileAction(action)
+                return !AppDelegate.isPassthroughTileAction(action)
             case .passThrough:
                 return false
             }
@@ -6427,6 +6534,153 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("reserved-dispatch", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// Drives the real A3 sizing/positioning executors against a focused tile.
+    /// Builds a canvas + two tiles (mirroring `--focus-scope-dispatch-check`),
+    /// focuses tile A through the production click router, then calls the real
+    /// `executeTileAction` and asserts the committed world frame in
+    /// `canvasState.tiles`. Expectations are derived INDEPENDENTLY from the pure
+    /// Core math (`TileGeometry`, `TileArrangement`), never copied from the
+    /// executor. Also asserts an action with no focused tile returns false.
+    static func runTileActionSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func approx(_ a: Double, _ b: Double, _ tol: Double = 0.001) -> Bool { abs(a - b) <= tol }
+
+        // Two note tiles; A is the action target, B is the throw neighbor. The
+        // gap between A's right edge (340) and B's left edge (480) is 140 world
+        // units so A has room to nudge before throwing into B.
+        let tileAId = UUID(uuidString: "00000000-0000-0000-0000-0000000003A1")!
+        let tileBId = UUID(uuidString: "00000000-0000-0000-0000-0000000003B2")!
+        let startFrame = TileFrame(x: 60, y: 60, width: 280, height: 200)
+        let neighborFrame = TileFrame(x: 480, y: 60, width: 280, height: 200)
+        let tileA = Tile(id: tileAId, kind: .note, title: "ACTION_A", frame: startFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: tileBId, kind: .note, title: "ACTION_B", frame: neighborFrame, zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: viewport, tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
+
+        let appDelegate = AppDelegate()
+        appDelegate.canvasView = canvas
+        let focusBroker = appDelegate.focusBroker
+        canvas.focusBroker = focusBroker
+        focusBroker.onAcceptedTileFocus = { [weak canvas] id in canvas?.markActive(tileId: id) }
+        canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 360)
+
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+
+        let viewA = TileNSView(tile: tileA)
+        let viewB = TileNSView(tile: tileB)
+        canvas.install(tileView: viewA, for: tileA)
+        canvas.install(tileView: viewB, for: tileB)
+        canvas.layoutSubtreeIfNeeded()
+
+        func frameOfA() -> TileFrame { canvas.canvasState.tiles.first(where: { $0.id == tileAId })!.frame }
+
+        // 0) No focused tile (scope .canvas) → executor returns false (passthrough).
+        focusBroker.enterScope(.canvas, reason: .userClick)
+        let noFocusConsumed = appDelegate.executeTileAction(.resizeToPreset(.large))
+        try expect(noFocusConsumed == false, "resize with no focused tile must return false (passthrough); got \(noFocusConsumed)")
+        try expect(frameOfA() == startFrame, "no-focus resize must not mutate any tile; A frame=\(frameOfA())")
+
+        // Focus A through the production router (title-bar click).
+        let titleAPoint = viewA.convert(NSPoint(x: viewA.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil)
+        AppDelegate.routeTileClickFocus(at: titleAPoint, in: canvas, focusBroker: focusBroker)
+        try expect(focusBroker.activeSurface == .tile(tileAId), "precondition: A focused; activeSurface=\(String(describing: focusBroker.activeSurface))")
+
+        // Expected preset sizes derived independently from TileGeometry.
+        let base = TileGeometry.preset(for: .note).defaultSize
+        let expectedLarge = CGSize(width: Double(base.width) * 1.4, height: Double(base.height) * 1.4)
+        let expectedCompact = CGSize(width: Double(base.width) * 0.7, height: Double(base.height) * 0.7)
+
+        // 1a) Resize to large → grows to 1.4× base, origin preserved.
+        let largeConsumed = appDelegate.executeTileAction(.resizeToPreset(.large))
+        let afterLarge = frameOfA()
+        try expect(largeConsumed == true, "resize(.large) must be consumed; got \(largeConsumed)")
+        try expect(approx(afterLarge.width, Double(expectedLarge.width)) && approx(afterLarge.height, Double(expectedLarge.height)), "large size mismatch: got \(afterLarge.width)x\(afterLarge.height), expected \(expectedLarge.width)x\(expectedLarge.height)")
+        try expect(afterLarge.width > startFrame.width && afterLarge.height > startFrame.height, "large must grow vs start \(startFrame.width)x\(startFrame.height); got \(afterLarge.width)x\(afterLarge.height)")
+        try expect(approx(afterLarge.x, startFrame.x) && approx(afterLarge.y, startFrame.y), "large must keep top-left origin (\(startFrame.x),\(startFrame.y)); got (\(afterLarge.x),\(afterLarge.y))")
+
+        // 1b) Resize to compact → shrinks to 0.7× base.
+        let compactConsumed = appDelegate.executeTileAction(.resizeToPreset(.compact))
+        let afterCompact = frameOfA()
+        try expect(compactConsumed == true, "resize(.compact) must be consumed; got \(compactConsumed)")
+        try expect(approx(afterCompact.width, Double(expectedCompact.width)) && approx(afterCompact.height, Double(expectedCompact.height)), "compact size mismatch: got \(afterCompact.width)x\(afterCompact.height), expected \(expectedCompact.width)x\(expectedCompact.height)")
+        try expect(afterCompact.width < afterLarge.width && afterCompact.height < afterLarge.height, "compact must shrink vs large; \(afterCompact.width)x\(afterCompact.height) vs \(afterLarge.width)x\(afterLarge.height)")
+
+        // Reset A to a known frame for positioning assertions (re-focus preserved).
+        var reset = canvas.canvasState.tiles.first(where: { $0.id == tileAId })!
+        reset.frame = startFrame
+        canvas.updateTile(reset)
+        try expect(frameOfA() == startFrame, "precondition: A reset to start frame; got \(frameOfA())")
+
+        // 2a) Nudge right → origin.x += nudge step (matches drag/world axis).
+        let step = AppDelegate.tileNudgeStep
+        let nudgeRightConsumed = appDelegate.executeTileAction(.nudge(.right))
+        let afterNudgeRight = frameOfA()
+        try expect(nudgeRightConsumed == true, "nudge(.right) must be consumed; got \(nudgeRightConsumed)")
+        try expect(approx(afterNudgeRight.x, startFrame.x + step), "nudge right should move origin.x by +\(step): got \(afterNudgeRight.x), expected \(startFrame.x + step)")
+        try expect(approx(afterNudgeRight.y, startFrame.y), "nudge right must not change origin.y; got \(afterNudgeRight.y)")
+
+        // 2b) Nudge up → origin.y -= nudge step (world top-left: up = smaller y).
+        reset.frame = startFrame
+        canvas.updateTile(reset)
+        let nudgeUpConsumed = appDelegate.executeTileAction(.nudge(.up))
+        let afterNudgeUp = frameOfA()
+        try expect(nudgeUpConsumed == true, "nudge(.up) must be consumed; got \(nudgeUpConsumed)")
+        try expect(approx(afterNudgeUp.y, startFrame.y - step), "nudge up should move origin.y by -\(step): got \(afterNudgeUp.y), expected \(startFrame.y - step)")
+        try expect(approx(afterNudgeUp.x, startFrame.x), "nudge up must not change origin.x; got \(afterNudgeUp.x)")
+
+        // 3) Throw right toward neighbor B → lands gap-adjacent. Expectation comes
+        //    from TileArrangement's own output (the source of truth), not a copy.
+        reset.frame = startFrame
+        canvas.updateTile(reset)
+        let gap = TileGapResolver.resolvedGap()
+        let expectedThrow = TileArrangement.throwDestination(startFrame, direction: .right, others: [neighborFrame], gap: gap)
+        let throwConsumed = appDelegate.executeTileAction(.throwToNeighbor(.right))
+        let afterThrow = frameOfA()
+        try expect(throwConsumed == true, "throwToNeighbor(.right) must be consumed; got \(throwConsumed)")
+        try expect(afterThrow == expectedThrow, "throw right must match TileArrangement.throwDestination \(expectedThrow); got \(afterThrow)")
+        try expect(approx(afterThrow.x + afterThrow.width + gap, neighborFrame.x), "thrown tile must be gap-adjacent to neighbor left edge \(neighborFrame.x); got right+gap=\(afterThrow.x + afterThrow.width + gap)")
+
+        let manifest: [String: Any] = [
+            "check": "tile-action",
+            "tileAId": tileAId.uuidString,
+            "tileBId": tileBId.uuidString,
+            "startFrame": ["x": startFrame.x, "y": startFrame.y, "w": startFrame.width, "h": startFrame.height],
+            "neighborFrame": ["x": neighborFrame.x, "y": neighborFrame.y, "w": neighborFrame.width, "h": neighborFrame.height],
+            "baseNoteSize": ["w": Double(base.width), "h": Double(base.height)],
+            "afterLarge": ["x": afterLarge.x, "y": afterLarge.y, "w": afterLarge.width, "h": afterLarge.height],
+            "expectedLarge": ["w": Double(expectedLarge.width), "h": Double(expectedLarge.height)],
+            "afterCompact": ["w": afterCompact.width, "h": afterCompact.height],
+            "expectedCompact": ["w": Double(expectedCompact.width), "h": Double(expectedCompact.height)],
+            "nudgeStep": step,
+            "afterNudgeRight": ["x": afterNudgeRight.x, "y": afterNudgeRight.y],
+            "afterNudgeUp": ["x": afterNudgeUp.x, "y": afterNudgeUp.y],
+            "gap": gap,
+            "afterThrow": ["x": afterThrow.x, "y": afterThrow.y, "w": afterThrow.width, "h": afterThrow.height],
+            "expectedThrow": ["x": expectedThrow.x, "y": expectedThrow.y, "w": expectedThrow.width, "h": expectedThrow.height],
+            "noFocusConsumed": noFocusConsumed,
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("tile-action", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
