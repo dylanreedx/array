@@ -253,6 +253,15 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         hostView = nil
     }
 
+    func find(_ query: String, direction: BrowserFindDirection) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let configuration = WKFindConfiguration()
+        configuration.backwards = direction == .backward
+        configuration.wraps = true
+        webView.find(trimmed, configuration: configuration) { _ in }
+    }
+
     func loadURL(_ urlString: String) {
         guard let url = URL(string: urlString) else {
             loadingState = .failed(message: "Invalid URL: \(urlString)")

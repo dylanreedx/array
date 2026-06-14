@@ -10,7 +10,7 @@ import WebKit
 /// to work — clicks land inside the content view's subviews (buttons,
 /// URL field, web view) before reaching `TileNSView.mouseDown`.
 @MainActor
-final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
+final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDelegate {
     let hostView: BrowserHostView
     let runtime: any BrowserRuntime
 
@@ -32,6 +32,12 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
     private let profileMenuButton: NSButton
     private let faviconLabel: NSTextField
     private let progressIndicator: NSProgressIndicator
+    private let findField: NSSearchField
+    private let findPreviousButton: NSButton
+    private let findNextButton: NSButton
+    private let findCloseButton: NSButton
+    private let findRow: NSStackView
+    private let findRowHeightConstraint: NSLayoutConstraint
     private let errorBanner: NSTextField
     private var lastPersistedURL: String
     private var lastPersistedTitle: String
@@ -46,6 +52,12 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
         self.profileMenuButton = NSButton(title: "⋯", target: nil, action: nil)
         self.faviconLabel = NSTextField(labelWithString: "◌")
         self.progressIndicator = NSProgressIndicator()
+        self.findField = NSSearchField()
+        self.findPreviousButton = NSButton(title: "↑", target: nil, action: nil)
+        self.findNextButton = NSButton(title: "↓", target: nil, action: nil)
+        self.findCloseButton = NSButton(title: "×", target: nil, action: nil)
+        self.findRow = NSStackView()
+        self.findRowHeightConstraint = findRow.heightAnchor.constraint(equalToConstant: 0)
         self.errorBanner = NSTextField(labelWithString: "")
         self.lastPersistedURL = runtime.url
         self.lastPersistedTitle = runtime.title
@@ -104,6 +116,39 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
         navRow.distribution = .fill
         navRow.translatesAutoresizingMaskIntoConstraints = false
 
+        findField.delegate = self
+        findField.placeholderString = "Find in page"
+        findField.translatesAutoresizingMaskIntoConstraints = false
+        findField.focusRingType = .none
+        findField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        findField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        findPreviousButton.target = self
+        findPreviousButton.action = #selector(handleFindPrevious(_:))
+        findPreviousButton.bezelStyle = .rounded
+        findPreviousButton.toolTip = "Previous match"
+        findPreviousButton.translatesAutoresizingMaskIntoConstraints = false
+
+        findNextButton.target = self
+        findNextButton.action = #selector(handleFindNext(_:))
+        findNextButton.bezelStyle = .rounded
+        findNextButton.toolTip = "Next match"
+        findNextButton.translatesAutoresizingMaskIntoConstraints = false
+
+        findCloseButton.target = self
+        findCloseButton.action = #selector(handleFindClose(_:))
+        findCloseButton.bezelStyle = .rounded
+        findCloseButton.toolTip = "Close find"
+        findCloseButton.translatesAutoresizingMaskIntoConstraints = false
+
+        findRow.setViews([findField, findPreviousButton, findNextButton, findCloseButton], in: .leading)
+        findRow.orientation = .horizontal
+        findRow.spacing = 4
+        findRow.alignment = .centerY
+        findRow.distribution = .fill
+        findRow.isHidden = true
+        findRow.translatesAutoresizingMaskIntoConstraints = false
+
         errorBanner.font = .systemFont(ofSize: 11)
         errorBanner.textColor = .systemRed
         errorBanner.maximumNumberOfLines = 2
@@ -114,6 +159,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
         hostView.translatesAutoresizingMaskIntoConstraints = false
 
         body.addSubview(navRow)
+        body.addSubview(findRow)
         body.addSubview(errorBanner)
         body.addSubview(hostView)
 
@@ -123,7 +169,13 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
             navRow.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -6),
             navRow.heightAnchor.constraint(equalToConstant: 24),
 
-            errorBanner.topAnchor.constraint(equalTo: navRow.bottomAnchor, constant: 2),
+            findRow.topAnchor.constraint(equalTo: navRow.bottomAnchor, constant: 4),
+            findRow.leadingAnchor.constraint(greaterThanOrEqualTo: body.leadingAnchor, constant: 6),
+            findRow.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -6),
+            findRow.widthAnchor.constraint(lessThanOrEqualToConstant: 320),
+            findRowHeightConstraint,
+
+            errorBanner.topAnchor.constraint(equalTo: findRow.bottomAnchor, constant: 2),
             errorBanner.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 8),
             errorBanner.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -8),
 
@@ -136,6 +188,10 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
         setContentView(body)
 
         hostView.attach(runtime: runtime)
+        hostView.browserFindShortcutHandler = { [weak self] in
+            self?.showFindBar()
+            return self != nil
+        }
 
         runtime.onStateChange = { [weak self] in
             guard let self else { return }
@@ -161,6 +217,19 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
 
     override func releaseFocus(reason: FocusRequest) {
         runtime.blur()
+    }
+
+    override func canHandleReservedShortcut(_ shortcut: ReservedShortcut) -> Bool {
+        shortcut == .focusMode
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.keyCode == 3, flags == .command {
+            showFindBar()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 
     private func refresh() {
@@ -196,6 +265,25 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
     @objc private func handleBack(_ sender: Any?) { runtime.goBack() }
     @objc private func handleForward(_ sender: Any?) { runtime.goForward() }
     @objc private func handleReload(_ sender: Any?) { runtime.reload() }
+    @objc private func handleFindPrevious(_ sender: Any?) { performFind(direction: .backward) }
+    @objc private func handleFindNext(_ sender: Any?) { performFind(direction: .forward) }
+    @objc private func handleFindClose(_ sender: Any?) { hideFindBar() }
+
+    private func showFindBar() {
+        findRowHeightConstraint.constant = 24
+        findRow.isHidden = false
+        window?.makeFirstResponder(findField)
+    }
+
+    private func hideFindBar() {
+        findRow.isHidden = true
+        findRowHeightConstraint.constant = 0
+        focusBrowserContent()
+    }
+
+    private func performFind(direction: BrowserFindDirection) {
+        runtime.find(findField.stringValue, direction: direction)
+    }
 
     @objc private func showProfileMenu(_ sender: NSButton) {
         profileMenuForQA().popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 2), in: sender)
@@ -258,11 +346,21 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
     var chromeTitleForQA: String { chromeSnapshot?.title ?? "" }
     var chromeFaviconTooltipForQA: String? { faviconLabel.toolTip }
     var chromeProgressForQA: (hidden: Bool, value: Double) { (progressIndicator.isHidden, progressIndicator.doubleValue) }
+    var findBarVisibleForQA: Bool { !findRow.isHidden }
+    var findRowHeightForQA: CGFloat { findRowHeightConstraint.constant }
+    var findFieldHasFocusForQA: Bool { window?.firstResponder === findField.currentEditor() || window?.firstResponder === findField }
 
     @discardableResult
     func performURLFieldCommandForQA(_ commandSelector: Selector) -> Bool {
         window?.makeFirstResponder(urlField)
         return control(urlField, textView: NSTextView(), doCommandBy: commandSelector)
+    }
+
+    @discardableResult
+    func performFindFieldCommandForQA(_ commandSelector: Selector, query: String) -> Bool {
+        showFindBar()
+        findField.stringValue = query
+        return control(findField, textView: NSTextView(), doCommandBy: commandSelector)
     }
 
     static func runURLFocusSelfCheck() throws {
@@ -361,6 +459,39 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
         try expect(window.firstResponder !== browserTile.hostView, "Return must not focus plain BrowserHostView")
         try expect(webView === window.firstResponder || runtime.isSemanticContentResponder(window.firstResponder), "Return first responder must be WKWebView or descendant")
 
+        let commandF = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .command,
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "f",
+            charactersIgnoringModifiers: "f",
+            isARepeat: false,
+            keyCode: 3
+        )!
+        try expect(browserTile.hostView.performKeyEquivalent(with: commandF), "Cmd-F should be handled from browser host key path")
+        try expect(browserTile.findBarVisibleForQA, "Cmd-F should show browser find bar")
+        try expect(browserTile.findRowHeightForQA == 24, "visible find bar should reserve exactly one chrome row")
+        try expect(browserTile.findFieldHasFocusForQA, "Cmd-F should focus the browser find field")
+        try expect(
+            browserTile.performFindFieldCommandForQA(#selector(NSResponder.insertNewline(_:)), query: "ready"),
+            "Return in find field should run forward find"
+        )
+        try expect(browserTile.findBarVisibleForQA, "Return in find field should keep find bar open")
+        try expect(
+            browserTile.performFindFieldCommandForQA(#selector(NSResponder.insertBacktab(_:)), query: "ready"),
+            "Shift-Return/backtab in find field should run backward find"
+        )
+        try expect(
+            browserTile.performFindFieldCommandForQA(#selector(NSResponder.cancelOperation(_:)), query: "ready"),
+            "Escape in find field should close find bar"
+        )
+        try expect(!browserTile.findBarVisibleForQA, "Escape should hide browser find bar")
+        try expect(browserTile.findRowHeightForQA == 0, "hidden find bar should collapse out of browser content layout")
+        try expect(runtime.isSemanticContentResponder(window.firstResponder), "Escape from find should restore browser content focus")
+
         browserTile.urlField.stringValue = "https://example.test/dirty"
         try expect(
             browserTile.performURLFieldCommandForQA(#selector(NSResponder.cancelOperation(_:))),
@@ -375,6 +506,22 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate {
     // MARK: - NSTextFieldDelegate
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if control === findField {
+            switch commandSelector {
+            case #selector(NSResponder.insertNewline(_:)):
+                performFind(direction: .forward)
+                return true
+            case #selector(NSResponder.insertBacktab(_:)):
+                performFind(direction: .backward)
+                return true
+            case #selector(NSResponder.cancelOperation(_:)):
+                hideFindBar()
+                return true
+            default:
+                return false
+            }
+        }
+
         switch commandSelector {
         case #selector(NSResponder.insertNewline(_:)):
             let next = urlField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)

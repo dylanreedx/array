@@ -10,6 +10,11 @@ enum BrowserLoadingState: Equatable {
     case failed(message: String)
 }
 
+enum BrowserFindDirection: Equatable {
+    case forward
+    case backward
+}
+
 @MainActor
 protocol BrowserRuntime: AnyObject {
     var id: BrowserRuntimeID { get }
@@ -28,6 +33,7 @@ protocol BrowserRuntime: AnyObject {
     func goForward()
     func reload()
     func stop()
+    func find(_ query: String, direction: BrowserFindDirection)
     func focus()
     func blur()
     func isSemanticContentResponder(_ responder: NSResponder?) -> Bool
@@ -37,6 +43,7 @@ protocol BrowserRuntime: AnyObject {
 final class BrowserHostView: NSView {
     private weak var runtime: BrowserRuntime?
     var reservedShortcutHandler: ((NSEvent) -> Bool)?
+    var browserFindShortcutHandler: (() -> Bool)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -59,6 +66,10 @@ final class BrowserHostView: NSView {
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.keyCode == 3, flags == .command, browserFindShortcutHandler?() == true {
+            return true
+        }
         if reservedShortcutHandler?(event) == true {
             return true
         }
