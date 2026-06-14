@@ -62,6 +62,7 @@ public enum ReservedShortcut: Equatable, Hashable, Sendable {
     case spawnProfile(Int)
     case navModeLeader
     case focusMode
+    case settings
 
     /// Classifies app-reserved shortcuts from hardware key codes. The caller
     /// passes platform modifier state translated into `FocusKeyModifiers` so
@@ -74,6 +75,7 @@ public enum ReservedShortcut: Equatable, Hashable, Sendable {
         switch keyCode {
         case 3: return .focusMode // F
         case 40: return .palette // K
+        case 43: return .settings // comma
         case 18: return .spawnProfile(1)
         case 19: return .spawnProfile(2)
         case 20: return .spawnProfile(3)

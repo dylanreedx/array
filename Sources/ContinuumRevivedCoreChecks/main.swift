@@ -269,6 +269,7 @@ do {
 
 do {
     expect(ReservedShortcut.classify(keyCode: 40, modifiers: .command) == .palette, "Cmd-K should classify as palette shortcut")
+    expect(ReservedShortcut.classify(keyCode: 43, modifiers: .command) == .settings, "Cmd-comma should classify as settings shortcut")
     expect(ReservedShortcut.classify(keyCode: 18, modifiers: .command) == .spawnProfile(1), "Cmd-1 should classify as spawn profile 1")
     expect(ReservedShortcut.classify(keyCode: 19, modifiers: .command) == .spawnProfile(2), "Cmd-2 should classify as spawn profile 2")
     expect(ReservedShortcut.classify(keyCode: 20, modifiers: .command) == .spawnProfile(3), "Cmd-3 should classify as spawn profile 3")
@@ -2453,6 +2454,110 @@ do {
         expect(CanvasEngine.defaultFrame(for: row.kind) == row.defaultSize, "CanvasEngine default delegates to TileGeometry for \(row.kind)")
         expect(CanvasEngine.minimumFrame(for: row.kind) == row.minimumSize, "CanvasEngine minimum delegates to TileGeometry for \(row.kind)")
     }
+}
+
+// MARK: - FocusDispatchChecks
+
+do {
+    let dispatchSuite = "FocusDispatchChecks-\(UUID().uuidString)"
+    guard let isolatedDispatchDefaults = UserDefaults(suiteName: dispatchSuite) else {
+        expect(false, "Could not create isolated UserDefaults suite")
+        fatalError("unreachable")
+    }
+    defer { isolatedDispatchDefaults.removePersistentDomain(forName: dispatchSuite) }
+
+    let tileId = UUID(uuidString: "FED00000-0000-4000-8000-000000000001")!
+    let canvasScope = FocusSurfaceID.canvas
+    let tileScope = FocusSurfaceID.tile(tileId)
+    let paletteScope = FocusSurfaceID.modal(.palette)
+
+    let cmd = FocusKeyModifiers.command
+    let cmdCtrl: FocusKeyModifiers = [.command, .control]
+    let ctrlOpt: FocusKeyModifiers = [.control, .option]
+    let ctrlOptCmd: FocusKeyModifiers = [.control, .option, .command]
+
+    func resolve(_ keyCode: UInt16, _ modifiers: FocusKeyModifiers, _ scope: FocusSurfaceID, _ kind: TileKind?) -> FocusDispatchResolution {
+        FocusDispatch.resolve(keyCode: keyCode, modifiers: modifiers, scope: scope, focusedKind: kind, defaults: isolatedDispatchDefaults)
+    }
+
+    // Catalog defaults are present per kind.
+    expect(TileActionCatalog.actions(for: .browser, defaults: isolatedDispatchDefaults)[TileChord(keyCode: 3, modifiers: cmd)] == .browserFind, "catalog defaults: browser claims Cmd-F as find")
+    expect(TileActionCatalog.actions(for: .note, defaults: isolatedDispatchDefaults)[TileChord(keyCode: 14, modifiers: cmd)] == .noteExport, "catalog defaults: note claims Cmd-E as export")
+    expect(TileActionCatalog.actions(for: .terminal, defaults: isolatedDispatchDefaults)[TileChord(keyCode: 3, modifiers: cmd)] == nil, "catalog defaults: non-browser tiles do not claim Cmd-F")
+    expect(TileActionCatalog.actions(for: .terminal, defaults: isolatedDispatchDefaults)[TileChord(keyCode: 18, modifiers: cmdCtrl)] == .resizeToPreset(.compact), "catalog defaults: universal Cmd-Ctrl-1 is compact preset on any kind")
+
+    struct DispatchCase {
+        let label: String
+        let keyCode: UInt16
+        let modifiers: FocusKeyModifiers
+        let scope: FocusSurfaceID
+        let kind: TileKind?
+        let expected: FocusDispatchResolution
+    }
+
+    let cases: [DispatchCase] = [
+        // Inviolable globals: always .global, even in a browser tile that claims chords.
+        DispatchCase(label: "Cmd-K palette is global in browser tile", keyCode: 40, modifiers: cmd, scope: tileScope, kind: .browser, expected: .global(.palette)),
+        DispatchCase(label: "Cmd-K palette is global on canvas", keyCode: 40, modifiers: cmd, scope: canvasScope, kind: nil, expected: .global(.palette)),
+        DispatchCase(label: "nav leader is global in browser tile", keyCode: 49, modifiers: .control, scope: tileScope, kind: .browser, expected: .global(.navModeLeader)),
+        DispatchCase(label: "Cmd-comma settings is global in browser tile", keyCode: 43, modifiers: cmd, scope: tileScope, kind: .browser, expected: .global(.settings)),
+        DispatchCase(label: "Cmd-comma settings is global in palette modal", keyCode: 43, modifiers: cmd, scope: paletteScope, kind: nil, expected: .global(.settings)),
+
+        // Tile claims win in tile scope; same chord is a global elsewhere.
+        DispatchCase(label: "Cmd-F is browser find in browser tile", keyCode: 3, modifiers: cmd, scope: tileScope, kind: .browser, expected: .tileAction(.browserFind)),
+        DispatchCase(label: "Cmd-F is focusMode global on canvas", keyCode: 3, modifiers: cmd, scope: canvasScope, kind: nil, expected: .global(.focusMode)),
+        DispatchCase(label: "Cmd-F is focusMode global in palette modal", keyCode: 3, modifiers: cmd, scope: paletteScope, kind: nil, expected: .global(.focusMode)),
+        DispatchCase(label: "Cmd-F is focusMode global in terminal tile (unclaimed)", keyCode: 3, modifiers: cmd, scope: tileScope, kind: .terminal, expected: .global(.focusMode)),
+        DispatchCase(label: "Cmd-L is browser focus-URL in browser tile", keyCode: 37, modifiers: cmd, scope: tileScope, kind: .browser, expected: .tileAction(.browserFocusURL)),
+        DispatchCase(label: "Cmd-E is note export in note tile", keyCode: 14, modifiers: cmd, scope: tileScope, kind: .note, expected: .tileAction(.noteExport)),
+        DispatchCase(label: "Cmd-E unclaimed in browser tile passes through", keyCode: 14, modifiers: cmd, scope: tileScope, kind: .browser, expected: .passThrough),
+
+        // Universal sizing/positioning claimed by any focused tile.
+        DispatchCase(label: "Cmd-Ctrl-0 fills viewport in terminal tile", keyCode: 29, modifiers: cmdCtrl, scope: tileScope, kind: .terminal, expected: .tileAction(.resizeToPreset(.fillViewport))),
+        DispatchCase(label: "Ctrl-Opt-Left nudges left in note tile", keyCode: 123, modifiers: ctrlOpt, scope: tileScope, kind: .note, expected: .tileAction(.nudge(.left))),
+        DispatchCase(label: "Ctrl-Opt-Cmd-Up throws up in browser tile", keyCode: 126, modifiers: ctrlOptCmd, scope: tileScope, kind: .browser, expected: .tileAction(.throwToNeighbor(.up))),
+        DispatchCase(label: "Cmd-Ctrl-1 ignored on canvas (no focused tile)", keyCode: 18, modifiers: cmdCtrl, scope: canvasScope, kind: nil, expected: .passThrough),
+        DispatchCase(label: "Cmd-Ctrl-1 ignored in tile scope with nil kind", keyCode: 18, modifiers: cmdCtrl, scope: tileScope, kind: nil, expected: .passThrough),
+
+        // Spawn-profile globals are not inviolable but still resolve as globals.
+        DispatchCase(label: "Cmd-1 spawn profile is global on canvas", keyCode: 18, modifiers: cmd, scope: canvasScope, kind: nil, expected: .global(.spawnProfile(1))),
+
+        // Passthrough for an unclaimed plain key in tile scope.
+        DispatchCase(label: "plain 'a' passes through in tile scope", keyCode: 0, modifiers: [], scope: tileScope, kind: .browser, expected: .passThrough),
+        DispatchCase(label: "plain 'a' passes through on canvas", keyCode: 0, modifiers: [], scope: canvasScope, kind: nil, expected: .passThrough),
+    ]
+
+    for row in cases {
+        expect(resolve(row.keyCode, row.modifiers, row.scope, row.kind) == row.expected, "FocusDispatch table: \(row.label)")
+    }
+}
+
+// MARK: - TileActionCatalog override round-trip
+
+do {
+    let suiteName = "TileActionCatalogChecks-\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suiteName) else {
+        expect(false, "Could not create isolated UserDefaults suite")
+        fatalError("unreachable")
+    }
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+
+    // Default present before override.
+    expect(TileActionCatalog.actions(for: .browser, defaults: defaults)[TileChord(keyCode: 3, modifiers: .command)] == .browserFind, "catalog override: default Cmd-F is browser find before override")
+
+    // Rebind browserFind to Cmd-Ctrl-F; honored, old chord released, others intact.
+    defaults.set("cmd+ctrl+f", forKey: "continuum.tileKeymap.browserFind")
+    let overridden = TileActionCatalog.actions(for: .browser, defaults: defaults)
+    expect(overridden[TileChord(keyCode: 3, modifiers: [.command, .control])] == .browserFind, "catalog override: rebound Cmd-Ctrl-F is honored")
+    expect(overridden[TileChord(keyCode: 3, modifiers: .command)] == nil, "catalog override: old Cmd-F chord is released after rebind")
+    expect(overridden[TileChord(keyCode: 37, modifiers: .command)] == .browserFocusURL, "catalog override: untouched Cmd-L focus-URL persists through override")
+
+    // Invalid override falls back to default and warns.
+    defaults.set("not-a-chord", forKey: "continuum.tileKeymap.noteExport")
+    var warnings: [String] = []
+    let noteMap = TileActionCatalog.actions(for: .note, defaults: defaults, warn: { warnings.append($0) })
+    expect(noteMap[TileChord(keyCode: 14, modifiers: .command)] == .noteExport, "catalog override: invalid override falls back to default Cmd-E")
+    expect(!warnings.isEmpty, "catalog override: invalid override warns")
 }
 
 // MARK: - LaunchProfileRegistry: built-ins

@@ -8,6 +8,40 @@ public struct KeyChord: Equatable, Hashable, Sendable {
         self.keyCode = keyCode
         self.modifiers = modifiers
     }
+
+    /// Human-readable chord like "⌘⌃F" for hints and the settings catalog.
+    public var displayString: String {
+        var result = ""
+        if modifiers.contains(.control) { result += "⌃" }
+        if modifiers.contains(.option) { result += "⌥" }
+        if modifiers.contains(.shift) { result += "⇧" }
+        if modifiers.contains(.command) { result += "⌘" }
+        result += KeyChord.keyName(for: keyCode)
+        return result
+    }
+
+    private static func keyName(for keyCode: UInt16) -> String {
+        switch keyCode {
+        case 3: return "F"
+        case 14: return "E"
+        case 15: return "R"
+        case 37: return "L"
+        case 30: return "]"
+        case 33: return "["
+        case 40: return "K"
+        case 43: return ","
+        case 18: return "1"
+        case 19: return "2"
+        case 20: return "3"
+        case 29: return "0"
+        case 123: return "←"
+        case 124: return "→"
+        case 125: return "↓"
+        case 126: return "↑"
+        case 49: return "Space"
+        default: return "key\(keyCode)"
+        }
+    }
 }
 
 public struct NavKeymap: Equatable, Sendable {

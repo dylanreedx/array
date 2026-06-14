@@ -1980,6 +1980,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case .navModeLeader:
             openNavMode()
             return true
+        case .settings:
+            // Settings panel + `⌘,` open are wired in A6 (docs/27); no-op for now.
+            return false
         case .spawnProfile:
             return false
         }
