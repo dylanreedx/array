@@ -2602,6 +2602,88 @@ do {
     expect(!warnings.isEmpty, "catalog override: invalid override warns")
 }
 
+// MARK: - ShortcutCatalogChecks
+
+do {
+    let entries = ShortcutCatalog.entries()
+
+    // Hygiene: unique ids, non-empty labels + chord displays.
+    expect(Set(entries.map(\.id)).count == entries.count, "ShortcutCatalog: entry ids are unique")
+    for entry in entries {
+        expect(!entry.label.isEmpty, "ShortcutCatalog: entry \(entry.id) has a non-empty label")
+        expect(!entry.chordDisplay.isEmpty, "ShortcutCatalog: entry \(entry.id) has a non-empty chord display")
+    }
+
+    let globalEntries = entries.filter { $0.layer == .global }
+    let navEntries = entries.filter { $0.layer == .navMode }
+
+    // Exhaustiveness: every ReservedShortcut case is represented by a .global
+    // entry. Enumerate all cases explicitly so a new case fails this check.
+    let reservedCases: [ReservedShortcut] = [
+        .palette, .focusMode, .settings,
+        .spawnProfile(1), .spawnProfile(2), .spawnProfile(3), .spawnProfile(4),
+        .navModeLeader,
+    ]
+    func globalLayerEntry(_ shortcut: ReservedShortcut) -> ShortcutCatalogEntry? {
+        let id: String
+        switch shortcut {
+        case .palette: id = "global.palette"
+        case .focusMode: id = "global.focusMode"
+        case .settings: id = "global.settings"
+        case .spawnProfile(let n): id = "global.spawnProfile.\(n)"
+        case .navModeLeader: id = "global.navModeLeader"
+        }
+        return globalEntries.first(where: { $0.id == id })
+    }
+    for shortcut in reservedCases {
+        expect(globalLayerEntry(shortcut) != nil, "ShortcutCatalog: ReservedShortcut \(shortcut) has a .global entry")
+    }
+    expect(globalEntries.count == reservedCases.count, "ShortcutCatalog: exactly one .global entry per ReservedShortcut case, got \(globalEntries.count)")
+
+    // configurable policy: globals are hardcoded (false) except the nav leader,
+    // whose chord persists via NavKeymap (true).
+    for entry in globalEntries {
+        let expectedConfigurable = entry.id == "global.navModeLeader"
+        expect(entry.configurable == expectedConfigurable, "ShortcutCatalog: global \(entry.id) configurable should be \(expectedConfigurable)")
+    }
+
+    // Exhaustiveness: every NavKeymap binding field is represented by a .navMode
+    // entry. Enumerate the field ids explicitly so a new field fails this check.
+    let navFieldIds = [
+        "navMode.up", "navMode.down", "navMode.left", "navMode.right",
+        "navMode.nextZone", "navMode.previousZone", "navMode.zonePicker", "navMode.workspacePicker",
+        "navMode.agentCycle", "navMode.agentNeedsAttention", "navMode.focusMode", "navMode.deleteTile",
+    ]
+    for fieldId in navFieldIds {
+        expect(navEntries.contains(where: { $0.id == fieldId }), "ShortcutCatalog: NavKeymap field \(fieldId) has a .navMode entry")
+    }
+    expect(navEntries.count == navFieldIds.count, "ShortcutCatalog: exactly one .navMode entry per NavKeymap field, got \(navEntries.count)")
+    for entry in navEntries {
+        expect(entry.configurable, "ShortcutCatalog: nav-mode \(entry.id) is configurable")
+    }
+
+    // Exhaustiveness: for each TileKind, the .tile(kind) entry count equals the
+    // TileActionCatalog default chord count for that kind.
+    let catalogDefaults = UserDefaults(suiteName: "ShortcutCatalogChecks-\(UUID().uuidString)")!
+    defer { catalogDefaults.removePersistentDomain(forName: "ShortcutCatalogChecks") }
+    for kind in TileKind.allCases {
+        let defaultCount = TileActionCatalog.actions(for: kind, defaults: catalogDefaults, warn: { _ in }).count
+        let tileCount = entries.filter { $0.layer == .tile(kind) }.count
+        expect(tileCount == defaultCount, "ShortcutCatalog: \(kind) has \(tileCount) tile entries, expected \(defaultCount) from TileActionCatalog defaults")
+        for entry in entries where entry.layer == .tile(kind) {
+            expect(entry.configurable, "ShortcutCatalog: tile \(entry.id) is configurable")
+        }
+    }
+
+    // navKeymap parameter threads through to nav + leader chord displays.
+    var remapped = NavKeymap.default
+    remapped.up = "i"
+    remapped.leader = KeyChord(keyCode: 3, modifiers: .control)
+    let remappedEntries = ShortcutCatalog.entries(navKeymap: remapped)
+    expect(remappedEntries.first(where: { $0.id == "navMode.up" })?.chordDisplay == "i", "ShortcutCatalog: nav entries reflect the supplied navKeymap")
+    expect(remappedEntries.first(where: { $0.id == "global.navModeLeader" })?.chordDisplay == "⌃F", "ShortcutCatalog: leader entry reflects the supplied navKeymap")
+}
+
 // MARK: - LaunchProfileRegistry: built-ins
 
 do {

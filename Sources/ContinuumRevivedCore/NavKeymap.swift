@@ -33,6 +33,7 @@ public struct KeyChord: Equatable, Hashable, Sendable {
         case 18: return "1"
         case 19: return "2"
         case 20: return "3"
+        case 21: return "4"
         case 29: return "0"
         case 123: return "←"
         case 124: return "→"
@@ -92,6 +93,7 @@ public struct KeyChord: Equatable, Hashable, Sendable {
         case 18: return "1"
         case 19: return "2"
         case 20: return "3"
+        case 21: return "4"
         case 29: return "0"
         case 123: return "left"
         case 124: return "right"
@@ -116,6 +118,7 @@ public struct KeyChord: Equatable, Hashable, Sendable {
         case "1": return 18
         case "2": return 19
         case "3": return 20
+        case "4": return 21
         case "0": return 29
         case "left", "arrowleft": return 123
         case "right", "arrowright": return 124
