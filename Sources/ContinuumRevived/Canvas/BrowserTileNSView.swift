@@ -459,6 +459,16 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         try expect(window.firstResponder !== browserTile.hostView, "Return must not focus plain BrowserHostView")
         try expect(webView === window.firstResponder || runtime.isSemanticContentResponder(window.firstResponder), "Return first responder must be WKWebView or descendant")
 
+        // P0 regression (Cmd-F greyed the screen): web-content focus does not
+        // route through TileNSView.mouseUp, so the broker's activeSurface is not
+        // the browser tile. The monitor must instead resolve the owning tile
+        // from the live first responder and let the tile's Cmd-F claim win.
+        let responderTileId = TileNSView.enclosingTileId(of: window.firstResponder)
+        try expect(responderTileId == browserTile.tile.id,
+            "web-content first responder must resolve to the browser tile for Cmd-F passthrough; got \(String(describing: responderTileId))")
+        try expect(browserTile.canHandleReservedShortcut(.focusMode),
+            "browser tile must claim Cmd-F so the monitor yields it to the find bar instead of Focus Mode")
+
         let commandF = NSEvent.keyEvent(
             with: .keyDown,
             location: .zero,

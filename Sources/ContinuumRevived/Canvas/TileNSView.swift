@@ -142,6 +142,20 @@ class TileNSView: NSView {
     func releaseFocus(reason: FocusRequest) {}
     func canHandleReservedShortcut(_ shortcut: ReservedShortcut) -> Bool { false }
 
+    /// Resolves the tile owning a responder by walking up the view hierarchy.
+    /// The pre-dispatch shortcut monitor uses this to honor a tile's reserved-
+    /// shortcut claim from the *live* first responder: clicks inside a WKWebView
+    /// (or other body content) never reach `mouseUp`'s focus registration, so
+    /// `FocusBroker.activeSurface` can be stale and must not be the sole gate.
+    static func enclosingTileId(of responder: NSResponder?) -> UUID? {
+        var view = responder as? NSView
+        while let current = view {
+            if let tileView = current as? TileNSView { return tileView.tile.id }
+            view = current.superview
+        }
+        return nil
+    }
+
     // MARK: - Hit testing
 
     /// Reclaim the 8pt resize ring from any body content view. Without this

@@ -1944,6 +1944,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return false
         }
 
+        // `activeSurface` only tracks tiles whose title bar was clicked; a click
+        // inside a WKWebView focuses web content without registering the tile,
+        // so resolve the owning tile from the live first responder too. Without
+        // this, Cmd-F in a focused browser opens Focus Mode instead of the find
+        // bar (the P0 grey-screen).
+        if let responderTileId = TileNSView.enclosingTileId(of: window?.firstResponder),
+           focusBroker.shouldSurfaceReceive(shortcut, surface: .tile(responderTileId)) {
+            return false
+        }
+
         switch shortcut {
         case .focusMode:
             if focusModeSession == nil, let selectedTileId = canvasView?.canvasState.lastActiveTileId {
