@@ -2461,6 +2461,72 @@ do {
     expect(cornerSnap.guides.contains(.trailingToLeadingGap) && cornerSnap.guides.contains(.bottomToTopGap), "Snap reports a guide per snapped axis, got \(cornerSnap.guides)")
 }
 
+// MARK: - TileArrangement: cornerSnap (dock gap + perpendicular edge-align → 90° corner)
+
+do {
+    // Side-by-side dock (X gap, Y overlap) + a top edge offset within threshold:
+    // park gap-adjacent on X AND align tops to the SAME neighbor — the corner.
+    let movingH = TileFrame(x: 100, y: 100, width: 50, height: 60) // x 100–150, y 100–160
+    let rightTaller = TileFrame(x: 165, y: 95, width: 50, height: 40) // X gap 15 (Δ +7), top 5 above
+    let cornered = TileArrangement.cornerSnap(movingH, others: [rightTaller], gap: 8, threshold: 12)
+    expect(cornered.frame == TileFrame(x: 107, y: 95, width: 50, height: 60), "cornerSnap docks gap-adjacent on X and aligns tops, got \(cornered.frame)")
+    expect(cornered.frame.x + cornered.frame.width + 8 == rightTaller.x, "cornered tile sits one gap left of the dock neighbor")
+    expect(cornered.frame.y == rightTaller.y, "cornered tile top is flush with the dock neighbor top")
+    expect(cornered.guides.contains(.trailingToLeadingGap) && cornered.guides.contains(.topAligned), "cornerSnap reports the gap + alignment guides, got \(cornered.guides)")
+
+    // Same dock, but the neighbor's edges are beyond the alignment threshold → gap only.
+    let rightFarOffset = TileFrame(x: 165, y: 80, width: 50, height: 40) // top 20 above, bottom 40 above
+    let gapOnly = TileArrangement.cornerSnap(movingH, others: [rightFarOffset], gap: 8, threshold: 12)
+    expect(gapOnly.frame == TileFrame(x: 107, y: 100, width: 50, height: 60), "cornerSnap applies the gap but skips out-of-range alignment, got \(gapOnly.frame)")
+    expect(gapOnly.guides == [.trailingToLeadingGap], "cornerSnap reports only the gap guide when no edge aligns, got \(gapOnly.guides)")
+
+    // Nothing within gap range → no dock, no-op.
+    let far = TileFrame(x: 500, y: 500, width: 50, height: 50)
+    let noDock = TileArrangement.cornerSnap(movingH, others: [far], gap: 8, threshold: 12)
+    expect(noDock.frame == movingH && noDock.guides.isEmpty, "cornerSnap with no neighbor in range is a no-op, got \(noDock.frame)")
+
+    // Stacked dock (Y gap, X overlap) + a left edge offset within threshold:
+    // park gap-adjacent on Y AND align left edges → the corner.
+    let movingV = TileFrame(x: 100, y: 100, width: 50, height: 50) // x 100–150, y 100–150
+    let belowWider = TileFrame(x: 95, y: 165, width: 80, height: 50) // Y gap 15 (Δ +7), left 5 over
+    let corneredV = TileArrangement.cornerSnap(movingV, others: [belowWider], gap: 8, threshold: 12)
+    expect(corneredV.frame == TileFrame(x: 95, y: 107, width: 50, height: 50), "cornerSnap docks gap-adjacent on Y and aligns left edges, got \(corneredV.frame)")
+    expect(corneredV.guides.contains(.bottomToTopGap) && corneredV.guides.contains(.leadingAligned), "cornerSnap reports the Y gap + left-align guides, got \(corneredV.guides)")
+}
+
+// MARK: - TileArrangement: resizeEdgeSnap (drag an edge flush → match neighbor dimension)
+
+do {
+    let gap = 8.0, threshold = 12.0
+    let minimum = CGSize(width: 80, height: 100)
+
+    // A short tile docked right of a taller one. Dragging A's BOTTOM edge down to
+    // within threshold of B's bottom snaps it flush → equal heights (far-edge path).
+    let tall = TileFrame(x: 0, y: 0, width: 100, height: 200) // bottom at 200
+    let shortA = TileFrame(x: 108, y: 0, width: 100, height: 192) // bottom at 192, Δ +8 to 200
+    let matchedBottom = TileArrangement.resizeEdgeSnap(shortA, edge: .bottom, others: [tall], gap: gap, threshold: threshold, minimum: minimum)
+    expect(matchedBottom.frame == TileFrame(x: 108, y: 0, width: 100, height: 200), "resizeEdgeSnap matches the taller neighbor's height via the bottom edge, got \(matchedBottom.frame)")
+    expect(matchedBottom.guides.contains(.bottomAligned), "resizeEdgeSnap reports a bottom-edge snap, got \(matchedBottom.guides)")
+
+    // Dragging A's TOP edge up to within threshold of B's top (origin-edge path).
+    let shortTop = TileFrame(x: 108, y: 8, width: 100, height: 192) // top at 8, Δ -8 to 0; bottom stays 200
+    let matchedTop = TileArrangement.resizeEdgeSnap(shortTop, edge: .top, others: [tall], gap: gap, threshold: threshold, minimum: minimum)
+    expect(matchedTop.frame == TileFrame(x: 108, y: 0, width: 100, height: 200), "resizeEdgeSnap matches height via the top edge, keeping the far edge fixed, got \(matchedTop.frame)")
+    expect(matchedTop.guides.contains(.topAligned), "resizeEdgeSnap reports a top-edge snap, got \(matchedTop.guides)")
+
+    // Out of range → no snap.
+    let farShort = TileFrame(x: 108, y: 0, width: 100, height: 170) // bottom at 170, Δ +30 to 200
+    let noSnap = TileArrangement.resizeEdgeSnap(farShort, edge: .bottom, others: [tall], gap: gap, threshold: threshold, minimum: minimum)
+    expect(noSnap.frame == farShort && noSnap.guides.isEmpty, "resizeEdgeSnap does not snap an out-of-range edge, got \(noSnap.frame)")
+
+    // Min-size clamp: a snap that would shrink below the minimum clamps to it.
+    let nearMin = TileFrame(x: 108, y: 0, width: 100, height: 108) // bottom at 108, just above min 100
+    let neighborInside = TileFrame(x: 0, y: 98, width: 100, height: 200) // near edge 98, Δ -10 to A bottom
+    let clamped = TileArrangement.resizeEdgeSnap(nearMin, edge: .bottom, others: [neighborInside], gap: gap, threshold: threshold, minimum: minimum)
+    expect(clamped.frame.height == minimum.height, "resizeEdgeSnap clamps a shrinking snap to the minimum height, got \(clamped.frame.height)")
+    expect(clamped.frame.y == 0, "resizeEdgeSnap keeps the fixed (top) edge while clamping, got \(clamped.frame.y)")
+}
+
 do {
     let defaultsName = "TileArrangementChecks-\(UUID().uuidString)"
     guard let defaults = UserDefaults(suiteName: defaultsName) else {

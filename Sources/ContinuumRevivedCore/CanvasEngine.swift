@@ -615,16 +615,16 @@ public enum ResizeEdge: Sendable {
     case bottomLeft
     case bottomRight
 
-    fileprivate var touchesTop: Bool {
+    var touchesTop: Bool {
         self == .top || self == .topLeft || self == .topRight
     }
-    fileprivate var touchesBottom: Bool {
+    var touchesBottom: Bool {
         self == .bottom || self == .bottomLeft || self == .bottomRight
     }
-    fileprivate var touchesLeft: Bool {
+    var touchesLeft: Bool {
         self == .left || self == .topLeft || self == .bottomLeft
     }
-    fileprivate var touchesRight: Bool {
+    var touchesRight: Bool {
         self == .right || self == .topRight || self == .bottomRight
     }
 }
