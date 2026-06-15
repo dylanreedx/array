@@ -140,6 +140,10 @@ public struct NavKeymap: Equatable, Sendable {
     /// Dwell in milliseconds before the held leader activates (so a quick tap of
     /// the modifier never enters the mode and never eats `⌥`+key typing). Default 300.
     public var leaderDwellMs: Int
+    /// The label keys offered to visible tiles in the hold-leader jump HUD, in
+    /// priority order. Home-row default (`asdfghjkl`); rebindable. Tiles beyond
+    /// this many are unlabeled (single-char labels only).
+    public var leaderLabelKeys: String
     public var up: String
     public var down: String
     public var left: String
@@ -153,10 +157,11 @@ public struct NavKeymap: Equatable, Sendable {
     public var focusMode: String
     public var deleteTile: String
 
-    public init(leader: KeyChord, leaderHoldModifier: FocusKeyModifiers = .option, leaderDwellMs: Int = 300, up: String, down: String, left: String, right: String, nextZone: String, previousZone: String, zonePicker: String, workspacePicker: String, agentCycle: String, agentNeedsAttention: String, focusMode: String, deleteTile: String) {
+    public init(leader: KeyChord, leaderHoldModifier: FocusKeyModifiers = .option, leaderDwellMs: Int = 300, leaderLabelKeys: String = "asdfghjkl", up: String, down: String, left: String, right: String, nextZone: String, previousZone: String, zonePicker: String, workspacePicker: String, agentCycle: String, agentNeedsAttention: String, focusMode: String, deleteTile: String) {
         self.leader = leader
         self.leaderHoldModifier = leaderHoldModifier
         self.leaderDwellMs = leaderDwellMs
+        self.leaderLabelKeys = leaderLabelKeys
         self.up = up
         self.down = down
         self.left = left
@@ -175,6 +180,7 @@ public struct NavKeymap: Equatable, Sendable {
         leader: KeyChord(keyCode: 49, modifiers: .control),
         leaderHoldModifier: .option,
         leaderDwellMs: 300,
+        leaderLabelKeys: "asdfghjkl",
         up: "k", down: "j", left: "h", right: "l",
         nextZone: "n", previousZone: "p", zonePicker: "z", workspacePicker: "w",
         agentCycle: "a", agentNeedsAttention: "A", focusMode: "f", deleteTile: "x"
@@ -184,7 +190,14 @@ public struct NavKeymap: Equatable, Sendable {
     /// the EXACT keys `resolve`/`persist` read).
     public static let leaderHoldDefaultsKey = "continuum.keymap.leaderHold"
     public static let leaderDwellDefaultsKey = "continuum.keymap.leaderDwellMs"
+    public static let leaderLabelKeysDefaultsKey = "continuum.keymap.leaderLabelKeys"
     public static let leaderHoldModifierOptions = ["opt", "ctrl", "cmd", "shift"]
+
+    /// The label keys as an ordered array of single-character strings — the form
+    /// `TileArrangement.jumpLabels` and the HUD consume.
+    public var leaderLabelAlphabet: [String] {
+        leaderLabelKeys.map(String.init)
+    }
 
     /// Single-modifier token serialization for the hold-leader (`opt`/`ctrl`/`cmd`/`shift`).
     public static func modifierToken(_ modifier: FocusKeyModifiers) -> String {
@@ -237,6 +250,14 @@ public struct NavKeymap: Equatable, Sendable {
         if let dwell = string("leaderDwellMs") {
             if let value = Int(dwell), value >= 0 { map.leaderDwellMs = value } else { warn("Invalid continuum.keymap.leaderDwellMs '\(dwell)'; using default 300") }
         }
+        if let labelKeys = string("leaderLabelKeys") {
+            let cleaned = labelKeys.lowercased()
+            if !cleaned.isEmpty, cleaned.allSatisfy({ $0.isLetter && $0.isASCII }), Set(cleaned).count == cleaned.count {
+                map.leaderLabelKeys = cleaned
+            } else {
+                warn("Invalid continuum.keymap.leaderLabelKeys '\(labelKeys)'; using default \(NavKeymap.default.leaderLabelKeys)")
+            }
+        }
         func apply(_ name: String, _ set: (String) -> Void) {
             guard let value = string(name) else { return }
             guard value.count == 1 else { warn("Invalid continuum.keymap.\(name) '\(value)'; using default"); return }
@@ -262,6 +283,7 @@ public struct NavKeymap: Equatable, Sendable {
         defaults.set(leader.serialized, forKey: prefix + "leader")
         defaults.set(NavKeymap.modifierToken(leaderHoldModifier), forKey: prefix + "leaderHold")
         defaults.set(String(leaderDwellMs), forKey: prefix + "leaderDwellMs")
+        defaults.set(leaderLabelKeys, forKey: prefix + "leaderLabelKeys")
         defaults.set(up, forKey: prefix + "up")
         defaults.set(down, forKey: prefix + "down")
         defaults.set(left, forKey: prefix + "left")

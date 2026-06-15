@@ -215,6 +215,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--leader-jump-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runLeaderJumpSelfCheck()
+                print("ContinuumRevivedLeaderJumpChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--palette-browser-spawn-check") {
             do {
                 _ = NSApplication.shared
@@ -1932,24 +1944,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func activateLeader() {
         guard focusBroker.activeSurface != .modal(.leader) else { return }
         focusBroker.openModal(.leader)
-        // HUD (labels) arrives in Phase C.
+        canvasView?.leaderLabelAlphabet = navKeymap.leaderLabelAlphabet
+        canvasView?.setLeaderOverlayVisible(true)
     }
 
     /// Cancel a pending dwell and exit the leader if open (modifier released or a
-    /// second modifier joined).
+    /// second modifier joined). Always hides the HUD (no-op if not shown).
     private func disarmLeader() {
         leaderDwellWorkItem?.cancel()
         leaderDwellWorkItem = nil
         if focusBroker.activeSurface == .modal(.leader) {
             focusBroker.closeModal(.leader)
         }
+        canvasView?.setLeaderOverlayVisible(false)
     }
 
-    /// Keys while the leader is held. Esc exits; jump (Phase C) and arrow-snap
-    /// (Phase D) land here. Everything is swallowed so nothing leaks to content.
+    /// Keys while the leader is held. Esc exits; a label key jumps to + centers
+    /// the labeled tile (Phase C); arrow-snap (Phase D) lands here too.
+    /// Everything is swallowed so nothing leaks to content.
     private func handleLeaderKey(_ event: NSEvent) -> Bool {
         if event.keyCode == 53 { // Esc
             disarmLeader()
+            return true
+        }
+        let key = (event.charactersIgnoringModifiers ?? "").lowercased()
+        if !key.isEmpty, let tileId = canvasView?.leaderJumpTarget(forLabel: key) {
+            disarmLeader() // closes the leader modal (restores prior scope) + hides HUD
+            canvasView?.centerOnTile(tileId)
+            focusBroker.enterScope(.tile(tileId), reason: .modalDismissed)
             return true
         }
         return true
@@ -5789,6 +5811,108 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("leader-activation", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// Phase C — hold-leader label jump, driven through the REAL input path:
+    /// synth `.flagsChanged` to open the leader, then `.keyDown` for a label key
+    /// through `handleHotkey` → `handleLeaderKey`, asserting the chosen tile
+    /// gains scope AND the viewport centers it. Esc and unmatched keys are
+    /// covered too (no jump, no leak, HUD lifecycle).
+    static func runLeaderJumpSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func flagsEvent(_ mods: NSEvent.ModifierFlags, keyCode: UInt16) throws -> NSEvent {
+            guard let e = NSEvent.keyEvent(with: .flagsChanged, location: .zero, modifierFlags: mods, timestamp: 0, windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: keyCode) else {
+                throw CheckError.failed("could not synthesize .flagsChanged for \(mods)")
+            }
+            return e
+        }
+        func keyDown(_ key: String, _ keyCode: UInt16, mods: NSEvent.ModifierFlags) throws -> NSEvent {
+            guard let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: mods, timestamp: 0, windowNumber: 0, context: nil, characters: key, charactersIgnoringModifiers: key, isARepeat: false, keyCode: keyCode) else {
+                throw CheckError.failed("could not synthesize keyDown \(key)")
+            }
+            return e
+        }
+        func vpEqual(_ a: CanvasViewport, _ b: CanvasViewport) -> Bool {
+            abs(a.x - b.x) < 0.001 && abs(a.y - b.y) < 0.001 && abs(a.zoom - b.zoom) < 0.001
+        }
+
+        let aId = UUID(uuidString: "00000000-0000-0000-0000-0000000000A1")!
+        let bId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B2")!
+        let tileA = Tile(id: aId, kind: .note, title: "A", frame: TileFrame(x: 40, y: 40, width: 200, height: 170), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: bId, kind: .note, title: "B", frame: TileFrame(x: 400, y: 300, width: 240, height: 180), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
+        canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        let app = AppDelegate()
+        app.canvasView = canvas
+        canvas.focusBroker = app.focusBroker
+        // Install real tile views so the tiles have focus adapters (the jump's
+        // enterScope(.tile) acquires focus exactly as in the running app).
+        canvas.install(tileView: TileNSView(tile: tileA), for: tileA)
+        canvas.install(tileView: TileNSView(tile: tileB), for: tileB)
+        _ = app.focusBroker.requestFocus(.canvas, reason: .userClick)
+        app.leaderDwell = 0
+
+        // Spatial order top→bottom: A (y=40) → "a", B (y=300) → "s".
+        let expectedB = CanvasEngine.centeredViewport(worldRect: CGRect(x: 400, y: 300, width: 240, height: 180), viewportSize: CGSize(width: 800, height: 600), zoom: 1)
+        let initialViewport = canvas.viewport
+
+        // 1) Open the leader → HUD installs.
+        app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        try expect(app.focusBroker.activeSurface == .modal(.leader), "⌥ held should open the leader; got \(String(describing: app.focusBroker.activeSurface))")
+        try expect(canvas.navModeOverlayQASnapshot().isInstalled, "the jump HUD overlay should install while the leader is held")
+
+        // 2) An unlabeled key is swallowed: no jump, no leak, HUD stays.
+        let swallowed = app.handleHotkey(try keyDown("z", 6, mods: [.option]))
+        try expect(swallowed == true, "an unmatched leader key must be swallowed")
+        try expect(app.focusBroker.activeSurface == .modal(.leader), "an unmatched key must not exit the leader")
+        try expect(vpEqual(canvas.viewport, initialViewport), "an unmatched key must not move the viewport")
+
+        // 3) A label key jumps: focus the labeled tile AND center the viewport on it.
+        _ = app.handleHotkey(try keyDown("s", 1, mods: [.option]))
+        try expect(app.focusBroker.activeSurface == .tile(bId), "label 's' should focus the second (lower) tile; got \(String(describing: app.focusBroker.activeSurface))")
+        try expect(vpEqual(canvas.viewport, expectedB), "jump should center the viewport on the chosen tile; got (\(canvas.viewport.x),\(canvas.viewport.y),\(canvas.viewport.zoom)) want (\(expectedB.x),\(expectedB.y),\(expectedB.zoom))")
+        try expect(!canvas.navModeOverlayQASnapshot().isInstalled, "the jump HUD must dismiss after a jump")
+
+        // 4) Releasing ⌥ after a jump leaves the focused tile intact (no snap-back).
+        app.handleFlagsChanged(try flagsEvent([], keyCode: 58))
+        try expect(app.focusBroker.activeSurface == .tile(bId), "releasing ⌥ after a jump must keep the focused tile; got \(String(describing: app.focusBroker.activeSurface))")
+
+        // 5) Esc exits the leader without jumping, restoring the prior scope + viewport.
+        let viewportBeforeEsc = canvas.viewport
+        app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        try expect(app.focusBroker.activeSurface == .modal(.leader), "⌥ should re-open the leader from a tile scope")
+        let escSwallowed = app.handleHotkey(try keyDown("\u{1B}", 53, mods: [.option]))
+        try expect(escSwallowed == true, "Esc must be swallowed by the leader")
+        try expect(app.focusBroker.activeSurface == .tile(bId), "Esc should restore the prior tile scope; got \(String(describing: app.focusBroker.activeSurface))")
+        try expect(vpEqual(canvas.viewport, viewportBeforeEsc), "Esc must not move the viewport")
+        app.handleFlagsChanged(try flagsEvent([], keyCode: 58))
+
+        let manifest: [String: Any] = [
+            "check": "leader-jump",
+            "path": "synthesized .flagsChanged + .keyDown NSEvents → handleFlagsChanged / handleHotkey → handleLeaderKey (real input path)",
+            "labeledTiles": 2,
+            "jumpedTo": "second tile via label 's'",
+            "centeredViewport": ["x": expectedB.x, "y": expectedB.y, "zoom": expectedB.zoom],
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("leader-jump", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

@@ -101,13 +101,16 @@ D-snap**, not A→B→C→D→E.
   → `--drag-magnetize-check` (synthesized real mouse drag: asserts tile tracks
   cursor, the real ghost overlay frames the destination, release commits, disabled
   = no ghost/no snap).
-- **B — Leader foundation.** Add `.flagsChanged` monitor + held-`⌥` detection
-  (tunable threshold, configurable leader in `NavKeymap`). `FocusModalKind.leader`
-  + `handleLeaderKey`. → `--leader-activation-check`.
-- **C — Jump (labels).** Deterministic single-char labels for visible tiles; HUD
-  overlay (extend `NavModeOverlayNSView`) with labels + phantom focus ring;
-  `handleLeaderKey` letter → focus + center; dynamic `⌘K` "Jump to <title>" rows.
-  → `--leader-jump-check`.
+- **B — Leader foundation.** ✅ shipped (`a72cd64`). `.flagsChanged` monitor +
+  held-`⌥` detection (tunable dwell, configurable leader modifier in `NavKeymap`).
+  `FocusModalKind.leader` + `handleLeaderKey`. → `--leader-activation-check`.
+- **C — Jump (labels).** ✅ shipped (leader label-jump). Deterministic single-char
+  labels for visible tiles (`TileArrangement.jumpLabels`, home-row default, the
+  `continuum.keymap.leaderLabelKeys` config); HUD via a `drawTileLabels` pass on the
+  shared nav overlay; `handleLeaderKey` letter → focus + center
+  (`CanvasEngine.centeredViewport`, `fit` fallback). → `--leader-jump-check` +
+  Core `jumpLabels`/`centeredViewport` tables. **Remaining:** dynamic `⌘K`
+  "Jump to <title>" rows reusing the same jump.
 - **D — Keyboard snap (SECONDARY).** Inside the leader: `⌥`+arrow → ghost at nearest
   dockable tile; same arrow again → advance to the next tile further (leapfrog);
   release commits, Esc cancels. Ghost overlay clones `FocusBorderOverlayView`. The

@@ -2566,15 +2566,76 @@ do {
     var custom = NavKeymap.default
     custom.leaderHoldModifier = .command
     custom.leaderDwellMs = 220
+    custom.leaderLabelKeys = "qwerty"
     custom.persist(to: persistDefaults)
     let roundTrip = NavKeymap.resolve(defaults: persistDefaults, warn: { _ in })
     expect(roundTrip.leaderHoldModifier == .command && roundTrip.leaderDwellMs == 220, "persist→resolve round-trips the hold-leader config, got \(roundTrip.leaderHoldModifier)/\(roundTrip.leaderDwellMs)")
+    expect(roundTrip.leaderLabelKeys == "qwerty", "persist→resolve round-trips the jump label keys, got \(roundTrip.leaderLabelKeys)")
+
+    // Jump label keys: default is the home row; a valid override resolves; an
+    // override with duplicates / non-letters falls back to the default.
+    expect(NavKeymap.default.leaderLabelKeys == "asdfghjkl", "default jump label keys are the home row")
+    expect(NavKeymap.default.leaderLabelAlphabet == ["a", "s", "d", "f", "g", "h", "j", "k", "l"], "alphabet splits the keys into single chars")
+    defaults.set("FJDKSL", forKey: "continuum.keymap.leaderLabelKeys")
+    expect(NavKeymap.resolve(defaults: defaults, warn: { _ in }).leaderLabelKeys == "fjdksl", "valid label-key override lowercases and resolves")
+    defaults.set("aabb", forKey: "continuum.keymap.leaderLabelKeys")
+    expect(NavKeymap.resolve(defaults: defaults, warn: { _ in }).leaderLabelKeys == "asdfghjkl", "duplicate label keys fall back to default")
+    defaults.set("a1c", forKey: "continuum.keymap.leaderLabelKeys")
+    expect(NavKeymap.resolve(defaults: defaults, warn: { _ in }).leaderLabelKeys == "asdfghjkl", "non-letter label keys fall back to default")
+    defaults.removeObject(forKey: "continuum.keymap.leaderLabelKeys")
 
     expect(TileGapResolver.resolvedGap(defaults: defaults) == 8, "Default tile gap is 8pt")
     defaults.set(12.5, forKey: TileGapResolver.userDefaultsKey)
     expect(TileGapResolver.resolvedGap(defaults: defaults) == 12.5, "Tile gap resolver honors positive override")
     defaults.set(-1, forKey: TileGapResolver.userDefaultsKey)
     expect(TileGapResolver.resolvedGap(defaults: defaults) == 8, "Tile gap resolver rejects non-positive override")
+}
+
+// MARK: - TileArrangement: jumpLabels (hold-leader jump label assignment)
+
+do {
+    let a = UUID(uuidString: "00000000-0000-0000-0000-0000000000A1")!
+    let b = UUID(uuidString: "00000000-0000-0000-0000-0000000000B2")!
+    let c = UUID(uuidString: "00000000-0000-0000-0000-0000000000C3")!
+    // Reading order: top row left→right (b@y40x300, then a@y40x500... no — sort by y then x).
+    let tiles: [(id: UUID, frame: TileFrame)] = [
+        (id: a, frame: TileFrame(x: 500, y: 200, width: 100, height: 100)), // lower
+        (id: b, frame: TileFrame(x: 300, y: 40, width: 100, height: 100)),  // top, left
+        (id: c, frame: TileFrame(x: 600, y: 40, width: 100, height: 100)),  // top, right
+    ]
+    let labels = TileArrangement.jumpLabels(for: tiles, alphabet: ["a", "s", "d", "f"])
+    expect(labels == [
+        TileArrangement.JumpLabel(id: b, label: "a"),
+        TileArrangement.JumpLabel(id: c, label: "s"),
+        TileArrangement.JumpLabel(id: a, label: "d"),
+    ], "jumpLabels orders top-to-bottom then left-to-right and assigns the alphabet in order, got \(labels)")
+
+    // Stable across input reordering (same layout → same labels).
+    let reordered = TileArrangement.jumpLabels(for: tiles.reversed(), alphabet: ["a", "s", "d", "f"])
+    expect(reordered == labels, "jumpLabels is stable regardless of input order, got \(reordered)")
+
+    // Fewer label keys than tiles → extra tiles are left unlabeled.
+    let capped = TileArrangement.jumpLabels(for: tiles, alphabet: ["a", "s"])
+    expect(capped.count == 2 && capped.map(\.id) == [b, c], "jumpLabels caps at the alphabet length, got \(capped)")
+}
+
+// MARK: - CanvasEngine: centeredViewport (hold-leader jump centering)
+
+do {
+    let v = CanvasEngine.centeredViewport(
+        worldRect: CGRect(x: 400, y: 300, width: 240, height: 180),
+        viewportSize: CGSize(width: 800, height: 600),
+        zoom: 1
+    )
+    expect(v.x == 120 && v.y == 90 && v.zoom == 1, "centeredViewport pans so the rect center sits at the viewport center, got (\(v.x),\(v.y),\(v.zoom))")
+
+    let zoomed = CanvasEngine.centeredViewport(
+        worldRect: CGRect(x: 0, y: 0, width: 100, height: 100),
+        viewportSize: CGSize(width: 800, height: 600),
+        zoom: 2
+    )
+    // center (50,50); half-extent in world = 800/2/2 = 200, 600/2/2 = 150.
+    expect(zoomed.x == -150 && zoomed.y == -100 && zoomed.zoom == 2, "centeredViewport keeps zoom and scales the half-extent by it, got (\(zoomed.x),\(zoomed.y),\(zoomed.zoom))")
 }
 
 // MARK: - TileGeometry: presets per kind

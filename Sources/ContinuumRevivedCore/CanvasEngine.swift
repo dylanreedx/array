@@ -603,6 +603,16 @@ public enum CanvasEngine {
         let originY = centerY - Double(viewportSize.height) / 2 / zoom
         return CanvasViewport(x: originX, y: originY, zoom: zoom)
     }
+
+    /// Pans (keeping the current `zoom`) so `worldRect`'s center sits at the
+    /// center of the viewport. Used by the hold-leader jump to bring the chosen
+    /// tile into view without changing scale; the caller falls back to `fit`
+    /// when the rect is too large to fit at the current zoom.
+    public static func centeredViewport(worldRect: CGRect, viewportSize: CGSize, zoom: Double) -> CanvasViewport {
+        let originX = Double(worldRect.midX) - Double(viewportSize.width) / 2 / zoom
+        let originY = Double(worldRect.midY) - Double(viewportSize.height) / 2 / zoom
+        return CanvasViewport(x: originX, y: originY, zoom: zoom)
+    }
 }
 
 public enum ResizeEdge: Sendable {

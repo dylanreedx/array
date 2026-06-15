@@ -35,6 +35,33 @@ public enum TileArrangement {
         }
     }
 
+    // MARK: - Hold-leader jump labels
+
+    public struct JumpLabel: Equatable, Sendable {
+        public let id: UUID
+        public let label: String
+
+        public init(id: UUID, label: String) {
+            self.id = id
+            self.label = label
+        }
+    }
+
+    /// Assigns deterministic single-character labels to visible tiles for the
+    /// hold-leader jump HUD. Tiles are ordered top-to-bottom then left-to-right
+    /// (reading order) so a fixed layout always yields the same labels, with the
+    /// tile id as a final tie-break for a total, stable order. `alphabet` is the
+    /// configurable home-row-first key set; tiles beyond its length are left
+    /// unlabeled (single-char only — multi-char labels are deferred).
+    public static func jumpLabels(for tiles: [(id: UUID, frame: TileFrame)], alphabet: [String]) -> [JumpLabel] {
+        let ordered = tiles.sorted { a, b in
+            if a.frame.y != b.frame.y { return a.frame.y < b.frame.y }
+            if a.frame.x != b.frame.x { return a.frame.x < b.frame.x }
+            return a.id.uuidString < b.id.uuidString
+        }
+        return zip(ordered, alphabet).map { JumpLabel(id: $0.0.id, label: $0.1) }
+    }
+
     /// Parks `frame` gap-adjacent to its nearest neighbor in `direction`.
     ///
     /// "Neighbor" = the closest tile lying strictly ahead in the throw direction

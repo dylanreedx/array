@@ -33,6 +33,11 @@ public enum SettingsSchema {
                         label: "Leader Hold Delay (ms)",
                         default: String(NavKeymap.default.leaderDwellMs)
                     ),
+                    .text(
+                        key: NavKeymap.leaderLabelKeysDefaultsKey,
+                        label: "Jump Label Keys",
+                        default: NavKeymap.default.leaderLabelKeys
+                    ),
                 ]
             ),
             SettingsSection(

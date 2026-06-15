@@ -71,6 +71,13 @@ final class CanvasNSView: NSView {
     private var zoneChromeViews: [UUID: ZoneChromeNSView] = [:]
     private var navModeOverlayView: NavModeOverlayNSView?
     var navModeHintLine = NavKeymap.default.hintLine
+    /// Which chrome the shared nav overlay draws: the legacy `⌃Space` nav-mode
+    /// (zone badges + hint line) or the hold-leader jump labels.
+    enum NavOverlayPresentation { case navMode, leaderLabels }
+    var navOverlayPresentation: NavOverlayPresentation = .navMode
+    /// The label keys offered to visible tiles in the hold-leader jump HUD,
+    /// pushed in by the app from the resolved `NavKeymap` when the leader opens.
+    var leaderLabelAlphabet: [String] = NavKeymap.default.leaderLabelAlphabet
     private var emptyStateView: CanvasEmptyStateNSView?
     private var emptyStateActions: CanvasEmptyStateActions?
     private var emptyStateProjectPath: String?
@@ -552,10 +559,68 @@ final class CanvasNSView: NSView {
 
     func setNavModeOverlayVisible(_ visible: Bool) {
         if visible {
+            navOverlayPresentation = .navMode
             installNavModeOverlayIfNeeded()
         } else {
             navModeOverlayView?.removeFromSuperview()
             navModeOverlayView = nil
+        }
+    }
+
+    // MARK: - Hold-leader jump (Phase C)
+
+    struct LeaderJumpAssignment: Equatable {
+        let tileId: UUID
+        let label: String
+        let worldFrame: TileFrame
+    }
+
+    /// The single source of truth for the jump HUD: the visible tiles (their
+    /// screen frame intersects the canvas) paired with their deterministic
+    /// labels. Both the overlay's `drawTileLabels` and key resolution read this
+    /// so a drawn label always maps to the tile the key jumps to.
+    func leaderJumpAssignments() -> [LeaderJumpAssignment] {
+        var worldFrames: [UUID: TileFrame] = [:]
+        let visible: [(id: UUID, frame: TileFrame)] = canvasState.tiles.compactMap { tile in
+            let worldFrame = activeZone.map { CanvasEngine.worldFrame(tile: tile, in: $0) } ?? tile.frame
+            let screenFrame = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport)
+            guard screenFrame.intersects(bounds) else { return nil }
+            worldFrames[tile.id] = worldFrame
+            return (id: tile.id, frame: worldFrame)
+        }
+        return TileArrangement.jumpLabels(for: visible, alphabet: leaderLabelAlphabet).compactMap { label in
+            guard let frame = worldFrames[label.id] else { return nil }
+            return LeaderJumpAssignment(tileId: label.id, label: label.label, worldFrame: frame)
+        }
+    }
+
+    func leaderJumpTarget(forLabel label: String) -> UUID? {
+        leaderJumpAssignments().first { $0.label == label }?.tileId
+    }
+
+    /// Pans (keeping the current zoom) so the tile sits centered; falls back to
+    /// `fit` when the tile is too large to fit at the current zoom.
+    func centerOnTile(_ tileId: UUID) {
+        guard let tile = canvasState.tiles.first(where: { $0.id == tileId }) else { return }
+        let worldFrame = activeZone.map { CanvasEngine.worldFrame(tile: tile, in: $0) } ?? tile.frame
+        let rect = CGRect(x: worldFrame.x, y: worldFrame.y, width: worldFrame.width, height: worldFrame.height)
+        let zoom = canvasState.viewport.zoom
+        let fits = rect.width * zoom <= Double(bounds.width) && rect.height * zoom <= Double(bounds.height)
+        let viewport = fits
+            ? CanvasEngine.centeredViewport(worldRect: rect, viewportSize: bounds.size, zoom: zoom)
+            : CanvasEngine.fit(worldRect: rect, viewportSize: bounds.size)
+        setViewport(viewport)
+    }
+
+    func setLeaderOverlayVisible(_ visible: Bool) {
+        if visible {
+            navOverlayPresentation = .leaderLabels
+            installNavModeOverlayIfNeeded()
+            navModeOverlayView?.needsDisplay = true
+        } else {
+            navModeOverlayView?.removeFromSuperview()
+            navModeOverlayView = nil
+            navOverlayPresentation = .navMode
         }
     }
 
@@ -2504,9 +2569,42 @@ private final class NavModeOverlayNSView: NSView {
         NSColor.black.withAlphaComponent(0.25).setFill()
         bounds.fill()
 
-        drawSelectionRing(in: canvas)
-        drawZoneBadges(in: canvas)
-        drawHintLine()
+        switch canvas.navOverlayPresentation {
+        case .navMode:
+            drawSelectionRing(in: canvas)
+            drawZoneBadges(in: canvas)
+            drawHintLine()
+        case .leaderLabels:
+            drawTileLabels(in: canvas)
+        }
+    }
+
+    /// Hold-leader jump HUD: a label badge centered on each visible tile, sourced
+    /// from the same `leaderJumpAssignments` key resolution uses so the badge a
+    /// user sees is exactly the key that jumps there.
+    private func drawTileLabels(in canvas: CanvasNSView) {
+        for assignment in canvas.leaderJumpAssignments() {
+            let screenFrame = CanvasEngine.tileScreenFrame(assignment.worldFrame, viewport: canvas.viewport)
+            let badge = CGRect(
+                x: screenFrame.midX - badgeSize.width / 2,
+                y: screenFrame.midY - badgeSize.height / 2,
+                width: badgeSize.width,
+                height: badgeSize.height
+            )
+            let badgePath = NSBezierPath(roundedRect: badge, xRadius: 8, yRadius: 8)
+            NSColor.controlAccentColor.withAlphaComponent(0.95).setFill()
+            badgePath.fill()
+            let text = assignment.label.uppercased()
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedSystemFont(ofSize: 15, weight: .bold),
+                .foregroundColor: NSColor.white
+            ]
+            let size = text.size(withAttributes: attributes)
+            text.draw(
+                at: CGPoint(x: badge.midX - size.width / 2, y: badge.midY - size.height / 2),
+                withAttributes: attributes
+            )
+        }
     }
 
     private func drawSelectionRing(in canvas: CanvasNSView) {
