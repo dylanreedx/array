@@ -1413,15 +1413,21 @@ final class CanvasNSView: NSView {
             // Move probe: midpoint of (floor, grab). At low zoom floor == m > titleH,
             // so this point is BELOW the drawn 24px bar yet WITHIN the grab strip —
             // exactly the click the old titleBarHeight-only logic dropped to body.
+            // Probe on the LEFT of the title bar, clear of the close button: it sits
+            // top-right and is floored to stay clickable, so at extreme zoom-out it
+            // balloons to fill most of the (also-floored) bar — a center probe would
+            // legitimately land on it (a CLOSE target, not move).
             let stripY = (floor + grab) / 2
-            stripIsMove[String(zoom)] = tileView.qaDragKindIsMove(at: CGPoint(x: midX, y: stripY))
+            let closeMinX = tileView.qaCloseButtonFrame.minX
+            let stripX = closeMinX > m + 2 ? (m + closeMinX) / 2 : midX
+            stripIsMove[String(zoom)] = tileView.qaDragKindIsMove(at: CGPoint(x: stripX, y: stripY))
             // Routing: the click must reach the tile's move handling (not body
             // content) so mouseDown classifies it as .move. The strip resolves to
             // EITHER the tile view (floored hitTest strip below the drawn bar) OR
             // the now-zoom-floored title bar, which forwards mouseDown to the tile
             // → .move. Either proves the move target survives at low zoom; only a
             // fall-through to body would be a regression.
-            stripRoutesToTile[String(zoom)] = tileView.qaHitRoutesToMove(atWorld: CGPoint(x: midX, y: stripY))
+            stripRoutesToTile[String(zoom)] = tileView.qaHitRoutesToMove(atWorld: CGPoint(x: stripX, y: stripY))
 
             // A point clearly in the body (below the grab strip, above the bottom
             // resize band) is NOT a move.
@@ -1462,8 +1468,61 @@ final class CanvasNSView: NSView {
         // Top edge always a resize (ring preserved).
         try expect(topEdgeIsResize.values.allSatisfy { $0 == true }, "top edge must remain a resize at every zoom: \(topEdgeIsResize)")
 
+        // --- Resize-ring reclaim from body content at a non-origin pan/zoom ---
+        // Regression guard for the hitTest coordinate bug: the bottom/left/right and
+        // bottom-corner rings must be reclaimed from a covering content view even when
+        // the tile is panned AND zoomed (so superview coords != local bounds coords).
+        // The old hitTest used the raw superview point as if it were local, so only an
+        // origin tile at zoom 1 reclaimed the ring — at any real position body content
+        // swallowed bottom/side/corner resize clicks (top survived only because the
+        // title bar forwards mouseDown). This drives the REAL hitTest resolution.
+        var ringReclaim: [String: Bool] = [:]
+        var ringBodyReclaimed = true
+        do {
+            let probe = Tile(
+                id: UUID(uuidString: "00000000-0000-0000-0000-0000000011C0")!,
+                kind: .note,
+                title: "RING_PROBE",
+                frame: TileFrame(x: 260, y: 180, width: 320, height: 240),
+                zIndex: 1,
+                runtimeRef: nil,
+                metadata: TileMetadata()
+            )
+            let ringCanvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 40, y: 25, zoom: 1.5), tiles: [probe], groups: [], lastActiveTileId: nil))
+            ringCanvas.frame = NSRect(x: 0, y: 0, width: 1200, height: 900)
+            let ringWindow = NSWindow(contentRect: ringCanvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            ringWindow.contentView = ringCanvas
+            ringWindow.orderFrontRegardless()
+            let ringView = TileNSView(tile: probe)
+            ringCanvas.install(tileView: ringView, for: probe)
+            ringView.setContentView(NSView(frame: .zero)) // a body that would swallow ring clicks
+            ringCanvas.layoutSubtreeIfNeeded()
+
+            let w = ringView.bounds.width
+            let h = ringView.bounds.height
+            let rm = TileNSView.resizeMargin / 1.5
+            let ringProbes: [(String, CGPoint)] = [
+                ("bottom", CGPoint(x: w / 2, y: h - 1)),
+                ("left", CGPoint(x: 1, y: h / 2)),
+                ("right", CGPoint(x: w - 1, y: h / 2)),
+                ("bottomLeft", CGPoint(x: 1, y: h - 1)),
+                ("bottomRight", CGPoint(x: w - 1, y: h - 1)),
+            ]
+            for (name, p) in ringProbes {
+                try expect(ringView.qaResizeEdge(at: p) != nil, "ring probe \(name) must sit on the resize ring (local-coords premise); got nil at \(p)")
+                ringReclaim[name] = ringView.qaHitRoutesToMove(atWorld: p)
+            }
+            // A deep-body point must still reach the content view (we didn't over-claim).
+            let bodyPoint = CGPoint(x: w / 2, y: (ringView.grabHeightInLocalCoordinates + (h - rm)) / 2)
+            try expect(ringView.qaResizeEdge(at: bodyPoint) == nil, "body probe must be off the ring; got \(String(describing: ringView.qaResizeEdge(at: bodyPoint)))")
+            ringBodyReclaimed = ringView.qaHitRoutesToMove(atWorld: bodyPoint)
+        }
+        try expect(ringReclaim.values.allSatisfy { $0 == true }, "a panned/zoomed tile must reclaim the resize ring from body content on every edge/corner: \(ringReclaim)")
+        try expect(ringBodyReclaimed == false, "a deep-body click must reach content, not be reclaimed by the tile as a resize/move")
+
         let manifest: [String: Any] = [
             "check": "tile-drag-grab",
+            "ringReclaim": ringReclaim,
             "worldSize": ["width": tile.frame.width, "height": tile.frame.height],
             "titleBarHeight": TileNSView.titleBarHeight,
             "minScreenGrabPx": TileNSView.minScreenGrabPx,

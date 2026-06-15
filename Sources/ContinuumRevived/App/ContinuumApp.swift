@@ -6855,10 +6855,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let aId = UUID(uuidString: "00000000-0000-0000-0000-00000000DE51")!
 
-        // Drive a real bottom-edge resize of tile A by `worldDy` (positive grows the
-        // tile downward, negative shrinks it), against `neighbors`. Returns A's
-        // committed world frame after the gesture.
-        func driveBottomResize(aFrame: TileFrame, neighbors: [(UUID, TileFrame)], worldDy: CGFloat) throws -> TileFrame {
+        // Drive a real bottom-edge resize of tile A through a SEQUENCE of drag events
+        // (`worldDys`: positive grows the tile downward, negative shrinks it), against
+        // `neighbors`. Returns A's committed world frame after EACH event, so a snap
+        // and a later pull-out-of-snap can both be asserted within one gesture.
+        func driveBottomResize(aFrame: TileFrame, neighbors: [(UUID, TileFrame)], worldDys: [CGFloat]) throws -> [TileFrame] {
             let tileA = Tile(id: aId, kind: .note, title: "RESIZE_A", frame: aFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
             var tiles = [tileA]
             for (id, f) in neighbors {
@@ -6887,14 +6888,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // coordinates. Local y near bounds.height is the bottom edge (flipped view).
             let grabLocal = NSPoint(x: viewA.bounds.midX, y: viewA.bounds.height - 1)
             try expect(viewA.qaResizeEdge(at: grabLocal) == .bottom, "precondition: grab point must be the bottom resize edge; got \(String(describing: viewA.qaResizeEdge(at: grabLocal)))")
-            let p0 = viewA.convert(grabLocal, to: nil)
-            // delta.height = -(p1.y - p0.y); growing the tile downward (+worldDy) needs
-            // delta.height = +worldDy → p1.y = p0.y - worldDy (zoom 1: window == world).
-            let p1 = NSPoint(x: p0.x, y: p0.y - worldDy)
-            viewA.mouseDown(with: try mouse(.leftMouseDown, at: p0))
-            viewA.mouseDragged(with: try mouse(.leftMouseDragged, at: p1))
-            viewA.mouseUp(with: try mouse(.leftMouseUp, at: p1))
-            return canvas.canvasState.tiles.first(where: { $0.id == aId })!.frame
+            var p = viewA.convert(grabLocal, to: nil)
+            // delta.height = -(p_i.y - p_{i-1}.y); growing the tile downward (+worldDy)
+            // needs delta.height = +worldDy → p_i.y = p_{i-1}.y - worldDy (zoom 1).
+            viewA.mouseDown(with: try mouse(.leftMouseDown, at: p))
+            var frames: [TileFrame] = []
+            for dy in worldDys {
+                p = NSPoint(x: p.x, y: p.y - dy)
+                viewA.mouseDragged(with: try mouse(.leftMouseDragged, at: p))
+                frames.append(canvas.canvasState.tiles.first(where: { $0.id == aId })!.frame)
+            }
+            viewA.mouseUp(with: try mouse(.leftMouseUp, at: p))
+            return frames
         }
 
         let bId = UUID(uuidString: "00000000-0000-0000-0000-00000000DE52")!
@@ -6906,13 +6911,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // above the minimum so CanvasEngine's own min-clamp never confounds the snap.
         let tall = TileFrame(x: 0, y: 0, width: 100, height: 260) // bottom at 260
         let shortStart = TileFrame(x: 120, y: 0, width: 120, height: 200) // bottom at 200
-        let matched = try driveBottomResize(aFrame: shortStart, neighbors: [(bId, tall)], worldDy: 50) // → bottom 250, snaps to 260
+        let matched = try driveBottomResize(aFrame: shortStart, neighbors: [(bId, tall)], worldDys: [50]).last! // → bottom 250, snaps to 260
         try expect(matched.y == 0 && matched.x == 120 && matched.width == 120, "resize must keep the fixed edges (top/left/right); got \(matched)")
         try expect(matched.height == tall.height, "resize-snap must match the taller neighbor's height (\(tall.height)); got \(matched.height)")
         try expect(matched.y + matched.height == tall.y + tall.height, "snapped bottom must be flush with the neighbor's bottom")
 
         // 2) Out of range: a small drag that stays beyond the pull radius does not snap.
-        let freeResize = try driveBottomResize(aFrame: shortStart, neighbors: [(bId, tall)], worldDy: 10) // → bottom 210, 50 from 260
+        let freeResize = try driveBottomResize(aFrame: shortStart, neighbors: [(bId, tall)], worldDys: [10]).last! // → bottom 210, 50 from 260
         try expect(freeResize.height == 210, "an out-of-range edge resizes freely (no snap); got \(freeResize.height)")
 
         // 3) Min-size clamp: a snap that would shrink the tile below its minimum clamps
@@ -6921,9 +6926,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // violate it — isolating resizeEdgeSnap's own clamp.
         let aTall = TileFrame(x: 300, y: 0, width: 300, height: 300) // bottom at 300
         let cInside = TileFrame(x: 620, y: 155, width: 100, height: 300) // top edge at 155 (< minH 160)
-        let clamped = try driveBottomResize(aFrame: aTall, neighbors: [(cId, cInside)], worldDy: -130) // → bottom 170, snap-to-155 would shrink below min
+        let clamped = try driveBottomResize(aFrame: aTall, neighbors: [(cId, cInside)], worldDys: [-130]).last! // → bottom 170, snap-to-155 would shrink below min
         try expect(clamped.height == minH, "resize-snap must clamp a sub-minimum snap to the minimum height (\(minH)); got \(clamped.height)")
         try expect(clamped.y == 0, "min clamp must keep the fixed (top) edge; got y=\(clamped.y)")
+
+        // 4) Pull out of a snap: once snapped flush, continuing to drag the SAME edge
+        // ~past the pull radius must release it to the free position — not re-capture
+        // it every event (the "can't unsnap, flickers" bug). Event 1 grows bottom to
+        // 250 → snaps to 260; event 2 shrinks the FREE edge by 35 (250→215, which is
+        // 45 from 260, just past the 44px radius) → unsnaps to 215.
+        let unsnap = try driveBottomResize(aFrame: shortStart, neighbors: [(bId, tall)], worldDys: [50, -35])
+        try expect(unsnap[0].height == tall.height, "event 1 must snap flush to the neighbor (\(tall.height)); got \(unsnap[0].height)")
+        try expect(unsnap[1].height == 215, "event 2 must pull out of the snap to the free height (215); got \(unsnap[1].height)")
 
         let manifest: [String: Any] = [
             "check": "resize-snap",
@@ -6932,6 +6946,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "dimensionMatch": ["x": matched.x, "y": matched.y, "w": matched.width, "h": matched.height],
             "outOfRange": ["x": freeResize.x, "y": freeResize.y, "w": freeResize.width, "h": freeResize.height],
             "minClamp": ["x": clamped.x, "y": clamped.y, "w": clamped.width, "h": clamped.height],
+            "unsnapSnappedThenFree": [unsnap[0].height, unsnap[1].height],
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)

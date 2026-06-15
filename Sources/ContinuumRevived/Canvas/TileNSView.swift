@@ -67,6 +67,12 @@ class TileNSView: NSView {
     /// shown and `mouseUp` commits it. Stays nil until the drag has dwelled in
     /// snap range for `dragGhostDelay`, so a quick drag-past places freely.
     private var dragSnapTarget: TileFrame?
+    /// The UN-snapped frame a live resize has accumulated this gesture. Resize-snap
+    /// is applied as a preview on top of this, but the raw drag keeps accruing here
+    /// so the edge can be pulled back out of a snap — without it the committed snap
+    /// becomes the next event's base and the edge sticks to the neighbor forever.
+    /// nil between gestures; the first resize event seeds it from `tile.frame`.
+    private var resizeFreeFrame: TileFrame?
     /// The candidate the dwell timer is currently counting down for (not yet
     /// armed). Distinct from `dragSnapTarget` so a re-entered/changed candidate
     /// restarts the dwell rather than arming instantly.
@@ -219,7 +225,14 @@ class TileNSView: NSView {
     /// bottom/left/right ring. Returning self for ring points routes mouseDown
     /// to TileNSView.mouseDown so the existing resize logic fires.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        if bounds.contains(point), resizeEdge(at: point) != nil {
+        // `point` arrives in the SUPERVIEW's coordinate system; convert to this
+        // view's bounds (world units) before any ring math. Using `point` raw only
+        // happens to work when frame.origin == .zero and zoom == 1 (an origin tile,
+        // no pan/zoom) — at any other position/zoom the bottom/left/right/corner
+        // rings never get reclaimed and body content swallows the resize. The top
+        // ring is the lone exception because the title bar forwards mouseDown to us.
+        let local = convert(point, from: superview)
+        if bounds.contains(local), resizeEdge(at: local) != nil {
             return self
         }
         // Floored move-grab strip. The drawn TitleBarView subview is only
@@ -230,10 +243,10 @@ class TileNSView: NSView {
         // already claimed above (resize wins on the top edge), and the title bar
         // subview keeps its own [0, titleBarHeight] region (close/stop buttons +
         // its own move-forwarding), so neither is stolen here.
-        if bounds.contains(point),
+        if bounds.contains(local),
            let titleBar,
-           point.y >= titleBar.frame.maxY,
-           point.y < grabHeightInLocalCoordinates {
+           local.y >= titleBar.frame.maxY,
+           local.y < grabHeightInLocalCoordinates {
             return self
         }
         return super.hitTest(point)
@@ -243,6 +256,7 @@ class TileNSView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         mouseDraggedSinceDown = false
+        resizeFreeFrame = nil
         dragLastWindowPoint = event.locationInWindow
         let local = convert(event.locationInWindow, from: nil)
         if let edge = resizeEdge(at: local) {
@@ -277,11 +291,19 @@ class TileNSView: NSView {
             canvas.updateTile(next)
             updateDragGhost(candidate: canvas.snapTarget(for: next.frame, excludingTileId: tile.id), on: canvas)
         case .resize(let edge):
-            // Live resize: the tile previews itself as it sizes. If the dragged edge
-            // comes within snap range of a neighbor's edge, snap it flush so the tile
-            // matches the neighbor's dimension along that axis. No dwell/ghost.
-            var next = CanvasEngine.tile(tile, resizedByScreenDelta: delta, edge: edge, viewport: canvas.viewport)
-            if let snapped = canvas.resizeSnapTarget(for: next.frame, edge: edge, kind: tile.kind, excludingTileId: tile.id) {
+            // Live resize: the tile previews itself as it sizes. Accumulate the raw,
+            // UN-snapped resize in `resizeFreeFrame` (seeded from the current frame on
+            // the first event) and apply the snap as a preview on top — so dragging an
+            // edge ~past the pull radius pulls it back out of a snap instead of having
+            // the committed snap re-capture every event. If the dragged edge is within
+            // snap range of a neighbor's edge, snap it flush so the tile matches the
+            // neighbor's dimension along that axis. No dwell/ghost.
+            var freeTile = tile
+            freeTile.frame = resizeFreeFrame ?? tile.frame
+            let resizedFree = CanvasEngine.tile(freeTile, resizedByScreenDelta: delta, edge: edge, viewport: canvas.viewport)
+            resizeFreeFrame = resizedFree.frame
+            var next = resizedFree
+            if let snapped = canvas.resizeSnapTarget(for: resizedFree.frame, edge: edge, kind: tile.kind, excludingTileId: tile.id) {
                 next.frame = snapped
             }
             canvas.updateTile(next)
@@ -295,6 +317,7 @@ class TileNSView: NSView {
         let wasClick = !mouseDraggedSinceDown
         dragKind = .none
         mouseDraggedSinceDown = false
+        resizeFreeFrame = nil
 
         // Commit the armed snap (if the dwell elapsed), then tear down the ghost.
         if case .move = completedDragKind, let target = dragSnapTarget {
