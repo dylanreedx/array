@@ -1256,9 +1256,26 @@ final class CanvasNSView: NSView {
         var bounds: [String: [String: Double]] = [:]
         var edgePasses: [String: Bool] = [:]
         var cornerPasses: [String: Bool] = [:]
+        var contentTopMatchesBar: [String: Bool] = [:]
+        var prevBarHeight = tileView.chromeBarHeight
+        // When the floored bar height does NOT change between zooms (the common
+        // zoomed-IN regime), the content view must NOT be relaid out — that is
+        // the world-bounds guarantee that AppKit's frame transform, not a manual
+        // reflow, scales the body. The content only re-frames when the bar height
+        // genuinely changes (the title-bar zoom-floor coupling).
         for zoom in zooms {
             canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
+            tileView.probe.setFrameSizeCalls = 0
             tileView.layoutSubtreeIfNeeded()
+            let barHeight = tileView.chromeBarHeight
+            if barHeight == prevBarHeight {
+                try expect(tileView.probe.setFrameSizeCalls == 0, "content setFrameSize calls during zoom \(zoom) (bar height unchanged at \(barHeight)) should be zero, got \(tileView.probe.setFrameSizeCalls) sizes=\(tileView.probe.observedSizes)")
+            }
+            prevBarHeight = barHeight
+            // Content top must track the floored bar height (no overlap/gap).
+            let contentTop = tileView.contentView?.frame.minY ?? -1
+            contentTopMatchesBar[String(zoom)] = abs(contentTop - barHeight) < 0.001
+            try expect(contentTopMatchesBar[String(zoom)] == true, "content top \(contentTop) must equal floored bar height \(barHeight) at zoom \(zoom)")
             frames[String(zoom)] = ["width": tileView.frame.width, "height": tileView.frame.height]
             bounds[String(zoom)] = ["width": tileView.bounds.width, "height": tileView.bounds.height]
             // Bands mirror TileNSView.resizeEdge: edge band `m` is a constant
@@ -1292,9 +1309,9 @@ final class CanvasNSView: NSView {
             try expect(tileView.bounds.size == CGSize(width: tile.frame.width, height: tile.frame.height), "bounds should remain world-sized at zoom \(zoom)")
         }
 
-        try expect(tileView.probe.setFrameSizeCalls == 0, "content setFrameSize calls during zoom should be zero, got \(tileView.probe.setFrameSizeCalls) sizes=\(tileView.probe.observedSizes)")
         try expect(edgePasses.values.allSatisfy { $0 }, "resize-edge hit tests failed: \(edgePasses)")
         try expect(cornerPasses.values.allSatisfy { $0 }, "resize-corner hit tests failed: \(cornerPasses)")
+        try expect(contentTopMatchesBar.values.allSatisfy { $0 }, "content top must track floored bar height: \(contentTopMatchesBar)")
 
         let manifest: [String: Any] = [
             "check": "tile-world-bounds",
@@ -1303,9 +1320,9 @@ final class CanvasNSView: NSView {
             "screenFrames": frames,
             "bounds": bounds,
             "contentSetFrameSizeCallsAfterInstall": callsAfterInstall,
-            "contentSetFrameSizeCallsDuringZoom": tileView.probe.setFrameSizeCalls,
             "resizeEdgePasses": edgePasses,
-            "resizeCornerPasses": cornerPasses
+            "resizeCornerPasses": cornerPasses,
+            "contentTopMatchesBar": contentTopMatchesBar
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -1379,10 +1396,13 @@ final class CanvasNSView: NSView {
             // exactly the click the old titleBarHeight-only logic dropped to body.
             let stripY = (floor + grab) / 2
             stripIsMove[String(zoom)] = tileView.qaDragKindIsMove(at: CGPoint(x: midX, y: stripY))
-            // Routing: the click must reach TileNSView (not body content) so
-            // mouseDown classifies it as .move. Proves the hitTest floor, not just
-            // the classifier.
-            stripRoutesToTile[String(zoom)] = (tileView.hitTest(CGPoint(x: midX, y: stripY)) === tileView)
+            // Routing: the click must reach the tile's move handling (not body
+            // content) so mouseDown classifies it as .move. The strip resolves to
+            // EITHER the tile view (floored hitTest strip below the drawn bar) OR
+            // the now-zoom-floored title bar, which forwards mouseDown to the tile
+            // → .move. Either proves the move target survives at low zoom; only a
+            // fall-through to body would be a regression.
+            stripRoutesToTile[String(zoom)] = tileView.qaHitRoutesToMove(atWorld: CGPoint(x: midX, y: stripY))
 
             // A point clearly in the body (below the grab strip, above the bottom
             // resize band) is NOT a move.
@@ -1441,6 +1461,111 @@ final class CanvasNSView: NSView {
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("tile-drag-grab", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// Geometry check for the zoom-scaled title-bar chrome: builds a real
+    /// `TileNSView`, drives the canvas zoom, runs layout, then reads the
+    /// LAID-OUT bar + close-button frames (not the constants) and asserts their
+    /// ON-SCREEN size (`worldHeight * zoom`) stays in a usable band across zoom.
+    static func runTileChromeScaleSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        // Tall enough that a body region survives below the floored bar even at
+        // the lowest test zoom (mirrors the drag-grab probe's reasoning).
+        let tile = Tile(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000001135")!,
+            kind: .terminal,
+            title: "CHROME_SCALE_PROBE",
+            frame: TileFrame(x: 40, y: 30, width: 400, height: 1000),
+            zIndex: 1,
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile], groups: [], lastActiveTileId: nil))
+        canvas.frame = NSRect(x: 0, y: 0, width: 900, height: 700)
+        let tileView = TileNSView(tile: tile)
+        // A real content view so the bar/content offset coupling is exercised.
+        tileView.setContentView(NSView(frame: .zero))
+        canvas.install(tileView: tileView, for: tile)
+        tileView.layoutSubtreeIfNeeded()
+
+        // Comfortable on-screen floor for the close button's hit size. The
+        // drawn bar floors to `minScreenGrabPx` (28). Both must clear ~22px.
+        let minUsableScreenPx: CGFloat = 22
+        let zooms: [Double] = [0.3, 1.0, 3.0]
+        var barScreenHeights: [String: Double] = [:]
+        var closeScreenSizes: [String: Double] = [:]
+        var contentTopWorld: [String: Double] = [:]
+        var contentTopMatchesBar: [String: Bool] = [:]
+        for zoom in zooms {
+            canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
+            tileView.layoutSubtreeIfNeeded()
+
+            // Read laid-out world frames and convert to on-screen px via the zoom
+            // transform (bounds are world-sized; frame = bounds * zoom).
+            let barWorldHeight = tileView.qaTitleBarFrame.height
+            let closeWorld = tileView.qaCloseButtonFrame
+            let barScreenH = barWorldHeight * CGFloat(zoom)
+            let closeScreenW = closeWorld.width * CGFloat(zoom)
+            let closeScreenH = closeWorld.height * CGFloat(zoom)
+            barScreenHeights[String(zoom)] = barScreenH
+            closeScreenSizes[String(zoom)] = min(closeScreenW, closeScreenH)
+
+            // Content offset must track the SAME floored bar height — no overlap,
+            // no gap. Read the laid-out content view's top edge (world units).
+            let contentTop = tileView.contentView?.frame.minY ?? -1
+            contentTopWorld[String(zoom)] = contentTop
+            contentTopMatchesBar[String(zoom)] = abs(contentTop - barWorldHeight) < 0.001
+
+            try expect(barScreenH >= minUsableScreenPx, "zoom \(zoom): title bar on-screen height \(barScreenH)px must be >= \(minUsableScreenPx)px")
+            try expect(closeScreenW >= minUsableScreenPx && closeScreenH >= minUsableScreenPx, "zoom \(zoom): close button on-screen hit size \(closeScreenW)x\(closeScreenH)px must be >= \(minUsableScreenPx)px")
+            try expect(contentTopMatchesBar[String(zoom)] == true, "zoom \(zoom): content top \(contentTop) must equal floored bar height \(barWorldHeight)")
+            // The close button must fit inside the bar at every zoom (otherwise
+            // it clips and the × becomes partially unclickable).
+            try expect(closeWorld.maxY <= barWorldHeight + 0.001, "zoom \(zoom): close button bottom \(closeWorld.maxY) must fit inside bar height \(barWorldHeight)")
+        }
+
+        // Floor only KICKS IN when zoomed out: at zoom 3 (zoomed in) the bar is
+        // the NATURAL titleBarHeight in world units (floor inert), so on screen it
+        // is `titleBarHeight * 3` — proving the floor doesn't inflate chrome when
+        // zoomed in. Conversely at zoom 1 the floor is `minScreenGrabPx` (the bar
+        // is intentionally aliased to the grab strip, so it never drops below it).
+        try expect(abs((barScreenHeights["3.0"] ?? 0) - Double(TileNSView.titleBarHeight) * 3) < 0.5, "zoom 3: zoomed-in bar should be the natural titleBarHeight*3 on screen (floor inert), got \(barScreenHeights["3.0"] ?? 0)")
+        try expect(abs((barScreenHeights["1.0"] ?? 0) - Double(TileNSView.minScreenGrabPx)) < 0.5, "zoom 1: bar should floor to minScreenGrabPx (aliased to grab strip), got \(barScreenHeights["1.0"] ?? 0)")
+
+        let manifest: [String: Any] = [
+            "check": "tile-chrome-scale",
+            "worldSize": ["width": tile.frame.width, "height": tile.frame.height],
+            "titleBarHeight": TileNSView.titleBarHeight,
+            "minScreenGrabPx": TileNSView.minScreenGrabPx,
+            "minScreenCloseButtonPx": TileNSView.minScreenCloseButtonPx,
+            "minUsableScreenPx": minUsableScreenPx,
+            "zooms": zooms,
+            "barScreenHeights": barScreenHeights,
+            "closeScreenSizes": closeScreenSizes,
+            "contentTopWorld": contentTopWorld,
+            "contentTopMatchesBar": contentTopMatchesBar
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("tile-chrome-scale", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

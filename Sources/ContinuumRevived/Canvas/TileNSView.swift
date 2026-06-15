@@ -21,9 +21,21 @@ class TileNSView: NSView {
     /// Screen-space floor for the move-grab strip. The drawn title bar is
     /// `titleBarHeight` world units, so at low zoom its on-screen height
     /// collapses (`24*zoom`px) and the move target becomes near-ungrabbable.
-    /// The move HIT region (not the drawn bar) is floored to at least this many
-    /// screen px regardless of zoom — see `grabHeightInLocalCoordinates`.
+    /// The move HIT region AND the drawn bar are floored to at least this many
+    /// screen px regardless of zoom — see `grabHeightInLocalCoordinates`, which
+    /// drives both the hit strip and the bar's laid-out height in `layout()`.
     static let minScreenGrabPx: CGFloat = 28
+    /// Close-button edge length (world units) at zoom 1, and its screen-space
+    /// floor at low zoom. Same world-px-as-screen-px floor pattern as the grab
+    /// strip so the × stays a clickable target instead of collapsing to a few
+    /// pixels when zoomed out. The button is sized in `layout()`.
+    static let closeButtonSize: CGFloat = 14
+    static let minScreenCloseButtonPx: CGFloat = 22
+    /// Close glyph point size at zoom 1; floored on screen so the × stays
+    /// legible when zoomed out (the symbol scales with the tile-view transform,
+    /// so its world point size must grow as zoom shrinks to hold screen size).
+    static let closeGlyphPointSize: CGFloat = 9
+    static let minScreenCloseGlyphPx: CGFloat = 11
 
     weak var canvas: CanvasNSView?
     var tile: Tile {
@@ -69,16 +81,16 @@ class TileNSView: NSView {
         layer?.masksToBounds = true
 
         let bar = TitleBarView(tile: tile, agentStatus: agentStatus)
-        bar.translatesAutoresizingMaskIntoConstraints = false
+        // Manual framing (not constraints) like the content view: under the
+        // canvas's frame/bounds zoom transform, Auto Layout lays constraint-based
+        // subviews out in the frame (screen) coordinate space, so a constrained
+        // bar would shrink with zoom. Framing it from `bounds` (world units) in
+        // `layout()` keeps it spanning the full world width at the floored height.
+        bar.translatesAutoresizingMaskIntoConstraints = true
+        bar.autoresizingMask = []
         bar.onCloseRequested = { [weak self] in self?.onClose?() }
         bar.onStopRunRequested = { [weak self] in self?.onStopRun?() }
         addSubview(bar)
-        NSLayoutConstraint.activate([
-            bar.leadingAnchor.constraint(equalTo: leadingAnchor),
-            bar.trailingAnchor.constraint(equalTo: trailingAnchor),
-            bar.topAnchor.constraint(equalTo: topAnchor),
-            bar.heightAnchor.constraint(equalToConstant: Self.titleBarHeight)
-        ])
         self.titleBar = bar
 
         installCornerOverlay()
@@ -122,11 +134,31 @@ class TileNSView: NSView {
 
     override func layout() {
         super.layout()
+        layoutChrome()
         layoutContentView()
     }
 
+    /// Drive the title-bar height + close-button size from the current zoom so
+    /// their on-screen size stays in a usable band. The tile view's `bounds` is
+    /// world-sized and AppKit scales the whole subtree by `zoom`, so a world
+    /// height `H` renders at `H*zoom` px; framing the bar from `bounds` at the
+    /// floored world height holds the screen size at the `minScreen*` floors when
+    /// zoomed out (and spans the full world width — see init for why not Auto
+    /// Layout).
+    private func layoutChrome() {
+        let barHeight = chromeBarHeight
+        let barFrame = NSRect(x: 0, y: 0, width: bounds.width, height: barHeight)
+        if titleBar?.frame != barFrame {
+            titleBar?.frame = barFrame
+        }
+        titleBar?.applyCloseButtonSizing(buttonSize: closeButtonWorldSize, glyphPointSize: closeGlyphWorldPointSize)
+    }
+
     private func layoutContentView() {
-        let nextFrame = NSRect(x: 0, y: Self.titleBarHeight, width: bounds.width, height: max(0, bounds.height - Self.titleBarHeight))
+        // Track the (zoom-floored) bar height so the body never overlaps the bar
+        // or leaves a gap beneath it.
+        let barHeight = chromeBarHeight
+        let nextFrame = NSRect(x: 0, y: barHeight, width: bounds.width, height: max(0, bounds.height - barHeight))
         if contentView?.frame != nextFrame {
             contentView?.frame = nextFrame
         }
@@ -315,8 +347,52 @@ class TileNSView: NSView {
         return max(Self.titleBarHeight, Self.minScreenGrabPx / CGFloat(zoom))
     }
 
+    /// World height the drawn title bar is laid out to. Aliased to the move-grab
+    /// floor so the visible bar and the grabbable strip are exactly the same
+    /// region — no second divergent floor to drift out of sync.
+    var chromeBarHeight: CGFloat { grabHeightInLocalCoordinates }
+
+    /// World edge length for the close button, floored so its on-screen size
+    /// stays `>= minScreenCloseButtonPx`. Mirrors the grab-strip floor pattern.
+    var closeButtonWorldSize: CGFloat {
+        guard let zoom = canvas?.viewport.zoom, zoom.isFinite, zoom > 0 else { return Self.closeButtonSize }
+        return max(Self.closeButtonSize, Self.minScreenCloseButtonPx / CGFloat(zoom))
+    }
+
+    /// World point size for the × glyph, floored so it stays legible on screen
+    /// (the glyph scales with the tile-view transform, hence the `/zoom` floor).
+    var closeGlyphWorldPointSize: CGFloat {
+        guard let zoom = canvas?.viewport.zoom, zoom.isFinite, zoom > 0 else { return Self.closeGlyphPointSize }
+        return max(Self.closeGlyphPointSize, Self.minScreenCloseGlyphPx / CGFloat(zoom))
+    }
+
     func qaResizeEdge(at point: CGPoint) -> ResizeEdge? {
         resizeEdge(at: point)
+    }
+
+    /// QA: laid-out title-bar frame (world units). On-screen height is
+    /// `height * zoom`. Drives `--tile-chrome-scale-check`.
+    var qaTitleBarFrame: CGRect { titleBar?.frame ?? .zero }
+
+    /// QA: laid-out close-button frame (world units), converted to the tile
+    /// view's own coordinate space. On-screen hit size is `size * zoom`.
+    var qaCloseButtonFrame: CGRect {
+        guard let titleBar else { return .zero }
+        return titleBar.convert(titleBar.qaCloseButtonFrame, to: self)
+    }
+
+    /// QA: does a world-coordinate click route to this tile's move handling
+    /// rather than body content, via the REAL `hitTest` path? Converts the world
+    /// point to the tile's superview (canvas) coordinate space — what AppKit
+    /// passes to `hitTest` — so the bounds/frame zoom transform is exercised, then
+    /// asserts the resolved view is the tile itself (floored strip) or the title
+    /// bar, which forwards mouseDown to the tile → `.move`. Body content would be
+    /// a regression. Drives `--tile-drag-grab-check`.
+    func qaHitRoutesToMove(atWorld worldPoint: CGPoint) -> Bool {
+        guard let superview else { return false }
+        let superPoint = convert(worldPoint, to: superview)
+        let hit = hitTest(superPoint)
+        return hit === self || hit === titleBar
     }
 
     /// QA: resolve the drag classification for a local-coordinate point, using
@@ -390,6 +466,16 @@ private final class TitleBarView: NSView {
     }
 
     private let closeButton: NSButton
+    /// Desired close-button edge length (world units) + glyph point size, set
+    /// from the parent tile's `layout()` so the × holds a usable on-screen size
+    /// across zoom (see `applyCloseButtonSizing`). The button is framed manually
+    /// in `layout()` — NSButton's bezel imposes its own required height
+    /// constraint that fights an explicit height constraint, so manual framing
+    /// (matching the body's manual-layout idiom) is the deterministic path.
+    private var closeButtonWorldSize: CGFloat = TileNSView.closeButtonSize
+    private var closeGlyphPointSize: CGFloat = TileNSView.closeGlyphPointSize
+    /// Trailing inset of the close button from the bar's right edge (world).
+    private static let closeButtonTrailingInset: CGFloat = 10
 
     init(tile: Tile, agentStatus: AgentStatus? = nil) {
         self.tile = tile
@@ -399,7 +485,7 @@ private final class TitleBarView: NSView {
         // that respects contentTintColor — the filled multicolor variant
         // renders red regardless of tint, which read as "alert" inside a
         // dark, dense canvas.
-        let config = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+        let config = NSImage.SymbolConfiguration(pointSize: TileNSView.closeGlyphPointSize, weight: .semibold)
         btn.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tile")?
             .withSymbolConfiguration(config)
         btn.imageScaling = .scaleProportionallyDown
@@ -416,14 +502,44 @@ private final class TitleBarView: NSView {
 
         btn.target = self
         btn.action = #selector(handleClose(_:))
+        btn.translatesAutoresizingMaskIntoConstraints = true
+        btn.autoresizingMask = []
         addSubview(btn)
-        NSLayoutConstraint.activate([
-            btn.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            btn.centerYAnchor.constraint(equalTo: centerYAnchor),
-            btn.widthAnchor.constraint(equalToConstant: 14),
-            btn.heightAnchor.constraint(equalToConstant: 14)
-        ])
     }
+
+    /// Set the close button's edge length (world units) and glyph point size.
+    /// Called from the tile's `layout()` so both track the current zoom; the
+    /// button is then framed in `layout()`. The glyph is only re-imaged when its
+    /// size changes (rebuilding the NSImage is needless churn on identity layout).
+    func applyCloseButtonSizing(buttonSize: CGFloat, glyphPointSize: CGFloat) {
+        if closeButtonWorldSize != buttonSize {
+            closeButtonWorldSize = buttonSize
+            needsLayout = true
+        }
+        if closeGlyphPointSize != glyphPointSize {
+            closeGlyphPointSize = glyphPointSize
+            let config = NSImage.SymbolConfiguration(pointSize: glyphPointSize, weight: .semibold)
+            closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tile")?
+                .withSymbolConfiguration(config)
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        // Right-align + vertically center the close button at its (zoom-floored)
+        // world size. Manual framing so the size is exactly what we set.
+        let size = closeButtonWorldSize
+        closeButton.frame = NSRect(
+            x: bounds.width - Self.closeButtonTrailingInset - size,
+            y: (bounds.height - size) / 2,
+            width: size,
+            height: size
+        )
+    }
+
+    /// QA: the close button's laid-out frame (world units) so the parent's
+    /// self-check can assert its on-screen hit size stays in a usable band.
+    var qaCloseButtonFrame: CGRect { closeButton.frame }
 
     func setAccessory(_ accessory: NSView?) {
         accessoryView?.removeFromSuperview()
@@ -431,8 +547,10 @@ private final class TitleBarView: NSView {
         guard let accessory else { return }
         accessory.translatesAutoresizingMaskIntoConstraints = false
         addSubview(accessory)
+        // Anchor to the bar's trailing edge (not the now-manually-framed close
+        // button): inset past the button's zoom-1 footprint + the original gap.
         NSLayoutConstraint.activate([
-            accessory.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -34),
+            accessory.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -(Self.closeButtonTrailingInset + TileNSView.closeButtonSize + 34)),
             accessory.centerYAnchor.constraint(equalTo: centerYAnchor),
             accessory.widthAnchor.constraint(greaterThanOrEqualToConstant: 160),
             accessory.heightAnchor.constraint(equalToConstant: 18)
