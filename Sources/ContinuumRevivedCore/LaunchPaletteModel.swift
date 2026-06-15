@@ -170,15 +170,9 @@ public enum LaunchPaletteRow: Equatable, Sendable {
 
 public enum LaunchPaletteModel {
     public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], harnessRoles: [HarnessRole] = []) -> [LaunchPaletteRow] {
-        profiles.map(LaunchPaletteRow.profile) + [
-            .action(.newNote),
-            .action(.newBrowser),
-            .action(.openFile),
-            .action(.openFileTree),
-            .action(.newDiffReview),
-            .action(.fitCanvasToAll),
-            .action(.newWorkspace)
-        ] + harnessRoles.map { LaunchPaletteRow.action(.spawnHarnessRole($0)) } + workspaces.flatMap { workspace in
+        profiles.map(LaunchPaletteRow.profile)
+            + CommandRegistry.paletteActions().map(LaunchPaletteRow.action)
+            + harnessRoles.map { LaunchPaletteRow.action(.spawnHarnessRole($0)) } + workspaces.flatMap { workspace in
             [
                 LaunchPaletteRow.workspace(workspace),
                 LaunchPaletteRow.workspaceAction(.renameWorkspace(workspace.id), workspace),

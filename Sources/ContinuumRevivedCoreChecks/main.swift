@@ -2678,6 +2678,27 @@ do {
     }
 }
 
+// MARK: - CommandRegistry: palette rows derive from one declared source
+
+do {
+    let commands = CommandRegistry.all()
+    expect(Set(commands.map(\.id)).count == commands.count, "CommandRegistry: command ids are unique")
+    for command in commands {
+        expect(!command.id.isEmpty, "CommandRegistry: command id must be non-empty")
+        expect(!command.action.displayName.isEmpty, "CommandRegistry: command \(command.id) action has a display name")
+    }
+    // The launch palette's static action rows must come from the registry — no
+    // drift from a separate hardcoded list.
+    let rows = LaunchPaletteModel.makeRows(profiles: [])
+    let actionRows: [LaunchPaletteAction] = rows.compactMap { row in
+        if case let .action(action) = row { return action } else { return nil }
+    }
+    expect(actionRows == CommandRegistry.paletteActions(), "palette static action rows must equal CommandRegistry.paletteActions(); got \(actionRows.map(\.displayName))")
+    let ids = Set(commands.map(\.id))
+    let canonical: Set<String> = ["tile.newNote", "tile.newBrowser", "tile.openFile", "tile.openFileTree", "tile.newDiffReview", "view.fitCanvasToAll", "workspace.new"]
+    expect(canonical.isSubset(of: ids), "CommandRegistry must contain the canonical static commands; missing \(canonical.subtracting(ids))")
+}
+
 // MARK: - TileActionCatalog override round-trip
 
 do {
