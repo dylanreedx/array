@@ -6746,7 +6746,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let snapTargetFrame = TileFrame(x: neighborFrame.x - gap - startFrame.width, y: startFrame.y, width: startFrame.width, height: startFrame.height)
         let freeXAfterDrag = startFrame.x + Double(worldDx)
 
-        // Scenario 1 — snapping ON (default). Drag right toward B.
+        // Scenario 1 — snapping ON, dwell delay 0 (arm synchronously). Drag toward B.
+        viewA.dragGhostDelay = 0
         let p0 = grabPoint()
         viewA.mouseDown(with: try mouse(.leftMouseDown, at: p0))
         viewA.mouseDragged(with: try mouse(.leftMouseDragged, at: NSPoint(x: p0.x + worldDx, y: p0.y)))
@@ -6761,6 +6762,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(committed == snapTargetFrame, "release must commit the previewed snap \(snapTargetFrame); got \(committed)")
         try expect(committed.x + committed.width + gap == neighborFrame.x, "committed tile must be gap-adjacent to B.left=\(neighborFrame.x); got A=\(committed)")
         try expect(canvas.qaDragGhostFrame == nil, "ghost must hide on release; got \(String(describing: canvas.qaDragGhostFrame))")
+
+        // Scenario 1b — DWELL gates a quick drag-past. With a real (>0) delay, a
+        // single in-range drag event must NOT arm yet (timer pending, no run loop
+        // spun here), so no ghost shows and a quick release does NOT snap.
+        viewA.dragGhostDelay = 0.15
+        var rearm = canvas.canvasState.tiles.first(where: { $0.id == aId })!
+        rearm.frame = startFrame
+        canvas.updateTile(rearm)
+        let d0 = grabPoint()
+        viewA.mouseDown(with: try mouse(.leftMouseDown, at: d0))
+        viewA.mouseDragged(with: try mouse(.leftMouseDragged, at: NSPoint(x: d0.x + worldDx, y: d0.y)))
+        try expect(canvas.qaDragGhostFrame == nil, "dwell: a single in-range drag must not show the phantom before the delay; got \(String(describing: canvas.qaDragGhostFrame))")
+        viewA.mouseUp(with: try mouse(.leftMouseUp, at: NSPoint(x: d0.x + worldDx, y: d0.y)))
+        try expect(frameOfA().x == freeXAfterDrag, "dwell: a quick drag-past must place freely (x=\(freeXAfterDrag)); got \(frameOfA().x)")
 
         // Scenario 2 — snapping DISABLED → no ghost, release keeps the free position.
         let offSuite = "DragMagnetizeOffChecks-\(UUID().uuidString)"

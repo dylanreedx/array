@@ -63,9 +63,19 @@ class TileNSView: NSView {
     private var dragKind: DragKind = .none
     private var dragLastWindowPoint: CGPoint = .zero
     private var mouseDraggedSinceDown = false
-    /// The world frame the in-flight move drag would snap to (preview shown as the
-    /// canvas ghost), committed on `mouseUp`. Nil when nothing is in snap range.
+    /// The world frame the in-flight move drag is ARMED to snap to: the ghost is
+    /// shown and `mouseUp` commits it. Stays nil until the drag has dwelled in
+    /// snap range for `dragGhostDelay`, so a quick drag-past places freely.
     private var dragSnapTarget: TileFrame?
+    /// The candidate the dwell timer is currently counting down for (not yet
+    /// armed). Distinct from `dragSnapTarget` so a re-entered/changed candidate
+    /// restarts the dwell rather than arming instantly.
+    private var pendingGhostTarget: TileFrame?
+    private var pendingGhostWorkItem: DispatchWorkItem?
+    /// Dwell before the snap phantom appears (and the snap arms). Short, so it
+    /// reads as "settle near a tile" not lag. Overridable so the self-check can
+    /// drive it to 0 (arm synchronously) or keep it (assert the dwell gates).
+    var dragGhostDelay: TimeInterval = 0.15
 
     override var isFlipped: Bool { true }
 
@@ -256,19 +266,13 @@ class TileNSView: NSView {
         dragLastWindowPoint = event.locationInWindow
         switch dragKind {
         case .move:
-            // The tile follows the cursor freely; if it comes within snap range of a
-            // neighbor, preview the destination as a translucent ghost and remember
-            // it to commit on release. No modifier — toggle the whole behavior in
-            // Settings ("Drag Snapping").
+            // The tile follows the cursor freely; once it dwells within snap range
+            // of a neighbor (~dragGhostDelay) the destination is previewed as a
+            // translucent ghost and armed for commit on release. No modifier —
+            // toggle the whole behavior in Settings ("Drag Snapping").
             let next = CanvasEngine.tile(tile, draggedByScreenDelta: delta, viewport: canvas.viewport)
             canvas.updateTile(next)
-            if let target = canvas.snapTarget(for: next.frame, excludingTileId: tile.id) {
-                dragSnapTarget = target
-                canvas.showDragGhost(at: target)
-            } else {
-                dragSnapTarget = nil
-                canvas.hideDragGhost()
-            }
+            updateDragGhost(candidate: canvas.snapTarget(for: next.frame, excludingTileId: tile.id), on: canvas)
         case .resize(let edge):
             let next = CanvasEngine.tile(tile, resizedByScreenDelta: delta, edge: edge, viewport: canvas.viewport)
             canvas.updateTile(next)
@@ -283,14 +287,13 @@ class TileNSView: NSView {
         dragKind = .none
         mouseDraggedSinceDown = false
 
-        // Commit the previewed snap (if any), then tear down the ghost + state.
+        // Commit the armed snap (if the dwell elapsed), then tear down the ghost.
         if case .move = completedDragKind, let target = dragSnapTarget {
             var snapped = tile
             snapped.frame = target
             canvas?.updateTile(snapped)
         }
-        canvas?.hideDragGhost()
-        dragSnapTarget = nil
+        if let canvas { cancelDragGhost(on: canvas) } else { teardownDragGhostState() }
 
         if case .move = completedDragKind, wasClick {
             canvas?.focusBroker?.enterScope(.tile(tile.id), reason: .userClick)
@@ -298,6 +301,53 @@ class TileNSView: NSView {
         }
 
         super.mouseUp(with: event)
+    }
+
+    /// Drive the dwell-gated snap phantom from the current drag candidate.
+    /// - nil candidate (out of range) → cancel everything, hide the ghost.
+    /// - same target already armed or already counting down → leave it.
+    /// - a new/changed target → restart the dwell; arm (show ghost + set
+    ///   `dragSnapTarget`) only after `dragGhostDelay`, so a quick drag-past never
+    ///   flashes a phantom and never snaps on release.
+    private func updateDragGhost(candidate: TileFrame?, on canvas: CanvasNSView) {
+        guard let candidate else {
+            cancelDragGhost(on: canvas)
+            return
+        }
+        if candidate == dragSnapTarget || candidate == pendingGhostTarget { return }
+        pendingGhostWorkItem?.cancel()
+        dragSnapTarget = nil
+        canvas.hideDragGhost()
+        guard dragGhostDelay > 0 else {
+            armDragGhost(candidate, on: canvas)
+            return
+        }
+        pendingGhostTarget = candidate
+        let work = DispatchWorkItem { [weak self, weak canvas] in
+            guard let self, let canvas, self.pendingGhostTarget == candidate else { return }
+            self.armDragGhost(candidate, on: canvas)
+        }
+        pendingGhostWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + dragGhostDelay, execute: work)
+    }
+
+    private func armDragGhost(_ target: TileFrame, on canvas: CanvasNSView) {
+        pendingGhostTarget = nil
+        pendingGhostWorkItem = nil
+        dragSnapTarget = target
+        canvas.showDragGhost(at: target)
+    }
+
+    private func cancelDragGhost(on canvas: CanvasNSView) {
+        teardownDragGhostState()
+        canvas.hideDragGhost()
+    }
+
+    private func teardownDragGhostState() {
+        pendingGhostWorkItem?.cancel()
+        pendingGhostWorkItem = nil
+        pendingGhostTarget = nil
+        dragSnapTarget = nil
     }
 
     // MARK: - Cursor affordance
