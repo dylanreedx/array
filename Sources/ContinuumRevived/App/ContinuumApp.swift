@@ -203,6 +203,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--leader-activation-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runLeaderActivationSelfCheck()
+                print("ContinuumRevivedLeaderActivationChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--palette-browser-spawn-check") {
             do {
                 _ = NSApplication.shared
@@ -952,12 +964,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var profilePalette: LaunchProfilePalette?
     private var settingsPanel: SettingsPanel?
     private let focusBroker = FocusBroker()
-    private var navKeymap: NavKeymap = .default
+    private var navKeymap: NavKeymap = .default {
+        didSet { leaderDwell = TimeInterval(navKeymap.leaderDwellMs) / 1000 }
+    }
     private var qaPerf: QAPerf?
     private var launchStartTime: CFTimeInterval?
     private lazy var browserRuntimeBudget = BrowserRuntimeBudget(maxLive: BrowserRuntimeBudget.resolveMaxLive())
     private lazy var terminalSpawnAdmission = TerminalSpawnAdmission(maxLive: TerminalSpawnAdmission.resolveMaxLive())
     private var hotkeyMonitor: Any?
+    private var flagsMonitor: Any?
+    /// Pending hold-leader dwell. Armed when the leader modifier is held alone,
+    /// cancelled on release / another modifier, fired → enter the leader.
+    private var leaderDwellWorkItem: DispatchWorkItem?
+    /// Hold-leader dwell in seconds (mirrors `navKeymap.leaderDwellMs`). Overridable
+    /// so the self-check can arm synchronously (0) — the `dragGhostDelay` pattern.
+    var leaderDwell: TimeInterval = 0.3
     private var passThroughNavModeLeaderEvent: NSEvent?
     private var lastNeedsAttentionCount = 0
     private var tileFocusMonitor: Any?
@@ -1684,6 +1705,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return self.handleHotkey(event) ? nil : event
         }
         self.hotkeyMonitor = monitor
+        // Detect the held leader modifier. Never consume `.flagsChanged` (the
+        // modifier itself must still flow to content); we only observe transitions
+        // to arm/exit the hold-`⌥` leader.
+        let flags = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            self?.handleFlagsChanged(event)
+            return event
+        }
+        self.flagsMonitor = flags
+    }
+
+    /// Observe a modifier-flags transition: if the configured leader modifier is now
+    /// held ALONE (no other modifier), arm the dwell → enter the leader; on any other
+    /// transition (released, or a second modifier joined) cancel the pending dwell and
+    /// exit the leader if open.
+    func handleFlagsChanged(_ event: NSEvent) {
+        let modifiers = FocusKeyModifiers(modifierFlags: event.modifierFlags)
+        let leaderModifier = navKeymap.leaderHoldModifier
+        if !leaderModifier.isEmpty, modifiers == leaderModifier {
+            scheduleLeaderActivation()
+        } else {
+            disarmLeader()
+        }
     }
 
     /// Body clicks (terminal surface, NSTextView, WKWebView, file tree row…)
@@ -1813,6 +1856,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return true
         }
 
+        // Hold-`⌥` leader: while active, keys route to the leader handler BEFORE the
+        // reserved/onlyCommand path, and unmatched keys are swallowed so nothing leaks
+        // to terminal/text content. Release of the leader modifier exits via
+        // `handleFlagsChanged`.
+        if focusBroker.activeSurface == .modal(.leader) {
+            return handleLeaderKey(event)
+        }
+
         if profilePalette?.handleKeyEvent(event) == true {
             return true
         }
@@ -1856,6 +1907,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         focusBroker.closeModal(.navMode)
         navSelectedZoneId = nil
         canvasView?.setNavModeOverlayVisible(false)
+    }
+
+    // MARK: - Hold-`⌥` leader
+
+    /// Arm the dwell when the leader modifier is held alone; once it fires (or
+    /// synchronously when `leaderDwell <= 0`) the leader scope opens. No-op if a
+    /// modal is already active or the leader is already armed/open.
+    private func scheduleLeaderActivation() {
+        if let surface = focusBroker.activeSurface, case .modal = surface { return }
+        guard leaderDwellWorkItem == nil else { return }
+        if leaderDwell <= 0 {
+            activateLeader()
+            return
+        }
+        let work = DispatchWorkItem { [weak self] in
+            self?.leaderDwellWorkItem = nil
+            self?.activateLeader()
+        }
+        leaderDwellWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + leaderDwell, execute: work)
+    }
+
+    private func activateLeader() {
+        guard focusBroker.activeSurface != .modal(.leader) else { return }
+        focusBroker.openModal(.leader)
+        // HUD (labels) arrives in Phase C.
+    }
+
+    /// Cancel a pending dwell and exit the leader if open (modifier released or a
+    /// second modifier joined).
+    private func disarmLeader() {
+        leaderDwellWorkItem?.cancel()
+        leaderDwellWorkItem = nil
+        if focusBroker.activeSurface == .modal(.leader) {
+            focusBroker.closeModal(.leader)
+        }
+    }
+
+    /// Keys while the leader is held. Esc exits; jump (Phase C) and arrow-snap
+    /// (Phase D) land here. Everything is swallowed so nothing leaks to content.
+    private func handleLeaderKey(_ event: NSEvent) -> Bool {
+        if event.keyCode == 53 { // Esc
+            disarmLeader()
+            return true
+        }
+        return true
     }
 
     private func handleNavModeKey(_ event: NSEvent) {
@@ -2394,6 +2491,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         panel.onClose = { [weak self] in
             self?.focusBroker.closeModal(.settings)
             self?.settingsPanel = nil
+            // Pick up Navigation-section edits (leader modifier / hold delay), which
+            // persist to continuum.keymap.* but don't flow through onKeymapChanged.
+            self?.applyEditedNavKeymap(NavKeymap.resolve())
         }
         panel.onKeymapChanged = { [weak self] keymap in
             self?.applyEditedNavKeymap(keymap)
@@ -5592,6 +5692,104 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "activeSurface": String(describing: delegate.focusBroker.activeSurface),
             "lastActiveTileId": canvas.canvasState.lastActiveTileId?.uuidString ?? "nil",
         ]
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// Drives the REAL hold-`⌥` leader path: synthesizes `.flagsChanged` `NSEvent`s
+    /// through `handleFlagsChanged` and asserts the leader scope opens/closes, that a
+    /// second modifier doesn't arm it, that a pending dwell (no run loop) doesn't
+    /// activate, and that a rebound leader modifier + custom dwell are honored. No
+    /// bypass — the monitor handler is the same one the `.flagsChanged` monitor calls.
+    static func runLeaderActivationSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func flagsEvent(_ mods: NSEvent.ModifierFlags, keyCode: UInt16) throws -> NSEvent {
+            guard let e = NSEvent.keyEvent(with: .flagsChanged, location: .zero, modifierFlags: mods, timestamp: 0, windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: keyCode) else {
+                throw CheckError.failed("could not synthesize .flagsChanged for \(mods)")
+            }
+            return e
+        }
+        func keyDown(_ key: String, _ keyCode: UInt16, mods: NSEvent.ModifierFlags) throws -> NSEvent {
+            guard let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: mods, timestamp: 0, windowNumber: 0, context: nil, characters: key, charactersIgnoringModifiers: key, isARepeat: false, keyCode: keyCode) else {
+                throw CheckError.failed("could not synthesize keyDown \(key)")
+            }
+            return e
+        }
+
+        let tileId = UUID(uuidString: "00000000-0000-0000-0000-00000000DEAD")!
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [Tile(id: tileId, kind: .note, title: "L", frame: TileFrame(x: 40, y: 40, width: 200, height: 150), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())], groups: [], lastActiveTileId: tileId))
+        canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        let app = AppDelegate()
+        app.canvasView = canvas
+        canvas.focusBroker = app.focusBroker // registers canvas + tile adapters
+        _ = app.focusBroker.requestFocus(.canvas, reason: .userClick)
+        try expect(app.focusBroker.activeSurface == .canvas, "precondition: canvas scope; got \(String(describing: app.focusBroker.activeSurface))")
+
+        // 1) Leader modifier held alone, dwell 0 → leader activates synchronously.
+        app.leaderDwell = 0
+        app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58)) // 58 = left Option
+        try expect(app.focusBroker.activeSurface == .modal(.leader), "⌥ held alone should activate the leader; got \(String(describing: app.focusBroker.activeSurface))")
+
+        // 2) Keys while the leader is held are swallowed (no leak to content).
+        let swallowed = app.handleHotkey(try keyDown("a", 0, mods: [.option]))
+        try expect(swallowed == true, "leader must swallow keys while held")
+
+        // 3) Releasing the modifier exits the leader, restoring the prior scope.
+        app.handleFlagsChanged(try flagsEvent([], keyCode: 58))
+        try expect(app.focusBroker.activeSurface == .canvas, "releasing ⌥ should exit the leader and restore canvas; got \(String(describing: app.focusBroker.activeSurface))")
+
+        // 4) Leader modifier + a second modifier does NOT activate.
+        app.handleFlagsChanged(try flagsEvent([.option, .command], keyCode: 58))
+        try expect(app.focusBroker.activeSurface == .canvas, "⌥+⌘ must not arm the leader")
+        app.handleFlagsChanged(try flagsEvent([], keyCode: 58))
+
+        // 5) A real (>0) dwell with no run-loop spin does NOT activate (gates a quick tap).
+        app.leaderDwell = 5
+        app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        try expect(app.focusBroker.activeSurface == .canvas, "a pending dwell (no run loop) must not activate")
+        app.handleFlagsChanged(try flagsEvent([], keyCode: 58)) // release cancels the pending dwell
+        try expect(app.focusBroker.activeSurface == .canvas, "release with a pending dwell stays in canvas")
+
+        // 6) A REBOUND leader modifier (⌃) + custom dwell ms is honored end-to-end.
+        var rebound = NavKeymap.default
+        rebound.leaderHoldModifier = .control
+        rebound.leaderDwellMs = 120
+        app.navKeymap = rebound // didSet syncs leaderDwell
+        try expect(abs(app.leaderDwell - 0.12) < 0.0001, "custom dwell ms should drive leaderDwell; got \(app.leaderDwell)")
+        app.leaderDwell = 0
+        app.handleFlagsChanged(try flagsEvent([.control], keyCode: 59)) // 59 = Control
+        try expect(app.focusBroker.activeSurface == .modal(.leader), "rebound leader modifier (⌃) should activate")
+        app.handleFlagsChanged(try flagsEvent([], keyCode: 59))
+        try expect(app.focusBroker.activeSurface == .canvas, "releasing the rebound modifier exits the leader")
+        app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        try expect(app.focusBroker.activeSurface == .canvas, "the old ⌥ must NOT activate after rebinding the leader to ⌃")
+        app.handleFlagsChanged(try flagsEvent([], keyCode: 58))
+
+        let manifest: [String: Any] = [
+            "check": "leader-activation",
+            "path": "synthesized .flagsChanged NSEvents → AppDelegate.handleFlagsChanged (real monitor handler)",
+            "defaultLeaderModifier": NavKeymap.modifierToken(NavKeymap.default.leaderHoldModifier),
+            "defaultDwellMs": NavKeymap.default.leaderDwellMs,
+            "reboundModifier": "ctrl",
+            "reboundDwellMs": 120,
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("leader-activation", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)

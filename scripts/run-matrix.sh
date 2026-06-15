@@ -77,6 +77,7 @@ run_app_check .build/debug/continuum-revived --palette-browser-spawn-check
 run_app_check .build/debug/continuum-revived --spawn-focus-policy-check
 run_app_check .build/debug/continuum-revived --focus-broker-activation-check
 run_app_check .build/debug/continuum-revived --nav-mode-check
+run_app_check .build/debug/continuum-revived --leader-activation-check
 run_app_check .build/debug/continuum-revived --palette-captures-keys-over-browser-check
 run_app_check .build/debug/continuum-revived --zindex-relaunch-hit-test-check
 run_app_check .build/debug/continuum-revived --single-zone-compat-check

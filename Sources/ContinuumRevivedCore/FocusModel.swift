@@ -7,6 +7,7 @@ public enum FocusModalKind: String, Codable, Equatable, Hashable, Sendable {
     case settings
     case navMode
     case focusMode
+    case leader
 }
 
 public enum FocusSurfaceID: Codable, Equatable, Hashable, Sendable {

@@ -133,6 +133,13 @@ public struct KeyChord: Equatable, Hashable, Sendable {
 
 public struct NavKeymap: Equatable, Sendable {
     public var leader: KeyChord
+    /// The modifier that, held alone past `leaderDwellMs`, enters the hold-`⌥`
+    /// leader (jump/snap). Distinct from `leader` (the legacy `⌃Space` toggle):
+    /// this is a held modifier, not a key-down chord. Default `.option`.
+    public var leaderHoldModifier: FocusKeyModifiers
+    /// Dwell in milliseconds before the held leader activates (so a quick tap of
+    /// the modifier never enters the mode and never eats `⌥`+key typing). Default 300.
+    public var leaderDwellMs: Int
     public var up: String
     public var down: String
     public var left: String
@@ -146,8 +153,10 @@ public struct NavKeymap: Equatable, Sendable {
     public var focusMode: String
     public var deleteTile: String
 
-    public init(leader: KeyChord, up: String, down: String, left: String, right: String, nextZone: String, previousZone: String, zonePicker: String, workspacePicker: String, agentCycle: String, agentNeedsAttention: String, focusMode: String, deleteTile: String) {
+    public init(leader: KeyChord, leaderHoldModifier: FocusKeyModifiers = .option, leaderDwellMs: Int = 300, up: String, down: String, left: String, right: String, nextZone: String, previousZone: String, zonePicker: String, workspacePicker: String, agentCycle: String, agentNeedsAttention: String, focusMode: String, deleteTile: String) {
         self.leader = leader
+        self.leaderHoldModifier = leaderHoldModifier
+        self.leaderDwellMs = leaderDwellMs
         self.up = up
         self.down = down
         self.left = left
@@ -164,10 +173,36 @@ public struct NavKeymap: Equatable, Sendable {
 
     public static let `default` = NavKeymap(
         leader: KeyChord(keyCode: 49, modifiers: .control),
+        leaderHoldModifier: .option,
+        leaderDwellMs: 300,
         up: "k", down: "j", left: "h", right: "l",
         nextZone: "n", previousZone: "p", zonePicker: "z", workspacePicker: "w",
         agentCycle: "a", agentNeedsAttention: "A", focusMode: "f", deleteTile: "x"
     )
+
+    /// Canonical UserDefaults keys for the hold-leader config (so Settings binds to
+    /// the EXACT keys `resolve`/`persist` read).
+    public static let leaderHoldDefaultsKey = "continuum.keymap.leaderHold"
+    public static let leaderDwellDefaultsKey = "continuum.keymap.leaderDwellMs"
+    public static let leaderHoldModifierOptions = ["opt", "ctrl", "cmd", "shift"]
+
+    /// Single-modifier token serialization for the hold-leader (`opt`/`ctrl`/`cmd`/`shift`).
+    public static func modifierToken(_ modifier: FocusKeyModifiers) -> String {
+        if modifier == .control { return "ctrl" }
+        if modifier == .command { return "cmd" }
+        if modifier == .shift { return "shift" }
+        return "opt"
+    }
+
+    public static func parseModifierToken(_ value: String) -> FocusKeyModifiers? {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "opt", "option", "alt": return .option
+        case "ctrl", "control": return .control
+        case "cmd", "command": return .command
+        case "shift": return .shift
+        default: return nil
+        }
+    }
 
     public var hintLine: String {
         "\(left)\(down)\(up)\(right) move · \(agentCycle) agents · \(agentNeedsAttention) needs you · 1-9 zone · 0 fit all · \(zonePicker)/\(workspacePicker) pick · ⏎ focus · esc exit"
@@ -196,6 +231,12 @@ public struct NavKeymap: Equatable, Sendable {
         if let leader = string("leader") {
             if let chord = parseLeaderChord(leader) { map.leader = chord } else { warn("Invalid continuum.keymap.leader '\(leader)'; using default control+space") }
         }
+        if let hold = string("leaderHold") {
+            if let modifier = parseModifierToken(hold) { map.leaderHoldModifier = modifier } else { warn("Invalid continuum.keymap.leaderHold '\(hold)'; using default opt") }
+        }
+        if let dwell = string("leaderDwellMs") {
+            if let value = Int(dwell), value >= 0 { map.leaderDwellMs = value } else { warn("Invalid continuum.keymap.leaderDwellMs '\(dwell)'; using default 300") }
+        }
         func apply(_ name: String, _ set: (String) -> Void) {
             guard let value = string(name) else { return }
             guard value.count == 1 else { warn("Invalid continuum.keymap.\(name) '\(value)'; using default"); return }
@@ -219,6 +260,8 @@ public struct NavKeymap: Equatable, Sendable {
     public func persist(to defaults: UserDefaults = .standard) {
         let prefix = "continuum.keymap."
         defaults.set(leader.serialized, forKey: prefix + "leader")
+        defaults.set(NavKeymap.modifierToken(leaderHoldModifier), forKey: prefix + "leaderHold")
+        defaults.set(String(leaderDwellMs), forKey: prefix + "leaderDwellMs")
         defaults.set(up, forKey: prefix + "up")
         defaults.set(down, forKey: prefix + "down")
         defaults.set(left, forKey: prefix + "left")

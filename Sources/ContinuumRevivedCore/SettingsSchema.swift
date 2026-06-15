@@ -19,6 +19,23 @@ public enum SettingsSchema {
                 ]
             ),
             SettingsSection(
+                id: "navigation",
+                title: "Navigation",
+                fields: [
+                    .choice(
+                        key: NavKeymap.leaderHoldDefaultsKey,
+                        label: "Leader Modifier (hold)",
+                        options: NavKeymap.leaderHoldModifierOptions,
+                        default: NavKeymap.modifierToken(NavKeymap.default.leaderHoldModifier)
+                    ),
+                    .text(
+                        key: NavKeymap.leaderDwellDefaultsKey,
+                        label: "Leader Hold Delay (ms)",
+                        default: String(NavKeymap.default.leaderDwellMs)
+                    ),
+                ]
+            ),
+            SettingsSection(
                 id: "general",
                 title: "General",
                 fields: [

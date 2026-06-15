@@ -2548,6 +2548,28 @@ do {
         fatalError("unreachable")
     }
     defer { UserDefaults().removePersistentDomain(forName: defaultsName) }
+    // Hold-leader config: default, override, persist round-trip, invalid → default.
+    expect(NavKeymap.default.leaderHoldModifier == .option, "default hold-leader modifier is ⌥")
+    expect(NavKeymap.default.leaderDwellMs == 300, "default hold-leader dwell is 300ms")
+    defaults.set("ctrl", forKey: "continuum.keymap.leaderHold")
+    defaults.set("150", forKey: "continuum.keymap.leaderDwellMs")
+    let resolvedLeader = NavKeymap.resolve(defaults: defaults, warn: { _ in })
+    expect(resolvedLeader.leaderHoldModifier == .control, "leaderHold override resolves to ⌃, got \(resolvedLeader.leaderHoldModifier)")
+    expect(resolvedLeader.leaderDwellMs == 150, "leaderDwellMs override resolves, got \(resolvedLeader.leaderDwellMs)")
+    defaults.set("bogus", forKey: "continuum.keymap.leaderHold")
+    defaults.set("-5", forKey: "continuum.keymap.leaderDwellMs")
+    let rejected = NavKeymap.resolve(defaults: defaults, warn: { _ in })
+    expect(rejected.leaderHoldModifier == .option && rejected.leaderDwellMs == 300, "invalid hold-leader config falls back to defaults, got \(rejected.leaderHoldModifier)/\(rejected.leaderDwellMs)")
+    let persistSuite = "NavKeymapLeaderPersist-\(UUID().uuidString)"
+    let persistDefaults = UserDefaults(suiteName: persistSuite)!
+    defer { UserDefaults().removePersistentDomain(forName: persistSuite) }
+    var custom = NavKeymap.default
+    custom.leaderHoldModifier = .command
+    custom.leaderDwellMs = 220
+    custom.persist(to: persistDefaults)
+    let roundTrip = NavKeymap.resolve(defaults: persistDefaults, warn: { _ in })
+    expect(roundTrip.leaderHoldModifier == .command && roundTrip.leaderDwellMs == 220, "persist→resolve round-trips the hold-leader config, got \(roundTrip.leaderHoldModifier)/\(roundTrip.leaderDwellMs)")
+
     expect(TileGapResolver.resolvedGap(defaults: defaults) == 8, "Default tile gap is 8pt")
     defaults.set(12.5, forKey: TileGapResolver.userDefaultsKey)
     expect(TileGapResolver.resolvedGap(defaults: defaults) == 12.5, "Tile gap resolver honors positive override")
