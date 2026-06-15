@@ -2402,19 +2402,36 @@ do {
 }
 
 do {
-    let moving = TileFrame(x: 100, y: 100, width: 50, height: 50)
-    let left = TileFrame(x: 20, y: 110, width: 40, height: 40)
+    let moving = TileFrame(x: 100, y: 100, width: 50, height: 50)   // x 100–150, y 100–150
+    let left = TileFrame(x: 20, y: 110, width: 40, height: 40)       // right edge 60, in row
     let fartherLeft = TileFrame(x: -80, y: 110, width: 40, height: 40)
-    let nonOverlapping = TileFrame(x: 20, y: 10, width: 40, height: 40)
-    let thrownLeft = TileArrangement.throwDestination(moving, direction: .left, others: [fartherLeft, nonOverlapping, left], gap: 8)
-    expect(thrownLeft == TileFrame(x: 68, y: 100, width: 50, height: 50), "Throw left stops at first obstructing neighbor plus gap, got \(thrownLeft)")
+    let offRow = TileFrame(x: 20, y: 10, width: 40, height: 40)      // also left, but a row up
 
-    let thrownRightNoObstacle = TileArrangement.throwDestination(moving, direction: .right, others: [left], gap: 8)
-    expect(thrownRightNoObstacle == TileFrame(x: 68, y: 100, width: 50, height: 50), "Throw right without obstacle becomes outermost against other tile bounds, got \(thrownRightNoObstacle)")
+    // Throw left parks gap-adjacent to the NEAREST tile ahead on the left,
+    // favoring the in-row neighbor over an equally-near-by-edge off-row one.
+    let thrownLeft = TileArrangement.throwDestination(moving, direction: .left, others: [fartherLeft, offRow, left], gap: 8)
+    expect(thrownLeft == TileFrame(x: 68, y: 100, width: 50, height: 50), "Throw left parks gap-adjacent to nearest left neighbor, got \(thrownLeft)")
 
-    let alreadyOutermost = TileArrangement.throwDestination(moving, direction: .right, others: [left], gap: 8)
-    let repeatedOutermost = TileArrangement.throwDestination(alreadyOutermost, direction: .right, others: [left], gap: 8)
-    expect(repeatedOutermost == alreadyOutermost, "Repeated throw at outer edge is idempotent, got \(repeatedOutermost)")
+    // Nothing lies to the right (every other tile is on the left) → NO-OP, not a
+    // fling to the far edge of the union of all tiles (the old unpredictable feel).
+    let noNeighborRight = TileArrangement.throwDestination(moving, direction: .right, others: [left, fartherLeft, offRow], gap: 8)
+    expect(noNeighborRight == moving, "Throw with no tile ahead is a no-op, got \(noNeighborRight)")
+
+    // Throw right parks gap-adjacent to the neighbor's near (left) edge, moving forward.
+    let right = TileFrame(x: 300, y: 100, width: 40, height: 40)     // left edge 300
+    let thrownRight = TileArrangement.throwDestination(moving, direction: .right, others: [right], gap: 8)
+    expect(thrownRight == TileFrame(x: 242, y: 100, width: 50, height: 50), "Throw right parks gap-left of neighbor, got \(thrownRight)")
+    expect(thrownRight.x + thrownRight.width + 8 == right.x, "Thrown tile is gap-adjacent to neighbor left edge")
+
+    // Already gap-adjacent to that neighbor → repeated throw is idempotent.
+    let again = TileArrangement.throwDestination(thrownRight, direction: .right, others: [right], gap: 8)
+    expect(again == thrownRight, "Repeated throw against the same neighbor is idempotent, got \(again)")
+
+    // Picks the NEAREST tile ahead, never a farther one.
+    let near = TileFrame(x: 200, y: 100, width: 30, height: 30)
+    let far = TileFrame(x: 400, y: 100, width: 30, height: 30)
+    let parkedAtNear = TileArrangement.throwDestination(moving, direction: .right, others: [far, near], gap: 8)
+    expect(parkedAtNear.x + parkedAtNear.width + 8 == near.x, "Throw parks at the nearest tile ahead (\(near.x)), not the far one; got \(parkedAtNear)")
 
     let sole = TileArrangement.throwDestination(moving, direction: .down, others: [], gap: 8)
     expect(sole == moving, "Sole tile throw is a no-op")

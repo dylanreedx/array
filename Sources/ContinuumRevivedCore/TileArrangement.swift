@@ -1,4 +1,3 @@
-import CoreGraphics
 import Foundation
 
 /// Pure rectangle-style tile arrangement math in world coordinates.
@@ -35,21 +34,20 @@ public enum TileArrangement {
         }
     }
 
+    /// Parks `frame` gap-adjacent to its nearest neighbor in `direction`.
+    ///
+    /// "Neighbor" = the closest tile lying strictly ahead in the throw direction
+    /// (its near edge at or past the moving tile's far edge, so the tile always
+    /// moves forward), scored by forward edge-gap biased toward orthogonal
+    /// alignment — the same `primary + 0.5·orthogonal` shape as
+    /// `CanvasEngine.nearestTile`. When nothing lies ahead the throw is a no-op:
+    /// the tile stays put rather than flinging to the far edge of the union of all
+    /// tiles (the old behavior, which dropped the tile somewhere unpredictable).
     public static func throwDestination(_ frame: TileFrame, direction: Direction, others: [TileFrame], gap: Double) -> TileFrame {
-        guard !others.isEmpty else { return frame }
-
-        let overlapping = others.filter { orthogonalExtentsOverlap(frame, $0, direction: direction) }
-        if let obstacle = firstObstacle(from: frame, direction: direction, others: overlapping) {
-            return moved(frame, direction: direction, against: obstacle, gap: gap)
+        guard let neighbor = nearestNeighbor(ahead: frame, direction: direction, among: others) else {
+            return frame
         }
-
-        let union = others.dropFirst().reduce(others[0].cgRect) { $0.union($1.cgRect) }
-        switch direction {
-        case .up: return TileFrame(x: frame.x, y: Double(union.minY) - gap - frame.height, width: frame.width, height: frame.height)
-        case .down: return TileFrame(x: frame.x, y: Double(union.maxY) + gap, width: frame.width, height: frame.height)
-        case .left: return TileFrame(x: Double(union.minX) - gap - frame.width, y: frame.y, width: frame.width, height: frame.height)
-        case .right: return TileFrame(x: Double(union.maxX) + gap, y: frame.y, width: frame.width, height: frame.height)
-        }
+        return moved(frame, direction: direction, against: neighbor, gap: gap)
     }
 
     public static func snapAdjustment(_ frame: TileFrame, others: [TileFrame], gap: Double, threshold: Double) -> SnapResult {
@@ -91,13 +89,35 @@ public enum TileArrangement {
         }
     }
 
-    private static func firstObstacle(from frame: TileFrame, direction: Direction, others: [TileFrame]) -> TileFrame? {
-        switch direction {
-        case .up: return others.filter { $0.y + $0.height <= frame.y }.max { $0.y + $0.height < $1.y + $1.height }
-        case .down: return others.filter { $0.y >= frame.y + frame.height }.min { $0.y < $1.y }
-        case .left: return others.filter { $0.x + $0.width <= frame.x }.max { $0.x + $0.width < $1.x + $1.width }
-        case .right: return others.filter { $0.x >= frame.x + frame.width }.min { $0.x < $1.x }
-        }
+    private static func nearestNeighbor(ahead frame: TileFrame, direction: Direction, among others: [TileFrame]) -> TileFrame? {
+        let frameCenterX = frame.x + frame.width / 2
+        let frameCenterY = frame.y + frame.height / 2
+        return others
+            .compactMap { other -> (frame: TileFrame, score: Double)? in
+                let primary: Double
+                let orthogonal: Double
+                switch direction {
+                case .left:
+                    guard other.x + other.width <= frame.x else { return nil }
+                    primary = frame.x - (other.x + other.width)
+                    orthogonal = abs((other.y + other.height / 2) - frameCenterY)
+                case .right:
+                    guard other.x >= frame.x + frame.width else { return nil }
+                    primary = other.x - (frame.x + frame.width)
+                    orthogonal = abs((other.y + other.height / 2) - frameCenterY)
+                case .up:
+                    guard other.y + other.height <= frame.y else { return nil }
+                    primary = frame.y - (other.y + other.height)
+                    orthogonal = abs((other.x + other.width / 2) - frameCenterX)
+                case .down:
+                    guard other.y >= frame.y + frame.height else { return nil }
+                    primary = other.y - (frame.y + frame.height)
+                    orthogonal = abs((other.x + other.width / 2) - frameCenterX)
+                }
+                return (other, primary + 0.5 * orthogonal)
+            }
+            .min { $0.score < $1.score }?
+            .frame
     }
 
     private static func moved(_ frame: TileFrame, direction: Direction, against obstacle: TileFrame, gap: Double) -> TileFrame {
@@ -118,8 +138,4 @@ public enum TileGapResolver {
         let value = defaults.double(forKey: userDefaultsKey)
         return value.isFinite && value > 0 ? value : defaultGap
     }
-}
-
-private extension TileFrame {
-    var cgRect: CGRect { CGRect(x: x, y: y, width: width, height: height) }
 }

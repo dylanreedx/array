@@ -6632,9 +6632,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         let tileId = UUID(uuidString: "00000000-0000-0000-0000-0000000006A1")!
+        let neighborId = UUID(uuidString: "00000000-0000-0000-0000-0000000006A2")!
         let startFrame = TileFrame(x: 80, y: 80, width: 200, height: 150)
+        let neighborFrame = TileFrame(x: 520, y: 80, width: 200, height: 150)
         let tile = Tile(id: tileId, kind: .note, title: "GATE", frame: startFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile], groups: [], lastActiveTileId: nil))
+        let neighbor = Tile(id: neighborId, kind: .note, title: "GATE_NEIGHBOR", frame: neighborFrame, zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile, neighbor], groups: [], lastActiveTileId: nil))
         let appDelegate = AppDelegate()
         appDelegate.canvasView = canvas
         let focusBroker = appDelegate.focusBroker
@@ -6646,6 +6649,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         window.orderFrontRegardless()
         let view = TileNSView(tile: tile)
         canvas.install(tileView: view, for: tile)
+        canvas.install(tileView: TileNSView(tile: neighbor), for: neighbor)
         canvas.layoutSubtreeIfNeeded()
 
         // Focus the tile through the production click router (title-bar click).
@@ -6664,6 +6668,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(resizeConsumed == true, "⌘⌃-3 must be consumed by handleHotkey (the gate no longer drops non-⌘ chords); got \(resizeConsumed)")
         try expect(resized.width > startFrame.width && resized.height > startFrame.height, "⌘⌃-3 must resize the focused tile to the large preset via the real key path; start \(startFrame.width)x\(startFrame.height) got \(resized.width)x\(resized.height)")
 
+        // 1b) ⌘⌃-→ (keyCode 124 = throw right) through the REAL handler parks the
+        //     focused tile gap-adjacent to its neighbor's near edge — and moves it
+        //     FORWARD, never flinging it to a far union edge. Reset to a known frame
+        //     first (the resize above grew it), and derive the expectation from the
+        //     pure Core math (source of truth), not a copied constant.
+        var resetTile = canvas.canvasState.tiles.first(where: { $0.id == tileId })!
+        resetTile.frame = startFrame
+        canvas.updateTile(resetTile)
+        try expect(frameNow() == startFrame, "precondition: focused tile reset to start frame; got \(frameNow())")
+        let throwGap = TileGapResolver.resolvedGap()
+        let expectedThrow = TileArrangement.throwDestination(startFrame, direction: .right, others: [neighborFrame], gap: throwGap)
+        guard let throwEvent = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command, .control], timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "\u{F703}", charactersIgnoringModifiers: "\u{F703}", isARepeat: false, keyCode: 124) else {
+            throw CheckError.failed("could not synthesize ⌘⌃-→ keyDown")
+        }
+        let throwConsumed = appDelegate.handleHotkey(throwEvent)
+        let thrown = frameNow()
+        try expect(throwConsumed == true, "⌘⌃-→ must be consumed by handleHotkey via the real key path; got \(throwConsumed)")
+        try expect(thrown == expectedThrow, "⌘⌃-→ must park the tile where TileArrangement.throwDestination says (\(expectedThrow)); got \(thrown)")
+        try expect(thrown.x > startFrame.x, "throw right must move the tile forward (toward the neighbor), not backward; start x=\(startFrame.x) got x=\(thrown.x)")
+        try expect(thrown.x + thrown.width + throwGap == neighborFrame.x, "thrown tile must be gap-adjacent to neighbor left edge \(neighborFrame.x); got right+gap=\(thrown.x + thrown.width + throwGap)")
+
         // 2) An unmodified key still passes through (handler returns false).
         guard let plainEvent = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "a", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0) else {
             throw CheckError.failed("could not synthesize plain 'a' keyDown")
@@ -6677,8 +6702,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "tileId": tileId.uuidString,
             "startFrame": ["x": startFrame.x, "y": startFrame.y, "w": startFrame.width, "h": startFrame.height],
             "afterResize": ["x": resized.x, "y": resized.y, "w": resized.width, "h": resized.height],
+            "afterThrow": ["x": thrown.x, "y": thrown.y, "w": thrown.width, "h": thrown.height],
             "resizeChord": "cmd+ctrl+3",
+            "throwChord": "cmd+ctrl+right",
             "resizeConsumed": resizeConsumed,
+            "throwConsumed": throwConsumed,
             "plainKeyConsumed": plainConsumed,
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
