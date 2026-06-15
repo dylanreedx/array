@@ -2167,7 +2167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `AppDelegate` instance — treats all tile actions as non-passthrough.
     static func isPassthroughTileAction(_ action: TileAction) -> Bool {
         switch action {
-        case .resizeToPreset, .throwToNeighbor,
+        case .resizeToPreset,
              .browserFind, .browserFocusURL, .browserReload, .browserBack, .browserForward, .noteExport:
             return false
         }
@@ -2185,11 +2185,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         switch action {
         case let .resizeToPreset(preset):
             return resizeFocusedTile(to: preset)
-        case let .throwToNeighbor(direction):
-            return moveFocusedTile { frame, gap in
-                let others = self.otherTileFrames()
-                return TileArrangement.throwDestination(frame, direction: Self.arrangementDirection(direction), others: others, gap: gap)
-            }
         case .browserFind:
             guard let browser = focusedTileView() as? BrowserTileNSView else { return false }
             browser.performFindAction()
@@ -2217,15 +2212,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private static func arrangementDirection(_ direction: TileActionDirection) -> TileArrangement.Direction {
-        switch direction {
-        case .up: return .up
-        case .down: return .down
-        case .left: return .left
-        case .right: return .right
-        }
-    }
-
     /// The focused tile (from `reservedDispatchScope`'s `.tile(id)`) in the live
     /// canvas model, or nil when scope is canvas/modal or no canvas exists.
     private func focusedTile() -> Tile? {
@@ -2242,14 +2228,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return canvasView.tileView(for: tileId)
     }
 
-    /// World frames of every tile except the focused one — input for throw math.
-    private func otherTileFrames() -> [TileFrame] {
-        guard let canvasView, let focused = focusedTile() else { return [] }
-        return canvasView.canvasState.tiles
-            .filter { $0.id != focused.id }
-            .map { $0.frame }
-    }
-
     /// Resize the focused tile to a preset. Keeps the tile's top-left origin
     /// (matches drag/world convention) for the scale ladder; `fillViewport`
     /// sets origin + size to the visible world rect.
@@ -2263,16 +2241,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let scale = Self.resizeScale(for: preset)
             tile.frame = TileFrame(x: tile.frame.x, y: tile.frame.y, width: Double(base.width) * scale, height: Double(base.height) * scale)
         }
-        canvasView.updateTile(tile)
-        return true
-    }
-
-    /// Apply a pure position transform (`transform(frame, gap) -> frame`) to the
-    /// focused tile and commit. Used by throw.
-    private func moveFocusedTile(_ transform: (TileFrame, Double) -> TileFrame) -> Bool {
-        guard let canvasView, var tile = focusedTile() else { return false }
-        let gap = TileGapResolver.resolvedGap()
-        tile.frame = transform(tile.frame, gap)
         canvasView.updateTile(tile)
         return true
     }
@@ -6632,12 +6600,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         let tileId = UUID(uuidString: "00000000-0000-0000-0000-0000000006A1")!
-        let neighborId = UUID(uuidString: "00000000-0000-0000-0000-0000000006A2")!
         let startFrame = TileFrame(x: 80, y: 80, width: 200, height: 150)
-        let neighborFrame = TileFrame(x: 520, y: 80, width: 200, height: 150)
         let tile = Tile(id: tileId, kind: .note, title: "GATE", frame: startFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let neighbor = Tile(id: neighborId, kind: .note, title: "GATE_NEIGHBOR", frame: neighborFrame, zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
-        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile, neighbor], groups: [], lastActiveTileId: nil))
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile], groups: [], lastActiveTileId: nil))
         let appDelegate = AppDelegate()
         appDelegate.canvasView = canvas
         let focusBroker = appDelegate.focusBroker
@@ -6649,7 +6614,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         window.orderFrontRegardless()
         let view = TileNSView(tile: tile)
         canvas.install(tileView: view, for: tile)
-        canvas.install(tileView: TileNSView(tile: neighbor), for: neighbor)
         canvas.layoutSubtreeIfNeeded()
 
         // Focus the tile through the production click router (title-bar click).
@@ -6668,26 +6632,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(resizeConsumed == true, "⌘⌃-3 must be consumed by handleHotkey (the gate no longer drops non-⌘ chords); got \(resizeConsumed)")
         try expect(resized.width > startFrame.width && resized.height > startFrame.height, "⌘⌃-3 must resize the focused tile to the large preset via the real key path; start \(startFrame.width)x\(startFrame.height) got \(resized.width)x\(resized.height)")
 
-        // 1b) ⌘⌃-→ (keyCode 124 = throw right) through the REAL handler parks the
-        //     focused tile gap-adjacent to its neighbor's near edge — and moves it
-        //     FORWARD, never flinging it to a far union edge. Reset to a known frame
-        //     first (the resize above grew it), and derive the expectation from the
-        //     pure Core math (source of truth), not a copied constant.
-        var resetTile = canvas.canvasState.tiles.first(where: { $0.id == tileId })!
-        resetTile.frame = startFrame
-        canvas.updateTile(resetTile)
-        try expect(frameNow() == startFrame, "precondition: focused tile reset to start frame; got \(frameNow())")
-        let throwGap = TileGapResolver.resolvedGap()
-        let expectedThrow = TileArrangement.throwDestination(startFrame, direction: .right, others: [neighborFrame], gap: throwGap)
+        // 1b) ⌘⌃-→ (keyCode 124, the old one-shot "throw right") now passes through
+        //     the REAL handler — the throw binding was removed; keyboard snapping is
+        //     being rebuilt inside the leader (docs/30). Assert the handler does NOT
+        //     consume it and the focused tile does not move.
         guard let throwEvent = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command, .control], timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "\u{F703}", charactersIgnoringModifiers: "\u{F703}", isARepeat: false, keyCode: 124) else {
             throw CheckError.failed("could not synthesize ⌘⌃-→ keyDown")
         }
         let throwConsumed = appDelegate.handleHotkey(throwEvent)
-        let thrown = frameNow()
-        try expect(throwConsumed == true, "⌘⌃-→ must be consumed by handleHotkey via the real key path; got \(throwConsumed)")
-        try expect(thrown == expectedThrow, "⌘⌃-→ must park the tile where TileArrangement.throwDestination says (\(expectedThrow)); got \(thrown)")
-        try expect(thrown.x > startFrame.x, "throw right must move the tile forward (toward the neighbor), not backward; start x=\(startFrame.x) got x=\(thrown.x)")
-        try expect(thrown.x + thrown.width + throwGap == neighborFrame.x, "thrown tile must be gap-adjacent to neighbor left edge \(neighborFrame.x); got right+gap=\(thrown.x + thrown.width + throwGap)")
+        try expect(throwConsumed == false, "⌘⌃-→ must pass through now that the throw binding is removed; got \(throwConsumed)")
+        try expect(frameNow() == resized, "⌘⌃-→ must not move the focused tile (throw removed); frame=\(frameNow())")
 
         // 2) An unmodified key still passes through (handler returns false).
         guard let plainEvent = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "a", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0) else {
@@ -6702,11 +6656,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "tileId": tileId.uuidString,
             "startFrame": ["x": startFrame.x, "y": startFrame.y, "w": startFrame.width, "h": startFrame.height],
             "afterResize": ["x": resized.x, "y": resized.y, "w": resized.width, "h": resized.height],
-            "afterThrow": ["x": thrown.x, "y": thrown.y, "w": thrown.width, "h": thrown.height],
             "resizeChord": "cmd+ctrl+3",
-            "throwChord": "cmd+ctrl+right",
             "resizeConsumed": resizeConsumed,
-            "throwConsumed": throwConsumed,
+            "throwChordPassesThrough": throwConsumed == false,
             "plainKeyConsumed": plainConsumed,
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
@@ -6721,13 +6673,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return artifact
     }
 
-    /// Drives the real A3 sizing/positioning executors against a focused tile.
-    /// Builds a canvas + two tiles (mirroring `--focus-scope-dispatch-check`),
-    /// focuses tile A through the production click router, then calls the real
-    /// `executeTileAction` and asserts the committed world frame in
+    /// Drives the real A3 sizing executor against a focused tile. Builds a canvas
+    /// with one tile, focuses it through the production click router, then calls the
+    /// real `executeTileAction` and asserts the committed world frame in
     /// `canvasState.tiles`. Expectations are derived INDEPENDENTLY from the pure
-    /// Core math (`TileGeometry`, `TileArrangement`), never copied from the
-    /// executor. Also asserts an action with no focused tile returns false.
+    /// Core math (`TileGeometry`), never copied from the executor. Also asserts an
+    /// action with no focused tile returns false.
     static func runTileActionSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)
@@ -6740,17 +6691,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         func approx(_ a: Double, _ b: Double, _ tol: Double = 0.001) -> Bool { abs(a - b) <= tol }
 
-        // Two note tiles; A is the action target, B is the throw neighbor. The
-        // gap between A's right edge (340) and B's left edge (480) is 140 world
-        // units so A lands gap-adjacent to B when thrown right.
+        // One note tile; A is the resize action target.
         let tileAId = UUID(uuidString: "00000000-0000-0000-0000-0000000003A1")!
-        let tileBId = UUID(uuidString: "00000000-0000-0000-0000-0000000003B2")!
         let startFrame = TileFrame(x: 60, y: 60, width: 280, height: 200)
-        let neighborFrame = TileFrame(x: 480, y: 60, width: 280, height: 200)
         let tileA = Tile(id: tileAId, kind: .note, title: "ACTION_A", frame: startFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let tileB = Tile(id: tileBId, kind: .note, title: "ACTION_B", frame: neighborFrame, zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
         let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
-        let canvas = CanvasNSView(canvasState: CanvasState(viewport: viewport, tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: viewport, tiles: [tileA], groups: [], lastActiveTileId: nil))
 
         let appDelegate = AppDelegate()
         appDelegate.canvasView = canvas
@@ -6764,9 +6710,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         window.orderFrontRegardless()
 
         let viewA = TileNSView(tile: tileA)
-        let viewB = TileNSView(tile: tileB)
         canvas.install(tileView: viewA, for: tileA)
-        canvas.install(tileView: viewB, for: tileB)
         canvas.layoutSubtreeIfNeeded()
 
         func frameOfA() -> TileFrame { canvas.canvasState.tiles.first(where: { $0.id == tileAId })!.frame }
@@ -6802,58 +6746,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(approx(afterCompact.width, Double(expectedCompact.width)) && approx(afterCompact.height, Double(expectedCompact.height)), "compact size mismatch: got \(afterCompact.width)x\(afterCompact.height), expected \(expectedCompact.width)x\(expectedCompact.height)")
         try expect(afterCompact.width < afterLarge.width && afterCompact.height < afterLarge.height, "compact must shrink vs large; \(afterCompact.width)x\(afterCompact.height) vs \(afterLarge.width)x\(afterLarge.height)")
 
-        // Reset A to a known frame for positioning assertions (re-focus preserved).
-        var reset = canvas.canvasState.tiles.first(where: { $0.id == tileAId })!
-        reset.frame = startFrame
-        canvas.updateTile(reset)
-        try expect(frameOfA() == startFrame, "precondition: A reset to start frame; got \(frameOfA())")
-
-        // 2) Throw is bound to ⌘⌃-arrows (a shallow sibling of the ⌘⌃-digit resize
-        //    presets) and NOT Rectangle's ⌃⌥-arrows. Assert the binding resolves
-        //    end-to-end in a focused tile, and that the old ⌃⌥-arrow chord no
-        //    longer claims a tile action (ships with the binding — docs/29).
-        let throwResolution = FocusDispatch.resolve(
-            keyCode: 124, modifiers: [.command, .control],
-            scope: .tile(tileAId), focusedKind: .note
-        )
-        try expect(throwResolution == .tileAction(.throwToNeighbor(.right)),
-                   "⌘⌃→ in a focused tile must resolve to throwToNeighbor(.right); got \(throwResolution)")
-        let rectangleChordResolution = FocusDispatch.resolve(
-            keyCode: 124, modifiers: [.control, .option],
-            scope: .tile(tileAId), focusedKind: .note
-        )
-        try expect(rectangleChordResolution == .passThrough,
-                   "⌃⌥→ (Rectangle's global hotkey) must not claim a tile action; got \(rectangleChordResolution)")
-
-        // 3) Throw right toward neighbor B → lands gap-adjacent. Expectation comes
-        //    from TileArrangement's own output (the source of truth), not a copy.
-        reset.frame = startFrame
-        canvas.updateTile(reset)
-        let gap = TileGapResolver.resolvedGap()
-        let expectedThrow = TileArrangement.throwDestination(startFrame, direction: .right, others: [neighborFrame], gap: gap)
-        let throwConsumed = appDelegate.executeTileAction(.throwToNeighbor(.right))
-        let afterThrow = frameOfA()
-        try expect(throwConsumed == true, "throwToNeighbor(.right) must be consumed; got \(throwConsumed)")
-        try expect(afterThrow == expectedThrow, "throw right must match TileArrangement.throwDestination \(expectedThrow); got \(afterThrow)")
-        try expect(approx(afterThrow.x + afterThrow.width + gap, neighborFrame.x), "thrown tile must be gap-adjacent to neighbor left edge \(neighborFrame.x); got right+gap=\(afterThrow.x + afterThrow.width + gap)")
-
         let manifest: [String: Any] = [
             "check": "tile-action",
             "tileAId": tileAId.uuidString,
-            "tileBId": tileBId.uuidString,
             "startFrame": ["x": startFrame.x, "y": startFrame.y, "w": startFrame.width, "h": startFrame.height],
-            "neighborFrame": ["x": neighborFrame.x, "y": neighborFrame.y, "w": neighborFrame.width, "h": neighborFrame.height],
             "baseNoteSize": ["w": Double(base.width), "h": Double(base.height)],
             "afterLarge": ["x": afterLarge.x, "y": afterLarge.y, "w": afterLarge.width, "h": afterLarge.height],
             "expectedLarge": ["w": Double(expectedLarge.width), "h": Double(expectedLarge.height)],
             "afterCompact": ["w": afterCompact.width, "h": afterCompact.height],
             "expectedCompact": ["w": Double(expectedCompact.width), "h": Double(expectedCompact.height)],
-            "throwChord": "cmd+ctrl+right",
-            "throwResolved": "\(throwResolution)",
-            "rectangleChordResolved": "\(rectangleChordResolution)",
-            "gap": gap,
-            "afterThrow": ["x": afterThrow.x, "y": afterThrow.y, "w": afterThrow.width, "h": afterThrow.height],
-            "expectedThrow": ["x": expectedThrow.x, "y": expectedThrow.y, "w": expectedThrow.width, "h": expectedThrow.height],
             "noFocusConsumed": noFocusConsumed,
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")

@@ -24,13 +24,18 @@ Dogfooding exposed canvas navigation as both **broken** and **wonky**:
   — `⌥` held alone is never sent to terminal/text content.
 - **Jump = labels, not guessing.** Each visible tile shows a single-char label;
   press it → focus + center that tile. Also `⌘K` "Jump to <tile>" rows.
-- **Snap = `⌥`+arrow + phantom.** Moves the focused tile flush (gap-adjacent) to
-  its nearest neighbor that way; a translucent **ghost** previews the destination;
-  tap the arrow again to **cycle** candidates; release commits. **Resize rule C:**
-  equalize the shared dimension (side-by-side → match height; stacked → match
-  width). Replaces throw/nudge entirely — snapping is the only keyboard move.
-- **Drag magnetize.** Dragging a tile snaps/aligns to nearby edges + keeps the
-  gap; **on by default**, toggle in Settings, hold-`⌘` to bypass mid-drag.
+- **Drag magnetize = the PRIMARY snap.** Dragging a tile snaps/aligns to nearby
+  edges + keeps the gap; **on by default**, toggle in Settings, hold-`⌘` to bypass
+  mid-drag. Dylan's call (2026-06-15): snapping is fundamentally a spatial/mouse
+  act, so this is built first and is the main way you snap.
+- **Snap = `⌥`+arrow + phantom (the SECONDARY, keyboard snap).** Interactive, not a
+  one-shot fling: tap an arrow → a translucent **ghost** previews where the tile
+  would dock (gap-adjacent to the nearest tile that way); tap the same arrow again
+  → ghost **advances to the next tile further** in that direction (leapfrog),
+  opposite arrow steps back; **release `⌥` commits**, Esc cancels. The cycle is the
+  fix for the old throw's two failures — *blind* (no preview) and *stuck* (parking
+  was idempotent, so you could never get past the first neighbor). **Resize rule
+  C** (equalize the shared dimension) layers on after positioning feels right.
 - **`⌘K`** = the unified command palette (today's launch rows + jump/snap/fit/
   close); **Settings** edits the same registry — so keybinds can't drift.
 
@@ -61,33 +66,50 @@ Every check drives the **real input path** — constructs actual `NSEvent`s
 observable effect. **No check may call an executor directly.** A bypass check is
 treated as no check — that bypass is exactly what hid the dead-throw bug.
 
+## Build order revised (2026-06-15)
+
+Dogfooding the reworked one-shot `⌘⌃`-arrow throw still felt wrong (Dylan: it
+"snaps weirdly… but stops, unable to snap further"). Two structural faults, not
+tuning: it was **blind** (no preview of where it'd land) and **stuck** (parking
+gap-adjacent was idempotent, so you could never leapfrog past the first neighbor).
+Decisions: **(1) the bare keyboard throw is removed entirely** — `TileAction
+.throwToNeighbor` + its `⌘⌃`-arrow catalog bindings + the App executor are gone
+(`TileArrangement.throwDestination`/`snapAdjustment` stay as unwired pure math, the
+project's standing pattern, to seed the rebuilds). **(2) Drag magnetization is the
+PRIMARY snap and is built FIRST**; the interactive leader snap (ghost + cycle) is
+secondary and comes after. So the order is now **A → (throw removal) → E → B → C →
+D-snap**, not A→B→C→D→E.
+
 ## Phases (each: matrix-green + its named real-path check + commit)
 
-- **A — Command registry.** `CanvasCommand`/`CommandRegistry` (Core); extend
-  `LaunchPaletteAction` (`snapToNeighbor(dir)`, `fitTile`, `closeTile`, migrated
-  nav verbs; jump targets stay dynamic). `LaunchPaletteModel.makeRows`/`filterRows`
-  build from the registry. Settings/`ShortcutCatalog` read bindings from it.
-  → Core `command-registry-check`.
-- **B — Input foundation.** Replace the `onlyCommand` early-out (rely on
-  `FocusDispatch.resolve` passthrough; un-breaks `⌘⌃` resize). Add `.flagsChanged`
-  monitor + held-`⌥` detection (tunable threshold, configurable leader in
-  `NavKeymap`). `FocusModalKind.leader` + `handleLeaderKey`.
-  → `--leader-activation-check` + a `⌘⌃`-resize real-path regression check.
+- **A — Command registry.** ✅ shipped (`7c7b998`). `CanvasCommand`/`CommandRegistry`
+  (Core); palette rows build from the registry. → Core `command-registry-check`.
+- **(input-gate fix)** ✅ shipped (`3706017`). Replaced the `onlyCommand` early-out
+  so non-`⌘` chords reach `FocusDispatch.resolve` (un-broke `⌘⌃` resize). →
+  `--input-gate-check` (real `NSEvent` path).
+- **(throw removal)** ✅ shipped. Deleted the one-shot throw wiring (see decision
+  above). → `--input-gate-check` asserts `⌘⌃`-arrows now pass through; dispatch
+  table + ShortcutCatalog checks updated.
+- **E — Drag magnetize (PRIMARY snap, build first).** Wire `snapAdjustment` into
+  `TileNSView.mouseDragged` (`⌘`-bypass, ~10px/zoom threshold, transient guides);
+  `continuum.dragMagnetize.enabled` setting (default true).
+  → `--drag-magnetize-check` (real synthesized drag, not a `snapAdjustment` call).
+- **B — Leader foundation.** Add `.flagsChanged` monitor + held-`⌥` detection
+  (tunable threshold, configurable leader in `NavKeymap`). `FocusModalKind.leader`
+  + `handleLeaderKey`. → `--leader-activation-check`.
 - **C — Jump (labels).** Deterministic single-char labels for visible tiles; HUD
   overlay (extend `NavModeOverlayNSView`) with labels + phantom focus ring;
   `handleLeaderKey` letter → focus + center; dynamic `⌘K` "Jump to <title>" rows.
   → `--leader-jump-check`.
-- **D — Snap.** Rename `throwToNeighbor`→`snapToNeighbor`; `snapWithResize` Core
-  (throwDestination + shared-dimension equalize, rule C); ghost overlay (clone
-  `FocusBorderOverlayView`); `⌥`+arrow preview → cycle (`nearestTile`) → commit.
-  → Core `snap-resize-table` + `--leader-snap-check`.
-- **E — Drag magnetize.** Wire `snapAdjustment` into `TileNSView.mouseDragged`
-  (`⌘`-bypass, ~10px/zoom threshold, transient guides); `continuum.dragMagnetize.
-  enabled` setting (default true).
-  → `--drag-magnetize-check`.
+- **D — Keyboard snap (SECONDARY).** Inside the leader: `⌥`+arrow → ghost at nearest
+  dockable tile; same arrow again → advance to the next tile further (leapfrog);
+  release commits, Esc cancels. Ghost overlay clones `FocusBorderOverlayView`. The
+  candidate-list + park math builds fresh from `throwDestination`/`nearestTile`;
+  resize rule C layers on after the positioning feel is blessed.
+  → Core candidate-order table + `--leader-snap-check`.
 - **F — Retire old nav.** Remove the `⌃Space` toggle; migrate fit-all/cycle-agent/
   delete-focused/focus-mode to registry commands; update `ShortcutCatalog` layer +
-  exhaustiveness + conflict-guard; remove the dead throw binding.
+  exhaustiveness + conflict-guard.
 
 ## Human dogfood gates (feel, not just pass)
 

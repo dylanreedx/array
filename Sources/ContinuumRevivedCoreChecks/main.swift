@@ -2568,10 +2568,12 @@ do {
         DispatchCase(label: "Cmd-E is note export in note tile", keyCode: 14, modifiers: cmd, scope: tileScope, kind: .note, expected: .tileAction(.noteExport)),
         DispatchCase(label: "Cmd-E unclaimed in browser tile passes through", keyCode: 14, modifiers: cmd, scope: tileScope, kind: .browser, expected: .passThrough),
 
-        // Universal sizing/positioning claimed by any focused tile.
+        // Universal sizing claimed by any focused tile.
         DispatchCase(label: "Cmd-Ctrl-0 fills viewport in terminal tile", keyCode: 29, modifiers: cmdCtrl, scope: tileScope, kind: .terminal, expected: .tileAction(.resizeToPreset(.fillViewport))),
-        DispatchCase(label: "Cmd-Ctrl-Left throws left in note tile", keyCode: 123, modifiers: cmdCtrl, scope: tileScope, kind: .note, expected: .tileAction(.throwToNeighbor(.left))),
-        DispatchCase(label: "Cmd-Ctrl-Up throws up in browser tile", keyCode: 126, modifiers: cmdCtrl, scope: tileScope, kind: .browser, expected: .tileAction(.throwToNeighbor(.up))),
+        // The one-shot ⌘⌃-arrow "throw" was removed — those chords now pass through
+        // (keyboard snapping is being rebuilt inside the leader; see docs/30).
+        DispatchCase(label: "Cmd-Ctrl-Left passes through (throw removed) in note tile", keyCode: 123, modifiers: cmdCtrl, scope: tileScope, kind: .note, expected: .passThrough),
+        DispatchCase(label: "Cmd-Ctrl-Up passes through (throw removed) in browser tile", keyCode: 126, modifiers: cmdCtrl, scope: tileScope, kind: .browser, expected: .passThrough),
         // Rectangle's global hotkey chords (and the old ⌃⌥⌘ throw) no longer claim
         // a tile action after the docs/29 conflict fix — they fall through.
         DispatchCase(label: "Ctrl-Opt-Left (Rectangle) passes through in note tile", keyCode: 123, modifiers: ctrlOpt, scope: tileScope, kind: .note, expected: .passThrough),

@@ -184,7 +184,6 @@ public enum ShortcutCatalog {
     private static func actionId(_ action: TileAction) -> String {
         switch action {
         case .resizeToPreset(let preset): return "resize.\(preset.rawValue)"
-        case .throwToNeighbor(let dir): return "throw.\(dir.rawValue)"
         case .browserFind: return "browserFind"
         case .browserFocusURL: return "browserFocusURL"
         case .browserReload: return "browserReload"
@@ -203,7 +202,6 @@ public enum ShortcutCatalog {
             case .large: return "Resize: large"
             case .fillViewport: return "Resize: fill viewport"
             }
-        case .throwToNeighbor(let dir): return "Throw \(dir.rawValue)"
         case .browserFind: return "Find in page"
         case .browserFocusURL: return "Focus URL"
         case .browserReload: return "Reload"

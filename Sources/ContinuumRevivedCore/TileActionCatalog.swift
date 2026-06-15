@@ -33,15 +33,9 @@ public enum TileActionCatalog {
         map["sizeDefault"] = (TileChord(keyCode: 19, modifiers: [.command, .control]), .resizeToPreset(.default))
         map["sizeLarge"] = (TileChord(keyCode: 20, modifiers: [.command, .control]), .resizeToPreset(.large))
         map["sizeFill"] = (TileChord(keyCode: 29, modifiers: [.command, .control]), .resizeToPreset(.fillViewport))
-        // Universal positioning — throw the tile to a gap-adjacent neighbor.
-        // `⌘⌃`-arrows: a shallow sibling of the `⌘⌃`-digit resize presets above.
-        // Deliberately NOT `⌃⌥`-arrows (claimed by Rectangle and similar global
-        // hotkey daemons) — see docs/29 + KnownChordConflicts. Arrow keyCodes:
-        // 123 left, 124 right, 125 down, 126 up.
-        map["throwLeft"] = (TileChord(keyCode: 123, modifiers: [.command, .control]), .throwToNeighbor(.left))
-        map["throwRight"] = (TileChord(keyCode: 124, modifiers: [.command, .control]), .throwToNeighbor(.right))
-        map["throwDown"] = (TileChord(keyCode: 125, modifiers: [.command, .control]), .throwToNeighbor(.down))
-        map["throwUp"] = (TileChord(keyCode: 126, modifiers: [.command, .control]), .throwToNeighbor(.up))
+        // Keyboard tile positioning is intentionally unbound: the one-shot ⌘⌃-arrow
+        // "throw" was removed (it felt unpredictable). Snapping is being rebuilt as
+        // drag magnetization first, then an interactive leader snap — see docs/30.
 
         switch kind {
         case .browser:

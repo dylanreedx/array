@@ -11,19 +11,11 @@ public enum TileSizePreset: String, Equatable, Sendable {
     case fillViewport
 }
 
-public enum TileActionDirection: String, Equatable, Sendable {
-    case up
-    case down
-    case left
-    case right
-}
-
 /// Tile-local actions dispatched from a focused tile's chord. Flat and
 /// extensible: new actions are added as cases plus catalog entries.
 public enum TileAction: Equatable, Sendable {
     // Universal — any focused tile.
     case resizeToPreset(TileSizePreset)
-    case throwToNeighbor(TileActionDirection)
     // Browser.
     case browserFind
     case browserFocusURL
