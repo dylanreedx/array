@@ -2450,6 +2450,15 @@ do {
     let unrelated = TileFrame(x: 102, y: 500, width: 70, height: 40)
     let unrelatedSnap = TileArrangement.snapAdjustment(moving, others: [unrelated], gap: 8, threshold: 12)
     expect(unrelatedSnap.frame == moving && unrelatedSnap.guides.isEmpty, "Snap ignores edge candidates without orthogonal overlap")
+
+    // Per-axis: a tile near a right neighbor (X gap) AND a below neighbor (Y gap)
+    // snaps BOTH axes at once — clicking into the corner the two neighbors form.
+    let corner = TileFrame(x: 100, y: 100, width: 50, height: 50)
+    let rightNeighbor = TileFrame(x: 165, y: 100, width: 50, height: 50)   // X gap 7 away
+    let belowNeighbor = TileFrame(x: 100, y: 165, width: 50, height: 50)   // Y gap 7 away
+    let cornerSnap = TileArrangement.snapAdjustment(corner, others: [rightNeighbor, belowNeighbor], gap: 8, threshold: 12)
+    expect(cornerSnap.frame == TileFrame(x: 107, y: 107, width: 50, height: 50), "Snap magnetizes both axes independently, got \(cornerSnap.frame)")
+    expect(cornerSnap.guides.contains(.trailingToLeadingGap) && cornerSnap.guides.contains(.bottomToTopGap), "Snap reports a guide per snapped axis, got \(cornerSnap.guides)")
 }
 
 do {
@@ -3758,8 +3767,18 @@ do {
         FocusBorderConfig.colorKey,
         FocusBorderConfig.gapKey,
         FocusBorderConfig.speedKey,
+        DragMagnetizeConfig.enabledKey,
     ]
     expect(expectedKeys.isSubset(of: Set(fieldKeys)), "settings schema must represent every existing pref key")
+
+    // Drag snapping resolver: default-true on empty defaults, reads an override.
+    let dragSuiteName = "DragMagnetizeChecks-\(UUID().uuidString)"
+    let dragDefaults = UserDefaults(suiteName: dragSuiteName)!
+    defer { dragDefaults.removePersistentDomain(forName: dragSuiteName) }
+    dragDefaults.removePersistentDomain(forName: dragSuiteName)
+    expect(DragMagnetizeConfig.enabled(defaults: dragDefaults) == true, "drag magnetize defaults to enabled")
+    dragDefaults.set(false, forKey: DragMagnetizeConfig.enabledKey)
+    expect(DragMagnetizeConfig.enabled(defaults: dragDefaults) == false, "drag magnetize reads a disabled override")
 
     // The Keybindings section renders the ShortcutCatalog via a .shortcuts field.
     expect(allFields.contains { if case .shortcuts = $0 { return true } else { return false } }, "settings schema must include a .shortcuts field")

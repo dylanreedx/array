@@ -395,6 +395,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--drag-magnetize-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runDragMagnetizeSelfCheck()
+                print("ContinuumRevivedDragMagnetizeChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-note-action-check") {
             do {
                 _ = NSApplication.shared
@@ -6666,6 +6678,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("input-gate", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// Drives the REAL drag path (`TileNSView.mouseDown`/`mouseDragged`/`mouseUp`
+    /// with synthesized mouse `NSEvent`s) to prove drag magnetization: dragging tile
+    /// A toward neighbor B parks it gap-adjacent (snapped), and holding `⌘` during
+    /// the drag bypasses the snap (free position). The assertion reads the committed
+    /// world frame — it never calls `snapAdjustment`/`magnetizedFrame` directly.
+    static func runDragMagnetizeSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let aId = UUID(uuidString: "00000000-0000-0000-0000-00000000DA61")!
+        let bId = UUID(uuidString: "00000000-0000-0000-0000-00000000DA62")!
+        let startFrame = TileFrame(x: 100, y: 100, width: 200, height: 150)
+        let neighborFrame = TileFrame(x: 520, y: 100, width: 200, height: 150)
+        let tileA = Tile(id: aId, kind: .note, title: "DRAG_A", frame: startFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: bId, kind: .note, title: "DRAG_B", frame: neighborFrame, zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
+        canvas.frame = NSRect(x: 0, y: 0, width: 900, height: 420)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        let viewA = TileNSView(tile: tileA)
+        canvas.install(tileView: viewA, for: tileA)
+        canvas.install(tileView: TileNSView(tile: tileB), for: tileB)
+        canvas.layoutSubtreeIfNeeded()
+
+        func frameOfA() -> TileFrame { canvas.canvasState.tiles.first(where: { $0.id == aId })!.frame }
+        func mouse(_ type: NSEvent.EventType, at p: NSPoint, mods: NSEvent.ModifierFlags = []) throws -> NSEvent {
+            guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: mods, timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else {
+                throw CheckError.failed("could not synthesize \(type) at \(p)")
+            }
+            return e
+        }
+        // Grab A by its title bar (move drag), in window coordinates.
+        func grabPoint() -> NSPoint { viewA.convert(NSPoint(x: viewA.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil) }
+        // Zoom 1 → window dx == world dx. +205 lands A.x at 305, whose right edge
+        // (505) is 7 world units from the gap-adjacent target (B.left − gap = 512),
+        // i.e. inside the 10-pt pull radius.
+        let worldDx: CGFloat = 205
+        let gap = TileGapResolver.resolvedGap()
+
+        // Scenario 1 — snapping ON (default). Drag right toward B → parks gap-adjacent.
+        let p0 = grabPoint()
+        viewA.mouseDown(with: try mouse(.leftMouseDown, at: p0))
+        viewA.mouseDragged(with: try mouse(.leftMouseDragged, at: NSPoint(x: p0.x + worldDx, y: p0.y)))
+        let snapped = frameOfA()
+        viewA.mouseUp(with: try mouse(.leftMouseUp, at: NSPoint(x: p0.x + worldDx, y: p0.y)))
+        try expect(snapped.x > startFrame.x, "drag must move A toward B; start x=\(startFrame.x) got \(snapped.x)")
+        try expect(snapped.x + snapped.width + gap == neighborFrame.x, "drag toward B must park gap-adjacent (A.right+gap == B.left=\(neighborFrame.x)); got A=\(snapped)")
+
+        // Reset A, then Scenario 2 — hold ⌘ bypasses the snap → free position.
+        var reset = canvas.canvasState.tiles.first(where: { $0.id == aId })!
+        reset.frame = startFrame
+        canvas.updateTile(reset)
+        try expect(frameOfA() == startFrame, "precondition: A reset to start; got \(frameOfA())")
+        let q0 = grabPoint()
+        viewA.mouseDown(with: try mouse(.leftMouseDown, at: q0))
+        viewA.mouseDragged(with: try mouse(.leftMouseDragged, at: NSPoint(x: q0.x + worldDx, y: q0.y), mods: [.command]))
+        let free = frameOfA()
+        viewA.mouseUp(with: try mouse(.leftMouseUp, at: NSPoint(x: q0.x + worldDx, y: q0.y), mods: [.command]))
+        try expect(free.x == startFrame.x + Double(worldDx), "⌘-drag must NOT snap; expected free x=\(startFrame.x + Double(worldDx)) got \(free.x)")
+        try expect(free.x + free.width + gap != neighborFrame.x, "⌘-drag must not be gap-adjacent to B; got A=\(free)")
+
+        let manifest: [String: Any] = [
+            "check": "drag-magnetize",
+            "path": "synthesized mouse NSEvents → TileNSView.mouseDown/Dragged/Up (real drag, not snapAdjustment)",
+            "startFrame": ["x": startFrame.x, "y": startFrame.y, "w": startFrame.width, "h": startFrame.height],
+            "neighborFrame": ["x": neighborFrame.x, "y": neighborFrame.y, "w": neighborFrame.width, "h": neighborFrame.height],
+            "snappedFrame": ["x": snapped.x, "y": snapped.y, "w": snapped.width, "h": snapped.height],
+            "bypassFrame": ["x": free.x, "y": free.y, "w": free.width, "h": free.height],
+            "gap": gap,
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("drag-magnetize", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

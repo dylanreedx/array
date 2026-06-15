@@ -50,36 +50,43 @@ public enum TileArrangement {
         return moved(frame, direction: direction, against: neighbor, gap: gap)
     }
 
+    /// Magnetize `frame` to nearby tile edges, snapping each axis INDEPENDENTLY to
+    /// its closest-within-threshold guide. Per-axis (not one global nearest guide)
+    /// so a horizontal drag still snaps the X gap even when the tiles already share
+    /// a Y edge — the natural "click into place beside a neighbor" feel. Returns the
+    /// frame unchanged with no guides when nothing is within threshold.
     public static func snapAdjustment(_ frame: TileFrame, others: [TileFrame], gap: Double, threshold: Double) -> SnapResult {
-        var best: (axis: Int, delta: Double, guide: SnapGuide)?
-        func consider(axis: Int, delta: Double, guide: SnapGuide) {
+        var bestX: (delta: Double, guide: SnapGuide)?
+        var bestY: (delta: Double, guide: SnapGuide)?
+        func considerX(_ delta: Double, _ guide: SnapGuide) {
             guard abs(delta) <= threshold else { return }
-            if best == nil || abs(delta) < abs(best!.delta) { best = (axis, delta, guide) }
+            if bestX == nil || abs(delta) < abs(bestX!.delta) { bestX = (delta, guide) }
+        }
+        func considerY(_ delta: Double, _ guide: SnapGuide) {
+            guard abs(delta) <= threshold else { return }
+            if bestY == nil || abs(delta) < abs(bestY!.delta) { bestY = (delta, guide) }
         }
 
         for other in others {
             if orthogonalExtentsOverlap(frame, other, direction: .left) {
-                consider(axis: 0, delta: other.x - gap - (frame.x + frame.width), guide: .trailingToLeadingGap)
-                consider(axis: 0, delta: other.x + other.width + gap - frame.x, guide: .leadingToTrailingGap)
-                consider(axis: 0, delta: other.x - frame.x, guide: .leadingAligned)
-                consider(axis: 0, delta: other.x + other.width - (frame.x + frame.width), guide: .trailingAligned)
+                considerX(other.x - gap - (frame.x + frame.width), .trailingToLeadingGap)
+                considerX(other.x + other.width + gap - frame.x, .leadingToTrailingGap)
+                considerX(other.x - frame.x, .leadingAligned)
+                considerX(other.x + other.width - (frame.x + frame.width), .trailingAligned)
             }
             if orthogonalExtentsOverlap(frame, other, direction: .up) {
-                consider(axis: 1, delta: other.y - gap - (frame.y + frame.height), guide: .bottomToTopGap)
-                consider(axis: 1, delta: other.y + other.height + gap - frame.y, guide: .topToBottomGap)
-                consider(axis: 1, delta: other.y - frame.y, guide: .topAligned)
-                consider(axis: 1, delta: other.y + other.height - (frame.y + frame.height), guide: .bottomAligned)
+                considerY(other.y - gap - (frame.y + frame.height), .bottomToTopGap)
+                considerY(other.y + other.height + gap - frame.y, .topToBottomGap)
+                considerY(other.y - frame.y, .topAligned)
+                considerY(other.y + other.height - (frame.y + frame.height), .bottomAligned)
             }
         }
 
-        guard let best else { return SnapResult(frame: frame, guides: []) }
-        let adjusted: TileFrame
-        if best.axis == 0 {
-            adjusted = TileFrame(x: frame.x + best.delta, y: frame.y, width: frame.width, height: frame.height)
-        } else {
-            adjusted = TileFrame(x: frame.x, y: frame.y + best.delta, width: frame.width, height: frame.height)
-        }
-        return SnapResult(frame: adjusted, guides: [best.guide])
+        var adjusted = frame
+        var guides: [SnapGuide] = []
+        if let bestX { adjusted.x += bestX.delta; guides.append(bestX.guide) }
+        if let bestY { adjusted.y += bestY.delta; guides.append(bestY.guide) }
+        return SnapResult(frame: adjusted, guides: guides)
     }
 
     private static func orthogonalExtentsOverlap(_ a: TileFrame, _ b: TileFrame, direction: Direction) -> Bool {

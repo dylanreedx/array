@@ -51,6 +51,10 @@ class TileNSView: NSView {
     private var dragKind: DragKind = .none
     private var dragLastWindowPoint: CGPoint = .zero
     private var mouseDraggedSinceDown = false
+    /// The raw (unsnapped) world frame accumulated across a move drag. The
+    /// committed frame magnetizes to neighbors, but the cursor stays attached to
+    /// this free frame so snapping never makes the tile lag the pointer.
+    private var dragFreeFrame: TileFrame?
 
     override var isFlipped: Bool { true }
 
@@ -221,7 +225,16 @@ class TileNSView: NSView {
         dragLastWindowPoint = event.locationInWindow
         switch dragKind {
         case .move:
-            let next = CanvasEngine.tile(tile, draggedByScreenDelta: delta, viewport: canvas.viewport)
+            // Accumulate the raw drag into `dragFreeFrame` (seeded from the current
+            // tile on the first event), then commit a magnetized copy — hold `⌘` to
+            // bypass the snap for this drag. The free frame, not the snapped one,
+            // carries forward so the tile tracks the cursor.
+            var freeBase = tile
+            freeBase.frame = dragFreeFrame ?? tile.frame
+            let free = CanvasEngine.tile(freeBase, draggedByScreenDelta: delta, viewport: canvas.viewport)
+            dragFreeFrame = free.frame
+            var next = free
+            next.frame = canvas.magnetizedFrame(for: free.frame, excludingTileId: tile.id, bypass: event.modifierFlags.contains(.command))
             canvas.updateTile(next)
         case .resize(let edge):
             let next = CanvasEngine.tile(tile, resizedByScreenDelta: delta, edge: edge, viewport: canvas.viewport)
@@ -236,6 +249,7 @@ class TileNSView: NSView {
         let wasClick = !mouseDraggedSinceDown
         dragKind = .none
         mouseDraggedSinceDown = false
+        dragFreeFrame = nil
 
         if case .move = completedDragKind, wasClick {
             canvas?.focusBroker?.enterScope(.tile(tile.id), reason: .userClick)

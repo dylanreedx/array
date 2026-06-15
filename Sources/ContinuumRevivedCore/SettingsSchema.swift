@@ -47,6 +47,11 @@ public enum SettingsSchema {
                         label: "Tile Gap",
                         default: String(Int(TileGapResolver.defaultGap))
                     ),
+                    .toggle(
+                        key: DragMagnetizeConfig.enabledKey,
+                        label: "Drag Snapping",
+                        default: DragMagnetizeConfig.defaultEnabled
+                    ),
                 ]
             ),
             SettingsSection(

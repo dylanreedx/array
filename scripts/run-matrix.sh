@@ -90,6 +90,7 @@ run_app_check .build/debug/continuum-revived --focus-scope-dispatch-check
 run_app_check .build/debug/continuum-revived --reserved-dispatch-check
 run_app_check .build/debug/continuum-revived --tile-action-check
 run_app_check .build/debug/continuum-revived --input-gate-check
+run_app_check .build/debug/continuum-revived --drag-magnetize-check
 run_app_check .build/debug/continuum-revived --browser-note-action-check
 run_app_check .build/debug/continuum-revived --focus-border-check
 run_app_check .build/debug/continuum-revived --browser-restore-state-check
