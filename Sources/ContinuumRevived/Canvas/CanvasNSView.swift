@@ -1968,19 +1968,19 @@ protocol CanvasNSViewDelegate: AnyObject {
 /// nil so it never blocks tiles or the canvas. Sized in screen space, so the
 /// stroke + dashes stay screen-space constant at any canvas zoom.
 @MainActor
-/// Translucent "ghost" rectangle previewing where a dragged tile will snap. A
-/// soft accent-tinted fill with a thin border — a "slight ghosting" of the
-/// destination. Click-transparent; no animation. Lifecycle mirrors
-/// `FocusBorderOverlayView`.
+/// A phantom OUTLINE previewing where a dragged tile will snap — an accent border
+/// with a barely-there tint, so the moving tile never reads as "turned blue". It
+/// materializes with a small fade + scale pop. Click-transparent. Lifecycle
+/// mirrors `FocusBorderOverlayView`.
 final class DragGhostOverlayView: NSView {
     override var isFlipped: Bool { true }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
-        layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.65).cgColor
-        layer?.borderWidth = 1.5
+        layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.06).cgColor
+        layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.9).cgColor
+        layer?.borderWidth = 2
         layer?.cornerRadius = 6
         isHidden = true
     }
@@ -1990,9 +1990,25 @@ final class DragGhostOverlayView: NSView {
     /// Draw only — never consume mouse events.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
+    /// Show/move the phantom. `frame` is set to the destination synchronously (so
+    /// it stays correct + deterministic for checks); the smoothing is purely
+    /// presentational — a fade + scale pop on first appear.
     func show(at screenFrame: CGRect) {
-        frame = screenFrame
+        let appearing = isHidden
         isHidden = false
+        frame = screenFrame
+        guard appearing, let layer else { return }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0
+        fade.toValue = 1
+        let scale = CABasicAnimation(keyPath: "transform.scale")
+        scale.fromValue = 0.96
+        scale.toValue = 1
+        let group = CAAnimationGroup()
+        group.animations = [fade, scale]
+        group.duration = 0.14
+        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(group, forKey: "ghostAppear")
     }
 
     func hide() { isHidden = true }

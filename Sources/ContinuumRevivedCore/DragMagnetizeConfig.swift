@@ -11,8 +11,8 @@ public enum DragMagnetizeConfig {
 
     /// Snap pull radius in SCREEN points; the live drag converts to world via
     /// `/ viewport.zoom` so the catch distance feels constant at any zoom. Wide
-    /// enough that the ghost catches from a visible distance, not a precise pixel.
-    public static let snapThresholdScreenPoints: Double = 24
+    /// enough that the phantom catches from a comfortable distance.
+    public static let snapThresholdScreenPoints: Double = 44
 
     public static func enabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: enabledKey) != nil
