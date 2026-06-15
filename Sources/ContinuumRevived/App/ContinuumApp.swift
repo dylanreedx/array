@@ -383,6 +383,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--input-gate-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runInputGateSelfCheck()
+                print("ContinuumRevivedInputGateChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-note-action-check") {
             do {
                 _ = NSApplication.shared
@@ -1741,7 +1753,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             || hitView.hasAncestor(ofType: TerminalHostView.self)
     }
 
-    private func handleHotkey(_ event: NSEvent) -> Bool {
+    func handleHotkey(_ event: NSEvent) -> Bool {
         if focusBroker.activeSurface == .modal(.focusMode) {
             if event.keyCode == 53 {
                 closeFocusMode()
@@ -1776,21 +1788,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let onlyCommand: NSEvent.ModifierFlags = [.command]
-        guard mods == onlyCommand else { return false }
 
         // Cmd-Backspace (key code 51): delete the active tile. Only fires when
         // the canvas itself is first responder so a Cmd-Backspace inside an
         // NSTextView, terminal, or WKWebView form field still gets its native
         // semantics. The × close button covers the case where the user is
         // focused inside a tile's content.
-        if event.keyCode == 51 {
+        if mods == [.command], event.keyCode == 51 {
             guard window?.firstResponder === canvasView else { return false }
             guard let id = canvasView?.canvasState.lastActiveTileId else { return false }
             deleteTile(id: id)
             return true
         }
 
+        // Dispatch through FocusDispatch. It consumes a matching reserved global
+        // or focused-tile action and otherwise returns false (.passThrough), so
+        // non-⌘ chords (e.g. the ⌘⌃-digit resize presets) now reach the dispatcher
+        // instead of being dropped by a coarse "⌘-only" gate — while unmatched
+        // keys (typing) still fall through to the responder chain / content.
         return handleReservedShortcut(event)
     }
 
@@ -2027,24 +2042,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func handleReservedShortcut(_ event: NSEvent) -> Bool {
-        guard let shortcut = focusBroker.reservedShortcut(for: event) else { return false }
-        if shortcut == .navModeLeader, passThroughNavModeLeaderEvent === event {
-            passThroughNavModeLeaderEvent = nil
-            return false
-        }
-        switch NavLeaderDecision.decide(
-            shortcut: shortcut,
-            navModeActive: focusBroker.activeSurface == .modal(.navMode),
-            eventOriginatedInFocusedSurface: true
-        ) {
-        case .closeNavModeAndPassThroughLiteral:
-            closeNavMode()
-            return false
-        case .closeNavMode:
-            closeNavMode()
-            return true
-        case .openNavMode, .ignore:
-            break
+        // Nav-mode leader carries special open/close/pass-through semantics, but
+        // ONLY when the event actually classifies as the leader. Everything else
+        // — including ⌘⌃ tile-action chords (resize presets, etc.) — must fall
+        // through to FocusDispatch.resolve below. The old
+        // `guard let shortcut … else { return false }` silently dropped every
+        // tile-action chord because it doesn't classify as a ReservedShortcut,
+        // which is why ⌘⌃ resize/throw never fired at runtime (docs/30).
+        if let shortcut = focusBroker.reservedShortcut(for: event) {
+            if shortcut == .navModeLeader, passThroughNavModeLeaderEvent === event {
+                passThroughNavModeLeaderEvent = nil
+                return false
+            }
+            switch NavLeaderDecision.decide(
+                shortcut: shortcut,
+                navModeActive: focusBroker.activeSurface == .modal(.navMode),
+                eventOriginatedInFocusedSurface: true
+            ) {
+            case .closeNavModeAndPassThroughLiteral:
+                closeNavMode()
+                return false
+            case .closeNavMode:
+                closeNavMode()
+                return true
+            case .openNavMode, .ignore:
+                break
+            }
         }
 
         // The scattered `shouldSurfaceReceive` guards and the per-shortcut switch
@@ -6584,6 +6607,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("reserved-dispatch", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// Drives the REAL keyDown path (`handleHotkey`, the hotkey monitor's handler)
+    /// to prove the input-gate fix: a `⌘⌃`-digit resize preset now reaches the
+    /// dispatcher and fires (it was silently dropped by the old
+    /// `mods == onlyCommand` gate), while an unmodified key still passes through.
+    /// This is NOT a bypass — it synthesizes real `NSEvent`s and pushes them
+    /// through `handleHotkey`, asserting the observable effect (tile resized /
+    /// event not consumed). Exactly the kind of check that would have caught the
+    /// dead-`⌘⌃` bug (docs/30).
+    static func runInputGateSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let tileId = UUID(uuidString: "00000000-0000-0000-0000-0000000006A1")!
+        let startFrame = TileFrame(x: 80, y: 80, width: 200, height: 150)
+        let tile = Tile(id: tileId, kind: .note, title: "GATE", frame: startFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile], groups: [], lastActiveTileId: nil))
+        let appDelegate = AppDelegate()
+        appDelegate.canvasView = canvas
+        let focusBroker = appDelegate.focusBroker
+        canvas.focusBroker = focusBroker
+        focusBroker.onAcceptedTileFocus = { [weak canvas] id in canvas?.markActive(tileId: id) }
+        canvas.frame = NSRect(x: 0, y: 0, width: 640, height: 360)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        let view = TileNSView(tile: tile)
+        canvas.install(tileView: view, for: tile)
+        canvas.layoutSubtreeIfNeeded()
+
+        // Focus the tile through the production click router (title-bar click).
+        let titlePoint = view.convert(NSPoint(x: view.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil)
+        AppDelegate.routeTileClickFocus(at: titlePoint, in: canvas, focusBroker: focusBroker)
+        try expect(focusBroker.activeSurface == .tile(tileId), "precondition: tile focused; activeSurface=\(String(describing: focusBroker.activeSurface))")
+
+        func frameNow() -> TileFrame { canvas.canvasState.tiles.first(where: { $0.id == tileId })!.frame }
+
+        // 1) ⌘⌃-3 (keyCode 20 = the large resize preset) through the REAL handler.
+        guard let resizeEvent = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command, .control], timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "3", charactersIgnoringModifiers: "3", isARepeat: false, keyCode: 20) else {
+            throw CheckError.failed("could not synthesize ⌘⌃-3 keyDown")
+        }
+        let resizeConsumed = appDelegate.handleHotkey(resizeEvent)
+        let resized = frameNow()
+        try expect(resizeConsumed == true, "⌘⌃-3 must be consumed by handleHotkey (the gate no longer drops non-⌘ chords); got \(resizeConsumed)")
+        try expect(resized.width > startFrame.width && resized.height > startFrame.height, "⌘⌃-3 must resize the focused tile to the large preset via the real key path; start \(startFrame.width)x\(startFrame.height) got \(resized.width)x\(resized.height)")
+
+        // 2) An unmodified key still passes through (handler returns false).
+        guard let plainEvent = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "a", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0) else {
+            throw CheckError.failed("could not synthesize plain 'a' keyDown")
+        }
+        let plainConsumed = appDelegate.handleHotkey(plainEvent)
+        try expect(plainConsumed == false, "an unmodified key must pass through (handleHotkey returns false); got \(plainConsumed)")
+
+        let manifest: [String: Any] = [
+            "check": "input-gate",
+            "path": "synthesized NSEvent → handleHotkey (real monitor handler, not executor)",
+            "tileId": tileId.uuidString,
+            "startFrame": ["x": startFrame.x, "y": startFrame.y, "w": startFrame.width, "h": startFrame.height],
+            "afterResize": ["x": resized.x, "y": resized.y, "w": resized.width, "h": resized.height],
+            "resizeChord": "cmd+ctrl+3",
+            "resizeConsumed": resizeConsumed,
+            "plainKeyConsumed": plainConsumed,
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("input-gate", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
