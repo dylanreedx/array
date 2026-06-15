@@ -1510,8 +1510,12 @@ final class CanvasNSView: NSView {
         let zooms: [Double] = [0.3, 1.0, 3.0]
         var barScreenHeights: [String: Double] = [:]
         var closeScreenSizes: [String: Double] = [:]
+        var titleScreenSizes: [String: Double] = [:]
         var contentTopWorld: [String: Double] = [:]
         var contentTopMatchesBar: [String: Bool] = [:]
+        // The title text scales with the bar, so it must stay legible on screen
+        // (>= this) instead of shrinking with zoom.
+        let minTitleScreenPx: CGFloat = 11
         for zoom in zooms {
             canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
             tileView.layoutSubtreeIfNeeded()
@@ -1525,6 +1529,8 @@ final class CanvasNSView: NSView {
             let closeScreenH = closeWorld.height * CGFloat(zoom)
             barScreenHeights[String(zoom)] = barScreenH
             closeScreenSizes[String(zoom)] = min(closeScreenW, closeScreenH)
+            let titleScreen = tileView.qaTitleFontWorldSize * CGFloat(zoom)
+            titleScreenSizes[String(zoom)] = titleScreen
 
             // Content offset must track the SAME floored bar height — no overlap,
             // no gap. Read the laid-out content view's top edge (world units).
@@ -1538,6 +1544,7 @@ final class CanvasNSView: NSView {
             // The close button must fit inside the bar at every zoom (otherwise
             // it clips and the × becomes partially unclickable).
             try expect(closeWorld.maxY <= barWorldHeight + 0.001, "zoom \(zoom): close button bottom \(closeWorld.maxY) must fit inside bar height \(barWorldHeight)")
+            try expect(titleScreen >= minTitleScreenPx, "zoom \(zoom): title on-screen point size \(titleScreen)px must be >= \(minTitleScreenPx)px (must not shrink with zoom)")
         }
 
         // Floor only KICKS IN when zoomed out: at zoom 3 (zoomed in) the bar is
@@ -1558,6 +1565,8 @@ final class CanvasNSView: NSView {
             "zooms": zooms,
             "barScreenHeights": barScreenHeights,
             "closeScreenSizes": closeScreenSizes,
+            "titleScreenSizes": titleScreenSizes,
+            "minTitleScreenPx": minTitleScreenPx,
             "contentTopWorld": contentTopWorld,
             "contentTopMatchesBar": contentTopMatchesBar
         ]
@@ -2117,23 +2126,39 @@ final class DragGhostOverlayView: NSView {
 
     /// Show/move the phantom. `frame` is set to the destination synchronously (so
     /// it stays correct + deterministic for checks); the smoothing is purely
-    /// presentational — a fade + scale pop on first appear.
+    /// presentational — a fade + scale pop on first appear, and a short eased
+    /// TRAIL on moves so the phantom lags slightly behind the tile as you ride a
+    /// neighbor's edge instead of rigidly mirroring it.
     func show(at screenFrame: CGRect) {
         let appearing = isHidden
+        let previousCenter = layer?.presentation()?.position
+            ?? CGPoint(x: frame.midX, y: frame.midY)
         isHidden = false
+        let moved = frame != screenFrame
         frame = screenFrame
-        guard appearing, let layer else { return }
-        let fade = CABasicAnimation(keyPath: "opacity")
-        fade.fromValue = 0
-        fade.toValue = 1
-        let scale = CABasicAnimation(keyPath: "transform.scale")
-        scale.fromValue = 0.96
-        scale.toValue = 1
-        let group = CAAnimationGroup()
-        group.animations = [fade, scale]
-        group.duration = 0.14
-        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        layer.add(group, forKey: "ghostAppear")
+        guard let layer else { return }
+        if appearing {
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = 0
+            fade.toValue = 1
+            let scale = CABasicAnimation(keyPath: "transform.scale")
+            scale.fromValue = 0.96
+            scale.toValue = 1
+            let group = CAAnimationGroup()
+            group.animations = [fade, scale]
+            group.duration = 0.14
+            group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            layer.add(group, forKey: "ghostAppear")
+        } else if moved {
+            // Animate position FROM where the phantom currently appears TO the new
+            // destination; each move interrupts the last, producing a continuous
+            // trailing lag as the tile rides along.
+            let trail = CABasicAnimation(keyPath: "position")
+            trail.fromValue = NSValue(point: previousCenter)
+            trail.duration = 0.16
+            trail.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            layer.add(trail, forKey: "ghostTrail")
+        }
     }
 
     func hide() { isHidden = true }

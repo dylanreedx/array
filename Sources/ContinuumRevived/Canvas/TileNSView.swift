@@ -160,6 +160,9 @@ class TileNSView: NSView {
         let barFrame = NSRect(x: 0, y: 0, width: bounds.width, height: barHeight)
         if titleBar?.frame != barFrame {
             titleBar?.frame = barFrame
+            // Bar height changed (zoom crossed the floor) → redraw the title +
+            // dots at the new chrome scale.
+            titleBar?.needsDisplay = true
         }
         titleBar?.applyCloseButtonSizing(buttonSize: closeButtonWorldSize, glyphPointSize: closeGlyphWorldPointSize)
     }
@@ -314,18 +317,29 @@ class TileNSView: NSView {
             cancelDragGhost(on: canvas)
             return
         }
-        if candidate == dragSnapTarget || candidate == pendingGhostTarget { return }
-        pendingGhostWorkItem?.cancel()
-        dragSnapTarget = nil
-        canvas.hideDragGhost()
+        // Already armed → FOLLOW the candidate (the phantom rides the edge with a
+        // trailing ease); never re-dwell mid-snap, so sliding along an edge stays
+        // smooth instead of blinking out and waiting again.
+        if dragSnapTarget != nil {
+            dragSnapTarget = candidate
+            canvas.showDragGhost(at: candidate)
+            return
+        }
+        // Counting down → keep the same timer running; arm to wherever the drag is
+        // when it fires (don't restart the dwell on every in-range jitter).
+        if pendingGhostWorkItem != nil {
+            pendingGhostTarget = candidate
+            return
+        }
+        // Fresh entry into snap range → start the dwell.
         guard dragGhostDelay > 0 else {
             armDragGhost(candidate, on: canvas)
             return
         }
         pendingGhostTarget = candidate
         let work = DispatchWorkItem { [weak self, weak canvas] in
-            guard let self, let canvas, self.pendingGhostTarget == candidate else { return }
-            self.armDragGhost(candidate, on: canvas)
+            guard let self, let canvas, let target = self.pendingGhostTarget else { return }
+            self.armDragGhost(target, on: canvas)
         }
         pendingGhostWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + dragGhostDelay, execute: work)
@@ -423,6 +437,10 @@ class TileNSView: NSView {
     /// QA: laid-out title-bar frame (world units). On-screen height is
     /// `height * zoom`. Drives `--tile-chrome-scale-check`.
     var qaTitleBarFrame: CGRect { titleBar?.frame ?? .zero }
+
+    /// QA: the title's world point size (scales with the bar). On-screen size is
+    /// `* zoom`. Drives `--tile-chrome-scale-check`.
+    var qaTitleFontWorldSize: CGFloat { titleBar?.titleFontWorldSize ?? 0 }
 
     /// QA: laid-out close-button frame (world units), converted to the tile
     /// view's own coordinate space. On-screen hit size is `size * zoom`.
@@ -663,24 +681,38 @@ private final class TitleBarView: NSView {
         onStopRunRequested?()
     }
 
+    /// Chrome scale: how much taller the (zoom-floored) bar is than its natural
+    /// height. 1 when zoomed in (floor inert), > 1 when zoomed out. Title text +
+    /// drag dots scale by this so they grow with the tab instead of shrinking to
+    /// nothing at low zoom (the bar height is `bounds.height`, set by the parent).
+    private var chromeScale: CGFloat { max(1, bounds.height / TileNSView.titleBarHeight) }
+
+    /// World point size the title is drawn at (natural 12 × chrome scale). On
+    /// screen it renders at `* zoom`. Exposed for the chrome-scale check.
+    var titleFontWorldSize: CGFloat { 12 * chromeScale }
+
     override func draw(_ dirtyRect: NSRect) {
+        let scale = chromeScale
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            .font: NSFont.systemFont(ofSize: titleFontWorldSize, weight: .medium),
             .foregroundColor: NSColor.lightGray
         ]
         let title = "\(tile.kind.rawValue.capitalized) · \(tile.title)" as NSString
-        title.draw(at: NSPoint(x: 8, y: 5), withAttributes: attrs)
+        // Vertically center in the (variable-height) bar; inset scales too.
+        let titleSize = title.size(withAttributes: attrs)
+        title.draw(at: NSPoint(x: 8 * scale, y: max(0, (bounds.height - titleSize.height) / 2)), withAttributes: attrs)
 
         if let agentStatus {
             drawAgentStatus(agentStatus)
         }
 
-        // Three-dot drag handle indicator, shifted left of the × close button.
+        // Three-dot drag handle indicator, left of the × close button. Sizes +
+        // gap scale with the chrome; positioned relative to the floored button.
         let dot = NSColor(white: 0.55, alpha: 1.0)
-        let radius: CGFloat = 1.5
-        let spacing: CGFloat = 4
+        let radius: CGFloat = 1.5 * scale
+        let spacing: CGFloat = 4 * scale
         let cy = bounds.midY
-        var cx = bounds.width - 34
+        var cx = bounds.width - Self.closeButtonTrailingInset - closeButtonWorldSize - 10 * scale
         dot.setFill()
         for _ in 0..<3 {
             let rect = NSRect(x: cx - radius, y: cy - radius, width: radius * 2, height: radius * 2)
