@@ -6716,7 +6716,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let aId = UUID(uuidString: "00000000-0000-0000-0000-00000000DA61")!
         let bId = UUID(uuidString: "00000000-0000-0000-0000-00000000DA62")!
         let startFrame = TileFrame(x: 100, y: 100, width: 200, height: 150)
-        let neighborFrame = TileFrame(x: 520, y: 100, width: 200, height: 150)
+        // B sits to the right AND 20 world units lower than A — a vertical offset
+        // inside the 44px pull radius. cornerSnap must dock the X gap AND align the
+        // tops to B (the 90° corner); snapAdjustment alone could not, since a
+        // side-by-side dock has no X overlap to gate the Y alignment.
+        let neighborFrame = TileFrame(x: 520, y: 120, width: 200, height: 150)
         let tileA = Tile(id: aId, kind: .note, title: "DRAG_A", frame: startFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
         let tileB = Tile(id: bId, kind: .note, title: "DRAG_B", frame: neighborFrame, zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
@@ -6743,7 +6747,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // i.e. inside the pull radius.
         let worldDx: CGFloat = 205
         let gap = TileGapResolver.resolvedGap()
-        let snapTargetFrame = TileFrame(x: neighborFrame.x - gap - startFrame.width, y: startFrame.y, width: startFrame.width, height: startFrame.height)
+        // The cornered destination: gap-adjacent left of B (X) AND top-aligned to B (Y).
+        let snapTargetFrame = TileFrame(x: neighborFrame.x - gap - startFrame.width, y: neighborFrame.y, width: startFrame.width, height: startFrame.height)
         let freeXAfterDrag = startFrame.x + Double(worldDx)
 
         // Scenario 1 — snapping ON, dwell delay 0 (arm synchronously). Drag toward B.
@@ -6754,6 +6759,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Mid-drag: the TILE tracks the cursor (free), and a GHOST previews the snap.
         let duringDrag = frameOfA()
         try expect(duringDrag.x == freeXAfterDrag, "mid-drag the tile must track the cursor (free x=\(freeXAfterDrag)); got \(duringDrag.x)")
+        try expect(duringDrag.y == startFrame.y, "mid-drag the tile must stay free on Y (the snap is preview-only); got \(duringDrag.y)")
         let expectedGhost = CanvasEngine.tileScreenFrame(snapTargetFrame, viewport: canvas.canvasState.viewport)
         try expect(canvas.qaDragGhostFrame == expectedGhost, "ghost must preview the gap-adjacent destination \(expectedGhost); got \(String(describing: canvas.qaDragGhostFrame))")
         // Release commits to the previewed snap and clears the ghost.
@@ -6761,6 +6767,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let committed = frameOfA()
         try expect(committed == snapTargetFrame, "release must commit the previewed snap \(snapTargetFrame); got \(committed)")
         try expect(committed.x + committed.width + gap == neighborFrame.x, "committed tile must be gap-adjacent to B.left=\(neighborFrame.x); got A=\(committed)")
+        try expect(committed.y == neighborFrame.y, "committed tile top must be flush with B (the 90° corner); got A.y=\(committed.y), B.y=\(neighborFrame.y)")
         try expect(canvas.qaDragGhostFrame == nil, "ghost must hide on release; got \(String(describing: canvas.qaDragGhostFrame))")
 
         // Scenario 1b — DWELL gates a quick drag-past. With a real (>0) delay, a

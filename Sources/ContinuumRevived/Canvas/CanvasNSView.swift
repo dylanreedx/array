@@ -213,8 +213,9 @@ final class CanvasNSView: NSView {
     /// or nil when drag snapping is off or nothing is within the pull radius. The
     /// drag itself keeps the tile under the cursor (free); this only drives the
     /// ghost preview + the on-release commit. Pure positioning via
-    /// `TileArrangement.snapAdjustment`; the pull radius is a constant screen
-    /// distance converted to world via `/ zoom`.
+    /// `TileArrangement.cornerSnap` (dock gap + perpendicular edge-align → a clean
+    /// 90° corner); the pull radius is a constant screen distance converted to
+    /// world via `/ zoom`.
     func snapTarget(for freeFrame: TileFrame, excludingTileId id: UUID) -> TileFrame? {
         guard DragMagnetizeConfig.enabled(defaults: dragMagnetizeDefaults) else { return nil }
         let zoom = viewport.zoom
@@ -223,7 +224,7 @@ final class CanvasNSView: NSView {
         guard !others.isEmpty else { return nil }
         let gap = TileGapResolver.resolvedGap()
         let threshold = DragMagnetizeConfig.snapThresholdScreenPoints / zoom
-        let result = TileArrangement.snapAdjustment(freeFrame, others: others, gap: gap, threshold: threshold)
+        let result = TileArrangement.cornerSnap(freeFrame, others: others, gap: gap, threshold: threshold)
         return result.guides.isEmpty ? nil : result.frame
     }
 
