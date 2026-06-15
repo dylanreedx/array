@@ -2,6 +2,12 @@ import AppKit
 import ContinuumRevivedCore
 import Foundation
 
+extension Notification.Name {
+    /// Posted by `SettingsPanel` after any preference write so live consumers
+    /// (e.g. the focus-border overlay) can re-resolve their config.
+    static let continuumSettingsChanged = Notification.Name("continuum.settingsChanged")
+}
+
 /// Top-level canvas view: hosts tile subviews, owns the viewport, translates
 /// world-space tile frames into AppKit subview frames, and routes pan/zoom
 /// gestures to the underlying viewport. Flipped so the y-axis matches the
@@ -98,6 +104,13 @@ final class CanvasNSView: NSView {
             installZoneChromeViews()
         }
         updateEmptyStateVisibility()
+        // Live focus-border config: re-apply when Settings writes a preference.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(focusBorderConfigDidChange),
+            name: .continuumSettingsChanged,
+            object: nil
+        )
     }
 
     required init?(coder: NSCoder) {
@@ -228,12 +241,29 @@ final class CanvasNSView: NSView {
     /// topmost subview so it renders above tiles; click-transparent.
     private var focusBorderOverlay: FocusBorderOverlayView?
 
+    /// UserDefaults the focus-border appearance resolves from (`FocusBorderConfig`).
+    /// Overridable so `runFocusBorderSelfCheck` can drive enabled/color/gap
+    /// deterministically without touching standard defaults.
+    var focusBorderDefaults: UserDefaults = .standard
+
     private func focusBorderOverlayView() -> FocusBorderOverlayView {
         if let overlay = focusBorderOverlay { return overlay }
         let overlay = FocusBorderOverlayView(frame: .zero)
         focusBorderOverlay = overlay
         addSubview(overlay, positioned: .above, relativeTo: nil)
         return overlay
+    }
+
+    /// Map a `FocusBorderConfig` color name to an `NSColor` (App layer — Core
+    /// stays AppKit-free). Unknown names fall back to the system accent.
+    private static func focusBorderColor(named name: String) -> NSColor {
+        switch name {
+        case "Blue": return .systemBlue
+        case "Mint": return .systemMint
+        case "Orange": return .systemOrange
+        case "Pink": return .systemPink
+        default: return .controlAccentColor
+        }
     }
 
     /// Drive the marching-ants overlay so it borders the single `targetId` tile
@@ -243,16 +273,36 @@ final class CanvasNSView: NSView {
     private func updateFocusBorder(borderedTileId targetId: UUID?) {
         guard borderedTileId != targetId else { return }
         borderedTileId = targetId
-        guard let targetId, let view = tileViews[targetId] else {
+        applyFocusBorder()
+    }
+
+    /// Resolve `FocusBorderConfig` and show/hide + style the overlay for the
+    /// current `borderedTileId`. Re-runnable (no dedupe) so a live config change
+    /// re-applies immediately.
+    private func applyFocusBorder() {
+        let config = FocusBorderConfig.resolvedFromDefaults(defaults: focusBorderDefaults)
+        guard config.enabled, let targetId = borderedTileId, let view = tileViews[targetId] else {
             focusBorderOverlay?.hide()
             return
         }
         let overlay = focusBorderOverlayView()
+        overlay.configure(
+            color: Self.focusBorderColor(named: config.color).withAlphaComponent(0.7),
+            gap: CGFloat(config.gap),
+            animationDuration: config.speed
+        )
         overlay.show(around: view.frame)
         // Keep the overlay topmost — tile installs/reorders can otherwise leave
         // it under later-added tile subviews.
         overlay.removeFromSuperview()
         addSubview(overlay, positioned: .above, relativeTo: nil)
+    }
+
+    /// Re-resolve focus-border config and re-apply to the current bordered tile.
+    /// Wired to the settings-changed notification so toggling/recoloring the
+    /// border in Settings reflects immediately (docs/29 §1 live update).
+    @objc func focusBorderConfigDidChange() {
+        applyFocusBorder()
     }
 
     /// Reposition the overlay around `tileId`'s current screen frame if it is
@@ -276,7 +326,7 @@ final class CanvasNSView: NSView {
               let view = tileViews[targetId],
               let overlay = focusBorderOverlay,
               overlay.qaIsAnimating else { return false }
-        return overlay.frame == view.frame.insetBy(dx: -FocusBorderOverlayView.gap, dy: -FocusBorderOverlayView.gap)
+        return overlay.frame == view.frame.insetBy(dx: -overlay.gap, dy: -overlay.gap)
     }
 
     /// QA: the overlay's current frame (or nil when no tile is bordered).
@@ -1706,7 +1756,8 @@ final class CanvasNSView: NSView {
 
         let titleAPoint = viewA.convert(NSPoint(x: viewA.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil)
         let titleBPoint = viewB.convert(NSPoint(x: viewB.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil)
-        let gap = FocusBorderOverlayView.gap
+        // Default config (standard defaults are empty in the check env) → default gap.
+        let gap = CGFloat(FocusBorderConfig.defaultGap)
 
         // 1) Focus A → overlay visible + animating, framed around A's screen
         //    frame outset by the gap; B is not bordered.
@@ -1758,6 +1809,31 @@ final class CanvasNSView: NSView {
         let metrics = VisualSnapshot.metrics(of: rep)
         try expect(!metrics.isBlank, "focus-border overlay render must not be blank/uniform — got \(metrics.distinctSampledColors) distinct sampled colors at \(metrics.width)x\(metrics.height)")
 
+        // 5) Live toggle OFF → overlay hides immediately without a scope change.
+        //    Drives config via an isolated defaults suite + the settings-changed
+        //    notification (the production live-update path).
+        let disabledDefaults = UserDefaults(suiteName: "focus-border-disabled-\(UUID().uuidString)")!
+        disabledDefaults.set(false, forKey: FocusBorderConfig.enabledKey)
+        canvas.focusBorderDefaults = disabledDefaults
+        NotificationCenter.default.post(name: .continuumSettingsChanged, object: nil)
+        try expect(canvas.borderedTileId == tileAId, "scope unchanged: A is still the bordered tile after a config change")
+        try expect(!canvas.qaFocusBorderActive, "disabling the focus border must hide the overlay live")
+        try expect(canvas.qaFocusBorderFrame == nil, "disabled focus border reports no overlay frame")
+
+        // 6) Live re-enable with a non-default color + gap → overlay returns,
+        //    outset by the NEW gap (proves color/gap are config-driven, not
+        //    hardcoded constants).
+        let customGap: CGFloat = 20
+        let customDefaults = UserDefaults(suiteName: "focus-border-custom-\(UUID().uuidString)")!
+        customDefaults.set(true, forKey: FocusBorderConfig.enabledKey)
+        customDefaults.set("Mint", forKey: FocusBorderConfig.colorKey)
+        customDefaults.set(Double(customGap), forKey: FocusBorderConfig.gapKey)
+        canvas.focusBorderDefaults = customDefaults
+        NotificationCenter.default.post(name: .continuumSettingsChanged, object: nil)
+        try expect(canvas.qaFocusBorderActive, "re-enabling with a custom config shows the overlay live")
+        let expectedCustomFrame = viewA.frame.insetBy(dx: -customGap, dy: -customGap)
+        try expect(canvas.qaFocusBorderFrame == expectedCustomFrame, "custom gap \(customGap) should outset the overlay by \(customGap); expected \(expectedCustomFrame), got \(String(describing: canvas.qaFocusBorderFrame))")
+
         let fm = FileManager.default
         let root = URL(fileURLWithPath: fm.currentDirectoryPath)
         let directory = root.appendingPathComponent("qa-runs", isDirectory: true)
@@ -1776,7 +1852,10 @@ final class CanvasNSView: NSView {
             "overlay": "canvas-owned outset marching-ants",
             "gap": Double(gap),
             "lineWidth": Double(FocusBorderOverlayView.lineWidth),
-            "animationDuration": FocusBorderOverlayView.animationDuration,
+            "animationDuration": FocusBorderConfig.defaultSpeed,
+            "liveDisabledHidesOverlay": true,
+            "liveCustomGap": Double(customGap),
+            "liveCustomColor": "Mint",
             "tileAId": tileAId.uuidString,
             "tileBId": tileBId.uuidString,
             "focusAScope": "overlay around A (outset by gap), B not bordered",
@@ -1836,16 +1915,19 @@ protocol CanvasNSViewDelegate: AnyObject {
 /// stroke + dashes stay screen-space constant at any canvas zoom.
 @MainActor
 final class FocusBorderOverlayView: NSView {
-    /// Gap (screen px) between the tile edge and the dashed border.
-    static let gap: CGFloat = 8
     static let lineWidth: CGFloat = 1.5
     static let dashPattern: [NSNumber] = [6, 4]
-    /// Loop duration (s). Lower = faster march. Tunable.
-    static let animationDuration: CFTimeInterval = 2.5
-    /// Tile corner radius (TileNSView uses 6) + gap, so the border is concentric
-    /// with the rounded tile.
-    static let cornerRadius: CGFloat = 6 + gap
     private static let animationKey = "marchingAnts"
+
+    /// Gap (screen px) between the tile edge and the dashed border. Configured
+    /// from `FocusBorderConfig`; defaults match the pre-config constant so an
+    /// unconfigured overlay looks identical to before.
+    private(set) var gap: CGFloat = CGFloat(FocusBorderConfig.defaultGap)
+    /// Marching-ants loop duration (s). Lower = faster march.
+    private var animationDuration: CFTimeInterval = FocusBorderConfig.defaultSpeed
+    /// Tile corner radius (TileNSView uses 6) + gap, so the border stays
+    /// concentric with the rounded tile at any gap.
+    private var cornerRadius: CGFloat { 6 + gap }
 
     private let shape = CAShapeLayer()
 
@@ -1857,7 +1939,8 @@ final class FocusBorderOverlayView: NSView {
         layer?.masksToBounds = false
         shape.fillColor = NSColor.clear.cgColor
         // Subtle, low-opacity accent so the border reads as "focused" without
-        // shouting inside a dense dark canvas.
+        // shouting inside a dense dark canvas. `configure` overrides this per the
+        // user's color preference before each show.
         shape.strokeColor = NSColor.controlAccentColor.withAlphaComponent(0.7).cgColor
         shape.lineWidth = Self.lineWidth
         shape.lineDashPattern = Self.dashPattern
@@ -1871,10 +1954,18 @@ final class FocusBorderOverlayView: NSView {
     /// mouse events on tiles or the canvas.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
+    /// Apply resolved appearance config (the canvas maps the color name to an
+    /// `NSColor` and applies alpha). Safe to call before each `show`.
+    func configure(color: NSColor, gap: CGFloat, animationDuration: CFTimeInterval) {
+        self.gap = gap
+        self.animationDuration = animationDuration
+        shape.strokeColor = color.cgColor
+    }
+
     /// Position the overlay around `tileScreenFrame` (the focused tile's frame),
     /// outset by `gap`, show it, and (re)attach the marching animation.
     func show(around tileScreenFrame: CGRect) {
-        frame = tileScreenFrame.insetBy(dx: -Self.gap, dy: -Self.gap)
+        frame = tileScreenFrame.insetBy(dx: -gap, dy: -gap)
         isHidden = false
         layoutShape()
         startMarchingAnts()
@@ -1897,7 +1988,7 @@ final class FocusBorderOverlayView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         shape.frame = bounds
-        shape.path = CGPath(roundedRect: rect, cornerWidth: Self.cornerRadius, cornerHeight: Self.cornerRadius, transform: nil)
+        shape.path = CGPath(roundedRect: rect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
         CATransaction.commit()
     }
 
@@ -1906,7 +1997,7 @@ final class FocusBorderOverlayView: NSView {
         let animation = CABasicAnimation(keyPath: "lineDashPhase")
         animation.fromValue = 0
         animation.toValue = phase
-        animation.duration = Self.animationDuration
+        animation.duration = animationDuration
         animation.repeatCount = .infinity
         shape.add(animation, forKey: Self.animationKey)
     }

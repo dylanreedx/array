@@ -410,21 +410,31 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     @objc private func toggleChanged(_ sender: NSButton) {
         guard let field = bindings[ObjectIdentifier(sender)] else { return }
         field.setValue(.bool(sender.state == .on), in: defaults)
+        notifySettingsChanged()
     }
 
     @objc private func choiceChanged(_ sender: NSPopUpButton) {
         guard let field = bindings[ObjectIdentifier(sender)], let title = sender.titleOfSelectedItem else { return }
         field.setValue(.string(title), in: defaults)
+        notifySettingsChanged()
     }
 
     @objc private func textCommitted(_ sender: NSTextField) {
         guard let field = bindings[ObjectIdentifier(sender)] else { return }
         field.setValue(.string(sender.stringValue), in: defaults)
+        notifySettingsChanged()
     }
 
     func controlTextDidEndEditing(_ obj: Notification) {
         guard let textField = obj.object as? NSTextField, let field = bindings[ObjectIdentifier(textField)] else { return }
         field.setValue(.string(textField.stringValue), in: defaults)
+        notifySettingsChanged()
+    }
+
+    /// Notify live consumers (e.g. the focus-border overlay) that a preference
+    /// changed, so they can re-resolve their config without an app restart.
+    private func notifySettingsChanged() {
+        NotificationCenter.default.post(name: .continuumSettingsChanged, object: nil)
     }
 
     private var bindings: [ObjectIdentifier: SettingsField] = [:]

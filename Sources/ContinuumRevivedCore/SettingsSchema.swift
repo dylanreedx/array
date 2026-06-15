@@ -49,6 +49,33 @@ public enum SettingsSchema {
                     ),
                 ]
             ),
+            SettingsSection(
+                id: "appearance",
+                title: "Appearance",
+                fields: [
+                    .toggle(
+                        key: FocusBorderConfig.enabledKey,
+                        label: "Focus Border",
+                        default: FocusBorderConfig.defaultEnabled
+                    ),
+                    .choice(
+                        key: FocusBorderConfig.colorKey,
+                        label: "Focus Border Color",
+                        options: FocusBorderConfig.colorOptions,
+                        default: FocusBorderConfig.defaultColor
+                    ),
+                    .text(
+                        key: FocusBorderConfig.gapKey,
+                        label: "Focus Border Gap (px)",
+                        default: String(Int(FocusBorderConfig.defaultGap))
+                    ),
+                    .text(
+                        key: FocusBorderConfig.speedKey,
+                        label: "Focus Border Speed (s)",
+                        default: String(FocusBorderConfig.defaultSpeed)
+                    ),
+                ]
+            ),
         ]
     }
 }
