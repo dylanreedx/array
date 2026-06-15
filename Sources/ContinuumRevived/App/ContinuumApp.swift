@@ -2124,10 +2124,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return focusBroker.activeSurface ?? .canvas
     }
 
-    /// World-unit step for a single `⌃⌥`arrow nudge. Fine-grained so arrow taps
-    /// reposition precisely; throw (`⌃⌥⌘`) covers the large gap-adjacent moves.
-    static let tileNudgeStep: Double = 16
-
     /// Resize ladder scale applied to a kind's base `TileGeometry.preset` size:
     /// compact ≈ 0.7×, default = base, large ≈ 1.4×. `fillViewport` ignores the
     /// ladder and sizes to the visible world rect (handled separately).
@@ -2148,7 +2144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `AppDelegate` instance — treats all tile actions as non-passthrough.
     static func isPassthroughTileAction(_ action: TileAction) -> Bool {
         switch action {
-        case .resizeToPreset, .nudge, .throwToNeighbor,
+        case .resizeToPreset, .throwToNeighbor,
              .browserFind, .browserFocusURL, .browserReload, .browserBack, .browserForward, .noteExport:
             return false
         }
@@ -2166,11 +2162,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         switch action {
         case let .resizeToPreset(preset):
             return resizeFocusedTile(to: preset)
-        case let .nudge(direction):
-            return moveFocusedTile { frame, gap in
-                _ = gap
-                return TileArrangement.nudge(frame, direction: Self.arrangementDirection(direction), step: Self.tileNudgeStep)
-            }
         case let .throwToNeighbor(direction):
             return moveFocusedTile { frame, gap in
                 let others = self.otherTileFrames()
@@ -2254,7 +2245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     /// Apply a pure position transform (`transform(frame, gap) -> frame`) to the
-    /// focused tile and commit. Shared by nudge and throw.
+    /// focused tile and commit. Used by throw.
     private func moveFocusedTile(_ transform: (TileFrame, Double) -> TileFrame) -> Bool {
         guard let canvasView, var tile = focusedTile() else { return false }
         let gap = TileGapResolver.resolvedGap()
@@ -6621,7 +6612,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         // Two note tiles; A is the action target, B is the throw neighbor. The
         // gap between A's right edge (340) and B's left edge (480) is 140 world
-        // units so A has room to nudge before throwing into B.
+        // units so A lands gap-adjacent to B when thrown right.
         let tileAId = UUID(uuidString: "00000000-0000-0000-0000-0000000003A1")!
         let tileBId = UUID(uuidString: "00000000-0000-0000-0000-0000000003B2")!
         let startFrame = TileFrame(x: 60, y: 60, width: 280, height: 200)
@@ -6687,22 +6678,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvas.updateTile(reset)
         try expect(frameOfA() == startFrame, "precondition: A reset to start frame; got \(frameOfA())")
 
-        // 2a) Nudge right → origin.x += nudge step (matches drag/world axis).
-        let step = AppDelegate.tileNudgeStep
-        let nudgeRightConsumed = appDelegate.executeTileAction(.nudge(.right))
-        let afterNudgeRight = frameOfA()
-        try expect(nudgeRightConsumed == true, "nudge(.right) must be consumed; got \(nudgeRightConsumed)")
-        try expect(approx(afterNudgeRight.x, startFrame.x + step), "nudge right should move origin.x by +\(step): got \(afterNudgeRight.x), expected \(startFrame.x + step)")
-        try expect(approx(afterNudgeRight.y, startFrame.y), "nudge right must not change origin.y; got \(afterNudgeRight.y)")
-
-        // 2b) Nudge up → origin.y -= nudge step (world top-left: up = smaller y).
-        reset.frame = startFrame
-        canvas.updateTile(reset)
-        let nudgeUpConsumed = appDelegate.executeTileAction(.nudge(.up))
-        let afterNudgeUp = frameOfA()
-        try expect(nudgeUpConsumed == true, "nudge(.up) must be consumed; got \(nudgeUpConsumed)")
-        try expect(approx(afterNudgeUp.y, startFrame.y - step), "nudge up should move origin.y by -\(step): got \(afterNudgeUp.y), expected \(startFrame.y - step)")
-        try expect(approx(afterNudgeUp.x, startFrame.x), "nudge up must not change origin.x; got \(afterNudgeUp.x)")
+        // 2) Throw is bound to ⌘⌃-arrows (a shallow sibling of the ⌘⌃-digit resize
+        //    presets) and NOT Rectangle's ⌃⌥-arrows. Assert the binding resolves
+        //    end-to-end in a focused tile, and that the old ⌃⌥-arrow chord no
+        //    longer claims a tile action (ships with the binding — docs/29).
+        let throwResolution = FocusDispatch.resolve(
+            keyCode: 124, modifiers: [.command, .control],
+            scope: .tile(tileAId), focusedKind: .note
+        )
+        try expect(throwResolution == .tileAction(.throwToNeighbor(.right)),
+                   "⌘⌃→ in a focused tile must resolve to throwToNeighbor(.right); got \(throwResolution)")
+        let rectangleChordResolution = FocusDispatch.resolve(
+            keyCode: 124, modifiers: [.control, .option],
+            scope: .tile(tileAId), focusedKind: .note
+        )
+        try expect(rectangleChordResolution == .passThrough,
+                   "⌃⌥→ (Rectangle's global hotkey) must not claim a tile action; got \(rectangleChordResolution)")
 
         // 3) Throw right toward neighbor B → lands gap-adjacent. Expectation comes
         //    from TileArrangement's own output (the source of truth), not a copy.
@@ -6727,9 +6718,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "expectedLarge": ["w": Double(expectedLarge.width), "h": Double(expectedLarge.height)],
             "afterCompact": ["w": afterCompact.width, "h": afterCompact.height],
             "expectedCompact": ["w": Double(expectedCompact.width), "h": Double(expectedCompact.height)],
-            "nudgeStep": step,
-            "afterNudgeRight": ["x": afterNudgeRight.x, "y": afterNudgeRight.y],
-            "afterNudgeUp": ["x": afterNudgeUp.x, "y": afterNudgeUp.y],
+            "throwChord": "cmd+ctrl+right",
+            "throwResolved": "\(throwResolution)",
+            "rectangleChordResolved": "\(rectangleChordResolution)",
             "gap": gap,
             "afterThrow": ["x": afterThrow.x, "y": afterThrow.y, "w": afterThrow.width, "h": afterThrow.height],
             "expectedThrow": ["x": expectedThrow.x, "y": expectedThrow.y, "w": expectedThrow.width, "h": expectedThrow.height],

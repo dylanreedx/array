@@ -23,7 +23,6 @@ public enum TileActionDirection: String, Equatable, Sendable {
 public enum TileAction: Equatable, Sendable {
     // Universal — any focused tile.
     case resizeToPreset(TileSizePreset)
-    case nudge(TileActionDirection)
     case throwToNeighbor(TileActionDirection)
     // Browser.
     case browserFind

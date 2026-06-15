@@ -2396,9 +2396,6 @@ do {
 // MARK: - TileArrangement: geometry
 
 do {
-    let frame = TileFrame(x: 100, y: 100, width: 80, height: 60)
-    expect(TileArrangement.nudge(frame, direction: .right, step: 12) == TileFrame(x: 112, y: 100, width: 80, height: 60), "Nudge right moves by step")
-    expect(TileArrangement.nudge(frame, direction: .up, step: 10) == TileFrame(x: 100, y: 90, width: 80, height: 60), "Nudge up moves by step")
     expect(TileArrangement.Direction.fromKey("h") == .left, "h maps left")
     expect(TileArrangement.Direction.fromKey("ArrowDown") == .down, "ArrowDown maps down")
     expect(TileArrangement.Direction.fromKey("x") == nil, "unmapped key returns nil")
@@ -2556,8 +2553,12 @@ do {
 
         // Universal sizing/positioning claimed by any focused tile.
         DispatchCase(label: "Cmd-Ctrl-0 fills viewport in terminal tile", keyCode: 29, modifiers: cmdCtrl, scope: tileScope, kind: .terminal, expected: .tileAction(.resizeToPreset(.fillViewport))),
-        DispatchCase(label: "Ctrl-Opt-Left nudges left in note tile", keyCode: 123, modifiers: ctrlOpt, scope: tileScope, kind: .note, expected: .tileAction(.nudge(.left))),
-        DispatchCase(label: "Ctrl-Opt-Cmd-Up throws up in browser tile", keyCode: 126, modifiers: ctrlOptCmd, scope: tileScope, kind: .browser, expected: .tileAction(.throwToNeighbor(.up))),
+        DispatchCase(label: "Cmd-Ctrl-Left throws left in note tile", keyCode: 123, modifiers: cmdCtrl, scope: tileScope, kind: .note, expected: .tileAction(.throwToNeighbor(.left))),
+        DispatchCase(label: "Cmd-Ctrl-Up throws up in browser tile", keyCode: 126, modifiers: cmdCtrl, scope: tileScope, kind: .browser, expected: .tileAction(.throwToNeighbor(.up))),
+        // Rectangle's global hotkey chords (and the old ⌃⌥⌘ throw) no longer claim
+        // a tile action after the docs/29 conflict fix — they fall through.
+        DispatchCase(label: "Ctrl-Opt-Left (Rectangle) passes through in note tile", keyCode: 123, modifiers: ctrlOpt, scope: tileScope, kind: .note, expected: .passThrough),
+        DispatchCase(label: "Ctrl-Opt-Cmd-Up (old throw chord) passes through in browser tile", keyCode: 126, modifiers: ctrlOptCmd, scope: tileScope, kind: .browser, expected: .passThrough),
         DispatchCase(label: "Cmd-Ctrl-1 ignored on canvas (no focused tile)", keyCode: 18, modifiers: cmdCtrl, scope: canvasScope, kind: nil, expected: .passThrough),
         DispatchCase(label: "Cmd-Ctrl-1 ignored in tile scope with nil kind", keyCode: 18, modifiers: cmdCtrl, scope: tileScope, kind: nil, expected: .passThrough),
 
@@ -2572,6 +2573,49 @@ do {
     for row in cases {
         expect(resolve(row.keyCode, row.modifiers, row.scope, row.kind) == row.expected, "FocusDispatch table: \(row.label)")
     }
+}
+
+// MARK: - KeybindConflictChecks: defaults avoid known system / daemon chords
+
+do {
+    // Executable form of the docs/29 re-home audit: every DEFAULT keybind
+    // Continuum ships must avoid chords claimed by macOS or a global hotkey
+    // daemon. Throw is ⌘⌃-arrows now, never Rectangle's ⌃⌥-arrows; a regression
+    // back onto a known-conflict chord fails the build here.
+    func auditNoKnownConflict(_ chord: KeyChord, _ label: String) {
+        if let hit = KnownChordConflicts.conflict(for: chord) {
+            expect(false, "default keybind \(label) (\(chord.displayString)) collides with \(hit.source.rawValue): \(hit.note)")
+        }
+    }
+
+    // Tile-action defaults across every kind (isolated empty store = in-code defaults).
+    let auditDefaults = UserDefaults(suiteName: "KeybindConflictChecks-\(UUID().uuidString)")!
+    for kind in TileKind.allCases {
+        for (chord, action) in TileActionCatalog.actions(for: kind, defaults: auditDefaults, warn: { _ in }) {
+            auditNoKnownConflict(chord, "tile.\(kind.rawValue).\(action)")
+        }
+    }
+
+    // Reserved globals, EXCEPT the nav leader: its default (⌃Space) intentionally
+    // sits on the macOS "previous input source" chord. Many users have a single
+    // input source (no-op) or disable that shortcut, and the leader is rebindable,
+    // so it is the one documented allowlisted default (docs/29 §3 open finding).
+    let reservedGlobals: [(chord: KeyChord, label: String)] = [
+        (KeyChord(keyCode: 40, modifiers: .command), "global.palette"),
+        (KeyChord(keyCode: 3, modifiers: .command), "global.focusMode"),
+        (KeyChord(keyCode: 43, modifiers: .command), "global.settings"),
+        (KeyChord(keyCode: 18, modifiers: .command), "global.spawnProfile.1"),
+        (KeyChord(keyCode: 19, modifiers: .command), "global.spawnProfile.2"),
+        (KeyChord(keyCode: 20, modifiers: .command), "global.spawnProfile.3"),
+        (KeyChord(keyCode: 21, modifiers: .command), "global.spawnProfile.4"),
+    ]
+    for global in reservedGlobals { auditNoKnownConflict(global.chord, global.label) }
+
+    // Positive anchors: throw's new chord is clear; the old chords ARE flagged;
+    // and the allowlisted leader genuinely is a macOS chord (documents the finding).
+    expect(KnownChordConflicts.conflict(for: KeyChord(keyCode: 124, modifiers: [.command, .control])) == nil, "throw ⌘⌃→ must be free of known conflicts")
+    expect(KnownChordConflicts.conflict(for: KeyChord(keyCode: 124, modifiers: [.control, .option]))?.source == .rectangle, "⌃⌥→ must be flagged as a Rectangle conflict")
+    expect(KnownChordConflicts.conflict(for: NavKeymap.default.leader)?.source == .macOS, "nav leader ⌃Space is a known macOS chord (allowlisted)")
 }
 
 // MARK: - TileActionCatalog override round-trip

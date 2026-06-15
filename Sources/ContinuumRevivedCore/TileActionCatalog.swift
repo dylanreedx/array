@@ -33,15 +33,15 @@ public enum TileActionCatalog {
         map["sizeDefault"] = (TileChord(keyCode: 19, modifiers: [.command, .control]), .resizeToPreset(.default))
         map["sizeLarge"] = (TileChord(keyCode: 20, modifiers: [.command, .control]), .resizeToPreset(.large))
         map["sizeFill"] = (TileChord(keyCode: 29, modifiers: [.command, .control]), .resizeToPreset(.fillViewport))
-        // Universal positioning. Arrow keyCodes: 123 left, 124 right, 125 down, 126 up.
-        map["nudgeLeft"] = (TileChord(keyCode: 123, modifiers: [.control, .option]), .nudge(.left))
-        map["nudgeRight"] = (TileChord(keyCode: 124, modifiers: [.control, .option]), .nudge(.right))
-        map["nudgeDown"] = (TileChord(keyCode: 125, modifiers: [.control, .option]), .nudge(.down))
-        map["nudgeUp"] = (TileChord(keyCode: 126, modifiers: [.control, .option]), .nudge(.up))
-        map["throwLeft"] = (TileChord(keyCode: 123, modifiers: [.control, .option, .command]), .throwToNeighbor(.left))
-        map["throwRight"] = (TileChord(keyCode: 124, modifiers: [.control, .option, .command]), .throwToNeighbor(.right))
-        map["throwDown"] = (TileChord(keyCode: 125, modifiers: [.control, .option, .command]), .throwToNeighbor(.down))
-        map["throwUp"] = (TileChord(keyCode: 126, modifiers: [.control, .option, .command]), .throwToNeighbor(.up))
+        // Universal positioning — throw the tile to a gap-adjacent neighbor.
+        // `⌘⌃`-arrows: a shallow sibling of the `⌘⌃`-digit resize presets above.
+        // Deliberately NOT `⌃⌥`-arrows (claimed by Rectangle and similar global
+        // hotkey daemons) — see docs/29 + KnownChordConflicts. Arrow keyCodes:
+        // 123 left, 124 right, 125 down, 126 up.
+        map["throwLeft"] = (TileChord(keyCode: 123, modifiers: [.command, .control]), .throwToNeighbor(.left))
+        map["throwRight"] = (TileChord(keyCode: 124, modifiers: [.command, .control]), .throwToNeighbor(.right))
+        map["throwDown"] = (TileChord(keyCode: 125, modifiers: [.command, .control]), .throwToNeighbor(.down))
+        map["throwUp"] = (TileChord(keyCode: 126, modifiers: [.command, .control]), .throwToNeighbor(.up))
 
         switch kind {
         case .browser:

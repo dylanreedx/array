@@ -35,15 +35,6 @@ public enum TileArrangement {
         }
     }
 
-    public static func nudge(_ frame: TileFrame, direction: Direction, step: Double) -> TileFrame {
-        switch direction {
-        case .up: return TileFrame(x: frame.x, y: frame.y - step, width: frame.width, height: frame.height)
-        case .down: return TileFrame(x: frame.x, y: frame.y + step, width: frame.width, height: frame.height)
-        case .left: return TileFrame(x: frame.x - step, y: frame.y, width: frame.width, height: frame.height)
-        case .right: return TileFrame(x: frame.x + step, y: frame.y, width: frame.width, height: frame.height)
-        }
-    }
-
     public static func throwDestination(_ frame: TileFrame, direction: Direction, others: [TileFrame], gap: Double) -> TileFrame {
         guard !others.isEmpty else { return frame }
 
