@@ -988,9 +988,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Pending hold-leader dwell. Armed when the leader modifier is held alone,
     /// cancelled on release / another modifier, fired → enter the leader.
     private var leaderDwellWorkItem: DispatchWorkItem?
-    /// Hold-leader dwell in seconds (mirrors `navKeymap.leaderDwellMs`). Overridable
+    /// Hold-leader dwell in seconds (mirrors `navKeymap.leaderDwellMs`). Seeded from
+    /// the default keymap so it matches before `navKeymap` is assigned. Overridable
     /// so the self-check can arm synchronously (0) — the `dragGhostDelay` pattern.
-    var leaderDwell: TimeInterval = 0.3
+    var leaderDwell: TimeInterval = TimeInterval(NavKeymap.default.leaderDwellMs) / 1000
     private var passThroughNavModeLeaderEvent: NSEvent?
     private var lastNeedsAttentionCount = 0
     private var tileFocusMonitor: Any?

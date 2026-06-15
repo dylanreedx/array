@@ -2550,7 +2550,7 @@ do {
     defer { UserDefaults().removePersistentDomain(forName: defaultsName) }
     // Hold-leader config: default, override, persist round-trip, invalid → default.
     expect(NavKeymap.default.leaderHoldModifier == .option, "default hold-leader modifier is ⌥")
-    expect(NavKeymap.default.leaderDwellMs == 300, "default hold-leader dwell is 300ms")
+    expect(NavKeymap.default.leaderDwellMs == 0, "default hold-leader dwell is 0ms (instant)")
     defaults.set("ctrl", forKey: "continuum.keymap.leaderHold")
     defaults.set("150", forKey: "continuum.keymap.leaderDwellMs")
     let resolvedLeader = NavKeymap.resolve(defaults: defaults, warn: { _ in })
@@ -2559,7 +2559,7 @@ do {
     defaults.set("bogus", forKey: "continuum.keymap.leaderHold")
     defaults.set("-5", forKey: "continuum.keymap.leaderDwellMs")
     let rejected = NavKeymap.resolve(defaults: defaults, warn: { _ in })
-    expect(rejected.leaderHoldModifier == .option && rejected.leaderDwellMs == 300, "invalid hold-leader config falls back to defaults, got \(rejected.leaderHoldModifier)/\(rejected.leaderDwellMs)")
+    expect(rejected.leaderHoldModifier == .option && rejected.leaderDwellMs == 0, "invalid hold-leader config falls back to defaults, got \(rejected.leaderHoldModifier)/\(rejected.leaderDwellMs)")
     let persistSuite = "NavKeymapLeaderPersist-\(UUID().uuidString)"
     let persistDefaults = UserDefaults(suiteName: persistSuite)!
     defer { UserDefaults().removePersistentDomain(forName: persistSuite) }

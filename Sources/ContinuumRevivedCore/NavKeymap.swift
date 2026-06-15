@@ -137,8 +137,10 @@ public struct NavKeymap: Equatable, Sendable {
     /// leader (jump/snap). Distinct from `leader` (the legacy `⌃Space` toggle):
     /// this is a held modifier, not a key-down chord. Default `.option`.
     public var leaderHoldModifier: FocusKeyModifiers
-    /// Dwell in milliseconds before the held leader activates (so a quick tap of
-    /// the modifier never enters the mode and never eats `⌥`+key typing). Default 300.
+    /// Dwell in milliseconds before the held leader activates. Default 0 (instant):
+    /// `⌥` held alone is inert, so there's nothing to gate. A positive value
+    /// re-introduces the gate (so a quick `⌥`+key tap can slip through to content
+    /// before the leader claims it) for anyone who types `⌥`/Alt combos a lot.
     public var leaderDwellMs: Int
     /// The label keys offered to visible tiles in the hold-leader jump HUD, in
     /// priority order. Home-row default (`asdfghjkl`); rebindable. Tiles beyond
@@ -157,7 +159,7 @@ public struct NavKeymap: Equatable, Sendable {
     public var focusMode: String
     public var deleteTile: String
 
-    public init(leader: KeyChord, leaderHoldModifier: FocusKeyModifiers = .option, leaderDwellMs: Int = 300, leaderLabelKeys: String = "asdfghjkl", up: String, down: String, left: String, right: String, nextZone: String, previousZone: String, zonePicker: String, workspacePicker: String, agentCycle: String, agentNeedsAttention: String, focusMode: String, deleteTile: String) {
+    public init(leader: KeyChord, leaderHoldModifier: FocusKeyModifiers = .option, leaderDwellMs: Int = 0, leaderLabelKeys: String = "asdfghjkl", up: String, down: String, left: String, right: String, nextZone: String, previousZone: String, zonePicker: String, workspacePicker: String, agentCycle: String, agentNeedsAttention: String, focusMode: String, deleteTile: String) {
         self.leader = leader
         self.leaderHoldModifier = leaderHoldModifier
         self.leaderDwellMs = leaderDwellMs
@@ -179,7 +181,7 @@ public struct NavKeymap: Equatable, Sendable {
     public static let `default` = NavKeymap(
         leader: KeyChord(keyCode: 49, modifiers: .control),
         leaderHoldModifier: .option,
-        leaderDwellMs: 300,
+        leaderDwellMs: 0,
         leaderLabelKeys: "asdfghjkl",
         up: "k", down: "j", left: "h", right: "l",
         nextZone: "n", previousZone: "p", zonePicker: "z", workspacePicker: "w",
@@ -248,7 +250,7 @@ public struct NavKeymap: Equatable, Sendable {
             if let modifier = parseModifierToken(hold) { map.leaderHoldModifier = modifier } else { warn("Invalid continuum.keymap.leaderHold '\(hold)'; using default opt") }
         }
         if let dwell = string("leaderDwellMs") {
-            if let value = Int(dwell), value >= 0 { map.leaderDwellMs = value } else { warn("Invalid continuum.keymap.leaderDwellMs '\(dwell)'; using default 300") }
+            if let value = Int(dwell), value >= 0 { map.leaderDwellMs = value } else { warn("Invalid continuum.keymap.leaderDwellMs '\(dwell)'; using default 0") }
         }
         if let labelKeys = string("leaderLabelKeys") {
             let cleaned = labelKeys.lowercased()

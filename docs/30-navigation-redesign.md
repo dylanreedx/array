@@ -102,8 +102,11 @@ D-snap**, not A→B→C→D→E.
   cursor, the real ghost overlay frames the destination, release commits, disabled
   = no ghost/no snap).
 - **B — Leader foundation.** ✅ shipped (`a72cd64`). `.flagsChanged` monitor +
-  held-`⌥` detection (tunable dwell, configurable leader modifier in `NavKeymap`).
-  `FocusModalKind.leader` + `handleLeaderKey`. → `--leader-activation-check`.
+  held-`⌥` detection. Dwell defaults to **0 (instant)** — `⌥` alone is inert so
+  there's nothing to gate — but stays configurable for `⌥`/Alt-combo typists.
+  Configurable leader modifier in `NavKeymap`; `FocusModalKind.leader` +
+  `handleLeaderKey`. → `--leader-activation-check` (covers instant + a positive
+  dwell gate).
 - **C — Jump (labels).** ✅ shipped (leader label-jump). Deterministic single-char
   labels for visible tiles (`TileArrangement.jumpLabels`, home-row default, the
   `continuum.keymap.leaderLabelKeys` config); HUD via a `drawTileLabels` pass on the
