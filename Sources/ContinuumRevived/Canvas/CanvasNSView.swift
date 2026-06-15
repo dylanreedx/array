@@ -222,25 +222,72 @@ final class CanvasNSView: NSView {
     /// is bordered at a time; nil when scope is canvas/modal.
     private(set) var borderedTileId: UUID?
 
-    /// Drive the marching-ants border so the single `targetId` tile (or none)
-    /// is bordered, clearing any previously-bordered tile. Lockstep entry point
+    /// Canvas-owned overlay that draws the outset marching-ants border around
+    /// the focused tile. Lives on the canvas (not the tile) so the outset path
+    /// is not clipped by the tile's `masksToBounds`. Lazily installed as the
+    /// topmost subview so it renders above tiles; click-transparent.
+    private var focusBorderOverlay: FocusBorderOverlayView?
+
+    private func focusBorderOverlayView() -> FocusBorderOverlayView {
+        if let overlay = focusBorderOverlay { return overlay }
+        let overlay = FocusBorderOverlayView(frame: .zero)
+        focusBorderOverlay = overlay
+        addSubview(overlay, positioned: .above, relativeTo: nil)
+        return overlay
+    }
+
+    /// Drive the marching-ants overlay so it borders the single `targetId` tile
+    /// (or none), clearing any previously-bordered tile. Lockstep entry point
     /// from `markActive` (tile became scope) and `clearFocusBorder` (scope left
     /// all tiles via the FocusBroker canvas/modal hook).
     private func updateFocusBorder(borderedTileId targetId: UUID?) {
         guard borderedTileId != targetId else { return }
-        if let previous = borderedTileId {
-            tileViews[previous]?.setFocused(false)
-        }
         borderedTileId = targetId
-        if let targetId {
-            tileViews[targetId]?.setFocused(true)
+        guard let targetId, let view = tileViews[targetId] else {
+            focusBorderOverlay?.hide()
+            return
         }
+        let overlay = focusBorderOverlayView()
+        overlay.show(around: view.frame)
+        // Keep the overlay topmost — tile installs/reorders can otherwise leave
+        // it under later-added tile subviews.
+        overlay.removeFromSuperview()
+        addSubview(overlay, positioned: .above, relativeTo: nil)
+    }
+
+    /// Reposition the overlay around `tileId`'s current screen frame if it is
+    /// the bordered tile. Called from layout paths so the border tracks the tile
+    /// on pan/zoom/move/resize. No-op when `tileId` is not bordered.
+    private func repositionFocusBorderIfNeeded(for tileId: UUID) {
+        guard tileId == borderedTileId, let view = tileViews[tileId] else { return }
+        focusBorderOverlayView().show(around: view.frame)
     }
 
     /// Clear the focus border when scope leaves all tiles (scope→canvas/modal).
     /// Wired to `FocusBroker.onAcceptedCanvasScope`.
     func clearFocusBorder() {
         updateFocusBorder(borderedTileId: nil)
+    }
+
+    /// QA: true when the overlay is visible + animating AND framed around the
+    /// bordered tile's outset screen frame. Drives the `--focus-border-check`.
+    var qaFocusBorderActive: Bool {
+        guard let targetId = borderedTileId,
+              let view = tileViews[targetId],
+              let overlay = focusBorderOverlay,
+              overlay.qaIsAnimating else { return false }
+        return overlay.frame == view.frame.insetBy(dx: -FocusBorderOverlayView.gap, dy: -FocusBorderOverlayView.gap)
+    }
+
+    /// QA: the overlay's current frame (or nil when no tile is bordered).
+    var qaFocusBorderFrame: CGRect? {
+        guard borderedTileId != nil, let overlay = focusBorderOverlay, !overlay.isHidden else { return nil }
+        return overlay.frame
+    }
+
+    /// QA: freeze the dash phase for a deterministic offscreen capture.
+    func qaFreezeFocusBorder(phase: CGFloat = 0) {
+        focusBorderOverlay?.qaFreeze(phase: phase)
     }
 
     func bringToFront(tileId: UUID) {
@@ -434,6 +481,12 @@ final class CanvasNSView: NSView {
             if lhsOrder == rhsOrder { return .orderedSame }
             return lhsOrder < rhsOrder ? .orderedAscending : .orderedDescending
         }, context: Unmanaged.passUnretained(ordering).toOpaque())
+        // The z-sort only orders tile subviews; keep the focus-border overlay
+        // above them so it isn't buried by a brought-to-front tile.
+        if let overlay = focusBorderOverlay, !overlay.isHidden {
+            overlay.removeFromSuperview()
+            addSubview(overlay, positioned: .above, relativeTo: nil)
+        }
     }
 
     // MARK: - Layout
@@ -462,6 +515,10 @@ final class CanvasNSView: NSView {
         view.bounds = NSRect(x: 0, y: 0, width: tile.frame.width, height: tile.frame.height)
         view.tile = tile
         view.setNeedsDisplay(view.bounds)
+        // Track the focus border with the tile's screen frame on pan/zoom/move/
+        // resize — the overlay lives on the canvas, not the tile, so it must be
+        // repositioned here whenever the bordered tile's frame updates.
+        repositionFocusBorderIfNeeded(for: tile.id)
     }
 
     private func updateEmptyStateVisibility() {
@@ -1605,11 +1662,12 @@ final class CanvasNSView: NSView {
     }
 
     /// Drives the production click→focus router for a 2-tile canvas and asserts
-    /// the marching-ants border tracks the focus scope: exactly one tile is
-    /// bordered, the border moves A→B on focus change, and clears entirely when
-    /// scope leaves all tiles (focus → canvas background). Then renders the
-    /// focused tile offscreen with the dash phase frozen and asserts the chrome
-    /// is non-degenerate (Tier-1 visual gate, docs/26). Wiring mirrors
+    /// the marching-ants border tracks the focus scope via the CANVAS overlay:
+    /// exactly one tile is bordered, the overlay is framed around that tile's
+    /// screen frame outset by the gap, it moves A→B on focus change, and clears
+    /// entirely when scope leaves all tiles (focus → canvas background). Then
+    /// renders the overlay offscreen with the dash phase frozen and asserts the
+    /// chrome is non-degenerate (Tier-1 visual gate, docs/26). Wiring mirrors
     /// `ZoneRuntimeController.attachUI` (lockstep + canvas-scope hooks).
     static func runFocusBorderSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
@@ -1648,23 +1706,28 @@ final class CanvasNSView: NSView {
 
         let titleAPoint = viewA.convert(NSPoint(x: viewA.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil)
         let titleBPoint = viewB.convert(NSPoint(x: viewB.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil)
+        let gap = FocusBorderOverlayView.gap
 
-        // 1) Focus A → A bordered, B not.
+        // 1) Focus A → overlay visible + animating, framed around A's screen
+        //    frame outset by the gap; B is not bordered.
         AppDelegate.routeTileClickFocus(at: titleAPoint, in: canvas, focusBroker: focusBroker)
-        try expect(viewA.qaFocusBorderActive, "focusing A should install + animate A's marching-ants border")
-        try expect(!viewB.qaFocusBorderActive, "B must not be bordered while A is focused")
+        try expect(canvas.qaFocusBorderActive, "focusing A should show + animate the canvas focus-border overlay around A")
         try expect(canvas.borderedTileId == tileAId, "canvas should track A as the single bordered tile")
+        let expectedAFrame = viewA.frame.insetBy(dx: -gap, dy: -gap)
+        try expect(canvas.qaFocusBorderFrame == expectedAFrame, "overlay frame should equal A's screen frame outset by \(gap); expected \(expectedAFrame), got \(String(describing: canvas.qaFocusBorderFrame))")
 
-        // 2) Focus B → B bordered, A cleared (exactly one bordered).
+        // 2) Focus B → overlay moves to B (A no longer bordered; exactly one).
         AppDelegate.routeTileClickFocus(at: titleBPoint, in: canvas, focusBroker: focusBroker)
-        try expect(viewB.qaFocusBorderActive, "focusing B should install + animate B's marching-ants border")
-        try expect(!viewA.qaFocusBorderActive, "A's border must be removed when focus moves to B")
+        try expect(canvas.qaFocusBorderActive, "focusing B should keep the overlay visible + animating around B")
         try expect(canvas.borderedTileId == tileBId, "canvas should track B as the single bordered tile")
+        let expectedBFrame = viewB.frame.insetBy(dx: -gap, dy: -gap)
+        try expect(canvas.qaFocusBorderFrame == expectedBFrame, "overlay should move to B's screen frame outset by \(gap); expected \(expectedBFrame), got \(String(describing: canvas.qaFocusBorderFrame))")
+        try expect(canvas.qaFocusBorderFrame != expectedAFrame, "overlay must no longer sit at A's outset frame after focus moves to B")
 
-        // 3) Scope → canvas (background click) → neither tile bordered. Drive
-        //    the real background mouseDown first (it makes the canvas first
-        //    responder, clearing the tile responder) so the router resolves to
-        //    .canvas instead of falling back to the focused tile's responder.
+        // 3) Scope → canvas (background click) → overlay hidden. Drive the real
+        //    background mouseDown first (it makes the canvas first responder,
+        //    clearing the tile responder) so the router resolves to .canvas
+        //    instead of falling back to the focused tile's responder.
         let backgroundPoint = NSPoint(x: 770, y: 330)
         try expect(canvas.tileId(at: canvas.convert(backgroundPoint, from: nil)) == nil, "precondition: background point must hit no tile")
         guard let bgDown = NSEvent.mouseEvent(with: .leftMouseDown, location: backgroundPoint, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1) else {
@@ -1673,21 +1736,27 @@ final class CanvasNSView: NSView {
         canvas.mouseDown(with: bgDown)
         AppDelegate.routeTileClickFocus(at: backgroundPoint, in: canvas, focusBroker: focusBroker)
         try expect(focusBroker.activeSurface == .canvas, "background click should set scope .canvas")
-        try expect(!viewA.qaFocusBorderActive && !viewB.qaFocusBorderActive, "no tile should be bordered when scope is canvas")
+        try expect(!canvas.qaFocusBorderActive, "overlay must be hidden when scope is canvas")
+        try expect(canvas.qaFocusBorderFrame == nil, "overlay should report no frame when scope is canvas")
         try expect(canvas.borderedTileId == nil, "canvas should track no bordered tile when scope is canvas")
 
-        // 4) Render the focused tile offscreen with the dash phase FROZEN and
-        //    assert the chrome is non-degenerate (grey-screen guard).
+        // 4) Render the overlay offscreen with the dash phase FROZEN and assert
+        //    the chrome is non-degenerate (grey-screen guard). Re-focus A so the
+        //    overlay is visible and framed before capture.
         AppDelegate.routeTileClickFocus(at: titleAPoint, in: canvas, focusBroker: focusBroker)
-        try expect(viewA.qaFocusBorderActive, "precondition: A re-focused for snapshot")
-        viewA.qaFreezeFocusBorder(phase: 0)
+        try expect(canvas.qaFocusBorderActive, "precondition: A re-focused for snapshot")
+        canvas.qaFreezeFocusBorder(phase: 0)
         canvas.layoutSubtreeIfNeeded()
-        guard let rep = viewA.bitmapImageRepForCachingDisplay(in: viewA.bounds) else {
+        // Render the canvas region covering A's outset overlay frame so the
+        // captured pixels include the dashed border (the overlay alone over the
+        // dark canvas reads as background + dashes).
+        let snapshotRect = expectedAFrame
+        guard let rep = canvas.bitmapImageRepForCachingDisplay(in: snapshotRect) else {
             throw CheckError.failed("focus-border snapshot bitmap rep was not created")
         }
-        viewA.cacheDisplay(in: viewA.bounds, to: rep)
+        canvas.cacheDisplay(in: snapshotRect, to: rep)
         let metrics = VisualSnapshot.metrics(of: rep)
-        try expect(!metrics.isBlank, "focused tile render must not be blank/uniform — got \(metrics.distinctSampledColors) distinct sampled colors at \(metrics.width)x\(metrics.height)")
+        try expect(!metrics.isBlank, "focus-border overlay render must not be blank/uniform — got \(metrics.distinctSampledColors) distinct sampled colors at \(metrics.width)x\(metrics.height)")
 
         let fm = FileManager.default
         let root = URL(fileURLWithPath: fm.currentDirectoryPath)
@@ -1699,13 +1768,23 @@ final class CanvasNSView: NSView {
             try png.write(to: screenshot, options: .atomic)
         }
         let artifact = directory.appendingPathComponent("manifest.json")
+        func rectDict(_ rect: CGRect) -> [String: Double] {
+            ["x": rect.origin.x, "y": rect.origin.y, "width": rect.width, "height": rect.height]
+        }
         let manifest: [String: Any] = [
             "check": "focus-border",
+            "overlay": "canvas-owned outset marching-ants",
+            "gap": Double(gap),
+            "lineWidth": Double(FocusBorderOverlayView.lineWidth),
+            "animationDuration": FocusBorderOverlayView.animationDuration,
             "tileAId": tileAId.uuidString,
             "tileBId": tileBId.uuidString,
-            "focusAScope": "A bordered, B not",
-            "focusBScope": "B bordered, A cleared",
-            "canvasScope": "neither bordered",
+            "focusAScope": "overlay around A (outset by gap), B not bordered",
+            "focusBScope": "overlay moved to B (outset by gap), A cleared",
+            "canvasScope": "overlay hidden",
+            "tileAScreenFrame": rectDict(viewA.frame),
+            "expectedAOutsetFrame": rectDict(expectedAFrame),
+            "expectedBOutsetFrame": rectDict(expectedBFrame),
             "frozenSnapshotDistinctColors": metrics.distinctSampledColors,
             "frozenSnapshotSize": ["width": metrics.width, "height": metrics.height],
             "frozenSnapshotIsBlank": metrics.isBlank,
@@ -1744,6 +1823,110 @@ final class CanvasNSView: NSView {
 @MainActor
 protocol CanvasNSViewDelegate: AnyObject {
     func canvasDidChange(_ canvas: CanvasNSView)
+}
+
+/// Canvas-owned marching-ants focus border. A `CAShapeLayer` strokes a dashed
+/// rounded rect around the *outside* of the focused tile's on-screen frame; a
+/// repeating `lineDashPhase` animation makes the dashes travel the perimeter.
+/// Lives on the canvas (not the tile) so the outset path is not clipped by the
+/// tile's `masksToBounds`; the overlay's own frame is the tile's screen frame
+/// outset by `gap`, and the dashed path is its `bounds` (so the stroke draws on
+/// the outside of the tile, in the gap). Click-transparent: `hitTest` returns
+/// nil so it never blocks tiles or the canvas. Sized in screen space, so the
+/// stroke + dashes stay screen-space constant at any canvas zoom.
+@MainActor
+final class FocusBorderOverlayView: NSView {
+    /// Gap (screen px) between the tile edge and the dashed border.
+    static let gap: CGFloat = 8
+    static let lineWidth: CGFloat = 1.5
+    static let dashPattern: [NSNumber] = [6, 4]
+    /// Loop duration (s). Lower = faster march. Tunable.
+    static let animationDuration: CFTimeInterval = 2.5
+    /// Tile corner radius (TileNSView uses 6) + gap, so the border is concentric
+    /// with the rounded tile.
+    static let cornerRadius: CGFloat = 6 + gap
+    private static let animationKey = "marchingAnts"
+
+    private let shape = CAShapeLayer()
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = false
+        shape.fillColor = NSColor.clear.cgColor
+        // Subtle, low-opacity accent so the border reads as "focused" without
+        // shouting inside a dense dark canvas.
+        shape.strokeColor = NSColor.controlAccentColor.withAlphaComponent(0.7).cgColor
+        shape.lineWidth = Self.lineWidth
+        shape.lineDashPattern = Self.dashPattern
+        layer?.addSublayer(shape)
+        isHidden = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    /// Pass clicks through — the overlay draws only and must never consume
+    /// mouse events on tiles or the canvas.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    /// Position the overlay around `tileScreenFrame` (the focused tile's frame),
+    /// outset by `gap`, show it, and (re)attach the marching animation.
+    func show(around tileScreenFrame: CGRect) {
+        frame = tileScreenFrame.insetBy(dx: -Self.gap, dy: -Self.gap)
+        isHidden = false
+        layoutShape()
+        startMarchingAnts()
+    }
+
+    func hide() {
+        isHidden = true
+        shape.removeAnimation(forKey: Self.animationKey)
+    }
+
+    override func layout() {
+        super.layout()
+        layoutShape()
+    }
+
+    private func layoutShape() {
+        // Inset by half the line width so the stroke sits fully inside the
+        // overlay bounds; the path is the overlay bounds (gap-outset tile rect).
+        let rect = bounds.insetBy(dx: Self.lineWidth / 2, dy: Self.lineWidth / 2)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shape.frame = bounds
+        shape.path = CGPath(roundedRect: rect, cornerWidth: Self.cornerRadius, cornerHeight: Self.cornerRadius, transform: nil)
+        CATransaction.commit()
+    }
+
+    private func startMarchingAnts() {
+        let phase = Self.dashPattern.reduce(0) { $0 + $1.doubleValue }
+        let animation = CABasicAnimation(keyPath: "lineDashPhase")
+        animation.fromValue = 0
+        animation.toValue = phase
+        animation.duration = Self.animationDuration
+        animation.repeatCount = .infinity
+        shape.add(animation, forKey: Self.animationKey)
+    }
+
+    /// QA: true when the overlay is visible AND its looping animation is
+    /// attached. Combined with frame/position assertions by the canvas accessor.
+    var qaIsAnimating: Bool {
+        !isHidden && shape.animation(forKey: Self.animationKey) != nil
+    }
+
+    /// QA: freeze the marching motion so the border renders deterministically
+    /// for an offscreen snapshot. Removes the animation and pins a fixed dash
+    /// phase, leaving the dashed stroke statically visible.
+    func qaFreeze(phase: CGFloat = 0) {
+        shape.removeAnimation(forKey: Self.animationKey)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shape.lineDashPhase = phase
+        CATransaction.commit()
+    }
 }
 
 @MainActor
