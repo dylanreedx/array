@@ -581,10 +581,15 @@ final class CanvasNSView: NSView {
     /// so a drawn label always maps to the tile the key jumps to.
     func leaderJumpAssignments() -> [LeaderJumpAssignment] {
         var worldFrames: [UUID: TileFrame] = [:]
+        let focusedId = canvasState.lastActiveTileId
         let visible: [(id: UUID, frame: TileFrame)] = canvasState.tiles.compactMap { tile in
             let worldFrame = activeZone.map { CanvasEngine.worldFrame(tile: tile, in: $0) } ?? tile.frame
             let screenFrame = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport)
             guard screenFrame.intersects(bounds) else { return nil }
+            // The tile you're already on AND fully seeing isn't a jump target —
+            // you're there. A focused tile only partially in view stays a target
+            // (the jump centers it), as does any unfocused visible tile.
+            if tile.id == focusedId, bounds.contains(screenFrame) { return nil }
             worldFrames[tile.id] = worldFrame
             return (id: tile.id, frame: worldFrame)
         }

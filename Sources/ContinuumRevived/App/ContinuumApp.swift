@@ -5860,8 +5860,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let app = AppDelegate()
         app.canvasView = canvas
         canvas.focusBroker = app.focusBroker
-        // Install real tile views so the tiles have focus adapters (the jump's
-        // enterScope(.tile) acquires focus exactly as in the running app).
+        // Lockstep wiring, exactly as production: accepted tile focus marks the
+        // tile active so `lastActiveTileId` tracks scope (the self-exclusion rule
+        // reads it). Install real tile views so the tiles have focus adapters.
+        app.focusBroker.onAcceptedTileFocus = { [weak canvas] id in canvas?.markActive(tileId: id) }
         canvas.install(tileView: TileNSView(tile: tileA), for: tileA)
         canvas.install(tileView: TileNSView(tile: tileB), for: tileB)
         _ = app.focusBroker.requestFocus(.canvas, reason: .userClick)
@@ -5902,12 +5904,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(vpEqual(canvas.viewport, viewportBeforeEsc), "Esc must not move the viewport")
         app.handleFlagsChanged(try flagsEvent([], keyCode: 58))
 
+        // 6) Self-exclusion: the tile you're on AND fully seeing is not a jump
+        //    target; an unfocused, only-partially-visible tile still is. After
+        //    step 3's jump+center, B is focused and fully in view; A hangs off
+        //    the top-left of the viewport (partially visible, unfocused).
+        try expect(canvas.canvasState.lastActiveTileId == bId, "precondition: B is the focused tile after the jump")
+        app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        let labels6 = canvas.leaderJumpAssignments()
+        try expect(!labels6.contains { $0.tileId == bId }, "the focused, fully-visible tile must not get a jump label")
+        try expect(labels6.contains { $0.tileId == aId }, "a partially-visible, unfocused tile must still get a jump label")
+        // B's former label key ('s') now matches no remaining label → swallowed.
+        _ = app.handleHotkey(try keyDown("s", 1, mods: [.option]))
+        try expect(app.focusBroker.activeSurface == .modal(.leader), "a key matching no remaining label must not jump (focused tile excluded); got \(String(describing: app.focusBroker.activeSurface))")
+        // The partially-visible tile A remains reachable.
+        _ = app.handleHotkey(try keyDown("a", 0, mods: [.option]))
+        try expect(app.focusBroker.activeSurface == .tile(aId), "the partially-visible unfocused tile must remain jumpable; got \(String(describing: app.focusBroker.activeSurface))")
+        app.handleFlagsChanged(try flagsEvent([], keyCode: 58))
+
+        // 7) A FOCUSED tile that is only partially in view stays jumpable — the
+        //    jump centers it. Exclusion requires full visibility, not just focus.
+        let cId = UUID(uuidString: "00000000-0000-0000-0000-0000000000C3")!
+        let tileC = Tile(id: cId, kind: .note, title: "C", frame: TileFrame(x: 0, y: 0, width: 240, height: 180), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let canvas2 = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 100, y: 0, zoom: 1), tiles: [tileC], groups: [], lastActiveTileId: nil))
+        canvas2.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let window2 = NSWindow(contentRect: canvas2.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window2.contentView = canvas2
+        window2.orderFrontRegardless()
+        let app2 = AppDelegate()
+        app2.canvasView = canvas2
+        canvas2.focusBroker = app2.focusBroker
+        app2.focusBroker.onAcceptedTileFocus = { [weak canvas2] id in canvas2?.markActive(tileId: id) }
+        canvas2.install(tileView: TileNSView(tile: tileC), for: tileC)
+        _ = app2.focusBroker.enterScope(.tile(cId), reason: .userClick)
+        app2.leaderDwell = 0
+        try expect(canvas2.canvasState.lastActiveTileId == cId, "precondition: C is the focused tile")
+        let cScreen = CanvasEngine.tileScreenFrame(TileFrame(x: 0, y: 0, width: 240, height: 180), viewport: canvas2.viewport)
+        try expect(!canvas2.bounds.contains(cScreen) && cScreen.intersects(canvas2.bounds), "precondition: focused tile C is only partially visible")
+        app2.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        try expect(canvas2.leaderJumpAssignments().contains { $0.tileId == cId }, "a focused but partially-visible tile must still get a jump label")
+        _ = app2.handleHotkey(try keyDown("a", 0, mods: [.option]))
+        try expect(app2.focusBroker.activeSurface == .tile(cId), "jumping to a focused, partially-visible tile keeps focus on it")
+        let expectedC = CanvasEngine.centeredViewport(worldRect: CGRect(x: 0, y: 0, width: 240, height: 180), viewportSize: CGSize(width: 800, height: 600), zoom: 1)
+        try expect(vpEqual(canvas2.viewport, expectedC), "jumping to a partially-visible focused tile centers it; got (\(canvas2.viewport.x),\(canvas2.viewport.y))")
+        app2.handleFlagsChanged(try flagsEvent([], keyCode: 58))
+
         let manifest: [String: Any] = [
             "check": "leader-jump",
             "path": "synthesized .flagsChanged + .keyDown NSEvents → handleFlagsChanged / handleHotkey → handleLeaderKey (real input path)",
             "labeledTiles": 2,
             "jumpedTo": "second tile via label 's'",
             "centeredViewport": ["x": expectedB.x, "y": expectedB.y, "zoom": expectedB.zoom],
+            "selfExclusion": "focused+fully-visible tile dropped; focused+partial and unfocused+partial stay jumpable",
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
