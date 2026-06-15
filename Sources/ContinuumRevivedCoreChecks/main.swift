@@ -2525,6 +2525,20 @@ do {
     let clamped = TileArrangement.resizeEdgeSnap(nearMin, edge: .bottom, others: [neighborInside], gap: gap, threshold: threshold, minimum: minimum)
     expect(clamped.frame.height == minimum.height, "resizeEdgeSnap clamps a shrinking snap to the minimum height, got \(clamped.frame.height)")
     expect(clamped.frame.y == 0, "resizeEdgeSnap keeps the fixed (top) edge while clamping, got \(clamped.frame.y)")
+
+    // Stacked tiles (vertically adjacent, sharing the X column): dragging the TOP
+    // tile's bottom edge toward the lower tile's top snaps GAP-ADJACENT. The lower
+    // tile overlaps on X, not Y — the relationship the Y-overlap-only gate missed.
+    let topTile = TileFrame(x: 300, y: 0, width: 300, height: 265) // bottom at 265
+    let lowerTile = TileFrame(x: 300, y: 280, width: 300, height: 200) // top at 280 (X-overlap, Y-gap)
+    let stacked = TileArrangement.resizeEdgeSnap(topTile, edge: .bottom, others: [lowerTile], gap: gap, threshold: threshold, minimum: minimum)
+    expect(stacked.frame == TileFrame(x: 300, y: 0, width: 300, height: 272), "resizeEdgeSnap snaps the bottom edge gap-adjacent above a stacked tile, got \(stacked.frame)")
+    expect(stacked.frame.y + stacked.frame.height + gap == lowerTile.y, "stacked snap leaves exactly one gap above the lower tile's top")
+
+    // A tile in neither the same column nor the same row is not a resize-snap target.
+    let offColumn = TileFrame(x: 700, y: 280, width: 300, height: 200) // no X overlap, no Y overlap
+    let noStack = TileArrangement.resizeEdgeSnap(topTile, edge: .bottom, others: [offColumn], gap: gap, threshold: threshold, minimum: minimum)
+    expect(noStack.frame == topTile && noStack.guides.isEmpty, "resizeEdgeSnap ignores a tile that shares neither axis, got \(noStack.frame)")
 }
 
 do {

@@ -177,10 +177,17 @@ public enum TileArrangement {
 
         if edge.touchesTop || edge.touchesBottom {
             let originControls = edge.touchesTop // .top moves frame.y; .bottom moves the far edge
-            let edges = others
-                .filter { orthogonalExtentsOverlap(frame, $0, direction: .left) } // Y overlap
-                .map { (near: $0.y, far: $0.y + $0.height) }
-            if let snap = snapResizeAxis(origin: adjusted.y, extent: adjusted.height, originControls: originControls, edges: edges, gap: gap, threshold: threshold, minimum: Double(minimum.height), guide: originControls ? .topAligned : .bottomAligned) {
+            var targets: [Double] = []
+            for o in others {
+                let near = o.y, far = o.y + o.height
+                if orthogonalExtentsOverlap(frame, o, direction: .left) { // beside (Y overlap)
+                    targets += [near, far, near - gap, far + gap]        // align/match height (+ park gap outside)
+                }
+                if orthogonalExtentsOverlap(frame, o, direction: .up) {  // stacked (X overlap)
+                    targets += [near - gap, far + gap]                   // gap-adjacent to the facing edge
+                }
+            }
+            if let snap = snapResizeAxis(origin: adjusted.y, extent: adjusted.height, originControls: originControls, targets: targets, threshold: threshold, minimum: Double(minimum.height), guide: originControls ? .topAligned : .bottomAligned) {
                 adjusted.y = snap.origin
                 adjusted.height = snap.extent
                 guides.append(snap.guide)
@@ -189,10 +196,17 @@ public enum TileArrangement {
 
         if edge.touchesLeft || edge.touchesRight {
             let originControls = edge.touchesLeft
-            let edges = others
-                .filter { orthogonalExtentsOverlap(frame, $0, direction: .up) } // X overlap
-                .map { (near: $0.x, far: $0.x + $0.width) }
-            if let snap = snapResizeAxis(origin: adjusted.x, extent: adjusted.width, originControls: originControls, edges: edges, gap: gap, threshold: threshold, minimum: Double(minimum.width), guide: originControls ? .leadingAligned : .trailingAligned) {
+            var targets: [Double] = []
+            for o in others {
+                let near = o.x, far = o.x + o.width
+                if orthogonalExtentsOverlap(frame, o, direction: .up) {   // stacked (X overlap)
+                    targets += [near, far, near - gap, far + gap]         // align/match width (+ park gap outside)
+                }
+                if orthogonalExtentsOverlap(frame, o, direction: .left) { // beside (Y overlap)
+                    targets += [near - gap, far + gap]                    // gap-adjacent to the facing edge
+                }
+            }
+            if let snap = snapResizeAxis(origin: adjusted.x, extent: adjusted.width, originControls: originControls, targets: targets, threshold: threshold, minimum: Double(minimum.width), guide: originControls ? .leadingAligned : .trailingAligned) {
                 adjusted.x = snap.origin
                 adjusted.width = snap.extent
                 guides.append(snap.guide)
@@ -203,22 +217,20 @@ public enum TileArrangement {
     }
 
     /// Snap one axis of a resize: move the dragged coordinate (the origin edge when
-    /// `originControls`, else the far edge) to the nearest neighbor edge / gap-offset
-    /// within threshold, keep the opposite edge fixed, and clamp the extent to `minimum`.
-    private static func snapResizeAxis(origin: Double, extent: Double, originControls: Bool, edges: [(near: Double, far: Double)], gap: Double, threshold: Double, minimum: Double, guide: SnapGuide) -> (origin: Double, extent: Double, guide: SnapGuide)? {
+    /// `originControls`, else the far edge) to the nearest `targets` coordinate within
+    /// threshold, keep the opposite edge fixed, and clamp the extent to `minimum`.
+    /// Candidates carry both meanings: a same-axis-overlap (beside) neighbor's own
+    /// edges = dimension-match alignment; a cross-axis-overlap (stacked) neighbor's
+    /// edge ± gap = gap-adjacency so two stacked tiles butt with the same clean gap a
+    /// corner snap leaves.
+    private static func snapResizeAxis(origin: Double, extent: Double, originControls: Bool, targets: [Double], threshold: Double, minimum: Double, guide: SnapGuide) -> (origin: Double, extent: Double, guide: SnapGuide)? {
         let far = origin + extent
         let current = originControls ? origin : far
         var bestDelta: Double?
-        func consider(_ target: Double) {
+        for target in targets {
             let delta = target - current
-            guard abs(delta) <= threshold else { return }
+            guard abs(delta) <= threshold else { continue }
             if bestDelta == nil || abs(delta) < abs(bestDelta!) { bestDelta = delta }
-        }
-        for e in edges {
-            consider(e.near)       // align to neighbor's near edge (matching dimension)
-            consider(e.far)        // align to neighbor's far edge (matching dimension)
-            consider(e.near - gap) // park gap outside the near edge
-            consider(e.far + gap)  // park gap outside the far edge
         }
         guard let delta = bestDelta else { return nil }
         let snapped = current + delta

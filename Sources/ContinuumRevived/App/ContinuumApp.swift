@@ -6939,6 +6939,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(unsnap[0].height == tall.height, "event 1 must snap flush to the neighbor (\(tall.height)); got \(unsnap[0].height)")
         try expect(unsnap[1].height == 215, "event 2 must pull out of the snap to the free height (215); got \(unsnap[1].height)")
 
+        // 5) Stacked tiles (one above the other, same column, vertical gap): dragging
+        // the TOP tile's bottom edge toward the lower tile's top snaps GAP-ADJACENT —
+        // the case the Y-overlap-only gate missed, since the lower tile overlaps on X,
+        // not Y. (Dylan's grid: two right-column tiles wouldn't snap to each other.)
+        let gap = TileGapResolver.resolvedGap()
+        let topT = TileFrame(x: 300, y: 0, width: 300, height: 200) // bottom at 200
+        let lowerT = TileFrame(x: 300, y: 280, width: 300, height: 200) // top at 280 (X-overlap, Y-gap)
+        let stacked = try driveBottomResize(aFrame: topT, neighbors: [(cId, lowerT)], worldDys: [40]).last! // bottom 240 → snaps gap-adjacent
+        try expect(stacked.height == lowerT.y - gap, "stacked resize must snap the bottom edge gap-adjacent above the lower tile (\(lowerT.y - gap)); got \(stacked.height)")
+        try expect(stacked.y + stacked.height + gap == lowerT.y, "snapped bottom must leave exactly one gap above the stacked tile's top")
+
         let manifest: [String: Any] = [
             "check": "resize-snap",
             "path": "synthesized mouse NSEvents → TileNSView.mouseDown/Dragged/Up on the bottom resize edge (real live resize)",
