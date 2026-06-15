@@ -2618,6 +2618,66 @@ do {
     expect(KnownChordConflicts.conflict(for: NavKeymap.default.leader)?.source == .macOS, "nav leader ⌃Space is a known macOS chord (allowlisted)")
 }
 
+// MARK: - KeybindConflictChecks: intra-scope uniqueness
+
+do {
+    // No two bindings in the same scope (layer) may share a chord. Tile layers
+    // are inherently unique (chord-keyed catalog), but global + nav-mode are
+    // hand-authored and this catches an accidental collision (e.g. two nav keys
+    // bound to the same letter, or a duplicate global).
+    let entries = ShortcutCatalog.entries()
+    func assertUniqueChords(_ scopeEntries: [ShortcutCatalogEntry], _ scope: String) {
+        let chords = scopeEntries.map(\.chordDisplay)
+        expect(Set(chords).count == chords.count, "ShortcutCatalog: scope \(scope) has duplicate chord bindings: \(chords.sorted())")
+    }
+    assertUniqueChords(entries.filter { $0.layer == .global }, "global")
+    assertUniqueChords(entries.filter { $0.layer == .navMode }, "navMode")
+    for kind in TileKind.allCases {
+        assertUniqueChords(entries.filter { $0.layer == .tile(kind) }, "tile.\(kind.rawValue)")
+    }
+}
+
+// MARK: - FocusBorderConfigChecks: resolver round-trip + invalid fallbacks
+
+do {
+    let suite = "FocusBorderConfigChecks-\(UUID().uuidString)"
+    let d = UserDefaults(suiteName: suite)!
+    d.removePersistentDomain(forName: suite)
+
+    // Empty defaults → declared defaults.
+    let base = FocusBorderConfig.resolvedFromDefaults(defaults: d)
+    expect(base.enabled == FocusBorderConfig.defaultEnabled, "focus border defaults to enabled")
+    expect(base.color == FocusBorderConfig.defaultColor, "focus border default color")
+    expect(base.gap == FocusBorderConfig.defaultGap, "focus border default gap")
+    expect(base.speed == FocusBorderConfig.defaultSpeed, "focus border default speed")
+
+    // Valid values round-trip.
+    d.set(false, forKey: FocusBorderConfig.enabledKey)
+    d.set("Mint", forKey: FocusBorderConfig.colorKey)
+    d.set(16.0, forKey: FocusBorderConfig.gapKey)
+    d.set(1.2, forKey: FocusBorderConfig.speedKey)
+    let custom = FocusBorderConfig.resolvedFromDefaults(defaults: d)
+    expect(custom.enabled == false, "focus border enabled round-trips")
+    expect(custom.color == "Mint", "focus border color round-trips")
+    expect(custom.gap == 16.0, "focus border gap round-trips")
+    expect(custom.speed == 1.2, "focus border speed round-trips")
+
+    // Invalid color → default; non-positive gap/speed → default.
+    d.set("Chartreuse", forKey: FocusBorderConfig.colorKey)
+    d.set(0.0, forKey: FocusBorderConfig.gapKey)
+    d.set(-3.0, forKey: FocusBorderConfig.speedKey)
+    let invalid = FocusBorderConfig.resolvedFromDefaults(defaults: d)
+    expect(invalid.color == FocusBorderConfig.defaultColor, "unknown focus border color falls back to default")
+    expect(invalid.gap == FocusBorderConfig.defaultGap, "non-positive focus border gap falls back to default")
+    expect(invalid.speed == FocusBorderConfig.defaultSpeed, "non-positive focus border speed falls back to default")
+
+    // Every advertised palette option resolves to itself (schema ↔ resolver agree).
+    for option in FocusBorderConfig.colorOptions {
+        d.set(option, forKey: FocusBorderConfig.colorKey)
+        expect(FocusBorderConfig.resolvedFromDefaults(defaults: d).color == option, "palette option \(option) resolves to itself")
+    }
+}
+
 // MARK: - TileActionCatalog override round-trip
 
 do {
@@ -3654,6 +3714,10 @@ do {
         DeleteConfirmPolicy.userDefaultsKey,
         DefaultBrowserURL.userDefaultsKey,
         TileGapResolver.userDefaultsKey,
+        FocusBorderConfig.enabledKey,
+        FocusBorderConfig.colorKey,
+        FocusBorderConfig.gapKey,
+        FocusBorderConfig.speedKey,
     ]
     expect(expectedKeys.isSubset(of: Set(fieldKeys)), "settings schema must represent every existing pref key")
 

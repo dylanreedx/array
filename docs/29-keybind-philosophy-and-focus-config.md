@@ -9,9 +9,15 @@ to fix. This doc records the WHY so implementation survives the context reset.
 
 ## 1. Focus border must be configurable (extensible / toggleable / color)
 
-Current: `FocusBorderOverlayView` (CanvasNSView) — a click-through canvas
-overlay outside the focused tile; constants in code: `gap = 8`, `lineWidth =
-1.5`, dash `[6,4]`, `controlAccentColor @ 0.7`, `animationDuration = 2.5`.
+**Shipped (855df84):** `FocusBorderConfig` (Core) resolves enabled/color/gap/
+speed from `continuum.focusBorder.*` UserDefaults; the overlay reads it; an
+**Appearance** settings section exposes a toggle, a named-palette color choice,
+and gap/speed fields; changes apply live via the settings-changed notification.
+
+Original design notes below. Current: `FocusBorderOverlayView` (CanvasNSView) —
+a click-through canvas overlay outside the focused tile; constants in code:
+`gap = 8`, `lineWidth = 1.5`, dash `[6,4]`, `controlAccentColor @ 0.7`,
+`animationDuration = 2.5`.
 
 Goal: surface it through the docs/24 `SettingsSchema` so it's toggleable and
 themeable, and structure it so adding a knob is trivial:
@@ -65,22 +71,30 @@ conflicting with general desktop / global workflows.
 - Everything **rebindable** via the docs/24 editor — defaults are good starting
   points, not law.
 
-## 3. KNOWN ISSUE — A3 positioning defaults collide with Rectangle
+## 3. RESOLVED — Rectangle conflict fixed; nudge dropped, throw re-homed
 
 A3 (commit a6f1007) shipped tile positioning as `⌃⌥`-arrows (nudge) +
 `⌃⌥⌘`-arrows (throw), described as "Rectangle-style muscle memory." But
-**Rectangle USES `⌃⌥`-arrows as global hotkeys**, so they preempt Continuum and
-these defaults silently don't fire when Rectangle is installed. They're also
-exactly the "deep chord" the philosophy argues against.
+**Rectangle USES `⌃⌥`-arrows as global hotkeys**, so they preempted Continuum
+and silently didn't fire when Rectangle is installed — and they were exactly
+the "deep chord" the philosophy argues against.
 
-**Fix (first post-compact task):** re-home tile move/throw per §2. Candidate
-direction — move tile move/throw into the **nav-mode modal scope** (it's an
-explicit mode, frontmost-only, so bare or single-modifier keys there can't
-collide with global daemons), or a leader sequence; keep rebindable. Also
-audit the resize presets (`⌘⌃`-digits) and any other default against the
-known-conflicts list (note `⌃`-digits are macOS Spaces switching; verify
-`⌘⌃`-digits are clear). Update the `TileActionCatalog` defaults +
-`ShortcutCatalog` accordingly.
+**Fixed (commit 9eb5953):** per Dylan, nudge was dropped entirely — **throw is
+now the single directional move primitive** (paired, eventually, with magnetic
+drag-snapping for the good feel). Throw re-homed from `⌃⌥⌘`-arrows to
+**`⌘⌃`-arrows** — a shallow 2-modifier focused-tile chord, a sibling of the
+`⌘⌃`-digit resize presets. Rectangle uses `⌃⌥` (not `⌘⌃`); macOS reserves
+`⌃`-arrows (Spaces) but not `⌘⌃`-arrows; `⌘`-combos route to the app so tile
+content is never shadowed. The audit lives in code now: `KnownChordConflicts`
+(curated macOS + Rectangle chords) + `KeybindConflictChecks` fail the build if
+any default lands on a conflict. Resize `⌘⌃`-digits, browser/note `⌘`-letters,
+and globals `⌘K`/`⌘,`/`⌘1-4` were all audited clear.
+
+**Open finding — the nav leader `⌃Space`** collides with the macOS "Select
+previous input source" shortcut. Left as-is for now (single-input-source users
+see no conflict, it's rebindable, and changing it is muscle-memory disruptive);
+it is the one **allowlisted** default in the conflict-guard. Decide later
+whether to keep it, rebind the leader, or disable the macOS shortcut.
 
 ## 4. Settings + keybinding test suite (grows with the surface)
 
@@ -105,15 +119,21 @@ Layers (some exist, some to build):
 or keybind ships, in the same change: its catalog/schema entry, a behavior
 assertion, and — if it has a default chord — a conflict-guard entry.
 
-## 5. Immediate post-compact tasks (ordered)
+## 5. Post-compact tasks — DONE
 
-1. **Fix the Rectangle conflict (§3):** re-home tile move/throw off `⌃⌥`-arrows;
-   audit all defaults against the known-conflicts list.
-2. **Focus-border config (§1):** enabled + color (+ gap/speed) `SettingsField`s
-   + a resolver the overlay reads; keep it extensible.
-3. **Grow the test suite (§4):** behavior assertions per binding + the
-   conflict-guard check; adopt the "ship the assertion with the binding"
-   convention.
+1. **Rectangle conflict (§3) — done (9eb5953):** dropped nudge, re-homed throw
+   to `⌘⌃`-arrows; added `KnownChordConflicts` + an executable audit.
+2. **Focus-border config (§1) — done (855df84):** `FocusBorderConfig` resolver
+   (enabled/color/gap/speed) + an Appearance settings section; the overlay reads
+   it and re-applies live on the settings-changed notification.
+3. **Test suite (§4) — done:** `FocusBorderConfigChecks` (round-trip +
+   invalid-input fallbacks), extended `SettingsSchemaChecks`, and
+   `KeybindConflictChecks` (no default on `KnownChordConflicts` + intra-scope
+   chord uniqueness, leader allowlisted). Convention adopted: ship the
+   catalog/schema entry + a behavior assertion + a conflict-guard entry together.
+
+**Still open:** the `⌃Space` leader finding (§3); magnetic drag-snapping to pair
+with throw (§3); evaluate the focus border at more zoomed-out states (§1).
 
 ## Key files
 `TileActionCatalog.swift` (defaults — the Rectangle conflict) · `FocusDispatch.swift`
