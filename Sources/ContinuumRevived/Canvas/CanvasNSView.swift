@@ -228,6 +228,24 @@ final class CanvasNSView: NSView {
         return result.guides.isEmpty ? nil : result.frame
     }
 
+    /// The snapped world frame a live resize would commit to, snapping the dragged
+    /// `edge` flush to a nearby neighbor's edge so a tile can take on a docked
+    /// neighbor's dimension (`TileArrangement.resizeEdgeSnap`). Returns nil when drag
+    /// snapping is off or nothing is within the pull radius. Shares the "Drag
+    /// Snapping" toggle, the gap, and the screen→world pull radius with `snapTarget`.
+    func resizeSnapTarget(for resizedFrame: TileFrame, edge: ResizeEdge, kind: TileKind, excludingTileId id: UUID) -> TileFrame? {
+        guard DragMagnetizeConfig.enabled(defaults: dragMagnetizeDefaults) else { return nil }
+        let zoom = viewport.zoom
+        guard zoom.isFinite, zoom > 0 else { return nil }
+        let others = canvasState.tiles.filter { $0.id != id }.map(\.frame)
+        guard !others.isEmpty else { return nil }
+        let gap = TileGapResolver.resolvedGap()
+        let threshold = DragMagnetizeConfig.snapThresholdScreenPoints / zoom
+        let minimum = CanvasEngine.minimumFrame(for: kind)
+        let result = TileArrangement.resizeEdgeSnap(resizedFrame, edge: edge, others: others, gap: gap, threshold: threshold, minimum: minimum)
+        return result.guides.isEmpty ? nil : result.frame
+    }
+
     /// Show the translucent drag-snap ghost at `worldFrame`'s screen rect, keeping
     /// it topmost (tile installs/reorders can otherwise bury it).
     func showDragGhost(at worldFrame: TileFrame) {

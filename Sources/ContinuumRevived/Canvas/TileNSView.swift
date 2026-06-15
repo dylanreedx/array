@@ -277,7 +277,13 @@ class TileNSView: NSView {
             canvas.updateTile(next)
             updateDragGhost(candidate: canvas.snapTarget(for: next.frame, excludingTileId: tile.id), on: canvas)
         case .resize(let edge):
-            let next = CanvasEngine.tile(tile, resizedByScreenDelta: delta, edge: edge, viewport: canvas.viewport)
+            // Live resize: the tile previews itself as it sizes. If the dragged edge
+            // comes within snap range of a neighbor's edge, snap it flush so the tile
+            // matches the neighbor's dimension along that axis. No dwell/ghost.
+            var next = CanvasEngine.tile(tile, resizedByScreenDelta: delta, edge: edge, viewport: canvas.viewport)
+            if let snapped = canvas.resizeSnapTarget(for: next.frame, edge: edge, kind: tile.kind, excludingTileId: tile.id) {
+                next.frame = snapped
+            }
             canvas.updateTile(next)
         case .none:
             super.mouseDragged(with: event)

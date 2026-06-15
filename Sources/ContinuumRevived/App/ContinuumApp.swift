@@ -419,6 +419,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--resize-snap-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runResizeSnapSelfCheck()
+                print("ContinuumRevivedResizeSnapChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-note-action-check") {
             do {
                 _ = NSApplication.shared
@@ -6818,6 +6830,114 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("drag-magnetize", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// Drives the REAL live-resize path: synthesizes a mouseDown on a tile's bottom
+    /// resize edge, drags it, and asserts the committed world frame in `canvasState`.
+    /// `resizeEdgeSnap` should snap the dragged edge flush to a docked neighbor's edge
+    /// so the tile matches the neighbor's dimension (drag a short tile's bottom down to
+    /// a taller neighbor's bottom → equal heights), leave an out-of-range edge free,
+    /// and never shrink below the kind's minimum. Expectations are derived
+    /// independently from the tile geometry, never copied from the snap math.
+    static func runResizeSnapSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let aId = UUID(uuidString: "00000000-0000-0000-0000-00000000DE51")!
+
+        // Drive a real bottom-edge resize of tile A by `worldDy` (positive grows the
+        // tile downward, negative shrinks it), against `neighbors`. Returns A's
+        // committed world frame after the gesture.
+        func driveBottomResize(aFrame: TileFrame, neighbors: [(UUID, TileFrame)], worldDy: CGFloat) throws -> TileFrame {
+            let tileA = Tile(id: aId, kind: .note, title: "RESIZE_A", frame: aFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+            var tiles = [tileA]
+            for (id, f) in neighbors {
+                tiles.append(Tile(id: id, kind: .note, title: "N", frame: f, zIndex: 2, runtimeRef: nil, metadata: TileMetadata()))
+            }
+            let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: tiles, groups: [], lastActiveTileId: nil))
+            canvas.frame = NSRect(x: 0, y: 0, width: 1100, height: 760)
+            let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = canvas
+            window.orderFrontRegardless()
+            let viewA = TileNSView(tile: tileA)
+            canvas.install(tileView: viewA, for: tileA)
+            for (id, _) in neighbors {
+                let n = canvas.canvasState.tiles.first(where: { $0.id == id })!
+                canvas.install(tileView: TileNSView(tile: n), for: n)
+            }
+            canvas.layoutSubtreeIfNeeded()
+
+            func mouse(_ type: NSEvent.EventType, at p: NSPoint) throws -> NSEvent {
+                guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else {
+                    throw CheckError.failed("could not synthesize \(type) at \(p)")
+                }
+                return e
+            }
+            // Grab the bottom edge at mid-width (clear of the corner bands), in window
+            // coordinates. Local y near bounds.height is the bottom edge (flipped view).
+            let grabLocal = NSPoint(x: viewA.bounds.midX, y: viewA.bounds.height - 1)
+            try expect(viewA.qaResizeEdge(at: grabLocal) == .bottom, "precondition: grab point must be the bottom resize edge; got \(String(describing: viewA.qaResizeEdge(at: grabLocal)))")
+            let p0 = viewA.convert(grabLocal, to: nil)
+            // delta.height = -(p1.y - p0.y); growing the tile downward (+worldDy) needs
+            // delta.height = +worldDy → p1.y = p0.y - worldDy (zoom 1: window == world).
+            let p1 = NSPoint(x: p0.x, y: p0.y - worldDy)
+            viewA.mouseDown(with: try mouse(.leftMouseDown, at: p0))
+            viewA.mouseDragged(with: try mouse(.leftMouseDragged, at: p1))
+            viewA.mouseUp(with: try mouse(.leftMouseUp, at: p1))
+            return canvas.canvasState.tiles.first(where: { $0.id == aId })!.frame
+        }
+
+        let bId = UUID(uuidString: "00000000-0000-0000-0000-00000000DE52")!
+        let cId = UUID(uuidString: "00000000-0000-0000-0000-00000000DE53")!
+        let minH = Double(CanvasEngine.minimumFrame(for: .note).height) // 160 — derived, not hardcoded
+
+        // 1) Dimension match: a short tile docked right of a taller one; dragging its
+        // bottom edge down into range snaps flush so the heights match. Both start
+        // above the minimum so CanvasEngine's own min-clamp never confounds the snap.
+        let tall = TileFrame(x: 0, y: 0, width: 100, height: 260) // bottom at 260
+        let shortStart = TileFrame(x: 120, y: 0, width: 120, height: 200) // bottom at 200
+        let matched = try driveBottomResize(aFrame: shortStart, neighbors: [(bId, tall)], worldDy: 50) // → bottom 250, snaps to 260
+        try expect(matched.y == 0 && matched.x == 120 && matched.width == 120, "resize must keep the fixed edges (top/left/right); got \(matched)")
+        try expect(matched.height == tall.height, "resize-snap must match the taller neighbor's height (\(tall.height)); got \(matched.height)")
+        try expect(matched.y + matched.height == tall.y + tall.height, "snapped bottom must be flush with the neighbor's bottom")
+
+        // 2) Out of range: a small drag that stays beyond the pull radius does not snap.
+        let freeResize = try driveBottomResize(aFrame: shortStart, neighbors: [(bId, tall)], worldDy: 10) // → bottom 210, 50 from 260
+        try expect(freeResize.height == 210, "an out-of-range edge resizes freely (no snap); got \(freeResize.height)")
+
+        // 3) Min-size clamp: a snap that would shrink the tile below its minimum clamps
+        // to the minimum instead. A starts tall; C's top edge sits below A.top + minH,
+        // and the post-drag bottom (170) stays above the minimum so only the SNAP would
+        // violate it — isolating resizeEdgeSnap's own clamp.
+        let aTall = TileFrame(x: 300, y: 0, width: 300, height: 300) // bottom at 300
+        let cInside = TileFrame(x: 620, y: 155, width: 100, height: 300) // top edge at 155 (< minH 160)
+        let clamped = try driveBottomResize(aFrame: aTall, neighbors: [(cId, cInside)], worldDy: -130) // → bottom 170, snap-to-155 would shrink below min
+        try expect(clamped.height == minH, "resize-snap must clamp a sub-minimum snap to the minimum height (\(minH)); got \(clamped.height)")
+        try expect(clamped.y == 0, "min clamp must keep the fixed (top) edge; got y=\(clamped.y)")
+
+        let manifest: [String: Any] = [
+            "check": "resize-snap",
+            "path": "synthesized mouse NSEvents → TileNSView.mouseDown/Dragged/Up on the bottom resize edge (real live resize)",
+            "minimumHeight": minH,
+            "dimensionMatch": ["x": matched.x, "y": matched.y, "w": matched.width, "h": matched.height],
+            "outOfRange": ["x": freeResize.x, "y": freeResize.y, "w": freeResize.width, "h": freeResize.height],
+            "minClamp": ["x": clamped.x, "y": clamped.y, "w": clamped.width, "h": clamped.height],
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("resize-snap", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
