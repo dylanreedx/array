@@ -6686,10 +6686,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     /// Drives the REAL drag path (`TileNSView.mouseDown`/`mouseDragged`/`mouseUp`
-    /// with synthesized mouse `NSEvent`s) to prove drag magnetization: dragging tile
-    /// A toward neighbor B parks it gap-adjacent (snapped), and holding `⌘` during
-    /// the drag bypasses the snap (free position). The assertion reads the committed
-    /// world frame — it never calls `snapAdjustment`/`magnetizedFrame` directly.
+    /// with synthesized mouse `NSEvent`s) to prove drag magnetization end to end:
+    /// while dragging tile A near neighbor B the tile stays under the cursor (free)
+    /// and a ghost previews the gap-adjacent destination; releasing commits to it.
+    /// With drag snapping disabled there is no ghost and release keeps the free
+    /// position. Assertions read the committed world frame + the real ghost overlay
+    /// frame — never `snapAdjustment`/`snapTarget` directly.
     static func runDragMagnetizeSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)
@@ -6716,8 +6718,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvas.layoutSubtreeIfNeeded()
 
         func frameOfA() -> TileFrame { canvas.canvasState.tiles.first(where: { $0.id == aId })!.frame }
-        func mouse(_ type: NSEvent.EventType, at p: NSPoint, mods: NSEvent.ModifierFlags = []) throws -> NSEvent {
-            guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: mods, timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else {
+        func mouse(_ type: NSEvent.EventType, at p: NSPoint) throws -> NSEvent {
+            guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else {
                 throw CheckError.failed("could not synthesize \(type) at \(p)")
             }
             return e
@@ -6726,39 +6728,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         func grabPoint() -> NSPoint { viewA.convert(NSPoint(x: viewA.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil) }
         // Zoom 1 → window dx == world dx. +205 lands A.x at 305, whose right edge
         // (505) is 7 world units from the gap-adjacent target (B.left − gap = 512),
-        // i.e. inside the 10-pt pull radius.
+        // i.e. inside the pull radius.
         let worldDx: CGFloat = 205
         let gap = TileGapResolver.resolvedGap()
+        let snapTargetFrame = TileFrame(x: neighborFrame.x - gap - startFrame.width, y: startFrame.y, width: startFrame.width, height: startFrame.height)
+        let freeXAfterDrag = startFrame.x + Double(worldDx)
 
-        // Scenario 1 — snapping ON (default). Drag right toward B → parks gap-adjacent.
+        // Scenario 1 — snapping ON (default). Drag right toward B.
         let p0 = grabPoint()
         viewA.mouseDown(with: try mouse(.leftMouseDown, at: p0))
         viewA.mouseDragged(with: try mouse(.leftMouseDragged, at: NSPoint(x: p0.x + worldDx, y: p0.y)))
-        let snapped = frameOfA()
+        // Mid-drag: the TILE tracks the cursor (free), and a GHOST previews the snap.
+        let duringDrag = frameOfA()
+        try expect(duringDrag.x == freeXAfterDrag, "mid-drag the tile must track the cursor (free x=\(freeXAfterDrag)); got \(duringDrag.x)")
+        let expectedGhost = CanvasEngine.tileScreenFrame(snapTargetFrame, viewport: canvas.canvasState.viewport)
+        try expect(canvas.qaDragGhostFrame == expectedGhost, "ghost must preview the gap-adjacent destination \(expectedGhost); got \(String(describing: canvas.qaDragGhostFrame))")
+        // Release commits to the previewed snap and clears the ghost.
         viewA.mouseUp(with: try mouse(.leftMouseUp, at: NSPoint(x: p0.x + worldDx, y: p0.y)))
-        try expect(snapped.x > startFrame.x, "drag must move A toward B; start x=\(startFrame.x) got \(snapped.x)")
-        try expect(snapped.x + snapped.width + gap == neighborFrame.x, "drag toward B must park gap-adjacent (A.right+gap == B.left=\(neighborFrame.x)); got A=\(snapped)")
+        let committed = frameOfA()
+        try expect(committed == snapTargetFrame, "release must commit the previewed snap \(snapTargetFrame); got \(committed)")
+        try expect(committed.x + committed.width + gap == neighborFrame.x, "committed tile must be gap-adjacent to B.left=\(neighborFrame.x); got A=\(committed)")
+        try expect(canvas.qaDragGhostFrame == nil, "ghost must hide on release; got \(String(describing: canvas.qaDragGhostFrame))")
 
-        // Reset A, then Scenario 2 — hold ⌘ bypasses the snap → free position.
+        // Scenario 2 — snapping DISABLED → no ghost, release keeps the free position.
+        let offSuite = "DragMagnetizeOffChecks-\(UUID().uuidString)"
+        let offDefaults = UserDefaults(suiteName: offSuite)!
+        defer { offDefaults.removePersistentDomain(forName: offSuite) }
+        offDefaults.set(false, forKey: DragMagnetizeConfig.enabledKey)
+        canvas.dragMagnetizeDefaults = offDefaults
         var reset = canvas.canvasState.tiles.first(where: { $0.id == aId })!
         reset.frame = startFrame
         canvas.updateTile(reset)
         try expect(frameOfA() == startFrame, "precondition: A reset to start; got \(frameOfA())")
         let q0 = grabPoint()
         viewA.mouseDown(with: try mouse(.leftMouseDown, at: q0))
-        viewA.mouseDragged(with: try mouse(.leftMouseDragged, at: NSPoint(x: q0.x + worldDx, y: q0.y), mods: [.command]))
+        viewA.mouseDragged(with: try mouse(.leftMouseDragged, at: NSPoint(x: q0.x + worldDx, y: q0.y)))
+        try expect(canvas.qaDragGhostFrame == nil, "disabled: no ghost during drag; got \(String(describing: canvas.qaDragGhostFrame))")
+        viewA.mouseUp(with: try mouse(.leftMouseUp, at: NSPoint(x: q0.x + worldDx, y: q0.y)))
         let free = frameOfA()
-        viewA.mouseUp(with: try mouse(.leftMouseUp, at: NSPoint(x: q0.x + worldDx, y: q0.y), mods: [.command]))
-        try expect(free.x == startFrame.x + Double(worldDx), "⌘-drag must NOT snap; expected free x=\(startFrame.x + Double(worldDx)) got \(free.x)")
-        try expect(free.x + free.width + gap != neighborFrame.x, "⌘-drag must not be gap-adjacent to B; got A=\(free)")
+        try expect(free.x == freeXAfterDrag, "disabled: release must keep the free position x=\(freeXAfterDrag); got \(free.x)")
+        try expect(free.x + free.width + gap != neighborFrame.x, "disabled: must not be gap-adjacent to B; got A=\(free)")
 
         let manifest: [String: Any] = [
             "check": "drag-magnetize",
-            "path": "synthesized mouse NSEvents → TileNSView.mouseDown/Dragged/Up (real drag, not snapAdjustment)",
+            "path": "synthesized mouse NSEvents → TileNSView.mouseDown/Dragged/Up (real drag + real ghost overlay)",
             "startFrame": ["x": startFrame.x, "y": startFrame.y, "w": startFrame.width, "h": startFrame.height],
             "neighborFrame": ["x": neighborFrame.x, "y": neighborFrame.y, "w": neighborFrame.width, "h": neighborFrame.height],
-            "snappedFrame": ["x": snapped.x, "y": snapped.y, "w": snapped.width, "h": snapped.height],
-            "bypassFrame": ["x": free.x, "y": free.y, "w": free.width, "h": free.height],
+            "freeDuringDrag": ["x": duringDrag.x, "y": duringDrag.y, "w": duringDrag.width, "h": duringDrag.height],
+            "committedSnap": ["x": committed.x, "y": committed.y, "w": committed.width, "h": committed.height],
+            "disabledFree": ["x": free.x, "y": free.y, "w": free.width, "h": free.height],
             "gap": gap,
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")

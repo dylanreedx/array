@@ -204,22 +204,54 @@ final class CanvasNSView: NSView {
         delegate?.canvasDidChange(self)
     }
 
-    /// Magnetize a dragged tile's free (unsnapped) world frame to nearby tile
-    /// edges. Returns the free frame unchanged when drag snapping is disabled,
-    /// bypassed (hold `⌘`), or nothing is within the screen-space pull radius.
-    /// The drag commits the snapped frame while the caller keeps accumulating the
-    /// free frame, so the cursor stays attached. Pure positioning — the math is
+    /// UserDefaults the drag-snap toggle resolves from (`DragMagnetizeConfig`).
+    /// Overridable so `runDragMagnetizeSelfCheck` can drive enabled/disabled
+    /// deterministically without touching standard defaults.
+    var dragMagnetizeDefaults: UserDefaults = .standard
+
+    /// The snapped world frame a tile being dragged to `freeFrame` would commit to,
+    /// or nil when drag snapping is off or nothing is within the pull radius. The
+    /// drag itself keeps the tile under the cursor (free); this only drives the
+    /// ghost preview + the on-release commit. Pure positioning via
     /// `TileArrangement.snapAdjustment`; the pull radius is a constant screen
     /// distance converted to world via `/ zoom`.
-    func magnetizedFrame(for freeFrame: TileFrame, excludingTileId id: UUID, bypass: Bool) -> TileFrame {
-        guard !bypass, DragMagnetizeConfig.enabled() else { return freeFrame }
+    func snapTarget(for freeFrame: TileFrame, excludingTileId id: UUID) -> TileFrame? {
+        guard DragMagnetizeConfig.enabled(defaults: dragMagnetizeDefaults) else { return nil }
         let zoom = viewport.zoom
-        guard zoom.isFinite, zoom > 0 else { return freeFrame }
+        guard zoom.isFinite, zoom > 0 else { return nil }
         let others = canvasState.tiles.filter { $0.id != id }.map(\.frame)
-        guard !others.isEmpty else { return freeFrame }
+        guard !others.isEmpty else { return nil }
         let gap = TileGapResolver.resolvedGap()
         let threshold = DragMagnetizeConfig.snapThresholdScreenPoints / zoom
-        return TileArrangement.snapAdjustment(freeFrame, others: others, gap: gap, threshold: threshold).frame
+        let result = TileArrangement.snapAdjustment(freeFrame, others: others, gap: gap, threshold: threshold)
+        return result.guides.isEmpty ? nil : result.frame
+    }
+
+    /// Show the translucent drag-snap ghost at `worldFrame`'s screen rect, keeping
+    /// it topmost (tile installs/reorders can otherwise bury it).
+    func showDragGhost(at worldFrame: TileFrame) {
+        let overlay = dragGhostOverlayView()
+        overlay.show(at: CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport))
+        overlay.removeFromSuperview()
+        addSubview(overlay, positioned: .above, relativeTo: nil)
+    }
+
+    func hideDragGhost() {
+        dragGhostOverlay?.hide()
+    }
+
+    private func dragGhostOverlayView() -> DragGhostOverlayView {
+        if let overlay = dragGhostOverlay { return overlay }
+        let overlay = DragGhostOverlayView(frame: .zero)
+        dragGhostOverlay = overlay
+        addSubview(overlay, positioned: .above, relativeTo: nil)
+        return overlay
+    }
+
+    /// QA: the drag-snap ghost's current screen frame, or nil when hidden.
+    var qaDragGhostFrame: CGRect? {
+        guard let overlay = dragGhostOverlay, !overlay.isHidden else { return nil }
+        return overlay.frame
     }
 
     /// Remove a tile from the canvas: drops the NSView, the dictionary entry,
@@ -258,6 +290,10 @@ final class CanvasNSView: NSView {
     /// is not clipped by the tile's `masksToBounds`. Lazily installed as the
     /// topmost subview so it renders above tiles; click-transparent.
     private var focusBorderOverlay: FocusBorderOverlayView?
+
+    /// Canvas-owned translucent ghost shown at a dragged tile's snap destination
+    /// while drag magnetization is in range. Topmost, click-transparent.
+    private var dragGhostOverlay: DragGhostOverlayView?
 
     /// UserDefaults the focus-border appearance resolves from (`FocusBorderConfig`).
     /// Overridable so `runFocusBorderSelfCheck` can drive enabled/color/gap
@@ -1932,6 +1968,36 @@ protocol CanvasNSViewDelegate: AnyObject {
 /// nil so it never blocks tiles or the canvas. Sized in screen space, so the
 /// stroke + dashes stay screen-space constant at any canvas zoom.
 @MainActor
+/// Translucent "ghost" rectangle previewing where a dragged tile will snap. A
+/// soft accent-tinted fill with a thin border — a "slight ghosting" of the
+/// destination. Click-transparent; no animation. Lifecycle mirrors
+/// `FocusBorderOverlayView`.
+final class DragGhostOverlayView: NSView {
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
+        layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.65).cgColor
+        layer?.borderWidth = 1.5
+        layer?.cornerRadius = 6
+        isHidden = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    /// Draw only — never consume mouse events.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func show(at screenFrame: CGRect) {
+        frame = screenFrame
+        isHidden = false
+    }
+
+    func hide() { isHidden = true }
+}
+
 final class FocusBorderOverlayView: NSView {
     static let lineWidth: CGFloat = 1.5
     static let dashPattern: [NSNumber] = [6, 4]

@@ -24,10 +24,14 @@ Dogfooding exposed canvas navigation as both **broken** and **wonky**:
   — `⌥` held alone is never sent to terminal/text content.
 - **Jump = labels, not guessing.** Each visible tile shows a single-char label;
   press it → focus + center that tile. Also `⌘K` "Jump to <tile>" rows.
-- **Drag magnetize = the PRIMARY snap.** Dragging a tile snaps/aligns to nearby
-  edges + keeps the gap; **on by default**, toggle in Settings, hold-`⌘` to bypass
-  mid-drag. Dylan's call (2026-06-15): snapping is fundamentally a spatial/mouse
-  act, so this is built first and is the main way you snap.
+- **Drag magnetize = the PRIMARY snap.** Dragging a tile near a neighbor previews
+  the gap-adjacent destination as a translucent **ghost**; the tile itself tracks
+  the cursor and **releasing commits to the ghost**. **No modifier** — it just
+  works near a tile; the whole behavior is a single on/off ("Drag Snapping" in
+  Settings, default on). Dylan's call (2026-06-15): snapping is a spatial/mouse act,
+  so this is built first and is the main way you snap; the earlier live-snap with a
+  `⌘`-bypass and a 10px pull was invisible/fiddly — replaced by the ghost preview +
+  a wider (24px) catch radius.
 - **Snap = `⌥`+arrow + phantom (the SECONDARY, keyboard snap).** Interactive, not a
   one-shot fling: tap an arrow → a translucent **ghost** previews where the tile
   would dock (gap-adjacent to the nearest tile that way); tap the same arrow again
@@ -90,10 +94,13 @@ D-snap**, not A→B→C→D→E.
 - **(throw removal)** ✅ shipped. Deleted the one-shot throw wiring (see decision
   above). → `--input-gate-check` asserts `⌘⌃`-arrows now pass through; dispatch
   table + ShortcutCatalog checks updated.
-- **E — Drag magnetize (PRIMARY snap, build first).** Wire `snapAdjustment` into
-  `TileNSView.mouseDragged` (`⌘`-bypass, ~10px/zoom threshold, transient guides);
-  `continuum.dragMagnetize.enabled` setting (default true).
-  → `--drag-magnetize-check` (real synthesized drag, not a `snapAdjustment` call).
+- **E — Drag magnetize (PRIMARY snap, built first).** ✅ shipped. The drag tracks
+  the cursor; `CanvasNSView.snapTarget` (per-axis `snapAdjustment`, 24px/zoom catch)
+  drives a translucent `DragGhostOverlayView` preview; `mouseUp` commits to it. No
+  modifier; `continuum.dragMagnetize.enabled` "Drag Snapping" toggle (default on).
+  → `--drag-magnetize-check` (synthesized real mouse drag: asserts tile tracks
+  cursor, the real ghost overlay frames the destination, release commits, disabled
+  = no ghost/no snap).
 - **B — Leader foundation.** Add `.flagsChanged` monitor + held-`⌥` detection
   (tunable threshold, configurable leader in `NavKeymap`). `FocusModalKind.leader`
   + `handleLeaderKey`. → `--leader-activation-check`.

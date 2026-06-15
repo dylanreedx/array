@@ -51,10 +51,9 @@ class TileNSView: NSView {
     private var dragKind: DragKind = .none
     private var dragLastWindowPoint: CGPoint = .zero
     private var mouseDraggedSinceDown = false
-    /// The raw (unsnapped) world frame accumulated across a move drag. The
-    /// committed frame magnetizes to neighbors, but the cursor stays attached to
-    /// this free frame so snapping never makes the tile lag the pointer.
-    private var dragFreeFrame: TileFrame?
+    /// The world frame the in-flight move drag would snap to (preview shown as the
+    /// canvas ghost), committed on `mouseUp`. Nil when nothing is in snap range.
+    private var dragSnapTarget: TileFrame?
 
     override var isFlipped: Bool { true }
 
@@ -225,17 +224,19 @@ class TileNSView: NSView {
         dragLastWindowPoint = event.locationInWindow
         switch dragKind {
         case .move:
-            // Accumulate the raw drag into `dragFreeFrame` (seeded from the current
-            // tile on the first event), then commit a magnetized copy — hold `⌘` to
-            // bypass the snap for this drag. The free frame, not the snapped one,
-            // carries forward so the tile tracks the cursor.
-            var freeBase = tile
-            freeBase.frame = dragFreeFrame ?? tile.frame
-            let free = CanvasEngine.tile(freeBase, draggedByScreenDelta: delta, viewport: canvas.viewport)
-            dragFreeFrame = free.frame
-            var next = free
-            next.frame = canvas.magnetizedFrame(for: free.frame, excludingTileId: tile.id, bypass: event.modifierFlags.contains(.command))
+            // The tile follows the cursor freely; if it comes within snap range of a
+            // neighbor, preview the destination as a translucent ghost and remember
+            // it to commit on release. No modifier — toggle the whole behavior in
+            // Settings ("Drag Snapping").
+            let next = CanvasEngine.tile(tile, draggedByScreenDelta: delta, viewport: canvas.viewport)
             canvas.updateTile(next)
+            if let target = canvas.snapTarget(for: next.frame, excludingTileId: tile.id) {
+                dragSnapTarget = target
+                canvas.showDragGhost(at: target)
+            } else {
+                dragSnapTarget = nil
+                canvas.hideDragGhost()
+            }
         case .resize(let edge):
             let next = CanvasEngine.tile(tile, resizedByScreenDelta: delta, edge: edge, viewport: canvas.viewport)
             canvas.updateTile(next)
@@ -249,7 +250,15 @@ class TileNSView: NSView {
         let wasClick = !mouseDraggedSinceDown
         dragKind = .none
         mouseDraggedSinceDown = false
-        dragFreeFrame = nil
+
+        // Commit the previewed snap (if any), then tear down the ghost + state.
+        if case .move = completedDragKind, let target = dragSnapTarget {
+            var snapped = tile
+            snapped.frame = target
+            canvas?.updateTile(snapped)
+        }
+        canvas?.hideDragGhost()
+        dragSnapTarget = nil
 
         if case .move = completedDragKind, wasClick {
             canvas?.focusBroker?.enterScope(.tile(tile.id), reason: .userClick)
