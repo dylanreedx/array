@@ -130,6 +130,10 @@ final class CanvasNSView: NSView {
     /// Overridable so `runZoneCreateGestureSelfCheck` can drive deterministically.
     var zoneGestureDefaults: UserDefaults = .standard
 
+    /// UserDefaults the zone break-out distance resolves from (ZoneBreakoutConfig).
+    /// Overridable so the break-out check can drive a deterministic threshold.
+    var breakoutDefaults: UserDefaults = .standard
+
     /// Fired when a drag-to-create gesture commits a new group zone.
     /// The placement is passed; the caller persists it (e.g. via WorkspaceDocument).
     var onZoneCreated: ((ZonePlacement) -> Void)?
@@ -237,6 +241,43 @@ final class CanvasNSView: NSView {
         p.size = grownSize
         liveZones[idx] = p
         onZoneMoved?(p)
+    }
+
+    /// After a tile MOVE commits, re-evaluate its zone membership (zone-unify P4):
+    /// dropping a tile so its center lands inside a zone adopts it (re-homing across
+    /// zones too); dragging a member so its center sits more than the break-out
+    /// distance beyond its zone detaches it to bare canvas. Returns true if changed.
+    @discardableResult
+    func reevaluateZoneMembership(forMovedTile tileId: UUID) -> Bool {
+        guard let tile = canvasState.tiles.first(where: { $0.id == tileId }) else { return false }
+        let cx = tile.frame.x + tile.frame.width / 2
+        let cy = tile.frame.y + tile.frame.height / 2
+        let current = tileZoneMembership[tileId]
+        let containing = liveZones.reversed().first { z in
+            let f = CanvasEngine.zoneWorldFrame(z)
+            return cx >= f.x && cx <= f.x + f.width && cy >= f.y && cy <= f.y + f.height
+        }
+        var changed = false
+        if let containing {
+            if containing.zoneId != current {
+                tileZoneMembership[tileId] = containing.zoneId   // adopt / re-home
+                growZoneToFitMembers(containing.zoneId)
+                changed = true
+            }
+        } else if let current, let zone = liveZones.first(where: { $0.zoneId == current }) {
+            // Center is outside every zone — eject only if pulled far enough past the edge.
+            let f = CanvasEngine.zoneWorldFrame(zone)
+            let outsideBy = max(f.x - cx, cx - (f.x + f.width), f.y - cy, cy - (f.y + f.height))
+            if outsideBy >= ZoneBreakoutConfig.distance(defaults: breakoutDefaults) {
+                tileZoneMembership.removeValue(forKey: tileId)   // break out → bare
+                changed = true
+            }
+        }
+        if changed {
+            layoutAllTiles()
+            delegate?.canvasDidChange(self)
+        }
+        return changed
     }
 
     /// World-space member tile frames for `zone`. Tiles store world frames, so a
@@ -1852,6 +1893,92 @@ final class CanvasNSView: NSView {
             "bare": [outId.uuidString]
         ]
         try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// zone-unify P4 — a member dragged just past the zone edge stays (grace), but
+    /// dragged beyond the configurable break-out distance detaches to a bare tile;
+    /// a bare tile dropped inside a zone is adopted. All via real TileNSView drags.
+    static func runZoneBreakoutSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(m): return m } }
+        }
+        func expect(_ c: @autoclosure () -> Bool, _ m: String) throws { if !c() { throw CheckError.failed(m) } }
+        func mouse(_ type: NSEvent.EventType, at p: NSPoint, window: NSWindow) throws -> NSEvent {
+            guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
+            else { throw CheckError.failed("could not synthesize \(type)") }
+            return e
+        }
+        func dragTile(_ view: TileNSView, by dx: CGFloat, _ dy: CGFloat, window: NSWindow) throws {
+            let g = view.convert(NSPoint(x: view.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil)
+            view.mouseDown(with: try mouse(.leftMouseDown, at: g, window: window))
+            view.mouseDragged(with: try mouse(.leftMouseDragged, at: NSPoint(x: g.x + dx, y: g.y + dy), window: window))
+            view.mouseUp(with: try mouse(.leftMouseUp, at: NSPoint(x: g.x + dx, y: g.y + dy), window: window))
+        }
+
+        let vp = CanvasViewport(x: 0, y: 0, zoom: 1)
+        let zoneId = UUID(uuidString: "00000000-0000-0000-0000-0000000000D2")!
+        let memberId = UUID(uuidString: "00000000-0000-0000-0000-0000000000D3")!
+        let bareId = UUID(uuidString: "00000000-0000-0000-0000-0000000000D4")!
+        let zone = ZonePlacement(zoneId: zoneId, projectId: UUID(uuidString: "00000000-0000-0000-0000-0000000000D1")!,
+                                 origin: ZonePoint(x: 50, y: 50), size: ZoneSize(width: 400, height: 300),
+                                 color: "teal", collapsed: false, hydrationPolicy: .automatic, name: "Z", navKey: nil)
+        let member = Tile(id: memberId, kind: .note, title: "m", frame: TileFrame(x: 100, y: 100, width: 120, height: 90), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: vp, tiles: [member], groups: [], lastActiveTileId: nil),
+            activeZone: zone,
+            zoneRenderModels: [ZoneRenderModel(placement: zone, displayName: "Z")],
+            showsZoneChrome: true)
+        // Deterministic threshold + no drag-magnetize interference.
+        let suite = "zone-breakout-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        defaults.set(60.0, forKey: ZoneBreakoutConfig.distanceKey)   // custom (proves config-driven)
+        canvas.breakoutDefaults = defaults
+        let noSnap = UserDefaults(suiteName: "zone-breakout-nosnap-\(UUID().uuidString)")!
+        noSnap.set(false, forKey: DragMagnetizeConfig.enabledKey)
+        canvas.dragMagnetizeDefaults = noSnap
+        defer { defaults.removePersistentDomain(forName: suite) }
+        canvas.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        let memberView = DescriptorTileNSView(tile: member)
+        canvas.install(tileView: memberView, for: member)
+        let bare = Tile(id: bareId, kind: .note, title: "b", frame: TileFrame(x: 600, y: 400, width: 120, height: 90), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let bareView = DescriptorTileNSView(tile: bare)
+        canvas.install(tileView: bareView, for: bare)
+        canvas.layoutSubtreeIfNeeded()
+
+        try expect(canvas.qaZoneMembership(of: memberId) == zoneId, "precondition: member belongs to the zone")
+        try expect(canvas.qaZoneMembership(of: bareId) == nil, "precondition: bare tile has no membership")
+
+        // Leg 1a: nudge the member just past the right edge (center → 470, outsideBy 20 < 60) → STAYS.
+        try dragTile(memberView, by: 310, 0, window: window)
+        try expect(canvas.qaZoneMembership(of: memberId) == zoneId, "sub-threshold overshoot must NOT eject the member (got \(String(describing: canvas.qaZoneMembership(of: memberId))))")
+
+        // Leg 1b: pull it far past the edge (outsideBy ≫ 60) → BREAKS OUT to bare.
+        try dragTile(memberView, by: 260, 0, window: window)
+        try expect(canvas.qaZoneMembership(of: memberId) == nil, "far drag past the edge must break the member out to bare")
+        // Still a real, clickable tile (frame.x = 100+310+260 = 670, center 730,145).
+        try expect(canvas.canvasState.tiles.contains { $0.id == memberId }, "broken-out tile must still exist")
+        try expect(canvas.tileId(at: CGPoint(x: 730, y: 145)) == memberId, "broken-out tile must still be clickable")
+
+        // Leg 2: drag the bare tile into the zone (world delta (-400,-300) → center 260,145 inside) → ADOPTED.
+        try dragTile(bareView, by: -400, 300, window: window)
+        try expect(canvas.qaZoneMembership(of: bareId) == zoneId, "bare tile dropped inside the zone must be adopted (got \(String(describing: canvas.qaZoneMembership(of: bareId))))")
+
+        let fm = FileManager.default
+        let tempRoot = URL(fileURLWithPath: fm.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("zone-breakout-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        let artifact = tempRoot.appendingPathComponent("manifest.json")
+        try JSONSerialization.data(withJSONObject: ["check": "zone-breakout", "threshold": 60], options: [.sortedKeys]).write(to: artifact, options: .atomic)
         return artifact
     }
 

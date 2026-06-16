@@ -333,6 +333,12 @@ class TileNSView: NSView {
             return
         }
 
+        // zone-unify P4: a committed move can change zone membership — drop a tile
+        // into a zone to adopt it, or pull a member far past the edge to break out.
+        if case .move = completedDragKind, !wasClick {
+            canvas?.reevaluateZoneMembership(forMovedTile: tile.id)
+        }
+
         super.mouseUp(with: event)
     }
 
