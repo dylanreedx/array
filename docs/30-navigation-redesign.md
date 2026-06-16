@@ -111,9 +111,12 @@ D-snap**, not A→B→C→D→E.
   labels for visible tiles (`TileArrangement.jumpLabels`, home-row default, the
   `continuum.keymap.leaderLabelKeys` config); HUD via a `drawTileLabels` pass on the
   shared nav overlay; `handleLeaderKey` letter → focus + center
-  (`CanvasEngine.centeredViewport`, `fit` fallback). → `--leader-jump-check` +
-  Core `jumpLabels`/`centeredViewport` tables. **Remaining:** dynamic `⌘K`
-  "Jump to <title>" rows reusing the same jump.
+  (`CanvasEngine.centeredViewport`, `fit` fallback). The focused tile is dropped
+  from the HUD when it's fully in view (no self-jump); a partially-visible focused
+  tile stays a target. Dynamic `⌘K` "Jump to <title>" rows reuse the same jump
+  (`LaunchPaletteAction.jumpToTile`, enters with the spawn-during-modal reason so
+  focus survives the palette close). → `--leader-jump-check` + `--palette-jump-check`
+  + Core `jumpLabels`/`centeredViewport` + palette `jumpToTile` tables.
 - **D — Keyboard snap (SECONDARY).** Inside the leader: `⌥`+arrow → ghost at nearest
   dockable tile; same arrow again → advance to the next tile further (leapfrog);
   release commits, Esc cancels. Ghost overlay clones `FocusBorderOverlayView`. The

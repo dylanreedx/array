@@ -69,6 +69,18 @@ expect(harnessRows.map(\.displayName) == ["New Note", "New Browser", "Open File.
 expect(LaunchPaletteModel.filterRows(harnessRows, query: "run qa").map(\.displayName) == ["Run QA Reviewer Agent…"], "harness role row filters by run and role name")
 expect(harnessRows.last?.isSelectable == true, "harness role action row is selectable")
 
+// Jump-to-tile rows: appended after the built-in actions; filter by "jump" or title.
+let jumpTileA = UUID(uuidString: "00000000-0000-0000-0000-0000000000A1")!
+let jumpTileB = UUID(uuidString: "00000000-0000-0000-0000-0000000000B2")!
+let jumpRows = LaunchPaletteModel.makeRows(
+    profiles: [],
+    jumpTiles: [JumpTileRow(id: jumpTileA, title: "API Server"), JumpTileRow(id: jumpTileB, title: "Notes")]
+)
+expect(jumpRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "New Workspace…", "Jump to API Server", "Jump to Notes"], "palette appends Jump-to-tile rows after the built-in actions")
+expect(LaunchPaletteModel.filterRows(jumpRows, query: "jump notes").map(\.displayName) == ["Jump to Notes"], "jump row filters by 'jump' + title")
+expect(LaunchPaletteModel.filterRows(jumpRows, query: "api").map(\.displayName) == ["Jump to API Server"], "jump row filters by title alone")
+expect(jumpRows.last?.isSelectable == true, "jump-to-tile row is selectable")
+
 let switchProjectId = UUID(uuidString: "00000000-0000-0000-0000-000000000129")!
 let projectRows = LaunchPaletteModel.makeRows(
     profiles: [],

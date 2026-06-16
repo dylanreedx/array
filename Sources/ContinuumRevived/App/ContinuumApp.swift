@@ -227,6 +227,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--palette-jump-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runPaletteJumpSelfCheck()
+                print("ContinuumRevivedPaletteJumpChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--palette-browser-spawn-check") {
             do {
                 _ = NSApplication.shared
@@ -2461,7 +2473,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             focusBroker.openModal(.palette)
         }
         let rows = zoneRuntimeController.paletteRows(registryStore: registryStore)
-        palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces, harnessRoles: harnessRolesForActiveProject(), initialQuery: initialQuery)
+        let jumpTiles = (canvasView?.canvasState.tiles ?? []).map { tile in
+            JumpTileRow(id: tile.id, title: tile.title.isEmpty ? "Untitled Tile" : tile.title)
+        }
+        palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces, harnessRoles: harnessRolesForActiveProject(), jumpTiles: jumpTiles, initialQuery: initialQuery)
     }
 
     private func harnessRolesForActiveProject() -> [HarnessRole] {
@@ -2724,7 +2739,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             switchWorkspaceAndRelaunch(workspaceId: workspaceId)
         case let .spawnHarnessRole(role):
             spawnHarnessRoleFromPalette(role)
+        case let .jumpToTile(tileId):
+            jumpToTileFromPalette(tileId)
         }
+    }
+
+    /// ⌘K "Jump to <title>" — reuses the leader jump's center + focus. Enters the
+    /// tile scope with `.tileSpawned` so the palette's snapshot restore on close
+    /// doesn't bounce focus back to the pre-palette scope (same intent as a
+    /// spawn-from-palette: land on the chosen tile).
+    private func jumpToTileFromPalette(_ tileId: UUID) {
+        guard canvasView?.canvasState.tiles.contains(where: { $0.id == tileId }) == true else { return }
+        canvasView?.centerOnTile(tileId)
+        focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
     }
 
     private func spawnHarnessRoleFromPalette(_ role: HarnessRole) {
@@ -5961,6 +5988,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("leader-jump", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// Phase C — ⌘K "Jump to <title>" reuses the leader jump. Drives the real
+    /// palette action handler (`performPaletteAction(.jumpToTile)`) inside an open
+    /// `.palette` modal, then closes the modal, asserting the target tile is
+    /// focused AND centered — and that the focus SURVIVES the modal's snapshot
+    /// restore (would regress to the pre-palette scope if the jump didn't enter
+    /// with the spawn-during-modal reason).
+    static func runPaletteJumpSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func vpEqual(_ a: CanvasViewport, _ b: CanvasViewport) -> Bool {
+            abs(a.x - b.x) < 0.001 && abs(a.y - b.y) < 0.001 && abs(a.zoom - b.zoom) < 0.001
+        }
+
+        let aId = UUID(uuidString: "00000000-0000-0000-0000-0000000000A1")!
+        let bId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B2")!
+        let tileA = Tile(id: aId, kind: .note, title: "A", frame: TileFrame(x: 40, y: 40, width: 200, height: 170), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: bId, kind: .note, title: "B", frame: TileFrame(x: 400, y: 300, width: 240, height: 180), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
+        canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        let app = AppDelegate()
+        app.canvasView = canvas
+        canvas.focusBroker = app.focusBroker
+        app.focusBroker.onAcceptedTileFocus = { [weak canvas] id in canvas?.markActive(tileId: id) }
+        canvas.install(tileView: TileNSView(tile: tileA), for: tileA)
+        canvas.install(tileView: TileNSView(tile: tileB), for: tileB)
+        _ = app.focusBroker.requestFocus(.canvas, reason: .userClick)
+
+        // Open ⌘K (snapshot = canvas), select "Jump to B", then close the palette.
+        app.focusBroker.openModal(.palette)
+        try expect(app.focusBroker.activeSurface == .modal(.palette), "precondition: palette modal open")
+        app.performPaletteAction(.jumpToTile(bId))
+        app.focusBroker.closeModal(.palette)
+        try expect(app.focusBroker.activeSurface == .tile(bId), "palette Jump-to-tile must focus the target and survive the modal close; got \(String(describing: app.focusBroker.activeSurface))")
+        let expectedB = CanvasEngine.centeredViewport(worldRect: CGRect(x: 400, y: 300, width: 240, height: 180), viewportSize: CGSize(width: 800, height: 600), zoom: 1)
+        try expect(vpEqual(canvas.viewport, expectedB), "palette jump must center the target tile; got (\(canvas.viewport.x),\(canvas.viewport.y),\(canvas.viewport.zoom))")
+
+        // An unknown tile id is a safe no-op (e.g. the tile was closed meanwhile).
+        let beforeViewport = canvas.viewport
+        app.performPaletteAction(.jumpToTile(UUID()))
+        try expect(vpEqual(canvas.viewport, beforeViewport) && app.focusBroker.activeSurface == .tile(bId), "jumping to a missing tile is a no-op")
+
+        let manifest: [String: Any] = [
+            "check": "palette-jump",
+            "path": "performPaletteAction(.jumpToTile) inside an open .palette modal → closeModal (real action + modal lifecycle)",
+            "centeredViewport": ["x": expectedB.x, "y": expectedB.y, "zoom": expectedB.zoom],
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("palette-jump", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

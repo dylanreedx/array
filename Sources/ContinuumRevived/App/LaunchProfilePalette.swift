@@ -19,8 +19,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private weak var previousFirstResponder: NSResponder?
     private weak var previousFirstResponderWindow: NSWindow?
 
-    func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], harnessRoles: [HarnessRole] = [], initialQuery: String = "") {
-        self.rows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)), projects: projects, workspaces: workspaces, harnessRoles: harnessRoles)
+    func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], initialQuery: String = "") {
+        self.rows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)), projects: projects, workspaces: workspaces, harnessRoles: harnessRoles, jumpTiles: jumpTiles)
         self.filtered = initialQuery.isEmpty ? rows : LaunchPaletteModel.filterRows(rows, query: initialQuery)
         guard let hostView = host.contentView else { return }
         let wasVisible = isVisible
@@ -132,6 +132,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             case .deleteWorkspace: return "Delete \(workspace.name) Workspace…"
             default: return action.displayName
             }
+        case let .jumpToTile(tile): return "Jump to \(tile.title)"
         }
     }
 
@@ -531,6 +532,9 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         case let .workspaceAction(action, workspace):
             text.stringValue = "\(action.displayName) \(workspace.name)"
             text.textColor = .labelColor
+        case let .jumpToTile(tile):
+            text.stringValue = "Jump to \(tile.title)"
+            text.textColor = .labelColor
         }
         return cell
     }
@@ -604,6 +608,9 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             close(restoreFocus: true)
         case let .workspaceAction(action, _):
             onSelectAction?(action)
+            close(restoreFocus: true)
+        case let .jumpToTile(tile):
+            onSelectAction?(.jumpToTile(tile.id))
             close(restoreFocus: true)
         }
     }

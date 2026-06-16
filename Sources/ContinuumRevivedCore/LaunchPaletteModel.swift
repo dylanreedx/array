@@ -15,6 +15,7 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case deleteWorkspace(UUID)
     case switchWorkspace(UUID)
     case spawnHarnessRole(HarnessRole)
+    case jumpToTile(UUID)
 
     public var displayName: String {
         switch self {
@@ -46,6 +47,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "Switch Workspace…"
         case let .spawnHarnessRole(role):
             return "Run \(role.displayName) Agent…"
+        case .jumpToTile:
+            return "Jump to Tile…"
         }
     }
 
@@ -79,7 +82,19 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["switch", "workspace", "canvas"]
         case let .spawnHarnessRole(role):
             return ["run", "spawn", "agent", "harness", "role", role.id, role.displayName.lowercased()]
+        case .jumpToTile:
+            return ["jump", "tile", "go"]
         }
+    }
+}
+
+public struct JumpTileRow: Equatable, Sendable {
+    public let id: UUID
+    public let title: String
+
+    public init(id: UUID, title: String) {
+        self.id = id
+        self.title = title
     }
 }
 
@@ -103,6 +118,7 @@ public enum LaunchPaletteRow: Equatable, Sendable {
     case project(ProjectPickerRow)
     case workspace(WorkspaceEntry)
     case workspaceAction(LaunchPaletteAction, WorkspaceEntry)
+    case jumpToTile(JumpTileRow)
 
     public var displayName: String {
         switch self {
@@ -120,6 +136,7 @@ public enum LaunchPaletteRow: Equatable, Sendable {
             case .deleteWorkspace: return "Delete \(workspace.name) Workspace…"
             default: return action.displayName
             }
+        case let .jumpToTile(tile): return "Jump to \(tile.title)"
         }
     }
 
@@ -130,6 +147,7 @@ public enum LaunchPaletteRow: Equatable, Sendable {
         case let .project(project): return project.isSelectable
         case let .workspace(workspace): return !workspace.projectIds.isEmpty
         case .workspaceAction: return true
+        case .jumpToTile: return true
         }
     }
 
@@ -164,15 +182,21 @@ public enum LaunchPaletteRow: Equatable, Sendable {
             let haystacks = [action.displayName, workspace.name, workspace.id.uuidString].map { $0.lowercased() }
             let queryTokens = query.split(separator: " ").map(String.init)
             return queryTokens.allSatisfy { token in haystacks.contains { $0.contains(token) } }
+        case let .jumpToTile(tile):
+            let haystacks = ["jump tile go", tile.title, tile.id.uuidString].map { $0.lowercased() }
+            let queryTokens = query.split(separator: " ").map(String.init)
+            return queryTokens.allSatisfy { token in haystacks.contains { $0.contains(token) } }
         }
     }
 }
 
 public enum LaunchPaletteModel {
-    public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], harnessRoles: [HarnessRole] = []) -> [LaunchPaletteRow] {
+    public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = []) -> [LaunchPaletteRow] {
         profiles.map(LaunchPaletteRow.profile)
             + CommandRegistry.paletteActions().map(LaunchPaletteRow.action)
-            + harnessRoles.map { LaunchPaletteRow.action(.spawnHarnessRole($0)) } + workspaces.flatMap { workspace in
+            + harnessRoles.map { LaunchPaletteRow.action(.spawnHarnessRole($0)) }
+            + jumpTiles.map(LaunchPaletteRow.jumpToTile)
+            + workspaces.flatMap { workspace in
             [
                 LaunchPaletteRow.workspace(workspace),
                 LaunchPaletteRow.workspaceAction(.renameWorkspace(workspace.id), workspace),
