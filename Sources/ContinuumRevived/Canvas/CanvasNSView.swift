@@ -78,6 +78,10 @@ final class CanvasNSView: NSView {
     /// The label keys offered to visible tiles in the hold-leader jump HUD,
     /// pushed in by the app from the resolved `NavKeymap` when the leader opens.
     var leaderLabelAlphabet: [String] = NavKeymap.default.leaderLabelAlphabet
+    /// The auto-ordinal pool for zone-jump labels in the hold-leader HUD, pushed in
+    /// by the app from the resolved `NavKeymap` when the leader opens (mirrors
+    /// `leaderLabelAlphabet`).
+    var leaderZoneOrdinalAlphabet: [String] = NavKeymap.default.leaderZoneOrdinalAlphabet
     private var emptyStateView: CanvasEmptyStateNSView?
     private var emptyStateActions: CanvasEmptyStateActions?
     private var emptyStateProjectPath: String?
@@ -663,6 +667,28 @@ final class CanvasNSView: NSView {
 
     func leaderJumpTarget(forLabel label: String) -> UUID? {
         leaderJumpAssignments().first { $0.label == label }?.tileId
+    }
+
+    /// Returns the key→zone mapping for the current zone-jump leader state,
+    /// pairing each zone in `navZoneRenderModels` order with its assigned key
+    /// (configured `navKey` or auto-ordinal from `leaderZoneOrdinalAlphabet`).
+    /// The conflict set is the live tile-jump labels so auto ordinals never shadow tiles.
+    func leaderZoneJumpAssignments() -> [(zoneId: UUID, key: String)] {
+        let models = navZoneRenderModels
+        let zoneIds = models.map { $0.placement.zoneId }
+        let configuredKeys = models.map { $0.placement.navKey }
+        let tileLabels = Set(leaderJumpAssignments().map(\.label))
+        return NavKeymap.zoneJumpLabels(
+            zoneIds: zoneIds,
+            configuredKeys: configuredKeys,
+            ordinalAlphabet: leaderZoneOrdinalAlphabet,
+            tileLabels: tileLabels
+        )
+    }
+
+    /// Returns the zone ID that a pressed key maps to, or nil if no zone owns it.
+    func leaderZoneJumpTarget(forKey key: String) -> UUID? {
+        leaderZoneJumpAssignments().first { $0.key == key.lowercased() }?.zoneId
     }
 
     /// Pans (keeping the current zoom) so the tile sits centered; falls back to

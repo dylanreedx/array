@@ -25,8 +25,8 @@ Legend: ⬜ todo · ✍️ spec-written · 🔨 building · 🔍 review · ✅ d
 | T14 | Profiles/snapshots (store + apply-modes) | overnight | T12 | ✅ | 192e44e | built (1 iter); store+apply-recipes REAL (RED-confirmed); snapshot==template INERT (WorkspaceDocument is LAYOUT-ONLY)→🔴 design; carry-fwd→T16 |
 | T15 | Sidebar view-model (pure tree) | overnight [pure] | T01 | ✅ | b3728fc | built PASS-WITH-RISKS (0 iters); ?? "" vs "Project" fallback to ratify before T16 |
 | T16 | Sidebar NSOutlineView | morning [appkit] | T15,T09 | ✍️ | — | spec written (review folds into build) |
-| T17 | ⌘K zone rows (jump/create) | overnight | T01 | ✅ | (T17) | 1st run STALLED→re-launched fresh; built+fixer (re-tightened nav-mode check + config round-trip, RED-confirmed); nav-z default-action shift→🔴 decision |
-| T18 | Per-zone nav keybind + leader zone-jump | overnight | T01 | ✍️ | — | spec written (review folds into build) |
+| T17 | ⌘K zone rows (jump/create) | overnight | T01 | ✅ | 4872bac | 1st run STALLED→re-launched fresh; built+fixer (re-tightened nav-mode check + config round-trip, RED-confirmed); nav-z default-action shift→🔴 decision |
+| T18 | Per-zone nav keybind + leader zone-jump | overnight | T01 | ✅ | (T18) | built+fixer (precedence bug + validator-rejects test + assertion-7 hardening, RED-confirmed); zone-fit target / precedence / HUD badge→🔴 |
 | T19 | Drag-to-create-zone + move-zone gesture | morning [appkit] | T05,T11 | ✍️ | — | spec written (review folds into build) |
 | T20 | ⚠Wire boot WorkspaceRuntime real per-project controller factory | overnight [appkit-chk] | T06(debt) | ⛔ | — | NEEDS-HUMAN design (T09 review): boot registry throws on acquire → add-zone/switch INERT in live app; keystone built+verified but NOT live until this. Stub: T20-wire-boot-registry-factory.md |
 

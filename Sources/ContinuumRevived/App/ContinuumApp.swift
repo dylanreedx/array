@@ -227,6 +227,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--leader-zone-jump-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runLeaderZoneJumpSelfCheck()
+                print("ContinuumRevivedLeaderZoneJumpChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--palette-jump-check") {
             do {
                 _ = NSApplication.shared
@@ -2059,6 +2071,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard focusBroker.activeSurface != .modal(.leader) else { return }
         focusBroker.openModal(.leader)
         canvasView?.leaderLabelAlphabet = navKeymap.leaderLabelAlphabet
+        canvasView?.leaderZoneOrdinalAlphabet = navKeymap.leaderZoneOrdinalAlphabet
         canvasView?.setLeaderOverlayVisible(true)
     }
 
@@ -2090,6 +2103,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return true
         }
         let key = (event.charactersIgnoringModifiers ?? "").lowercased()
+        // Zone-jump is resolved BEFORE tile-jump so a configured zone navKey that
+        // collides with a tile label always wins (precedence rule 1).
+        if !key.isEmpty, let zoneId = canvasView?.leaderZoneJumpTarget(forKey: key) {
+            disarmLeader()
+            if let vp = canvasView?.fitZoneToViewport(zoneId: zoneId) { canvasView?.setViewport(vp) }
+            navSelectedZoneId = zoneId
+            return true
+        }
         if !key.isEmpty, let tileId = canvasView?.leaderJumpTarget(forLabel: key) {
             disarmLeader() // closes the leader modal (restores prior scope) + hides HUD
             canvasView?.centerOnTile(tileId)
@@ -7675,6 +7696,235 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("leader-jump", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// T18 — Per-zone nav keybind leader check. Drives the hold-`⌥` leader through
+    /// synthesized `.flagsChanged` / `.keyDown` NSEvents → `handleFlagsChanged` /
+    /// `handleHotkey` → `handleLeaderKey` and asserts the observable viewport (zone-fit)
+    /// and scope for both auto-ordinal and configured-navKey zone jumps, plus precedence
+    /// over colliding tile labels, the unmatched-key swallow, tile-jump regression, and Esc.
+    static func runLeaderZoneJumpSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func flagsEvent(_ mods: NSEvent.ModifierFlags, keyCode: UInt16) throws -> NSEvent {
+            guard let e = NSEvent.keyEvent(with: .flagsChanged, location: .zero, modifierFlags: mods, timestamp: 0, windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: keyCode) else {
+                throw CheckError.failed("could not synthesize .flagsChanged for \(mods)")
+            }
+            return e
+        }
+        func keyDown(_ key: String, _ keyCode: UInt16, mods: NSEvent.ModifierFlags) throws -> NSEvent {
+            guard let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: mods, timestamp: 0, windowNumber: 0, context: nil, characters: key, charactersIgnoringModifiers: key, isARepeat: false, keyCode: keyCode) else {
+                throw CheckError.failed("could not synthesize keyDown \(key)")
+            }
+            return e
+        }
+        func vpEqual(_ a: CanvasViewport, _ b: CanvasViewport) -> Bool {
+            abs(a.x - b.x) < 0.001 && abs(a.y - b.y) < 0.001 && abs(a.zoom - b.zoom) < 0.001
+        }
+
+        // Three zones with disjoint world origins/sizes so each has a distinct fit viewport.
+        // zA: navKey nil → auto ordinal "1"
+        // zB: navKey nil → auto ordinal "2"
+        // zC: navKey "q" → configured
+        let zAId = UUID(uuidString: "00000000-0000-0000-0000-00000000181A")!
+        let zBId = UUID(uuidString: "00000000-0000-0000-0000-00000000181B")!
+        let zCId = UUID(uuidString: "00000000-0000-0000-0000-00000000181C")!
+        let pId  = UUID(uuidString: "00000000-0000-0000-0000-000000001800")!
+
+        let placementA = ZonePlacement(zoneId: zAId, projectId: pId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 300, height: 200), color: "blue", collapsed: false, hydrationPolicy: .automatic, navKey: nil)
+        let placementB = ZonePlacement(zoneId: zBId, projectId: pId, origin: ZonePoint(x: 1000, y: 0), size: ZoneSize(width: 300, height: 200), color: "mint", collapsed: false, hydrationPolicy: .automatic, navKey: nil)
+        let placementC = ZonePlacement(zoneId: zCId, projectId: pId, origin: ZonePoint(x: 0, y: 1000), size: ZoneSize(width: 300, height: 200), color: "purple", collapsed: false, hydrationPolicy: .automatic, navKey: "q")
+
+        // Pre-derive expected target viewports using the production helper, never by hand.
+        // viewportSize = 800×600 (window size set below).
+        let vpSize = CGSize(width: 800, height: 600)
+        let expectedA = CanvasEngine.fit(worldRect: CGRect(x: 0, y: 0, width: 300, height: 200), viewportSize: vpSize)
+        let expectedB = CanvasEngine.fit(worldRect: CGRect(x: 1000, y: 0, width: 300, height: 200), viewportSize: vpSize)
+        let expectedC = CanvasEngine.fit(worldRect: CGRect(x: 0, y: 1000, width: 300, height: 200), viewportSize: vpSize)
+
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil),
+            activeZone: nil,
+            zoneRenderModels: [
+                CanvasNSView.ZoneRenderModel(placement: placementA, displayName: "ZoneA"),
+                CanvasNSView.ZoneRenderModel(placement: placementB, displayName: "ZoneB"),
+                CanvasNSView.ZoneRenderModel(placement: placementC, displayName: "ZoneC"),
+            ],
+            showsZoneChrome: false
+        )
+        canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+
+        let app = AppDelegate()
+        app.canvasView = canvas
+        canvas.focusBroker = app.focusBroker
+        app.focusBroker.onAcceptedTileFocus = { [weak canvas] id in canvas?.markActive(tileId: id) }
+        _ = app.focusBroker.requestFocus(.canvas, reason: .userClick)
+        app.leaderDwell = 0
+
+        // 1. Leader opens via the real path: synthesized .flagsChanged(⌥, 58) →
+        //    handleFlagsChanged → activateLeader.
+        app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        try expect(app.focusBroker.activeSurface == .modal(.leader),
+                   "assertion 1: ⌥ held should open leader; got \(String(describing: app.focusBroker.activeSurface))")
+        try expect(canvas.navModeOverlayQASnapshot().isInstalled,
+                   "assertion 1: HUD overlay must be installed when leader opens")
+
+        // 2. Auto-ordinal assignment exists (derived from §0 rules 1–3, no tile labels).
+        let assignments = canvas.leaderZoneJumpAssignments()
+        try expect(assignments.contains(where: { $0.zoneId == zAId && $0.key == "1" }),
+                   "assertion 2: zA must be assigned auto ordinal '1'")
+        try expect(assignments.contains(where: { $0.zoneId == zBId && $0.key == "2" }),
+                   "assertion 2: zB must be assigned auto ordinal '2'")
+        try expect(assignments.contains(where: { $0.zoneId == zCId && $0.key == "q" }),
+                   "assertion 2: zC must be assigned configured navKey 'q'")
+
+        // 3. Auto-ordinal jump (key "1") pans/fits zone A; HUD dismisses.
+        let initialVP = canvas.viewport
+        _ = app.handleHotkey(try keyDown("1", 18, mods: [.option]))
+        try expect(vpEqual(canvas.viewport, expectedA),
+                   "assertion 3: '1' must fit-jump to zA; got (\(canvas.viewport.x),\(canvas.viewport.y),\(canvas.viewport.zoom)) want (\(expectedA.x),\(expectedA.y),\(expectedA.zoom))")
+        try expect(!canvas.navModeOverlayQASnapshot().isInstalled,
+                   "assertion 3: HUD must dismiss after zone jump")
+        try expect(app.focusBroker.activeSurface != .modal(.leader),
+                   "assertion 3: leader modal must close after zone jump")
+
+        // 4. Configured navKey "q" jumps to zC. Re-open leader first.
+        app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        try expect(app.focusBroker.activeSurface == .modal(.leader),
+                   "assertion 4: leader must re-open")
+        _ = app.handleHotkey(try keyDown("q", 12, mods: [.option]))
+        try expect(vpEqual(canvas.viewport, expectedC),
+                   "assertion 4: 'q' must fit-jump to zC; got (\(canvas.viewport.x),\(canvas.viewport.y),\(canvas.viewport.zoom)) want (\(expectedC.x),\(expectedC.y),\(expectedC.zoom))")
+
+        // 5. Precedence: configured zone navKey beats a colliding tile label.
+        //    Add a tile that leaderJumpAssignments would label "a", then configure a
+        //    zone with navKey "a"; the zone must win (viewport == zone-fit, not tile-center).
+        //    We use a fresh canvas with one zone navKey="a" and one visible tile.
+        let tileId5 = UUID(uuidString: "00000000-0000-0000-0000-000000001851")!
+        let tileFor5 = Tile(id: tileId5, kind: .note, title: "tile5", frame: TileFrame(x: 50, y: 50, width: 200, height: 150), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let placementD = ZonePlacement(zoneId: UUID(uuidString: "00000000-0000-0000-0000-00000000181D")!, projectId: pId, origin: ZonePoint(x: 2000, y: 0), size: ZoneSize(width: 300, height: 200), color: "orange", collapsed: false, hydrationPolicy: .automatic, navKey: "a")
+        let expectedD = CanvasEngine.fit(worldRect: CGRect(x: 2000, y: 0, width: 300, height: 200), viewportSize: vpSize)
+        let canvas5 = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileFor5], groups: [], lastActiveTileId: nil),
+            activeZone: nil,
+            zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: placementD, displayName: "ZoneD")],
+            showsZoneChrome: false
+        )
+        canvas5.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let window5 = NSWindow(contentRect: canvas5.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window5.contentView = canvas5
+        window5.orderFrontRegardless()
+        let app5 = AppDelegate()
+        app5.canvasView = canvas5
+        canvas5.focusBroker = app5.focusBroker
+        app5.focusBroker.onAcceptedTileFocus = { [weak canvas5] id in canvas5?.markActive(tileId: id) }
+        canvas5.install(tileView: TileNSView(tile: tileFor5), for: tileFor5)
+        _ = app5.focusBroker.requestFocus(.canvas, reason: .userClick)
+        app5.leaderDwell = 0
+        app5.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        try expect(app5.focusBroker.activeSurface == .modal(.leader),
+                   "assertion 5: leader must open on canvas5")
+        // Confirm leaderJumpAssignments() sees label "a" for the tile (proving the collision).
+        let tileAssignments5 = canvas5.leaderJumpAssignments()
+        try expect(tileAssignments5.contains(where: { $0.tileId == tileId5 && $0.label == "a" }),
+                   "assertion 5: tile must get label 'a' from leaderJumpAssignments (confirming collision)")
+        // And the zone resolver returns the zone for "a" (configured navKey wins).
+        try expect(canvas5.leaderZoneJumpTarget(forKey: "a") == placementD.zoneId,
+                   "assertion 5: leaderZoneJumpTarget('a') must return the zone (not nil) — config wins")
+        // Pressing "a" through the real handler must jump the ZONE (zone-fit viewport).
+        _ = app5.handleHotkey(try keyDown("a", 0, mods: [.option]))
+        try expect(vpEqual(canvas5.viewport, expectedD),
+                   "assertion 5: 'a' must fit-jump to zoneD (configured navKey wins over tile label 'a'); got (\(canvas5.viewport.x),\(canvas5.viewport.y)) want (\(expectedD.x),\(expectedD.y))")
+
+        // 6. Unmatched key is swallowed; leader stays open; viewport unchanged.
+        app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58)) // re-open on original canvas
+        let vpBeforeUnmatched = canvas.viewport
+        let swallowed = app.handleHotkey(try keyDown("Z", 6, mods: [.option]))
+        try expect(swallowed == true, "assertion 6: unmatched key must be swallowed")
+        try expect(app.focusBroker.activeSurface == .modal(.leader),
+                   "assertion 6: leader must stay open on unmatched key")
+        try expect(vpEqual(canvas.viewport, vpBeforeUnmatched),
+                   "assertion 6: viewport must not change on unmatched key")
+
+        // 7. Tile-jump still works (no regression of the tile path).
+        //    Use a fresh canvas with tiles so leaderJumpAssignments yields labeled tiles.
+        let tileId7a = UUID(uuidString: "00000000-0000-0000-0000-000000001871")!
+        let tileId7b = UUID(uuidString: "00000000-0000-0000-0000-000000001872")!
+        let tile7a = Tile(id: tileId7a, kind: .note, title: "T7A", frame: TileFrame(x: 40, y: 40, width: 200, height: 170), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tile7b = Tile(id: tileId7b, kind: .note, title: "T7B", frame: TileFrame(x: 400, y: 300, width: 240, height: 180), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        // Zone with ordinal "1" — tile labels are letters; no collision.
+        let placement7 = ZonePlacement(zoneId: UUID(uuidString: "00000000-0000-0000-0000-000000001870")!, projectId: pId, origin: ZonePoint(x: 5000, y: 5000), size: ZoneSize(width: 300, height: 200), color: "blue", collapsed: false, hydrationPolicy: .automatic, navKey: nil)
+        let canvas7 = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile7a, tile7b], groups: [], lastActiveTileId: nil),
+            activeZone: nil,
+            zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: placement7, displayName: "Zone7")],
+            showsZoneChrome: false
+        )
+        canvas7.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let window7 = NSWindow(contentRect: canvas7.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window7.contentView = canvas7
+        window7.orderFrontRegardless()
+        let app7 = AppDelegate()
+        app7.canvasView = canvas7
+        canvas7.focusBroker = app7.focusBroker
+        app7.focusBroker.onAcceptedTileFocus = { [weak canvas7] id in canvas7?.markActive(tileId: id) }
+        canvas7.install(tileView: TileNSView(tile: tile7a), for: tile7a)
+        canvas7.install(tileView: TileNSView(tile: tile7b), for: tile7b)
+        _ = app7.focusBroker.requestFocus(.canvas, reason: .userClick)
+        app7.leaderDwell = 0
+        app7.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        let tileLabels7 = canvas7.leaderJumpAssignments()
+        try expect(!tileLabels7.isEmpty, "assertion 7: tiles must get labels for the regression check")
+        // Pre-assert tile7b's assigned label before synthesizing the keypress, so any
+        // ordering change in leaderJumpAssignments is caught here rather than a silent
+        // wrong-tile focus (mirrors the collision pre-assert in assertion 5).
+        try expect(tileLabels7.contains(where: { $0.tileId == tileId7b && $0.label == "s" }),
+                   "assertion 7: tile7b must be assigned label 's' by leaderJumpAssignments (ordering regression guard)")
+        // The second tile (lower y) gets the second label "s".
+        let expectedTile7b = CanvasEngine.centeredViewport(worldRect: CGRect(x: 400, y: 300, width: 240, height: 180), viewportSize: vpSize, zoom: 1)
+        _ = app7.handleHotkey(try keyDown("s", 1, mods: [.option]))
+        try expect(app7.focusBroker.activeSurface == .tile(tileId7b),
+                   "assertion 7: tile label 's' must focus the tile (tile path not regressed); got \(String(describing: app7.focusBroker.activeSurface))")
+        try expect(vpEqual(canvas7.viewport, expectedTile7b),
+                   "assertion 7: tile jump must center the tile; got (\(canvas7.viewport.x),\(canvas7.viewport.y))")
+
+        // 8. Esc exits leader without jumping; viewport unchanged.
+        app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        let vpBeforeEsc = canvas.viewport
+        let escSwallowed = app.handleHotkey(try keyDown("\u{1B}", 53, mods: [.option]))
+        try expect(escSwallowed == true, "assertion 8: Esc must be swallowed")
+        try expect(app.focusBroker.activeSurface != .modal(.leader),
+                   "assertion 8: leader must close after Esc")
+        try expect(vpEqual(canvas.viewport, vpBeforeEsc),
+                   "assertion 8: Esc must not move the viewport")
+
+        let autoOrdinalMap = assignments.reduce(into: [String: String]()) { dict, pair in
+            dict[pair.zoneId.uuidString] = pair.key
+        }
+        let manifest: [String: Any] = [
+            "check": "leader-zone-jump",
+            "path": "synthesized .flagsChanged + .keyDown NSEvents → handleFlagsChanged / handleHotkey → handleLeaderKey (real input path)",
+            "autoOrdinalMap": autoOrdinalMap,
+            "configuredOverrideTarget": "zC (navKey='q') → fit(0,1000,300×200)",
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("leader-zone-jump", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

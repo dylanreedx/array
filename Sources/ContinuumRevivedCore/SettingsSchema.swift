@@ -38,6 +38,11 @@ public enum SettingsSchema {
                         label: "Jump Label Keys",
                         default: NavKeymap.default.leaderLabelKeys
                     ),
+                    .text(
+                        key: NavKeymap.leaderZoneOrdinalKeysDefaultsKey,
+                        label: "Zone Jump Ordinal Keys",
+                        default: NavKeymap.default.leaderZoneOrdinalKeys
+                    ),
                 ]
             ),
             SettingsSection(

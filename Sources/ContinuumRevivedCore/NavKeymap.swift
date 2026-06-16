@@ -146,6 +146,10 @@ public struct NavKeymap: Equatable, Sendable {
     /// priority order. Home-row default (`asdfghjkl`); rebindable. Tiles beyond
     /// this many are unlabeled (single-char labels only).
     public var leaderLabelKeys: String
+    /// The auto-ordinal keys offered to zones that have no configured `navKey`, in
+    /// priority order. Default `"123456789"` (digits, disjoint from the tile-label
+    /// alphabet `asdfghjkl`). Rebindable via UserDefaults.
+    public var leaderZoneOrdinalKeys: String
     public var up: String
     public var down: String
     public var left: String
@@ -159,11 +163,12 @@ public struct NavKeymap: Equatable, Sendable {
     public var focusMode: String
     public var deleteTile: String
 
-    public init(leader: KeyChord, leaderHoldModifier: FocusKeyModifiers = .option, leaderDwellMs: Int = 0, leaderLabelKeys: String = "asdfghjkl", up: String, down: String, left: String, right: String, nextZone: String, previousZone: String, zonePicker: String, workspacePicker: String, agentCycle: String, agentNeedsAttention: String, focusMode: String, deleteTile: String) {
+    public init(leader: KeyChord, leaderHoldModifier: FocusKeyModifiers = .option, leaderDwellMs: Int = 0, leaderLabelKeys: String = "asdfghjkl", leaderZoneOrdinalKeys: String = "123456789", up: String, down: String, left: String, right: String, nextZone: String, previousZone: String, zonePicker: String, workspacePicker: String, agentCycle: String, agentNeedsAttention: String, focusMode: String, deleteTile: String) {
         self.leader = leader
         self.leaderHoldModifier = leaderHoldModifier
         self.leaderDwellMs = leaderDwellMs
         self.leaderLabelKeys = leaderLabelKeys
+        self.leaderZoneOrdinalKeys = leaderZoneOrdinalKeys
         self.up = up
         self.down = down
         self.left = left
@@ -183,6 +188,7 @@ public struct NavKeymap: Equatable, Sendable {
         leaderHoldModifier: .option,
         leaderDwellMs: 0,
         leaderLabelKeys: "asdfghjkl",
+        leaderZoneOrdinalKeys: "123456789",
         up: "k", down: "j", left: "h", right: "l",
         nextZone: "n", previousZone: "p", zonePicker: "z", workspacePicker: "w",
         agentCycle: "a", agentNeedsAttention: "A", focusMode: "f", deleteTile: "x"
@@ -193,12 +199,19 @@ public struct NavKeymap: Equatable, Sendable {
     public static let leaderHoldDefaultsKey = "continuum.keymap.leaderHold"
     public static let leaderDwellDefaultsKey = "continuum.keymap.leaderDwellMs"
     public static let leaderLabelKeysDefaultsKey = "continuum.keymap.leaderLabelKeys"
+    public static let leaderZoneOrdinalKeysDefaultsKey = "continuum.keymap.leaderZoneOrdinalKeys"
     public static let leaderHoldModifierOptions = ["opt", "ctrl", "cmd", "shift"]
 
     /// The label keys as an ordered array of single-character strings — the form
     /// `TileArrangement.jumpLabels` and the HUD consume.
     public var leaderLabelAlphabet: [String] {
         leaderLabelKeys.map(String.init)
+    }
+
+    /// The zone ordinal keys as an ordered array of single-character strings —
+    /// consumed in order by `zoneJumpLabels` when a zone has no configured `navKey`.
+    public var leaderZoneOrdinalAlphabet: [String] {
+        leaderZoneOrdinalKeys.map(String.init)
     }
 
     /// Single-modifier token serialization for the hold-leader (`opt`/`ctrl`/`cmd`/`shift`).
@@ -260,6 +273,14 @@ public struct NavKeymap: Equatable, Sendable {
                 warn("Invalid continuum.keymap.leaderLabelKeys '\(labelKeys)'; using default \(NavKeymap.default.leaderLabelKeys)")
             }
         }
+        if let ordinalKeys = string("leaderZoneOrdinalKeys") {
+            let cleaned = ordinalKeys.lowercased()
+            if !cleaned.isEmpty, cleaned.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }), Set(cleaned).count == cleaned.count {
+                map.leaderZoneOrdinalKeys = cleaned
+            } else {
+                warn("Invalid continuum.keymap.leaderZoneOrdinalKeys '\(ordinalKeys)'; using default \(NavKeymap.default.leaderZoneOrdinalKeys)")
+            }
+        }
         func apply(_ name: String, _ set: (String) -> Void) {
             guard let value = string(name) else { return }
             guard value.count == 1 else { warn("Invalid continuum.keymap.\(name) '\(value)'; using default"); return }
@@ -286,6 +307,7 @@ public struct NavKeymap: Equatable, Sendable {
         defaults.set(NavKeymap.modifierToken(leaderHoldModifier), forKey: prefix + "leaderHold")
         defaults.set(String(leaderDwellMs), forKey: prefix + "leaderDwellMs")
         defaults.set(leaderLabelKeys, forKey: prefix + "leaderLabelKeys")
+        defaults.set(leaderZoneOrdinalKeys, forKey: prefix + "leaderZoneOrdinalKeys")
         defaults.set(up, forKey: prefix + "up")
         defaults.set(down, forKey: prefix + "down")
         defaults.set(left, forKey: prefix + "left")
@@ -298,6 +320,62 @@ public struct NavKeymap: Equatable, Sendable {
         defaults.set(agentNeedsAttention, forKey: prefix + "agentNeedsAttention")
         defaults.set(focusMode, forKey: prefix + "focusMode")
         defaults.set(deleteTile, forKey: prefix + "deleteTile")
+    }
+}
+
+extension NavKeymap {
+    /// Deterministic key→zone assignment for the leader zone-jump.
+    ///
+    /// - Parameters:
+    ///   - zoneIds: The zone IDs in render order.
+    ///   - configuredKeys: Each zone's explicit navKey in render order (nil or "" = auto).
+    ///   - ordinalAlphabet: The auto-ordinal pool (e.g. ["1".."9"]), consumed in order.
+    ///   - tileLabels: The tile-jump labels live this session (the conflict set).
+    ///
+    /// Precedence:
+    ///   1. A zone's CONFIGURED navKey always wins for that zone, even if a tile also
+    ///      carries that label this session — the tile loses the key, the zone owns it.
+    ///   2. AUTO ordinals skip any key already taken by (a) a configured zone navKey or
+    ///      (b) a live tile label, so an auto-assigned zone never shadows a tile jump.
+    ///   3. A zone whose configured navKey is empty/blank is treated as auto.
+    ///
+    /// Returns assignments in input zone order; zones that get no key are omitted.
+    public static func zoneJumpLabels(
+        zoneIds: [UUID],
+        configuredKeys: [String?],
+        ordinalAlphabet: [String],
+        tileLabels: Set<String>
+    ) -> [(zoneId: UUID, key: String)] {
+        // Collect all explicitly-configured keys (non-empty, lowercased) to build the
+        // auto-skip set BEFORE iterating, so auto ordinals never collide with them.
+        var takenKeys: Set<String> = tileLabels.map { $0.lowercased() }.reduce(into: Set()) { $0.insert($1) }
+        for k in configuredKeys {
+            if let k = k, !k.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                takenKeys.insert(k.lowercased())
+            }
+        }
+
+        var result: [(zoneId: UUID, key: String)] = []
+        // Build the ordered pool of auto-ordinals that are not already taken by a
+        // configured zone navKey or a live tile label.
+        let availableOrdinals: [String] = ordinalAlphabet.filter { !takenKeys.contains($0.lowercased()) }
+        var ordinalIndex = 0
+
+        for (zoneId, configuredKey) in zip(zoneIds, configuredKeys) {
+            let trimmed = configuredKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty {
+                // Configured key — always assigned (rule 1).
+                result.append((zoneId: zoneId, key: trimmed.lowercased()))
+            } else {
+                // Auto ordinal — take the next available one.
+                if ordinalIndex < availableOrdinals.count {
+                    result.append((zoneId: zoneId, key: availableOrdinals[ordinalIndex]))
+                    ordinalIndex += 1
+                }
+                // else: pool exhausted — zone gets no label (omitted per spec).
+            }
+        }
+        return result
     }
 }
 

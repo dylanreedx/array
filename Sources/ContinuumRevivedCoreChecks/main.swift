@@ -5048,4 +5048,84 @@ do {
     expect(tree == tree2, "sidebar tree: build must be deterministic — two calls on same inputs must be equal")
 }
 
+// MARK: - T18 zoneJumpLabels core assignment table
+
+do {
+    let z1 = UUID(uuidString: "00000000-0000-0000-0000-000000001801")!
+    let z2 = UUID(uuidString: "00000000-0000-0000-0000-000000001802")!
+    let z3 = UUID(uuidString: "00000000-0000-0000-0000-000000001803")!
+    let ordinal = ["1","2","3","4","5","6","7","8","9"]
+
+    // 1. All auto, no tile collision → ordinals consumed in order.
+    let r1 = NavKeymap.zoneJumpLabels(zoneIds: [z1,z2,z3], configuredKeys: [nil,nil,nil], ordinalAlphabet: ordinal, tileLabels: [])
+    expect(r1.count == 3, "T18 §0.1: all-auto should assign 3 keys")
+    expect(r1[0] == (zoneId: z1, key: "1"), "T18 §0.1: z1 → '1'")
+    expect(r1[1] == (zoneId: z2, key: "2"), "T18 §0.1: z2 → '2'")
+    expect(r1[2] == (zoneId: z3, key: "3"), "T18 §0.1: z3 → '3'")
+
+    // 2. Configured override: z1→"q", auto continues z2→"1", z3→"2".
+    let r2 = NavKeymap.zoneJumpLabels(zoneIds: [z1,z2,z3], configuredKeys: ["q",nil,nil], ordinalAlphabet: ordinal, tileLabels: [])
+    expect(r2[0] == (zoneId: z1, key: "q"), "T18 §0.2: z1 has configured key 'q'")
+    expect(r2[1].zoneId == z2 && r2[1].key == "1", "T18 §0.2: z2 auto-gets '1' (pool not offset by configured key)")
+    expect(r2[2].zoneId == z3 && r2[2].key == "2", "T18 §0.2: z3 auto-gets '2'")
+
+    // 3. Auto skips a configured key: z1→"1" (config), z2→"2" (auto skips "1"), z3→"3".
+    let r3 = NavKeymap.zoneJumpLabels(zoneIds: [z1,z2,z3], configuredKeys: ["1",nil,nil], ordinalAlphabet: ["1","2","3"], tileLabels: [])
+    expect(r3[0] == (zoneId: z1, key: "1"), "T18 §0.3: z1 configured '1'")
+    expect(r3[1].zoneId == z2 && r3[1].key == "2", "T18 §0.3: z2 auto skips taken '1' → '2'")
+    expect(r3[2].zoneId == z3 && r3[2].key == "3", "T18 §0.3: z3 → '3'")
+    let r3keys = r3.map(\.key)
+    expect(Set(r3keys).count == r3keys.count, "T18 §0.3: no two zones share a key")
+
+    // 4. Auto skips a tile label: ordinal=["a","b","c"], tileLabels={"a"} → z1→"b", z2→"c", z3 omitted.
+    let r4 = NavKeymap.zoneJumpLabels(zoneIds: [z1,z2,z3], configuredKeys: [nil,nil,nil], ordinalAlphabet: ["a","b","c"], tileLabels: ["a"])
+    expect(r4.count == 2, "T18 §0.4: z3 omitted (pool exhausted after skipping 'a')")
+    expect(r4[0] == (zoneId: z1, key: "b"), "T18 §0.4: z1→'b' (auto skips tile label 'a')")
+    expect(r4[1] == (zoneId: z2, key: "c"), "T18 §0.4: z2→'c'")
+    expect(!r4.map(\.key).contains("a"), "T18 §0.4: auto never lands on a live tile label")
+
+    // 5. Configured beats a tile label (precedence rule 1): z1→"a" even though tileLabels={"a"}.
+    let r5 = NavKeymap.zoneJumpLabels(zoneIds: [z1,z2,z3], configuredKeys: ["a",nil,nil], ordinalAlphabet: ordinal, tileLabels: ["a"])
+    expect(r5[0] == (zoneId: z1, key: "a"), "T18 §0.5: configured zone navKey 'a' wins even when tile has 'a'")
+
+    // 6. Blank/empty navKey treated as auto: behaves identically to [nil,nil,nil].
+    let r6 = NavKeymap.zoneJumpLabels(zoneIds: [z1,z2,z3], configuredKeys: ["",nil,nil], ordinalAlphabet: ordinal, tileLabels: [])
+    expect(r6[0] == (zoneId: z1, key: "1"), "T18 §0.6: blank navKey is auto → z1→'1'")
+    expect(r6[1] == (zoneId: z2, key: "2"), "T18 §0.6: z2→'2'")
+    expect(r6[2] == (zoneId: z3, key: "3"), "T18 §0.6: z3→'3'")
+
+    // 7. NavKeymap round-trip: persist → resolve reconstructs leaderZoneOrdinalKeys;
+    //    invalid values are rejected with default retained.
+    let tempDefaults = UserDefaults(suiteName: "com.continuum.T18.test.\(UUID().uuidString)")!
+    var km = NavKeymap.default
+    km.leaderZoneOrdinalKeys = "987654321"
+    km.persist(to: tempDefaults)
+    let resolved = NavKeymap.resolve(defaults: tempDefaults)
+    expect(resolved.leaderZoneOrdinalKeys == "987654321", "T18 §0.7: persist→resolve round-trips leaderZoneOrdinalKeys")
+
+    // Invalid: duplicate chars → rejected, default retained.
+    var warns: [String] = []
+    tempDefaults.set("11", forKey: NavKeymap.leaderZoneOrdinalKeysDefaultsKey)
+    let rejectedDup = NavKeymap.resolve(defaults: tempDefaults, warn: { warns.append($0) })
+    expect(rejectedDup.leaderZoneOrdinalKeys == NavKeymap.default.leaderZoneOrdinalKeys, "T18 §0.7: dup chars rejected, default retained")
+    expect(!warns.isEmpty, "T18 §0.7: invalid value triggers a warn")
+
+    // Invalid: empty string → rejected, default retained.
+    warns.removeAll()
+    tempDefaults.set("", forKey: NavKeymap.leaderZoneOrdinalKeysDefaultsKey)
+    let rejectedEmpty = NavKeymap.resolve(defaults: tempDefaults, warn: { warns.append($0) })
+    expect(rejectedEmpty.leaderZoneOrdinalKeys == NavKeymap.default.leaderZoneOrdinalKeys, "T18 §0.7: empty string rejected, default retained")
+    expect(!warns.isEmpty, "T18 §0.7: empty invalid value triggers a warn")
+
+    // Invalid: contains non-ASCII numerals → rejected, default retained.
+    // Validates the operator-precedence fix: $0.isASCII && ($0.isLetter || $0.isNumber)
+    // ensures isNumber alone (non-ASCII) doesn't pass the ASCII guard.
+    warns.removeAll()
+    tempDefaults.set("12²", forKey: NavKeymap.leaderZoneOrdinalKeysDefaultsKey)  // ² is isNumber but not isASCII
+    let rejectedNonASCIINumeral = NavKeymap.resolve(defaults: tempDefaults, warn: { warns.append($0) })
+    expect(rejectedNonASCIINumeral.leaderZoneOrdinalKeys == NavKeymap.default.leaderZoneOrdinalKeys,
+           "T18 §0.7: non-ASCII numeral (e.g. '²') in ordinal keys rejected, default retained")
+    expect(!warns.isEmpty, "T18 §0.7: non-ASCII numeral triggers a warn")
+}
+
 print("ContinuumRevivedCoreChecks passed")

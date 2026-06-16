@@ -1,0 +1,33 @@
+{
+  "task": "T18",
+  "title": "Per-zone nav keybind + leader zone-jump",
+  "verdict": "PASS WITH RISKS",
+  "iterations": 0,
+  "fixerApplied": [
+    "R1 (real precedence bug NavKeymap.swift:278): added parens so non-ASCII numerals are rejected per spec ('ASCII alphanumeric') + a validator-rejects-non-ASCII-numeral Core assertion ('12²' → default retained + warn). RED-confirmed.",
+    "R2 (test fragility): runLeaderZoneJumpSelfCheck assertion 7 now pre-asserts tile7b is assigned label 's' before the keypress (labeler-ordering regression guard). RED-confirmed."
+  ],
+  "redProven": true,
+  "green": true,
+  "matrixFast": "green",
+  "buildClean": true,
+  "namedCheck": "--leader-zone-jump-check passed",
+  "guards": "--leader-zone-jump-check (8 app assertions): synth keyDown through handleHotkey → handleLeaderKey, assert canvas.viewport == CanvasEngine.fit(zoneRect). Bypass disproved (remove the zone-jump branch → RED assertion 3, with a hand-derived expected viewport). + 7-assertion Core zoneJumpLabels table + the validator-rejects test. --leader-jump-check (tile path) still green.",
+  "filesTouched": [
+    "Sources/ContinuumRevived/App/ContinuumApp.swift",
+    "Sources/ContinuumRevived/Canvas/CanvasNSView.swift",
+    "Sources/ContinuumRevivedCore/NavKeymap.swift",
+    "Sources/ContinuumRevivedCore/SettingsSchema.swift",
+    "Sources/ContinuumRevivedCoreChecks/main.swift",
+    "scripts/run-matrix.sh"
+  ],
+  "risks": [
+    "Zone resolver keys off event.charactersIgnoringModifiers (shared with the tile branch) — a non-US keyboard layout whose digit row yields non-ASCII glyphs wouldn't match the digit ordinals (pre-existing pattern, flagged for awareness).",
+    "Release-⌥-no-snap-back not explicitly asserted (structurally impossible — disarmLeader() runs before the persistent setViewport; a later ⌥-release is a no-op on a closed modal). Low."
+  ],
+  "needsHuman": [
+    "Jump target = zone-FIT, not last-active-tile (the model has no per-zone lastActiveTile). Confirm zone-fit is desired, or schedule a T01 follow-on for a per-zone lastActiveTileId.",
+    "Precedence: a configured zone navKey beats a colliding tile label; auto ordinals skip live tile labels. With disjoint defaults (zones=digits, tiles=letters) collisions never occur; the rule only bites under user rebinding. Confirm vs tile-labels-win (flip branch order + invert assertion 5).",
+    "Zone-jump HUD badge NOT drawn (out-of-scope / morning polish) — the leader HUD doesn't show which key jumps which zone. Visual gate before it feels complete to a user."
+  ]
+}

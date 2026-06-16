@@ -79,6 +79,7 @@ run_app_check .build/debug/continuum-revived --focus-broker-activation-check
 run_app_check .build/debug/continuum-revived --nav-mode-check
 run_app_check .build/debug/continuum-revived --leader-activation-check
 run_app_check .build/debug/continuum-revived --leader-jump-check
+run_app_check .build/debug/continuum-revived --leader-zone-jump-check
 run_app_check .build/debug/continuum-revived --palette-jump-check
 run_app_check .build/debug/continuum-revived --palette-zone-check
 run_app_check .build/debug/continuum-revived --leader-snap-check
