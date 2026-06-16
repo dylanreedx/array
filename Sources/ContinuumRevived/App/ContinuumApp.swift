@@ -407,6 +407,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--zone-resize-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try CanvasNSView.runZoneResizeSelfCheck()
+                print("ContinuumRevivedZoneResizeChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--multi-zone-render-check") {
             do {
                 _ = NSApplication.shared

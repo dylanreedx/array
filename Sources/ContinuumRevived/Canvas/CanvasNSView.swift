@@ -96,6 +96,7 @@ final class CanvasNSView: NSView {
         case none
         case creating(originScreen: CGPoint)
         case movingZone(zoneId: UUID, lastWindowPoint: CGPoint)
+        case resizingZone(zoneId: UUID, edge: ResizeEdge, lastWindowPoint: CGPoint)
     }
     private var zoneGesture: ZoneGesture = .none
     /// Tracks the latest placement during a render-model zone move (no ZoneLayer).
@@ -755,6 +756,60 @@ final class CanvasNSView: NSView {
         }?.zoneId
     }
 
+    /// The topmost zone + edge whose border `screenPoint` is within the resize
+    /// band of (8px edges, 16px corners), or nil. Mirrors `TileNSView.resizeEdge`
+    /// so a zone resizes by its edges/corners exactly like a tile.
+    private func zoneResizeEdge(at screenPoint: CGPoint) -> (UUID, ResizeEdge)? {
+        let m: CGFloat = 8, c: CGFloat = 16
+        for placement in liveZones.reversed() {
+            let f = CanvasEngine.tileScreenFrame(CanvasEngine.zoneWorldFrame(placement), viewport: canvasState.viewport)
+            guard f.width > 0, f.height > 0 else { continue }
+            guard screenPoint.x >= f.minX - m, screenPoint.x <= f.maxX + m,
+                  screenPoint.y >= f.minY - m, screenPoint.y <= f.maxY + m else { continue }
+            let nearLeft = abs(screenPoint.x - f.minX) <= m, nearRight = abs(screenPoint.x - f.maxX) <= m
+            let nearTop = abs(screenPoint.y - f.minY) <= m, nearBottom = abs(screenPoint.y - f.maxY) <= m
+            let nlC = abs(screenPoint.x - f.minX) <= c, nrC = abs(screenPoint.x - f.maxX) <= c
+            let ntC = abs(screenPoint.y - f.minY) <= c, nbC = abs(screenPoint.y - f.maxY) <= c
+            let edge: ResizeEdge?
+            if ntC && nlC { edge = .topLeft } else if ntC && nrC { edge = .topRight }
+            else if nbC && nlC { edge = .bottomLeft } else if nbC && nrC { edge = .bottomRight }
+            else if nearTop { edge = .top } else if nearBottom { edge = .bottom }
+            else if nearLeft { edge = .left } else if nearRight { edge = .right }
+            else { edge = nil }
+            if let edge { return (placement.zoneId, edge) }
+        }
+        return nil
+    }
+
+    /// Apply a resize-edge drag to a zone's stored frame (zone-unify: zones resize
+    /// like tiles). Members keep their world frames — resizing the container does
+    /// not move its contents. Clamped to a minimum zone size.
+    private func resizedZonePlacement(_ placement: ZonePlacement, edge: ResizeEdge, screenDelta: CGSize) -> ZonePlacement {
+        let vp = canvasState.viewport
+        let dx = Double(screenDelta.width) / vp.zoom, dy = Double(screenDelta.height) / vp.zoom
+        let minW = 120.0, minH = 80.0
+        let touchesLeft: [ResizeEdge] = [.left, .topLeft, .bottomLeft]
+        let touchesRight: [ResizeEdge] = [.right, .topRight, .bottomRight]
+        let touchesTop: [ResizeEdge] = [.top, .topLeft, .topRight]
+        let touchesBottom: [ResizeEdge] = [.bottom, .bottomLeft, .bottomRight]
+        var x = placement.origin.x, y = placement.origin.y
+        var w = placement.size.width, h = placement.size.height
+        if touchesLeft.contains(edge) {
+            let pw = w - dx
+            if pw < minW { x += w - minW; w = minW } else { x += dx; w = pw }
+        }
+        if touchesRight.contains(edge) { w = max(w + dx, minW) }
+        if touchesTop.contains(edge) {
+            let ph = h - dy
+            if ph < minH { y += h - minH; h = minH } else { y += dy; h = ph }
+        }
+        if touchesBottom.contains(edge) { h = max(h + dy, minH) }
+        var p = placement
+        p.origin = ZonePoint(x: x, y: y)
+        p.size = ZoneSize(width: w, height: h)
+        return p
+    }
+
     private static func cgRect(from frame: TileFrame) -> CGRect {
         CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
     }
@@ -1144,6 +1199,13 @@ final class CanvasNSView: NSView {
             onZoneCloseRequested?(zoneId)
             return
         }
+        // zone-unify: a press on a zone's edge/corner resizes it (like a tile).
+        // Checked before the header so the top edge resizes and the band below moves.
+        if let (zoneId, edge) = zoneResizeEdge(at: point) {
+            pendingMovedPlacement = nil
+            zoneGesture = .resizingZone(zoneId: zoneId, edge: edge, lastWindowPoint: event.locationInWindow)
+            return
+        }
         // Zone gesture classification (T19): check chrome header → move; empty canvas → create.
         // A press that reaches a tile falls through to TileNSView, which owns tile drag.
         pendingMovedPlacement = nil
@@ -1167,6 +1229,15 @@ final class CanvasNSView: NSView {
             if let rect = zoneHeaderScreenRect(for: placement) {
                 addCursorRect(rect, cursor: .pointingHand)
             }
+            // Resize cursors on the zone edges (added after the header so they win
+            // on the thin edge bands). No public diagonal cursor → corners reuse these.
+            let f = CanvasEngine.tileScreenFrame(CanvasEngine.zoneWorldFrame(placement), viewport: canvasState.viewport)
+            guard f.width > 0, f.height > 0 else { continue }
+            let m: CGFloat = 8
+            addCursorRect(CGRect(x: f.minX - m / 2, y: f.minY, width: m, height: f.height), cursor: .resizeLeftRight)
+            addCursorRect(CGRect(x: f.maxX - m / 2, y: f.minY, width: m, height: f.height), cursor: .resizeLeftRight)
+            addCursorRect(CGRect(x: f.minX, y: f.minY - m / 2, width: f.width, height: m), cursor: .resizeUpDown)
+            addCursorRect(CGRect(x: f.minX, y: f.maxY - m / 2, width: f.width, height: m), cursor: .resizeUpDown)
         }
     }
 
@@ -1231,6 +1302,17 @@ final class CanvasNSView: NSView {
                     let f = canvasState.tiles[i].frame
                     canvasState.tiles[i].frame = TileFrame(x: f.x + dxW, y: f.y + dyW, width: f.width, height: f.height)
                 }
+                pendingMovedPlacement = newPlacement
+                layoutAllTiles()
+            }
+            return
+        case .resizingZone(let zoneId, let edge, let lastWindowPoint):
+            let dx = event.locationInWindow.x - lastWindowPoint.x
+            let dy = -(event.locationInWindow.y - lastWindowPoint.y)
+            zoneGesture = .resizingZone(zoneId: zoneId, edge: edge, lastWindowPoint: event.locationInWindow)
+            if let idx = liveZones.firstIndex(where: { $0.zoneId == zoneId }) {
+                let newPlacement = resizedZonePlacement(liveZones[idx], edge: edge, screenDelta: CGSize(width: dx, height: dy))
+                liveZones[idx] = newPlacement
                 pendingMovedPlacement = newPlacement
                 layoutAllTiles()
             }
@@ -1313,6 +1395,14 @@ final class CanvasNSView: NSView {
             } else if let pending = pendingMovedPlacement {
                 onZoneMoved?(pending)
                 // Persist the members' translated world frames (canvas save).
+                delegate?.canvasDidChange(self)
+            }
+            pendingMovedPlacement = nil
+            return
+        case .resizingZone:
+            // Commit the resized frame (origin + size) via the same persist path.
+            if let pending = pendingMovedPlacement {
+                onZoneMoved?(pending)
                 delegate?.canvasDidChange(self)
             }
             pendingMovedPlacement = nil
@@ -2200,6 +2290,79 @@ final class CanvasNSView: NSView {
         try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
         let artifact = tempRoot.appendingPathComponent("manifest.json")
         try JSONSerialization.data(withJSONObject: ["check": "zone-chrome-zorder", "cases": ["boot-seeded", "gesture-created"]], options: [.sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// zone-unify — a zone resizes by its edges like a tile: the right edge grows
+    /// width, the bottom grows height, the left edge shifts origin + width, and
+    /// member tiles never move (resizing the container doesn't move its contents).
+    static func runZoneResizeSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(m): return m } }
+        }
+        func expect(_ c: @autoclosure () -> Bool, _ m: String) throws { if !c() { throw CheckError.failed(m) } }
+        func win(_ cx: CGFloat, _ cy: CGFloat) -> NSPoint { NSPoint(x: cx, y: 700 - cy) }
+        func drag(_ canvas: CanvasNSView, from: NSPoint, to: NSPoint, window: NSWindow) throws {
+            func ev(_ t: NSEvent.EventType, _ p: NSPoint) throws -> NSEvent {
+                guard let e = NSEvent.mouseEvent(with: t, location: p, modifierFlags: [],
+                                                 timestamp: ProcessInfo.processInfo.systemUptime,
+                                                 windowNumber: window.windowNumber, context: nil,
+                                                 eventNumber: 0, clickCount: 1, pressure: t == .leftMouseUp ? 0 : 1)
+                else { throw CheckError.failed("synth \(t)") }
+                return e
+            }
+            canvas.mouseDown(with: try ev(.leftMouseDown, from))
+            canvas.mouseDragged(with: try ev(.leftMouseDragged, to))
+            canvas.mouseUp(with: try ev(.leftMouseUp, to))
+        }
+
+        let vp = CanvasViewport(x: 0, y: 0, zoom: 1)
+        let zoneId = UUID(uuidString: "00000000-0000-0000-0000-0000000000F2")!
+        let memberId = UUID(uuidString: "00000000-0000-0000-0000-0000000000F3")!
+        let zone = ZonePlacement(zoneId: zoneId, projectId: UUID(uuidString: "00000000-0000-0000-0000-0000000000F1")!,
+                                 origin: ZonePoint(x: 100, y: 100), size: ZoneSize(width: 400, height: 300),
+                                 color: "teal", collapsed: false, hydrationPolicy: .automatic, name: "Z", navKey: nil)
+        let member = Tile(id: memberId, kind: .note, title: "m", frame: TileFrame(x: 150, y: 150, width: 120, height: 90), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: vp, tiles: [member], groups: [], lastActiveTileId: nil),
+            activeZone: zone, zoneRenderModels: [ZoneRenderModel(placement: zone, displayName: "Z")], showsZoneChrome: true)
+        canvas.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        canvas.install(tileView: DescriptorTileNSView(tile: member), for: member)
+        canvas.layoutSubtreeIfNeeded()
+        var moved = 0
+        canvas.onZoneMoved = { _ in moved += 1 }
+        let memberStart = CGRect(x: 150, y: 150, width: 120, height: 90)
+
+        // 1. Right edge +100 → width 400→500, origin unchanged, member unmoved.
+        try drag(canvas, from: win(500, 250), to: win(600, 250), window: window)
+        try expect(abs((canvas.qaLiveZonePlacement(zoneId)?.size.width ?? 0) - 500) < 0.5, "right-edge resize should grow width to 500; got \(String(describing: canvas.qaLiveZonePlacement(zoneId)?.size.width))")
+        try expect((canvas.qaLiveZonePlacement(zoneId)?.origin.x ?? -1) == 100, "right-edge resize must not move the origin")
+        try expect(canvas.tileView(for: memberId)?.frame == memberStart, "right-edge resize must NOT move the member")
+
+        // 2. Bottom edge +50 → height 300→350.
+        try drag(canvas, from: win(300, 400), to: win(300, 450), window: window)
+        try expect(abs((canvas.qaLiveZonePlacement(zoneId)?.size.height ?? 0) - 350) < 0.5, "bottom-edge resize should grow height to 350; got \(String(describing: canvas.qaLiveZonePlacement(zoneId)?.size.height))")
+
+        // 3. Left edge dragged left 50 → origin.x 100→50, width 500→550, member unmoved.
+        try drag(canvas, from: win(100, 250), to: win(50, 250), window: window)
+        try expect(abs((canvas.qaLiveZonePlacement(zoneId)?.origin.x ?? -1) - 50) < 0.5, "left-edge resize should move origin.x to 50; got \(String(describing: canvas.qaLiveZonePlacement(zoneId)?.origin.x))")
+        try expect(abs((canvas.qaLiveZonePlacement(zoneId)?.size.width ?? 0) - 550) < 0.5, "left-edge resize should grow width to 550; got \(String(describing: canvas.qaLiveZonePlacement(zoneId)?.size.width))")
+        try expect(canvas.tileView(for: memberId)?.frame == memberStart, "left-edge resize must NOT move the member (container resize keeps contents put)")
+
+        // 4. Each resize committed once.
+        try expect(moved == 3, "each edge resize should fire onZoneMoved once; got \(moved)")
+
+        let fm = FileManager.default
+        let tempRoot = URL(fileURLWithPath: fm.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("zone-resize-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        let artifact = tempRoot.appendingPathComponent("manifest.json")
+        try JSONSerialization.data(withJSONObject: ["check": "zone-resize", "finalWidth": 550, "finalHeight": 350], options: [.sortedKeys]).write(to: artifact, options: .atomic)
         return artifact
     }
 
