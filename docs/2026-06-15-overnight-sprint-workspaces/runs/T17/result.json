@@ -1,0 +1,38 @@
+{
+  "task": "T17",
+  "title": "⌘K zone rows: jump-to-zone + create-zone",
+  "verdict": "PASS WITH RISKS",
+  "iterations": 0,
+  "note": "First workflow run STALLED (agent infra, 6 attempts no-progress); orchestrator cleaned the partial tree (git reset --hard + rm DefaultGroupZoneName.swift, baseline recompiled green) and re-launched fresh → PASS WITH RISKS.",
+  "fixerApplied": [
+    "DEFECT 1 (weakened existing check): re-tightened --nav-mode-check from 'Review Zone present anywhere' to pin the deterministic default-selected row (selectedDisplayNameForQA == 'Jump to Alpha') + project-presence. RED-confirmed.",
+    "DEFECT 2 (configurable-first): added a DefaultGroupZoneName UserDefaults round-trip (absent → 'Zone', override → resolves, whitespace → 'Zone'). RED-confirmed."
+  ],
+  "redProven": true,
+  "green": true,
+  "matrixFast": "green",
+  "buildClean": true,
+  "namedCheck": "--palette-zone-check passed",
+  "guards": "--palette-zone-check: performPaletteAction(.jumpToZone)/(.createZone) inside an open .palette modal → asserts viewport == CanvasEngine.fit, focus survives closeModal, unknown-zone no-op, create-zone re-loads the WorkspaceDocument FROM DISK + registry projectIds unchanged. Bypass disproved (stub both production fns → RED). + Core makeRows table + the re-tightened nav-mode default-row pin.",
+  "filesTouched": [
+    "Sources/ContinuumRevivedCore/LaunchPaletteModel.swift",
+    "Sources/ContinuumRevivedCore/WorkspaceDocument.swift",
+    "Sources/ContinuumRevivedCore/DefaultGroupZoneName.swift (new)",
+    "Sources/ContinuumRevivedCore/SettingsSchema.swift",
+    "Sources/ContinuumRevived/App/LaunchProfilePalette.swift",
+    "Sources/ContinuumRevived/App/ContinuumApp.swift",
+    "Sources/ContinuumRevivedCoreChecks/main.swift",
+    "Sources/ContinuumRevivedPaletteChecks/main.swift",
+    "scripts/run-matrix.sh"
+  ],
+  "risks": [
+    "R1 DECISION (nav-z UX shift): jump-to-zone + the always-appended 'Create Zone…' row now match the 'zone' query and sort BEFORE projects, so nav-z default-highlights 'Jump to Alpha' (a zone-jump row) instead of the matching project — Enter changed meaning vs the shipped nav flow. The check now PINS this (honest), but whether the new default is desired is a UX call: accept, or adjust makeRows ordering / nav-z prefill.",
+    "create-zone primary runtime branch (workspaceRuntime?.workspaceId) untested — scenario 2 exercises only the registry.lastActiveWorkspaceId fallback (the real runtime branch is T20-gated).",
+    "firstTileInZone uses intersects (any overlap) not the spec's containment (agree for the fully-inside test; boundary-straddling untested). Empty-zone jump (pan-only, focus does not survive closeModal) untested. createGroupZoneFromPalette is net-new WorkspaceStore.load()+save (matches spec prose, not addProjectZone's runtime-delegating body).",
+    "navSelectedZoneIdForQA QA hook added on AppDelegate (matches the searchTextForQA precedent). No ⌘K visual gate run."
+  ],
+  "needsHuman": [
+    "Confirm the nav-z default-action shift (now Create/Jump, was switch-to-project) is acceptable, or adjust the ordering — not just the test.",
+    ".createZone home = makeRows-append (unconditional; appears under new/create/zone queries) vs a CommandRegistry — confirm. Focus target = option (a) first-member-tile, intersects-vs-contains — confirm."
+  ]
+}

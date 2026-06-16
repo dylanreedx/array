@@ -88,6 +88,34 @@ public struct WorkspaceDocument: Equatable, Sendable {
         lastActiveZoneId = zoneId
         return placement
     }
+
+    @discardableResult
+    public mutating func appendGroupZone(
+        name: String,
+        zoneId: UUID = UUID(),
+        defaultSize: ZoneSize = ZoneSize(width: 1280, height: 720),
+        gap: Double = 120,
+        color: String = "mint"
+    ) -> ZonePlacement {
+        let maxX = zones.map { $0.origin.x + $0.size.width }.max() ?? 0
+        let origin = zones.isEmpty ? ZonePoint(x: 0, y: 0) : ZonePoint(x: maxX + gap, y: 0)
+        let placement = ZonePlacement(
+            zoneId: zoneId,
+            projectId: nil,
+            origin: origin,
+            size: defaultSize,
+            color: color,
+            collapsed: false,
+            hydrationPolicy: .automatic,
+            name: name,
+            navKey: nil
+        )
+        zones.append(placement)
+        zoneZOrder.removeAll { $0 == zoneId }
+        zoneZOrder.append(zoneId)
+        lastActiveZoneId = zoneId
+        return placement
+    }
 }
 
 extension WorkspaceDocument: Codable {

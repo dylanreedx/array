@@ -239,6 +239,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--palette-zone-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runPaletteZoneSelfCheck()
+                print("ContinuumRevivedPaletteZoneChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--leader-snap-check") {
             do {
                 _ = NSApplication.shared
@@ -2642,7 +2654,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let jumpTiles = (canvasView?.canvasState.tiles ?? []).map { tile in
             JumpTileRow(id: tile.id, title: tile.title.isEmpty ? "Untitled Tile" : tile.title)
         }
-        palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces, harnessRoles: harnessRolesForActiveProject(), jumpTiles: jumpTiles, initialQuery: initialQuery)
+        let jumpZones = (canvasView?.navZoneRenderModels ?? []).map { model in
+            JumpZoneRow(id: model.placement.zoneId, title: model.displayName)
+        }
+        palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces, harnessRoles: harnessRolesForActiveProject(), jumpTiles: jumpTiles, jumpZones: jumpZones, initialQuery: initialQuery)
     }
 
     private func harnessRolesForActiveProject() -> [HarnessRole] {
@@ -2907,6 +2922,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawnHarnessRoleFromPalette(role)
         case let .jumpToTile(tileId):
             jumpToTileFromPalette(tileId)
+        case let .jumpToZone(zoneId):
+            jumpToZoneFromPalette(zoneId)
+        case .createZone:
+            createGroupZoneFromPalette()
         }
     }
 
@@ -2918,6 +2937,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard canvasView?.canvasState.tiles.contains(where: { $0.id == tileId }) == true else { return }
         canvasView?.centerOnTile(tileId)
         focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
+    }
+
+    /// QA accessor for `navSelectedZoneId` (mirrors `searchTextForQA` precedent).
+    var navSelectedZoneIdForQA: UUID? { navSelectedZoneId }
+
+    /// ⌘K "Jump to <zone name>" — mirrors jumpToTileFromPalette: fits the zone into
+    /// the viewport, sets navSelectedZoneId, and enters the zone's first member tile
+    /// with `.tileSpawned` so the palette snapshot restore on close doesn't bounce
+    /// focus back to the pre-palette scope.
+    private func jumpToZoneFromPalette(_ zoneId: UUID) {
+        guard let canvasView,
+              canvasView.navZoneRenderModels.contains(where: { $0.placement.zoneId == zoneId }),
+              let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) else { return }
+        canvasView.setViewport(viewport)
+        navSelectedZoneId = zoneId
+        // Focus the zone's first member tile (the tile whose world frame falls inside
+        // the zone's world rect). If the zone is empty, skip the focus change.
+        if let tileId = firstTileInZone(zoneId) {
+            focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
+        }
+    }
+
+    /// Returns the id of the first tile whose world frame intersects the zone's world rect.
+    private func firstTileInZone(_ zoneId: UUID) -> UUID? {
+        guard let canvasView,
+              let model = canvasView.navZoneRenderModels.first(where: { $0.placement.zoneId == zoneId }) else { return nil }
+        let zoneFrame = CanvasEngine.zoneWorldFrame(model.placement)
+        let zoneRect = CGRect(x: zoneFrame.x, y: zoneFrame.y, width: zoneFrame.width, height: zoneFrame.height)
+        return canvasView.canvasState.tiles.first { tile in
+            let tileRect = CGRect(x: tile.frame.x, y: tile.frame.y, width: tile.frame.width, height: tile.frame.height)
+            return zoneRect.intersects(tileRect)
+        }?.id
+    }
+
+    /// ⌘K "Create Zone" — mirrors the persistence body of addProjectZone (minus the
+    /// project/registry mutation). Resolves the active workspaceId, loads the document,
+    /// appends a group zone with the configured default name, persists, and saves the
+    /// registry. Does NOT spin a ZoneRuntimeController (T08's addZone responsibility).
+    private func createGroupZoneFromPalette() {
+        guard let registryStore else { return }
+        do {
+            var registry = try registryStore.loadOrEmpty()
+            let workspaceId: UUID
+            if let wId = workspaceRuntime?.workspaceId {
+                workspaceId = wId
+            } else if let wId = registry.lastActiveWorkspaceId {
+                workspaceId = wId
+            } else {
+                fputs("Create Zone failed: no active workspace\n", stderr)
+                return
+            }
+            let appSupport = registryStore.registryFile.deletingLastPathComponent()
+            let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
+            var document = try store.load()
+            document.appendGroupZone(name: DefaultGroupZoneName.resolve())
+            let saveController = WorkspaceDocumentSaveController(store: store)
+            saveController.scheduleZoneLayoutSave(document)
+            try saveController.flushPendingSave()
+            try registryStore.save(registry)
+        } catch {
+            fputs("Create Zone failed: \(error)\n", stderr)
+        }
     }
 
     private func spawnHarnessRoleFromPalette(_ role: HarnessRole) {
@@ -7667,6 +7748,184 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return artifact
     }
 
+    /// T17 — ⌘K zone rows: jump-to-zone and create-zone.
+    /// Scenario 1: drives the REAL performPaletteAction(.jumpToZone) inside an open
+    /// .palette modal; asserts viewport, navSelectedZoneId, focus survival after
+    /// closeModal, and unknown-zone no-op.
+    /// Scenario 2: drives performPaletteAction(.createZone) on disk, re-loads the
+    /// document and asserts the group zone was persisted with the right fields.
+    static func runPaletteZoneSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func vpEqual(_ a: CanvasViewport, _ b: CanvasViewport) -> Bool {
+            abs(a.x - b.x) < 0.001 && abs(a.y - b.y) < 0.001 && abs(a.zoom - b.zoom) < 0.001
+        }
+
+        // --- Scenario 1: Jump to Zone ---
+        // Zone A: origin (0,0) size 1000×700.  Zone B: origin (1400,0) size 800×600.
+        // One tile inside zone B so the focus-survival assertion has a tile target.
+        let zoneAId = UUID(uuidString: "00000000-0000-0000-0000-000000000A10")!
+        let zoneBId = UUID(uuidString: "00000000-0000-0000-0000-000000000B20")!
+        let zoneA = ZonePlacement(
+            zoneId: zoneAId,
+            projectId: nil,
+            origin: ZonePoint(x: 0, y: 0),
+            size: ZoneSize(width: 1000, height: 700),
+            color: "mint",
+            collapsed: false,
+            hydrationPolicy: .automatic,
+            name: "Alpha"
+        )
+        let zoneB = ZonePlacement(
+            zoneId: zoneBId,
+            projectId: nil,
+            origin: ZonePoint(x: 1400, y: 0),
+            size: ZoneSize(width: 800, height: 600),
+            color: "sky",
+            collapsed: false,
+            hydrationPolicy: .automatic,
+            name: "Beta"
+        )
+        // Tile inside zone B's world rect (1400..2200, 0..600).
+        let tileBId = UUID(uuidString: "00000000-0000-0000-0000-000000000B21")!
+        let tileInB = Tile(id: tileBId, kind: .note, title: "B-tile", frame: TileFrame(x: 1450, y: 50, width: 200, height: 150), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileInB], groups: [], lastActiveTileId: nil),
+            zoneRenderModels: [
+                CanvasNSView.ZoneRenderModel(placement: zoneA, displayName: "Alpha"),
+                CanvasNSView.ZoneRenderModel(placement: zoneB, displayName: "Beta")
+            ]
+        )
+        canvas.frame = NSRect(x: 0, y: 0, width: 1400, height: 900)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        let app = AppDelegate()
+        app.canvasView = canvas
+        canvas.focusBroker = app.focusBroker
+        app.focusBroker.onAcceptedTileFocus = { [weak canvas] id in canvas?.markActive(tileId: id) }
+        canvas.install(tileView: TileNSView(tile: tileInB), for: tileInB)
+        _ = app.focusBroker.requestFocus(.canvas, reason: .userClick)
+
+        // Precondition: open palette modal (snapshots .canvas).
+        app.focusBroker.openModal(.palette)
+        try expect(app.focusBroker.activeSurface == .modal(.palette), "precondition: palette modal open; got \(String(describing: app.focusBroker.activeSurface))")
+
+        // Jump to zone B via the REAL performPaletteAction.
+        app.performPaletteAction(.jumpToZone(zoneBId))
+
+        // Assert 3 — viewport == fitZoneToViewport(B).
+        let expectedViewport = CanvasEngine.fit(
+            worldRect: CGRect(x: 1400, y: 0, width: 800, height: 600),
+            viewportSize: CGSize(width: 1400, height: 900)
+        )
+        try expect(vpEqual(canvas.viewport, expectedViewport), "palette jump-to-zone: viewport must fit zone B; got (\(canvas.viewport.x),\(canvas.viewport.y),\(canvas.viewport.zoom)) want (\(expectedViewport.x),\(expectedViewport.y),\(expectedViewport.zoom))")
+
+        // Assert 4 — navSelectedZoneId == zoneBId.
+        try expect(app.navSelectedZoneIdForQA == zoneBId, "palette jump-to-zone: navSelectedZoneId must be zone B; got \(String(describing: app.navSelectedZoneIdForQA))")
+
+        // Assert 5 — focus survives closeModal (tile in B must be focused, NOT .canvas).
+        app.focusBroker.closeModal(.palette)
+        try expect(app.focusBroker.activeSurface == .tile(tileBId), "palette jump-to-zone: focus must survive closeModal as .tile(tileBId); got \(String(describing: app.focusBroker.activeSurface))")
+
+        // Assert 6 — unknown zone id is a no-op.
+        let beforeViewport = canvas.viewport
+        let beforeSurface = app.focusBroker.activeSurface
+        app.performPaletteAction(.jumpToZone(UUID()))
+        try expect(vpEqual(canvas.viewport, beforeViewport), "jumping to unknown zone must not change viewport")
+        try expect(app.focusBroker.activeSurface == beforeSurface, "jumping to unknown zone must not change activeSurface; got \(String(describing: app.focusBroker.activeSurface))")
+
+        // --- Scenario 2: Create Zone (on-disk) ---
+        let tempAppSupport = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("continuum-palette-zone-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempAppSupport) }
+        try FileManager.default.createDirectory(at: tempAppSupport, withIntermediateDirectories: true)
+
+        let workspaceW = UUID(uuidString: "00000000-0000-0000-0000-00000000EE17")!
+        let projectP = UUID(uuidString: "00000000-0000-0000-0000-00000000FF17")!
+        let now = Date()
+        let initialRegistry = Registry(
+            lastActiveWorkspaceId: workspaceW,
+            lastActiveProjectId: projectP,
+            workspaces: [WorkspaceEntry(id: workspaceW, name: "T17 Check Workspace", projectIds: [projectP], createdAt: now, updatedAt: now)],
+            projects: [ProjectEntry(id: projectP, name: "T17 Check Project", rootPath: "/tmp/t17", workspaceId: workspaceW, lastOpenedAt: now, pinned: false)],
+            settings: RegistrySettings(preferredEditor: .auto, zoomModifier: .command, openLastProjectOnLaunch: true)
+        )
+        let registryStore = RegistryStore(applicationSupportDirectory: tempAppSupport)
+        try registryStore.save(initialRegistry)
+
+        // Initial workspace document: one project zone.
+        let firstZone = ZonePlacement(
+            zoneId: UUID(uuidString: "00000000-0000-0000-0000-00000000AA01")!,
+            projectId: projectP,
+            origin: ZonePoint(x: 0, y: 0),
+            size: ZoneSize(width: 1280, height: 720),
+            color: "mint",
+            collapsed: false,
+            hydrationPolicy: .automatic
+        )
+        var initialDoc = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [firstZone],
+            zoneZOrder: [firstZone.zoneId],
+            lastActiveZoneId: firstZone.zoneId
+        )
+        let workspaceStore = WorkspaceStore(workspaceId: workspaceW, applicationSupportDirectory: tempAppSupport)
+        try workspaceStore.save(initialDoc)
+
+        // Assert 7 — precondition: reloaded doc has 1 zone with projectId == P.
+        let preDoc = try workspaceStore.load()
+        try expect(preDoc.zones.count == 1, "precondition: initial workspace has 1 zone; got \(preDoc.zones.count)")
+        try expect(preDoc.zones[0].projectId == projectP, "precondition: initial zone has projectId == P")
+
+        // Wire app with registryStore pointing at tempAppSupport.
+        let checkApp = AppDelegate()
+        checkApp.registryStore = registryStore
+
+        // Assert 8 — create via the REAL performPaletteAction.
+        checkApp.focusBroker.openModal(.palette)
+        checkApp.performPaletteAction(.createZone)
+        checkApp.focusBroker.closeModal(.palette)
+
+        // Assert 9 — re-load from disk: 2 zones, new zone is group zone.
+        let postDoc = try workspaceStore.load()
+        try expect(postDoc.zones.count == 2, "create-zone must write a second zone to disk; got \(postDoc.zones.count)")
+        let newZone = postDoc.zones[1]
+        try expect(newZone.projectId == nil, "created group zone must have projectId == nil; got \(String(describing: newZone.projectId))")
+        try expect(newZone.name == DefaultGroupZoneName.resolve(), "created group zone must have configured default name; got '\(newZone.name)'")
+        let expectedOriginX = firstZone.origin.x + Double(firstZone.size.width) + 120
+        try expect(abs(newZone.origin.x - expectedOriginX) < 0.001, "created group zone origin.x must be firstZone.right + 120 gap; got \(newZone.origin.x) want \(expectedOriginX)")
+        try expect(postDoc.zoneZOrder.last == newZone.zoneId, "created group zone must be last in zoneZOrder")
+        try expect(postDoc.lastActiveZoneId == newZone.zoneId, "created group zone must be lastActiveZoneId")
+
+        // Assert 10 — registry projectIds unchanged (no project added for group zone).
+        let postRegistry = try registryStore.loadOrEmpty()
+        let workspaceEntry = postRegistry.workspaces.first(where: { $0.id == workspaceW })!
+        try expect(workspaceEntry.projectIds == [projectP], "create-zone must NOT add a project to the workspace's projectIds; got \(workspaceEntry.projectIds)")
+
+        let manifest: [String: Any] = [
+            "check": "palette-zone",
+            "path": "performPaletteAction(.jumpToZone)/(.createZone) inside an open .palette modal → closeModal (real action + modal lifecycle + on-disk WorkspaceDocument)",
+            "fitViewport": ["x": expectedViewport.x, "y": expectedViewport.y, "zoom": expectedViewport.zoom],
+            "createdZoneOrigin": ["x": newZone.origin.x, "y": newZone.origin.y],
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("palette-zone", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
     /// Phase D — ⌥+arrow keyboard dock + leapfrog, driven through the REAL input
     /// path: open the leader, synth arrow `keyDown`s through `handleHotkey` →
     /// `handleLeaderKey`, asserting the focused tile's COMMITTED frame docks
@@ -8045,7 +8304,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         navApp.handleNavModeKey(keyEvent("z", keyCode: 6))
         try expect(navApp.focusBroker.activeSurface == .modal(.palette), "nav z should hand off from nav mode to the palette modal")
         try expect(navApp.profilePalette?.searchTextForQA == "zone", "nav z should prefill the zone picker query; query=\(navApp.profilePalette?.searchTextForQA ?? "nil")")
-        try expect(navApp.profilePalette?.selectedDisplayNameForQA?.contains("Review Zone") == true, "nav z should select a zone-filtered project row; selected=\(navApp.profilePalette?.selectedDisplayNameForQA ?? "nil")")
+        // T17: jump-to-zone rows sort before project rows in makeRows, so the first-selected
+        // row under "zone" query is the first jumpToZone row ("Jump to Alpha", zoneA).
+        // The "Review Zone" project row is present further down in the filtered results.
+        let zoneFilteredNames = navApp.profilePalette?.filteredDisplayNamesForQA ?? []
+        try expect(navApp.profilePalette?.selectedDisplayNameForQA == "Jump to Alpha", "nav z should default-select the first jump-to-zone row (Alpha); selected=\(navApp.profilePalette?.selectedDisplayNameForQA ?? "nil")")
+        try expect(zoneFilteredNames.contains { $0.contains("Review Zone") }, "nav z filtered rows must include the Review Zone project row; filtered=\(zoneFilteredNames)")
         navApp.profilePalette?.close()
 
         overlayCanvas.setNavModeOverlayVisible(false)

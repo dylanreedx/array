@@ -19,8 +19,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private weak var previousFirstResponder: NSResponder?
     private weak var previousFirstResponderWindow: NSWindow?
 
-    func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], initialQuery: String = "") {
-        self.rows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)), projects: projects, workspaces: workspaces, harnessRoles: harnessRoles, jumpTiles: jumpTiles)
+    func show(near host: NSWindow, profiles: [TileSpawner.AnnotatedProfile], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = [], initialQuery: String = "") {
+        self.rows = LaunchPaletteModel.makeRows(profiles: profiles.map(Self.profileRow(for:)), projects: projects, workspaces: workspaces, harnessRoles: harnessRoles, jumpTiles: jumpTiles, jumpZones: jumpZones)
         self.filtered = initialQuery.isEmpty ? rows : LaunchPaletteModel.filterRows(rows, query: initialQuery)
         guard let hostView = host.contentView else { return }
         let wasVisible = isVisible
@@ -118,6 +118,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     var isVisible: Bool { paletteView?.superview != nil }
 
     var searchTextForQA: String { searchField?.stringValue ?? "" }
+    var filteredDisplayNamesForQA: [String] { filtered.map(\.displayName) }
 
     var selectedDisplayNameForQA: String? {
         guard let tableView, tableView.selectedRow >= 0, tableView.selectedRow < filtered.count else { return nil }
@@ -133,6 +134,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             default: return action.displayName
             }
         case let .jumpToTile(tile): return "Jump to \(tile.title)"
+        case let .jumpToZone(zone): return "Jump to \(zone.title)"
         }
     }
 
@@ -535,6 +537,9 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         case let .jumpToTile(tile):
             text.stringValue = "Jump to \(tile.title)"
             text.textColor = .labelColor
+        case let .jumpToZone(zone):
+            text.stringValue = "Jump to \(zone.title)"
+            text.textColor = .labelColor
         }
         return cell
     }
@@ -611,6 +616,9 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             close(restoreFocus: true)
         case let .jumpToTile(tile):
             onSelectAction?(.jumpToTile(tile.id))
+            close(restoreFocus: true)
+        case let .jumpToZone(zone):
+            onSelectAction?(.jumpToZone(zone.id))
             close(restoreFocus: true)
         }
     }

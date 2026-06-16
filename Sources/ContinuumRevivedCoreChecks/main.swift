@@ -2878,6 +2878,25 @@ do {
     expect(TileGapResolver.resolvedGap(defaults: defaults) == 8, "Tile gap resolver rejects non-positive override")
 }
 
+// MARK: - DefaultGroupZoneName: UserDefaults round-trip
+
+do {
+    let suite = "DefaultGroupZoneNameChecks-\(UUID().uuidString)"
+    let d = UserDefaults(suiteName: suite)!
+    defer { d.removePersistentDomain(forName: suite) }
+
+    // Absent key → fallback ("Zone").
+    expect(DefaultGroupZoneName.resolve(defaults: d) == "Zone", "DefaultGroupZoneName absent key must return fallback 'Zone'")
+
+    // User override round-trips.
+    d.set("My Canvas", forKey: DefaultGroupZoneName.userDefaultsKey)
+    expect(DefaultGroupZoneName.resolve(defaults: d) == "My Canvas", "DefaultGroupZoneName resolve must return the user override; got '\(DefaultGroupZoneName.resolve(defaults: d))'")
+
+    // Whitespace-only override falls back to "Zone".
+    d.set("   ", forKey: DefaultGroupZoneName.userDefaultsKey)
+    expect(DefaultGroupZoneName.resolve(defaults: d) == "Zone", "DefaultGroupZoneName whitespace-only override must fall back to 'Zone'")
+}
+
 // MARK: - TileArrangement: jumpLabels (hold-leader jump label assignment)
 
 do {
@@ -3191,12 +3210,14 @@ do {
         expect(!command.action.displayName.isEmpty, "CommandRegistry: command \(command.id) action has a display name")
     }
     // The launch palette's static action rows must come from the registry — no
-    // drift from a separate hardcoded list.
+    // drift from a separate hardcoded list. T17 appends .createZone directly in
+    // makeRows (not via CommandRegistry) so the expected rows are registry + createZone.
     let rows = LaunchPaletteModel.makeRows(profiles: [])
     let actionRows: [LaunchPaletteAction] = rows.compactMap { row in
         if case let .action(action) = row { return action } else { return nil }
     }
-    expect(actionRows == CommandRegistry.paletteActions(), "palette static action rows must equal CommandRegistry.paletteActions(); got \(actionRows.map(\.displayName))")
+    let expectedActionRows = CommandRegistry.paletteActions() + [LaunchPaletteAction.createZone]
+    expect(actionRows == expectedActionRows, "palette static action rows must equal CommandRegistry.paletteActions() + [.createZone]; got \(actionRows.map(\.displayName))")
     let ids = Set(commands.map(\.id))
     let canonical: Set<String> = ["tile.newNote", "tile.newBrowser", "tile.openFile", "tile.openFileTree", "tile.newDiffReview", "view.fitCanvasToAll", "workspace.new"]
     expect(canonical.isSubset(of: ids), "CommandRegistry must contain the canonical static commands; missing \(canonical.subtracting(ids))")
@@ -4247,6 +4268,7 @@ do {
         ZoneHydrationReconcileConfig.intervalKey,
         BrowserRuntimeBudget.defaultsKey,
         AmbientZoneHome.userDefaultsKey,
+        DefaultGroupZoneName.userDefaultsKey,
         AutosaveConfig.debounceMsKey,
         // WorkspaceProfileConfig.defaultCaptureModeKey and defaultApplyModeKey are
         // intentionally excluded: captureMode/applyMode have no behavioral effect yet

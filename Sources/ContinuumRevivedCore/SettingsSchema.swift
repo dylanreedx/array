@@ -98,6 +98,11 @@ public enum SettingsSchema {
                         default: ZoneRuntimeBudgetConfig.defaultCloseOnZero
                     ),
                     .text(
+                        key: DefaultGroupZoneName.userDefaultsKey,
+                        label: "Default Zone Name",
+                        default: DefaultGroupZoneName.fallback
+                    ),
+                    .text(
                         key: AmbientZoneHome.userDefaultsKey,
                         label: "Ambient Zone Home Directory",
                         default: AmbientZoneHome.fallback

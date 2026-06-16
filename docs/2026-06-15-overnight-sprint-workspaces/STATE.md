@@ -22,10 +22,10 @@ Legend: ⬜ todo · ✍️ spec-written · 🔨 building · 🔍 review · ✅ d
 | T11 | Adaptive zone bounds (union+padding) | overnight [pure+wiring] | T05 | ✅ | 16806b1 | built PASS-WITH-RISKS; legacy chrome only — ZoneLayer-chrome gap→T06 |
 | T12 | Bulletproof restore (atomic, crash-safe) | overnight | T01,T02 | ✅ | ddd0795 | built PASS-WITH-RISKS; 14-assertion crash-safe check; fsync in SHARED AtomicWriter (NH1) + no live autosave caller yet (NH2)→🔴 |
 | T13 | Live-session resume (terminal/browser) | overnight | T12 | ✅ | 87de37f | built (2 iters)+fixer (A7 bypass + A2 bound closed, RED-confirmed); OSC-7 real-shell-emit dep + cold-reboot blob + A6 replay→🔴 |
-| T14 | Profiles/snapshots (store + apply-modes) | overnight | T12 | ✅ | (T14) | built (1 iter); store+apply-recipes REAL (RED-confirmed); snapshot==template INERT (WorkspaceDocument is LAYOUT-ONLY)→🔴 design; carry-fwd→T16 |
+| T14 | Profiles/snapshots (store + apply-modes) | overnight | T12 | ✅ | 192e44e | built (1 iter); store+apply-recipes REAL (RED-confirmed); snapshot==template INERT (WorkspaceDocument is LAYOUT-ONLY)→🔴 design; carry-fwd→T16 |
 | T15 | Sidebar view-model (pure tree) | overnight [pure] | T01 | ✅ | b3728fc | built PASS-WITH-RISKS (0 iters); ?? "" vs "Project" fallback to ratify before T16 |
 | T16 | Sidebar NSOutlineView | morning [appkit] | T15,T09 | ✍️ | — | spec written (review folds into build) |
-| T17 | ⌘K zone rows (jump/create) | overnight | T01 | ✍️ | — | spec written (review folds into build) |
+| T17 | ⌘K zone rows (jump/create) | overnight | T01 | ✅ | (T17) | 1st run STALLED→re-launched fresh; built+fixer (re-tightened nav-mode check + config round-trip, RED-confirmed); nav-z default-action shift→🔴 decision |
 | T18 | Per-zone nav keybind + leader zone-jump | overnight | T01 | ✍️ | — | spec written (review folds into build) |
 | T19 | Drag-to-create-zone + move-zone gesture | morning [appkit] | T05,T11 | ✍️ | — | spec written (review folds into build) |
 | T20 | ⚠Wire boot WorkspaceRuntime real per-project controller factory | overnight [appkit-chk] | T06(debt) | ⛔ | — | NEEDS-HUMAN design (T09 review): boot registry throws on acquire → add-zone/switch INERT in live app; keystone built+verified but NOT live until this. Stub: T20-wire-boot-registry-factory.md |

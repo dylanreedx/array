@@ -45,9 +45,9 @@ let rows = LaunchPaletteModel.makeRows(profiles: [
     profile(id: "shell", displayName: "Shell"),
     profile(id: "claude", displayName: "Claude Code")
 ])
-expect(rows.map(\.displayName) == ["Shell", "Claude Code", "New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "New Workspace…"], "palette appends note/browser/file/file-tree/diff/fit/workspace actions after profiles")
+expect(rows.map(\.displayName) == ["Shell", "Claude Code", "New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "New Workspace…", "Create Zone…"], "palette appends note/browser/file/file-tree/diff/fit/workspace actions after profiles, then Create Zone")
 expect(LaunchPaletteModel.filterRows(rows, query: "note").map(\.displayName) == ["New Note"], "note query matches New Note")
-expect(LaunchPaletteModel.filterRows(rows, query: "new").map(\.displayName) == ["New Note", "New Browser", "New Diff Review", "New Workspace…"], "new query matches New actions")
+expect(LaunchPaletteModel.filterRows(rows, query: "new").map(\.displayName) == ["New Note", "New Browser", "New Diff Review", "New Workspace…", "Create Zone…"], "new query matches New actions including Create Zone (has 'new' token)")
 expect(LaunchPaletteModel.filterRows(rows, query: "fit all").map(\.displayName) == ["Fit Canvas to All"], "fit all query matches Fit Canvas to All")
 expect(LaunchPaletteModel.filterRows(rows, query: "browser").map(\.displayName) == ["New Browser"], "browser query matches New Browser")
 expect(LaunchPaletteModel.filterRows(rows, query: "open file").map(\.displayName) == ["Open File...", "Open File Tree..."], "open file query matches file actions")
@@ -65,9 +65,9 @@ let harnessRows = LaunchPaletteModel.makeRows(
     profiles: [],
     harnessRoles: [HarnessRole(id: "qa-reviewer", displayName: "QA Reviewer", promptPath: "/repo/.pi/agents/qa-reviewer.md")]
 )
-expect(harnessRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "New Workspace…", "Run QA Reviewer Agent…"], "palette appends harness role actions after built-in actions")
+expect(harnessRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "New Workspace…", "Run QA Reviewer Agent…", "Create Zone…"], "palette appends harness role actions after built-in actions, then Create Zone")
 expect(LaunchPaletteModel.filterRows(harnessRows, query: "run qa").map(\.displayName) == ["Run QA Reviewer Agent…"], "harness role row filters by run and role name")
-expect(harnessRows.last?.isSelectable == true, "harness role action row is selectable")
+expect(harnessRows.last?.isSelectable == true, "Create Zone action row is selectable (last row in harnessRows)")
 
 // Jump-to-tile rows: appended after the built-in actions; filter by "jump" or title.
 let jumpTileA = UUID(uuidString: "00000000-0000-0000-0000-0000000000A1")!
@@ -76,10 +76,43 @@ let jumpRows = LaunchPaletteModel.makeRows(
     profiles: [],
     jumpTiles: [JumpTileRow(id: jumpTileA, title: "API Server"), JumpTileRow(id: jumpTileB, title: "Notes")]
 )
-expect(jumpRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "New Workspace…", "Jump to API Server", "Jump to Notes"], "palette appends Jump-to-tile rows after the built-in actions")
+expect(jumpRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "New Workspace…", "Jump to API Server", "Jump to Notes", "Create Zone…"], "palette appends Jump-to-tile rows after the built-in actions, then Create Zone")
 expect(LaunchPaletteModel.filterRows(jumpRows, query: "jump notes").map(\.displayName) == ["Jump to Notes"], "jump row filters by 'jump' + title")
 expect(LaunchPaletteModel.filterRows(jumpRows, query: "api").map(\.displayName) == ["Jump to API Server"], "jump row filters by title alone")
-expect(jumpRows.last?.isSelectable == true, "jump-to-tile row is selectable")
+expect(jumpRows.last?.isSelectable == true, "Create Zone action row is selectable (last row in jumpRows)")
+
+// Jump-to-zone rows: appended after jump-tile rows; filter by "jump" + title or title alone; Create Zone action appended last of this block.
+let zA = UUID(uuidString: "00000000-0000-0000-0000-000000000C01")!
+let zB = UUID(uuidString: "00000000-0000-0000-0000-000000000C02")!
+let jumpZoneRows = LaunchPaletteModel.makeRows(
+    profiles: [],
+    jumpZones: [JumpZoneRow(id: zA, title: "API"), JumpZoneRow(id: zB, title: "Scratch")]
+)
+// Assertion 1: order — 7 built-ins + zone rows + Create Zone.
+let builtIns7 = ["New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "New Workspace…"]
+expect(jumpZoneRows.map(\.displayName) == builtIns7 + ["Jump to API", "Jump to Scratch", "Create Zone…"], "palette appends jump-zone rows then Create Zone action after built-in actions")
+// Assertion 2: filter by "jump scratch".
+expect(LaunchPaletteModel.filterRows(jumpZoneRows, query: "jump scratch").map(\.displayName) == ["Jump to Scratch"], "jump zone row filters by 'jump' + title")
+// Assertion 3: filter by title alone.
+expect(LaunchPaletteModel.filterRows(jumpZoneRows, query: "api").map(\.displayName) == ["Jump to API"], "jump zone row filters by title alone")
+// Assertion 4: filter by "create zone".
+expect(LaunchPaletteModel.filterRows(jumpZoneRows, query: "create zone").map(\.displayName) == ["Create Zone…"], "create-zone action row filters by its tokens")
+// Assertion 5: selectability.
+let jumpZoneRow = jumpZoneRows.first(where: { $0.displayName == "Jump to API" })!
+let createZoneRow = jumpZoneRows.first(where: { $0.displayName == "Create Zone…" })!
+expect(jumpZoneRow.isSelectable == true, "jump-to-zone row is selectable")
+expect(createZoneRow.isSelectable == true, "create-zone action row is selectable")
+// Assertion 6: co-existence — tile-jump BEFORE zone-jump BEFORE Create Zone.
+let coexistRows = LaunchPaletteModel.makeRows(
+    profiles: [],
+    jumpTiles: [JumpTileRow(id: jumpTileA, title: "TileX")],
+    jumpZones: [JumpZoneRow(id: zA, title: "ZoneY")]
+)
+let coexistNames = coexistRows.map(\.displayName)
+let tileXIdx = coexistNames.firstIndex(of: "Jump to TileX")!
+let zoneYIdx = coexistNames.firstIndex(of: "Jump to ZoneY")!
+let createZoneIdx = coexistNames.firstIndex(of: "Create Zone…")!
+expect(tileXIdx < zoneYIdx && zoneYIdx < createZoneIdx, "tile-jump rows appear before zone-jump rows which appear before Create Zone: tile=\(tileXIdx) zone=\(zoneYIdx) create=\(createZoneIdx)")
 
 let switchProjectId = UUID(uuidString: "00000000-0000-0000-0000-000000000129")!
 let projectRows = LaunchPaletteModel.makeRows(
@@ -94,7 +127,7 @@ let projectRows = LaunchPaletteModel.makeRows(
         availability: .available
     )]
 )
-expect(projectRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "New Workspace…", "Add Work Project to Canvas"], "palette appends add-project rows")
+expect(projectRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "New Workspace…", "Create Zone…", "Add Work Project to Canvas"], "palette appends Create Zone then add-project rows")
 expect(LaunchPaletteModel.filterRows(projectRows, query: "add work").map(\.displayName) == ["Add Work Project to Canvas"], "add-project row filters by add token and project name")
 expect(projectRows.last?.isSelectable == true, "available add-project row is selectable")
 
@@ -126,7 +159,7 @@ let workspaceRows = LaunchPaletteModel.makeRows(
         updatedAt: Date(timeIntervalSince1970: 2_000)
     )]
 )
-expect(workspaceRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "New Workspace…", "Switch to Client Work Workspace", "Rename Client Work Workspace…", "Delete Client Work Workspace…"], "palette appends workspace rows")
+expect(workspaceRows.map(\.displayName) == ["New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "New Workspace…", "Create Zone…", "Switch to Client Work Workspace", "Rename Client Work Workspace…", "Delete Client Work Workspace…"], "palette appends Create Zone then workspace rows")
 expect(LaunchPaletteModel.filterRows(workspaceRows, query: "switch client").map(\.displayName) == ["Switch to Client Work Workspace"], "workspace row filters by switch token and workspace name")
 expect(LaunchPaletteModel.filterRows(workspaceRows, query: "new workspace").map(\.displayName) == ["New Workspace…"], "new-workspace action filters by workspace tokens")
 let emptyWorkspaceRows = LaunchPaletteModel.makeRows(
@@ -139,7 +172,9 @@ let emptyWorkspaceRows = LaunchPaletteModel.makeRows(
         updatedAt: Date(timeIntervalSince1970: 2_100)
     )]
 )
-expect(emptyWorkspaceRows[7].isSelectable == false, "empty workspace switch rows are not selectable")
+// Index [7] = Create Zone… (selectable), [8] = Switch to Empty Workspace (not selectable because empty).
+expect(emptyWorkspaceRows[7].isSelectable == true, "Create Zone action row at index 7 is selectable")
+expect(emptyWorkspaceRows[8].isSelectable == false, "empty workspace switch rows are not selectable")
 
 let missingRows = LaunchPaletteModel.makeRows(profiles: [
     profile(id: "shell", displayName: "Shell", detail: "zsh not found", isSelectable: false),
@@ -181,7 +216,7 @@ guard binPath.status == 0 else { Foundation.exit(binPath.status) }
 let appPath = URL(fileURLWithPath: binPath.output.trimmingCharacters(in: .whitespacesAndNewlines))
     .appendingPathComponent("continuum-revived")
 
-for flag in ["--palette-duplicate-root-check", "--palette-first-responder-restore-check"] {
+for flag in ["--palette-duplicate-root-check", "--palette-first-responder-restore-check", "--palette-zone-check"] {
     let process = Process()
     process.executableURL = appPath
     process.arguments = [flag]

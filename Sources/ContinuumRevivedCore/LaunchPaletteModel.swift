@@ -16,6 +16,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case switchWorkspace(UUID)
     case spawnHarnessRole(HarnessRole)
     case jumpToTile(UUID)
+    case jumpToZone(UUID)
+    case createZone
 
     public var displayName: String {
         switch self {
@@ -49,6 +51,10 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "Run \(role.displayName) Agent…"
         case .jumpToTile:
             return "Jump to Tile…"
+        case .jumpToZone:
+            return "Jump to Zone…"
+        case .createZone:
+            return "Create Zone…"
         }
     }
 
@@ -84,11 +90,25 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["run", "spawn", "agent", "harness", "role", role.id, role.displayName.lowercased()]
         case .jumpToTile:
             return ["jump", "tile", "go"]
+        case .jumpToZone:
+            return ["jump", "zone", "go"]
+        case .createZone:
+            return ["create", "new", "zone"]
         }
     }
 }
 
 public struct JumpTileRow: Equatable, Sendable {
+    public let id: UUID
+    public let title: String
+
+    public init(id: UUID, title: String) {
+        self.id = id
+        self.title = title
+    }
+}
+
+public struct JumpZoneRow: Equatable, Sendable {
     public let id: UUID
     public let title: String
 
@@ -119,6 +139,7 @@ public enum LaunchPaletteRow: Equatable, Sendable {
     case workspace(WorkspaceEntry)
     case workspaceAction(LaunchPaletteAction, WorkspaceEntry)
     case jumpToTile(JumpTileRow)
+    case jumpToZone(JumpZoneRow)
 
     public var displayName: String {
         switch self {
@@ -137,6 +158,7 @@ public enum LaunchPaletteRow: Equatable, Sendable {
             default: return action.displayName
             }
         case let .jumpToTile(tile): return "Jump to \(tile.title)"
+        case let .jumpToZone(zone): return "Jump to \(zone.title)"
         }
     }
 
@@ -148,6 +170,7 @@ public enum LaunchPaletteRow: Equatable, Sendable {
         case let .workspace(workspace): return !workspace.projectIds.isEmpty
         case .workspaceAction: return true
         case .jumpToTile: return true
+        case .jumpToZone: return true
         }
     }
 
@@ -186,16 +209,22 @@ public enum LaunchPaletteRow: Equatable, Sendable {
             let haystacks = ["jump tile go", tile.title, tile.id.uuidString].map { $0.lowercased() }
             let queryTokens = query.split(separator: " ").map(String.init)
             return queryTokens.allSatisfy { token in haystacks.contains { $0.contains(token) } }
+        case let .jumpToZone(zone):
+            let haystacks = ["jump zone go", zone.title, zone.id.uuidString].map { $0.lowercased() }
+            let queryTokens = query.split(separator: " ").map(String.init)
+            return queryTokens.allSatisfy { token in haystacks.contains { $0.contains(token) } }
         }
     }
 }
 
 public enum LaunchPaletteModel {
-    public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = []) -> [LaunchPaletteRow] {
+    public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = []) -> [LaunchPaletteRow] {
         profiles.map(LaunchPaletteRow.profile)
             + CommandRegistry.paletteActions().map(LaunchPaletteRow.action)
             + harnessRoles.map { LaunchPaletteRow.action(.spawnHarnessRole($0)) }
             + jumpTiles.map(LaunchPaletteRow.jumpToTile)
+            + jumpZones.map(LaunchPaletteRow.jumpToZone)
+            + [LaunchPaletteRow.action(.createZone)]
             + workspaces.flatMap { workspace in
             [
                 LaunchPaletteRow.workspace(workspace),
