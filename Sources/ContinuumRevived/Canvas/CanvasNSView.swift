@@ -119,6 +119,8 @@ final class CanvasNSView: NSView {
     var qaLiveZoneIds: [UUID] { liveZones.map { $0.zoneId } }
     /// QA reader: the zone a tile currently belongs to, or nil if bare.
     func qaZoneMembership(of tileId: UUID) -> UUID? { tileZoneMembership[tileId] }
+    /// QA reader: the current (mutable) placement of a live zone, or nil.
+    func qaLiveZonePlacement(_ zoneId: UUID) -> ZonePlacement? { liveZones.first { $0.zoneId == zoneId } }
 
     /// UserDefaults the zone-gesture threshold resolves from (ZoneGestureConfig).
     /// Overridable so `runZoneCreateGestureSelfCheck` can drive deterministically.
@@ -646,17 +648,30 @@ final class CanvasNSView: NSView {
             }
             return CanvasEngine.hitTest(worldPoint: worldPoint, zones: navigationZones, tilesByZone: tilesByZone)?.tile.id
         }
-        // Single-zone path (unchanged).
-        if let activeZone {
-            if activeZone.collapsed { return nil }
-            let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: canvasState.viewport)
-            return CanvasEngine.hitTest(
-                worldPoint: worldPoint,
-                zones: [CanvasEngine.NavigationZone(id: activeZone.zoneId, frame: CanvasEngine.zoneWorldFrame(activeZone), zIndex: 0)],
-                tilesByZone: [activeZone.zoneId: canvasState.tiles]
-            )?.tile.id
+        // Unified live path (zone-unify P1): hit-test every tile at its world
+        // frame — members offset by their membership zone, bare tiles as-is.
+        // Tiles in a collapsed zone are skipped. zIndex ordering is global.
+        return CanvasEngine.hitTest(screenPoint: screenPoint, viewport: canvasState.viewport, tiles: worldFrameTiles())?.id
+    }
+
+    /// The live zone a tile belongs to, resolved against the mutable `liveZones`
+    /// (so a moved zone is reflected). Nil when the tile is bare.
+    private func membershipPlacement(of tileId: UUID) -> ZonePlacement? {
+        guard let zoneId = tileZoneMembership[tileId] else { return nil }
+        return liveZones.first { $0.zoneId == zoneId }
+    }
+
+    /// `canvasState.tiles` mapped into world coordinates: a member's frame is
+    /// offset by its membership zone origin; bare tiles keep their frame.
+    /// Tiles whose membership zone is collapsed are omitted.
+    private func worldFrameTiles() -> [Tile] {
+        canvasState.tiles.compactMap { tile in
+            guard let zone = membershipPlacement(of: tile.id) else { return tile }
+            if zone.collapsed { return nil }
+            var worldTile = tile
+            worldTile.frame = CanvasEngine.worldFrame(tile: tile, in: zone)
+            return worldTile
         }
-        return CanvasEngine.hitTest(screenPoint: screenPoint, viewport: canvasState.viewport, tiles: canvasState.tiles)?.id
     }
 
     func zoneId(at screenPoint: CGPoint) -> UUID? {
@@ -883,9 +898,13 @@ final class CanvasNSView: NSView {
 
     private func layoutTile(_ tile: Tile) {
         guard let view = tileViews[tile.id] else { return }
-        let worldFrame = activeZone.map { CanvasEngine.worldFrame(tile: tile, in: $0) } ?? tile.frame
+        // zone-unify P1: position each tile by its membership zone's current
+        // (mutable) placement so a moved zone carries its members; bare tiles
+        // render at their world frame.
+        let zone = membershipPlacement(of: tile.id)
+        let worldFrame = zone.map { CanvasEngine.worldFrame(tile: tile, in: $0) } ?? tile.frame
         let rect = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport)
-        view.isHidden = activeZone?.collapsed == true
+        view.isHidden = zone?.collapsed == true
         view.frame = rect
         view.bounds = NSRect(x: 0, y: 0, width: tile.frame.width, height: tile.frame.height)
         view.tile = tile
@@ -1063,32 +1082,15 @@ final class CanvasNSView: NSView {
             if let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) {
                 let newPlacement = CanvasEngine.zone(layer.placement, draggedByScreenDelta: screenDelta, viewport: vp)
                 setZonePlacement(newPlacement)
-            } else if let model = zoneRenderModels.first(where: { $0.placement.zoneId == zoneId }) {
-                // Render-model (production immutable-zones) path: update the chrome view
-                // directly and accumulate the committed placement in pendingMovedPlacement
-                // so mouseUp can fire onZoneMoved even without a ZoneLayer.
-                let base = pendingMovedPlacement ?? model.placement
-                let worldDx = Double(dx) / vp.zoom
-                let worldDy = Double(dy) / vp.zoom
-                var updatedPlacement = base
-                updatedPlacement.origin = ZonePoint(x: base.origin.x + worldDx, y: base.origin.y + worldDy)
-                pendingMovedPlacement = updatedPlacement
-                if let chromeView = zoneChromeViews[zoneId] {
-                    let memberFrames = zoneMemberWorldFrames(model.placement)
-                    let adaptiveBounds = CanvasEngine.zoneBounds(
-                        memberFrames: memberFrames,
-                        padding: ZoneBoundsConfig.padding(),
-                        minSize: ZoneBoundsConfig.emptyMinSize(),
-                        headerHeight: ZoneChromeNSView.headerHeight
-                    )
-                    let adjustedBounds = memberFrames.isEmpty
-                        ? TileFrame(x: updatedPlacement.origin.x + adaptiveBounds.x,
-                                    y: updatedPlacement.origin.y + adaptiveBounds.y,
-                                    width: adaptiveBounds.width, height: adaptiveBounds.height)
-                        : adaptiveBounds
-                    chromeView.frame = CanvasEngine.tileScreenFrame(adjustedBounds, viewport: vp)
-                    chromeView.needsDisplay = true
-                }
+            } else if let idx = liveZones.firstIndex(where: { $0.zoneId == zoneId }) {
+                // Unified live path (zone-unify P1): mutate the authoritative
+                // `liveZones` placement, then relayout. Members are zone-local so
+                // they follow the new origin for free; chrome reads liveZones —
+                // no snap-back on the next relayout.
+                let newPlacement = CanvasEngine.zone(liveZones[idx], draggedByScreenDelta: screenDelta, viewport: vp)
+                liveZones[idx] = newPlacement
+                pendingMovedPlacement = newPlacement
+                layoutAllTiles()
             }
             return
         }
@@ -1614,6 +1616,104 @@ final class CanvasNSView: NSView {
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// zone-unify P1 — a zone move mutates the authoritative `liveZones`
+    /// (no snap-back), carries its members (zone-local), leaves bare tiles put,
+    /// keeps every tile clickable, and fires onZoneMoved exactly once.
+    static func runZoneMoveUnifiedSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(m): return m } }
+        }
+        func expect(_ c: @autoclosure () -> Bool, _ m: String) throws { if !c() { throw CheckError.failed(m) } }
+        func mouse(_ type: NSEvent.EventType, at p: NSPoint, window: NSWindow) throws -> NSEvent {
+            guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: 1,
+                                             pressure: type == .leftMouseUp ? 0 : 1)
+            else { throw CheckError.failed("could not synthesize \(type) at \(p)") }
+            return e
+        }
+        func win(_ cx: CGFloat, _ cy: CGFloat, canvasH: CGFloat) -> NSPoint { NSPoint(x: cx, y: canvasH - cy) }
+
+        let cH: CGFloat = 700
+        let vp = CanvasViewport(x: 0, y: 0, zoom: 1)
+        let projectId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B1")!
+        let zoneId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B2")!
+        let aId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B3")!
+        let bId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B4")!
+        let bareId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B5")!
+        // Zone at a non-zero origin so member-following is observable.
+        let zone = ZonePlacement(zoneId: zoneId, projectId: projectId,
+                                 origin: ZonePoint(x: 50, y: 50), size: ZoneSize(width: 400, height: 300),
+                                 color: "teal", collapsed: false, hydrationPolicy: .automatic, name: "Z", navKey: nil)
+        // Member tiles stored ZONE-LOCAL (world = local + zone origin).
+        let tileA = Tile(id: aId, kind: .note, title: "a", frame: TileFrame(x: 20, y: 40, width: 100, height: 80), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: bId, kind: .note, title: "b", frame: TileFrame(x: 200, y: 40, width: 100, height: 80), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: vp, tiles: [tileA, tileB], groups: [], lastActiveTileId: nil),
+            activeZone: zone,
+            zoneRenderModels: [ZoneRenderModel(placement: zone, displayName: "Z")],
+            showsZoneChrome: true
+        )
+        canvas.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        for t in [tileA, tileB] { canvas.install(tileView: DescriptorTileNSView(tile: t), for: t) }
+        // Bare tile installed post-init → never assigned membership → world frame.
+        let bare = Tile(id: bareId, kind: .note, title: "bare", frame: TileFrame(x: 700, y: 400, width: 100, height: 80), zIndex: 3, runtimeRef: nil, metadata: TileMetadata())
+        canvas.install(tileView: DescriptorTileNSView(tile: bare), for: bare)
+        canvas.layoutSubtreeIfNeeded()
+
+        // Pre-move sanity.
+        try expect(canvas.tileView(for: aId)?.frame == CGRect(x: 70, y: 90, width: 100, height: 80), "pre-move: tileA renders at world (70,90)")
+        try expect(canvas.qaZoneMembership(of: bareId) == nil, "bare tile must have no membership")
+        try expect(canvas.tileId(at: CGPoint(x: 120, y: 130)) == aId, "pre-move: tileA clickable at its center")
+
+        var moved: [ZonePlacement] = []
+        canvas.onZoneMoved = { moved.append($0) }
+
+        // Drag the zone header: local (100,60) → (250,120) ⇒ world delta (+150,+60).
+        canvas.mouseDown(with: try mouse(.leftMouseDown, at: win(100, 60, canvasH: cH), window: window))
+        canvas.mouseDragged(with: try mouse(.leftMouseDragged, at: win(250, 120, canvasH: cH), window: window))
+        canvas.mouseUp(with: try mouse(.leftMouseUp, at: win(250, 120, canvasH: cH), window: window))
+
+        // 1. liveZones origin updated by the world delta (no immutable render-model).
+        try expect(canvas.qaLiveZonePlacement(zoneId)?.origin == ZonePoint(x: 200, y: 110), "zone origin should move to (200,110); got \(String(describing: canvas.qaLiveZonePlacement(zoneId)?.origin))")
+        // 2. members followed by exactly (+150,+60).
+        let aExpected = CGRect(x: 220, y: 150, width: 100, height: 80)
+        try expect(canvas.tileView(for: aId)?.frame == aExpected, "tileA should follow to \(aExpected); got \(String(describing: canvas.tileView(for: aId)?.frame))")
+        try expect(canvas.tileView(for: bId)?.frame == CGRect(x: 400, y: 150, width: 100, height: 80), "tileB should follow the zone")
+        // 3. bare tile did NOT move.
+        try expect(canvas.tileView(for: bareId)?.frame == CGRect(x: 700, y: 400, width: 100, height: 80), "bare tile must stay put")
+        // 4. no snap-back after a forced relayout.
+        canvas.layoutSubtreeIfNeeded()
+        try expect(canvas.tileView(for: aId)?.frame == aExpected, "no snap-back: tileA stays moved after relayout")
+        // 5. every tile still clickable at its new position (unclickable-bug guard).
+        try expect(canvas.tileId(at: CGPoint(x: 270, y: 190)) == aId, "post-move: tileA clickable at moved center")
+        try expect(canvas.tileId(at: CGPoint(x: 450, y: 190)) == bId, "post-move: tileB clickable at moved center")
+        try expect(canvas.tileId(at: CGPoint(x: 750, y: 440)) == bareId, "bare tile still clickable")
+        // 6. onZoneMoved fired exactly once with the new origin.
+        try expect(moved.count == 1, "onZoneMoved should fire exactly once; got \(moved.count)")
+        try expect(moved.first?.origin == ZonePoint(x: 200, y: 110), "onZoneMoved should carry the new origin")
+
+        let fm = FileManager.default
+        let tempRoot = URL(fileURLWithPath: fm.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("zone-move-unified-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        let artifact = tempRoot.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "zone-move-unified",
+            "newOrigin": ["x": 200, "y": 110],
+            "memberDelta": ["dx": 150, "dy": 60],
+            "onZoneMovedCount": moved.count
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
         return artifact
     }
 
