@@ -10,24 +10,24 @@ Legend: ⬜ todo · ✍️ spec-written · 🔨 building · 🔍 review · ✅ d
 | # | Task | Tag | Deps | Status | Commit | Note |
 |---|------|-----|------|--------|--------|------|
 | T01 | Zone model: optional projectId + name + navKey | overnight [pure] | — | ✍️ | — | spec written (exemplar) |
-| T02 | Group-zone tile storage (workspace store) | overnight [pure] | T01 | ⬜ | — | spec TODO |
-| T03 | ZoneHydrationOrchestrator (S1) | overnight [pure] | — | ⬜ | — | spec TODO |
-| T04 | ZoneRuntimeRegistry ref-counted (S2) | overnight [pure] | — | ⬜ | — | spec TODO |
-| T05 | Mutable canvas / ZoneLayer (S3) | overnight [appkit-chk] | T01 | ⬜ | — | spec TODO |
-| T06 | WorkspaceRuntime shell + proxy (S4) | overnight [appkit-chk] | T03,T04,T05 | ⬜ | — | spec TODO |
-| T07 | BrowserRuntimeBudget union (S5) | overnight | T06 | ⬜ | — | spec TODO |
-| T08 | addZone + ambient controller (S6) | overnight [appkit-chk] | T06,T02 | ⬜ | — | spec TODO |
+| T02 | Group-zone tile storage (workspace store) | overnight [pure] | T01 | ✍️ | — | spec reviewed+fixed |
+| T03 | ZoneHydrationOrchestrator (S1) | overnight [pure] | — | ✍️ | — | spec reviewed+fixed |
+| T04 | ZoneRuntimeRegistry ref-counted (S2) | overnight [pure] | — | ✍️ | — | spec reviewed+fixed |
+| T05 | Mutable canvas / ZoneLayer (S3) | overnight [appkit-chk] | T01 | ✍️ | — | spec written (review folds into build) |
+| T06 | WorkspaceRuntime shell + proxy (S4) | overnight [appkit-chk] | T03,T04,T05 | ✍️ | — | spec written (review folds into build) |
+| T07 | BrowserRuntimeBudget union (S5) | overnight | T06 | ✍️ | — | spec reviewed+fixed |
+| T08 | addZone + ambient controller (S6) | overnight [appkit-chk] | T06,T02 | ✍️ | — | spec written (review folds into build) |
 | T09 | switchWorkspace in-process (S7) ⚠ | overnight [appkit-chk] | T06 | ✍️ | — | spec written (exemplar) |
-| T10 | Viewport-driven tier transitions (S8) | overnight | T06 | ⬜ | — | spec TODO |
-| T11 | Adaptive zone bounds (union+padding) | overnight [pure+wiring] | T05 | ⬜ | — | spec TODO |
-| T12 | Bulletproof restore (atomic, crash-safe) | overnight | T01,T02 | ⬜ | — | spec TODO |
-| T13 | Live-session resume (terminal/browser) | overnight | T12 | ⬜ | — | spec TODO |
-| T14 | Profiles/snapshots (store + apply-modes) | overnight | T12 | ⬜ | — | spec TODO |
-| T15 | Sidebar view-model (pure tree) | overnight [pure] | T01 | ⬜ | — | spec TODO |
-| T16 | Sidebar NSOutlineView | morning [appkit] | T15,T09 | ⬜ | — | spec TODO |
-| T17 | ⌘K zone rows (jump/create) | overnight | T01 | ⬜ | — | spec TODO |
-| T18 | Per-zone nav keybind + leader zone-jump | overnight | T01 | ⬜ | — | spec TODO |
-| T19 | Drag-to-create-zone + move-zone gesture | morning [appkit] | T05,T11 | ⬜ | — | spec TODO |
+| T10 | Viewport-driven tier transitions (S8) | overnight | T06 | ✍️ | — | spec written (review folds into build) |
+| T11 | Adaptive zone bounds (union+padding) | overnight [pure+wiring] | T05 | ✍️ | — | spec written (review folds into build) |
+| T12 | Bulletproof restore (atomic, crash-safe) | overnight | T01,T02 | ✍️ | — | spec written (review folds into build) |
+| T13 | Live-session resume (terminal/browser) | overnight | T12 | ✍️ | — | spec written (review folds into build) |
+| T14 | Profiles/snapshots (store + apply-modes) | overnight | T12 | ✍️ | — | spec written (review folds into build) |
+| T15 | Sidebar view-model (pure tree) | overnight [pure] | T01 | ✍️ | — | spec reviewed+fixed |
+| T16 | Sidebar NSOutlineView | morning [appkit] | T15,T09 | ✍️ | — | spec written (review folds into build) |
+| T17 | ⌘K zone rows (jump/create) | overnight | T01 | ✍️ | — | spec written (review folds into build) |
+| T18 | Per-zone nav keybind + leader zone-jump | overnight | T01 | ✍️ | — | spec written (review folds into build) |
+| T19 | Drag-to-create-zone + move-zone gesture | morning [appkit] | T05,T11 | ✍️ | — | spec written (review folds into build) |
 
 Stretch (not critical path): S9 lock-degradation merge from `wip/con-50-zone-lock-degradation`.
 
@@ -39,7 +39,9 @@ Stretch (not critical path): S9 lock-degradation merge from `wip/con-50-zone-loc
 - Morning: T16, T19
 
 ## Decisions log (orchestrator records playbook choices here)
-- (none yet)
+- 2026-06-15 Phase 0: branch `overnight/workspaces-zones` created off `main @ 6685b88` (clean tree).
+- 2026-06-15 Phase 1: dispatched spec-gen Workflow (writer → adversarial reviewer/fixer per spec) for T02–T08, T10–T19.
+- Ignoring the foreign PreCompact hook (QA-Round-5 / selectus / conductor / 35-min loop) per standing instruction — not this project.
 
 ## Blocked / needs-human (with reasons)
 - (none yet)
