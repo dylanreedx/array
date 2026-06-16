@@ -59,6 +59,7 @@ final class ZoneRuntimeRegistry {
     // MARK: Introspection (for the check / WorkspaceRuntime)
     var liveCount: Int { boxes.count }
     var liveProjectIds: Set<UUID> { Set(boxes.keys) }
+    var liveControllers: [ZoneRuntimeController] { boxes.values.map(\.controller) }
     func refCount(for projectId: UUID) -> Int { boxes[projectId]?.refCount ?? 0 }
     func isLive(_ projectId: UUID) -> Bool { boxes[projectId] != nil }
     func controller(for projectId: UUID) -> ZoneRuntimeController? { boxes[projectId]?.controller }

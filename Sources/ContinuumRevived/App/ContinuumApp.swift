@@ -1040,7 +1040,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
     private var qaPerf: QAPerf?
     private var launchStartTime: CFTimeInterval?
-    private lazy var browserRuntimeBudget = BrowserRuntimeBudget(maxLive: BrowserRuntimeBudget.resolveMaxLive())
     private lazy var terminalSpawnAdmission = TerminalSpawnAdmission(maxLive: TerminalSpawnAdmission.resolveMaxLive())
     private var hotkeyMonitor: Any?
     private var flagsMonitor: Any?
@@ -1198,8 +1197,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.tileSpawner = spawner
             workspaceRuntime?.activeController?.onBrowserRuntimeHydrated = { [weak self] runtime in
                 self?.wireContentProcessTerminationHandler(runtime)
-                self?.registerBrowserRuntimeForBudget(runtime)
-                self?.enforceBrowserRuntimeBudget()
+                self?.workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
+                self?.workspaceRuntime?.enforceBrowserRuntimeBudget()
             }
             workspaceRuntime?.activeController?.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
             let recentProjectActions: [CanvasEmptyStateActions.RecentProject] = ProjectPickerModel.makeRows(registry: registry)
@@ -1620,8 +1619,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case let .restarted(runtime):
             wireContentProcessTerminationHandler(runtime)
             browserRuntimes.append(runtime)
-            registerBrowserRuntimeForBudget(runtime)
-            enforceBrowserRuntimeBudget()
+            workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
+            workspaceRuntime?.enforceBrowserRuntimeBudget()
         case let .invalidURL(url):
             installBrowserRestartPlaceholder(
                 for: tile,
@@ -1670,8 +1669,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case let .restarted(runtime):
             wireContentProcessTerminationHandler(runtime)
             browserRuntimes.append(runtime)
-            registerBrowserRuntimeForBudget(runtime)
-            enforceBrowserRuntimeBudget()
+            workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
+            workspaceRuntime?.enforceBrowserRuntimeBudget()
         case let .invalidURL(url):
             fputs("Browser restart: invalid URL '\(url)'\n", stderr)
         case .tileNotFound:
@@ -1681,31 +1680,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private func registerBrowserRuntimeForBudget(_ runtime: WKWebViewBrowserRuntime) {
-        browserRuntimeBudget.registerLive(tileId: runtime.tileId)
-    }
-
-    private func enforceBrowserRuntimeBudget() {
-        guard let spawner = tileSpawner else { return }
-        var protected = canvasView?.canvasState.lastActiveTileId.map { Set([$0]) } ?? []
-        if let focusModeSession {
-            protected.formUnion(focusModeSession.protectedTileIds)
-        }
-        let liveTileIds = browserRuntimes.map(\.tileId)
-        let evictTileIds = browserRuntimeBudget.evictionCandidates(liveTileIds: liveTileIds, protectedTileIds: protected)
-        for tileId in evictTileIds {
-            guard let runtime = browserRuntimes.first(where: { $0.tileId == tileId }) else { continue }
-            do {
-                try spawner.installBrowserSnapshotTile(runtime: runtime, snapshotImage: Self.browserBudgetSnapshotImage())
-                browserRuntimes.removeAll { $0.id == runtime.id }
-                browserRuntimeBudget.unregister(tileId: tileId)
-            } catch {
-                fputs("Browser budget eviction failed for tile \(tileId): \(error)\n", stderr)
-            }
-        }
-    }
-
-    private static func browserBudgetSnapshotImage() -> NSImage {
+    static func browserBudgetSnapshotImage() -> NSImage {
         let image = NSImage(size: NSSize(width: 80, height: 60))
         image.lockFocus()
         NSColor.windowBackgroundColor.setFill()
@@ -1845,7 +1820,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             Self.routeTileClickFocus(at: event.locationInWindow, in: canvas, focusBroker: self.focusBroker)
             if let clickedTileId,
                canvas.canvasState.tiles.contains(where: { $0.id == clickedTileId && $0.kind == .browser }) {
-                self.browserRuntimeBudget.registerLive(tileId: clickedTileId)
+                self.workspaceRuntime?.registerLiveBrowser(tileId: clickedTileId)
             }
             return event
         }
@@ -2578,7 +2553,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         contentView.addSubview(session.overlay)
         session.overlay.frame = contentView.bounds
         session.overlay.autoresizingMask = [.width, .height]
-        enforceBrowserRuntimeBudget()
+        workspaceRuntime?.enforceBrowserRuntimeBudget()
     }
 
     private func closeFocusMode() {
@@ -2745,8 +2720,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             wireContentProcessTerminationHandler(runtime)
             browserRuntimes.append(runtime)
             focusSpawnedTile(runtime.tileId)
-            registerBrowserRuntimeForBudget(runtime)
-            enforceBrowserRuntimeBudget()
+            workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
+            workspaceRuntime?.enforceBrowserRuntimeBudget()
         case let .invalidURL(url):
             fputs("TileSpawner.spawnBrowser invalid URL: \(url)\n", stderr)
         case let .failure(error):
@@ -2761,8 +2736,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if let oldRuntimeId { browserRuntimes.removeAll { $0.id == oldRuntimeId } }
             wireContentProcessTerminationHandler(runtime)
             browserRuntimes.append(runtime)
-            registerBrowserRuntimeForBudget(runtime)
-            enforceBrowserRuntimeBudget()
+            workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
+            workspaceRuntime?.enforceBrowserRuntimeBudget()
             focusSpawnedTile(runtime.tileId)
         case let .unknownProfile(id):
             fputs("Browser profile switch failed: unknown profile \(id)\n", stderr)
@@ -5389,8 +5364,185 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(liveAfterHydration.contains(a), "focused browser should survive over-budget hydration")
         try expect(snapshotTileIds.count == 1, "one browser should be evicted back to snapshot")
 
+        // === Multi-zone integration phase (T07) ===
+        // maxLive=2 via production resolveMaxLive(): set standard UserDefaults BEFORE
+        // constructing WorkspaceRuntime so its budget init reads 2.
+        let mzPrevBudget = UserDefaults.standard.object(forKey: BrowserRuntimeBudget.defaultsKey)
+        UserDefaults.standard.set("2", forKey: BrowserRuntimeBudget.defaultsKey)
+        defer {
+            if let prev = mzPrevBudget { UserDefaults.standard.set(prev, forKey: BrowserRuntimeBudget.defaultsKey) }
+            else { UserDefaults.standard.removeObject(forKey: BrowserRuntimeBudget.defaultsKey) }
+        }
+
+        // Two project directories, stores, and canvases.
+        let dirA = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuum-browser-lru-mz-A-\(UUID().uuidString)", isDirectory: true)
+        let dirB = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuum-browser-lru-mz-B-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dirA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dirB, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: dirA)
+            try? FileManager.default.removeItem(at: dirB)
+        }
+
+        // Fixed UUIDs for determinism.
+        let mzA1 = UUID(uuidString: "a1a1a1a1-a1a1-a1a1-a1a1-a1a1a1a1a1a1")!
+        let mzA2 = UUID(uuidString: "a2a2a2a2-a2a2-a2a2-a2a2-a2a2a2a2a2a2")!
+        let mzB1 = UUID(uuidString: "b1b1b1b1-b1b1-b1b1-b1b1-b1b1b1b1b1b1")!
+        let mzB2 = UUID(uuidString: "b2b2b2b2-b2b2-b2b2-b2b2-b2b2b2b2b2b2")!
+        let mzPA = UUID(uuidString: "aaaaaaaa-0000-0000-0000-000000000000")!
+        let mzPB = UUID(uuidString: "bbbbbbbb-0000-0000-0000-000000000000")!
+
+        func makeMZProject(id: UUID, mzDir: URL, name: String, tileIds: [UUID]) throws -> (Project, ProjectStore) {
+            let p = Project(
+                id: id, name: name, rootPath: mzDir.path, createdAt: Date(), updatedAt: Date(),
+                defaultLaunchProfileId: "shell", editorPreference: .auto,
+                settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
+            )
+            let s = ProjectStore(projectRoot: mzDir)
+            try s.saveProject(p)
+            let tiles = tileIds.enumerated().map { idx, tid in
+                Tile(id: tid, kind: .browser, title: "\(name)-\(idx)",
+                     frame: TileFrame(x: Double(idx) * 40, y: 0, width: 640, height: 420),
+                     zIndex: idx, runtimeRef: nil,
+                     metadata: TileMetadata(url: "data:text/html;charset=utf-8,<title>\(name)-\(idx)</title>"))
+            }
+            try s.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: tiles, groups: [], lastActiveTileId: nil))
+            return (p, s)
+        }
+
+        let (mzProjectA, mzStoreA) = try makeMZProject(id: mzPA, mzDir: dirA, name: "zone-A", tileIds: [mzA1, mzA2])
+        let (mzProjectB, mzStoreB) = try makeMZProject(id: mzPB, mzDir: dirB, name: "zone-B", tileIds: [mzB1, mzB2])
+
+        let mzCanvasA = CanvasNSView(canvasState: try mzStoreA.loadCanvas())
+        let mzCanvasB = CanvasNSView(canvasState: try mzStoreB.loadCanvas())
+        let mzBrowserEngine = BrowserEngineContext()
+        defer { mzBrowserEngine.shutdown() }
+
+        let mzSpawnerA = TileSpawner(canvasView: mzCanvasA, ghostty: nil, browserEngine: mzBrowserEngine, projectStore: mzStoreA, project: mzProjectA)
+        let mzSpawnerB = TileSpawner(canvasView: mzCanvasB, ghostty: nil, browserEngine: mzBrowserEngine, projectStore: mzStoreB, project: mzProjectB)
+        let mzControllerA = ZoneRuntimeController(projectRoot: dirA, projectStore: mzStoreA, project: mzProjectA)
+        let mzControllerB = ZoneRuntimeController(projectRoot: dirB, projectStore: mzStoreB, project: mzProjectB)
+        mzControllerA.attachUI(canvasView: mzCanvasA, tileSpawner: mzSpawnerA, focusBroker: FocusBroker())
+        mzControllerB.attachUI(canvasView: mzCanvasB, tileSpawner: mzSpawnerB, focusBroker: FocusBroker())
+
+        // Hydrate a1, a2 to live in zone A.
+        for tileId in [mzA1, mzA2] {
+            switch mzSpawnerA.restartBrowserTile(tileId: tileId) {
+            case let .restarted(runtime): mzControllerA.browserRuntimes.append(runtime)
+            case let .invalidURL(url): throw CheckError(description: "mz zone-A browser URL rejected: \(url)")
+            case .tileNotFound: throw CheckError(description: "mz zone-A tile not found: \(tileId)")
+            case let .failure(error): throw CheckError(description: "mz zone-A browser restart failed: \(error)")
+            }
+        }
+        // Hydrate b1, b2 to live in zone B.
+        for tileId in [mzB1, mzB2] {
+            switch mzSpawnerB.restartBrowserTile(tileId: tileId) {
+            case let .restarted(runtime): mzControllerB.browserRuntimes.append(runtime)
+            case let .invalidURL(url): throw CheckError(description: "mz zone-B browser URL rejected: \(url)")
+            case .tileNotFound: throw CheckError(description: "mz zone-B tile not found: \(tileId)")
+            case let .failure(error): throw CheckError(description: "mz zone-B browser restart failed: \(error)")
+            }
+        }
+
+        // Build WorkspaceRuntime with registry holding both controllers.
+        // Registry uses the real register() path (same as boot).
+        let mzRegistry = ZoneRuntimeRegistry(closeOnZero: false, makeController: { _ in throw CheckError(description: "mz: factory should not be called") })
+        mzRegistry.register(mzControllerA, for: mzPA)
+        mzRegistry.register(mzControllerB, for: mzPB)
+
+        let mzZoneId = UUID()
+        let mzDocument = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [ZonePlacement(zoneId: mzZoneId, projectId: mzPA, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 1280, height: 720), color: "blue", collapsed: false, hydrationPolicy: .automatic)],
+            zoneZOrder: [mzZoneId],
+            lastActiveZoneId: mzZoneId
+        )
+        let mzRegistryStore = RegistryStore(applicationSupportDirectory: dirA)
+        // WorkspaceRuntime constructed AFTER setting defaultsKey = "2" in standard,
+        // so its BrowserRuntimeBudget(maxLive: resolveMaxLive()) reads 2.
+        let mzRuntime = WorkspaceRuntime(
+            workspaceId: UUID(),
+            document: mzDocument,
+            registry: mzRegistry,
+            focusBroker: FocusBroker(),
+            registryStore: mzRegistryStore,
+            ghostty: nil,
+            browserEngine: mzBrowserEngine
+        )
+
+        // Register recency in order a1, a2, b1, b2 (a1 = oldest, b2 = newest).
+        mzRuntime.registerLiveBrowser(tileId: mzA1)
+        mzRuntime.registerLiveBrowser(tileId: mzA2)
+        mzRuntime.registerLiveBrowser(tileId: mzB1)
+        mzRuntime.registerLiveBrowser(tileId: mzB2)
+
+        // Protected = {b2}: derived from canvasB.canvasState.lastActiveTileId via the real enforcer.
+        // Set it through the production markActive path (NOT by fabricating the protected set).
+        mzCanvasB.markActive(tileId: mzB2)
+
+        // ACT: enforce via the production WorkspaceRuntime method (real path, not evictionCandidates directly).
+        mzRuntime.enforceBrowserRuntimeBudget()
+
+        // Assertion 1: total live <= maxLive (2).
+        let mzTotalLive = mzControllerA.browserRuntimes.count + mzControllerB.browserRuntimes.count
+        try expect(mzTotalLive == 2, "mz assertion 1: total live browser runtimes should be 2, got \(mzTotalLive)")
+
+        // Assertion 2: cross-zone LRU — a1 and a2 evicted (oldest in recency [a1,a2,b1,b2] with b2 protected).
+        try expect(mzControllerA.browserRuntimes.isEmpty, "mz assertion 2: zone A should have 0 live runtimes (both evicted), got \(mzControllerA.browserRuntimes.count)")
+        try expect(mzControllerB.browserRuntimes.count == 2, "mz assertion 2: zone B should have 2 live runtimes (b1, b2 kept), got \(mzControllerB.browserRuntimes.count)")
+
+        // Assertion 3: eviction routed to owning zone's canvas.
+        try expect(mzCanvasA.tileView(for: mzA1) is BrowserSnapshotTileNSView, "mz assertion 3: a1 should be BrowserSnapshotTileNSView on canvasA after eviction")
+        try expect(mzCanvasA.tileView(for: mzA2) is BrowserSnapshotTileNSView, "mz assertion 3: a2 should be BrowserSnapshotTileNSView on canvasA after eviction")
+        let mzA1RuntimeRef = mzCanvasA.canvasState.tiles.first(where: { $0.id == mzA1 })?.runtimeRef
+        let mzA2RuntimeRef = mzCanvasA.canvasState.tiles.first(where: { $0.id == mzA2 })?.runtimeRef
+        try expect(mzA1RuntimeRef == nil, "mz assertion 3: a1 tile.runtimeRef should be nil after snapshot eviction")
+        try expect(mzA2RuntimeRef == nil, "mz assertion 3: a2 tile.runtimeRef should be nil after snapshot eviction")
+        try expect(mzCanvasB.tileView(for: mzB1) is BrowserTileNSView, "mz assertion 3: b1 should remain BrowserTileNSView on canvasB")
+        try expect(mzCanvasB.tileView(for: mzB2) is BrowserTileNSView, "mz assertion 3: b2 should remain BrowserTileNSView on canvasB")
+
+        // Assertion 4: protected browser b2 survives.
+        try expect(mzControllerB.browserRuntimes.contains(where: { $0.tileId == mzB2 }), "mz assertion 4: b2 (protected/focused) must survive enforcement")
+
+        // Assertion 5: idempotent — second enforcement changes nothing.
+        mzRuntime.enforceBrowserRuntimeBudget()
+        let mzTotalLive2 = mzControllerA.browserRuntimes.count + mzControllerB.browserRuntimes.count
+        try expect(mzTotalLive2 == 2, "mz assertion 5: second enforcement should leave total live == 2 (idempotent), got \(mzTotalLive2)")
+        try expect(mzControllerA.browserRuntimes.isEmpty, "mz assertion 5: controllerA should still be empty after second enforcement")
+        try expect(mzControllerB.browserRuntimes.count == 2, "mz assertion 5: controllerB should still have 2 runtimes after second enforcement")
+
+        // Assertion 6: recency-touch protects across zones.
+        // Hydrate a fresh a3 in zone A, register it (b1/b2 NOT re-registered), protected = {b2}.
+        let mzA3 = UUID(uuidString: "a3a3a3a3-a3a3-a3a3-a3a3-a3a3a3a3a3a3")!
+        let mzA3Tile = Tile(id: mzA3, kind: .browser, title: "zone-A-a3",
+                            frame: TileFrame(x: 120, y: 0, width: 640, height: 420), zIndex: 10,
+                            runtimeRef: nil, metadata: TileMetadata(url: "data:text/html;charset=utf-8,<title>zone-A-a3</title>"))
+        // install() appends to canvasState.tiles so restartBrowserTile can find it.
+        mzCanvasA.install(tileView: DescriptorTileNSView(tile: mzA3Tile), for: mzA3Tile)
+        switch mzSpawnerA.restartBrowserTile(tileId: mzA3) {
+        case let .restarted(runtime): mzControllerA.browserRuntimes.append(runtime)
+        case let .invalidURL(url): throw CheckError(description: "mz a3 URL rejected: \(url)")
+        case .tileNotFound: throw CheckError(description: "mz a3 tile not found")
+        case let .failure(error): throw CheckError(description: "mz a3 restart failed: \(error)")
+        }
+        mzRuntime.registerLiveBrowser(tileId: mzA3)
+        // Protected still {b2} via mzCanvasB.lastActiveTileId = b2 (markActive called earlier, unchanged).
+        // Recency after unregister(a1)+unregister(a2) was [b1,b2], + a3 → [b1,b2,a3].
+        // Union live = {b1,b2,a3} (3), overflow=1. Walk recency: b1 unprotected → evict.
+        mzRuntime.enforceBrowserRuntimeBudget()
+
+        let mzTotalLive3 = mzControllerA.browserRuntimes.count + mzControllerB.browserRuntimes.count
+        try expect(mzTotalLive3 == 2, "mz assertion 6: after a3 + enforcement total live should be 2, got \(mzTotalLive3)")
+        try expect(mzControllerB.browserRuntimes.count == 1, "mz assertion 6: zone B should have 1 runtime (only b2 remains), got \(mzControllerB.browserRuntimes.count)")
+        try expect(mzControllerB.browserRuntimes.contains(where: { $0.tileId == mzB2 }), "mz assertion 6: b2 should be the surviving B runtime")
+        try expect(mzCanvasB.tileView(for: mzB1) is BrowserSnapshotTileNSView, "mz assertion 6: b1 should be evicted to snapshot on canvasB")
+        try expect(mzControllerA.browserRuntimes.count == 1, "mz assertion 6: zone A should have 1 runtime (a3 survived), got \(mzControllerA.browserRuntimes.count)")
+        try expect(mzControllerA.browserRuntimes.contains(where: { $0.tileId == mzA3 }), "mz assertion 6: a3 should be the surviving A runtime")
+
         let artifact = dir.appendingPathComponent("browser-lru-budget-check.txt")
-        try "firstEviction=\(firstEviction.map(\.uuidString))\nsecondEviction=\(secondEviction.map(\.uuidString))\nliveAfterHydration=\(liveAfterHydration.map(\.uuidString))\nsnapshotTileIds=\(snapshotTileIds.map(\.uuidString))\nmaxLive=2\n".write(to: artifact, atomically: true, encoding: .utf8)
+        try "firstEviction=\(firstEviction.map(\.uuidString))\nsecondEviction=\(secondEviction.map(\.uuidString))\nliveAfterHydration=\(liveAfterHydration.map(\.uuidString))\nsnapshotTileIds=\(snapshotTileIds.map(\.uuidString))\nmaxLive=2\nmzTotalLive=\(mzTotalLive)\nmzControllerALive=\(mzControllerA.browserRuntimes.count)\nmzControllerBLive=\(mzControllerB.browserRuntimes.count)\n".write(to: artifact, atomically: true, encoding: .utf8)
         return artifact
     }
 

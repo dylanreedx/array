@@ -237,6 +237,45 @@ final class WorkspaceRuntime {
         installedLayers = []
     }
 
+    // MARK: - Browser Runtime Budget (T07)
+
+    private var browserRuntimeBudget = BrowserRuntimeBudget(maxLive: BrowserRuntimeBudget.resolveMaxLive())
+
+    func registerLiveBrowser(tileId: UUID) {
+        browserRuntimeBudget.registerLive(tileId: tileId)
+    }
+
+    /// Gather protected tile ids from each live controller's canvas lastActiveTileId.
+    private func currentProtectedBrowserTileIds() -> Set<UUID> {
+        var protected = Set<UUID>()
+        for controller in registry.liveControllers {
+            if let tileId = controller.canvasView?.canvasState.lastActiveTileId {
+                protected.insert(tileId)
+            }
+        }
+        return protected
+    }
+
+    /// Enforce the WKWebView cap across the UNION of live browser tiles in ALL live zones.
+    func enforceBrowserRuntimeBudget() {
+        let liveControllers = registry.liveControllers
+        let liveTileIds: [UUID] = liveControllers.flatMap { $0.browserRuntimes.map(\.tileId) }
+        let protected = currentProtectedBrowserTileIds()
+        let evictIds = browserRuntimeBudget.evictionCandidates(liveTileIds: liveTileIds, protectedTileIds: protected)
+        for tileId in evictIds {
+            guard let controller = liveControllers.first(where: { $0.browserRuntimes.contains { $0.tileId == tileId } }),
+                  let runtime = controller.browserRuntimes.first(where: { $0.tileId == tileId }),
+                  let spawner = controller.tileSpawner else { continue }
+            do {
+                try spawner.installBrowserSnapshotTile(runtime: runtime, snapshotImage: AppDelegate.browserBudgetSnapshotImage())
+                controller.browserRuntimes.removeAll { $0.id == runtime.id }
+                browserRuntimeBudget.unregister(tileId: tileId)
+            } catch {
+                fputs("Browser budget eviction failed for tile \(tileId): \(error)\n", stderr)
+            }
+        }
+    }
+
     // MARK: - Private
 
     private func restoreFocus(from canvasView: CanvasNSView) {

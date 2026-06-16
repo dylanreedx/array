@@ -1,0 +1,26 @@
+{
+  "task": "T07",
+  "title": "BrowserRuntimeBudget over the union of live tiles (docs/23 S5)",
+  "verdict": "PASS WITH RISKS",
+  "iterations": 0,
+  "redProven": true,
+  "green": true,
+  "matrixFast": "green",
+  "buildClean": true,
+  "guards": "--browser-lru-budget-check extended with a multi-zone phase (6 assertions): calls the REAL WorkspaceRuntime.enforceBrowserRuntimeBudget(), maxLive from production resolveMaxLive() reading UserDefaults, protected set derived via canvasState.lastActiveTileId. Bypass disproved (env-gated no-op stub → RED 'total live should be 2, got 4').",
+  "filesTouched": [
+    "Sources/ContinuumRevived/App/WorkspaceRuntime.swift (browserRuntimeBudget + registerLiveBrowser + enforceBrowserRuntimeBudget)",
+    "Sources/ContinuumRevived/App/ZoneRuntimeRegistry.swift (liveControllers)",
+    "Sources/ContinuumRevived/App/ContinuumApp.swift (multi-zone check phase; repoint call sites; remove orphaned AppDelegate budget field+methods)",
+    "Sources/ContinuumRevivedCore/SettingsSchema.swift",
+    "Sources/ContinuumRevivedCoreChecks/main.swift (expectedKeys)"
+  ],
+  "risks": [
+    "R1 REGRESSION (needsHuman): currentProtectedBrowserTileIds() reads ONLY lastActiveTileId, not focusModeSession.protectedTileIds (which lives on AppDelegate, unreachable from WorkspaceRuntime). A focus-mode companion browser that is globally oldest can now be evicted to a snapshot while the user views it. Pre-T07 enforcer protected the focus-mode set. No check covers focus-mode protection.",
+    "R2 forward (T08): non-active controllers have tileSpawner == nil, so the enforcer's `guard let spawner` silently skips evicting their browsers — the 'live count never exceeds maxLive across all zones' guarantee only fully holds once T08 attaches UI to all live controllers. The check proves the mechanism by attaching UI to both controllers."
+  ],
+  "needsHuman": [
+    "R1: wire focusModeSession.protectedTileIds into WorkspaceRuntime.currentProtectedBrowserTileIds() (closure/accessor) to restore pre-T07 focus-mode protection, OR accept focus-mode browsers protected only when lastActive.",
+    "R2: confirm this is acceptable for the shell phase; T08 completes cross-zone eviction."
+  ]
+}

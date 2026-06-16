@@ -4244,6 +4244,7 @@ do {
         FocusBorderConfig.speedKey,
         DragMagnetizeConfig.enabledKey,
         ZoneHydrationBudgetConfig.maxLiveZonesKey,
+        BrowserRuntimeBudget.defaultsKey,
     ]
     expect(expectedKeys.isSubset(of: Set(fieldKeys)), "settings schema must represent every existing pref key")
 

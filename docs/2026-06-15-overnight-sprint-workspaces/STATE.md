@@ -14,8 +14,8 @@ Legend: ⬜ todo · ✍️ spec-written · 🔨 building · 🔍 review · ✅ d
 | T03 | ZoneHydrationOrchestrator (S1) | overnight [pure] | — | ✅ | 0b39c8c | built+reviewed PASS (0 iters); planner wiring deferred→T06/T10 |
 | T04 | ZoneRuntimeRegistry ref-counted (S2) | overnight [pure→app] | — | ✅ | 974c2fa | built, reviewed PASS-WITH-RISKS (0 iters); closeOnZero design knob flagged |
 | T05 | Mutable canvas / ZoneLayer (S3) | overnight [appkit-chk] | T01 | ✅ | 70a77e1 | built PASS-WITH-RISKS; storage-shape B + morning visual gate flagged |
-| T06 | WorkspaceRuntime shell + proxy (S4) | overnight [appkit-chk] | T03,T04,T05 | ✅ | (T06) | built PASS-WITH-RISKS; 3 carry-fwds done (budget+chrome probed; shape-B→T09); windowWillClose-order/attachUI risks→🔴 |
-| T07 | BrowserRuntimeBudget union (S5) | overnight | T06 | ✍️ | — | spec reviewed+fixed |
+| T06 | WorkspaceRuntime shell + proxy (S4) | overnight [appkit-chk] | T03,T04,T05 | ✅ | 93c68f4 | built PASS-WITH-RISKS; 3 carry-fwds done (budget+chrome probed; shape-B→T09); windowWillClose-order/attachUI risks→🔴 |
+| T07 | BrowserRuntimeBudget union (S5) | overnight | T06 | ✅ | (T07) | built PASS-WITH-RISKS; focus-mode protect regression→🔴(R1); cross-zone full after T08(R2) |
 | T08 | addZone + ambient controller (S6) | overnight [appkit-chk] | T06,T02 | ✍️ | — | spec written (review folds into build) |
 | T09 | switchWorkspace in-process (S7) ⚠ | overnight [appkit-chk] | T06 | ✍️ | — | spec written (exemplar) |
 | T10 | Viewport-driven tier transitions (S8) | overnight | T06 | ✍️ | — | spec written (review folds into build) |

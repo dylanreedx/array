@@ -82,6 +82,11 @@ public enum SettingsSchema {
                         label: "Max Live Zones",
                         default: String(ZoneHydrationBudgetConfig.defaultMaxLiveZones)
                     ),
+                    .text(
+                        key: BrowserRuntimeBudget.defaultsKey,
+                        label: "Max Live Web Views",
+                        default: String(BrowserRuntimeBudget.defaultMaxLive)
+                    ),
                     .toggle(
                         key: ZoneRuntimeBudgetConfig.closeOnZeroKey,
                         label: "Close Project Runtime When Unused",
