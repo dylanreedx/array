@@ -16,6 +16,12 @@ runtimes, install the new workspace's, restore its viewport + focus — with **n
 relaunch**. Replaces `switchWorkspaceAndRelaunch` / `relaunchApplication`. Also: creating
 a workspace opens a fresh empty canvas in place (not a relaunch).
 
+## ⚠ ORCHESTRATOR CARRY-FORWARD (added mid-sprint from the T06 review — IN SCOPE for T09)
+T06's `install()` (the shell) currently layers ALL zones — INCLUDING the active one — as `DescriptorTileNSView`s in `ZoneLayer`s, leaving the canvas's own `canvasState.tiles` empty ("shape B"). That was fine while `install` was dormant, but **T09 is the first task to call the swap for real**, so T09 MUST reconcile where the active zone's LIVE tiles live after a switch:
+- After `switchWorkspace(to:)`, the target workspace's ACTIVE zone must present its tiles as the live, interactive canvas tiles the rest of the app expects (the ~71 `canvasState.tiles` read-sites + focus/hit-test), NOT descriptor-only layer tiles — OR adopt a deliberate, documented model where active-zone tiles live in a `ZoneLayer` with full interactivity. Pick one and make the swap honor it.
+- Add a swap-invariant assertion that, after switching to workspace B, B's active-zone tile is a LIVE interactive tile (focusable via the broker AND hit-testable AND present where the app reads active tiles) — not a descriptor placeholder. This closes the T06 shape-B gap with a real guard.
+If full reconciliation exceeds T09's scope, implement the swap with the active zone genuinely live, add the assertion, and flag any residual shape-B unification as needs-human — do NOT silently ship descriptor-only active tiles.
+
 ## Exact scope — files & symbols
 - **`Sources/ContinuumRevived/App/WorkspaceRuntime.swift`** (created in T06) — implement
   `switchWorkspace(to workspaceId: UUID)`: flush current, compute the target's zone set,
