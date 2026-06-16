@@ -1130,10 +1130,31 @@ final class CanvasNSView: NSView {
                     name: "",
                     navKey: nil
                 )
-                // Install as a ZoneLayer so it's live on canvas.
-                let renderModel = ZoneRenderModel(placement: placement, displayName: "")
-                let layer = ZoneLayer(placement: placement, renderModel: renderModel, tiles: [])
-                upsertZoneLayer(layer)
+                // Unified live path (zone-unify P2): register the zone in the
+                // authoritative `liveZones` (NOT a ZoneLayer — that path is the
+                // dormant keystone/descriptor world). Hit-test stays membership-
+                // free, so creating a zone never orphans existing tiles. Any bare
+                // tile whose center falls inside the marquee is adopted into the
+                // new zone (frame converted world→zone-local so its world position
+                // is preserved).
+                liveZones.append(placement)
+                zoneDisplayByZoneId[newZoneId] = ZoneRenderModel(placement: placement, displayName: "")
+                let ox = placement.origin.x, oy = placement.origin.y
+                let ow = placement.size.width, oh = placement.size.height
+                for i in canvasState.tiles.indices {
+                    guard tileZoneMembership[canvasState.tiles[i].id] == nil else { continue }
+                    let f = canvasState.tiles[i].frame
+                    let cx = f.x + f.width / 2, cy = f.y + f.height / 2
+                    guard cx >= ox && cx <= ox + ow && cy >= oy && cy <= oy + oh else { continue }
+                    tileZoneMembership[canvasState.tiles[i].id] = newZoneId
+                    canvasState.tiles[i].frame = TileFrame(x: f.x - ox, y: f.y - oy, width: f.width, height: f.height)
+                }
+                if showsZoneChrome, zoneChromeViews[newZoneId] == nil {
+                    let view = ZoneChromeNSView(model: zoneDisplayByZoneId[newZoneId]!)
+                    zoneChromeViews[newZoneId] = view
+                    addSubview(view)
+                }
+                layoutAllTiles()
                 onZoneCreated?(placement)
             }
             return
@@ -1712,6 +1733,94 @@ final class CanvasNSView: NSView {
             "newOrigin": ["x": 200, "y": 110],
             "memberDelta": ["dx": 150, "dy": 60],
             "onZoneMovedCount": moved.count
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// zone-unify P2 — drag-create registers a live zone (not a ZoneLayer) and
+    /// adopts any bare tile whose center is inside the marquee, preserving each
+    /// adopted tile's world position; tiles outside stay bare; all stay clickable.
+    static func runZoneCreateEnclosesSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(m): return m } }
+        }
+        func expect(_ c: @autoclosure () -> Bool, _ m: String) throws { if !c() { throw CheckError.failed(m) } }
+        func mouse(_ type: NSEvent.EventType, at p: NSPoint, window: NSWindow) throws -> NSEvent {
+            guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: 1,
+                                             pressure: type == .leftMouseUp ? 0 : 1)
+            else { throw CheckError.failed("could not synthesize \(type) at \(p)") }
+            return e
+        }
+        func win(_ cx: CGFloat, _ cy: CGFloat, canvasH: CGFloat) -> NSPoint { NSPoint(x: cx, y: canvasH - cy) }
+
+        let cH: CGFloat = 700
+        let vp = CanvasViewport(x: 0, y: 0, zoom: 1)
+        let in1Id = UUID(uuidString: "00000000-0000-0000-0000-0000000000C1")!
+        let in2Id = UUID(uuidString: "00000000-0000-0000-0000-0000000000C2")!
+        let outId = UUID(uuidString: "00000000-0000-0000-0000-0000000000C3")!
+        // Bare tiles (no activeZone → no seeded membership).
+        let in1 = Tile(id: in1Id, kind: .note, title: "in1", frame: TileFrame(x: 150, y: 150, width: 80, height: 60), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let in2 = Tile(id: in2Id, kind: .note, title: "in2", frame: TileFrame(x: 250, y: 160, width: 80, height: 60), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let out = Tile(id: outId, kind: .note, title: "out", frame: TileFrame(x: 600, y: 400, width: 80, height: 60), zIndex: 3, runtimeRef: nil, metadata: TileMetadata())
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: vp, tiles: [in1, in2, out], groups: [], lastActiveTileId: nil),
+            showsZoneChrome: true
+        )
+        canvas.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        for t in [in1, in2, out] { canvas.install(tileView: DescriptorTileNSView(tile: t), for: t) }
+        canvas.layoutSubtreeIfNeeded()
+        let suite = "P2-encloses-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        canvas.zoneGestureDefaults = defaults
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        try expect(canvas.qaZoneMembership(of: in1Id) == nil && canvas.qaZoneMembership(of: outId) == nil, "pre-create: all tiles bare")
+
+        var created: [ZonePlacement] = []
+        canvas.onZoneCreated = { created.append($0) }
+
+        // Marquee canvas-local (100,100)→(400,300) ⇒ origin (100,100), size (300,200).
+        canvas.mouseDown(with: try mouse(.leftMouseDown, at: win(100, 100, canvasH: cH), window: window))
+        canvas.mouseDragged(with: try mouse(.leftMouseDragged, at: win(400, 300, canvasH: cH), window: window))
+        canvas.mouseUp(with: try mouse(.leftMouseUp, at: win(400, 300, canvasH: cH), window: window))
+
+        // 1. exactly one live zone (not a ZoneLayer).
+        try expect(canvas.qaLiveZoneIds.count == 1, "exactly one live zone created; got \(canvas.qaLiveZoneIds.count)")
+        try expect(canvas.installedZoneLayerIds.isEmpty, "create must not install a ZoneLayer")
+        let zoneId = canvas.qaLiveZoneIds[0]
+        try expect(created.count == 1, "onZoneCreated fired exactly once; got \(created.count)")
+        // 2. enclosed tiles adopted into the zone.
+        try expect(canvas.qaZoneMembership(of: in1Id) == zoneId, "in1 should be adopted into the new zone")
+        try expect(canvas.qaZoneMembership(of: in2Id) == zoneId, "in2 should be adopted into the new zone")
+        // 3. outside tile stays bare.
+        try expect(canvas.qaZoneMembership(of: outId) == nil, "out tile must remain bare")
+        // 4. adopted tiles keep their WORLD position (no jump on enroll).
+        try expect(canvas.tileView(for: in1Id)?.frame == CGRect(x: 150, y: 150, width: 80, height: 60), "in1 world position preserved after adoption; got \(String(describing: canvas.tileView(for: in1Id)?.frame))")
+        // 5. all tiles still clickable.
+        try expect(canvas.tileId(at: CGPoint(x: 190, y: 180)) == in1Id, "in1 clickable after adoption")
+        try expect(canvas.tileId(at: CGPoint(x: 290, y: 190)) == in2Id, "in2 clickable after adoption")
+        try expect(canvas.tileId(at: CGPoint(x: 640, y: 430)) == outId, "out clickable (the unclickable-bug guard)")
+
+        let fm = FileManager.default
+        let tempRoot = URL(fileURLWithPath: fm.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("zone-create-encloses-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        let artifact = tempRoot.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "zone-create-encloses",
+            "zoneId": zoneId.uuidString,
+            "adopted": [in1Id.uuidString, in2Id.uuidString],
+            "bare": [outId.uuidString]
         ]
         try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
         return artifact
@@ -3332,7 +3441,8 @@ final class CanvasNSView: NSView {
         try expect(created.name == "", "assertion 2: created zone name == \"\"")
         try expect(created.navKey == nil, "assertion 2: created zone navKey == nil")
         try expect(created.color == "teal", "assertion 2: created zone color == \"teal\"")
-        try expect(canvasA.installedZoneLayerIds.count == 1, "assertion 2: canvas zone set has exactly one layer")
+        try expect(canvasA.qaLiveZoneIds == [created.zoneId], "assertion 2: created zone registered in the live zone set (not a ZoneLayer)")
+        try expect(canvasA.installedZoneLayerIds.isEmpty, "assertion 2: live create must NOT install a ZoneLayer (keystone path stays dormant)")
 
         // ── Assertion 3: created zone bounds == drag rect (world) ─────────────────
         // At zoom 1, viewport (0,0): screen == world. origin=(120,150), size=(400,320).

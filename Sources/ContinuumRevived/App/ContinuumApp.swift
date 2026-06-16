@@ -359,6 +359,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--zone-create-encloses-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try CanvasNSView.runZoneCreateEnclosesSelfCheck()
+                print("ContinuumRevivedZoneCreateEnclosesChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--multi-zone-render-check") {
             do {
                 _ = NSApplication.shared
