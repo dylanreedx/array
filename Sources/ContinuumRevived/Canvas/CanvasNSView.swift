@@ -201,7 +201,11 @@ final class CanvasNSView: NSView {
     /// Callers must NOT retain the returned reference — the canvas may swap
     /// the underlying view at any time and a cached pointer will go stale.
     func tileView(for tileId: UUID) -> TileNSView? {
-        tileViews[tileId]
+        if let v = tileViews[tileId] { return v }
+        for layer in zoneLayers {
+            if let v = layer.tileViews[tileId] { return v }
+        }
+        return nil
     }
 
     func updateTile(_ tile: Tile) {
@@ -519,6 +523,24 @@ final class CanvasNSView: NSView {
     /// Returns the topmost tile id at a screen-space point according to the
     /// semantic canvas model, not AppKit subview insertion order.
     func tileId(at screenPoint: CGPoint) -> UUID? {
+        // Multi-layer path (T05): hit-test across all installed ZoneLayers.
+        if !zoneLayers.isEmpty {
+            let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: canvasState.viewport)
+            var navigationZones: [CanvasEngine.NavigationZone] = []
+            var tilesByZone: [UUID: [Tile]] = [:]
+            for (index, zoneId) in zoneLayerOrder.enumerated() {
+                guard let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) else { continue }
+                guard !layer.placement.collapsed else { continue }
+                navigationZones.append(CanvasEngine.NavigationZone(
+                    id: zoneId,
+                    frame: CanvasEngine.zoneWorldFrame(layer.placement),
+                    zIndex: index  // later in order = higher zIndex = wins
+                ))
+                tilesByZone[zoneId] = layer.tiles
+            }
+            return CanvasEngine.hitTest(worldPoint: worldPoint, zones: navigationZones, tilesByZone: tilesByZone)?.tile.id
+        }
+        // Single-zone path (unchanged).
         if let activeZone {
             if activeZone.collapsed { return nil }
             let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: canvasState.viewport)
@@ -652,9 +674,19 @@ final class CanvasNSView: NSView {
     }
 
     private func reorderTileSubviewsByZIndex() {
+        // ordering: tileId.uuidString → [zoneIndex, tileZIndex, tileArrayIndex]
+        // zoneIndex for single-zone tiles: 0 (they're their own zone).
+        // For ZoneLayer tiles: position in zoneLayerOrder + 1 so they sort after
+        // single-zone tiles when both are present (choice B coexistence).
         let ordering = NSMutableDictionary()
         for (index, tile) in canvasState.tiles.enumerated() {
-            ordering[tile.id.uuidString] = [tile.zIndex, index]
+            ordering[tile.id.uuidString] = [0, tile.zIndex, index]
+        }
+        for layer in zoneLayers {
+            let zoneIdx = (zoneLayerOrder.firstIndex(of: layer.placement.zoneId) ?? 0) + 1
+            for (tileIdx, tile) in layer.tiles.enumerated() {
+                ordering[tile.id.uuidString] = [zoneIdx, tile.zIndex, tileIdx]
+            }
         }
         sortSubviews({ lhs, rhs, context in
             guard
@@ -666,13 +698,12 @@ final class CanvasNSView: NSView {
             else {
                 return .orderedSame
             }
-            let lhsZ = lhsInfo[0]
-            let rhsZ = rhsInfo[0]
-            if lhsZ != rhsZ { return lhsZ < rhsZ ? .orderedAscending : .orderedDescending }
-            let lhsOrder = lhsInfo[1]
-            let rhsOrder = rhsInfo[1]
-            if lhsOrder == rhsOrder { return .orderedSame }
-            return lhsOrder < rhsOrder ? .orderedAscending : .orderedDescending
+            // Compare (zoneIndex, tileZIndex, tileArrayIndex) lexicographically.
+            for i in 0..<3 {
+                let l = lhsInfo[i], r = rhsInfo[i]
+                if l != r { return l < r ? .orderedAscending : .orderedDescending }
+            }
+            return .orderedSame
         }, context: Unmanaged.passUnretained(ordering).toOpaque())
         // The z-sort only orders tile subviews; keep the focus-border overlay
         // above them so it isn't buried by a brought-to-front tile.
@@ -695,6 +726,17 @@ final class CanvasNSView: NSView {
         layoutZoneChromeViews()
         for tile in canvasState.tiles {
             layoutTile(tile)
+        }
+        // Lay out tiles for every installed ZoneLayer (T05).
+        for layer in zoneLayers {
+            for tile in layer.tiles {
+                _layoutLayerTile(tile, in: layer)
+            }
+            if let chrome = layer.chrome {
+                let worldFrame = CanvasEngine.zoneWorldFrame(layer.placement)
+                chrome.frame = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport)
+                chrome.needsDisplay = true
+            }
         }
         navModeOverlayView?.needsDisplay = true
     }
@@ -869,6 +911,145 @@ final class CanvasNSView: NSView {
             return
         }
         super.keyUp(with: event)
+    }
+
+    // MARK: - ZoneLayer (T05)
+
+    /// A reference type representing one installed layer on the canvas.
+    /// Choice B: additive over the existing single-zone storage — the active zone
+    /// keeps using activeZone+canvasState.tiles; ZoneLayer represents additional
+    /// installed zones (plus an adopted active zone when setZones is called).
+    @MainActor
+    final class ZoneLayer {
+        var placement: ZonePlacement
+        var renderModel: ZoneRenderModel
+        var tiles: [Tile]
+        var tileViews: [UUID: TileNSView] = [:]
+        fileprivate var chrome: ZoneChromeNSView?
+
+        init(placement: ZonePlacement, renderModel: ZoneRenderModel, tiles: [Tile] = []) {
+            self.placement = placement
+            self.renderModel = renderModel
+            self.tiles = tiles
+        }
+    }
+
+    // Installed layers (excluding the activeZone single-zone path).
+    private var zoneLayers: [ZoneLayer] = []
+    // z-order: back-to-front (index 0 = bottom, last = top).
+    private var zoneLayerOrder: [UUID] = []
+
+    /// Replace the entire installed layer set in place.
+    func setZones(_ layers: [ZoneLayer], zoneZOrder: [UUID]) {
+        // Unregister + remove all currently installed layers.
+        for layer in zoneLayers {
+            for (_, view) in layer.tileViews {
+                focusBroker?.unregister(view.focusSurfaceID)
+                view.removeFromSuperview()
+            }
+            layer.chrome?.removeFromSuperview()
+        }
+        zoneLayers = []
+        zoneLayerOrder = []
+
+        // Install the new layers in z-order.
+        let orderedLayers = zoneZOrder.compactMap { id in layers.first { $0.placement.zoneId == id } }
+        for layer in orderedLayers {
+            _installLayer(layer)
+        }
+        // Any layers not in zoneZOrder are appended last.
+        for layer in layers where !zoneZOrder.contains(layer.placement.zoneId) {
+            _installLayer(layer)
+        }
+
+        layoutAllTiles()
+        reorderTileSubviewsByZIndex()
+    }
+
+    /// Add or replace a single layer by zoneId. Unregisters old tile adapters before registering new ones.
+    func upsertZoneLayer(_ layer: ZoneLayer) {
+        let zoneId = layer.placement.zoneId
+        if let existing = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) {
+            // Unregister and remove old layer's tiles.
+            for (_, view) in existing.tileViews {
+                focusBroker?.unregister(view.focusSurfaceID)
+                view.removeFromSuperview()
+            }
+            existing.chrome?.removeFromSuperview()
+            zoneLayers.removeAll { $0.placement.zoneId == zoneId }
+        }
+        // Add at end of z-order if not already present.
+        if !zoneLayerOrder.contains(zoneId) {
+            zoneLayerOrder.append(zoneId)
+        }
+        _installLayer(layer)
+        layoutAllTiles()
+        reorderTileSubviewsByZIndex()
+    }
+
+    /// Remove a layer: unregisters its tile adapters, removes subviews, drops from set.
+    func removeZoneLayer(zoneId: UUID) {
+        guard let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) else { return }
+        for (_, view) in layer.tileViews {
+            focusBroker?.unregister(view.focusSurfaceID)
+            view.removeFromSuperview()
+        }
+        layer.chrome?.removeFromSuperview()
+        zoneLayers.removeAll { $0.placement.zoneId == zoneId }
+        zoneLayerOrder.removeAll { $0 == zoneId }
+    }
+
+    /// Update only a layer's placement in place; relays its tiles + chrome.
+    func setZonePlacement(_ placement: ZonePlacement) {
+        guard let layer = zoneLayers.first(where: { $0.placement.zoneId == placement.zoneId }) else { return }
+        layer.placement = placement
+        for tile in layer.tiles {
+            _layoutLayerTile(tile, in: layer)
+        }
+        if let chrome = layer.chrome {
+            let worldFrame = CanvasEngine.zoneWorldFrame(placement)
+            chrome.frame = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport)
+            chrome.needsDisplay = true
+        }
+    }
+
+    /// Test introspection: zoneIds of installed layers in z-order (back-to-front).
+    var installedZoneLayerIds: [UUID] { zoneLayerOrder }
+
+    /// Test introspection: the tile ids a layer currently owns.
+    func tileIds(inZone zoneId: UUID) -> [UUID] {
+        zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.tiles.map(\.id) ?? []
+    }
+
+    // Install a layer: add subviews + register adapters + track in storage.
+    private func _installLayer(_ layer: ZoneLayer) {
+        zoneLayers.append(layer)
+        let zoneId = layer.placement.zoneId
+        if !zoneLayerOrder.contains(zoneId) {
+            zoneLayerOrder.append(zoneId)
+        }
+        for (_, view) in layer.tileViews {
+            addSubview(view)
+            focusBroker?.register(view)
+        }
+        if showsZoneChrome {
+            let chromeView = ZoneChromeNSView(model: layer.renderModel)
+            layer.chrome = chromeView
+            addSubview(chromeView)
+        }
+    }
+
+    // Layout a single tile belonging to a ZoneLayer.
+    private func _layoutLayerTile(_ tile: Tile, in layer: ZoneLayer) {
+        guard let view = layer.tileViews[tile.id] else { return }
+        let worldFrame = CanvasEngine.worldFrame(tile: tile, in: layer.placement)
+        let rect = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport)
+        view.isHidden = layer.placement.collapsed
+        view.frame = rect
+        view.bounds = NSRect(x: 0, y: 0, width: tile.frame.width, height: tile.frame.height)
+        view.tile = tile
+        view.setNeedsDisplay(view.bounds)
+        repositionFocusBorderIfNeeded(for: tile.id)
     }
 
     static func runZIndexRelaunchHitTestSelfCheck() throws -> URL {
@@ -1182,6 +1363,141 @@ final class CanvasNSView: NSView {
         let chromePixels = VisualSnapshot.metrics(of: rep)
         try expect(!chromePixels.isBlank, "zone chrome render must not be blank/uniform (the grey-screen guard) — got \(chromePixels.distinctSampledColors) distinct sampled colors at \(chromePixels.width)x\(chromePixels.height)")
         let artifact = directory.appendingPathComponent("manifest.json")
+        // MARK: — Multi-layer block (T05 assertions 1–12)
+        // Fresh canvas: no conflict with alpha/beta/gamma fixtures above.
+        let layerViewport = CanvasViewport(x: 0, y: 0, zoom: 1)
+        let layerCanvas = CanvasNSView(
+            canvasState: CanvasState(viewport: layerViewport, tiles: [], groups: [], lastActiveTileId: nil),
+            activeZone: nil,
+            zoneRenderModels: [],
+            showsZoneChrome: true
+        )
+        // Real FocusBroker held strongly (focusBroker property is weak).
+        let broker = FocusBroker()
+        layerCanvas.focusBroker = broker
+
+        let layerAProjectId = UUID(uuidString: "00000000-0000-0000-0000-000000004801")!
+        let layerBProjectId = UUID(uuidString: "00000000-0000-0000-0000-000000004802")!
+        let layerAZoneId    = UUID(uuidString: "00000000-0000-0000-0000-000000004811")!
+        let layerBZoneId    = UUID(uuidString: "00000000-0000-0000-0000-000000004812")!
+        let layerGZoneId    = UUID(uuidString: "00000000-0000-0000-0000-000000004814")!
+        let tAId            = UUID(uuidString: "00000000-0000-0000-0000-000000004821")!
+        let tBId            = UUID(uuidString: "00000000-0000-0000-0000-000000004822")!
+        let tGId            = UUID(uuidString: "00000000-0000-0000-0000-000000004824")!
+
+        let placementA = ZonePlacement(zoneId: layerAZoneId, projectId: layerAProjectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 640, height: 420), color: "blue", collapsed: false, hydrationPolicy: .automatic)
+        let placementB = ZonePlacement(zoneId: layerBZoneId, projectId: layerBProjectId, origin: ZonePoint(x: 760, y: 0), size: ZoneSize(width: 640, height: 420), color: "mint", collapsed: false, hydrationPolicy: .automatic)
+        let placementG = ZonePlacement(zoneId: layerGZoneId, projectId: nil, origin: ZonePoint(x: 0, y: 500), size: ZoneSize(width: 640, height: 300), color: "purple", collapsed: false, hydrationPolicy: .automatic)
+
+        let tA = Tile(id: tAId, kind: .note, title: "tA", frame: TileFrame(x: 40, y: 52, width: 180, height: 120), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tB = Tile(id: tBId, kind: .note, title: "tB", frame: TileFrame(x: 30, y: 40, width: 200, height: 140), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tG = Tile(id: tGId, kind: .note, title: "tG", frame: TileFrame(x: 20, y: 30, width: 160, height: 100), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+
+        let layerA = ZoneLayer(placement: placementA, renderModel: ZoneRenderModel(placement: placementA, displayName: "LayerA"), tiles: [tA])
+        layerA.tileViews[tAId] = DescriptorTileNSView(tile: tA)
+        let layerB = ZoneLayer(placement: placementB, renderModel: ZoneRenderModel(placement: placementB, displayName: "LayerB"), tiles: [tB])
+        layerB.tileViews[tBId] = DescriptorTileNSView(tile: tB)
+        let layerG = ZoneLayer(placement: placementG, renderModel: ZoneRenderModel(placement: placementG, displayName: "LayerG"), tiles: [tG])
+        layerG.tileViews[tGId] = DescriptorTileNSView(tile: tG)
+
+        layerCanvas.setZones([layerA, layerB, layerG], zoneZOrder: [layerAZoneId, layerBZoneId, layerGZoneId])
+        layerCanvas.layoutSubtreeIfNeeded()
+
+        // Assertion 1: installed set + order
+        try expect(layerCanvas.installedZoneLayerIds == [layerAZoneId, layerBZoneId, layerGZoneId], "assertion 1: installedZoneLayerIds should match zoneZOrder [A,B,G]")
+
+        // Assertion 2: per-layer ownership — no cross-leak
+        try expect(layerCanvas.tileIds(inZone: layerAZoneId) == [tAId], "assertion 2: layer A should own only tA")
+        try expect(layerCanvas.tileIds(inZone: layerBZoneId) == [tBId], "assertion 2: layer B should own only tB")
+        try expect(layerCanvas.tileIds(inZone: layerGZoneId) == [tGId], "assertion 2: layer G should own only tG")
+
+        // Assertion 3: per-layer layout A (origin 0,0)
+        let expectedFrameA = CanvasEngine.tileScreenFrame(CanvasEngine.worldFrame(tile: tA, in: placementA), viewport: layerViewport)
+        try expect(layerCanvas.tileView(for: tAId)?.frame == expectedFrameA, "assertion 3: tA frame should be \(expectedFrameA), got \(String(describing: layerCanvas.tileView(for: tAId)?.frame))")
+
+        // Assertion 4: per-layer layout B (non-origin zone, origin 760,0)
+        // tB zone-local (30,40) + origin (760,0) = world (790,40,200,140)
+        let expectedFrameB = CanvasEngine.tileScreenFrame(CanvasEngine.worldFrame(tile: tB, in: placementB), viewport: layerViewport)
+        try expect(layerCanvas.tileView(for: tBId)?.frame == expectedFrameB, "assertion 4: tB frame should be \(expectedFrameB) (world 790,40), got \(String(describing: layerCanvas.tileView(for: tBId)?.frame))")
+
+        // Assertion 5: per-layer layout G (group zone, y-offset 500)
+        // tG zone-local (20,30) + origin (0,500) = world (20,530,160,100)
+        let expectedFrameG = CanvasEngine.tileScreenFrame(CanvasEngine.worldFrame(tile: tG, in: placementG), viewport: layerViewport)
+        try expect(layerCanvas.tileView(for: tGId)?.frame == expectedFrameG, "assertion 5: tG frame should be \(expectedFrameG) (world 20,530), got \(String(describing: layerCanvas.tileView(for: tGId)?.frame))")
+
+        // Assertion 6: per-layer hit-test A
+        try expect(layerCanvas.tileId(at: CGPoint(x: 50, y: 60)) == tAId, "assertion 6: (50,60) should hit tA (world frame 40,52,180,120)")
+
+        // Assertion 7: per-layer hit-test B (outside A entirely)
+        try expect(layerCanvas.tileId(at: CGPoint(x: 800, y: 50)) == tBId, "assertion 7: (800,50) should hit tB (world 790,40,200,140), not tA")
+
+        // Assertion 8: per-layer hit-test G
+        try expect(layerCanvas.tileId(at: CGPoint(x: 40, y: 560)) == tGId, "assertion 8: (40,560) should hit tG (world 20,530,160,100)")
+
+        // Assertion 9: cross-layer z-order paint — AppKit subview order tA < tB < tG
+        let subviewTileIds = layerCanvas.subviews.compactMap { ($0 as? TileNSView)?.tile.id }
+        try expect(subviewTileIds.contains(tAId) && subviewTileIds.contains(tBId) && subviewTileIds.contains(tGId), "assertion 9: all three tile subviews must be present")
+        let posA = subviewTileIds.firstIndex(of: tAId)!
+        let posB = subviewTileIds.firstIndex(of: tBId)!
+        let posG = subviewTileIds.firstIndex(of: tGId)!
+        try expect(posA < posB && posB < posG, "assertion 9: subview order should be tA(\(posA)) < tB(\(posB)) < tG(\(posG)) (zone z-order A<B<G)")
+
+        // Assertion 10: adapter register-on-add
+        try expect(broker.requestFocus(.tile(tAId), reason: .userClick), "assertion 10: tA adapter should be registered after setZones")
+        try expect(broker.requestFocus(.tile(tBId), reason: .userClick), "assertion 10: tB adapter should be registered after setZones")
+        try expect(broker.requestFocus(.tile(tGId), reason: .userClick), "assertion 10: tG adapter should be registered after setZones")
+
+        // Assertion 11: overlap → topmost LAYER wins
+        // layerOver: origin (0,0) size 200x200, tile tOver (10,10,150,150) zIndex 1, placed LAST in z-order
+        let layerOverZoneId   = UUID(uuidString: "00000000-0000-0000-0000-000000004815")!
+        let layerOverProjectId = UUID(uuidString: "00000000-0000-0000-0000-000000004805")!
+        let tOverId           = UUID(uuidString: "00000000-0000-0000-0000-000000004825")!
+        let placementOver = ZonePlacement(zoneId: layerOverZoneId, projectId: layerOverProjectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 200, height: 200), color: "orange", collapsed: false, hydrationPolicy: .automatic)
+        let tOver = Tile(id: tOverId, kind: .note, title: "tOver", frame: TileFrame(x: 10, y: 10, width: 150, height: 150), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let layerOver = ZoneLayer(placement: placementOver, renderModel: ZoneRenderModel(placement: placementOver, displayName: "LayerOver"), tiles: [tOver])
+        layerOver.tileViews[tOverId] = DescriptorTileNSView(tile: tOver)
+        layerCanvas.upsertZoneLayer(layerOver)
+        // (70,70) is inside tOver world (10,10,150,150) AND tA world (40,52,180,120) → topmost layer wins
+        try expect(layerCanvas.tileId(at: CGPoint(x: 70, y: 70)) == tOverId, "assertion 11: (70,70) must resolve to tOver (top layer), not tA — overlap cross-layer z-order")
+
+        // Assertion 12: remove layer B → unregisters adapters (T09 contract)
+        layerCanvas.removeZoneLayer(zoneId: layerBZoneId)
+        try expect(!layerCanvas.installedZoneLayerIds.contains(layerBZoneId), "assertion 12a: installedZoneLayerIds must not contain B after remove")
+        try expect(layerCanvas.tileView(for: tBId) == nil, "assertion 12b: tileView(for: tB) should be nil after removeZoneLayer")
+        try expect(layerCanvas.tileId(at: CGPoint(x: 800, y: 50)) == nil, "assertion 12c: hit at (800,50) should be nil — no layer there after removing B")
+        // THE assertion: requestFocus returns false → adapter was unregistered
+        let focusBAfterRemove = broker.requestFocus(.tile(tBId), reason: .userClick)
+        try expect(!focusBAfterRemove, "assertion 12d: requestFocus(.tile(tB)) must return false after removeZoneLayer (adapter unregistered)")
+        // Survivors intact: (200,100) is inside tA world (40,52,180,120) but outside tOver world (x>160)
+        try expect(broker.requestFocus(.tile(tAId), reason: .userClick), "assertion 12e: tA adapter must still be registered after removing B")
+        try expect(layerCanvas.tileId(at: CGPoint(x: 200, y: 100)) == tAId, "assertion 12f: (200,100) should still resolve to tA (outside tOver, inside tA)")
+
+        let layerManifestFields: [String: Any] = [
+            "installedZoneLayerIds": layerCanvas.installedZoneLayerIds.map { $0.uuidString },
+            "perLayerTileFrames": [
+                layerAZoneId.uuidString: [tAId.uuidString: rectDictionary(layerCanvas.tileView(for: tAId)?.frame ?? .zero)],
+                layerBZoneId.uuidString: [:],
+                layerGZoneId.uuidString: [tGId.uuidString: rectDictionary(layerCanvas.tileView(for: tGId)?.frame ?? .zero)]
+            ],
+            "perLayerHitIds": [
+                "50_60": layerCanvas.tileId(at: CGPoint(x: 50, y: 60))?.uuidString as Any,
+                "40_560": layerCanvas.tileId(at: CGPoint(x: 40, y: 560))?.uuidString as Any
+            ],
+            "crossLayerSubviewOrder": subviewTileIds.map { $0.uuidString },
+            "adapterRegisteredOnAdd": [
+                tAId.uuidString: true,
+                tGId.uuidString: true
+            ],
+            "overlapTopHitId": tOverId.uuidString,
+            "afterRemoveB": [
+                "installedIds": layerCanvas.installedZoneLayerIds.map { $0.uuidString },
+                "tBViewPresent": layerCanvas.tileView(for: tBId) != nil,
+                "hitAtB": layerCanvas.tileId(at: CGPoint(x: 800, y: 50))?.uuidString as Any,
+                "focusBFalse": !focusBAfterRemove,
+                "aStillFocusable": true
+            ]
+        ]
+
         let manifest: [String: Any] = [
             "check": "multi-zone-render",
             "artifactKind": "geometry-snapshot",
@@ -1196,7 +1512,8 @@ final class CanvasNSView: NSView {
             "collapsedChildHitSuppressed": true,
             "collapsedHeaderZoneId": gammaZoneId.uuidString,
             "zoneChromeScreenshot": screenshot.path,
-            "screenshots": [screenshot.path]
+            "screenshots": [screenshot.path],
+            "multiLayerAssertions": layerManifestFields
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)

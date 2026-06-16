@@ -1,41 +1,41 @@
 # Morning Review — workspaces/zones sprint
 
-**Open this first.** Single entry point for reviewing the overnight run. Changes are triaged
-by ATTENTION, not by build order. Tick each `[ ]` as you review. Ask me for the **guided
-walkthrough** and I'll drive it highest-risk first, carrying the context so you don't have to
-reconstruct it.
+**Open this first.** Single entry point for reviewing the overnight run. Triaged by ATTENTION,
+not build order. Tick each `[ ]` as you review. Ask me for the **guided walkthrough** and I'll
+drive it highest-risk first, carrying the context.
 
-Branch: `overnight/workspaces-zones` (off `main`). **Nothing is merged to `main` — that's your call.**
-Review commit-by-commit: `git log --oneline main..overnight/workspaces-zones` — each task is one commit, tagged `(Tnn)` in its subject.
+Branch: `overnight/workspaces-zones` (off `main`). **Nothing merged to `main` — your call.**
+Commit-by-commit spine: `git log --oneline main..overnight/workspaces-zones` (each task = one commit, tagged `(Tnn)`).
+Rebuild for visual gates: `./scripts/make-app-bundle.sh --configuration release --output ~/Applications/ContinuumRevived.app && open ~/Applications/ContinuumRevived.app`
 
-## Status (updated as each task lands)
-- Committed: **4** · blocked: **0** · staged-for-morning: **0** · of 17 build tasks (T01–T19; T09 last session's exemplar pending build)
-- Fast matrix on branch HEAD: **green** (after T04) · `swift build` clean
-- Wave 1 (T01–T04) complete. Spec foundation: 17 specs committed (5 adversarially reviewed, 12 first-draft + reviewer pass at build time).
+## Status
+- Committed: **5** · blocked: **0** · staged-for-morning: **0** · of 17 build tasks
+- Fast matrix on branch HEAD: **green** · `swift build` clean
+- Wave 1 (T01–T04) done; Wave 2 in progress (T05 done).
 
-## 🔴 Decide / eyeball — read these (tests could not prove them)
-_Design calls deferred, visual/feel gates, anything unverified. The un-missable list._
-- [ ] **T01 · navKey configurable-first split** — `navKey` ships as per-zone *document data* only; Settings entry + conflict-guard owned by **T18**. Reviewer judged intentional — **confirm.** · `runs/T01/review.md`
-- [ ] **T02 · group-zone storage shape** — group-zone tiles as `WorkspaceDocument.groupZoneTiles` (record array) vs a list on `ZonePlacement`. Spec-flagged choice; build follows it. **Confirm the seam** before T05/T08/T11/T15 build on it. · `runs/T02/review.md`
-- [ ] **T03 · "Max Live Zones" has no UI validation** — hydration budget Setting is free-text; resolver guards `>0` but the pane doesn't constrain input. Glance when Settings UI is reviewed. · `runs/T03/review.md`
-- [ ] **T04 · closeOnZero warm-keep semantics** — registry default drops the controller box at ref-count 0 (re-acquire rebuilds), NOT a warm pool. Confirm option (a) is intended (or schedule a warm-pool follow-up), and whether the `closeOnZero` knob is warranted at all (spec flagged it). · `runs/T04/review.md`
+## 🔴 Decide / eyeball — tests could not prove these
+**Design confirmations** (settle before later tasks ripple them):
+- [ ] **T02/T05 · storage shape B** — group-zone tiles live in `WorkspaceDocument.groupZoneTiles` and the canvas keeps `ZoneLayer`s *additively* over single-zone storage. **T06 will ripple 71 `canvasState.tiles` read-sites** — confirm B before then, or escalate to a uniform per-layer store. · `runs/T02/review.md`, `runs/T05/review.md`
+- [ ] **T01 · navKey config split** — ships as document data only; Settings + conflict-guard owned by **T18**. Confirm. · `runs/T01/`
+- [ ] **T04 · closeOnZero semantics** — registry drops the controller box at refcount 0 (rebuild on re-acquire), not a warm pool. Confirm option (a), and whether the knob is warranted. · `runs/T04/`
+- [ ] **T05 · per-zone focus surface** — none today; only tile adapters unregister, `.canvas` stays. Confirm zone-level focus stays out of T05 (would be new `FocusSurfaceID` work for T06/T18). · `runs/T05/`
+- [ ] **T03 · "Max Live Zones"** free-text Setting, no numeric UI validation. Glance with the Settings UI. · `runs/T03/`
 
-## 🟡 Pass with risks — review carefully
-_Committed + verified, but the reviewer named a specific risk._
-- [ ] **T03 · planner not yet wired (downstream)** — `plan()` is correct but dead code until **T06/T10**, and the budget resolver isn't passed into `plan(maxLiveZones:)` yet. **The T06 reviewer must confirm the wiring** or the threshold is decorative. · `runs/T03/review.md`
-- [ ] **T04 — ZoneRuntimeRegistry** committed PASS WITH RISKS. Risks: (1) misleading failure-label when an assertion hits a wrong controller state (still exits non-zero); (2) `closeOnZero` is drop-box not warm-pool (see 🔴); (3) per-run `qa-runs/<ts>/` artifacts accumulate. · `runs/T04/review.md`
+**Visual gates — rebuild the bundle and eyeball** (headless checks prove correctness, not pixels):
+- [ ] **T05 · mutable canvas** — (1) flicker on live zone add/remove; (2) z-paint when a layer upserts on top; (3) cursor rects for multiple zone-chrome headers; (4) no lost first-responder when a focused tile's layer is removed. Also the empty-state overlay may wrongly persist on a layer-only canvas (R2). · `runs/T05/review.md`
 
-## 🟢 Verified routine — skim or trust
-_Committed, test-guarded, reviewer clean._
-- [ ] **T01 — zone model** · `ZonePlacement.projectId` → optional, `name`+`navKey`, custom `Codable` backward-compat, `schemaVersion` 1→2 · CoreChecks T01 table · `runs/T01/`
-- [ ] **T02 — group-zone tile storage** · `GroupZoneTiles` + `WorkspaceDocument.groupZoneTiles`, isolated from project canvases · CoreChecks T02 (8 assertions, real `WorkspaceStore` save→load) · `runs/T02/`
-- [ ] **T03 — hydration planner** · `ZoneHydrationOrchestrator.plan()` + `ZoneHydrationBudgetConfig` · `--zone-hydration-plan-check` (13 assertions; bypass disproved 2 ways) · `runs/T03/`
-- [ ] **T04 — runtime registry** · `ZoneRuntimeRegistry` (@MainActor, per-project ref-counted, injected factory) + `ZoneRuntimeBudgetConfig` · `--zone-registry-refcount-check` (9 assertions; bypass disproved via detached worktree stubs) · `runs/T04/` _(see 🟡 for its risks)_
+## 🟡 Pass with risks — committed, review the named risk
+- [ ] **T05 — mutable ZoneLayer canvas** (PASS WITH RISKS) · forward risks for T06/T09: focus-border tracks only the flat `tileViews` dict not `layer.tileViews` (R1); `upsertZoneLayer` z-order policy is undocumented (R4); manifest literal cosmetic (R3). · `runs/T05/`
+- [ ] **T04 — ZoneRuntimeRegistry** (PASS WITH RISKS) · misleading failure-label on wrong-state assertions (still exits non-zero); per-run `qa-runs/<ts>/` artifacts accumulate. · `runs/T04/`
+- [ ] **T03 → watch at T06** — `plan()` is dead code until T06/T10 and the budget resolver isn't passed to `plan(maxLiveZones:)` yet. **The T06 reviewer must confirm the wiring** or the threshold is decorative. · `runs/T03/`
+
+## 🟢 Verified routine — clean PASS, skim or trust
+- [ ] **T01 — zone model** · optional `projectId` + `name`/`navKey`, custom `Codable`, `schemaVersion` 1→2 · CoreChecks T01 table · `runs/T01/`
+- [ ] **T02 — group-zone tile storage** · `WorkspaceDocument.groupZoneTiles`, isolated from project canvases · CoreChecks T02 (8 assertions, real `WorkspaceStore` save→load) · `runs/T02/`
+- [ ] **T03 — hydration planner** · `ZoneHydrationOrchestrator.plan()` + budget config · `--zone-hydration-plan-check` (13 assertions; bypass disproved 2 ways) · `runs/T03/`
 
 ## ⛔ Blocked / needs-human
-_Couldn't reach a clean PASS in the retry budget; reason recorded._
 - _(none yet)_
 
 ---
-Each entry reads: `[ ] Tnn — what it does · guards: <check> · runs/Tnn/{build,review}.md`
-Per-task evidence lives in `runs/<task>/` (see `runs/README.md`) — the source of truth.
+Each entry: `[ ] Tnn — what · guards: <check> · runs/Tnn/{build,review}.md`. Evidence in `runs/<task>/` is the source of truth.

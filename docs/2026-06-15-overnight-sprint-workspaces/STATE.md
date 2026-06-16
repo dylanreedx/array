@@ -12,8 +12,8 @@ Legend: ⬜ todo · ✍️ spec-written · 🔨 building · 🔍 review · ✅ d
 | T01 | Zone model: optional projectId + name + navKey | overnight [pure] | — | ✅ | 6aa283d | built+reviewed PASS (0 iters); navKey config split→T18 (confirm) |
 | T02 | Group-zone tile storage (workspace store) | overnight [pure] | T01 | ✅ | 390079a | built+reviewed PASS (0 iters); storage-shape choice flagged |
 | T03 | ZoneHydrationOrchestrator (S1) | overnight [pure] | — | ✅ | 0b39c8c | built+reviewed PASS (0 iters); planner wiring deferred→T06/T10 |
-| T04 | ZoneRuntimeRegistry ref-counted (S2) | overnight [pure→app] | — | ✅ | (T04) | built, reviewed PASS-WITH-RISKS (0 iters); closeOnZero design knob flagged |
-| T05 | Mutable canvas / ZoneLayer (S3) | overnight [appkit-chk] | T01 | ✍️ | — | spec written (review folds into build) |
+| T04 | ZoneRuntimeRegistry ref-counted (S2) | overnight [pure→app] | — | ✅ | 974c2fa | built, reviewed PASS-WITH-RISKS (0 iters); closeOnZero design knob flagged |
+| T05 | Mutable canvas / ZoneLayer (S3) | overnight [appkit-chk] | T01 | ✅ | (T05) | built PASS-WITH-RISKS; storage-shape B + morning visual gate flagged |
 | T06 | WorkspaceRuntime shell + proxy (S4) | overnight [appkit-chk] | T03,T04,T05 | ✍️ | — | spec written (review folds into build) |
 | T07 | BrowserRuntimeBudget union (S5) | overnight | T06 | ✍️ | — | spec reviewed+fixed |
 | T08 | addZone + ambient controller (S6) | overnight [appkit-chk] | T06,T02 | ✍️ | — | spec written (review folds into build) |

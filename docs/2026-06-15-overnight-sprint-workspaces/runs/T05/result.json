@@ -1,0 +1,31 @@
+{
+  "task": "T05",
+  "title": "Mutable canvas: ZoneLayer set, per-layer layout + hit-test",
+  "verdict": "PASS WITH RISKS",
+  "iterations": 0,
+  "redProven": true,
+  "green": true,
+  "matrixFast": "green",
+  "buildClean": true,
+  "guards": "runMultiZoneRenderSelfCheck extended (assertions 1-12); --multi-zone-render-check + --single-zone-compat-check + --zindex-relaunch-hit-test-check + --tile-world-bounds-check. Drives real setZones/upsertZoneLayer/removeZoneLayer + real FocusBroker register/unregister.",
+  "filesTouched": ["Sources/ContinuumRevived/Canvas/CanvasNSView.swift"],
+  "storageShape": "B (additive over single-zone). Spec default. CONFIRM before T06 ripples 71 canvasState.tiles read-sites.",
+  "risks": [
+    "R1 forward (T06/T09): _layoutLayerTile -> repositionFocusBorderIfNeeded reads the flat tileViews dict, not layer.tileViews. Harmless now (borderedTileId is always an active-zone tile) but the focus border won't track a layer-resident tile if T06/T09 ever focus one.",
+    "R2 visual: empty-state overlay stays installed on a layer-only canvas (setZones never calls updateEmptyStateVisibility; canvasState.tiles stays empty). No assertion affected; likely a visual artifact (morning gate).",
+    "R3 cosmetic: manifest adapterRegisteredOnAdd is hardcoded {tA:true,tG:true} literals, not re-queried (load-bearing assertions use live broker.requestFocus). Low.",
+    "R4 forward (T06): upsertZoneLayer replace-path keeps the zoneId's old z-position; a brand-new layer appends to top. Reasonable, undocumented z-order policy T06 depends on."
+  ],
+  "morningVisualGate": [
+    "Live add/remove flicker when zones install/uninstall.",
+    "Z-paint correctness when a layer is upserted on top.",
+    "Cursor rects (resetCursorRects) for multiple zone-chrome headers.",
+    "No lost first-responder when a focused tile's layer is removed."
+  ],
+  "needsHuman": [
+    "Confirm storage shape B before T06.",
+    "Confirm no per-zone focus surface in T05 (only tile adapters unregister; .canvas stays). A zone-level FocusSurfaceID would be new work for T06/T18.",
+    "Visual gate above on a rebuilt bundle."
+  ],
+  "unverified": ["The 4 visual-gate items (headless check covers correctness, not pixels).", "setZonePlacement at runtime (wired for T11, no assertion drives it).", "Full (non-fast) matrix / app-bundle check."]
+}
