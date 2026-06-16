@@ -1,0 +1,48 @@
+import Foundation
+
+/// Resolves the two sidebar display preferences (visible at launch, show nav-key
+/// affordance) from UserDefaults, and provides the nav-key conflict predicate used
+/// by the sidebar's rename/nav-key edit handler. Mirrors the `DragMagnetizeConfig`
+/// shape: static keys + defaults + `resolve*` pair.
+public enum SidebarChromeConfig {
+
+    // MARK: - Sidebar visibility
+
+    public static let visibleKey = "continuum.sidebar.visible"
+    public static let defaultVisible = true
+
+    public static func resolveVisible(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: visibleKey) != nil
+            ? defaults.bool(forKey: visibleKey)
+            : defaultVisible
+    }
+
+    // MARK: - Show nav-key affordance
+
+    public static let showNavKeysKey = "continuum.sidebar.showNavKeys"
+    public static let defaultShowNavKeys = true
+
+    public static func resolveShowNavKeys(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: showNavKeysKey) != nil
+            ? defaults.bool(forKey: showNavKeysKey)
+            : defaultShowNavKeys
+    }
+
+    // MARK: - Nav-key conflict guard
+
+    /// Returns `true` if `key` must be rejected for a zone nav-key edit.
+    ///
+    /// Rejects when:
+    /// - `key` is in `reserved` (the NavKeymap reserved single-char tokens), or
+    /// - `key` appears in `against` (the nav-keys of sibling zones in the same workspace).
+    ///
+    /// Kept in Core so the check can unit-pin it without AppKit.
+    public static func navKeyConflicts(
+        _ key: String,
+        against siblingKeys: [String?],
+        reserved: Set<String>
+    ) -> Bool {
+        if reserved.contains(key) { return true }
+        return siblingKeys.compactMap({ $0 }).contains(key)
+    }
+}

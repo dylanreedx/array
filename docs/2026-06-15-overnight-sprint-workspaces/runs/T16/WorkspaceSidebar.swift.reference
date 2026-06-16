@@ -1,0 +1,245 @@
+import AppKit
+import ContinuumRevivedCore
+
+// MARK: - WorkspaceSidebar
+
+@MainActor
+final class WorkspaceSidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate, NSTextFieldDelegate {
+
+    // MARK: - Item type
+
+    enum SidebarItem {
+        case workspace(SidebarWorkspaceRow)
+        case zone(SidebarZoneRow)
+    }
+
+    // MARK: - Callback seams (AppDelegate wires these to production handlers)
+
+    var onSwitchWorkspace: ((UUID) -> Void)?
+    var onJumpToZone: ((UUID) -> Void)?
+    var onRenameWorkspace: ((UUID, String) -> Void)?
+    var onRenameZone: ((UUID, String) -> Void)?
+    var onEditZoneNavKey: ((UUID, String?) -> Void)?
+
+    // MARK: - Public views
+
+    let scrollView: NSScrollView
+    private let outlineView: NSOutlineView
+
+    /// Exposed for the headless check (same file → no bypass).
+    var _outlineView: NSOutlineView { outlineView }
+
+    // MARK: - Data
+
+    private var tree: SidebarTree = SidebarTree(workspaces: [])
+    /// Flat list of all rows in current expanded state, in outline order.
+    /// We expand all workspaces so children are always visible.
+    private var flatItems: [SidebarItem] = []
+
+    // MARK: - Init
+
+    override init() {
+        let outline = NSOutlineView()
+        outline.headerView = nil
+        outline.rowHeight = 24
+        outline.allowsMultipleSelection = false
+        outline.backgroundColor = .clear
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("item"))
+        col.width = 200
+        outline.addTableColumn(col)
+        outline.indentationPerLevel = 16
+        outline.style = .sourceList
+        outline.autoresizingMask = [.width, .height]
+
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.documentView = outline
+        scroll.autoresizingMask = [.width, .height]
+
+        self.outlineView = outline
+        self.scrollView = scroll
+
+        super.init()
+
+        outline.dataSource = self
+        outline.delegate = self
+        outline.target = self
+        outline.action = #selector(outlineViewClicked(_:))
+    }
+
+    // MARK: - Reload
+
+    func reload(tree: SidebarTree) {
+        self.tree = tree
+        outlineView.reloadData()
+        // Expand all workspace items so zones are visible.
+        for ws in tree.workspaces {
+            let item = SidebarItem.workspace(ws)
+            outlineView.expandItem(item)
+        }
+        rebuildFlatItems()
+    }
+
+    // MARK: - Flat index helpers (for qa* and row routing)
+
+    private func rebuildFlatItems() {
+        var flat: [SidebarItem] = []
+        for ws in tree.workspaces {
+            flat.append(.workspace(ws))
+            for zone in ws.zones {
+                flat.append(.zone(zone))
+            }
+        }
+        flatItems = flat
+    }
+
+    private func item(atFlatIndex index: Int) -> SidebarItem? {
+        guard index >= 0, index < flatItems.count else { return nil }
+        return flatItems[index]
+    }
+
+    // MARK: - Shared routing (single path for real handler + qa* — R1)
+
+    private func activate(_ item: SidebarItem) {
+        switch item {
+        case .workspace(let row):
+            onSwitchWorkspace?(row.workspaceId)
+        case .zone(let row):
+            onJumpToZone?(row.zoneId)
+        }
+    }
+
+    private func commitRename(_ item: SidebarItem, _ raw: String) {
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        switch item {
+        case .workspace(let row):
+            onRenameWorkspace?(row.workspaceId, name)
+        case .zone(let row):
+            onRenameZone?(row.zoneId, name)
+        }
+    }
+
+    private func commitNavKey(_ item: SidebarItem, _ key: String?) {
+        guard case .zone(let row) = item else { return }
+        // Conflict guard: resolve the reserved set from the live NavKeymap default.
+        let keymap = NavKeymap.default
+        let reserved: Set<String> = [
+            keymap.up, keymap.down, keymap.left, keymap.right,
+            keymap.nextZone, keymap.previousZone, keymap.zonePicker,
+            keymap.workspacePicker, keymap.agentCycle, keymap.agentNeedsAttention,
+            keymap.focusMode, keymap.deleteTile
+        ]
+        if let key {
+            // Collect sibling navKeys from the workspace containing this zone.
+            let siblingKeys: [String?] = tree.workspaces
+                .first(where: { $0.zones.contains(where: { $0.zoneId == row.zoneId }) })?
+                .zones
+                .filter({ $0.zoneId != row.zoneId })
+                .map({ $0.navKey }) ?? []
+            if SidebarChromeConfig.navKeyConflicts(key, against: siblingKeys, reserved: reserved) {
+                return // Rejected — no callback fired
+            }
+        }
+        onEditZoneNavKey?(row.zoneId, key)
+    }
+
+    // MARK: - QA entry points (drive the SAME shared routing)
+
+    /// Simulates a click on the row at the given flat expanded index.
+    func qaClickRow(at index: Int) {
+        guard let item = item(atFlatIndex: index) else { return }
+        activate(item)
+    }
+
+    /// Simulates a committed inline rename at the given flat expanded index.
+    func qaCommitRename(itemAt index: Int, to newName: String) {
+        guard let item = item(atFlatIndex: index) else { return }
+        commitRename(item, newName)
+    }
+
+    /// Simulates a committed nav-key edit for the zone at the given flat expanded index.
+    func qaCommitNavKey(zoneAt index: Int, to navKey: String?) {
+        guard let item = item(atFlatIndex: index) else { return }
+        commitNavKey(item, navKey)
+    }
+
+    // MARK: - NSOutlineViewDataSource
+
+    func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
+        if item == nil {
+            return tree.workspaces.count
+        }
+        guard let sidebarItem = item as? SidebarItem else { return 0 }
+        switch sidebarItem {
+        case .workspace(let row): return row.zones.count
+        case .zone: return 0
+        }
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
+        if item == nil {
+            let ws = tree.workspaces[index]
+            return SidebarItem.workspace(ws)
+        }
+        guard let sidebarItem = item as? SidebarItem,
+              case .workspace(let row) = sidebarItem else {
+            return SidebarItem.zone(SidebarZoneRow(zoneId: UUID(), name: "", color: "", navKey: nil, collapsed: false, projectId: nil))
+        }
+        return SidebarItem.zone(row.zones[index])
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
+        guard let sidebarItem = item as? SidebarItem else { return false }
+        switch sidebarItem {
+        case .workspace: return true
+        case .zone: return false
+        }
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, objectValueFor tableColumn: NSTableColumn?, byItem item: Any?) -> Any? {
+        guard let sidebarItem = item as? SidebarItem else { return nil }
+        switch sidebarItem {
+        case .workspace(let row): return row.name
+        case .zone(let row): return row.name
+        }
+    }
+
+    // MARK: - NSOutlineViewDelegate
+
+    func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
+        guard let sidebarItem = item as? SidebarItem else { return nil }
+        let cell = NSTextField(labelWithString: "")
+        cell.isEditable = false
+        cell.isBezeled = false
+        cell.drawsBackground = false
+        cell.font = .systemFont(ofSize: 13)
+        switch sidebarItem {
+        case .workspace(let row):
+            cell.stringValue = row.name
+        case .zone(let row):
+            cell.stringValue = row.name
+        }
+        return cell
+    }
+
+    // MARK: - Click handler (real delegate path → shared activate)
+
+    @objc private func outlineViewClicked(_ sender: Any) {
+        let row = outlineView.clickedRow
+        guard row >= 0 else { return }
+        guard let item = outlineView.item(atRow: row) as? SidebarItem else { return }
+        activate(item)
+    }
+
+    // MARK: - NSTextFieldDelegate (rename / nav-key commit)
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField else { return }
+        let row = outlineView.row(for: field)
+        guard row >= 0, let item = outlineView.item(atRow: row) as? SidebarItem else { return }
+        commitRename(item, field.stringValue)
+    }
+}

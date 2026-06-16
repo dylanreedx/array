@@ -1,0 +1,19 @@
+{
+  "task": "T16",
+  "title": "Sidebar NSOutlineView (name/color/navKey/switch/jump)",
+  "verdict": "BLOCKED",
+  "reason": "--sidebar-check HANGS headlessly — never terminates (3 invocations observed running 32 / 22 / 19 min). The AppKit NSOutlineView check spins a live run loop / waits on a window that never resolves headlessly, so the process never exits and wedges run-matrix. The workflow also wedged mid-integration (build incomplete: ContinuumApp.swift dispatch was reverted; tree half-built). Orchestrator killed the hung processes, stopped the workflow, preserved the sidebar code, and reset to the clean baseline (3e21cb3, swift build green).",
+  "green": false,
+  "matrixFast": "n/a (check hangs)",
+  "committed": false,
+  "preserved": [
+    "runs/T16/WorkspaceSidebar.swift.reference — the built sidebar AppKit class (rename to .swift to resurrect)",
+    "runs/T16/SidebarChromeConfig.swift.reference",
+    "runs/T16/build.md — builder notes"
+  ],
+  "rootCause": "An AppKit headless check must drive the NSOutlineView SYNCHRONOUSLY (construct it + set the data source + reloadData + call the delegate methods directly + assert + RETURN). The codebase already has NON-hanging AppKit checks to model on — runNavModeSelfCheck / runLeaderJumpSelfCheck synthesize NSEvents through the real handlers WITHOUT NSApp.run() / a live run loop. The builder's --sidebar-check spun a run loop (or awaited a window) → hang.",
+  "needsHuman": [
+    "T16 needs a headless-SAFE --sidebar-check + a clean rebuild. The sidebar code is preserved in runs/T16/*.reference. Recommend pairing: rebuild the check on the synchronous-drive pattern (no live run loop; wrap every check invocation in `timeout` so a regression can't wedge CI again).",
+    "T16 (the sidebar) is the highest-value remaining piece Dylan explicitly wanted; it is gated only on this headless-check rewrite. Its carry-forwards stand: switch is inert-until-T20 (spy the call), profiles are layout-only (T14)."
+  ]
+}
