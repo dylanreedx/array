@@ -288,7 +288,8 @@ class TileNSView: NSView {
             // translucent ghost and armed for commit on release. No modifier —
             // toggle the whole behavior in Settings ("Drag Snapping").
             let next = CanvasEngine.tile(tile, draggedByScreenDelta: delta, viewport: canvas.viewport)
-            canvas.updateTile(next)
+            // zone-unify P3: a move must not reshape the owning zone.
+            canvas.updateTile(next, recalculateZoneBounds: false)
             updateDragGhost(candidate: canvas.snapTarget(for: next.frame, excludingTileId: tile.id), on: canvas)
         case .resize(let edge):
             // Live resize: the tile previews itself as it sizes. Accumulate the raw,

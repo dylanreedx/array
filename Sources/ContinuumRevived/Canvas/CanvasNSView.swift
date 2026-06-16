@@ -121,6 +121,10 @@ final class CanvasNSView: NSView {
     func qaZoneMembership(of tileId: UUID) -> UUID? { tileZoneMembership[tileId] }
     /// QA reader: the current (mutable) placement of a live zone, or nil.
     func qaLiveZonePlacement(_ zoneId: UUID) -> ZonePlacement? { liveZones.first { $0.zoneId == zoneId } }
+    /// QA reader: the move-grab header rect for a live zone (screen coords).
+    func qaZoneHeaderGrabRect(_ zoneId: UUID) -> CGRect? {
+        liveZones.first { $0.zoneId == zoneId }.flatMap { zoneHeaderScreenRect(for: $0) }
+    }
 
     /// UserDefaults the zone-gesture threshold resolves from (ZoneGestureConfig).
     /// Overridable so `runZoneCreateGestureSelfCheck` can drive deterministically.
@@ -193,23 +197,46 @@ final class CanvasNSView: NSView {
 
     private func layoutZoneChromeViews() {
         guard showsZoneChrome else { return }
+        // zone-unify P3: a zone renders at its STORED frame (placement), not an
+        // adaptive hug. This keeps the size the user drew (room for more tiles),
+        // and makes the visible chrome coincide with the move-grab header rect
+        // (zoneHeaderScreenRect also reads placement) so the zone is movable.
+        // The frame only changes via create / move / grow-on-tile-resize.
         for placement in liveZones {
             guard let view = zoneChromeViews[placement.zoneId] else { continue }
-            let memberFrames = zoneMemberWorldFrames(placement)
-            var adaptiveBounds = CanvasEngine.zoneBounds(
-                memberFrames: memberFrames,
-                padding: ZoneBoundsConfig.padding(),
-                minSize: ZoneBoundsConfig.emptyMinSize(),
-                headerHeight: ZoneChromeNSView.headerHeight
-            )
-            if memberFrames.isEmpty {
-                let origin = placement.origin
-                adaptiveBounds = TileFrame(x: origin.x + adaptiveBounds.x, y: origin.y + adaptiveBounds.y,
-                                           width: adaptiveBounds.width, height: adaptiveBounds.height)
-            }
-            view.frame = CanvasEngine.tileScreenFrame(adaptiveBounds, viewport: canvasState.viewport)
+            view.frame = CanvasEngine.tileScreenFrame(CanvasEngine.zoneWorldFrame(placement), viewport: canvasState.viewport)
             view.needsDisplay = true
         }
+    }
+
+    /// Grow a zone's stored frame to contain its members (union + padding +
+    /// header), never shrinking. Called on tile resize (not move). Persists the
+    /// new placement via `onZoneMoved` so the grown size survives relaunch.
+    private func growZoneToFitMembers(_ zoneId: UUID) {
+        guard let idx = liveZones.firstIndex(where: { $0.zoneId == zoneId }) else { return }
+        let members = canvasState.tiles.filter { tileZoneMembership[$0.id] == zoneId }
+        guard !members.isEmpty else { return }
+        let pad = ZoneBoundsConfig.padding()
+        let hh = Double(ZoneChromeNSView.headerHeight)
+        var minX = Double.greatestFiniteMagnitude, minY = Double.greatestFiniteMagnitude
+        var maxX = -Double.greatestFiniteMagnitude, maxY = -Double.greatestFiniteMagnitude
+        for m in members {
+            minX = min(minX, m.frame.x); minY = min(minY, m.frame.y)
+            maxX = max(maxX, m.frame.x + m.frame.width); maxY = max(maxY, m.frame.y + m.frame.height)
+        }
+        let cur = liveZones[idx]
+        let newX = min(cur.origin.x, minX - pad)
+        let newY = min(cur.origin.y, minY - pad - hh)
+        let newMaxX = max(cur.origin.x + cur.size.width, maxX + pad)
+        let newMaxY = max(cur.origin.y + cur.size.height, maxY + pad)
+        let grown = ZonePoint(x: newX, y: newY)
+        let grownSize = ZoneSize(width: newMaxX - newX, height: newMaxY - newY)
+        guard grown != cur.origin || grownSize != cur.size else { return }
+        var p = cur
+        p.origin = grown
+        p.size = grownSize
+        liveZones[idx] = p
+        onZoneMoved?(p)
     }
 
     /// World-space member tile frames for `zone`. Tiles store world frames, so a
@@ -300,9 +327,14 @@ final class CanvasNSView: NSView {
         return nil
     }
 
-    func updateTile(_ tile: Tile) {
+    func updateTile(_ tile: Tile, recalculateZoneBounds: Bool = true) {
         guard let idx = canvasState.tiles.firstIndex(where: { $0.id == tile.id }) else { return }
         canvasState.tiles[idx] = tile
+        // zone-unify P3: only a RESIZE grows the owning zone; a MOVE leaves the
+        // zone frame fixed (the caller passes recalculateZoneBounds: false).
+        if recalculateZoneBounds, let zoneId = tileZoneMembership[tile.id] {
+            growZoneToFitMembers(zoneId)
+        }
         layoutTile(tile)
         layoutZoneChromeViews()
         delegate?.canvasDidChange(self)
@@ -1869,13 +1901,11 @@ final class CanvasNSView: NSView {
         let betaSnap = try expectSnapshot(canvas.zoneChromeSnapshot(for: betaZoneId), "missing beta chrome")
         try expect(betaSnap.displayName == "Beta", "zone name should come from render model")
         try expect(betaSnap.color == "mint", "zone color should be preserved")
-        // T11: beta has no tiles → adaptive bounds = empty-zone min size at beta's origin.
-        // ZoneBoundsConfig defaults: padding=24, emptyMinSize=480×320, headerHeight=34.
-        // Empty branch: TileFrame(x: beta.origin.x, y: beta.origin.y, w: 480, h: 320).
-        let betaAdaptiveBounds = TileFrame(x: Double(beta.origin.x), y: Double(beta.origin.y),
-                                           width: ZoneBoundsConfig.defaultEmptyMinWidth,
-                                           height: ZoneBoundsConfig.defaultEmptyMinHeight)
-        try expect(betaSnap.frame == CanvasEngine.tileScreenFrame(betaAdaptiveBounds, viewport: viewport), "beta chrome should use adaptive zone bounds (empty → min size at origin); expected \(CanvasEngine.tileScreenFrame(betaAdaptiveBounds, viewport: viewport)), got \(betaSnap.frame)")
+        // zone-unify P3: a zone renders at its STORED frame (placement), not an
+        // adaptive hug — so beta's chrome is its full placement (640×420 at its
+        // origin), keeping the size the user drew.
+        let betaStoredBounds = CanvasEngine.zoneWorldFrame(beta)
+        try expect(betaSnap.frame == CanvasEngine.tileScreenFrame(betaStoredBounds, viewport: viewport), "beta chrome should render at its stored placement frame; expected \(CanvasEngine.tileScreenFrame(betaStoredBounds, viewport: viewport)), got \(betaSnap.frame)")
         try expect(betaSnap.qaVerdictGlyph == "✓", "zone chrome snapshot should expose QA verdict glyph")
         try expect(betaSnap.qaVerdictTooltip?.contains("matrix: passed") == true, "zone chrome snapshot should expose QA verdict tooltip")
 
@@ -2113,9 +2143,10 @@ final class CanvasNSView: NSView {
 
     // MARK: - Zone adaptive bounds check (T11)
 
-    /// Real-path check: builds a live CanvasNSView with an activeZone + tiles,
-    /// synthesizes real NSEvent move/resize drags through TileNSView, and asserts
-    /// the zone chrome's drawn bounds recompute live after each committed gesture.
+    /// Real-path check (zone-unify P3): a zone renders at its STORED frame
+    /// (stable, not hugging), the move-grab header coincides with the visible
+    /// chrome, moving a tile inside does NOT reshape the zone, and resizing a tile
+    /// beyond the frame GROWS it (never shrinks). Drives real NSEvent drags.
     static func runZoneAdaptiveBoundsSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)
@@ -2131,8 +2162,6 @@ final class CanvasNSView: NSView {
             else { throw CheckError.failed("\(message): expected \(expected), got \(a)") }
         }
 
-        let padding = ZoneBoundsConfig.defaultPadding      // 24
-        let hh = ZoneChromeNSView.headerHeight             // 34
         let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
 
         // UUIDs for this check — stable and outside every other check's space.
@@ -2184,160 +2213,38 @@ final class CanvasNSView: NSView {
             return e
         }
 
-        // Assertion 1: Initial bounds = union+padding of the installed tiles.
-        // Union: (40,52,400,170). Adaptive: x=16, y=52-24-34=-6, w=448, h=170+48+34=252.
-        let expected1 = TileFrame(x: 16, y: -6, width: 448, height: 252)
-        try expectFrame(canvas.qaZoneDrawnWorldBounds(for: zoneId), expected1, "assertion 1: initial bounds")
+        // Assertion 1: the zone renders at its STORED frame (0,0,600,400),
+        // NOT an adaptive hug of the tiles.
+        let storedFrame = TileFrame(x: 0, y: 0, width: 600, height: 400)
+        try expectFrame(canvas.qaZoneDrawnWorldBounds(for: zoneId), storedFrame, "assertion 1: zone renders at its stored placement frame (not hugging)")
 
-        // Assertion 2: The chrome SCREEN frame matches tileScreenFrame(adaptiveBounds).
-        let expectedScreenFrame1 = CanvasEngine.tileScreenFrame(expected1, viewport: viewport)
-        let chromeSnap1 = canvas.zoneChromeSnapshot(for: zoneId)
-        guard let snap1 = chromeSnap1 else { throw CheckError.failed("assertion 2: missing chrome snapshot") }
-        try expect(snap1.frame == expectedScreenFrame1, "assertion 2: chrome screen frame should equal tileScreenFrame(adaptiveBounds); expected \(expectedScreenFrame1), got \(snap1.frame)")
+        // Assertion 2: the move-grab header rect coincides with the visible chrome
+        // top — so the zone is movable by grabbing what you see (the old divergence
+        // between adaptive chrome and the placement-based grab rect is gone).
+        guard let snap1 = canvas.zoneChromeSnapshot(for: zoneId) else { throw CheckError.failed("assertion 2: missing chrome snapshot") }
+        guard let grab = canvas.qaZoneHeaderGrabRect(zoneId) else { throw CheckError.failed("assertion 2: missing header grab rect") }
+        try expect(abs(grab.minX - snap1.frame.minX) < 0.5 && abs(grab.minY - snap1.frame.minY) < 0.5,
+                   "assertion 2: header grab rect top must align with the visible chrome top; grab=\(grab), chrome=\(snap1.frame)")
 
-        // Assertion 3: Move tile 2 right by Δx=300 via real drag → bounds grow.
-        // Tile 2 commits to (560,52,180,170). New union = (40,52,700,170). Adaptive: w=748, h=252.
-        let grabY2 = TileNSView.titleBarHeight / 2
-        let grab2Local = NSPoint(x: view2.bounds.midX, y: grabY2)
-        let grab2Window = view2.convert(grab2Local, to: nil)
-        let worldDx: CGFloat = 300
-        view2.mouseDown(with: try mouse(.leftMouseDown, at: grab2Window))
-        view2.mouseDragged(with: try mouse(.leftMouseDragged, at: NSPoint(x: grab2Window.x + worldDx, y: grab2Window.y)))
-        view2.mouseUp(with: try mouse(.leftMouseUp, at: NSPoint(x: grab2Window.x + worldDx, y: grab2Window.y)))
+        // Assertion 3: moving a tile WITHIN the zone does NOT reshape it.
+        let grab2 = view2.convert(NSPoint(x: view2.bounds.midX, y: TileNSView.titleBarHeight / 2), to: nil)
+        view2.mouseDown(with: try mouse(.leftMouseDown, at: grab2))
+        view2.mouseDragged(with: try mouse(.leftMouseDragged, at: NSPoint(x: grab2.x + 100, y: grab2.y)))
+        view2.mouseUp(with: try mouse(.leftMouseUp, at: NSPoint(x: grab2.x + 100, y: grab2.y)))
+        try expectFrame(canvas.qaZoneDrawnWorldBounds(for: zoneId), storedFrame, "assertion 3: moving a tile inside must NOT reshape the zone")
 
-        let expected3 = TileFrame(x: 16, y: -6, width: 748, height: 252)
-        try expectFrame(canvas.qaZoneDrawnWorldBounds(for: zoneId), expected3, "assertion 3: bounds grow after tile 2 moved right")
-        let snapAfter3 = canvas.zoneChromeSnapshot(for: zoneId)
-        guard let s3 = snapAfter3 else { throw CheckError.failed("assertion 3: missing chrome snapshot after move") }
-        let expectedScreen3 = CanvasEngine.tileScreenFrame(expected3, viewport: viewport)
-        try expect(s3.frame == expectedScreen3, "assertion 3: chrome screen frame must match adaptive bounds after move; expected \(expectedScreen3), got \(s3.frame)")
-
-        // Assertion 4: Move tile 1 UP by Δy=−40 → top edge (and header) rises.
-        // Tile 1 → y=12. New union minY=12. bounds.y = 12-24-34 = -46.
-        // Window coords have y=0 at bottom: moving UP in world (−world_y) means
-        // increasing window y. dy = newY − prevY > 0 → delta.height = −dy < 0 → world y decreases.
-        let grabY1 = TileNSView.titleBarHeight / 2
-        let grab1Local = NSPoint(x: view1.bounds.midX, y: grabY1)
-        let grab1Window = view1.convert(grab1Local, to: nil)
-        // +40 in window y = tile moves up 40 in world.
-        let windowDy4: CGFloat = 40
-        view1.mouseDown(with: try mouse(.leftMouseDown, at: grab1Window))
-        view1.mouseDragged(with: try mouse(.leftMouseDragged, at: NSPoint(x: grab1Window.x, y: grab1Window.y + windowDy4)))
-        view1.mouseUp(with: try mouse(.leftMouseUp, at: NSPoint(x: grab1Window.x, y: grab1Window.y + windowDy4)))
-
-        let bounds4 = canvas.qaZoneDrawnWorldBounds(for: zoneId)
-        // New union minY = 12, so bounds.y = 12 - 24 - 34 = -46.
-        // union h = (52+170) - 12 = 210. adaptive h = 210+48+34 = 292.
-        try expectFrame(bounds4, TileFrame(x: 16, y: -46, width: 748, height: 292),
-                        "assertion 4: bounds.y should rise after tile1 moved up")
-        guard let b4 = bounds4 else { throw CheckError.failed("assertion 4: nil bounds") }
-        try expect(abs(b4.y - (-46)) < 0.5, "assertion 4: bounds.y == -46 (12-24-34); got \(b4.y)")
-        try expect(abs((b4.y + hh) - (12 - padding)) < 0.5, "assertion 4: header bottom (bounds.y+34) should equal unionMinY - padding; got \(b4.y + hh)")
-
-        // Assertions 5+6: Resize tile 2's bottom edge.
-        // Pre-resize bounds (after assertion 4): capture them.
-        let preResizeBounds = canvas.qaZoneDrawnWorldBounds(for: zoneId)!
-
-        // Tile 2 is now at zone-local (560,52,180,150) — world same since origin (0,0).
-        // Bottom-edge resize: grab at (view2.bounds.midX, view2.bounds.height-1), drag DOWN +60px.
-        let resizeLocal2 = NSPoint(x: view2.bounds.midX, y: view2.bounds.height - 1)
-        try expect(view2.qaResizeEdge(at: resizeLocal2) == .bottom, "assertion 5 precondition: grab point must be bottom resize edge")
-        let resizeWindow2 = view2.convert(resizeLocal2, to: nil)
-        view2.mouseDown(with: try mouse(.leftMouseDown, at: resizeWindow2))
-        // In a flipped view: moving DOWN in world = moving DOWN in window coords (y increases = down in screen/world).
-        // But drag events: worldDy=+60 means tile grows down. In screen coords at zoom 1, delta.height = worldDy.
-        // TileNSView resize: delta.height = -(current.y - previous.y). To get delta.height = +60: current.y = previous.y - 60.
-        let resizeDelta: CGFloat = 60
-        view2.mouseDragged(with: try mouse(.leftMouseDragged, at: NSPoint(x: resizeWindow2.x, y: resizeWindow2.y - resizeDelta)))
-        view2.mouseUp(with: try mouse(.leftMouseUp, at: NSPoint(x: resizeWindow2.x, y: resizeWindow2.y - resizeDelta)))
-
-        let postResizeBounds = canvas.qaZoneDrawnWorldBounds(for: zoneId)
-        guard let postR = postResizeBounds else { throw CheckError.failed("assertion 5: nil bounds after resize") }
-        try expect(abs(postR.height - preResizeBounds.height - resizeDelta) < 0.5, "assertion 5: height should increase by \(resizeDelta); pre=\(preResizeBounds.height), post=\(postR.height)")
-        // Bottom edge = unionMaxY + padding. unionMaxY after resize = 52 + 170 + 60 = 282.
-        let unionMaxYAfterResize: Double = 52 + 170 + 60
-        try expect(abs((postR.y + postR.height) - (unionMaxYAfterResize + padding)) < 0.5,
-                   "assertion 5: bottom edge should equal unionMaxY + padding = \(unionMaxYAfterResize + padding); got \(postR.y + postR.height)")
-
-        // Assertion 6: Shrink back by -60px → bounds return to pre-resize value.
-        // Re-capture the current bottom-edge position (view2 is now taller after +60 resize).
-        // Sanity: tile2 should have height=230 after +60 grow.
-        let tile2AfterGrow = canvas.canvasState.tiles.first(where: { $0.id == t2Id })
-        try expect(tile2AfterGrow?.frame.height == 170 + 60, "assertion 6 precondition: tile2.height should be 230 after grow; got \(String(describing: tile2AfterGrow?.frame.height))")
-        try expect(view2.bounds.height == 230, "assertion 6 precondition: view2.bounds.height should be 230 after grow; got \(view2.bounds.height)")
-        let shrinkLocal2 = NSPoint(x: view2.bounds.midX, y: view2.bounds.height - 1)
-        let shrinkWindow2 = view2.convert(shrinkLocal2, to: nil)
-        // Shrink: delta.height = -60, so dy = +60, so new event y = shrinkWindow2.y + 60.
-        view2.mouseDown(with: try mouse(.leftMouseDown, at: shrinkWindow2))
-        view2.mouseDragged(with: try mouse(.leftMouseDragged, at: NSPoint(x: shrinkWindow2.x, y: shrinkWindow2.y + resizeDelta)))
-        view2.mouseUp(with: try mouse(.leftMouseUp, at: NSPoint(x: shrinkWindow2.x, y: shrinkWindow2.y + resizeDelta)))
-
-        let postShrinkBounds = canvas.qaZoneDrawnWorldBounds(for: zoneId)
-        guard let shrunk = postShrinkBounds else { throw CheckError.failed("assertion 6: nil bounds after shrink") }
-        let tile2AfterShrink = canvas.canvasState.tiles.first(where: { $0.id == t2Id })
-        try expect(abs(shrunk.height - preResizeBounds.height) < 0.5, "assertion 6: height should return to pre-resize value \(preResizeBounds.height); got \(shrunk.height) (tile2 height after shrink: \(String(describing: tile2AfterShrink?.frame.height)))")
-        try expectFrame(postShrinkBounds, preResizeBounds, "assertion 6: bounds should return to pre-resize value after shrink")
-
-        // Assertion 7: Empty zone → min size at the stored origin.
-        let emptyZoneId = UUID(uuidString: "00000000-0000-0000-0000-000000005B02")!
-        let emptyProjId = UUID(uuidString: "00000000-0000-0000-0000-000000005B03")!
-        let emptyZone = ZonePlacement(zoneId: emptyZoneId, projectId: emptyProjId,
-                                      origin: ZonePoint(x: 200, y: 100),
-                                      size: ZoneSize(width: 640, height: 400), color: "mint",
-                                      collapsed: false, hydrationPolicy: .automatic)
-        let emptyCanvas = CanvasNSView(
-            canvasState: CanvasState(viewport: viewport, tiles: [], groups: [], lastActiveTileId: nil),
-            activeZone: emptyZone,
-            zoneRenderModels: [ZoneRenderModel(placement: emptyZone, displayName: "Empty")],
-            showsZoneChrome: true
-        )
-        emptyCanvas.frame = NSRect(x: 0, y: 0, width: 1200, height: 800)
-        let emptyWindow = NSWindow(contentRect: emptyCanvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-        emptyWindow.contentView = emptyCanvas
-        emptyWindow.orderFrontRegardless()
-        emptyCanvas.layoutSubtreeIfNeeded()
-
-        let expected7 = TileFrame(x: 200, y: 100,
-                                  width: ZoneBoundsConfig.defaultEmptyMinWidth,
-                                  height: ZoneBoundsConfig.defaultEmptyMinHeight)
-        try expectFrame(emptyCanvas.qaZoneDrawnWorldBounds(for: emptyZoneId), expected7, "assertion 7: empty zone → min size at stored origin")
-        // Height must not double-count the header (320, not 354).
-        try expect(abs((emptyCanvas.qaZoneDrawnWorldBounds(for: emptyZoneId)?.height ?? 0) - 320) < 0.5, "assertion 7: height must be exactly 320, not 354 (header not double-added)")
-
-        // Assertion 8: Overlap is allowed (v1 — no neighbor auto-reflow).
-        let overAId = UUID(uuidString: "00000000-0000-0000-0000-000000005B04")!
-        let overBId = UUID(uuidString: "00000000-0000-0000-0000-000000005B05")!
-        let oTile1 = Tile(id: t1Id, kind: .note, title: "OA", frame: TileFrame(x: 10, y: 10, width: 100, height: 100), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let oTile2 = Tile(id: t2Id, kind: .note, title: "OB", frame: TileFrame(x: 60, y: 60, width: 100, height: 100), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
-        let zoneA = ZonePlacement(zoneId: overAId, projectId: projId, origin: ZonePoint(x: 0, y: 0),
-                                  size: ZoneSize(width: 400, height: 400), color: "blue",
-                                  collapsed: false, hydrationPolicy: .automatic)
-        let zoneB = ZonePlacement(zoneId: overBId, projectId: projId, origin: ZonePoint(x: 30, y: 30),
-                                  size: ZoneSize(width: 400, height: 400), color: "mint",
-                                  collapsed: false, hydrationPolicy: .automatic)
-        // Two single-tile canvases with overlapping adaptive bounds.
-        let overCanvasA = CanvasNSView(
-            canvasState: CanvasState(viewport: viewport, tiles: [oTile1], groups: [], lastActiveTileId: nil),
-            activeZone: zoneA,
-            zoneRenderModels: [ZoneRenderModel(placement: zoneA, displayName: "OverA")],
-            showsZoneChrome: true
-        )
-        overCanvasA.layoutSubtreeIfNeeded()
-        let overCanvasB = CanvasNSView(
-            canvasState: CanvasState(viewport: viewport, tiles: [oTile2], groups: [], lastActiveTileId: nil),
-            activeZone: zoneB,
-            zoneRenderModels: [ZoneRenderModel(placement: zoneB, displayName: "OverB")],
-            showsZoneChrome: true
-        )
-        overCanvasB.layoutSubtreeIfNeeded()
-
-        // Each canvas independently computes its own adaptive bounds — no reflow.
-        // oTile1 world = (10,10,100,100). Zone A bounds = (10-24,10-24-34,100+48,100+48+34)=(-14,-48,148,182).
-        let expectedA8 = TileFrame(x: 10 - padding, y: 10 - padding - hh, width: 100 + 2 * padding, height: 100 + 2 * padding + hh)
-        // Members store WORLD frames (no zone-origin offset): oTile2 world = (60,60).
-        let expectedB8 = TileFrame(x: 60 - padding, y: 60 - padding - hh, width: 100 + 2 * padding, height: 100 + 2 * padding + hh)
-        try expectFrame(overCanvasA.qaZoneDrawnWorldBounds(for: overAId), expectedA8, "assertion 8a: zone A bounds unchanged by neighbor")
-        try expectFrame(overCanvasB.qaZoneDrawnWorldBounds(for: overBId), expectedB8, "assertion 8b: zone B bounds unchanged by neighbor")
+        // Assertion 4: resizing a tile beyond the zone GROWS it (never shrinks below
+        // the original frame). Drag tile2's bottom edge down well past the 400 floor.
+        let resizeLocal = NSPoint(x: view2.bounds.midX, y: view2.bounds.height - 1)
+        try expect(view2.qaResizeEdge(at: resizeLocal) == .bottom, "assertion 4 precondition: grab point must be the bottom resize edge")
+        let resizeWindow = view2.convert(resizeLocal, to: nil)
+        view2.mouseDown(with: try mouse(.leftMouseDown, at: resizeWindow))
+        view2.mouseDragged(with: try mouse(.leftMouseDragged, at: NSPoint(x: resizeWindow.x, y: resizeWindow.y - 250)))
+        view2.mouseUp(with: try mouse(.leftMouseUp, at: NSPoint(x: resizeWindow.x, y: resizeWindow.y - 250)))
+        guard let grown = canvas.qaZoneDrawnWorldBounds(for: zoneId) else { throw CheckError.failed("assertion 4: nil bounds") }
+        try expect(grown.height > 400 + 0.5, "assertion 4: resizing a tile beyond the zone must grow its height; got \(grown.height)")
+        try expect(grown.x <= 0.5 && grown.y <= 0.5 && grown.x + grown.width >= 600 - 0.5 && grown.y + grown.height >= 400 - 0.5,
+                   "assertion 4: grown zone must still contain the original frame; got \(grown)")
 
         // Assertion 9: Non-blank render (grey-screen guard) + PNG artifact.
         let fm = FileManager.default
@@ -2360,10 +2267,9 @@ final class CanvasNSView: NSView {
 
         let artifact = directory.appendingPathComponent("manifest.json")
         let manifest: [String: Any] = [
-            "check": "zone-adaptive-bounds",
+            "check": "zone-frame (stable; move=no-reshape, resize=grow)",
             "path": "synthesized NSEvent move/resize through TileNSView (real drag path)",
-            "assertion1InitialBounds": ["x": expected1.x, "y": expected1.y, "w": expected1.width, "h": expected1.height],
-            "assertion3BoundsAfterMove": ["x": expected3.x, "y": expected3.y, "w": expected3.width, "h": expected3.height],
+            "storedFrame": ["x": storedFrame.x, "y": storedFrame.y, "w": storedFrame.width, "h": storedFrame.height],
             "screenshots": [screenshot.path]
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
