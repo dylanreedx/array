@@ -90,6 +90,30 @@ final class CanvasNSView: NSView {
     private var spaceHeld = false
     private var spaceDragLastWindowPoint: CGPoint = .zero
 
+    // MARK: - Zone gesture state machine (T19)
+
+    private enum ZoneGesture {
+        case none
+        case creating(originScreen: CGPoint)
+        case movingZone(zoneId: UUID, lastWindowPoint: CGPoint)
+    }
+    private var zoneGesture: ZoneGesture = .none
+    /// Tracks the latest placement during a render-model zone move (no ZoneLayer).
+    /// Read in mouseUp to fire onZoneMoved even on the render-model path.
+    private var pendingMovedPlacement: ZonePlacement?
+
+    /// UserDefaults the zone-gesture threshold resolves from (ZoneGestureConfig).
+    /// Overridable so `runZoneCreateGestureSelfCheck` can drive deterministically.
+    var zoneGestureDefaults: UserDefaults = .standard
+
+    /// Fired when a drag-to-create gesture commits a new group zone.
+    /// The placement is passed; the caller persists it (e.g. via WorkspaceDocument).
+    var onZoneCreated: ((ZonePlacement) -> Void)?
+
+    /// Fired when a drag-on-chrome gesture commits a moved zone.
+    /// The new placement (translated origin) is passed; the caller persists it.
+    var onZoneMoved: ((ZonePlacement) -> Void)?
+
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
@@ -554,6 +578,17 @@ final class CanvasNSView: NSView {
         }?.placement.zoneId
     }
 
+    /// Zone gesture classification (T19): checks both `zoneRenderModels` and `zoneLayers`
+    /// so that zones installed via T05's ZoneLayer API are also recognized.
+    private func _zoneHeaderZoneId(at screenPoint: CGPoint) -> UUID? {
+        if let id = zoneHeaderZoneId(at: screenPoint) { return id }
+        // Also check ZoneLayers installed via T05.
+        return zoneLayers.reversed().first { layer in
+            guard let header = zoneHeaderScreenRect(for: layer.placement) else { return false }
+            return header.contains(screenPoint)
+        }?.placement.zoneId
+    }
+
     private func zoneHeaderScreenRect(for placement: ZonePlacement) -> CGRect? {
         let frame = CanvasEngine.tileScreenFrame(CanvasEngine.zoneWorldFrame(placement), viewport: canvasState.viewport)
         guard frame.width > 0, frame.height > 0 else { return nil }
@@ -601,6 +636,19 @@ final class CanvasNSView: NSView {
         let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: canvasState.viewport)
         return zoneRenderModels.reversed().first { model in
             let frame = CanvasEngine.zoneWorldFrame(model.placement)
+            return worldPoint.x >= frame.x && worldPoint.x <= frame.x + frame.width
+                && worldPoint.y >= frame.y && worldPoint.y <= frame.y + frame.height
+        }?.placement.zoneId
+    }
+
+    /// Zone gesture classification (T19): checks both `zoneRenderModels` and `zoneLayers`
+    /// so that zones installed only via T05's ZoneLayer API (e.g. after a workspace switch
+    /// where `zoneRenderModels` is stale) are not wrongly treated as empty canvas.
+    private func _zoneId(at screenPoint: CGPoint) -> UUID? {
+        if let id = zoneId(at: screenPoint) { return id }
+        let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: canvasState.viewport)
+        return zoneLayers.reversed().first { layer in
+            let frame = CanvasEngine.zoneWorldFrame(layer.placement)
             return worldPoint.x >= frame.x && worldPoint.x <= frame.x + frame.width
                 && worldPoint.y >= frame.y && worldPoint.y <= frame.y + frame.height
         }?.placement.zoneId
@@ -914,6 +962,17 @@ final class CanvasNSView: NSView {
         if event.clickCount >= 2, qaDoubleClickZoneHeaderOrBackground(at: point) != nil {
             return
         }
+        // Zone gesture classification (T19): check chrome header → move; empty canvas → create.
+        // A press that reaches a tile falls through to TileNSView, which owns tile drag.
+        pendingMovedPlacement = nil
+        if let zoneId = _zoneHeaderZoneId(at: point) {
+            zoneGesture = .movingZone(zoneId: zoneId, lastWindowPoint: event.locationInWindow)
+            return
+        }
+        if tileId(at: point) == nil && _zoneId(at: point) == nil {
+            zoneGesture = .creating(originScreen: point)
+            // Fall through to deselect on background click.
+        }
         // Click on canvas background — deselect.
         canvasState.lastActiveTileId = nil
         delegate?.canvasDidChange(self)
@@ -943,12 +1002,123 @@ final class CanvasNSView: NSView {
             setViewport(v)
             return
         }
+        let point = convert(event.locationInWindow, from: nil)
+        switch zoneGesture {
+        case .none:
+            break
+        case .creating(let originScreen):
+            // Show marquee ghost once the drag exceeds the create threshold.
+            let dx = point.x - originScreen.x
+            let dy = point.y - originScreen.y
+            let dist = sqrt(dx * dx + dy * dy)
+            let threshold = ZoneGestureConfig.minCreateDragScreenPoints(defaults: zoneGestureDefaults)
+            if dist >= threshold {
+                let vp = canvasState.viewport
+                let aw = CanvasEngine.screenToWorld(originScreen, viewport: vp)
+                let bw = CanvasEngine.screenToWorld(point, viewport: vp)
+                let marqueeWorld = TileFrame(
+                    x: Double(min(aw.x, bw.x)),
+                    y: Double(min(aw.y, bw.y)),
+                    width: Double(abs(bw.x - aw.x)),
+                    height: Double(abs(bw.y - aw.y))
+                )
+                showDragGhost(at: marqueeWorld)
+            }
+            return
+        case .movingZone(let zoneId, let lastWindowPoint):
+            let dx = event.locationInWindow.x - lastWindowPoint.x
+            // Negate dy: window-y-up vs canvas-y-down (same convention as TileNSView.mouseDragged).
+            let dy = -(event.locationInWindow.y - lastWindowPoint.y)
+            zoneGesture = .movingZone(zoneId: zoneId, lastWindowPoint: event.locationInWindow)
+            let vp = canvasState.viewport
+            let screenDelta = CGSize(width: dx, height: dy)
+            // Update the zone layer placement live so chrome + tiles repaint.
+            if let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) {
+                let newPlacement = CanvasEngine.zone(layer.placement, draggedByScreenDelta: screenDelta, viewport: vp)
+                setZonePlacement(newPlacement)
+            } else if let model = zoneRenderModels.first(where: { $0.placement.zoneId == zoneId }) {
+                // Render-model (production immutable-zones) path: update the chrome view
+                // directly and accumulate the committed placement in pendingMovedPlacement
+                // so mouseUp can fire onZoneMoved even without a ZoneLayer.
+                let base = pendingMovedPlacement ?? model.placement
+                let worldDx = Double(dx) / vp.zoom
+                let worldDy = Double(dy) / vp.zoom
+                var updatedPlacement = base
+                updatedPlacement.origin = ZonePoint(x: base.origin.x + worldDx, y: base.origin.y + worldDy)
+                pendingMovedPlacement = updatedPlacement
+                if let chromeView = zoneChromeViews[zoneId] {
+                    let memberFrames = zoneMemberWorldFrames(model)
+                    let adaptiveBounds = CanvasEngine.zoneBounds(
+                        memberFrames: memberFrames,
+                        padding: ZoneBoundsConfig.padding(),
+                        minSize: ZoneBoundsConfig.emptyMinSize(),
+                        headerHeight: ZoneChromeNSView.headerHeight
+                    )
+                    let adjustedBounds = memberFrames.isEmpty
+                        ? TileFrame(x: updatedPlacement.origin.x + adaptiveBounds.x,
+                                    y: updatedPlacement.origin.y + adaptiveBounds.y,
+                                    width: adaptiveBounds.width, height: adaptiveBounds.height)
+                        : adaptiveBounds
+                    chromeView.frame = CanvasEngine.tileScreenFrame(adjustedBounds, viewport: vp)
+                    chromeView.needsDisplay = true
+                }
+            }
+            return
+        }
         super.mouseDragged(with: event)
     }
 
     override func mouseUp(with event: NSEvent) {
         if spaceHeld {
             NSCursor.pop()
+            return
+        }
+        let currentGesture = zoneGesture
+        zoneGesture = .none
+        switch currentGesture {
+        case .none:
+            break
+        case .creating(let originScreen):
+            hideDragGhost()
+            let point = convert(event.locationInWindow, from: nil)
+            let dx = point.x - originScreen.x
+            let dy = point.y - originScreen.y
+            let dist = sqrt(dx * dx + dy * dy)
+            let threshold = ZoneGestureConfig.minCreateDragScreenPoints(defaults: zoneGestureDefaults)
+            if dist >= threshold {
+                let vp = canvasState.viewport
+                let aw = CanvasEngine.screenToWorld(originScreen, viewport: vp)
+                let bw = CanvasEngine.screenToWorld(point, viewport: vp)
+                let newZoneId = UUID()
+                let placement = ZonePlacement(
+                    zoneId: newZoneId,
+                    projectId: nil,
+                    origin: ZonePoint(x: Double(min(aw.x, bw.x)), y: Double(min(aw.y, bw.y))),
+                    size: ZoneSize(width: Double(abs(bw.x - aw.x)), height: Double(abs(bw.y - aw.y))),
+                    color: "teal",
+                    collapsed: false,
+                    hydrationPolicy: .automatic,
+                    name: "",
+                    navKey: nil
+                )
+                // Install as a ZoneLayer so it's live on canvas.
+                let renderModel = ZoneRenderModel(placement: placement, displayName: "")
+                let layer = ZoneLayer(placement: placement, renderModel: renderModel, tiles: [])
+                upsertZoneLayer(layer)
+                onZoneCreated?(placement)
+            }
+            return
+        case .movingZone(let zoneId, _):
+            hideDragGhost()
+            // Commit: fire onZoneMoved so callers can persist.
+            // ZoneLayer path: placement was updated live via setZonePlacement.
+            // Render-model path: accumulated in pendingMovedPlacement during mouseDragged.
+            if let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) {
+                onZoneMoved?(layer.placement)
+            } else if let pending = pendingMovedPlacement {
+                onZoneMoved?(pending)
+            }
+            pendingMovedPlacement = nil
             return
         }
         super.mouseUp(with: event)
@@ -1110,6 +1280,11 @@ final class CanvasNSView: NSView {
     /// Test introspection: the tile ids a layer currently owns.
     func tileIds(inZone zoneId: UUID) -> [UUID] {
         zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.tiles.map(\.id) ?? []
+    }
+
+    /// QA (T19): the current stored placement for a ZoneLayer (reflects adaptive-bounds recompute).
+    func qaZoneLayerPlacement(for zoneId: UUID) -> ZonePlacement? {
+        zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement
     }
 
     // Install a layer: add subviews + register adapters + track in storage.
@@ -2877,6 +3052,504 @@ final class CanvasNSView: NSView {
             "frozenSnapshotSize": ["width": metrics.width, "height": metrics.height],
             "frozenSnapshotIsBlank": metrics.isBlank,
             "screenshots": [screenshot.path]
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    // MARK: - Zone create/move gesture check (T19)
+
+    static func runZoneCreateGestureSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(m): return m } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func mouse(_ type: NSEvent.EventType, at p: NSPoint, window: NSWindow) throws -> NSEvent {
+            guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: 1,
+                                             pressure: type == .leftMouseUp ? 0 : 1)
+            else { throw CheckError.failed("could not synthesize \(type) at \(p)") }
+            return e
+        }
+        // Convert canvas-local (y-down, 0 at top) → window (y-up, 0 at bottom).
+        // The canvas is the contentView at origin (0,0), height = canvasH.
+        func win(_ cx: CGFloat, _ cy: CGFloat, canvasH: CGFloat) -> NSPoint {
+            NSPoint(x: cx, y: canvasH - cy)
+        }
+
+        // ── Setup A: empty canvas, zoom 1, window 1000×700 ────────────────────────
+
+        let vp1 = CanvasViewport(x: 0, y: 0, zoom: 1)
+        let canvasA = CanvasNSView(
+            canvasState: CanvasState(viewport: vp1, tiles: [], groups: [], lastActiveTileId: nil),
+            showsZoneChrome: true
+        )
+        canvasA.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let windowA = NSWindow(contentRect: canvasA.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        windowA.contentView = canvasA
+        windowA.orderFrontRegardless()
+        canvasA.layoutSubtreeIfNeeded()
+
+        // Isolated defaults so ZoneGestureConfig doesn't read real user defaults.
+        let suiteNameA = "T19-check-A-\(UUID().uuidString)"
+        let gestureDefaultsA = UserDefaults(suiteName: suiteNameA)!
+        gestureDefaultsA.removePersistentDomain(forName: suiteNameA)
+        canvasA.zoneGestureDefaults = gestureDefaultsA
+        defer { gestureDefaultsA.removePersistentDomain(forName: suiteNameA) }
+
+        var createdPlacements: [ZonePlacement] = []
+        canvasA.onZoneCreated = { createdPlacements.append($0) }
+
+        let cH: CGFloat = 700  // canvas height for win() conversion
+
+        // ── Assertion 1: below-threshold drag is NOT a create ─────────────────────
+        // Canvas-local: start (200,200), drag +10px to (210,200). Dist < 24 threshold.
+        let threshold = ZoneGestureConfig.defaultMinCreateDragScreenPoints  // 24
+
+        canvasA.mouseDown(with: try mouse(.leftMouseDown, at: win(200, 200, canvasH: cH), window: windowA))
+        canvasA.mouseDragged(with: try mouse(.leftMouseDragged, at: win(210, 200, canvasH: cH), window: windowA))
+        canvasA.mouseUp(with: try mouse(.leftMouseUp, at: win(210, 200, canvasH: cH), window: windowA))
+
+        try expect(createdPlacements.isEmpty, "assertion 1: below-threshold drag (10 px < \(threshold) threshold) must NOT create a zone")
+        try expect(canvasA.canvasState.lastActiveTileId == nil, "assertion 1: lastActiveTileId must remain nil after below-threshold drag")
+        try expect(canvasA.installedZoneLayerIds.isEmpty, "assertion 1: canvas zone set must be empty after below-threshold drag")
+
+        // ── Assertion 2: above-threshold drag creates exactly one group zone ───────
+        // Canvas-local: (120,150)→(520,470). Window: (120, 700-150)=(120,550) → (520, 700-470)=(520,230).
+        let downWin2 = win(120, 150, canvasH: cH)   // window (120, 550)
+        let dragWin2 = win(520, 470, canvasH: cH)   // window (520, 230)
+
+        canvasA.mouseDown(with: try mouse(.leftMouseDown, at: downWin2, window: windowA))
+        canvasA.mouseDragged(with: try mouse(.leftMouseDragged, at: dragWin2, window: windowA))
+        canvasA.mouseUp(with: try mouse(.leftMouseUp, at: dragWin2, window: windowA))
+
+        try expect(createdPlacements.count == 1, "assertion 2: exactly one zone created; got \(createdPlacements.count)")
+        let created = createdPlacements[0]
+        try expect(created.projectId == nil, "assertion 2: created zone must have projectId == nil (group zone)")
+        try expect(created.collapsed == false, "assertion 2: created zone collapsed == false")
+        try expect(created.hydrationPolicy == .automatic, "assertion 2: created zone hydrationPolicy == .automatic")
+        try expect(created.name == "", "assertion 2: created zone name == \"\"")
+        try expect(created.navKey == nil, "assertion 2: created zone navKey == nil")
+        try expect(created.color == "teal", "assertion 2: created zone color == \"teal\"")
+        try expect(canvasA.installedZoneLayerIds.count == 1, "assertion 2: canvas zone set has exactly one layer")
+
+        // ── Assertion 3: created zone bounds == drag rect (world) ─────────────────
+        // At zoom 1, viewport (0,0): screen == world. origin=(120,150), size=(400,320).
+        try expect(abs(created.origin.x - 120) < 0.5 && abs(created.origin.y - 150) < 0.5,
+                   "assertion 3: created zone origin == (120, 150), got (\(created.origin.x), \(created.origin.y))")
+        try expect(abs(created.size.width - 400) < 0.5 && abs(created.size.height - 320) < 0.5,
+                   "assertion 3: created zone size == (400, 320), got (\(created.size.width), \(created.size.height))")
+
+        // ── Assertion 4: in-flight marquee ghost ──────────────────────────────────
+        // Fresh canvas for isolation.
+        createdPlacements.removeAll()
+        let canvasA4 = CanvasNSView(
+            canvasState: CanvasState(viewport: vp1, tiles: [], groups: [], lastActiveTileId: nil),
+            showsZoneChrome: true
+        )
+        canvasA4.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let windowA4 = NSWindow(contentRect: canvasA4.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        windowA4.contentView = canvasA4
+        windowA4.orderFrontRegardless()
+        canvasA4.layoutSubtreeIfNeeded()
+        let suiteNameA4 = "T19-check-A4-\(UUID().uuidString)"
+        let gestureDefaultsA4 = UserDefaults(suiteName: suiteNameA4)!
+        gestureDefaultsA4.removePersistentDomain(forName: suiteNameA4)
+        canvasA4.zoneGestureDefaults = gestureDefaultsA4
+        defer { gestureDefaultsA4.removePersistentDomain(forName: suiteNameA4) }
+        var createdA4: [ZonePlacement] = []
+        canvasA4.onZoneCreated = { createdA4.append($0) }
+
+        canvasA4.mouseDown(with: try mouse(.leftMouseDown, at: downWin2, window: windowA4))
+        // Ghost should appear on first above-threshold drag event.
+        canvasA4.mouseDragged(with: try mouse(.leftMouseDragged, at: dragWin2, window: windowA4))
+        try expect(canvasA4.qaDragGhostFrame != nil, "assertion 4: ghost must be visible during above-threshold drag")
+        // Ghost frame should equal tileScreenFrame of the current marquee world rect.
+        // At zoom 1, viewport (0,0): world == canvas-local. Origin=(120,150), size=(400,320).
+        let marqueeWorld4 = TileFrame(x: 120, y: 150, width: 400, height: 320)
+        let expectedGhostFrame4 = CanvasEngine.tileScreenFrame(marqueeWorld4, viewport: vp1)
+        try expect(canvasA4.qaDragGhostFrame == expectedGhostFrame4,
+                   "assertion 4: ghost frame == tileScreenFrame(marqueeWorldRect); expected \(expectedGhostFrame4), got \(String(describing: canvasA4.qaDragGhostFrame))")
+        canvasA4.mouseUp(with: try mouse(.leftMouseUp, at: dragWin2, window: windowA4))
+        try expect(canvasA4.qaDragGhostFrame == nil, "assertion 4: ghost must be hidden after mouseUp")
+
+        // ── Assertion 5: reversed drag normalizes ─────────────────────────────────
+        createdPlacements.removeAll()
+        let canvasA5 = CanvasNSView(
+            canvasState: CanvasState(viewport: vp1, tiles: [], groups: [], lastActiveTileId: nil),
+            showsZoneChrome: true
+        )
+        canvasA5.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let windowA5 = NSWindow(contentRect: canvasA5.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        windowA5.contentView = canvasA5
+        windowA5.orderFrontRegardless()
+        canvasA5.layoutSubtreeIfNeeded()
+        let suiteNameA5 = "T19-check-A5-\(UUID().uuidString)"
+        let gestureDefaultsA5 = UserDefaults(suiteName: suiteNameA5)!
+        gestureDefaultsA5.removePersistentDomain(forName: suiteNameA5)
+        canvasA5.zoneGestureDefaults = gestureDefaultsA5
+        defer { gestureDefaultsA5.removePersistentDomain(forName: suiteNameA5) }
+        var createdA5: [ZonePlacement] = []
+        canvasA5.onZoneCreated = { createdA5.append($0) }
+
+        // Drag up-left: canvas-local (520,470)→(120,150). Window: (520,230)→(120,550).
+        canvasA5.mouseDown(with: try mouse(.leftMouseDown, at: win(520, 470, canvasH: cH), window: windowA5))
+        canvasA5.mouseDragged(with: try mouse(.leftMouseDragged, at: win(120, 150, canvasH: cH), window: windowA5))
+        canvasA5.mouseUp(with: try mouse(.leftMouseUp, at: win(120, 150, canvasH: cH), window: windowA5))
+
+        try expect(createdA5.count == 1, "assertion 5: reversed drag creates exactly one zone")
+        let rev = createdA5[0]
+        try expect(abs(rev.origin.x - 120) < 0.5 && abs(rev.origin.y - 150) < 0.5,
+                   "assertion 5: reversed drag origin == (120, 150), got (\(rev.origin.x), \(rev.origin.y))")
+        try expect(abs(rev.size.width - 400) < 0.5 && abs(rev.size.height - 320) < 0.5,
+                   "assertion 5: reversed drag size == (400, 320), got (\(rev.size.width), \(rev.size.height))")
+
+        // ── Assertion 6: zoom + non-origin viewport ───────────────────────────────
+        // Viewport (x:200, y:100, zoom:0.5). Drag screen (100,100)→(300,300).
+        // worldX = vp.x + screenX/zoom = 200 + 100/0.5 = 400; worldY = 100 + 100/0.5 = 300.
+        // size: |300-100|/0.5 = 400, |300-100|/0.5 = 400. → origin (400,300), size (400,400).
+        let vp05 = CanvasViewport(x: 200, y: 100, zoom: 0.5)
+        let canvasA6 = CanvasNSView(
+            canvasState: CanvasState(viewport: vp05, tiles: [], groups: [], lastActiveTileId: nil),
+            showsZoneChrome: true
+        )
+        canvasA6.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let windowA6 = NSWindow(contentRect: canvasA6.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        windowA6.contentView = canvasA6
+        windowA6.orderFrontRegardless()
+        canvasA6.layoutSubtreeIfNeeded()
+        let suiteNameA6 = "T19-check-A6-\(UUID().uuidString)"
+        let gestureDefaultsA6 = UserDefaults(suiteName: suiteNameA6)!
+        gestureDefaultsA6.removePersistentDomain(forName: suiteNameA6)
+        canvasA6.zoneGestureDefaults = gestureDefaultsA6
+        defer { gestureDefaultsA6.removePersistentDomain(forName: suiteNameA6) }
+        var createdA6: [ZonePlacement] = []
+        canvasA6.onZoneCreated = { createdA6.append($0) }
+
+        // Canvas-local (100,100)→(300,300). Window: (100,600)→(300,400).
+        canvasA6.mouseDown(with: try mouse(.leftMouseDown, at: win(100, 100, canvasH: cH), window: windowA6))
+        canvasA6.mouseDragged(with: try mouse(.leftMouseDragged, at: win(300, 300, canvasH: cH), window: windowA6))
+        canvasA6.mouseUp(with: try mouse(.leftMouseUp, at: win(300, 300, canvasH: cH), window: windowA6))
+
+        try expect(createdA6.count == 1, "assertion 6: zoom+non-origin viewport creates one zone")
+        let z6 = createdA6[0]
+        try expect(abs(z6.origin.x - 400) < 0.5 && abs(z6.origin.y - 300) < 0.5,
+                   "assertion 6: origin must be screenToWorld((100,100)) = (400,300), got (\(z6.origin.x), \(z6.origin.y))")
+        try expect(abs(z6.size.width - 400) < 0.5 && abs(z6.size.height - 400) < 0.5,
+                   "assertion 6: size must be (200/0.5, 200/0.5) = (400,400), got (\(z6.size.width), \(z6.size.height))")
+
+        // ── Assertion 7: persistence — real WorkspaceDocument disk round-trip ────
+        // Wire onZoneCreated to inline persistence logic (same as persistCreatedGroupZone
+        // in AppDelegate) so this checks the full seam: gesture → callback → WorkspaceStore
+        // → disk → reload. A stubbed callback would leave the store empty → RED.
+        let fm7 = FileManager.default
+        let tempRoot7 = fm7.temporaryDirectory
+            .appendingPathComponent("T19-check-A7-\(UUID().uuidString)", isDirectory: true)
+        let appSupport7 = tempRoot7.appendingPathComponent("AppSupport", isDirectory: true)
+        try fm7.createDirectory(at: appSupport7, withIntermediateDirectories: true)
+        defer { try? fm7.removeItem(at: tempRoot7) }
+        let workspaceId7 = UUID(uuidString: "00000000-0000-0000-0000-000000001970")!
+        let store7 = WorkspaceStore(workspaceId: workspaceId7, applicationSupportDirectory: appSupport7)
+        let emptyDoc7 = WorkspaceDocument(viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                                          zones: [], zoneZOrder: [], lastActiveZoneId: nil)
+        try store7.save(emptyDoc7)
+
+        let canvasA7 = CanvasNSView(
+            canvasState: CanvasState(viewport: vp1, tiles: [], groups: [], lastActiveTileId: nil),
+            showsZoneChrome: true
+        )
+        canvasA7.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let windowA7 = NSWindow(contentRect: canvasA7.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        windowA7.contentView = canvasA7
+        windowA7.orderFrontRegardless()
+        canvasA7.layoutSubtreeIfNeeded()
+        let suiteNameA7 = "T19-check-A7-\(UUID().uuidString)"
+        let gestureDefaultsA7 = UserDefaults(suiteName: suiteNameA7)!
+        gestureDefaultsA7.removePersistentDomain(forName: suiteNameA7)
+        canvasA7.zoneGestureDefaults = gestureDefaultsA7
+        defer { gestureDefaultsA7.removePersistentDomain(forName: suiteNameA7) }
+        // Wire onZoneCreated to real persistence (same logic as AppDelegate.persistCreatedGroupZone).
+        canvasA7.onZoneCreated = { placement in
+            do {
+                var doc = try store7.load()
+                guard !doc.zones.contains(where: { $0.zoneId == placement.zoneId }) else { return }
+                doc.zones.append(placement)
+                doc.zoneZOrder.removeAll { $0 == placement.zoneId }
+                doc.zoneZOrder.append(placement.zoneId)
+                try store7.save(doc)
+            } catch {
+                // will be detected by the assertions below
+            }
+        }
+        // Same above-threshold drag as assertion 2: canvas-local (120,150)→(520,470).
+        canvasA7.mouseDown(with: try mouse(.leftMouseDown, at: win(120, 150, canvasH: cH), window: windowA7))
+        canvasA7.mouseDragged(with: try mouse(.leftMouseDragged, at: win(520, 470, canvasH: cH), window: windowA7))
+        canvasA7.mouseUp(with: try mouse(.leftMouseUp, at: win(520, 470, canvasH: cH), window: windowA7))
+        // Reload from disk and assert the zone is present with correct geometry.
+        let reloaded7 = try store7.load()
+        try expect(reloaded7.zones.count == 1,
+                   "assertion 7: reloaded WorkspaceDocument must contain exactly 1 zone; got \(reloaded7.zones.count)")
+        let persisted7 = reloaded7.zones[0]
+        try expect(persisted7.projectId == nil, "assertion 7: reloaded zone must have projectId == nil (group zone)")
+        try expect(abs(persisted7.origin.x - 120) < 0.5 && abs(persisted7.origin.y - 150) < 0.5,
+                   "assertion 7: reloaded zone origin == (120,150), got (\(persisted7.origin.x),\(persisted7.origin.y))")
+        try expect(abs(persisted7.size.width - 400) < 0.5 && abs(persisted7.size.height - 320) < 0.5,
+                   "assertion 7: reloaded zone size == (400,320), got (\(persisted7.size.width),\(persisted7.size.height))")
+        try expect(reloaded7.zoneZOrder.contains(persisted7.zoneId),
+                   "assertion 7: reloaded zoneZOrder must contain the created zone id")
+
+        // ── Assertion 7b: create-guard asymmetry — ZoneLayer-only canvas body press ─
+        // A canvas with a zone installed ONLY as a ZoneLayer (zoneRenderModels is empty)
+        // must NOT classify a press in the zone body as .creating (Defect A guard).
+        // Without _zoneId(at:) checking zoneLayers, this press would produce a spurious zone.
+        let gzBodyId = UUID(uuidString: "00000000-0000-0000-0000-000000001972")!
+        let gzBodyPlacement = ZonePlacement(
+            zoneId: gzBodyId, projectId: nil,
+            origin: ZonePoint(x: 50, y: 50), size: ZoneSize(width: 200, height: 150),
+            color: "teal", collapsed: false, hydrationPolicy: .automatic
+        )
+        // Build a canvas with NO zoneRenderModels but with a ZoneLayer for gzBodyPlacement.
+        let canvasA7b = CanvasNSView(
+            canvasState: CanvasState(viewport: vp1, tiles: [], groups: [], lastActiveTileId: nil),
+            showsZoneChrome: true
+        )
+        canvasA7b.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let windowA7b = NSWindow(contentRect: canvasA7b.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        windowA7b.contentView = canvasA7b
+        windowA7b.orderFrontRegardless()
+        canvasA7b.layoutSubtreeIfNeeded()
+        let suiteNameA7b = "T19-check-A7b-\(UUID().uuidString)"
+        let gestureDefaultsA7b = UserDefaults(suiteName: suiteNameA7b)!
+        gestureDefaultsA7b.removePersistentDomain(forName: suiteNameA7b)
+        canvasA7b.zoneGestureDefaults = gestureDefaultsA7b
+        defer { gestureDefaultsA7b.removePersistentDomain(forName: suiteNameA7b) }
+        // Install the zone as a ZoneLayer (NOT in zoneRenderModels).
+        let layerBody = ZoneLayer(placement: gzBodyPlacement,
+                                  renderModel: ZoneRenderModel(placement: gzBodyPlacement, displayName: "Body"),
+                                  tiles: [])
+        canvasA7b.upsertZoneLayer(layerBody)
+        canvasA7b.layoutSubtreeIfNeeded()
+        var createdA7b: [ZonePlacement] = []
+        canvasA7b.onZoneCreated = { createdA7b.append($0) }
+        // Press at zone body center (100,120) — inside zone bounds [50..250, 50..200], below header band.
+        // At zoom 1, canvas-local == world. gzBodyPlacement header band = y ∈ [50, 82].
+        // Body point (100, 120) is inside the zone (x∈[50,250], y∈[50,200]) but below the header.
+        // zoneId(at:) would return nil (zoneRenderModels is empty); _zoneId(at:) returns gzBodyId.
+        // Then classify: drag (100,120)→(350,420), dist ≈ 354 > threshold → would create if not guarded.
+        canvasA7b.mouseDown(with: try mouse(.leftMouseDown, at: win(100, 120, canvasH: cH), window: windowA7b))
+        canvasA7b.mouseDragged(with: try mouse(.leftMouseDragged, at: win(350, 420, canvasH: cH), window: windowA7b))
+        canvasA7b.mouseUp(with: try mouse(.leftMouseUp, at: win(350, 420, canvasH: cH), window: windowA7b))
+        try expect(createdA7b.isEmpty,
+                   "assertion 7b: press in ZoneLayer-only zone body must NOT create a new zone; got \(createdA7b.count)")
+
+        // ── Setup B: MOVE — one group zone with two member tiles ──────────────────
+        let gzId   = UUID(uuidString: "00000000-0000-0000-0000-000000001981")!
+        let t1Id   = UUID(uuidString: "00000000-0000-0000-0000-000000001982")!
+        let t2Id   = UUID(uuidString: "00000000-0000-0000-0000-000000001983")!
+
+        // Zone-local tile frames.
+        let t1ZoneLocal = TileFrame(x: 20, y: 40, width: 160, height: 120)
+        let t2ZoneLocal = TileFrame(x: 200, y: 40, width: 160, height: 120)
+        let t1 = Tile(id: t1Id, kind: .note, title: "MV_T1", frame: t1ZoneLocal, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let t2 = Tile(id: t2Id, kind: .note, title: "MV_T2", frame: t2ZoneLocal, zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+
+        let gz = ZonePlacement(
+            zoneId: gzId, projectId: nil,
+            origin: ZonePoint(x: 300, y: 200), size: ZoneSize(width: 400, height: 300),
+            color: "teal", collapsed: false, hydrationPolicy: .automatic
+        )
+
+        let vpB = CanvasViewport(x: 0, y: 0, zoom: 1)
+        // Pass gz in zoneRenderModels so zoneHeaderZoneId recognizes the header.
+        let canvasB = CanvasNSView(
+            canvasState: CanvasState(viewport: vpB, tiles: [], groups: [], lastActiveTileId: nil),
+            zoneRenderModels: [ZoneRenderModel(placement: gz, displayName: "GZ")],
+            showsZoneChrome: true
+        )
+        canvasB.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let windowB = NSWindow(contentRect: canvasB.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        windowB.contentView = canvasB
+        windowB.orderFrontRegardless()
+
+        // Install tile views in the ZoneLayer.
+        let view1 = DescriptorTileNSView(tile: t1)
+        let view2 = DescriptorTileNSView(tile: t2)
+        let layer = ZoneLayer(placement: gz, renderModel: ZoneRenderModel(placement: gz, displayName: "GZ"), tiles: [t1, t2])
+        layer.tileViews[t1Id] = view1
+        layer.tileViews[t2Id] = view2
+        canvasB.upsertZoneLayer(layer)
+        canvasB.layoutSubtreeIfNeeded()
+
+        let suiteNameB = "T19-check-B-\(UUID().uuidString)"
+        let gestureDefaultsB = UserDefaults(suiteName: suiteNameB)!
+        gestureDefaultsB.removePersistentDomain(forName: suiteNameB)
+        canvasB.zoneGestureDefaults = gestureDefaultsB
+        defer { gestureDefaultsB.removePersistentDomain(forName: suiteNameB) }
+
+        var movedPlacements: [ZonePlacement] = []
+        canvasB.onZoneMoved = { movedPlacements.append($0) }
+
+        // ── Assertion 8: press on chrome classifies as move, not create, not tile ──
+        // At zoom 1, viewport (0,0): world == canvas-local.
+        // Zone chrome header: zone origin (300,200), size (400,300). Header band = y ∈ [200,232].
+        // Canvas-local press point (310, 210) is inside the header band.
+        // zoneHeaderZoneId(at:) takes canvas-local coords (it uses zoneHeaderScreenRect which
+        // produces canvas-local rects at zoom 1). tileId(at:) also takes canvas-local coords.
+        let pressBLocal = CGPoint(x: 310, y: 210)  // canvas-local
+        try expect(canvasB.zoneHeaderZoneId(at: pressBLocal) == gzId,
+                   "assertion 8 precondition: zoneHeaderZoneId at (\(pressBLocal.x),\(pressBLocal.y)) must == gzId")
+        try expect(canvasB.tileId(at: pressBLocal) == nil,
+                   "assertion 8 precondition: no tile at press point (header sits above tiles; tiles start at world-y=240)")
+
+        // Gesture: canvas-local (310,210)→(390,260). Window: (310,490)→(390,440).
+        // dy_window = 440-490 = -50 (window-y decreasing = downward drag = increasing canvas-y = +world-y).
+        // In mouseDragged: dy = -(locationInWindow.y - lastWindowPoint.y) = -(-50) = +50.
+        // worldDy = 50/1 = 50. New origin = (300+80, 200+50) = (380, 250). ✓
+        canvasB.mouseDown(with: try mouse(.leftMouseDown, at: win(310, 210, canvasH: cH), window: windowB))
+        canvasB.mouseDragged(with: try mouse(.leftMouseDragged, at: win(390, 260, canvasH: cH), window: windowB))
+        canvasB.mouseUp(with: try mouse(.leftMouseUp, at: win(390, 260, canvasH: cH), window: windowB))
+
+        try expect(movedPlacements.count == 1, "assertion 8: move gesture fires onZoneMoved exactly once; got \(movedPlacements.count)")
+
+        // ── Assertion 9: whole zone translates by the world delta ─────────────────
+        // Window delta dx = 390-310 = +80. Window dy = 440-490 = -50.
+        // In mouseDragged: worldDx = 80/1 = 80; dy = -(-50) = +50, worldDy = 50/1 = 50.
+        // New origin = (300+80, 200+50) = (380, 250). Size unchanged.
+        let moved = movedPlacements[0]
+        try expect(abs(moved.origin.x - 380) < 0.5, "assertion 9: moved origin.x == 300+80=380, got \(moved.origin.x)")
+        try expect(abs(moved.origin.y - 250) < 0.5, "assertion 9: moved origin.y == 200+50=250, got \(moved.origin.y)")
+        try expect(abs(moved.size.width - gz.size.width) < 0.5, "assertion 9: moved size unchanged (width)")
+        try expect(abs(moved.size.height - gz.size.height) < 0.5, "assertion 9: moved size unchanged (height)")
+
+        // ── Assertion 10: tiles ride along (stored zone-local frames unchanged) ────
+        // Stored zone-local frames must be UNCHANGED.
+        let layerAfter = canvasB.installedZoneLayerIds.first(where: { $0 == gzId })
+        try expect(layerAfter != nil, "assertion 10 precondition: gz still installed after move")
+        let layerB2 = canvasB.zoneLayers.first(where: { $0.placement.zoneId == gzId })!
+        let t1Stored = layerB2.tiles.first(where: { $0.id == t1Id })!.frame
+        let t2Stored = layerB2.tiles.first(where: { $0.id == t2Id })!.frame
+        try expect(abs(t1Stored.x - t1ZoneLocal.x) < 0.5 && abs(t1Stored.y - t1ZoneLocal.y) < 0.5,
+                   "assertion 10: t1 stored zone-local frame unchanged: expected (\(t1ZoneLocal.x),\(t1ZoneLocal.y)), got (\(t1Stored.x),\(t1Stored.y))")
+        try expect(abs(t2Stored.x - t2ZoneLocal.x) < 0.5 && abs(t2Stored.y - t2ZoneLocal.y) < 0.5,
+                   "assertion 10: t2 stored zone-local frame unchanged: expected (\(t2ZoneLocal.x),\(t2ZoneLocal.y)), got (\(t2Stored.x),\(t2Stored.y))")
+        // On-screen frames must have shifted by world delta (+80, +50).
+        // New zone origin (380,250). t1 world = (380+20, 250+40) = (400,290). Screen = same at zoom 1.
+        let movedPlacement = layerB2.placement
+        let t1ExpectedWorldFrame = TileFrame(
+            x: movedPlacement.origin.x + t1ZoneLocal.x, y: movedPlacement.origin.y + t1ZoneLocal.y,
+            width: t1ZoneLocal.width, height: t1ZoneLocal.height
+        )
+        let t1ExpectedScreenFrame = CanvasEngine.tileScreenFrame(t1ExpectedWorldFrame, viewport: vpB)
+        try expect(canvasB.tileView(for: t1Id)?.frame == t1ExpectedScreenFrame,
+                   "assertion 10: t1 screen frame must match world frame via new origin; expected \(t1ExpectedScreenFrame), got \(String(describing: canvasB.tileView(for: t1Id)?.frame))")
+
+        // ── Assertion 11: adaptive bounds (T11) after the move ───────────────────
+        // After move, zone origin is (380,250). Member tile world frames:
+        // t1=(380+20, 250+40, 160, 120)=(400,290,160,120), t2=(380+200, 250+40,160,120)=(580,290,160,120).
+        // Union: (400,290,340,120). With P=ZoneBoundsConfig.defaultPadding (24), H=ZoneChromeNSView.headerHeight (34):
+        // adaptive: x=400-24=376, y=290-24-34=232, w=340+48=388, h=120+48+34=202.
+        let P = ZoneBoundsConfig.defaultPadding      // 24
+        let H = ZoneChromeNSView.headerHeight        // 34
+        let expectedAdaptiveFrame = TileFrame(
+            x: 400 - P, y: 290 - P - H,
+            width: 340 + 2 * P, height: 120 + 2 * P + H
+        )  // = (376, 232, 388, 202)
+        let expectedChromeScreenFrame = CanvasEngine.tileScreenFrame(expectedAdaptiveFrame, viewport: vpB)
+        let actualChromeFrame = canvasB.zoneLayerChromeFrame(for: gzId)
+        try expect(actualChromeFrame == expectedChromeScreenFrame,
+                   "assertion 11: chrome screen frame after move must equal adaptive bounds screen frame; expected \(expectedChromeScreenFrame), got \(String(describing: actualChromeFrame))")
+
+        // ── Assertion 12: no drag-snap side effects ───────────────────────────────
+        try expect(canvasB.qaDragGhostFrame == nil, "assertion 12: qaDragGhostFrame must be nil after move (no tile snap ghost)")
+        try expect(canvasB.canvasState.lastActiveTileId == nil, "assertion 12: lastActiveTileId unchanged by chrome drag")
+
+        // ── Setup C: MOVE via render-model-only path (production boot path) ────────
+        // Production at boot has zones only in zoneRenderModels (immutable), NOT as
+        // ZoneLayers — WorkspaceRuntime.install skips projectId==nil group zones so they
+        // never get upsertZoneLayer. This exercises the pendingMovedPlacement branch
+        // (mouseDragged :1026-1052) which the ZoneLayer Setup B does NOT cover.
+        // If this branch is stubbed, assertion C1 fires RED.
+        let gzCId = UUID(uuidString: "00000000-0000-0000-0000-000000001984")!
+        let gzC = ZonePlacement(
+            zoneId: gzCId, projectId: nil,
+            origin: ZonePoint(x: 300, y: 200), size: ZoneSize(width: 400, height: 300),
+            color: "teal", collapsed: false, hydrationPolicy: .automatic
+        )
+        let vpC = CanvasViewport(x: 0, y: 0, zoom: 1)
+        // Build canvas with ONLY zoneRenderModels, NO upsertZoneLayer call.
+        let canvasC = CanvasNSView(
+            canvasState: CanvasState(viewport: vpC, tiles: [], groups: [], lastActiveTileId: nil),
+            zoneRenderModels: [ZoneRenderModel(placement: gzC, displayName: "GZ-C")],
+            showsZoneChrome: true
+        )
+        canvasC.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let windowC = NSWindow(contentRect: canvasC.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        windowC.contentView = canvasC
+        windowC.orderFrontRegardless()
+        canvasC.layoutSubtreeIfNeeded()
+        let suiteNameC = "T19-check-C-\(UUID().uuidString)"
+        let gestureDefaultsC = UserDefaults(suiteName: suiteNameC)!
+        gestureDefaultsC.removePersistentDomain(forName: suiteNameC)
+        canvasC.zoneGestureDefaults = gestureDefaultsC
+        defer { gestureDefaultsC.removePersistentDomain(forName: suiteNameC) }
+
+        var movedC: [ZonePlacement] = []
+        canvasC.onZoneMoved = { movedC.append($0) }
+
+        // Verify precondition: no ZoneLayers installed (render-model-only).
+        try expect(canvasC.zoneLayers.isEmpty,
+                   "Setup C precondition: canvas must have no ZoneLayers (render-model-only path)")
+        try expect(canvasC.zoneHeaderZoneId(at: CGPoint(x: 310, y: 210)) == gzCId,
+                   "Setup C precondition: zone header must be recognized via zoneRenderModels")
+
+        // Same drag as Setup B: press header at (310,210), drag to (390,260).
+        // Expected: onZoneMoved fires once via pendingMovedPlacement path.
+        // delta dx=+80, dy=+50 → new origin (380,250). Size unchanged.
+        canvasC.mouseDown(with: try mouse(.leftMouseDown, at: win(310, 210, canvasH: cH), window: windowC))
+        canvasC.mouseDragged(with: try mouse(.leftMouseDragged, at: win(390, 260, canvasH: cH), window: windowC))
+        canvasC.mouseUp(with: try mouse(.leftMouseUp, at: win(390, 260, canvasH: cH), window: windowC))
+
+        // C1: render-model move fires onZoneMoved via pendingMovedPlacement.
+        try expect(movedC.count == 1,
+                   "assertion C1: render-model-only move must fire onZoneMoved exactly once; got \(movedC.count)")
+        // C2: origin shifted correctly by the world delta.
+        let movedCPlacement = movedC[0]
+        try expect(abs(movedCPlacement.origin.x - 380) < 0.5,
+                   "assertion C2: render-model move origin.x == 300+80=380, got \(movedCPlacement.origin.x)")
+        try expect(abs(movedCPlacement.origin.y - 250) < 0.5,
+                   "assertion C2: render-model move origin.y == 200+50=250, got \(movedCPlacement.origin.y)")
+        try expect(abs(movedCPlacement.size.width - gzC.size.width) < 0.5,
+                   "assertion C2: render-model move size.width unchanged")
+        try expect(abs(movedCPlacement.size.height - gzC.size.height) < 0.5,
+                   "assertion C2: render-model move size.height unchanged")
+        // C3: no spurious create zone (body press on a render-model zone must not create).
+        // (The _zoneId fix means the header press is already classified as movingZone, so no
+        // create can happen here — this is a consistency proof for the render-model path.)
+        try expect(canvasC.installedZoneLayerIds.isEmpty || canvasC.installedZoneLayerIds == [gzCId],
+                   "assertion C3: render-model move must not spuriously install extra zone layers")
+
+        // ── Write artifact ────────────────────────────────────────────────────────
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: fm.currentDirectoryPath)
+        let directory = root.appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("zone-create-gesture-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "zone-create-gesture",
+            "createZoneId": created.zoneId.uuidString,
+            "createOrigin": ["x": created.origin.x, "y": created.origin.y],
+            "createSize": ["w": created.size.width, "h": created.size.height],
+            "moveZoneId": gzId.uuidString,
+            "movedOrigin": ["x": moved.origin.x, "y": moved.origin.y],
+            "threshold": threshold,
+            "assertions": "1-12 + 7b + C1-C3 passed"
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)

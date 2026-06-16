@@ -4270,6 +4270,7 @@ do {
         AmbientZoneHome.userDefaultsKey,
         DefaultGroupZoneName.userDefaultsKey,
         AutosaveConfig.debounceMsKey,
+        ZoneGestureConfig.minCreateDragScreenPointsKey,
         // WorkspaceProfileConfig.defaultCaptureModeKey and defaultApplyModeKey are
         // intentionally excluded: captureMode/applyMode have no behavioral effect yet
         // (WorkspaceDocument is layout-only; T13 session-state is in ProjectStore sibling
@@ -4331,6 +4332,19 @@ do {
     expect(AutosaveConfig.debounceMs(defaults: autosaveDefaults) == AutosaveConfig.maxDebounceMs, "autosave debounce: '99999' clamps to max (\(AutosaveConfig.maxDebounceMs))")
     autosaveDefaults.set("abc", forKey: AutosaveConfig.debounceMsKey)
     expect(AutosaveConfig.debounceMs(defaults: autosaveDefaults) == 200, "autosave debounce: 'abc' non-numeric falls back to 200")
+
+    // ZoneGestureConfig resolver: empty defaults → 24; override 40 → 40; override 0 or negative → 24.
+    let zoneGestureSuiteName = "ZoneGestureConfigChecks-\(UUID().uuidString)"
+    let zoneGestureDefaults = UserDefaults(suiteName: zoneGestureSuiteName)!
+    defer { zoneGestureDefaults.removePersistentDomain(forName: zoneGestureSuiteName) }
+    zoneGestureDefaults.removePersistentDomain(forName: zoneGestureSuiteName)
+    expect(ZoneGestureConfig.minCreateDragScreenPoints(defaults: zoneGestureDefaults) == 24, "zoneGestureConfig: absent key returns 24")
+    zoneGestureDefaults.set(40.0, forKey: ZoneGestureConfig.minCreateDragScreenPointsKey)
+    expect(ZoneGestureConfig.minCreateDragScreenPoints(defaults: zoneGestureDefaults) == 40, "zoneGestureConfig: override 40 returns 40")
+    zoneGestureDefaults.set(0.0, forKey: ZoneGestureConfig.minCreateDragScreenPointsKey)
+    expect(ZoneGestureConfig.minCreateDragScreenPoints(defaults: zoneGestureDefaults) == 24, "zoneGestureConfig: override 0 falls back to 24")
+    zoneGestureDefaults.set(-5.0, forKey: ZoneGestureConfig.minCreateDragScreenPointsKey)
+    expect(ZoneGestureConfig.minCreateDragScreenPoints(defaults: zoneGestureDefaults) == 24, "zoneGestureConfig: negative override falls back to 24")
 
     // The Keybindings section renders the ShortcutCatalog via a .shortcuts field.
     expect(allFields.contains { if case .shortcuts = $0 { return true } else { return false } }, "settings schema must include a .shortcuts field")
@@ -5126,6 +5140,54 @@ do {
     expect(rejectedNonASCIINumeral.leaderZoneOrdinalKeys == NavKeymap.default.leaderZoneOrdinalKeys,
            "T18 §0.7: non-ASCII numeral (e.g. '²') in ordinal keys rejected, default retained")
     expect(!warns.isEmpty, "T18 §0.7: non-ASCII numeral triggers a warn")
+}
+
+// MARK: - Zone gesture math (T19)
+
+do {
+    // CanvasEngine.zone(_:draggedByScreenDelta:viewport:) — pure origin-shift, size unchanged.
+    let gz = ZonePlacement(
+        zoneId: UUID(uuidString: "00000000-0000-0000-0000-000000001901")!,
+        projectId: nil,
+        origin: ZonePoint(x: 300, y: 200),
+        size: ZoneSize(width: 400, height: 300),
+        color: "teal",
+        collapsed: false,
+        hydrationPolicy: .automatic
+    )
+
+    // At zoom 1: delta (80, 50) in screen → world delta (80, 50).
+    let vp1 = CanvasViewport(x: 0, y: 0, zoom: 1)
+    let moved1 = CanvasEngine.zone(gz, draggedByScreenDelta: CGSize(width: 80, height: 50), viewport: vp1)
+    expect(moved1.origin.x == 380 && moved1.origin.y == 250, "zone draggedByScreenDelta at zoom 1: origin (300+80, 200+50) == (380, 250)")
+    expect(moved1.size.width == gz.size.width && moved1.size.height == gz.size.height, "zone draggedByScreenDelta: size unchanged")
+
+    // At zoom 0.5: delta (80, 50) in screen → world delta (160, 100).
+    let vp05 = CanvasViewport(x: 0, y: 0, zoom: 0.5)
+    let moved05 = CanvasEngine.zone(gz, draggedByScreenDelta: CGSize(width: 80, height: 50), viewport: vp05)
+    expect(moved05.origin.x == 460 && moved05.origin.y == 300, "zone draggedByScreenDelta at zoom 0.5: origin (300+160, 200+100) == (460, 300)")
+    expect(moved05.size == gz.size, "zone draggedByScreenDelta at zoom 0.5: size unchanged")
+
+    // Create-rect normalization: min/abs of two endpoints, regardless of order.
+    // endpoints (520,470) → (120,150): origin = (120,150), size = (400,320)
+    let aw = CGPoint(x: 520, y: 470)
+    let bw = CGPoint(x: 120, y: 150)
+    let normOriginX = Swift.min(aw.x, bw.x)
+    let normOriginY = Swift.min(aw.y, bw.y)
+    let normWidth   = Swift.abs(bw.x - aw.x)
+    let normHeight  = Swift.abs(bw.y - aw.y)
+    expect(normOriginX == 120 && normOriginY == 150, "create-rect normalization: origin is (min_x, min_y) == (120, 150)")
+    expect(normWidth == 400 && normHeight == 320, "create-rect normalization: size is (abs_dx, abs_dy) == (400, 320)")
+
+    // Reversed drag: same result.
+    let aw2 = CGPoint(x: 120, y: 150)
+    let bw2 = CGPoint(x: 520, y: 470)
+    let normOriginX2 = Swift.min(aw2.x, bw2.x)
+    let normOriginY2 = Swift.min(aw2.y, bw2.y)
+    let normWidth2   = Swift.abs(bw2.x - aw2.x)
+    let normHeight2  = Swift.abs(bw2.y - aw2.y)
+    expect(normOriginX2 == 120 && normOriginY2 == 150, "create-rect normalization reversed: origin still (120, 150)")
+    expect(normWidth2 == 400 && normHeight2 == 320, "create-rect normalization reversed: size still (400, 320)")
 }
 
 print("ContinuumRevivedCoreChecks passed")

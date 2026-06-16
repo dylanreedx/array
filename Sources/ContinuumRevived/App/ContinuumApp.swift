@@ -347,6 +347,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--zone-create-gesture-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try CanvasNSView.runZoneCreateGestureSelfCheck()
+                print("ContinuumRevivedZoneCreateGestureChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-adaptive-bounds-check") {
             do {
                 _ = NSApplication.shared
@@ -1207,6 +1219,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             canvasView.onTileStopRunRequested = { [weak self] tileId in
                 self?.stopHarnessRun(tileId: tileId)
+            }
+            canvasView.onZoneCreated = { [weak self] placement in
+                self?.persistCreatedGroupZone(placement)
+            }
+            canvasView.onZoneMoved = { [weak self] placement in
+                self?.persistMovedZone(placement)
             }
 
             self.ghostty = ghostty
@@ -3019,6 +3037,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try registryStore.save(registry)
         } catch {
             fputs("Create Zone failed: \(error)\n", stderr)
+        }
+    }
+
+    /// Persist a group zone created by the on-canvas drag-to-create gesture (T19).
+    /// Appends the placement as-is (origin/size come from the drag rect) to the stored
+    /// WorkspaceDocument and flushes the save. Called from canvasView.onZoneCreated.
+    private func persistCreatedGroupZone(_ placement: ZonePlacement) {
+        guard let registryStore else { return }
+        do {
+            let workspaceId: UUID
+            if let wId = workspaceRuntime?.workspaceId {
+                workspaceId = wId
+            } else if let wId = (try? registryStore.loadOrEmpty())?.lastActiveWorkspaceId {
+                workspaceId = wId
+            } else {
+                fputs("persistCreatedGroupZone: no active workspace\n", stderr)
+                return
+            }
+            let appSupport = registryStore.registryFile.deletingLastPathComponent()
+            let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
+            var document = try store.load()
+            // Only append if not already present (idempotent guard).
+            guard !document.zones.contains(where: { $0.zoneId == placement.zoneId }) else { return }
+            document.zones.append(placement)
+            document.zoneZOrder.removeAll { $0 == placement.zoneId }
+            document.zoneZOrder.append(placement.zoneId)
+            let saveController = WorkspaceDocumentSaveController(store: store)
+            saveController.scheduleZoneLayoutSave(document)
+            try saveController.flushPendingSave()
+        } catch {
+            fputs("persistCreatedGroupZone failed: \(error)\n", stderr)
+        }
+    }
+
+    /// Persist a zone's moved origin after an on-canvas chrome-drag gesture (T19).
+    /// Finds the zone by zoneId in the stored WorkspaceDocument, replaces its origin/size
+    /// with the committed placement, and flushes the save. Called from canvasView.onZoneMoved.
+    private func persistMovedZone(_ placement: ZonePlacement) {
+        guard let registryStore else { return }
+        do {
+            let workspaceId: UUID
+            if let wId = workspaceRuntime?.workspaceId {
+                workspaceId = wId
+            } else if let wId = (try? registryStore.loadOrEmpty())?.lastActiveWorkspaceId {
+                workspaceId = wId
+            } else {
+                fputs("persistMovedZone: no active workspace\n", stderr)
+                return
+            }
+            let appSupport = registryStore.registryFile.deletingLastPathComponent()
+            let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
+            var document = try store.load()
+            guard let i = document.zones.firstIndex(where: { $0.zoneId == placement.zoneId }) else {
+                fputs("persistMovedZone: zone \(placement.zoneId) not in document\n", stderr)
+                return
+            }
+            document.zones[i] = placement
+            let saveController = WorkspaceDocumentSaveController(store: store)
+            saveController.scheduleZoneLayoutSave(document)
+            try saveController.flushPendingSave()
+        } catch {
+            fputs("persistMovedZone failed: \(error)\n", stderr)
         }
     }
 

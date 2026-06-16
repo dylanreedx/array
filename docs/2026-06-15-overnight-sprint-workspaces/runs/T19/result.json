@@ -1,0 +1,40 @@
+{
+  "task": "T19",
+  "title": "On-canvas drag-to-create-zone + move-zone gesture",
+  "verdict": "PASS WITH RISKS",
+  "iterations": 2,
+  "staged": true,
+  "redProven": true,
+  "green": true,
+  "matrixFast": "green",
+  "buildClean": true,
+  "namedCheck": "--zone-create-gesture-check passed (terminates cleanly — no hang)",
+  "guards": "--zone-create-gesture-check: synthesizes real mouse NSEvents through canvas.mouseDown/Dragged/Up; one zone created at the drag rect (bypass disproved — comment out gesture recognition → RED assertion 2), zone+tiles move as a group, persistence via a REAL WorkspaceStore disk round-trip (assertion 7, not the prior tautology), + Setup C render-model move path (C1-C3).",
+  "iterationNote": "Reviewer found 3 defects; builder fixed across 2 iterations — (A) _zoneId(at:) checks render-models + ZoneLayers (assertion 7b), (B) tautological persistence assertion → real disk round-trip, (C) Setup C for the render-model move path. Re-reviewed PASS WITH RISKS.",
+  "filesTouched": [
+    "Sources/ContinuumRevived/Canvas/CanvasNSView.swift",
+    "Sources/ContinuumRevived/App/ContinuumApp.swift",
+    "Sources/ContinuumRevivedCore/CanvasEngine.swift",
+    "Sources/ContinuumRevivedCore/ZoneGestureConfig.swift (new)",
+    "Sources/ContinuumRevivedCore/SettingsSchema.swift",
+    "Sources/ContinuumRevivedCoreChecks/main.swift",
+    "scripts/run-matrix.sh"
+  ],
+  "risks": [
+    "Render-model move leaves zoneRenderModels stale (it's a let; move updates the chrome .frame + pendingMovedPlacement + persists, but not zoneRenderModels[i].placement) — a relayout before reconstruct could snap chrome back to the old origin. (Visual gate.)",
+    "Freshly-created empty zone lands at the 480x320 empty-min, not the marquee rect — a marquee <480px visibly pops wider on release (vs spec 'no jump on landing'). Stored geometry is correct; the pop is a render artifact. (Visual gate.)",
+    "Created zone double-represents within a session (live ZoneLayer + on-disk render model); relayout between create and reconstruct unverified (likely benign).",
+    "Assertion 11 reads ZoneBoundsConfig.defaultPadding (constant) while the live move uses padding() (resolver) — coincide without an override; latent coupling, low."
+  ],
+  "needsHuman_visualGate": [
+    "Create-marquee: live rect tracks cursor smoothly, click-transparent, no flicker; confirm the landing jump (marquee → 480x320 empty-min) reads acceptable.",
+    "Move: zone + tiles move as one rigid group, no lag/detach, header stays under cursor.",
+    "Render-model move re-render (risk 1): move a group zone, then pan/zoom — chrome must NOT snap back to the old origin.",
+    "Z-paint/layering during drag + on settle; marquee ghost paints topmost + tears down cleanly (no residue).",
+    "Cursor rects: pointingHand over header, arrow/crosshair over empty canvas; restores cleanly (no stuck closed-hand).",
+    "24px threshold feels right; a small accidental drag deselects (does not spawn a tiny zone).",
+    "Adaptive snap-back after move (border hugs tiles+padding, no visible pop; header above the tile union).",
+    "Overlap allowed (v1): dragging a zone over another just overlaps (no reflow), reads intentional.",
+    "Pan/zoom: create + move feel anchored under the cursor at zoom 0.5 / 2.0 and at a non-origin pan."
+  ]
+}

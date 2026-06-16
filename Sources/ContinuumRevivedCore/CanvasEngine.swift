@@ -526,6 +526,18 @@ public enum CanvasEngine {
 
     // MARK: - Drag and resize
 
+    /// Move a zone placement by a screen-space delta. World-space delta is `screenDelta / zoom`.
+    /// The dy convention matches `tile(_:draggedByScreenDelta:viewport:)`: the caller negates dy
+    /// (window-y-up → world-y-down) before passing the delta, so this function simply divides by zoom.
+    /// Member tile zone-local frames are unchanged; moving the origin moves them on screen for free.
+    public static func zone(_ placement: ZonePlacement, draggedByScreenDelta delta: CGSize, viewport: CanvasViewport) -> ZonePlacement {
+        let worldDx = Double(delta.width) / viewport.zoom
+        let worldDy = Double(delta.height) / viewport.zoom
+        var moved = placement
+        moved.origin = ZonePoint(x: placement.origin.x + worldDx, y: placement.origin.y + worldDy)
+        return moved
+    }
+
     /// Move the tile by a screen-space delta. World-space delta is `screenDelta / zoom`.
     public static func tile(_ tile: Tile, draggedByScreenDelta delta: CGSize, viewport: CanvasViewport) -> Tile {
         let worldDx = Double(delta.width) / viewport.zoom

@@ -127,6 +127,11 @@ public enum SettingsSchema {
                         label: "Scrollback Resume Max Lines",
                         default: String(SessionResumeConfig.scrollbackMaxLinesDefault)
                     ),
+                    .text(
+                        key: ZoneGestureConfig.minCreateDragScreenPointsKey,
+                        label: "Zone Create Drag Threshold (px)",
+                        default: String(Int(ZoneGestureConfig.defaultMinCreateDragScreenPoints))
+                    ),
                     // WorkspaceProfileConfig.defaultCaptureModeKey and defaultApplyModeKey
                     // are intentionally not in SettingsSchema yet. The captureMode/applyMode
                     // distinction has no behavioral effect: T13 session-state fields live in
