@@ -92,6 +92,7 @@ run_app_check .build/debug/continuum-revived --multi-zone-render-check
 run_app_check .build/debug/continuum-revived --zone-create-gesture-check
 run_app_check .build/debug/continuum-revived --zone-create-encloses-check
 run_app_check .build/debug/continuum-revived --zone-breakout-check
+run_app_check .build/debug/continuum-revived --zone-close-keep-delete-check
 run_app_check .build/debug/continuum-revived --zone-adaptive-bounds-check
 run_app_check .build/debug/continuum-revived --agent-status-check
 run_app_check .build/debug/continuum-revived --tile-world-bounds-check

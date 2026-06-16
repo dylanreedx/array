@@ -383,6 +383,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--zone-close-keep-delete-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try CanvasNSView.runZoneCloseKeepDeleteSelfCheck()
+                print("ContinuumRevivedZoneCloseKeepDeleteChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--multi-zone-render-check") {
             do {
                 _ = NSApplication.shared
@@ -1273,6 +1285,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             canvasView.onZoneMoved = { [weak self] placement in
                 self?.persistMovedZone(placement)
+            }
+            canvasView.onZoneCloseRequested = { [weak self] zoneId in
+                self?.presentZoneCloseConfirm(zoneId)
+            }
+            canvasView.onZoneClosed = { [weak self] zoneId in
+                self?.persistClosedZone(zoneId)
             }
 
             self.ghostty = ghostty
@@ -3090,6 +3108,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     /// Persist a group zone created by the on-canvas drag-to-create gesture (T19).
     /// Appends the placement as-is (origin/size come from the drag rect) to the stored
+    /// Present the keep-or-delete confirm for closing a zone (zone-unify P5),
+    /// then drive `closeZone`. Keep is the default (non-destructive) button.
+    private func presentZoneCloseConfirm(_ zoneId: UUID) {
+        let alert = NSAlert()
+        alert.messageText = "Close this zone?"
+        alert.informativeText = "Keep the tiles on the canvas, or delete them along with the zone."
+        alert.addButton(withTitle: "Keep Tiles")
+        alert.addButton(withTitle: "Delete Tiles")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: canvasView?.closeZone(zoneId: zoneId, keepTiles: true)
+        case .alertSecondButtonReturn: canvasView?.closeZone(zoneId: zoneId, keepTiles: false)
+        default: break
+        }
+    }
+
+    /// Drop a closed zone from the WorkspaceDocument (placement, z-order, and any
+    /// persisted group-zone tiles) and flush. Called from canvasView.onZoneClosed.
+    private func persistClosedZone(_ zoneId: UUID) {
+        guard let registryStore else { return }
+        do {
+            let workspaceId: UUID
+            if let wId = workspaceRuntime?.workspaceId {
+                workspaceId = wId
+            } else if let wId = (try? registryStore.loadOrEmpty())?.lastActiveWorkspaceId {
+                workspaceId = wId
+            } else {
+                fputs("persistClosedZone: no active workspace\n", stderr)
+                return
+            }
+            let appSupport = registryStore.registryFile.deletingLastPathComponent()
+            let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
+            var document = try store.load()
+            document.zones.removeAll { $0.zoneId == zoneId }
+            document.zoneZOrder.removeAll { $0 == zoneId }
+            document.setTiles([], forZone: zoneId)
+            let saveController = WorkspaceDocumentSaveController(store: store)
+            saveController.scheduleZoneLayoutSave(document)
+            try saveController.flushPendingSave()
+        } catch {
+            fputs("persistClosedZone failed: \(error)\n", stderr)
+        }
+    }
+
     /// WorkspaceDocument and flushes the save. Called from canvasView.onZoneCreated.
     private func persistCreatedGroupZone(_ placement: ZonePlacement) {
         guard let registryStore else { return }

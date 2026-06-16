@@ -142,6 +142,13 @@ final class CanvasNSView: NSView {
     /// The new placement (translated origin) is passed; the caller persists it.
     var onZoneMoved: ((ZonePlacement) -> Void)?
 
+    /// Fired when the user clicks a zone's close (✕) button. The app decides
+    /// keep-vs-delete (e.g. a confirm) and then calls `closeZone(zoneId:keepTiles:)`.
+    var onZoneCloseRequested: ((UUID) -> Void)?
+
+    /// Fired after a zone is closed so the caller can drop it from persistence.
+    var onZoneClosed: ((UUID) -> Void)?
+
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
@@ -278,6 +285,31 @@ final class CanvasNSView: NSView {
             delegate?.canvasDidChange(self)
         }
         return changed
+    }
+
+    /// Close a zone (zone-unify P5). `keepTiles` (the user's choice) spills the
+    /// members onto bare canvas; otherwise a GROUP zone's tiles are deleted. A
+    /// PROJECT zone never deletes its tiles (they're the project's, shared and
+    /// persisted) — closing it just removes the zone view and keeps the tiles.
+    func closeZone(zoneId: UUID, keepTiles: Bool) {
+        guard let idx = liveZones.firstIndex(where: { $0.zoneId == zoneId }) else { return }
+        let isGroupZone = liveZones[idx].projectId == nil
+        let memberIds = canvasState.tiles.filter { tileZoneMembership[$0.id] == zoneId }.map { $0.id }
+        if !keepTiles && isGroupZone {
+            for id in memberIds {
+                tileZoneMembership.removeValue(forKey: id)
+                removeTile(id: id)
+            }
+        } else {
+            for id in memberIds { tileZoneMembership.removeValue(forKey: id) }  // spill to bare canvas
+        }
+        liveZones.remove(at: idx)
+        zoneDisplayByZoneId.removeValue(forKey: zoneId)
+        zoneChromeViews[zoneId]?.removeFromSuperview()
+        zoneChromeViews.removeValue(forKey: zoneId)
+        onZoneClosed?(zoneId)
+        layoutAllTiles()
+        delegate?.canvasDidChange(self)
     }
 
     /// World-space member tile frames for `zone`. Tiles store world frames, so a
@@ -693,6 +725,22 @@ final class CanvasNSView: NSView {
         return CGRect(x: frame.minX, y: frame.minY, width: frame.width, height: min(32, frame.height))
     }
 
+    /// Screen rect of a zone's close (✕) button — top-right of the header band.
+    /// Mirrors `ZoneChromeNSView`'s drawn close glyph so click == what you see.
+    func zoneCloseButtonScreenRect(for placement: ZonePlacement) -> CGRect? {
+        guard let header = zoneHeaderScreenRect(for: placement) else { return nil }
+        let s: CGFloat = 24
+        return CGRect(x: header.maxX - s - 4, y: header.minY + 4, width: s, height: min(s, max(0, header.height - 4)))
+    }
+
+    /// The topmost zone whose close button contains `screenPoint`, or nil.
+    private func zoneCloseButtonZoneId(at screenPoint: CGPoint) -> UUID? {
+        liveZones.reversed().first { placement in
+            guard let r = zoneCloseButtonScreenRect(for: placement) else { return false }
+            return r.contains(screenPoint)
+        }?.zoneId
+    }
+
     private static func cgRect(from frame: TileFrame) -> CGRect {
         CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
     }
@@ -1067,6 +1115,11 @@ final class CanvasNSView: NSView {
         }
         let point = convert(event.locationInWindow, from: nil)
         if event.clickCount >= 2, qaDoubleClickZoneHeaderOrBackground(at: point) != nil {
+            return
+        }
+        // zone-unify P5: a click on a zone's close (✕) button requests closing it.
+        if let zoneId = zoneCloseButtonZoneId(at: point) {
+            onZoneCloseRequested?(zoneId)
             return
         }
         // Zone gesture classification (T19): check chrome header → move; empty canvas → create.
@@ -1979,6 +2032,82 @@ final class CanvasNSView: NSView {
         try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
         let artifact = tempRoot.appendingPathComponent("manifest.json")
         try JSONSerialization.data(withJSONObject: ["check": "zone-breakout", "threshold": 60], options: [.sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// zone-unify P5 — clicking a zone's close (✕) button routes through
+    /// onZoneCloseRequested; KEEP spills a group zone's tiles to bare canvas,
+    /// DELETE removes them, and a PROJECT zone never deletes its tiles. The
+    /// keep/delete decision is injected (no runModal) and the click is real.
+    static func runZoneCloseKeepDeleteSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(m): return m } }
+        }
+        func expect(_ c: @autoclosure () -> Bool, _ m: String) throws { if !c() { throw CheckError.failed(m) } }
+        let cH: CGFloat = 700
+        let vp = CanvasViewport(x: 0, y: 0, zoom: 1)
+
+        // Builds a canvas with one zone (`projectId`) holding one member tile, wires
+        // the close request to closeZone(keepTiles:), then synthesizes a real click
+        // on the zone's close button. Returns the canvas + ids for assertions.
+        func makeCanvasAndClose(projectId: UUID?, keepTiles: Bool) throws -> (CanvasNSView, UUID, UUID) {
+            let zoneId = UUID()
+            let memberId = UUID()
+            let zone = ZonePlacement(zoneId: zoneId, projectId: projectId,
+                                     origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 400, height: 300),
+                                     color: "teal", collapsed: false, hydrationPolicy: .automatic, name: "Z", navKey: nil)
+            let member = Tile(id: memberId, kind: .note, title: "m", frame: TileFrame(x: 100, y: 100, width: 120, height: 90), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+            let canvas = CanvasNSView(
+                canvasState: CanvasState(viewport: vp, tiles: [member], groups: [], lastActiveTileId: nil),
+                activeZone: zone,
+                zoneRenderModels: [ZoneRenderModel(placement: zone, displayName: "Z")],
+                showsZoneChrome: true)
+            canvas.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+            let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = canvas
+            window.orderFrontRegardless()
+            canvas.install(tileView: DescriptorTileNSView(tile: member), for: member)
+            canvas.layoutSubtreeIfNeeded()
+            // Inject the user's keep/delete decision (the app would show a confirm).
+            canvas.onZoneCloseRequested = { [weak canvas] id in canvas?.closeZone(zoneId: id, keepTiles: keepTiles) }
+            guard let closeRect = canvas.zoneCloseButtonScreenRect(for: zone) else { throw CheckError.failed("no close-button rect") }
+            // Click (canvas-local close center → window coords for the synthesized event).
+            let p = NSPoint(x: closeRect.midX, y: cH - closeRect.midY)
+            guard let down = NSEvent.mouseEvent(with: .leftMouseDown, location: p, modifierFlags: [],
+                                                timestamp: ProcessInfo.processInfo.systemUptime,
+                                                windowNumber: window.windowNumber, context: nil,
+                                                eventNumber: 0, clickCount: 1, pressure: 1)
+            else { throw CheckError.failed("could not synthesize close click") }
+            canvas.mouseDown(with: down)
+            return (canvas, zoneId, memberId)
+        }
+
+        // A. Group zone + KEEP → member spills to bare canvas, still present + clickable; zone gone.
+        let (cA, zA, mA) = try makeCanvasAndClose(projectId: nil, keepTiles: true)
+        try expect(!cA.qaLiveZoneIds.contains(zA), "KEEP: zone must be removed")
+        try expect(cA.qaZoneMembership(of: mA) == nil, "KEEP: member must become bare")
+        try expect(cA.canvasState.tiles.contains { $0.id == mA }, "KEEP: member tile must still exist")
+        try expect(cA.tileId(at: CGPoint(x: 160, y: 145)) == mA, "KEEP: member must still be clickable")
+
+        // B. Group zone + DELETE → member tile removed; zone gone.
+        let (cB, zB, mB) = try makeCanvasAndClose(projectId: nil, keepTiles: false)
+        try expect(!cB.qaLiveZoneIds.contains(zB), "DELETE: zone must be removed")
+        try expect(!cB.canvasState.tiles.contains { $0.id == mB }, "DELETE: group-zone member tile must be removed")
+
+        // C. PROJECT zone + DELETE → tiles are NEVER destroyed (the never-destroy guard).
+        let (cC, zC, mC) = try makeCanvasAndClose(projectId: UUID(), keepTiles: false)
+        try expect(!cC.qaLiveZoneIds.contains(zC), "PROJECT close: zone must be removed")
+        try expect(cC.canvasState.tiles.contains { $0.id == mC }, "PROJECT close must NOT delete the project's tiles, even on 'delete'")
+        try expect(cC.qaZoneMembership(of: mC) == nil, "PROJECT close: member spills to bare")
+
+        let fm = FileManager.default
+        let tempRoot = URL(fileURLWithPath: fm.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("zone-close-keep-delete-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        let artifact = tempRoot.appendingPathComponent("manifest.json")
+        try JSONSerialization.data(withJSONObject: ["check": "zone-close-keep-delete", "legs": ["group-keep", "group-delete", "project-delete-keeps"]], options: [.sortedKeys]).write(to: artifact, options: .atomic)
         return artifact
     }
 
@@ -4170,7 +4299,16 @@ final class ZoneChromeNSView: NSView {
         ]
         title.draw(in: headerRect.insetBy(dx: 12, dy: 8), withAttributes: attributes)
 
-        var rightInset: CGFloat = 12
+        // Close (✕) button — top-right of the header. The canvas owns the click
+        // (hitTest here returns nil); this only draws the affordance.
+        let closeSize: CGFloat = 24
+        let closeRect = CGRect(x: headerRect.maxX - closeSize - 4, y: 4, width: closeSize, height: min(closeSize, max(0, headerRect.height - 4)))
+        ("✕" as NSString).draw(in: closeRect.insetBy(dx: 6, dy: 3), withAttributes: [
+            .font: NSFont.systemFont(ofSize: 14, weight: .medium),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.70)
+        ])
+
+        var rightInset: CGFloat = 12 + closeSize + 6   // reserve the close-button slot
         if let qaVerdict = model.qaVerdict {
             let badgeAttributes: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: 12, weight: .bold),
@@ -4178,7 +4316,7 @@ final class ZoneChromeNSView: NSView {
             ]
             let glyph = qaVerdict.verdict.glyph
             let badgeSize = (glyph as NSString).size(withAttributes: badgeAttributes)
-            let badgeRect = CGRect(x: headerRect.maxX - badgeSize.width - 12, y: 8, width: badgeSize.width, height: 16)
+            let badgeRect = CGRect(x: headerRect.maxX - badgeSize.width - 12 - closeSize - 6, y: 8, width: badgeSize.width, height: 16)
             glyph.draw(in: badgeRect, withAttributes: badgeAttributes)
             toolTip = qaVerdict.tooltip
             rightInset += badgeSize.width + 10
