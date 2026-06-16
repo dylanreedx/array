@@ -184,6 +184,67 @@ public enum TileArrangement {
         return SnapResult(frame: adjusted, guides: guides)
     }
 
+    /// Keyboard dock destination: park `frame` gap-adjacent to `neighbor` in
+    /// `direction` (via `moved`), then align the perpendicular edge to that same
+    /// neighbor so the two meet at a clean 90° corner — the same shape as
+    /// `cornerSnap`, but UNCONDITIONAL (no threshold gate): keyboard docking is an
+    /// intentional command at any distance. Aligns to whichever perpendicular edge
+    /// (top/bottom for a side dock, left/right for a stacked dock) is nearer.
+    public static func dockDestination(_ frame: TileFrame, direction: Direction, against neighbor: TileFrame, gap: Double) -> TileFrame {
+        var docked = moved(frame, direction: direction, against: neighbor, gap: gap)
+        switch direction {
+        case .left, .right:
+            let topDelta = neighbor.y - docked.y
+            let bottomDelta = (neighbor.y + neighbor.height) - (docked.y + docked.height)
+            docked.y += abs(topDelta) <= abs(bottomDelta) ? topDelta : bottomDelta
+        case .up, .down:
+            let leftDelta = neighbor.x - docked.x
+            let rightDelta = (neighbor.x + neighbor.width) - (docked.x + docked.width)
+            docked.x += abs(leftDelta) <= abs(rightDelta) ? leftDelta : rightDelta
+        }
+        return docked
+    }
+
+    /// Tiles lying strictly ahead of `frame` in `direction`, ordered nearest→farthest
+    /// by the same forward-gap-biased-toward-alignment score as `CanvasEngine.nearestTile`
+    /// (ties broken by position for a stable total order). This is the list the
+    /// keyboard dock leapfrogs through: index 0 is the immediate neighbor, each
+    /// further index a tile beyond it.
+    public static func dockCandidates(ahead frame: TileFrame, direction: Direction, among others: [TileFrame]) -> [TileFrame] {
+        let frameCenterX = frame.x + frame.width / 2
+        let frameCenterY = frame.y + frame.height / 2
+        return others
+            .compactMap { other -> (frame: TileFrame, score: Double)? in
+                let primary: Double
+                let orthogonal: Double
+                switch direction {
+                case .left:
+                    guard other.x + other.width <= frame.x else { return nil }
+                    primary = frame.x - (other.x + other.width)
+                    orthogonal = abs((other.y + other.height / 2) - frameCenterY)
+                case .right:
+                    guard other.x >= frame.x + frame.width else { return nil }
+                    primary = other.x - (frame.x + frame.width)
+                    orthogonal = abs((other.y + other.height / 2) - frameCenterY)
+                case .up:
+                    guard other.y + other.height <= frame.y else { return nil }
+                    primary = frame.y - (other.y + other.height)
+                    orthogonal = abs((other.x + other.width / 2) - frameCenterX)
+                case .down:
+                    guard other.y >= frame.y + frame.height else { return nil }
+                    primary = other.y - (frame.y + frame.height)
+                    orthogonal = abs((other.x + other.width / 2) - frameCenterX)
+                }
+                return (other, primary + 0.5 * orthogonal)
+            }
+            .sorted { a, b in
+                if a.score != b.score { return a.score < b.score }
+                if a.frame.x != b.frame.x { return a.frame.x < b.frame.x }
+                return a.frame.y < b.frame.y
+            }
+            .map(\.frame)
+    }
+
     private static func nearestAlignment(_ candidates: [(delta: Double, guide: SnapGuide)], threshold: Double) -> (delta: Double, guide: SnapGuide)? {
         candidates
             .filter { abs($0.delta) <= threshold }
@@ -278,34 +339,7 @@ public enum TileArrangement {
     }
 
     private static func nearestNeighbor(ahead frame: TileFrame, direction: Direction, among others: [TileFrame]) -> TileFrame? {
-        let frameCenterX = frame.x + frame.width / 2
-        let frameCenterY = frame.y + frame.height / 2
-        return others
-            .compactMap { other -> (frame: TileFrame, score: Double)? in
-                let primary: Double
-                let orthogonal: Double
-                switch direction {
-                case .left:
-                    guard other.x + other.width <= frame.x else { return nil }
-                    primary = frame.x - (other.x + other.width)
-                    orthogonal = abs((other.y + other.height / 2) - frameCenterY)
-                case .right:
-                    guard other.x >= frame.x + frame.width else { return nil }
-                    primary = other.x - (frame.x + frame.width)
-                    orthogonal = abs((other.y + other.height / 2) - frameCenterY)
-                case .up:
-                    guard other.y + other.height <= frame.y else { return nil }
-                    primary = frame.y - (other.y + other.height)
-                    orthogonal = abs((other.x + other.width / 2) - frameCenterX)
-                case .down:
-                    guard other.y >= frame.y + frame.height else { return nil }
-                    primary = other.y - (frame.y + frame.height)
-                    orthogonal = abs((other.x + other.width / 2) - frameCenterX)
-                }
-                return (other, primary + 0.5 * orthogonal)
-            }
-            .min { $0.score < $1.score }?
-            .frame
+        dockCandidates(ahead: frame, direction: direction, among: others).first
     }
 
     private static func moved(_ frame: TileFrame, direction: Direction, against obstacle: TileFrame, gap: Double) -> TileFrame {

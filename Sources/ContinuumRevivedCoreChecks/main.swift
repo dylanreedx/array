@@ -2619,6 +2619,31 @@ do {
     expect(capped.count == 2 && capped.map(\.id) == [b, c], "jumpLabels caps at the alphabet length, got \(capped)")
 }
 
+// MARK: - TileArrangement: dockDestination + dockCandidates (keyboard dock/leapfrog)
+
+do {
+    let a = TileFrame(x: 300, y: 200, width: 100, height: 100)
+    let b = TileFrame(x: 600, y: 210, width: 100, height: 120) // ahead-right, nearer
+    let c = TileFrame(x: 900, y: 190, width: 100, height: 100) // further right
+
+    // Dock right against B: gap-adjacent on the left of B, top edges aligned.
+    let toB = TileArrangement.dockDestination(a, direction: .right, against: b, gap: 8)
+    expect(toB == TileFrame(x: 492, y: 210, width: 100, height: 100), "dockDestination parks gap-adjacent + aligns the nearer (top) edge, got \(toB)")
+    // Dock right against C (leapfrog target): past B, top-aligned to C.
+    let toC = TileArrangement.dockDestination(a, direction: .right, against: c, gap: 8)
+    expect(toC == TileFrame(x: 792, y: 190, width: 100, height: 100), "dockDestination against a farther tile leapfrogs past the nearer one, got \(toC)")
+
+    // Stacked dock (down) aligns the perpendicular (left) edge.
+    let below = TileFrame(x: 320, y: 600, width: 140, height: 100)
+    let down = TileArrangement.dockDestination(a, direction: .down, against: below, gap: 8)
+    expect(down == TileFrame(x: 320, y: 492, width: 100, height: 100), "dockDestination down parks above the tile and left-aligns, got \(down)")
+
+    // Candidate order: nearest→farthest ahead, stable regardless of input order.
+    let cands = TileArrangement.dockCandidates(ahead: a, direction: .right, among: [c, b])
+    expect(cands == [b, c], "dockCandidates orders ahead tiles nearest→farthest, got \(cands)")
+    expect(TileArrangement.dockCandidates(ahead: a, direction: .left, among: [b, c]).isEmpty, "dockCandidates is empty when nothing lies ahead")
+}
+
 // MARK: - CanvasEngine: centeredViewport (hold-leader jump centering)
 
 do {
