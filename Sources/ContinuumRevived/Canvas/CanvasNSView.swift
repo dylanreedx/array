@@ -212,14 +212,10 @@ final class CanvasNSView: NSView {
         }
     }
 
-    /// World-space member tile frames for `zone`, derived from the unified
-    /// membership index. Tile frames are stored zone-local (relative to the
-    /// zone origin), so a member's world frame is `worldFrame(tile:in:zone)`.
-    /// For the active project zone (origin 0,0) this equals the bare frame.
+    /// World-space member tile frames for `zone`. Tiles store world frames, so a
+    /// member's world frame is simply its `frame`.
     private func zoneMemberWorldFrames(_ zone: ZonePlacement) -> [TileFrame] {
-        canvasState.tiles
-            .filter { tileZoneMembership[$0.id] == zone.zoneId }
-            .map { CanvasEngine.worldFrame(tile: $0, in: zone) }
+        canvasState.tiles.filter { tileZoneMembership[$0.id] == zone.zoneId }.map { $0.frame }
     }
 
     /// QA reader: the zone chrome's current drawn bounds in world coords, derived
@@ -661,17 +657,10 @@ final class CanvasNSView: NSView {
         return liveZones.first { $0.zoneId == zoneId }
     }
 
-    /// `canvasState.tiles` mapped into world coordinates: a member's frame is
-    /// offset by its membership zone origin; bare tiles keep their frame.
-    /// Tiles whose membership zone is collapsed are omitted.
+    /// Tiles eligible for hit-testing: all tiles (world frames) except those in
+    /// a collapsed zone.
     private func worldFrameTiles() -> [Tile] {
-        canvasState.tiles.compactMap { tile in
-            guard let zone = membershipPlacement(of: tile.id) else { return tile }
-            if zone.collapsed { return nil }
-            var worldTile = tile
-            worldTile.frame = CanvasEngine.worldFrame(tile: tile, in: zone)
-            return worldTile
-        }
+        canvasState.tiles.filter { membershipPlacement(of: $0.id)?.collapsed != true }
     }
 
     func zoneId(at screenPoint: CGPoint) -> UUID? {
@@ -898,13 +887,12 @@ final class CanvasNSView: NSView {
 
     private func layoutTile(_ tile: Tile) {
         guard let view = tileViews[tile.id] else { return }
-        // zone-unify P1: position each tile by its membership zone's current
-        // (mutable) placement so a moved zone carries its members; bare tiles
-        // render at their world frame.
-        let zone = membershipPlacement(of: tile.id)
-        let worldFrame = zone.map { CanvasEngine.worldFrame(tile: tile, in: $0) } ?? tile.frame
-        let rect = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport)
-        view.isHidden = zone?.collapsed == true
+        // zone-unify: tiles store WORLD frames (the project canvas stays
+        // self-consistent). Zone membership is a pure overlay tag; a moved zone
+        // translates its members' world frames explicitly. A member is hidden
+        // only when its zone is collapsed.
+        let rect = CanvasEngine.tileScreenFrame(tile.frame, viewport: canvasState.viewport)
+        view.isHidden = membershipPlacement(of: tile.id)?.collapsed == true
         view.frame = rect
         view.bounds = NSRect(x: 0, y: 0, width: tile.frame.width, height: tile.frame.height)
         view.tile = tile
@@ -1084,11 +1072,17 @@ final class CanvasNSView: NSView {
                 setZonePlacement(newPlacement)
             } else if let idx = liveZones.firstIndex(where: { $0.zoneId == zoneId }) {
                 // Unified live path (zone-unify P1): mutate the authoritative
-                // `liveZones` placement, then relayout. Members are zone-local so
-                // they follow the new origin for free; chrome reads liveZones —
-                // no snap-back on the next relayout.
+                // `liveZones` placement and translate its members' world frames by
+                // the same delta, then relayout. Chrome reads liveZones — no
+                // snap-back on the next relayout.
                 let newPlacement = CanvasEngine.zone(liveZones[idx], draggedByScreenDelta: screenDelta, viewport: vp)
+                let dxW = newPlacement.origin.x - liveZones[idx].origin.x
+                let dyW = newPlacement.origin.y - liveZones[idx].origin.y
                 liveZones[idx] = newPlacement
+                for i in canvasState.tiles.indices where tileZoneMembership[canvasState.tiles[i].id] == zoneId {
+                    let f = canvasState.tiles[i].frame
+                    canvasState.tiles[i].frame = TileFrame(x: f.x + dxW, y: f.y + dyW, width: f.width, height: f.height)
+                }
                 pendingMovedPlacement = newPlacement
                 layoutAllTiles()
             }
@@ -1146,8 +1140,9 @@ final class CanvasNSView: NSView {
                     let f = canvasState.tiles[i].frame
                     let cx = f.x + f.width / 2, cy = f.y + f.height / 2
                     guard cx >= ox && cx <= ox + ow && cy >= oy && cy <= oy + oh else { continue }
+                    // Membership is a pure overlay tag — the tile keeps its world
+                    // frame (no conversion), so the project canvas stays valid.
                     tileZoneMembership[canvasState.tiles[i].id] = newZoneId
-                    canvasState.tiles[i].frame = TileFrame(x: f.x - ox, y: f.y - oy, width: f.width, height: f.height)
                 }
                 if showsZoneChrome, zoneChromeViews[newZoneId] == nil {
                     let view = ZoneChromeNSView(model: zoneDisplayByZoneId[newZoneId]!)
@@ -1671,9 +1666,9 @@ final class CanvasNSView: NSView {
         let zone = ZonePlacement(zoneId: zoneId, projectId: projectId,
                                  origin: ZonePoint(x: 50, y: 50), size: ZoneSize(width: 400, height: 300),
                                  color: "teal", collapsed: false, hydrationPolicy: .automatic, name: "Z", navKey: nil)
-        // Member tiles stored ZONE-LOCAL (world = local + zone origin).
-        let tileA = Tile(id: aId, kind: .note, title: "a", frame: TileFrame(x: 20, y: 40, width: 100, height: 80), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let tileB = Tile(id: bId, kind: .note, title: "b", frame: TileFrame(x: 200, y: 40, width: 100, height: 80), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        // Member tiles store WORLD frames; zone-move translates them explicitly.
+        let tileA = Tile(id: aId, kind: .note, title: "a", frame: TileFrame(x: 70, y: 90, width: 100, height: 80), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: bId, kind: .note, title: "b", frame: TileFrame(x: 250, y: 90, width: 100, height: 80), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
         let canvas = CanvasNSView(
             canvasState: CanvasState(viewport: vp, tiles: [tileA, tileB], groups: [], lastActiveTileId: nil),
             activeZone: zone,
@@ -2337,7 +2332,8 @@ final class CanvasNSView: NSView {
         // Each canvas independently computes its own adaptive bounds — no reflow.
         // oTile1 world = (10,10,100,100). Zone A bounds = (10-24,10-24-34,100+48,100+48+34)=(-14,-48,148,182).
         let expectedA8 = TileFrame(x: 10 - padding, y: 10 - padding - hh, width: 100 + 2 * padding, height: 100 + 2 * padding + hh)
-        let expectedB8 = TileFrame(x: 60 + 30 - padding, y: 60 + 30 - padding - hh, width: 100 + 2 * padding, height: 100 + 2 * padding + hh)
+        // Members store WORLD frames (no zone-origin offset): oTile2 world = (60,60).
+        let expectedB8 = TileFrame(x: 60 - padding, y: 60 - padding - hh, width: 100 + 2 * padding, height: 100 + 2 * padding + hh)
         try expectFrame(overCanvasA.qaZoneDrawnWorldBounds(for: overAId), expectedA8, "assertion 8a: zone A bounds unchanged by neighbor")
         try expectFrame(overCanvasB.qaZoneDrawnWorldBounds(for: overBId), expectedB8, "assertion 8b: zone B bounds unchanged by neighbor")
 
