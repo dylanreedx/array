@@ -116,6 +116,7 @@ run_app_check .build/debug/continuum-revived --spawn-placement-check
 run_app_check .build/debug/continuum-revived --focus-mode-check
 run_app_check .build/debug/continuum-revived --spawn-rate-limit-check
 run_app_check .build/debug/continuum-revived --file-tree-boot-persistence-check
+run_app_check .build/debug/continuum-revived --persistence-crash-safe-check
 run_app_check .build/debug/continuum-revived --ticket-queue-tile-check
 run_app_check .build/debug/continuum-revived --conductor-queue-tile-check
 run_app_check .build/debug/continuum-revived --agent-input-check

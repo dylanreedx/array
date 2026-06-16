@@ -4247,6 +4247,7 @@ do {
         ZoneHydrationReconcileConfig.intervalKey,
         BrowserRuntimeBudget.defaultsKey,
         AmbientZoneHome.userDefaultsKey,
+        AutosaveConfig.debounceMsKey,
     ]
     expect(expectedKeys.isSubset(of: Set(fieldKeys)), "settings schema must represent every existing pref key")
 
@@ -4289,6 +4290,21 @@ do {
     let bogusResolution = AmbientZoneHome.resolvedFromDefaults(standardDefaults: ambientDefaults, directoryExists: { _ in false })
     expect(bogusResolution.path == NSHomeDirectory(), "ambient zone home: bogus override rejected, fallback to $HOME")
     expect(bogusResolution.source == .fallbackDefault, "ambient zone home: bogus override source is .fallbackDefault")
+
+    // AutosaveConfig resolver: default / clamp-low / clamp-high / non-numeric → default.
+    let autosaveSuiteName = "AutosaveConfigChecks-\(UUID().uuidString)"
+    let autosaveDefaults = UserDefaults(suiteName: autosaveSuiteName)!
+    defer { autosaveDefaults.removePersistentDomain(forName: autosaveSuiteName) }
+    autosaveDefaults.removePersistentDomain(forName: autosaveSuiteName)
+    expect(AutosaveConfig.debounceMs(defaults: autosaveDefaults) == 200, "autosave debounce: empty defaults returns 200")
+    autosaveDefaults.set("750", forKey: AutosaveConfig.debounceMsKey)
+    expect(AutosaveConfig.debounceMs(defaults: autosaveDefaults) == 750, "autosave debounce: '750' reads back 750")
+    autosaveDefaults.set("-5", forKey: AutosaveConfig.debounceMsKey)
+    expect(AutosaveConfig.debounceMs(defaults: autosaveDefaults) == AutosaveConfig.minDebounceMs, "autosave debounce: '-5' clamps to min (\(AutosaveConfig.minDebounceMs))")
+    autosaveDefaults.set("99999", forKey: AutosaveConfig.debounceMsKey)
+    expect(AutosaveConfig.debounceMs(defaults: autosaveDefaults) == AutosaveConfig.maxDebounceMs, "autosave debounce: '99999' clamps to max (\(AutosaveConfig.maxDebounceMs))")
+    autosaveDefaults.set("abc", forKey: AutosaveConfig.debounceMsKey)
+    expect(AutosaveConfig.debounceMs(defaults: autosaveDefaults) == 200, "autosave debounce: 'abc' non-numeric falls back to 200")
 
     // The Keybindings section renders the ShortcutCatalog via a .shortcuts field.
     expect(allFields.contains { if case .shortcuts = $0 { return true } else { return false } }, "settings schema must include a .shortcuts field")

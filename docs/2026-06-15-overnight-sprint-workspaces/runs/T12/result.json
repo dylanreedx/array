@@ -1,0 +1,31 @@
+{
+  "task": "T12",
+  "title": "Bulletproof restore: debounced atomic autosave + crash-safe reload",
+  "verdict": "PASS WITH RISKS",
+  "iterations": 0,
+  "redProven": true,
+  "green": true,
+  "matrixFast": "green",
+  "buildClean": true,
+  "namedCheck": "--persistence-crash-safe-check passed (14 assertions)",
+  "guards": "--persistence-crash-safe-check drives real WorkspaceStore.save/load + WorkspaceDocumentSaveController: corrupt-primary recovery to the newest backup proven (== D1, zoom 1.5); coalescing proven by backup-count delta==1; configurable debounce RED-confirmed (revert→FAIL E14 got 15.0); clamp resolver RED-confirmed (stub→FAIL).",
+  "filesTouched": [
+    "Sources/ContinuumRevivedCore/AtomicWriter.swift (atomicDurableWrite: temp → fsync → rename(2) → dir-fsync; SHARED — all persisted JSON)",
+    "Sources/ContinuumRevivedCore/AutosaveConfig.swift (new; debounce resolver, clamp [0,5000], non-numeric fallback 200)",
+    "Sources/ContinuumRevived/App/WorkspaceDocumentSaveController.swift (read AutosaveConfig.debounceInterval)",
+    "Sources/ContinuumRevivedCore/SettingsSchema.swift",
+    "Sources/ContinuumRevivedCoreChecks/main.swift",
+    "Sources/ContinuumRevived/App/ContinuumApp.swift",
+    "scripts/run-matrix.sh"
+  ],
+  "risks": [
+    "R1 (inherent, acknowledged by spec rubric): fsync power-loss durability is NOT headless-RED-able (reverting to Data.write(.atomic) leaves the check green) — verified by CODE REVIEW only (temp same-dir → atomic rename → dir fd fsynced). Corrupt-primary recovery IS asserted; only power-loss durability is review-only.",
+    "R2 (minor, optional follow-up NH3): atomicDurableWrite cleans the leftover temp only on rename failure, not if data.write/fsync throws (contradicts the spec's stated cleanup). LOW impact — temp is dot-prefixed + excluded from the backup scanner + .skipsHiddenFiles, so load is never corrupted; only orphaned hidden temps accumulate on repeated write failures.",
+    "R3 (documented): assertion-10 runloop spin widened 0.05→0.30s vs spec (coalescing is a write-count property; defensible, no correctness impact)."
+  ],
+  "needsHuman": [
+    "NH1: fsync now lives in the SHARED AtomicWriter, so EVERY persisted JSON (Workspace/Project/Registry/file-tree/browser-profile) gets durable writes. All regression checks green. Confirm this wider blast radius is intended (spec scoped T12 to WorkspaceStore).",
+    "NH2: no live drag/resize/move autosave CALLER is wired in T12 — coalescing is proven at the controller level, but no production path fires a debounced autosave yet (deferred to T05/T11/T19 zone interactions). The crash-safe MECHANISM exists; confirm the live triggering is tracked.",
+    "NH3 (optional): R2 temp cleanup on temp-write/fsync failure."
+  ]
+}

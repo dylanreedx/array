@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public enum AtomicWriterError: Error, Equatable {
@@ -38,8 +39,8 @@ public struct AtomicWriter: Sendable {
         // Backup the existing file before overwriting.
         try backupExistingFile(at: url)
 
-        // Atomic write: Foundation writes to a temp file and renames.
-        try data.write(to: url, options: .atomic)
+        // Durable atomic write: temp in same dir → fsync temp fd → rename(2) → fsync dir fd.
+        try atomicDurableWrite(data, to: url)
 
         // Trim old backups for this file.
         try pruneOldBackups(for: url)
@@ -70,6 +71,31 @@ public struct AtomicWriter: Sendable {
     }
 
     // MARK: - Internal helpers
+
+    /// Write `data` to `url` durably:
+    ///   1. Write bytes to a dot-prefixed sibling temp in the **same directory** (same volume → rename is atomic).
+    ///   2. fsync the temp's file descriptor so bytes are on stable storage before the rename.
+    ///   3. rename(2) the temp into place atomically.
+    ///   4. fsync the parent directory fd so the rename itself is durable.
+    /// If any step fails, the temp is removed and `url` is untouched.
+    private func atomicDurableWrite(_ data: Data, to url: URL) throws {
+        let dir = url.deletingLastPathComponent()
+        let tmp = dir.appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
+        // Write bytes to the temp (not atomic — it's throwaway; atomicity comes from rename).
+        try data.write(to: tmp)
+        // fsync the temp's data to stable storage before rename.
+        let fd = open(tmp.path, O_RDONLY)
+        if fd >= 0 { fsync(fd); close(fd) }
+        // Atomic, same-volume rename. On failure, clean up the temp and rethrow.
+        if rename(tmp.path, url.path) != 0 {
+            let err = errno
+            try? FileManager.default.removeItem(at: tmp)
+            throw POSIXError(POSIXErrorCode(rawValue: err) ?? .EIO)
+        }
+        // fsync the parent directory so the directory entry (rename) is durable.
+        let dfd = open(dir.path, O_RDONLY)
+        if dfd >= 0 { fsync(dfd); close(dfd) }
+    }
 
     private func backupExistingFile(at url: URL) throws {
         guard

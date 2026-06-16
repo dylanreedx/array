@@ -645,6 +645,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--persistence-crash-safe-check") {
+            do {
+                let artifact = try AppDelegate.runPersistenceCrashSafeSelfCheck()
+                print("ContinuumRevivedPersistenceCrashSafeChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--ticket-queue-tile-check") {
             do {
                 let artifact = try AppDelegate.runTicketQueueTileSelfCheck()
@@ -9496,6 +9507,237 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         """
         try json.write(to: artifact, atomically: true, encoding: .utf8)
         return artifact
+    }
+
+    // MARK: - Persistence Crash-Safe Check
+
+    static func runPersistenceCrashSafeSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(msg): return msg }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fm = FileManager.default
+        let appSupport: URL
+        if let env = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"], !env.isEmpty {
+            appSupport = URL(fileURLWithPath: env, isDirectory: true)
+        } else {
+            appSupport = fm.temporaryDirectory
+                .appendingPathComponent("continuum-persistence-crash-safe-\(UUID().uuidString)", isDirectory: true)
+        }
+        try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+
+        let wsId = UUID(uuidString: "11111111-1111-1111-1111-111111111101")!
+        let projectZoneId = UUID(uuidString: "22222222-2222-2222-2222-222222222201")!
+        let groupZoneId   = UUID(uuidString: "22222222-2222-2222-2222-222222222202")!
+        let projectId     = UUID(uuidString: "33333333-3333-3333-3333-333333333301")!
+
+        // Use a generous retainedBackups to prevent pruning from confounding the write-count assertions.
+        let store = WorkspaceStore(
+            workspaceId: wsId,
+            applicationSupportDirectory: appSupport,
+            retainedBackups: 64
+        )
+
+        func backupFileCount() -> Int {
+            guard let entries = try? fm.contentsOfDirectory(
+                at: store.layout.backupsDirectory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else { return 0 }
+            return entries.filter { entry in
+                let name = entry.lastPathComponent
+                return name.hasPrefix("canvas.") && name.hasSuffix(".json")
+            }.count
+        }
+
+        // Build D1: viewport (5, 7, 1.5), one project zone + one group zone.
+        let D1 = WorkspaceDocument(
+            viewport: CanvasViewport(x: 5, y: 7, zoom: 1.5),
+            zones: [
+                ZonePlacement(
+                    zoneId: projectZoneId,
+                    projectId: projectId,
+                    origin: ZonePoint(x: 0, y: 0),
+                    size: ZoneSize(width: 1280, height: 720),
+                    color: "mint",
+                    collapsed: false,
+                    hydrationPolicy: .automatic
+                ),
+                ZonePlacement(
+                    zoneId: groupZoneId,
+                    projectId: nil,
+                    origin: ZonePoint(x: 1400, y: 0),
+                    size: ZoneSize(width: 800, height: 600),
+                    color: "blue",
+                    collapsed: false,
+                    hydrationPolicy: .automatic
+                ),
+            ],
+            zoneZOrder: [projectZoneId, groupZoneId],
+            lastActiveZoneId: groupZoneId
+        )
+
+        // A1: save D1 and round-trip.
+        try store.save(D1)
+        try expect(fm.fileExists(atPath: store.layout.canvasFile.path), "A1: canvasFile must exist after save")
+        let loaded1 = try store.load()
+        try expect(loaded1 == D1, "A1: loaded document must equal D1 after round-trip")
+
+        // A2: no leftover temp file from the write.
+        let wsDir = store.layout.workspaceDirectory
+        let wsDirContents = (try? fm.contentsOfDirectory(atPath: wsDir.path)) ?? []
+        let tempFiles = wsDirContents.filter { $0.hasPrefix(".canvas.json.tmp-") }
+        try expect(tempFiles.isEmpty, "A3: no .canvas.json.tmp-* leftover after durable write, found: \(tempFiles)")
+
+        // B4: save D2 = D1 with zoom 3.0; assert round-trip.
+        var D2 = D1
+        D2.viewport = CanvasViewport(x: 5, y: 7, zoom: 3.0)
+        try store.save(D2)
+        let loaded2 = try store.load()
+        try expect(loaded2 == D2, "B4: loaded document must equal D2 after second save")
+        // After step 4: backups = {D1}, primary = D2.
+
+        // B5: simulate crash that left a corrupt primary.
+        let garbage = Data("{ \"schemaVer".utf8)
+        try garbage.write(to: store.layout.canvasFile, options: .atomic)
+
+        // B6: reader falls back to newest valid backup (D1, not D2).
+        // Backup set: D1 backed up during save(D2), D2 never backed up (primary == D2, now garbage).
+        let recovered = try store.load()
+        try expect(recovered == D1, "B6: corrupt primary must recover to D1 (newest valid backup)")
+        try expect(recovered.viewport.zoom == 1.5, "B6: recovered doc must have D1's zoom (1.5), got \(recovered.viewport.zoom)")
+
+        // B7: stray temp file is never loaded as primary or backup.
+        let strayTemp = wsDir.appendingPathComponent(".canvas.json.tmp-\(UUID().uuidString)")
+        try Data("{ partial".utf8).write(to: strayTemp, options: .atomic)
+        let afterStray = try store.load()
+        try expect(afterStray == D1, "B7: stray temp file must not affect load, still returns D1")
+
+        // C8: good primary survives a write; writer still healthy post-recovery.
+        try store.save(D1)
+        let afterResave = try store.load()
+        try expect(afterResave == D1, "C8: save after recovery succeeds and round-trips D1")
+
+        // D9-10: coalescing — N rapid schedules → exactly one atomic write.
+        // NOTE: The controller already coalesces (it's a regression guard). Use a long enough
+        // spin (0.3s) that covers both the current hardcoded 0.2s interval and the future
+        // configured 10ms interval — the coalescing test is about write count, not speed.
+        let suiteName = "PersistenceCrashSafeChecks-\(UUID().uuidString)"
+        let suite = UserDefaults(suiteName: suiteName)!
+        defer { suite.removePersistentDomain(forName: suiteName) }
+        suite.removePersistentDomain(forName: suiteName)
+        suite.set("10", forKey: AutosaveConfig.debounceMsKey)  // 10 ms window (post-fix)
+
+        let saveController = WorkspaceDocumentSaveController(store: store, defaults: suite)
+        let nBackupsBefore = backupFileCount()
+
+        // Schedule 5 documents without flushing.
+        for x in [10.0, 11.0, 12.0, 13.0, 14.0] {
+            saveController.scheduleZoneLayoutSave(
+                WorkspaceDocument(
+                    viewport: CanvasViewport(x: x, y: 0, zoom: 1.0),
+                    zones: [],
+                    zoneZOrder: [],
+                    lastActiveZoneId: nil
+                )
+            )
+        }
+
+        // Spin runloop long enough that any interval up to 250ms fires once.
+        // (Pre-fix: controller ignores suite, uses 0.2s; 0.3s covers it. Post-fix: 10ms fires sooner.)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.30))
+
+        let nBackupsAfter = backupFileCount()
+        let delta = nBackupsAfter - nBackupsBefore
+        try expect(delta == 1, "D10: coalesced N=5 schedules must create exactly 1 backup (got delta=\(delta))")
+        let afterCoalesce = try store.load()
+        try expect(afterCoalesce.viewport.x == 14.0, "D10: primary must hold last-scheduled doc (x=14), got \(afterCoalesce.viewport.x)")
+
+        // D11: explicit flush.
+        let D_f = WorkspaceDocument(
+            viewport: CanvasViewport(x: 15, y: 0, zoom: 1.0),
+            zones: [],
+            zoneZOrder: [],
+            lastActiveZoneId: nil
+        )
+        saveController.scheduleZoneLayoutSave(D_f)
+        try saveController.flushPendingSave()
+        let afterFlush = try store.load()
+        try expect(afterFlush.viewport.x == 15.0, "D11: explicit flush writes synchronously (x=15), got \(afterFlush.viewport.x)")
+
+        // E12-14: configurable debounce.
+        let emptySuiteName = "PersistenceCrashSafeChecksEmpty-\(UUID().uuidString)"
+        let emptySuite = UserDefaults(suiteName: emptySuiteName)!
+        defer { emptySuite.removePersistentDomain(forName: emptySuiteName) }
+        emptySuite.removePersistentDomain(forName: emptySuiteName)
+
+        try expect(AutosaveConfig.debounceMs(defaults: emptySuite) == 200,
+                   "E12: empty defaults must return 200 (default)")
+
+        emptySuite.set("750", forKey: AutosaveConfig.debounceMsKey)
+        try expect(AutosaveConfig.debounceMs(defaults: emptySuite) == 750,
+                   "E13a: '750' must resolve to 750")
+
+        emptySuite.set("-5", forKey: AutosaveConfig.debounceMsKey)
+        try expect(AutosaveConfig.debounceMs(defaults: emptySuite) == AutosaveConfig.minDebounceMs,
+                   "E13b: '-5' must clamp to min (\(AutosaveConfig.minDebounceMs))")
+
+        emptySuite.set("99999", forKey: AutosaveConfig.debounceMsKey)
+        try expect(AutosaveConfig.debounceMs(defaults: emptySuite) == AutosaveConfig.maxDebounceMs,
+                   "E13c: '99999' must clamp to max (\(AutosaveConfig.maxDebounceMs))")
+
+        emptySuite.set("abc", forKey: AutosaveConfig.debounceMsKey)
+        try expect(AutosaveConfig.debounceMs(defaults: emptySuite) == 200,
+                   "E13d: 'abc' non-numeric must fall back to 200")
+
+        // E14: controller actually reads AutosaveConfig (0ms → fires next loop).
+        let zeroSuiteName = "PersistenceCrashSafeChecksZero-\(UUID().uuidString)"
+        let zeroSuite = UserDefaults(suiteName: zeroSuiteName)!
+        defer { zeroSuite.removePersistentDomain(forName: zeroSuiteName) }
+        zeroSuite.removePersistentDomain(forName: zeroSuiteName)
+        zeroSuite.set("0", forKey: AutosaveConfig.debounceMsKey)
+
+        let zeroController = WorkspaceDocumentSaveController(store: store, defaults: zeroSuite)
+        let D_zero = WorkspaceDocument(
+            viewport: CanvasViewport(x: 99, y: 0, zoom: 1.0),
+            zones: [],
+            zoneZOrder: [],
+            lastActiveZoneId: nil
+        )
+        zeroController.scheduleZoneLayoutSave(D_zero)
+        // 0ms interval: timer fires on next runloop pass.
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
+        let afterZero = try store.load()
+        try expect(afterZero.viewport.x == 99.0,
+                   "E14: controller with 0ms config must flush on next runloop (x=99), got \(afterZero.viewport.x)")
+
+        // Write manifest.
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let directory = URL(fileURLWithPath: fm.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("persistence-crash-safe", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifest = directory.appendingPathComponent("manifest.json")
+        let manifestData: [String: Any] = [
+            "check": "persistence-crash-safe",
+            "recoveredViewportZoom": recovered.viewport.zoom,
+            "backupDelta": delta,
+            "coalesceCount": delta,
+            "postCoalesceViewportX": afterCoalesce.viewport.x,
+            "flushViewportX": afterFlush.viewport.x,
+            "status": "passed",
+            "note": "fsync durability not observable in normal process exit; temp-hygiene (assertion 3) and crash-recovery (assertion 6) are the observable guarantees"
+        ]
+        let manifestJson = try JSONSerialization.data(withJSONObject: manifestData, options: [.prettyPrinted, .sortedKeys])
+        try manifestJson.write(to: manifest)
+        return manifest
     }
 
     private static func textFieldStrings(in view: NSView) -> [String] {

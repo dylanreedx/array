@@ -102,6 +102,11 @@ public enum SettingsSchema {
                         label: "Ambient Zone Home Directory",
                         default: AmbientZoneHome.fallback
                     ),
+                    .text(
+                        key: AutosaveConfig.debounceMsKey,
+                        label: "Autosave Debounce (ms)",
+                        default: String(AutosaveConfig.defaultDebounceMs)
+                    ),
                 ]
             ),
             SettingsSection(
