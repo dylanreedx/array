@@ -1162,6 +1162,8 @@ final class CanvasNSView: NSView {
                 onZoneMoved?(layer.placement)
             } else if let pending = pendingMovedPlacement {
                 onZoneMoved?(pending)
+                // Persist the members' translated world frames (canvas save).
+                delegate?.canvasDidChange(self)
             }
             pendingMovedPlacement = nil
             return
