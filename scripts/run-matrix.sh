@@ -108,6 +108,7 @@ run_app_check .build/debug/continuum-revived --zone-hydration-lifecycle-check
 run_app_check .build/debug/continuum-revived --zone-save-isolation-check
 run_app_check .build/debug/continuum-revived --zone-registry-refcount-check
 run_app_check .build/debug/continuum-revived --workspace-runtime-install-check
+run_app_check .build/debug/continuum-revived --workspace-switch-check
 run_app_check .build/debug/continuum-revived --add-zone-check
 run_app_check .build/debug/continuum-revived --browser-lru-budget-check
 run_app_check .build/debug/continuum-revived --spawn-placement-check

@@ -370,6 +370,149 @@ final class WorkspaceRuntime {
         return zoneId
     }
 
+    // MARK: - Workspace Switch (T09)
+
+    /// Tear down the current workspace's zone layers + runtimes and install the target
+    /// workspace's in-process (no app relaunch). Steps:
+    ///   1. Flush all current controllers.
+    ///   2. Load the target `WorkspaceDocument` from disk.
+    ///   3. Diff current vs target project sets: release departing (ref-count → close-at-zero),
+    ///      keep shared (same instance, ref-count unchanged), acquire arriving.
+    ///   4. Build `ZoneLayer`s for the target workspace and call `setZones` on the canvas
+    ///      (which unregisters old adapters and registers new ones via T05).
+    ///   5. Set the canvas viewport to the target document's saved viewport.
+    ///   6. Restore focus to the target workspace's last-active tile (or `.canvas`).
+    ///   7. Update `workspaceId`, `document`, `acquiredProjectIds`.
+    ///
+    /// The relaunch-spy seam: `_relaunchSpy` is non-nil only in checks; production leaves it nil.
+    var _relaunchSpy: (() -> Void)?
+
+    func switchWorkspace(to targetWorkspaceId: UUID) throws {
+        // 1. Flush current + persist departing workspace's live viewport to disk.
+        flushAll()
+
+        // Capture the canvas's current in-memory viewport and write it back into
+        // the departing WorkspaceDocument before saving, so a round-trip restores
+        // the user's last pan/zoom position rather than the stale on-disk value.
+        if let liveViewport = canvasView?.viewport {
+            document.viewport = liveViewport
+            let appSupportForSave = registryStore.registryFile.deletingLastPathComponent()
+            let departingStore = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupportForSave)
+            try departingStore.save(document)
+        }
+
+        // 2. Load target document.
+        let appSupport = registryStore.registryFile.deletingLastPathComponent()
+        let targetStore = WorkspaceStore(workspaceId: targetWorkspaceId, applicationSupportDirectory: appSupport)
+        guard let targetDocument = try targetStore.tryLoad() else {
+            throw WorkspaceSwitchError.documentNotFound(targetWorkspaceId)
+        }
+
+        // 3. Diff project sets.
+        let currentProjectIds = Set(acquiredProjectIds)
+        let targetProjectIds = Set(
+            targetDocument.zones.compactMap(\.projectId)
+        )
+        let departing = currentProjectIds.subtracting(targetProjectIds)
+        let arriving = targetProjectIds.subtracting(currentProjectIds)
+
+        // Build new ZoneLayers for the target workspace before releasing (so shared controllers stay alive).
+        let plan = ZoneHydrationOrchestrator.plan(
+            zones: targetDocument.zones,
+            viewport: targetDocument.viewport,
+            visibleSize: canvasView.map { CGSize(width: $0.bounds.width > 0 ? $0.bounds.width : 1280,
+                                                  height: $0.bounds.height > 0 ? $0.bounds.height : 720) }
+                ?? CGSize(width: 1280, height: 720),
+            focusedTileZone: targetDocument.lastActiveZoneId,
+            maxLiveZones: ZoneHydrationBudgetConfig.maxLiveZones()
+        )
+
+        // Acquire arriving project controllers (only truly new ones — shared ones already have ref-count).
+        // newlyAcquired tracks the full set of projectIds this workspace owns after the switch (de-duped).
+        var newlyAcquired: [UUID] = []
+        var acquiredSet = Set<UUID>()
+        for zone in targetDocument.zones {
+            guard let projectId = zone.projectId else { continue }
+            guard plan.tier(for: zone.zoneId) == .live else { continue }
+            if arriving.contains(projectId) && !acquiredSet.contains(projectId) {
+                // Truly new: acquire (creates controller at ref=1).
+                _ = try registry.acquire(projectId: projectId)
+            }
+            if !acquiredSet.contains(projectId) {
+                newlyAcquired.append(projectId)
+                acquiredSet.insert(projectId)
+            }
+        }
+
+        // Build layers from newly acquired + shared controllers.
+        var layers: [CanvasNSView.ZoneLayer] = []
+        for zone in targetDocument.zones {
+            guard let projectId = zone.projectId else { continue }
+            guard plan.tier(for: zone.zoneId) == .live else { continue }
+            guard let controller = registry.controller(for: projectId) else { continue }
+
+            let canvasState: CanvasState
+            if let loaded = try controller.projectStore.tryLoadCanvas() {
+                canvasState = loaded
+            } else {
+                canvasState = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil)
+            }
+            var tileViews: [UUID: TileNSView] = [:]
+            for tile in canvasState.tiles {
+                let view = DescriptorTileNSView(tile: tile)
+                tileViews[tile.id] = view
+            }
+            let displayName = zone.name.isEmpty ? controller.project.name : zone.name
+            let renderModel = CanvasNSView.ZoneRenderModel(placement: zone, displayName: displayName)
+            let layer = CanvasNSView.ZoneLayer(placement: zone, renderModel: renderModel, tiles: canvasState.tiles)
+            layer.tileViews = tileViews
+            layers.append(layer)
+        }
+
+        // 4. Swap canvas: setZones unregisters old adapters + registers new ones (T05).
+        canvasView?.setZones(layers, zoneZOrder: targetDocument.zoneZOrder)
+        installedLayers = layers
+
+        // 5. Release departing (after setZones so adapters are already unregistered by T05).
+        for projectId in departing {
+            registry.release(projectId: projectId)
+        }
+
+        // 6. Set viewport.
+        canvasView?.setViewport(targetDocument.viewport)
+
+        // 7. Re-establish focus.
+        workspaceId = targetWorkspaceId
+        document = targetDocument
+        acquiredProjectIds = newlyAcquired
+
+        // Attach UI to the new active controller.
+        if let canvas = canvasView, let active = activeController {
+            let activeStore = active.projectStore
+            let spawner = TileSpawner(
+                canvasView: canvas,
+                ghostty: ghostty,
+                browserEngine: browserEngine,
+                projectStore: activeStore,
+                project: active.project
+            )
+            active.attachUI(canvasView: canvas, tileSpawner: spawner, focusBroker: focusBroker)
+        }
+
+        if let canvas = canvasView {
+            restoreFocus(from: canvas)
+        } else {
+            _ = focusBroker.requestFocus(.canvas, reason: .appActivated)
+        }
+    }
+
+    enum WorkspaceSwitchError: Error, CustomStringConvertible {
+        case documentNotFound(UUID)
+        var description: String {
+            switch self { case let .documentNotFound(id): return "switchWorkspace: no document for workspace \(id)" }
+        }
+    }
+
     // MARK: - Browser Runtime Budget (T07)
 
     private var browserRuntimeBudget = BrowserRuntimeBudget(maxLive: BrowserRuntimeBudget.resolveMaxLive())

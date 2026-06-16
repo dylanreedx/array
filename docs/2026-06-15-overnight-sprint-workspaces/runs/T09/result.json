@@ -1,0 +1,28 @@
+{
+  "task": "T09",
+  "title": "switchWorkspace in-process (retire relaunch)",
+  "verdict": "PASS WITH RISKS",
+  "iterations": 1,
+  "redProven": true,
+  "green": true,
+  "matrixFast": "green",
+  "buildClean": true,
+  "namedCheck": "--workspace-switch-check passed",
+  "guards": "--workspace-switch-check drives the REAL runtime.switchWorkspace(to:): asserts installed layers, broker focus round-trips, registry refCount/=== identity, viewport restore, hit-test (inv2b), in-process reachability (inv7). Bypass disproved 2 ways (no-op switch → RED inv1; remove viewport-persist → RED inv8).",
+  "iterationNote": "Reviewer requested changes once; builder fixed inv7 (vacuous→real reachability), added inv2b hit-test for the shape-B active tile, added departing-viewport persistence (RED-confirmed at (10,20) before fix). Re-reviewed PASS WITH RISKS.",
+  "filesTouched": [
+    "Sources/ContinuumRevived/App/WorkspaceRuntime.swift",
+    "Sources/ContinuumRevived/App/ContinuumApp.swift",
+    "scripts/run-matrix.sh"
+  ],
+  "risks": [
+    "HIGH (→T20, near-blocking for PRODUCTION): the live WorkspaceRuntime is built with a THROWING boot registry factory ('unexpected acquire on boot registry — T08 wires this'; immutable let, no swap-in seam). In the running app switchWorkspace AND addProjectZone throw on the first project acquire → caught → switch silently no-ops. T09 REMOVED the relaunch fallback, so ⌘K switch-workspace is now an inert regression live. The checks pass only because they inject a fully-wired registry. The LOGIC is verified; production needs T20 to wire the real per-project controller factory. The whole keystone (T06–T10) is built+verified but inert in the live app until T20.",
+    "MED (interacts with T10): ref-count leak — a previously-acquired target project whose zone is budget-demoted to non-live falls in neither departing nor newlyAcquired (acquire loop tier-filters to .live), so it drops from acquiredProjectIds while refCount>0 → never released. Not exercised (check uses high budget; all zones live). T10 (tier transitions) should address.",
+    "LOW: inv2 focus disjunction (tileInPb || .canvas) looser than hand-derived (inv3 still rejects stale-A → not a bypass). inv5 asserts shared-P === identity (rubric) but not the D4 Snapshot tier the spec text named (T10 owns tiers). inv7 _relaunchSpy line is vacuous (never invoked) — the real no-relaunch proof is workspaceId==WB. switchWorkspaceAndRelaunch/createWorkspaceAndRelaunch/deleteWorkspaceAndRelaunch are now misnomers (names kept, surgical)."
+  ],
+  "needsHuman": [
+    "HIGH DECISION: wire the boot registry's real per-project controller factory now (T20) or accept ⌘K switch/add-zone inert until a follow-up. See T20-wire-boot-registry-factory.md.",
+    "shape-B: accept descriptor-only active-zone tiles (canvasState.tiles not populated by setZones; ~71 read-sites blind to switched-in tiles) as the interim model, or reconcile to live canvasState.tiles before merge? inv2b proves the active tile is hit-testable; the canvasState gap is documented.",
+    "VISUAL gate (blocked-pending-T20): live ⌘K switch — flicker, z-paint after setZones, cursor rects, old-tile focus-border clearing. Cannot be exercised until T20."
+  ]
+}

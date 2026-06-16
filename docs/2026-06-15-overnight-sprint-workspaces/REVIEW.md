@@ -7,35 +7,42 @@ Branch: `overnight/workspaces-zones` (off `main`). **Nothing merged to `main` �
 Spine: `git log --oneline main..overnight/workspaces-zones` (each task = one `(Tnn)` commit).
 Rebuild for visual gates: `./scripts/make-app-bundle.sh --configuration release --output ~/Applications/ContinuumRevived.app && open ~/Applications/ContinuumRevived.app`
 
+## ⛔ HEADLINE — read this first
+**The keystone (T06–T10) is BUILT + headlessly VERIFIED but INERT in the live app.** The boot
+`WorkspaceRuntime` is wired with a **throwing placeholder registry factory** (`"T08 wires this"`,
+immutable `let`, no swap-in seam). So in the running app, `addProjectZone` and `switchWorkspace`
+throw on the first project acquire → no-op. T09 removed the relaunch fallback, so **⌘K switch is a
+silent no-op regression** live. Every T07–T10 check passes because each **injects a real registry**.
+→ **Captured as `T20` (`T20-wire-boot-registry-factory.md`)** — a required follow-up that needs a
+small **design decision from you** (per-project controller construction at boot). Until T20, the
+live-switch visual gates can't be exercised. This is the #1 thing to decide in the morning.
+
 ## Status
-- Committed: **10** · blocked: **0** · staged-for-morning: **0** · of 17 build tasks
-- Fast matrix green · `swift build` clean
-- W1 (T01–T04) + W2 (T05,T11,T15) + T06 keystone + T07 + T08 done. Next: T09 → T10.
+- Committed: **11** · blocked: **0** · staged-for-morning: **0** · needs-human follow-up: **1 (T20)** · of 17 build tasks
+- Fast matrix green · `swift build` clean · `--workspace-switch-check` green
+- W1 + W2 + T06 + T07 + T08 + T09 done. Next: T10 → T12 → T13/T14 → T17/T18 → morning T16/T19.
 
 ## 🔴 Decide / eyeball — tests could not prove these
-**Behavioral regressions / design decisions:**
-- [ ] **T07 · focus-mode eviction protection dropped (regression)** — `currentProtectedBrowserTileIds()` reads only `lastActiveTileId`, not `focusModeSession.protectedTileIds`. A focus-mode companion browser that's globally oldest can be evicted while viewed. **Decide:** wire `focusModeSession` into `WorkspaceRuntime`, or accept. · `runs/T07/`
-- [ ] **T08 · group zone writes to `$HOME` by default** — a group/ambient zone with no `AmbientZoneHome` override roots its controller at `$HOME` → materializes `$HOME/.continuum-revived/project.json` (a project named after you). **Dormant** until group-zone *creation* is wired (T17/sidebar/T19). **Decide:** intended+document, or sandbox the ambient root. · `runs/T08/`
-- [ ] **T06 · windowWillClose quit-flush ordering** now runs AFTER force-terminate (no check covers `windowWillClose`). Accept or add a quit-path flush check. · `runs/T06/`
-- [ ] **T06 · shape-B install discrepancy → T09 reconciles** — `install()` layers ALL zones as descriptor tiles, `canvasState.tiles` empty (injected into T09). · **T06 `attachUI` optional-chained** silent-nil surface.
-- ✓ **Resolved in T06:** budget→`plan()` wired; ZoneLayer chrome adaptive (probe-guarded).
+**Decisions:**
+- [ ] **T20 / boot registry (HIGH)** — wire the real per-project controller factory at boot (3 design Qs in `T20-…md`), or accept the switch/add-zone inert until a follow-up. **The keystone isn't live without it.**
+- [ ] **T09 · shape-B model** — accept descriptor-only active-zone tiles (`canvasState.tiles` not populated; ~71 read-sites blind to switched-in tiles), or reconcile to live `canvasState.tiles`? inv2b proves hit-testable; gap documented. · `runs/T09/`
+- [ ] **T07 · focus-mode eviction protection dropped (regression)** — wire `focusModeSession` into `WorkspaceRuntime` or accept. · `runs/T07/`
+- [ ] **T08 · group zone writes `$HOME/.continuum-revived/project.json`** by default (dormant until creation wired) — intended+document or sandbox. · `runs/T08/`
+- [ ] **T06 · windowWillClose quit-flush ordering** (after force-terminate; no check) · **T06 `attachUI` optional-chained** · **T09 MED:** ref-count leak on budget-demoted target project (T10 should address).
+- [ ] Ratifications: **T15** name fallback · **T01** navKey→T18 · **T04** closeOnZero · **T05** per-zone focus · **T03** "Max Live Zones" no UI validation.
 
-**Smaller ratifications:** T15 name fallback `?? ""` vs `?? "Project"` (before T16) · T01 navKey→T18 · T04 closeOnZero design · T05 per-zone focus stays out · T03 "Max Live Zones" no UI validation.
-
-**Visual gates — rebuild & eyeball:**
-- [ ] **T08** group zone's installed ZoneLayer on the live canvas (chrome, empty bounds, z-order). · **T06** focus-border smoke (click a tile). · **T05** flicker/z-paint/cursor-rects/first-responder/empty-state overlay. · **T11** header title fit.
+**Visual gates — rebuild & eyeball** (T06/T09 live-switch ones are **blocked-pending-T20**):
+- [ ] **T09/T06** live ⌘K switch: flicker, z-paint after `setZones`, cursor rects, old-tile focus-border clearing _(after T20)_. · **T08** group-zone layer chrome. · **T05** flicker/z-paint/cursor/first-responder/empty-state. · **T11** header title fit.
 
 ## 🟡 Pass with risks — committed, review the named risk
-- [ ] **T08 — addZone (project + ambient group)** · +fixer strengthened the check (R2 asserts no project lock for ambient; R3 real group-tile workspace-store round-trip + ProjectStore isolation, both RED-confirmed). Original RED not separately confirmed (retro-established). R4 forwarder change low-risk. · `runs/T08/`
-- [ ] **T07 — browser budget over live union** · R2: cross-zone eviction fully effective once T08… (T08 now done; verify a non-active zone's browsers are actually evictable in the live app — they only are if the controller has a `tileSpawner`). · `runs/T07/`
-- [ ] **T06 — WorkspaceRuntime shell** (+fixer). Risks in 🔴. · `runs/T06/`
-- [ ] **T15** sidebar view-model · **T11** adaptive bounds · **T05** mutable ZoneLayer canvas · **T04** ZoneRuntimeRegistry — minor risks, see each `runs/Tnn/`.
+- [ ] **T09 — switchWorkspace in-process** (1 iter; inv7→real reachability, inv2b hit-test, viewport-persist RED-confirmed). Risks in 🔴 + MED ref-count leak + LOW inv5/inv7-spy/naming. · `runs/T09/`
+- [ ] **T08 — addZone** (+fixer: lock + tile-routing checks, RED-confirmed) · **T07 — browser budget union** (R2 cross-zone needs live spawner) · **T06 — WorkspaceRuntime shell** (+fixer) · **T15 / T11 / T05 / T04** minor risks — see each `runs/Tnn/`.
 
 ## 🟢 Verified routine — clean PASS
-- [ ] **T01** zone model · **T02** group-zone tile storage (real `WorkspaceStore` save→load) · **T03** hydration planner (`--zone-hydration-plan-check`, bypass disproved 2 ways).
+- [ ] **T01** zone model · **T02** group-zone tile storage · **T03** hydration planner (`--zone-hydration-plan-check`).
 
 ## ⛔ Blocked / needs-human
-- _(none yet)_
+- **T20** — boot registry factory (design decision; see HEADLINE). The only thing standing between "built+verified" and "live."
 
 ---
 Each entry: `[ ] Tnn — what · guards: <check> · runs/Tnn/{build,review}.md`. Evidence in `runs/<task>/` is the source of truth.

@@ -16,8 +16,8 @@ Legend: ⬜ todo · ✍️ spec-written · 🔨 building · 🔍 review · ✅ d
 | T05 | Mutable canvas / ZoneLayer (S3) | overnight [appkit-chk] | T01 | ✅ | 70a77e1 | built PASS-WITH-RISKS; storage-shape B + morning visual gate flagged |
 | T06 | WorkspaceRuntime shell + proxy (S4) | overnight [appkit-chk] | T03,T04,T05 | ✅ | 93c68f4 | built PASS-WITH-RISKS; 3 carry-fwds done (budget+chrome probed; shape-B→T09); windowWillClose-order/attachUI risks→🔴 |
 | T07 | BrowserRuntimeBudget union (S5) | overnight | T06 | ✅ | 4ba7eac | built PASS-WITH-RISKS; focus-mode protect regression→🔴(R1); cross-zone full after T08(R2) |
-| T08 | addZone + ambient controller (S6) | overnight [appkit-chk] | T06,T02 | ✅ | (T08) | built PASS-WITH-RISKS; +fixer (R2 lock + R3 tile-routing, RED-confirmed); $HOME-write design→🔴 |
-| T09 | switchWorkspace in-process (S7) ⚠ | overnight [appkit-chk] | T06 | ✍️ | — | spec written (exemplar) |
+| T08 | addZone + ambient controller (S6) | overnight [appkit-chk] | T06,T02 | ✅ | a18b1ac | built PASS-WITH-RISKS; +fixer (R2 lock + R3 tile-routing, RED-confirmed); $HOME-write design→🔴 |
+| T09 | switchWorkspace in-process (S7) ⚠ | overnight [appkit-chk] | T06 | ✅ | (T09) | built PASS-WITH-RISKS (1 iter); HIGH: prod switch INERT (throwing boot registry)→T20+🔴; shape-B descriptor-active→🔴 |
 | T10 | Viewport-driven tier transitions (S8) | overnight | T06 | ✍️ | — | spec written (review folds into build) |
 | T11 | Adaptive zone bounds (union+padding) | overnight [pure+wiring] | T05 | ✅ | 16806b1 | built PASS-WITH-RISKS; legacy chrome only — ZoneLayer-chrome gap→T06 |
 | T12 | Bulletproof restore (atomic, crash-safe) | overnight | T01,T02 | ✍️ | — | spec written (review folds into build) |
@@ -28,6 +28,7 @@ Legend: ⬜ todo · ✍️ spec-written · 🔨 building · 🔍 review · ✅ d
 | T17 | ⌘K zone rows (jump/create) | overnight | T01 | ✍️ | — | spec written (review folds into build) |
 | T18 | Per-zone nav keybind + leader zone-jump | overnight | T01 | ✍️ | — | spec written (review folds into build) |
 | T19 | Drag-to-create-zone + move-zone gesture | morning [appkit] | T05,T11 | ✍️ | — | spec written (review folds into build) |
+| T20 | ⚠Wire boot WorkspaceRuntime real per-project controller factory | overnight [appkit-chk] | T06(debt) | ⛔ | — | NEEDS-HUMAN design (T09 review): boot registry throws on acquire → add-zone/switch INERT in live app; keystone built+verified but NOT live until this. Stub: T20-wire-boot-registry-factory.md |
 
 Stretch (not critical path): S9 lock-degradation merge from `wip/con-50-zone-lock-degradation`.
 

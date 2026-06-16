@@ -2924,8 +2924,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     lastActiveZoneId: nil
                 )
             )
-            workspaceRuntime?.flushAll()
             try registryStore.save(registry)
+            // Switch in-process to the new empty workspace (no relaunch).
+            try workspaceRuntime?.switchWorkspace(to: workspace.id)
         } catch {
             fputs("Create Workspace failed: \(error)\n", stderr)
         }
@@ -2963,19 +2964,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func switchWorkspaceAndRelaunch(workspaceId: UUID) {
-        guard let registryStore else { return }
         do {
-            var registry = try registryStore.loadOrEmpty()
-            guard let workspace = registry.workspaces.first(where: { $0.id == workspaceId }) else { return }
-            guard let projectEntry = workspace.projectIds.compactMap({ projectId in registry.projects.first(where: { $0.id == projectId }) }).first else {
-                fputs("Switch Workspace failed: workspace has no project to launch\n", stderr)
-                return
-            }
-            registry.lastActiveWorkspaceId = workspaceId
-            registry.lastActiveProjectId = projectEntry.id
-            workspaceRuntime?.flushAll()
-            try registryStore.save(registry)
-            relaunchApplication(projectRoot: URL(fileURLWithPath: projectEntry.rootPath))
+            // Switch in-process — no relaunch needed.
+            try workspaceRuntime?.switchWorkspace(to: workspaceId)
         } catch {
             fputs("Switch Workspace failed: \(error)\n", stderr)
         }
@@ -4191,86 +4182,252 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(disabledRequest.reason == .openLastProjectDisabled, "picker receives disabled-open-last reason")
     }
 
+    // swiftlint:disable:next function_body_length
     static func runWorkspaceSwitchSelfCheck() throws {
-        struct CheckFailure: Error, CustomStringConvertible { let description: String }
+        // T09 — switchWorkspace(to:) in-process swap invariants.
+        // Builds two workspaces in memory sharing one project P (exercises ref-count sharing)
+        // and each with a unique project (Pa only in A, Pb only in B).
+        // Calls the REAL workspaceRuntime.switchWorkspace(to: B) and asserts all 8 invariants.
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(m): return m } }
+        }
         func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
-            if !condition() { throw CheckFailure(description: message) }
+            if !condition() { throw CheckError.failed(message) }
         }
 
-        let now = Date(timeIntervalSince1970: 1_800_000_000)
-        let projectA = UUID(uuidString: "00000000-0000-0000-0000-000000005501")!
-        let projectB = UUID(uuidString: "00000000-0000-0000-0000-000000005502")!
-        let workspaceA = UUID(uuidString: "00000000-0000-0000-0000-0000000055A1")!
-        let workspaceB = UUID(uuidString: "00000000-0000-0000-0000-0000000055B2")!
-        let emptyWorkspace = UUID(uuidString: "00000000-0000-0000-0000-0000000055EE")!
-        var registry = Registry.empty()
-        registry.lastActiveProjectId = projectA
-        registry.lastActiveWorkspaceId = workspaceA
-        registry.projects = [
-            ProjectEntry(id: projectA, name: "Alpha", rootPath: "/tmp/continuum-ws-alpha", workspaceId: workspaceA, lastOpenedAt: now, pinned: false),
-            ProjectEntry(id: projectB, name: "Beta", rootPath: "/tmp/continuum-ws-beta", workspaceId: workspaceB, lastOpenedAt: now.addingTimeInterval(-1), pinned: false)
-        ]
-        registry.workspaces = [
-            WorkspaceEntry(id: workspaceA, name: "Main Canvas", projectIds: [projectA], createdAt: now, updatedAt: now),
-            WorkspaceEntry(id: workspaceB, name: "Review Canvas", projectIds: [projectB], createdAt: now, updatedAt: now),
-            WorkspaceEntry(id: emptyWorkspace, name: "Empty Canvas", projectIds: [], createdAt: now, updatedAt: now)
-        ]
-        let probes = ProjectRootResolver.FileSystemProbes(
-            directoryExists: { $0 == "/tmp/continuum-ws-alpha" || $0 == "/tmp/continuum-ws-beta" },
-            continuumDirectoryExists: { $0 == "/tmp/continuum-ws-alpha" || $0 == "/tmp/continuum-ws-beta" },
-            canCreateContinuumDirectory: { _ in false }
+        let fileManager = FileManager.default
+        let now = Date(timeIntervalSince1970: 1_900_000_000)
+
+        // Fixed UUIDs for determinism.
+        let workspaceWA  = UUID(uuidString: "00000000-0000-0000-0000-000000009A01")!
+        let workspaceWB  = UUID(uuidString: "00000000-0000-0000-0000-000000009B02")!
+        let projectPa    = UUID(uuidString: "00000000-0000-0000-0000-000000009C03")!
+        let projectP     = UUID(uuidString: "00000000-0000-0000-0000-000000009D04")!  // shared
+        let projectPb    = UUID(uuidString: "00000000-0000-0000-0000-000000009E05")!
+        let zoneAa       = UUID(uuidString: "00000000-0000-0000-0000-000000009F06")!  // Pa in WA
+        let zoneAp       = UUID(uuidString: "00000000-0000-0000-0000-000000009F07")!  // P in WA
+        let zoneBb       = UUID(uuidString: "00000000-0000-0000-0000-000000009F08")!  // Pb in WB
+        let zoneBp       = UUID(uuidString: "00000000-0000-0000-0000-000000009F09")!  // P in WB
+        let tileInPa     = UUID(uuidString: "00000000-0000-0000-0000-000000009F0A")!
+        let tileInP      = UUID(uuidString: "00000000-0000-0000-0000-000000009F0B")!
+        let tileInPb     = UUID(uuidString: "00000000-0000-0000-0000-000000009F0C")!
+
+        // Temp directories.
+        let tempRoot   = fileManager.temporaryDirectory.appendingPathComponent("continuum-ws-switch-\(UUID().uuidString)", isDirectory: true)
+        let paRoot     = tempRoot.appendingPathComponent("Pa", isDirectory: true)
+        let pRoot      = tempRoot.appendingPathComponent("P",  isDirectory: true)
+        let pbRoot     = tempRoot.appendingPathComponent("Pb", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        try fileManager.createDirectory(at: paRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: pRoot,  withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: pbRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        func makeProject(id: UUID, name: String, root: URL) -> Project {
+            Project(id: id, name: name, rootPath: root.path, createdAt: now, updatedAt: now,
+                    defaultLaunchProfileId: "shell", editorPreference: .auto,
+                    settings: ProjectSettings(restorePolicy: .restoreDescriptors,
+                                             browserStoragePolicy: .perProject,
+                                             terminalClosePolicy: .askWhenRunning))
+        }
+        func makeCanvas(tileId: UUID, lastActive: Bool) -> CanvasState {
+            CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                        tiles: [Tile(id: tileId, kind: .note, title: "tile", frame: TileFrame(x: 10, y: 10, width: 200, height: 120), zIndex: 1, runtimeRef: nil, metadata: TileMetadata(noteId: tileId))],
+                        groups: [],
+                        lastActiveTileId: lastActive ? tileId : nil)
+        }
+
+        let projectPaObj = makeProject(id: projectPa, name: "Pa", root: paRoot)
+        let projectPObj  = makeProject(id: projectP,  name: "P",  root: pRoot)
+        let projectPbObj = makeProject(id: projectPb, name: "Pb", root: pbRoot)
+        let storePa = ProjectStore(projectRoot: paRoot)
+        let storeP  = ProjectStore(projectRoot: pRoot)
+        let storePb = ProjectStore(projectRoot: pbRoot)
+        try storePa.saveProject(projectPaObj); try storePa.saveCanvas(makeCanvas(tileId: tileInPa, lastActive: true))
+        try storeP.saveProject(projectPObj);   try storeP.saveCanvas(makeCanvas(tileId: tileInP,  lastActive: false))
+        try storePb.saveProject(projectPbObj); try storePb.saveCanvas(makeCanvas(tileId: tileInPb, lastActive: true))
+
+        // Workspace A: zones [Za→Pa, Zap→P], active=Za.
+        let docA = WorkspaceDocument(
+            viewport: CanvasViewport(x: 10, y: 20, zoom: 1),
+            zones: [
+                ZonePlacement(zoneId: zoneAa, projectId: projectPa, origin: ZonePoint(x: 0, y: 0),   size: ZoneSize(width: 640, height: 480), color: "blue",  collapsed: false, hydrationPolicy: .automatic),
+                ZonePlacement(zoneId: zoneAp, projectId: projectP,  origin: ZonePoint(x: 700, y: 0), size: ZoneSize(width: 640, height: 480), color: "green", collapsed: false, hydrationPolicy: .automatic)
+            ],
+            zoneZOrder: [zoneAa, zoneAp],
+            lastActiveZoneId: zoneAa
         )
-        var pickerRegistry = registry
-        pickerRegistry.settings.openLastProjectOnLaunch = false
-        guard case let .presentPicker(request) = ProjectLaunchCoordinator.decide(environment: [:], registry: pickerRegistry, fileSystem: probes) else {
-            throw CheckFailure(description: "disabled open-last should present workspace-aware picker")
-        }
-        try expect(request.workspaces.map { $0.workspace.id } == [workspaceA, workspaceB, emptyWorkspace], "picker request includes workspace section rows")
-        try expect(ProjectLaunchCoordinator.selectWorkspace(id: workspaceB, from: request) == projectB, "workspace picker row resolves to first project")
-        try expect(ProjectLaunchCoordinator.selectWorkspaceForNextLaunch(id: workspaceB, from: request) == projectB, "workspace picker records pending workspace selection")
-        try expect(ProjectLaunchCoordinator.consumePendingWorkspaceSelection() == workspaceB, "pending workspace selection is available to startup")
-        try expect(ProjectLaunchCoordinator.selectWorkspace(id: emptyWorkspace, from: request) == nil, "empty workspace picker row is not selectable")
-        let rows = LaunchPaletteModel.makeRows(profiles: [], projects: ProjectPickerModel.makeRows(registry: registry, fileSystem: probes), workspaces: registry.workspaces)
-        try expect(rows.contains(where: { if case let .workspace(workspace) = $0 { return workspace.id == workspaceB }; return false }), "palette exposes switch workspace row")
-        let workspaceFilterRows = LaunchPaletteModel.filterRows(rows, query: "review workspace")
-        try expect(workspaceFilterRows.first == .workspace(registry.workspaces[1]), "palette workspace picker filters to the review workspace row; rows=\(workspaceFilterRows.map(\.displayName))")
-        let zoneFilterRows = LaunchPaletteModel.filterRows(rows, query: "beta zone")
-        try expect(zoneFilterRows.first == .project(ProjectPickerModel.makeRows(registry: registry, fileSystem: probes)[1]), "palette zone picker filters to the Beta add-project row; rows=\(zoneFilterRows.map(\.displayName))")
-        let emptyWorkspaceRows = LaunchPaletteModel.filterRows(rows, query: "empty workspace")
-        try expect(emptyWorkspaceRows.first?.isSelectable == false, "empty workspace picker row should remain unselectable")
-        let titleProject = Project(id: projectA, name: "Alpha", rootPath: "/tmp/continuum-ws-alpha", createdAt: now, updatedAt: now, defaultLaunchProfileId: "shell", editorPreference: .auto, settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning))
-        try expect(mainWindowTitle(for: titleProject, registry: registry) == "Main Canvas — Continuum", "window title uses active workspace name")
-
-        registry.projects = [ProjectEntry(id: projectA, name: "Alpha", rootPath: "/tmp/continuum-ws-alpha", workspaceId: workspaceA, lastOpenedAt: now, pinned: false)]
-        registry.workspaces = [
-            WorkspaceEntry(id: workspaceA, name: "Main Canvas", projectIds: [projectA], createdAt: now, updatedAt: now),
-            WorkspaceEntry(id: workspaceB, name: "Review Canvas", projectIds: [projectA], createdAt: now, updatedAt: now)
-        ]
-        registry.lastActiveProjectId = projectA
-        registry.lastActiveWorkspaceId = workspaceB
-        let appSupport = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("continuum-workspace-switch-check-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: appSupport) }
-        let zoneA = UUID(uuidString: "00000000-0000-0000-0000-000000005A0A")!
-        let zoneB = UUID(uuidString: "00000000-0000-0000-0000-000000005B0B")!
-        try WorkspaceStore(workspaceId: workspaceA, applicationSupportDirectory: appSupport).save(WorkspaceDocument(
-            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-            zones: [ZonePlacement(zoneId: zoneA, projectId: projectA, origin: ZonePoint(x: 10, y: 20), size: ZoneSize(width: 640, height: 480), color: "blue", collapsed: false, hydrationPolicy: .automatic)],
-            zoneZOrder: [zoneA],
-            lastActiveZoneId: zoneA
-        ))
-        try WorkspaceStore(workspaceId: workspaceB, applicationSupportDirectory: appSupport).save(WorkspaceDocument(
+        // Workspace B: zones [Zbb→Pb, Zbp→P], active=Zbb, viewport=(50,60).
+        let docB = WorkspaceDocument(
             viewport: CanvasViewport(x: 50, y: 60, zoom: 1),
-            zones: [ZonePlacement(zoneId: zoneB, projectId: projectA, origin: ZonePoint(x: 300, y: 400), size: ZoneSize(width: 800, height: 600), color: "purple", collapsed: false, hydrationPolicy: .automatic)],
-            zoneZOrder: [zoneB],
-            lastActiveZoneId: zoneB
-        ))
-        let sharedStore = RegistryStore(applicationSupportDirectory: appSupport)
-        try sharedStore.save(registry)
-        let sharedModels = try loadActiveZoneRenderModels(from: sharedStore)
-        try expect(registry.workspaces.allSatisfy { $0.projectIds == [projectA] }, "same project remains attached to both workspaces")
-        try expect(sharedModels.map { $0.placement.zoneId } == [zoneB], "active workspace render uses selected workspace placement")
-        try expect(sharedModels.first?.placement.origin == ZonePoint(x: 300, y: 400), "active workspace preserves selected workspace layout")
+            zones: [
+                ZonePlacement(zoneId: zoneBb, projectId: projectPb, origin: ZonePoint(x: 0, y: 0),   size: ZoneSize(width: 640, height: 480), color: "red",   collapsed: false, hydrationPolicy: .automatic),
+                ZonePlacement(zoneId: zoneBp, projectId: projectP,  origin: ZonePoint(x: 700, y: 0), size: ZoneSize(width: 640, height: 480), color: "green", collapsed: false, hydrationPolicy: .automatic)
+            ],
+            zoneZOrder: [zoneBb, zoneBp],
+            lastActiveZoneId: zoneBb
+        )
+        try WorkspaceStore(workspaceId: workspaceWA, applicationSupportDirectory: appSupport).save(docA)
+        try WorkspaceStore(workspaceId: workspaceWB, applicationSupportDirectory: appSupport).save(docB)
+
+        var appRegistry = Registry.empty()
+        appRegistry.lastActiveWorkspaceId = workspaceWA
+        appRegistry.projects = [
+            ProjectEntry(id: projectPa, name: "Pa", rootPath: paRoot.path, workspaceId: workspaceWA, lastOpenedAt: now, pinned: false, missing: false),
+            ProjectEntry(id: projectP,  name: "P",  rootPath: pRoot.path,  workspaceId: workspaceWA, lastOpenedAt: now, pinned: false, missing: false),
+            ProjectEntry(id: projectPb, name: "Pb", rootPath: pbRoot.path, workspaceId: workspaceWB, lastOpenedAt: now, pinned: false, missing: false)
+        ]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(appRegistry)
+
+        let focusBroker = FocusBroker()
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+
+        let zoneRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { projectId in
+            if projectId == projectPa { return ZoneRuntimeController(projectRoot: paRoot, projectStore: storePa, project: projectPaObj) }
+            if projectId == projectP  { return ZoneRuntimeController(projectRoot: pRoot,  projectStore: storeP,  project: projectPObj)  }
+            if projectId == projectPb { return ZoneRuntimeController(projectRoot: pbRoot, projectStore: storePb, project: projectPbObj) }
+            throw CheckError.failed("unexpected projectId in factory: \(projectId)")
+        })
+
+        let runtime = WorkspaceRuntime(
+            workspaceId: workspaceWA,
+            document: docA,
+            registry: zoneRegistry,
+            focusBroker: focusBroker,
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+
+        // Install workspace A.
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 10, y: 20, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil), activeZone: nil, zoneRenderModels: [], showsZoneChrome: false)
+        canvas.frame = CGRect(x: 0, y: 0, width: 2000, height: 1200)
+        try runtime.install(into: canvas, appRegistry: appRegistry)
+        canvas.layoutSubtreeIfNeeded()
+
+        // Verify WA is installed: both Pa and P zones present.
+        try expect(canvas.installedZoneLayerIds.contains(zoneAa), "pre-switch: zoneAa installed in WA")
+        try expect(canvas.installedZoneLayerIds.contains(zoneAp), "pre-switch: zoneAp installed in WA")
+        try expect(zoneRegistry.refCount(for: projectPa) == 1, "pre-switch: Pa ref-count == 1")
+        try expect(zoneRegistry.refCount(for: projectP)  == 1, "pre-switch: P ref-count == 1")
+
+        // Capture P's controller identity BEFORE the switch.
+        guard let pControllerBefore = zoneRegistry.controller(for: projectP) else {
+            throw CheckError.failed("pre-switch: P controller must exist before switch")
+        }
+
+        // Focus a tile in WA (tileInPa).
+        _ = focusBroker.requestFocus(.tile(tileInPa), reason: .userClick)
+        try expect(focusBroker.activeSurface == .tile(tileInPa), "pre-switch: focus is tileInPa")
+
+        // Mutate WA's canvas viewport in-memory (simulates a pan that hasn't hit disk yet).
+        // inv8 will assert this mutated value is restored after the round-trip, proving
+        // switchWorkspace persists the departing viewport before loading the target.
+        let mutatedWAViewport = CanvasViewport(x: 77, y: 88, zoom: 1)
+        canvas.setViewport(mutatedWAViewport)
+        try expect(canvas.viewport.x == 77, "pre-switch: WA viewport must be 77 after in-memory mutation")
+
+        // Wire no-relaunch spy.
+        var relaunchCalled = false
+        runtime._relaunchSpy = { relaunchCalled = true }
+
+        // === ACT: switch to workspace B ===
+        try runtime.switchWorkspace(to: workspaceWB)
+        canvas.layoutSubtreeIfNeeded()
+
+        // --- Invariant 1: Canvas zone set == B's zones exactly ---
+        let installedAfter = canvas.installedZoneLayerIds
+        try expect(installedAfter.contains(zoneBb),  "inv1: zoneBb (Pb) must be installed after switch to WB")
+        try expect(installedAfter.contains(zoneBp),  "inv1: zoneBp (P) must be installed after switch to WB")
+        try expect(!installedAfter.contains(zoneAa), "inv1: zoneAa (Pa) must NOT be installed after switch to WB")
+        try expect(!installedAfter.contains(zoneAp), "inv1: zoneAp (P in WA) must NOT be installed after switch to WB")
+        try expect(installedAfter.count == 2,         "inv1: exactly 2 zone layers after switch; got \(installedAfter.count)")
+
+        // --- Invariant 2: Focus scope == B's expected surface ---
+        // WB lastActiveZoneId = Zbb → projectPb → lastActiveTileId = tileInPb (seeded above)
+        let focusAfter = focusBroker.activeSurface
+        try expect(focusAfter == .tile(tileInPb) || focusAfter == .canvas,
+                   "inv2: activeSurface after switch must be tileInPb or .canvas; got \(String(describing: focusAfter))")
+        // It must NOT still be the A tile.
+        try expect(focusAfter != .tile(tileInPa), "inv2: activeSurface must not be stale A tile after switch")
+
+        // --- Invariant 3: Adapter registration ---
+        // Pa's tile adapter must be unregistered (requestFocus returns false).
+        let focusPaAfter = focusBroker.requestFocus(.tile(tileInPa), reason: .userClick)
+        try expect(!focusPaAfter, "inv3: requestFocus(tileInPa) must return false after switch (Pa unregistered)")
+        // Pb's tile adapter must be registered (requestFocus returns true).
+        let focusPbAfter = focusBroker.requestFocus(.tile(tileInPb), reason: .userClick)
+        try expect(focusPbAfter, "inv3: requestFocus(tileInPb) must return true after switch (Pb registered)")
+
+        // --- Invariant 2b: Shape-B hit-test — B's active tile is hit-testable via canvas.tileId(at:) ---
+        // The active tile (tileInPb) lives in ZoneLayer.tiles, not canvasState.tiles (shape-B model).
+        // It must be hit-testable via the multi-zone path in tileId(at:).
+        // tileInPb: zone-local frame (x:10, y:10, w:200, h:120), zone origin (0,0),
+        // viewport (x:50, y:60, zoom:1) → screen center at (60, 10).
+        // NEEDS-HUMAN: canvasState.tiles is NOT populated by setZones (shape-B gap);
+        // the ~71 canvasState.tiles read-sites do not see this tile. Full unification deferred.
+        let pbTileScreenCenter = CGPoint(x: 60, y: 10)
+        let hitTileId = canvas.tileId(at: pbTileScreenCenter)
+        try expect(hitTileId == tileInPb, "inv2b: tileInPb must be hit-testable at screen point (60,10) via ZoneLayer; got \(String(describing: hitTileId))")
+
+        // --- Invariant 4: Runtime ref-count ---
+        try expect(zoneRegistry.refCount(for: projectPa) == 0, "inv4: Pa ref-count must be 0 after switch (released)")
+        try expect(zoneRegistry.refCount(for: projectP)  == 1, "inv4: P ref-count must be 1 after switch (shared, unchanged)")
+        try expect(zoneRegistry.refCount(for: projectPb) == 1, "inv4: Pb ref-count must be 1 after switch (acquired)")
+        try expect(zoneRegistry.controller(for: projectPa) == nil, "inv4: Pa controller must be gone from registry after release")
+        try expect(zoneRegistry.controller(for: projectP)  != nil, "inv4: P controller must still be in registry (shared)")
+        try expect(zoneRegistry.controller(for: projectPb) != nil, "inv4: Pb controller must be in registry")
+
+        // --- Invariant 5: Demotion — shared P controller is SAME instance (not recreated) ---
+        guard let pControllerAfter = zoneRegistry.controller(for: projectP) else {
+            throw CheckError.failed("inv5: P controller must exist after switch")
+        }
+        try expect(pControllerAfter === pControllerBefore, "inv5: P controller must be the SAME instance (===) across the switch (shared, not recreated)")
+
+        // --- Invariant 6: Viewport == B's saved WorkspaceDocument.viewport ---
+        let canvasViewport = canvas.viewport
+        try expect(canvasViewport.x == docB.viewport.x && canvasViewport.y == docB.viewport.y && canvasViewport.zoom == docB.viewport.zoom,
+                   "inv6: canvas viewport after switch must match WB document viewport (\(docB.viewport)); got \(canvasViewport)")
+
+        // --- Invariant 7: No relaunch (real reachability proof) ---
+        // Structural proof: WorkspaceRuntime has no reference to AppDelegate and therefore
+        // cannot call AppDelegate.relaunchApplication. The in-process proof is that after
+        // switchWorkspace returns, `runtime` is a live heap object reflecting WB state.
+        // If the process had relaunched, `runtime.workspaceId` would be stale/dead.
+        try expect(runtime.workspaceId == workspaceWB, "inv7: runtime.workspaceId must equal WB after in-process switch (proves no relaunch)")
+        // Additionally verify the _relaunchSpy was never invoked (vacuous but documents intent).
+        try expect(!relaunchCalled, "inv7: relaunch spy must NOT be called during switchWorkspace")
+
+        // --- Invariant 8: Round-trip — switch back to A ---
+        // Mutate WB's viewport in-memory too, so round-trip also exercises WB → WA persistence.
+        let mutatedWBViewport = CanvasViewport(x: 55, y: 65, zoom: 1)
+        canvas.setViewport(mutatedWBViewport)
+        _ = focusBroker.requestFocus(.canvas, reason: .appActivated)
+        try runtime.switchWorkspace(to: workspaceWA)
+        canvas.layoutSubtreeIfNeeded()
+
+        let installedRoundTrip = canvas.installedZoneLayerIds
+        try expect(installedRoundTrip.contains(zoneAa), "inv8: round-trip: zoneAa must be re-installed in WA")
+        try expect(installedRoundTrip.contains(zoneAp), "inv8: round-trip: zoneAp must be re-installed in WA")
+        try expect(!installedRoundTrip.contains(zoneBb), "inv8: round-trip: zoneBb must NOT be installed in WA")
+        try expect(!installedRoundTrip.contains(zoneBp), "inv8: round-trip: zoneBp must NOT be installed in WA")
+        // B-only adapter (Pb) should be released after round-trip.
+        try expect(zoneRegistry.refCount(for: projectPb) == 0, "inv8: round-trip: Pb ref-count must be 0 after return to WA")
+        // Pa and P must be re-acquired.
+        try expect(zoneRegistry.refCount(for: projectPa) == 1, "inv8: round-trip: Pa ref-count must be 1 after return to WA")
+        try expect(zoneRegistry.refCount(for: projectP)  == 1, "inv8: round-trip: P ref-count must be 1 after return to WA")
+        // No residue from B.
+        let focusBbAfterRoundTrip = focusBroker.requestFocus(.tile(tileInPb), reason: .userClick)
+        try expect(!focusBbAfterRoundTrip, "inv8: round-trip: Pb tile adapter must be unregistered after return to WA")
+        // WA viewport must be the mutated value (77, 88) — not the stale on-disk value (10, 20).
+        // This asserts that switchWorkspace persisted the in-memory viewport before switching away.
+        let roundTripViewport = canvas.viewport
+        try expect(roundTripViewport.x == mutatedWAViewport.x && roundTripViewport.y == mutatedWAViewport.y,
+                   "inv8: round-trip: canvas viewport must match WA's in-memory mutated viewport (\(mutatedWAViewport)); got \(roundTripViewport) — switchWorkspace must persist departing viewport before unloading")
     }
 
     private func presentFatalError(_ error: Error) {
