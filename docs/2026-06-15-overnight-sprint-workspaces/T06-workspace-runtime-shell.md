@@ -21,6 +21,17 @@ T07 hangs the budget off it, T08 spins controllers through it, T09 adds `switchW
 T10 adds viewport-driven tier transitions. **Shell only** — install + teardown of the
 *current* workspace; switching between workspaces is T09.
 
+## ⚠ ORCHESTRATOR CARRY-FORWARD (added mid-sprint from T03/T05/T11 reviews — IN SCOPE for T06)
+Three integration gaps surfaced by the reviewers of the tasks T06 builds on. T06 is where they go live; address all three and the reviewer WILL verify each:
+
+1. **Wire the hydration budget into the planner.** T03 shipped `ZoneHydrationOrchestrator.plan(maxLiveZones:)` + `ZoneHydrationBudgetConfig.maxLiveZones(defaults:)`, but nothing feeds the resolver into `plan()`. Wherever `WorkspaceRuntime` calls the planner, pass `ZoneHydrationBudgetConfig.maxLiveZones(defaults:)` as `maxLiveZones` — otherwise the configurable budget is decorative. Add a check assertion that the budget actually gates the live set.
+
+2. **Make the installed `ZoneLayer` chrome adaptive.** T11 made `CanvasEngine.zoneBounds` drive ONLY the legacy active-zone chrome; T05's `ZoneLayer` chrome (`setZonePlacement`/`_installLayer`) still uses the STORED `zoneWorldFrame`. Since T06 installs live `ZoneLayer`s, their chrome MUST use `CanvasEngine.zoneBounds` over the member frames (ideally route both paths through one shared chrome-layout helper). Add a real-path assertion: an installed `ZoneLayer`'s drawn chrome frame == the adaptive bounds of its members (T05's check asserts only tile frames, so this gap is otherwise invisible to CI).
+
+3. **Confirm storage-shape B across the read-sites.** Group-zone tiles live in `WorkspaceDocument.groupZoneTiles` (T02); the canvas keeps `ZoneLayer`s additively over single-zone storage (T05, "shape B"). As you reroute AppDelegate through `WorkspaceRuntime`, ensure the active zone still drives the ~71 `canvasState.tiles` read-sites and group-zone tiles come from the workspace store. If a uniform per-layer store is genuinely required, STOP and flag needs-human rather than silently refactoring all 71 sites.
+
+If any one truly cannot be done within T06's scope, implement the other two, add a pending/failing guard + a clear needs-human note for the deferred one in build.md, and say so — do not silently skip.
+
 ## Exact scope — files & symbols
 - **`Sources/ContinuumRevived/App/WorkspaceRuntime.swift`** (NEW, `@MainActor final class`):
   - Owns: `private(set) var document: WorkspaceDocument`, the `ZoneRuntimeRegistry` (T04),
