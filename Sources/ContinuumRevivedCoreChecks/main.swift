@@ -1251,6 +1251,181 @@ do {
     }
 }
 
+// MARK: - Group-zone tile storage (T02)
+
+do {
+    let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-group-zone-tiles-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: scratch) }
+
+    // Fixture UUIDs (literal — every asserted value is hand-derivable)
+    let wsId   = UUID(uuidString: "AAAAAAAA-0000-4000-8000-000000000001")!
+    let gz     = UUID(uuidString: "0000AAAA-0000-4000-8000-00000000000A")!   // group zone
+    let pz     = UUID(uuidString: "0000BBBB-0000-4000-8000-00000000000B")!   // project zone
+    let projP  = UUID(uuidString: "0000CCCC-0000-4000-8000-00000000000C")!
+    let t1id   = UUID(uuidString: "0000D001-0000-4000-8000-000000000001")!
+    let t2id   = UUID(uuidString: "0000D002-0000-4000-8000-000000000002")!
+    let gz2    = UUID(uuidString: "0000AAAA-0000-4000-8000-00000000000B")!   // second group zone
+    let t3id   = UUID(uuidString: "0000D003-0000-4000-8000-000000000003")!
+
+    func makeTile(id: UUID, x: Double, y: Double, w: Double, h: Double) -> Tile {
+        Tile(
+            id: id,
+            kind: .terminal,
+            title: "T-\(id.uuidString.prefix(8))",
+            frame: TileFrame(x: x, y: y, width: w, height: h),
+            zIndex: 0,
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+    }
+
+    let t1 = makeTile(id: t1id, x: 40,  y: 40, w: 600, h: 400)
+    let t2 = makeTile(id: t2id, x: 700, y: 40, w: 500, h: 300)
+    let t3 = makeTile(id: t3id, x: 100, y: 100, w: 400, h: 300)
+
+    let gzPlacement = ZonePlacement(
+        zoneId: gz,
+        projectId: nil,       // group zone
+        origin: ZonePoint(x: 0, y: 0),
+        size: ZoneSize(width: 1280, height: 720),
+        color: "blue",
+        collapsed: false,
+        hydrationPolicy: .automatic
+    )
+    let pzPlacement = ZonePlacement(
+        zoneId: pz,
+        projectId: projP,     // project zone
+        origin: ZonePoint(x: 1400, y: 0),
+        size: ZoneSize(width: 1280, height: 720),
+        color: "mint",
+        collapsed: false,
+        hydrationPolicy: .automatic
+    )
+
+    var document = WorkspaceDocument(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        zones: [gzPlacement, pzPlacement],
+        zoneZOrder: [gz, pz],
+        lastActiveZoneId: gz
+    )
+    document.setTiles([t1, t2], forZone: gz)
+    // pz intentionally has no group tiles (its tiles live in ProjectStore)
+
+    let store = WorkspaceStore(
+        workspaceId: wsId,
+        applicationSupportDirectory: scratch,
+        retainedBackups: 2
+    )
+    try store.save(document)
+    let loaded = try store.load()
+
+    // 1. Full round-trip equality (proves groupZoneTiles is in Equatable + Codable)
+    expect(loaded == document, "T02 assertion 1: store round-trip equality includes groupZoneTiles")
+
+    // 2. Group tiles survive disk round-trip; zone-local frames intact
+    let reloadedTiles = loaded.tiles(forZone: gz)
+    expect(reloadedTiles == [t1, t2], "T02 assertion 2: group-zone tiles equal after round-trip")
+    expect(reloadedTiles.first?.frame.x == 40, "T02 assertion 2b: zone-local frame.x preserved (== 40)")
+
+    // 3. Project zone has no workspace-stored tiles
+    expect(loaded.tiles(forZone: pz) == [], "T02 assertion 3a: project zone has no workspace tiles")
+    expect(
+        !loaded.groupZoneTiles.contains(where: { $0.zoneId == pz }),
+        "T02 assertion 3b: project zone has no groupZoneTiles entry"
+    )
+
+    // 4. Isolation: workspace canvas.json has group tile ids; no ProjectStore canvas.json written
+    let workspaceJSON = try String(contentsOf: store.layout.canvasFile, encoding: .utf8)
+    expect(
+        workspaceJSON.contains(t1id.uuidString),
+        "T02 assertion 4a: workspace canvas.json contains t1 id"
+    )
+    expect(
+        workspaceJSON.contains(gz.uuidString),
+        "T02 assertion 4b: workspace canvas.json contains group zone id"
+    )
+    var foundProjectCanvas = false
+    if let enumerator = FileManager.default.enumerator(at: scratch, includingPropertiesForKeys: nil) {
+        for case let fileURL as URL in enumerator {
+            if fileURL.path.hasSuffix(".continuum-revived/canvas.json") {
+                foundProjectCanvas = true
+            }
+        }
+    }
+    expect(!foundProjectCanvas, "T02 assertion 4c: no ProjectStore canvas.json written under scratch")
+
+    // 5. Backward compat: v2 doc WITHOUT groupZoneTiles key decodes to []
+    // Hand-written literal (no groupZoneTiles key) — proves an older on-disk shape loads
+    let literalJSON = """
+    {
+      "schemaVersion": 2,
+      "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+      "zones": [{
+        "zoneId": "0000BBBB-0000-4000-8000-00000000000B",
+        "projectId": "0000CCCC-0000-4000-8000-00000000000C",
+        "origin": {"x": 0, "y": 0},
+        "size": {"width": 1280, "height": 720},
+        "color": "mint",
+        "collapsed": false,
+        "hydrationPolicy": "automatic",
+        "name": ""
+      }],
+      "zoneZOrder": ["0000BBBB-0000-4000-8000-00000000000B"],
+      "lastActiveZoneId": "0000BBBB-0000-4000-8000-00000000000B"
+    }
+    """
+    // Use the full AtomicWriter path: write to store.layout.canvasFile, then store.load()
+    try Data(literalJSON.utf8).write(to: store.layout.canvasFile)
+    let decodedOld = try store.load()
+    expect(decodedOld.groupZoneTiles == [], "T02 assertion 5a: old v2 doc (no groupZoneTiles key) decodes to []")
+    expect(decodedOld.tiles(forZone: pz) == [], "T02 assertion 5b: old v2 doc: project zone has no tiles")
+
+    // Restore the document for remaining assertions
+    try store.save(document)
+
+    // 6. setTiles empty removes the entry
+    var docForEmpty = document
+    docForEmpty.setTiles([], forZone: gz)
+    expect(docForEmpty.tiles(forZone: gz) == [], "T02 assertion 6a: setTiles([]) removes the entry")
+    expect(
+        !docForEmpty.groupZoneTiles.contains(where: { $0.zoneId == gz }),
+        "T02 assertion 6b: setTiles([]) removes the zone row entirely"
+    )
+
+    // 7. setTiles upsert replaces, doesn't duplicate
+    var docForUpsert = document  // already has gz → [t1, t2]
+    docForUpsert.setTiles([t1], forZone: gz)
+    expect(
+        docForUpsert.groupZoneTiles.filter { $0.zoneId == gz }.count == 1,
+        "T02 assertion 7a: setTiles upsert produces exactly one zone row"
+    )
+    expect(
+        docForUpsert.tiles(forZone: gz) == [t1],
+        "T02 assertion 7b: setTiles upsert replaces tiles, not appends"
+    )
+
+    // 8. Multiple group zones coexist
+    var docMulti = document
+    docMulti.setTiles([t3], forZone: gz2)
+    let storeMulti = WorkspaceStore(
+        workspaceId: UUID(uuidString: "AAAAAAAA-0000-4000-8000-000000000002")!,
+        applicationSupportDirectory: scratch,
+        retainedBackups: 2
+    )
+    try storeMulti.save(docMulti)
+    let loadedMulti = try storeMulti.load()
+    expect(
+        loadedMulti.tiles(forZone: gz) == [t1, t2],
+        "T02 assertion 8a: multiple group zones coexist — gz still has [t1, t2]"
+    )
+    expect(
+        loadedMulti.tiles(forZone: gz2) == [t3],
+        "T02 assertion 8b: multiple group zones coexist — gz2 has [t3]"
+    )
+}
+
 // MARK: - DefaultWorkspaceMigration
 
 do {

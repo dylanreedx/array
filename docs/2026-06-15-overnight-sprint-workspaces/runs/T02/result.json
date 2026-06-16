@@ -1,0 +1,23 @@
+{
+  "task": "T02",
+  "title": "Group-zone tile storage in the workspace store",
+  "verdict": "PASS",
+  "iterations": 0,
+  "redProven": true,
+  "green": true,
+  "matrixFast": "green",
+  "guards": "ContinuumRevivedCoreChecks T02 table (8 assertions; drives the real WorkspaceStore save -> canvas.json -> load path)",
+  "filesTouched": [
+    "Sources/ContinuumRevivedCore/WorkspaceDocument.swift",
+    "Sources/ContinuumRevivedCoreChecks/main.swift"
+  ],
+  "risks": [
+    "Assertion 4c (negative scan for no project canvas.json) is near-vacuous in a Core table; the load-bearing isolation proof is the positive on-disk content check 4a/4b. By spec.",
+    "Group tiles stored zone-local by convention; world-vs-local not enforced at the storage layer (render-time conversion lives in T05/T08/T11). Correct for pure storage.",
+    "decodeIfPresent ?? [] is load-bearing for several pre-existing WorkspaceDocument fixture/migration checks too — a strengthening (broader RED), not a defect."
+  ],
+  "needsHuman": [
+    "Storage-shape design call (flagged in spec lines 309-315): T02 chose WorkspaceDocument.groupZoneTiles record-array over tiles-on-ZonePlacement. Implementation follows that choice; an override is a human design decision."
+  ],
+  "orchestratorNote": "Launched intending T03 but the scriptPath+args re-invocation did not deliver T03 args; the workflow built T02 (valid, dep T01 met). Committed as T02. Switching to task-baked-literal scripts for deterministic launches."
+}

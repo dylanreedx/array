@@ -1,6 +1,16 @@
 import Foundation
 
-public struct WorkspaceDocument: Codable, Equatable, Sendable {
+public struct GroupZoneTiles: Codable, Equatable, Sendable {
+    public let zoneId: UUID
+    public var tiles: [Tile]
+
+    public init(zoneId: UUID, tiles: [Tile]) {
+        self.zoneId = zoneId
+        self.tiles = tiles
+    }
+}
+
+public struct WorkspaceDocument: Equatable, Sendable {
     public static let currentSchemaVersion = 2
 
     public let schemaVersion: Int
@@ -8,19 +18,35 @@ public struct WorkspaceDocument: Codable, Equatable, Sendable {
     public var zones: [ZonePlacement]
     public var zoneZOrder: [UUID]
     public var lastActiveZoneId: UUID?
+    public var groupZoneTiles: [GroupZoneTiles]
 
     public init(
         schemaVersion: Int = WorkspaceDocument.currentSchemaVersion,
         viewport: CanvasViewport,
         zones: [ZonePlacement],
         zoneZOrder: [UUID],
-        lastActiveZoneId: UUID?
+        lastActiveZoneId: UUID?,
+        groupZoneTiles: [GroupZoneTiles] = []
     ) {
         self.schemaVersion = schemaVersion
         self.viewport = viewport
         self.zones = zones
         self.zoneZOrder = zoneZOrder
         self.lastActiveZoneId = lastActiveZoneId
+        self.groupZoneTiles = groupZoneTiles
+    }
+
+    public func tiles(forZone zoneId: UUID) -> [Tile] {
+        groupZoneTiles.first(where: { $0.zoneId == zoneId })?.tiles ?? []
+    }
+
+    public mutating func setTiles(_ tiles: [Tile], forZone zoneId: UUID) {
+        if let i = groupZoneTiles.firstIndex(where: { $0.zoneId == zoneId }) {
+            if tiles.isEmpty { groupZoneTiles.remove(at: i) }
+            else { groupZoneTiles[i].tiles = tiles }
+        } else if !tiles.isEmpty {
+            groupZoneTiles.append(GroupZoneTiles(zoneId: zoneId, tiles: tiles))
+        }
     }
 
     public func validateSchema(at url: URL) throws {
@@ -61,6 +87,32 @@ public struct WorkspaceDocument: Codable, Equatable, Sendable {
         zoneZOrder.append(zoneId)
         lastActiveZoneId = zoneId
         return placement
+    }
+}
+
+extension WorkspaceDocument: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, viewport, zones, zoneZOrder, lastActiveZoneId, groupZoneTiles
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        viewport = try container.decode(CanvasViewport.self, forKey: .viewport)
+        zones = try container.decode([ZonePlacement].self, forKey: .zones)
+        zoneZOrder = try container.decode([UUID].self, forKey: .zoneZOrder)
+        lastActiveZoneId = try container.decodeIfPresent(UUID.self, forKey: .lastActiveZoneId)
+        groupZoneTiles = try container.decodeIfPresent([GroupZoneTiles].self, forKey: .groupZoneTiles) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(viewport, forKey: .viewport)
+        try container.encode(zones, forKey: .zones)
+        try container.encode(zoneZOrder, forKey: .zoneZOrder)
+        try container.encodeIfPresent(lastActiveZoneId, forKey: .lastActiveZoneId)
+        try container.encode(groupZoneTiles, forKey: .groupZoneTiles)
     }
 }
 

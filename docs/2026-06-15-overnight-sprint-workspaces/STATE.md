@@ -9,8 +9,8 @@ Legend: ⬜ todo · ✍️ spec-written · 🔨 building · 🔍 review · ✅ d
 
 | # | Task | Tag | Deps | Status | Commit | Note |
 |---|------|-----|------|--------|--------|------|
-| T01 | Zone model: optional projectId + name + navKey | overnight [pure] | — | ✅ | (T01) | built+reviewed PASS (0 iters); navKey config split→T18 (confirm) |
-| T02 | Group-zone tile storage (workspace store) | overnight [pure] | T01 | ✍️ | — | spec reviewed+fixed |
+| T01 | Zone model: optional projectId + name + navKey | overnight [pure] | — | ✅ | 6aa283d | built+reviewed PASS (0 iters); navKey config split→T18 (confirm) |
+| T02 | Group-zone tile storage (workspace store) | overnight [pure] | T01 | ✅ | (T02) | built+reviewed PASS (0 iters); storage-shape choice flagged |
 | T03 | ZoneHydrationOrchestrator (S1) | overnight [pure] | — | ✍️ | — | spec reviewed+fixed |
 | T04 | ZoneRuntimeRegistry ref-counted (S2) | overnight [pure] | — | ✍️ | — | spec reviewed+fixed |
 | T05 | Mutable canvas / ZoneLayer (S3) | overnight [appkit-chk] | T01 | ✍️ | — | spec written (review folds into build) |
