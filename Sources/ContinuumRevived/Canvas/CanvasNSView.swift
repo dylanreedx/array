@@ -102,6 +102,24 @@ final class CanvasNSView: NSView {
     /// Read in mouseUp to fire onZoneMoved even on the render-model path.
     private var pendingMovedPlacement: ZonePlacement?
 
+    // MARK: - Unified live zone model (zone-unify P0)
+
+    /// The mutable live zone overlay — the single source of truth for zones the
+    /// user interacts with on the active canvas (project zone + group zones).
+    /// Seeded at init from `zoneRenderModels`. Distinct from `zoneLayers`, which
+    /// remains the dormant keystone/descriptor multi-project path (T05–T10/T20).
+    private var liveZones: [ZonePlacement] = []
+    /// Chrome display metadata (name / agent rollup / qa) keyed by zoneId, derived
+    /// from `zoneRenderModels`; `liveZones` holds the authoritative placement.
+    private var zoneDisplayByZoneId: [UUID: ZoneRenderModel] = [:]
+    /// tileId → zoneId. A tile absent from this map is a bare (unzoned) tile.
+    private var tileZoneMembership: [UUID: UUID] = [:]
+
+    /// QA reader: the live zone ids in seeded order.
+    var qaLiveZoneIds: [UUID] { liveZones.map { $0.zoneId } }
+    /// QA reader: the zone a tile currently belongs to, or nil if bare.
+    func qaZoneMembership(of tileId: UUID) -> UUID? { tileZoneMembership[tileId] }
+
     /// UserDefaults the zone-gesture threshold resolves from (ZoneGestureConfig).
     /// Overridable so `runZoneCreateGestureSelfCheck` can drive deterministically.
     var zoneGestureDefaults: UserDefaults = .standard
@@ -135,6 +153,14 @@ final class CanvasNSView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.withAlphaComponent(0.92).cgColor
         registerForDraggedTypes([.fileURL])
+        // zone-unify P0: seed the unified live model from the boot zone set.
+        // `liveZones` is the authoritative placement; display metadata is kept
+        // by zoneId; the active project zone owns all current tiles.
+        liveZones = self.zoneRenderModels.map { $0.placement }
+        zoneDisplayByZoneId = Dictionary(self.zoneRenderModels.map { ($0.placement.zoneId, $0) }, uniquingKeysWith: { first, _ in first })
+        if let activeZone {
+            for tile in canvasState.tiles { tileZoneMembership[tile.id] = activeZone.zoneId }
+        }
         if showsZoneChrome {
             installZoneChromeViews()
         }
@@ -154,9 +180,10 @@ final class CanvasNSView: NSView {
 
     private func installZoneChromeViews() {
         guard showsZoneChrome else { return }
-        for model in zoneRenderModels {
+        for placement in liveZones {
+            let model = zoneDisplayByZoneId[placement.zoneId] ?? ZoneRenderModel(placement: placement, displayName: "")
             let view = ZoneChromeNSView(model: model)
-            zoneChromeViews[model.placement.zoneId] = view
+            zoneChromeViews[placement.zoneId] = view
             addSubview(view)
         }
         layoutZoneChromeViews()
@@ -164,9 +191,9 @@ final class CanvasNSView: NSView {
 
     private func layoutZoneChromeViews() {
         guard showsZoneChrome else { return }
-        for model in zoneRenderModels {
-            guard let view = zoneChromeViews[model.placement.zoneId] else { continue }
-            let memberFrames = zoneMemberWorldFrames(model)
+        for placement in liveZones {
+            guard let view = zoneChromeViews[placement.zoneId] else { continue }
+            let memberFrames = zoneMemberWorldFrames(placement)
             var adaptiveBounds = CanvasEngine.zoneBounds(
                 memberFrames: memberFrames,
                 padding: ZoneBoundsConfig.padding(),
@@ -174,7 +201,7 @@ final class CanvasNSView: NSView {
                 headerHeight: ZoneChromeNSView.headerHeight
             )
             if memberFrames.isEmpty {
-                let origin = model.placement.origin
+                let origin = placement.origin
                 adaptiveBounds = TileFrame(x: origin.x + adaptiveBounds.x, y: origin.y + adaptiveBounds.y,
                                            width: adaptiveBounds.width, height: adaptiveBounds.height)
             }
@@ -183,14 +210,14 @@ final class CanvasNSView: NSView {
         }
     }
 
-    /// Returns the world-space member tile frames for `model`'s zone. For the
-    /// single project-zone case (activeZone), returns `canvasState.tiles` mapped
-    /// through `CanvasEngine.worldFrame(tile:in:activeZone)`. For all other zones
-    /// (group zones whose member source lives in T02/T05), returns [] so the
-    /// empty-branch min-size fallback applies until those layers provide members.
-    private func zoneMemberWorldFrames(_ model: ZoneRenderModel) -> [TileFrame] {
-        guard let zone = activeZone, zone.zoneId == model.placement.zoneId else { return [] }
-        return canvasState.tiles.map { CanvasEngine.worldFrame(tile: $0, in: zone) }
+    /// World-space member tile frames for `zone`, derived from the unified
+    /// membership index. Tile frames are stored zone-local (relative to the
+    /// zone origin), so a member's world frame is `worldFrame(tile:in:zone)`.
+    /// For the active project zone (origin 0,0) this equals the bare frame.
+    private func zoneMemberWorldFrames(_ zone: ZonePlacement) -> [TileFrame] {
+        canvasState.tiles
+            .filter { tileZoneMembership[$0.id] == zone.zoneId }
+            .map { CanvasEngine.worldFrame(tile: $0, in: zone) }
     }
 
     /// QA reader: the zone chrome's current drawn bounds in world coords, derived
@@ -560,11 +587,11 @@ final class CanvasNSView: NSView {
     }
 
     func qaZoneHeaderCursorRectCount() -> Int {
-        zoneRenderModels.filter { zoneHeaderScreenRect(for: $0.placement) != nil }.count
+        liveZones.filter { zoneHeaderScreenRect(for: $0) != nil }.count
     }
 
     private func zoneWorldBounds() -> CGRect? {
-        let rects = zoneRenderModels.map { Self.cgRect(from: CanvasEngine.zoneWorldFrame($0.placement)) }
+        let rects = liveZones.map { Self.cgRect(from: CanvasEngine.zoneWorldFrame($0)) }
             .filter { $0.origin.x.isFinite && $0.origin.y.isFinite && $0.width.isFinite && $0.height.isFinite && $0.width > 0 && $0.height > 0 }
         guard var bounds = rects.first else { return nil }
         for rect in rects.dropFirst() { bounds = bounds.union(rect) }
@@ -572,10 +599,10 @@ final class CanvasNSView: NSView {
     }
 
     private func zoneHeaderZoneId(at screenPoint: CGPoint) -> UUID? {
-        zoneRenderModels.reversed().first { model in
-            guard let header = zoneHeaderScreenRect(for: model.placement) else { return false }
+        liveZones.reversed().first { placement in
+            guard let header = zoneHeaderScreenRect(for: placement) else { return false }
             return header.contains(screenPoint)
-        }?.placement.zoneId
+        }?.zoneId
     }
 
     /// Zone gesture classification (T19): checks both `zoneRenderModels` and `zoneLayers`
@@ -634,11 +661,11 @@ final class CanvasNSView: NSView {
 
     func zoneId(at screenPoint: CGPoint) -> UUID? {
         let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: canvasState.viewport)
-        return zoneRenderModels.reversed().first { model in
-            let frame = CanvasEngine.zoneWorldFrame(model.placement)
+        return liveZones.reversed().first { placement in
+            let frame = CanvasEngine.zoneWorldFrame(placement)
             return worldPoint.x >= frame.x && worldPoint.x <= frame.x + frame.width
                 && worldPoint.y >= frame.y && worldPoint.y <= frame.y + frame.height
-        }?.placement.zoneId
+        }?.zoneId
     }
 
     /// Zone gesture classification (T19): checks both `zoneRenderModels` and `zoneLayers`
@@ -981,8 +1008,8 @@ final class CanvasNSView: NSView {
 
     override func resetCursorRects() {
         super.resetCursorRects()
-        for model in zoneRenderModels {
-            if let rect = zoneHeaderScreenRect(for: model.placement) {
+        for placement in liveZones {
+            if let rect = zoneHeaderScreenRect(for: placement) {
                 addCursorRect(rect, cursor: .pointingHand)
             }
         }
@@ -1047,7 +1074,7 @@ final class CanvasNSView: NSView {
                 updatedPlacement.origin = ZonePoint(x: base.origin.x + worldDx, y: base.origin.y + worldDy)
                 pendingMovedPlacement = updatedPlacement
                 if let chromeView = zoneChromeViews[zoneId] {
-                    let memberFrames = zoneMemberWorldFrames(model)
+                    let memberFrames = zoneMemberWorldFrames(model.placement)
                     let adaptiveBounds = CanvasEngine.zoneBounds(
                         memberFrames: memberFrames,
                         padding: ZoneBoundsConfig.padding(),
@@ -1516,6 +1543,74 @@ final class CanvasNSView: NSView {
             "projectCanvasByteCountBefore": seededCanvasBytes.count,
             "projectCanvasByteCountAfter": roundTripBytes.count,
             "projectCanvasByteIdentical": roundTripBytes == seededCanvasBytes
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// zone-unify P0 — proves the unified live model (`liveZones` + `tileZoneMembership`)
+    /// is seeded from the boot zone with bit-identical hit-test + layout output.
+    static func runUnifiedModelBootSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(m): return m } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        let fm = FileManager.default
+        let tempRoot = URL(fileURLWithPath: fm.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("unified-model-boot-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+
+        let projectId = UUID(uuidString: "00000000-0000-0000-0000-0000000000A1")!
+        let zoneId = UUID(uuidString: "00000000-0000-0000-0000-0000000000A2")!
+        let aId = UUID(uuidString: "00000000-0000-0000-0000-0000000000A3")!
+        let bId = UUID(uuidString: "00000000-0000-0000-0000-0000000000A4")!
+        let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
+        // The active project zone is always origin (0,0) (DefaultWorkspaceMigration),
+        // so world frames == zone-local frames — output must stay bit-identical.
+        let zone = ZonePlacement(
+            zoneId: zoneId, projectId: projectId,
+            origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 800, height: 600),
+            color: "teal", collapsed: false, hydrationPolicy: .automatic, name: "Proj", navKey: nil
+        )
+        let tileA = Tile(id: aId, kind: .note, title: "a", frame: TileFrame(x: 100, y: 100, width: 200, height: 140), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: bId, kind: .note, title: "b", frame: TileFrame(x: 360, y: 120, width: 200, height: 140), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: viewport, tiles: [tileA, tileB], groups: [], lastActiveTileId: nil),
+            activeZone: zone
+        )
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        canvas.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        for t in [tileA, tileB] { canvas.install(tileView: DescriptorTileNSView(tile: t), for: t) }
+        canvas.layoutSubtreeIfNeeded()
+
+        // 1. liveZones seeded from the boot zone.
+        try expect(canvas.qaLiveZoneIds == [zoneId], "liveZones should be seeded with exactly the project zone; got \(canvas.qaLiveZoneIds)")
+        // 2. membership: both tiles belong to the project zone.
+        try expect(canvas.qaZoneMembership(of: aId) == zoneId, "tileA should be a member of the project zone; got \(String(describing: canvas.qaZoneMembership(of: aId)))")
+        try expect(canvas.qaZoneMembership(of: bId) == zoneId, "tileB should be a member of the project zone")
+        // 3. hit-test parity (membership does not gate tile hits).
+        try expect(canvas.tileId(at: CGPoint(x: 200, y: 170)) == aId, "hit over tileA center should return tileA")
+        try expect(canvas.tileId(at: CGPoint(x: 460, y: 190)) == bId, "hit over tileB center should return tileB")
+        try expect(canvas.tileId(at: CGPoint(x: 700, y: 500)) == nil, "hit inside the zone but outside any tile should be nil")
+        // 4. layout parity: rendered frame equals the bare world frame.
+        for t in [tileA, tileB] {
+            let expected = CanvasEngine.tileScreenFrame(t.frame, viewport: viewport)
+            try expect(canvas.tileView(for: t.id)?.frame == expected, "tile \(t.title) rendered frame should equal bare world frame \(expected); got \(String(describing: canvas.tileView(for: t.id)?.frame))")
+        }
+
+        let artifact = tempRoot.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "unified-model-boot",
+            "liveZoneIds": canvas.qaLiveZoneIds.map { $0.uuidString },
+            "membership": [aId.uuidString: canvas.qaZoneMembership(of: aId)?.uuidString as Any,
+                           bId.uuidString: canvas.qaZoneMembership(of: bId)?.uuidString as Any]
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)

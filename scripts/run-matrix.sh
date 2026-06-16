@@ -86,6 +86,7 @@ run_app_check .build/debug/continuum-revived --leader-snap-check
 run_app_check .build/debug/continuum-revived --palette-captures-keys-over-browser-check
 run_app_check .build/debug/continuum-revived --zindex-relaunch-hit-test-check
 run_app_check .build/debug/continuum-revived --single-zone-compat-check
+run_app_check .build/debug/continuum-revived --unified-model-boot-check
 run_app_check .build/debug/continuum-revived --multi-zone-render-check
 run_app_check .build/debug/continuum-revived --zone-create-gesture-check
 run_app_check .build/debug/continuum-revived --zone-adaptive-bounds-check
