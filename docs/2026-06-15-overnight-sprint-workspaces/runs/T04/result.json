@@ -1,0 +1,28 @@
+{
+  "task": "T04",
+  "title": "ZoneRuntimeRegistry per-projectId, ref-counted",
+  "verdict": "PASS WITH RISKS",
+  "iterations": 0,
+  "redProven": true,
+  "green": true,
+  "matrixFast": "green",
+  "guards": "--zone-registry-refcount-check (registered in run-matrix.sh + ContinuumApp dispatch); 9 assertions through the real acquire/release API, instance identity via ===, genuine close() via the controller's .controllerClosed throw",
+  "filesTouched": [
+    "Sources/ContinuumRevived/App/ZoneRuntimeRegistry.swift (new)",
+    "Sources/ContinuumRevivedCore/ZoneRuntimeBudgetConfig.swift (new)",
+    "Sources/ContinuumRevivedCore/SettingsSchema.swift",
+    "scripts/run-matrix.sh",
+    "Sources/ContinuumRevived/App/ContinuumApp.swift"
+  ],
+  "risks": [
+    "R1 diagnostics nit: assertions 3/4/8 have a single catch arm; a wrong-state error propagates uncaught with a misleading label (still exits non-zero / matrix-correct). ZoneRuntimeRegistry.swift:158-163/142-149/235-242.",
+    "R2 closeOnZero==false implements option (a) drop-box (re-acquire rebuilds), NOT a true warm-pool (option b). Spec default; warm-keep semantics unsettled (docs/23 S2 silent).",
+    "R3 each check run writes qa-runs/<ts>/zone-registry-refcount/manifest.json under the repo root — consistent with the other zone checks, but accumulates."
+  ],
+  "needsHuman": [
+    "Confirm closeOnZero option (a) (drop box, skip close) is intended, or schedule option (b) (warm pool + reaper) as a follow-up.",
+    "Confirm the closeOnZero config knob is warranted at all (spec out-of-scope flagged it; kept per configurable-first).",
+    "Low: re-label the misleading raw-error failure message (R1) with a per-assertion catch-all."
+  ],
+  "note": "Registry lives in the App target (@MainActor, manages ZoneRuntimeController) with a real-path CLI check — effectively appkit-checkable though tagged [pure] in the index. Verified headlessly."
+}

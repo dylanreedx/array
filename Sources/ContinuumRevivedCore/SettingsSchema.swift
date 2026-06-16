@@ -79,6 +79,11 @@ public enum SettingsSchema {
                         label: "Max Live Zones",
                         default: String(ZoneHydrationBudgetConfig.defaultMaxLiveZones)
                     ),
+                    .toggle(
+                        key: ZoneRuntimeBudgetConfig.closeOnZeroKey,
+                        label: "Close Project Runtime When Unused",
+                        default: ZoneRuntimeBudgetConfig.defaultCloseOnZero
+                    ),
                 ]
             ),
             SettingsSection(

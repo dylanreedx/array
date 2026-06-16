@@ -574,6 +574,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--zone-registry-refcount-check") {
+            do {
+                let artifact = try ZoneRuntimeRegistry.runZoneRegistryRefcountSelfCheck()
+                print("ContinuumRevivedZoneRegistryRefcountChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-lru-budget-check") {
             do {
                 _ = NSApplication.shared
