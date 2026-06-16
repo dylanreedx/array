@@ -107,6 +107,16 @@ public enum SettingsSchema {
                         label: "Autosave Debounce (ms)",
                         default: String(AutosaveConfig.defaultDebounceMs)
                     ),
+                    .toggle(
+                        key: SessionResumeConfig.scrollbackEnabledKey,
+                        label: "Restore Scrollback on Resume",
+                        default: SessionResumeConfig.scrollbackEnabledDefault
+                    ),
+                    .text(
+                        key: SessionResumeConfig.scrollbackMaxLinesKey,
+                        label: "Scrollback Resume Max Lines",
+                        default: String(SessionResumeConfig.scrollbackMaxLinesDefault)
+                    ),
                 ]
             ),
             SettingsSection(

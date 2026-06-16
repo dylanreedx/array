@@ -1,7 +1,7 @@
 import Foundation
 
 public struct TerminalSessionDescriptor: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
     public let schemaVersion: Int
     public let id: UUID
@@ -16,6 +16,9 @@ public struct TerminalSessionDescriptor: Codable, Equatable, Sendable {
     public var lastStartedAt: Date
     public var lastExit: TerminalLastExit?
     public var agentDescriptor: AgentDescriptor?
+    /// Display-only scrollback snapshot captured at flush. nil = no snapshot.
+    /// Decoded with decodeIfPresent so v1 session files (no scrollback key) still load.
+    public var scrollback: String?
 
     public init(
         schemaVersion: Int = TerminalSessionDescriptor.currentSchemaVersion,
@@ -30,7 +33,8 @@ public struct TerminalSessionDescriptor: Codable, Equatable, Sendable {
         createdAt: Date,
         lastStartedAt: Date,
         lastExit: TerminalLastExit?,
-        agentDescriptor: AgentDescriptor? = nil
+        agentDescriptor: AgentDescriptor? = nil,
+        scrollback: String? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.id = id
@@ -45,6 +49,30 @@ public struct TerminalSessionDescriptor: Codable, Equatable, Sendable {
         self.lastStartedAt = lastStartedAt
         self.lastExit = lastExit
         self.agentDescriptor = agentDescriptor
+        self.scrollback = scrollback
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, id, tileId, launchProfileId, command, args, cwd, env, title
+        case createdAt, lastStartedAt, lastExit, agentDescriptor, scrollback
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        id = try container.decode(UUID.self, forKey: .id)
+        tileId = try container.decode(UUID.self, forKey: .tileId)
+        launchProfileId = try container.decode(String.self, forKey: .launchProfileId)
+        command = try container.decode(String.self, forKey: .command)
+        args = try container.decode([String].self, forKey: .args)
+        cwd = try container.decode(String.self, forKey: .cwd)
+        env = try container.decode([String: String].self, forKey: .env)
+        title = try container.decode(String.self, forKey: .title)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        lastStartedAt = try container.decode(Date.self, forKey: .lastStartedAt)
+        lastExit = try container.decodeIfPresent(TerminalLastExit.self, forKey: .lastExit)
+        agentDescriptor = try container.decodeIfPresent(AgentDescriptor.self, forKey: .agentDescriptor)
+        scrollback = try container.decodeIfPresent(String.self, forKey: .scrollback)
     }
 
     public func restoredForBoot() -> TerminalSessionDescriptor {

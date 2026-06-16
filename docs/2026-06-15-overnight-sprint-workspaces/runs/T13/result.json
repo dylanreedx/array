@@ -1,0 +1,38 @@
+{
+  "task": "T13",
+  "title": "Live-session resume: terminal cwd+scrollback, browser interactionState",
+  "verdict": "PASS WITH RISKS (after orchestrator fixer; workflow returned CHANGES REQUESTED)",
+  "iterations": 2,
+  "fixerApplied": [
+    "A7 (was a CONFIRMED BYPASS): scrollback config-gate now drives the REAL flushTerminalSessionSnapshot with gate-off defaults injected + asserts the reloaded scrollback == nil. RED-confirmed (remove production guard → 0/30 vs clean 30/30). Also fixed a non-determinism bug (stale descriptor after restart → deleteSession(oldRuntimeId), now 30/30 deterministic).",
+    "A2 (was an untested bound): now emits 15 lines, flushes with maxLines:10, asserts the reloaded scrollback line-count == 10 (exact). RED-confirmed (suffix(100000) → 0/30). TileSpawner.flushTerminalSessionSnapshot gained additive defaults:/maxLines: params (default = current behavior, no production change)."
+  ],
+  "redProven": true,
+  "green": true,
+  "matrixFast": "green",
+  "buildClean": true,
+  "namedCheck": "--session-resume-check passed (14 assertions)",
+  "guards": "--session-resume-check: real OSC-7 cwd capture (A1/A5 RED-confirmed), real browser interactionState restore (A8/A10 RED-confirmed), scrollback gate (A7, now real-path) + bound (A2, now real-path). Drives the real flush + restartTerminalTile + ProjectStore reload.",
+  "filesTouched": [
+    "Sources/ContinuumRevivedCore/SessionResumeConfig.swift (new)",
+    "Sources/ContinuumRevivedCore/TerminalSessionDescriptor.swift (scrollback)",
+    "Sources/ContinuumRevivedCore/BrowserState.swift (interactionState)",
+    "Sources/ContinuumRevivedCore/SettingsSchema.swift",
+    "Sources/ContinuumRevived/App/TileSpawner.swift (capture + flush; additive defaults:/maxLines:)",
+    "Sources/ContinuumRevived/App/ContinuumApp.swift (check)",
+    "Sources/ContinuumRevived/BrowserEngine/WKWebViewBrowserRuntime.swift",
+    "Sources/ContinuumRevived/TerminalEngine/GhosttyTerminalRuntime.swift (capturedCwd/capturedScrollback)",
+    "Sources/ContinuumRevived/TerminalEngine/GhosttyTerminalView.swift (OSC-7 lastReportedCwd)",
+    "scripts/run-matrix.sh"
+  ],
+  "risks": [
+    "OSC-7 real-shell-emit dependency (IMPORTANT): cwd capture relies on the shell emitting OSC 7 on cd. The check FORCES the emit (printf). If a real login shell (default zsh/bash) does NOT auto-emit OSC 7, capturedCwd falls back to launchProfile.cwd → live cwd NOT captured in real use. Unverified for production shells (may need a shell-integration snippet).",
+    "Cold-reboot WebKit blob durability unverified — interactionState round-trips as Data same-process (A8/A10 green); cross-process/cold-reboot durability not exercised.",
+    "A6 scrollback on-screen replay DEFERRED (spec option c) — scrollback is persisted + carried through restartTerminalTile but NEVER displayed (replayScrollback is a documented no-op): dead weight on disk until a replay mechanism is chosen.",
+    "A10 passes via blob-round-trip fallback, not canGoBack (false in the headless harness) — proves the same opaque blob was set, not that back/forward nav works. A12 asserts the re-persisted STORE url, not newRuntime.url (partly redundant with --browser-restore-state-check)."
+  ],
+  "needsHuman": [
+    "Decide the scrollback replay mechanism (A6), or stop persisting scrollback until then (currently dead weight on disk).",
+    "Confirm production shells emit OSC 7 on cd (else live cwd capture silently falls back to launchProfile.cwd)."
+  ]
+}

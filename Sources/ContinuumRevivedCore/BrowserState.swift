@@ -1,7 +1,7 @@
 import Foundation
 
 public struct BrowserState: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
     public let schemaVersion: Int
     public var tiles: [BrowserTile]
@@ -21,6 +21,9 @@ public struct BrowserTile: Codable, Equatable, Sendable {
     public var profileId: UUID
     public let createdAt: Date
     public var updatedAt: Date
+    /// Opaque WKWebView interactionState blob (back/forward history + scroll + forms).
+    /// nil = no snapshot. Decoded with decodeIfPresent so v1 tiles still load.
+    public var interactionState: Data?
 
     public init(
         id: UUID,
@@ -30,7 +33,8 @@ public struct BrowserTile: Codable, Equatable, Sendable {
         storageGroupId: String,
         profileId: UUID = BrowserProfile.defaultProfileId,
         createdAt: Date,
-        updatedAt: Date
+        updatedAt: Date,
+        interactionState: Data? = nil
     ) {
         self.id = id
         self.tileId = tileId
@@ -40,10 +44,12 @@ public struct BrowserTile: Codable, Equatable, Sendable {
         self.profileId = profileId
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.interactionState = interactionState
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, tileId, url, title, storageGroupId, profileId, createdAt, updatedAt
+        case interactionState
     }
 
     public init(from decoder: Decoder) throws {
@@ -56,6 +62,7 @@ public struct BrowserTile: Codable, Equatable, Sendable {
         profileId = try container.decodeIfPresent(UUID.self, forKey: .profileId) ?? BrowserProfile.defaultProfileId
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        interactionState = try container.decodeIfPresent(Data.self, forKey: .interactionState)
     }
 }
 

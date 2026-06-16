@@ -15,6 +15,16 @@ final class GhosttyTerminalView: NSView {
     private var keyTextAccumulator: [String]?
     var reservedShortcutHandler: ((NSEvent) -> Bool)?
 
+    /// Last cwd reported by the shell via OSC 7 (GHOSTTY_ACTION_PWD). Nil until the
+    /// first OSC 7 fires. Used by GhosttyTerminalRuntime.capturedCwd.
+    private(set) var lastReportedCwd: String?
+
+    /// Called from scheduleGhosttyPwd when Ghostty delivers a GHOSTTY_ACTION_PWD action.
+    func applyPwdAction(_ path: String) {
+        lastReportedCwd = path
+    }
+
+
     override var acceptsFirstResponder: Bool { true }
 
     init(

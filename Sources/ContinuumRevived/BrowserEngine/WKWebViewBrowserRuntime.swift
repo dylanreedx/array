@@ -408,6 +408,18 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         hostView = nil
         onStateChange = nil
     }
+
+    /// Captures the opaque WKWebView interactionState blob (back/forward history,
+    /// scroll position, form state). Returns nil if WebKit has not yet populated it.
+    var capturedInteractionState: Data? {
+        webView.interactionState as? Data
+    }
+
+    /// Applies a previously-captured interactionState blob to this WKWebView,
+    /// restoring back/forward history, scroll position, and form state.
+    func restoreInteractionState(_ data: Data) {
+        webView.interactionState = data
+    }
 }
 
 extension WKWebViewBrowserRuntime: WKNavigationDelegate {

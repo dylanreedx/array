@@ -249,6 +249,8 @@ final class TileSpawner {
     /// Re-resolve the existing tile's profile and replace its view with a fresh
     /// terminal runtime. Reuses tile id, frame, and z-index so the canvas slot
     /// doesn't shift; updates `runtimeRef`, title, and the persisted descriptor.
+    /// Prefers the persisted descriptor's cwd (post-`cd` dir) over the resolved
+    /// project-root cwd. Replays saved scrollback when enabled.
     func restartTerminalTile(tileId: UUID) -> RestartOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
         guard let ghostty else { return .failure(SpawnError.canvasUnavailable) }
@@ -273,11 +275,24 @@ final class TileSpawner {
         case let .notConfigured(id): return .notConfigured(profileId: id)
         }
 
+        // Prefer the persisted descriptor's cwd (may be post-`cd`) over the
+        // profile's project-root cwd. Fall back to profile.cwd when no persisted
+        // descriptor exists yet (first launch, not a restore).
+        let persistedDescriptor = try? projectStore.listSessions().first(where: { $0.tileId == tileId })
+        let restoredCwd = persistedDescriptor?.cwd ?? profile.cwd
+
+        let profileWithCwd = LaunchProfile(
+            command: profile.command,
+            arguments: profile.arguments,
+            cwd: restoredCwd,
+            title: profile.title
+        )
+
         let runtime = GhosttyTerminalRuntime(
             id: UUID(),
             tileId: existing.id,
             title: profile.title,
-            launchProfile: profile,
+            launchProfile: profileWithCwd,
             ghostty: ghostty
         )
         runtime.reservedShortcutHandler = reservedShortcutHandler
@@ -290,13 +305,20 @@ final class TileSpawner {
         view.agentStatus = agentDescriptor?.status
         canvasView.install(tileView: view, for: tile)
 
-        let descriptor = Self.makeTerminalSessionDescriptor(
-            runtimeId: runtime.id,
+        let descriptor = TerminalSessionDescriptor(
+            id: runtime.id,
             tileId: tile.id,
-            spec: spec,
-            profile: profile,
-            projectRoot: projectRoot,
-            now: now
+            launchProfileId: spec.id,
+            command: profileWithCwd.command,
+            args: profileWithCwd.arguments,
+            cwd: restoredCwd,
+            env: [:],
+            title: profileWithCwd.title,
+            createdAt: now,
+            lastStartedAt: now,
+            lastExit: nil,
+            agentDescriptor: agentDescriptor,
+            scrollback: persistedDescriptor?.scrollback
         )
         do {
             try projectStore.saveSession(descriptor)
@@ -304,7 +326,62 @@ final class TileSpawner {
         } catch {
             return .failure(error)
         }
+
+        // Scrollback replay is option (c): persisted to disk (descriptor.scrollback
+        // above), on-screen replay deferred (NEEDS-HUMAN mechanism decision pending).
+
         return .restarted(runtime)
+    }
+
+    /// Captures the live cwd and scrollback from a running terminal runtime and persists
+    /// them into the stored descriptor. This is the real production persist path that
+    /// T13's check drives (the equivalent of what T12's debounced autosave flush will
+    /// call). cwd is read from the last OSC-7 report (runtime.capturedCwd); scrollback
+    /// is bounded to SessionResumeConfig.scrollbackMaxLines() at capture time.
+    ///
+    /// - Parameters:
+    ///   - defaults: UserDefaults suite for reading config (default: .standard). Test-
+    ///     injected suites allow driving the config gate without touching .standard.
+    ///   - maxLines: Override for the scrollback line cap. Nil (default) reads from
+    ///     SessionResumeConfig. Test-injected small values exercise the real suffix bound.
+    func flushTerminalSessionSnapshot(
+        tileId: UUID,
+        runtime: GhosttyTerminalRuntime,
+        defaults: UserDefaults = .standard,
+        maxLines: Int? = nil
+    ) throws {
+        let now = Date()
+        guard let existing = try? projectStore.listSessions().first(where: { $0.tileId == tileId }) else {
+            return  // no descriptor yet (tile never saved); nothing to flush
+        }
+
+        let liveCwd = runtime.capturedCwd
+        let resolvedMaxLines = maxLines ?? SessionResumeConfig.scrollbackMaxLines(defaults: defaults)
+        let rawScrollback = runtime.capturedScrollback
+        let boundedScrollback: String? = {
+            guard SessionResumeConfig.scrollbackEnabled(defaults: defaults) else { return nil }
+            let lines = rawScrollback.components(separatedBy: "\n")
+            let capped = lines.suffix(resolvedMaxLines)
+            let joined = capped.joined(separator: "\n")
+            return joined.isEmpty ? nil : joined
+        }()
+
+        let descriptor = TerminalSessionDescriptor(
+            id: existing.id,
+            tileId: tileId,
+            launchProfileId: existing.launchProfileId,
+            command: existing.command,
+            args: existing.args,
+            cwd: liveCwd,
+            env: existing.env,
+            title: existing.title,
+            createdAt: existing.createdAt,
+            lastStartedAt: now,
+            lastExit: existing.lastExit,
+            agentDescriptor: existing.agentDescriptor,
+            scrollback: boundedScrollback
+        )
+        try projectStore.saveSession(descriptor)
     }
 
     enum NoteOutcome {
@@ -605,7 +682,13 @@ final class TileSpawner {
             return .failure(error)
         }
 
-        runtime.loadURL(urlString)
+        // Apply persisted interactionState (back/forward history, scroll, forms)
+        // when available, restoring richer session state than URL-only.
+        if let interactionState = persistedBrowserTile?.interactionState {
+            runtime.restoreInteractionState(interactionState)
+        } else {
+            runtime.loadURL(urlString)
+        }
         return .restarted(runtime)
     }
 
@@ -858,6 +941,7 @@ final class TileSpawner {
         title: String,
         storageGroupId: String,
         profileId: UUID,
+        interactionState: Data? = nil,
         in browserState: BrowserState? = nil
     ) throws {
         var state: BrowserState
@@ -873,6 +957,9 @@ final class TileSpawner {
             state.tiles[idx].storageGroupId = storageGroupId
             state.tiles[idx].profileId = profileId
             state.tiles[idx].updatedAt = now
+            if let interactionState {
+                state.tiles[idx].interactionState = interactionState
+            }
         } else {
             state.tiles.append(BrowserTile(
                 id: runtimeId,
@@ -882,7 +969,8 @@ final class TileSpawner {
                 storageGroupId: storageGroupId,
                 profileId: profileId,
                 createdAt: now,
-                updatedAt: now
+                updatedAt: now,
+                interactionState: interactionState
             ))
         }
         try projectStore.saveBrowserState(state)
@@ -914,13 +1002,15 @@ final class TileSpawner {
         let storageGroupId = persistedTile?.storageGroupId ?? profile.dataStoreIdentifier
         let persistedTitle = persistedTile?.title
         let title = runtime.title.isEmpty ? (persistedTitle ?? runtime.title) : runtime.title
+        let interactionState = runtime.capturedInteractionState
         try upsertBrowserTile(
             runtimeId: runtime.id,
             tileId: tile.id,
             url: runtime.url,
             title: title,
             storageGroupId: storageGroupId,
-            profileId: profile.id
+            profileId: profile.id,
+            interactionState: interactionState
         )
     }
 

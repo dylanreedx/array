@@ -146,6 +146,29 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         visibleText()
     }
 
+    /// Captures the current working directory for persistence. Returns the last cwd
+    /// reported via OSC 7 (GHOSTTY_ACTION_PWD) if available, falling back to the
+    /// launch profile's cwd when no OSC 7 has fired yet.
+    var capturedCwd: String {
+        terminalView?.lastReportedCwd ?? launchProfile.cwd
+    }
+
+    /// Captures the current visible/scrollback text for persistence. Reuses
+    /// the existing `ghostty_surface_read_text` path via `visibleText()`.
+    var capturedScrollback: String {
+        visibleText()
+    }
+
+    /// Scrollback replay entry point. Option (c) per the spec NEEDS-HUMAN gotcha:
+    /// the replay mechanism (display-only injection vs. typed banner) requires a
+    /// human decision before wiring. This function exists so callers can be written
+    /// against the interface; the body is intentionally a no-op until the mechanism
+    /// is chosen. The scrollback IS persisted to disk — only the on-screen replay is
+    /// deferred.
+    func replayScrollback(_ text: String) {
+        // No-op: replay mechanism deferred (NEEDS-HUMAN). Scrollback persisted on disk.
+    }
+
     func sendReturn() {
         sendInput(Data("\n".utf8))
     }
@@ -398,7 +421,18 @@ final class GhosttyRuntimeContext {
                     ghostty_app_tick(app)
                 }
             },
-            action_cb: { _, _, _ in false },
+            action_cb: { _, target, action in
+                // Intercept GHOSTTY_ACTION_PWD (OSC 7): deliver the reported cwd to the
+                // surface's view so GhosttyTerminalRuntime.capturedCwd can read it.
+                if action.tag == GHOSTTY_ACTION_PWD,
+                   target.tag == GHOSTTY_TARGET_SURFACE,
+                   let surface = Optional(target.target.surface) {
+                    let userdata = ghostty_surface_userdata(surface)
+                    let pwd = action.action.pwd.pwd
+                    scheduleGhosttyPwd(userdata: userdata, pwd: pwd)
+                }
+                return false
+            },
             read_clipboard_cb: { _, _, _ in false },
             confirm_read_clipboard_cb: { _, _, _, _ in },
             write_clipboard_cb: { _, _, _, _, _ in },
@@ -442,5 +476,20 @@ private func scheduleGhosttyClose(userdata: UnsafeMutableRawPointer?, processAli
     DispatchQueue.main.async {
         let pointer = userdataAddress.flatMap { UnsafeMutableRawPointer(bitPattern: $0) }
         GhosttyTerminalView.handleGhosttyClose(userdata: pointer, processAlive: processAlive)
+    }
+}
+
+/// Delivers an OSC-7 cwd update (GHOSTTY_ACTION_PWD) to the surface's view.
+/// Called from the action_cb C closure; schedules on the main queue to maintain
+/// MainActor isolation on GhosttyTerminalView.
+private func scheduleGhosttyPwd(userdata: UnsafeMutableRawPointer?, pwd: UnsafePointer<CChar>?) {
+    guard let userdata, let pwd else { return }
+    // Copy the C string before the callback frame is torn down.
+    let path = String(cString: pwd)
+    let userdataAddress = UInt(bitPattern: userdata)
+    DispatchQueue.main.async {
+        guard let pointer = UnsafeMutableRawPointer(bitPattern: userdataAddress) else { return }
+        let view = Unmanaged<GhosttyTerminalView>.fromOpaque(pointer).takeUnretainedValue()
+        view.applyPwdAction(path)
     }
 }
