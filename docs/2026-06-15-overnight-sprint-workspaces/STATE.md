@@ -9,7 +9,7 @@ Legend: ⬜ todo · ✍️ spec-written · 🔨 building · 🔍 review · ✅ d
 
 | # | Task | Tag | Deps | Status | Commit | Note |
 |---|------|-----|------|--------|--------|------|
-| T01 | Zone model: optional projectId + name + navKey | overnight [pure] | — | ✍️ | — | spec written (exemplar) |
+| T01 | Zone model: optional projectId + name + navKey | overnight [pure] | — | ✅ | (T01) | built+reviewed PASS (0 iters); navKey config split→T18 (confirm) |
 | T02 | Group-zone tile storage (workspace store) | overnight [pure] | T01 | ✍️ | — | spec reviewed+fixed |
 | T03 | ZoneHydrationOrchestrator (S1) | overnight [pure] | — | ✍️ | — | spec reviewed+fixed |
 | T04 | ZoneRuntimeRegistry ref-counted (S2) | overnight [pure] | — | ✍️ | — | spec reviewed+fixed |

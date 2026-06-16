@@ -1,0 +1,3 @@
+Spec: docs/2026-06-15-overnight-sprint-workspaces/T01-zone-model-optional-project-name-navkey.md. Builder: claude-sonnet-4-6 (cheap model). Branch: overnight/workspaces-zones.
+
+Files to touch: Sources/ContinuumRevivedCore/WorkspaceDocument.swift (ZonePlacement struct: projectId UUID→UUID?, add name: String and navKey: String?; custom Codable; bump schemaVersion 1→2; update appendProjectZone call site). Sources/ContinuumRevivedCoreChecks/main.swift (add T01 check block: 4 assertions — v2 project-zone round-trip, v2 group-zone round-trip, v1→v2 migration from hand-written JSON literal, mixed-document round-trip). No AppKit files touched; no runtime files touched.

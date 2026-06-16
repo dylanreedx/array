@@ -1,0 +1,21 @@
+{
+  "task": "T01",
+  "title": "Zone model: optional projectId + name + navKey",
+  "verdict": "PASS",
+  "iterations": 0,
+  "redProven": true,
+  "green": true,
+  "matrixFast": "green",
+  "guards": "ContinuumRevivedCoreChecks T01 table (v2 project/group round-trips, v1->v2 migration from JSON literal, mixed-doc)",
+  "filesTouched": [
+    "Sources/ContinuumRevivedCore/WorkspaceDocument.swift",
+    "Sources/ContinuumRevivedCoreChecks/main.swift"
+  ],
+  "risks": [
+    "Check exercises JSONCodec directly (same codec as the on-disk path), not the full ProjectStore save/load round-trip (T12 owns that). Low.",
+    "Group zones encode name as empty until set; project-zone name backfill deferred to runtime T06. By design."
+  ],
+  "needsHuman": [
+    "Configurable-first split: navKey is per-zone document data, not a global UserDefaults binding; its Settings entry + conflict-guard are owned by T18 (which depends on T01.navKey). Reviewer judged this intentional — confirm."
+  ]
+}

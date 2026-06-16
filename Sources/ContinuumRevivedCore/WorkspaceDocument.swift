@@ -1,7 +1,7 @@
 import Foundation
 
 public struct WorkspaceDocument: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
     public let schemaVersion: Int
     public var viewport: CanvasViewport
@@ -52,7 +52,9 @@ public struct WorkspaceDocument: Codable, Equatable, Sendable {
             size: defaultSize,
             color: color,
             collapsed: false,
-            hydrationPolicy: .automatic
+            hydrationPolicy: .automatic,
+            name: "",
+            navKey: nil
         )
         zones.append(placement)
         zoneZOrder.removeAll { $0 == zoneId }
@@ -62,23 +64,27 @@ public struct WorkspaceDocument: Codable, Equatable, Sendable {
     }
 }
 
-public struct ZonePlacement: Codable, Equatable, Sendable {
+public struct ZonePlacement: Equatable, Sendable {
     public let zoneId: UUID
-    public var projectId: UUID
+    public var projectId: UUID?
     public var origin: ZonePoint
     public var size: ZoneSize
     public var color: String
     public var collapsed: Bool
     public var hydrationPolicy: ZoneHydrationPolicy
+    public var name: String
+    public var navKey: String?
 
     public init(
         zoneId: UUID,
-        projectId: UUID,
+        projectId: UUID?,
         origin: ZonePoint,
         size: ZoneSize,
         color: String,
         collapsed: Bool,
-        hydrationPolicy: ZoneHydrationPolicy
+        hydrationPolicy: ZoneHydrationPolicy,
+        name: String = "",
+        navKey: String? = nil
     ) {
         self.zoneId = zoneId
         self.projectId = projectId
@@ -87,6 +93,40 @@ public struct ZonePlacement: Codable, Equatable, Sendable {
         self.color = color
         self.collapsed = collapsed
         self.hydrationPolicy = hydrationPolicy
+        self.name = name
+        self.navKey = navKey
+    }
+}
+
+extension ZonePlacement: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case zoneId, projectId, origin, size, color, collapsed, hydrationPolicy, name, navKey
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        zoneId = try container.decode(UUID.self, forKey: .zoneId)
+        projectId = try container.decodeIfPresent(UUID.self, forKey: .projectId)
+        origin = try container.decode(ZonePoint.self, forKey: .origin)
+        size = try container.decode(ZoneSize.self, forKey: .size)
+        color = try container.decode(String.self, forKey: .color)
+        collapsed = try container.decode(Bool.self, forKey: .collapsed)
+        hydrationPolicy = try container.decode(ZoneHydrationPolicy.self, forKey: .hydrationPolicy)
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
+        navKey = try container.decodeIfPresent(String.self, forKey: .navKey)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(zoneId, forKey: .zoneId)
+        try container.encodeIfPresent(projectId, forKey: .projectId)
+        try container.encode(origin, forKey: .origin)
+        try container.encode(size, forKey: .size)
+        try container.encode(color, forKey: .color)
+        try container.encode(collapsed, forKey: .collapsed)
+        try container.encode(hydrationPolicy, forKey: .hydrationPolicy)
+        try container.encode(name, forKey: .name)
+        try container.encodeIfPresent(navKey, forKey: .navKey)
     }
 }
 

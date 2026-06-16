@@ -606,7 +606,7 @@ do {
     expect(decoded == workspace, "WorkspaceDocument round trip")
     expect(decoded.schemaVersion == WorkspaceDocument.currentSchemaVersion, "WorkspaceDocument schema version preserved")
     let json = String(data: data, encoding: .utf8) ?? ""
-    expect(json.contains("\"schemaVersion\":1"), "WorkspaceDocument encodes schemaVersion as 1")
+    expect(json.contains("\"schemaVersion\":2"), "WorkspaceDocument encodes schemaVersion as 2")
     expect(json.contains("\"hydrationPolicy\":\"automatic\""), "WorkspaceDocument encodes automatic hydration policy")
     expect(json.contains("\"hydrationPolicy\":\"pinnedLive\""), "WorkspaceDocument encodes pinned-live hydration policy")
 }
@@ -703,7 +703,7 @@ do {
     expect(decoded.zones.count == 1, "WorkspaceDocument fixture zone count")
     let zone = decoded.zones[0]
     expect(zone.zoneId.uuidString == "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC", "WorkspaceDocument fixture zoneId")
-    expect(zone.projectId.uuidString == "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD", "WorkspaceDocument fixture projectId")
+    expect(zone.projectId?.uuidString == "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD", "WorkspaceDocument fixture projectId")
     expect(zone.origin == ZonePoint(x: 320, y: 240), "WorkspaceDocument fixture origin")
     expect(zone.size == ZoneSize(width: 1280, height: 720), "WorkspaceDocument fixture size")
     expect(zone.color == "mint", "WorkspaceDocument fixture color")
@@ -727,6 +727,118 @@ do {
         expect(version == WorkspaceDocument.currentSchemaVersion + 1, "WorkspaceDocument future schema reports version")
         expect(supported == WorkspaceDocument.currentSchemaVersion, "WorkspaceDocument future schema reports supported version")
     }
+}
+
+// MARK: - T01 Zone model: optional projectId + name + navKey
+
+do {
+    // 1. Round-trip v2 — project zone
+    let projectZoneId = UUID(uuidString: "A1A1A1A1-A1A1-4A1A-8A1A-A1A1A1A1A1A1")!
+    let projectId = UUID(uuidString: "B2B2B2B2-B2B2-4B2B-8B2B-B2B2B2B2B2B2")!
+    let projectZone = ZonePlacement(
+        zoneId: projectZoneId,
+        projectId: projectId,
+        origin: ZonePoint(x: 10, y: 20),
+        size: ZoneSize(width: 1280, height: 720),
+        color: "blue",
+        collapsed: false,
+        hydrationPolicy: .automatic,
+        name: "API",
+        navKey: "a"
+    )
+    let projectZoneData = try JSONCodec.makeEncoder().encode(projectZone)
+    let projectZoneDecoded = try JSONCodec.makeDecoder().decode(ZonePlacement.self, from: projectZoneData)
+    expect(projectZoneDecoded == projectZone, "T01: v2 project zone round-trips")
+    expect(projectZoneDecoded.projectId == projectId, "T01: v2 project zone preserves projectId")
+    expect(projectZoneDecoded.name == "API", "T01: v2 project zone preserves name")
+    expect(projectZoneDecoded.navKey == "a", "T01: v2 project zone preserves navKey")
+
+    // 2. Round-trip v2 — group zone (projectId nil)
+    let groupZoneId = UUID(uuidString: "C3C3C3C3-C3C3-4C3C-8C3C-C3C3C3C3C3C3")!
+    let groupZone = ZonePlacement(
+        zoneId: groupZoneId,
+        projectId: nil,
+        origin: ZonePoint(x: 0, y: 0),
+        size: ZoneSize(width: 800, height: 600),
+        color: "mint",
+        collapsed: false,
+        hydrationPolicy: .automatic,
+        name: "Scratch",
+        navKey: nil
+    )
+    let groupZoneData = try JSONCodec.makeEncoder().encode(groupZone)
+    let groupZoneDecoded = try JSONCodec.makeDecoder().decode(ZonePlacement.self, from: groupZoneData)
+    expect(groupZoneDecoded == groupZone, "T01: v2 group zone round-trips")
+    expect(groupZoneDecoded.projectId == nil, "T01: v2 group zone projectId is nil")
+    expect(groupZoneDecoded.name == "Scratch", "T01: v2 group zone preserves name")
+    expect(groupZoneDecoded.navKey == nil, "T01: v2 group zone navKey is nil")
+
+    // 3. v1 → v2 migration: hand-written v1 JSON (no name, no navKey, schemaVersion 1)
+    let v1JSON = """
+    {
+      "schemaVersion": 1,
+      "viewport": { "x": 0, "y": 0, "zoom": 1 },
+      "zones": [
+        {
+          "zoneId": "D4D4D4D4-D4D4-4D4D-8D4D-D4D4D4D4D4D4",
+          "projectId": "E5E5E5E5-E5E5-4E5E-8E5E-E5E5E5E5E5E5",
+          "origin": { "x": 0, "y": 0 },
+          "size": { "width": 1280, "height": 720 },
+          "color": "mint",
+          "collapsed": false,
+          "hydrationPolicy": "automatic"
+        }
+      ],
+      "zoneZOrder": ["D4D4D4D4-D4D4-4D4D-8D4D-D4D4D4D4D4D4"],
+      "lastActiveZoneId": "D4D4D4D4-D4D4-4D4D-8D4D-D4D4D4D4D4D4"
+    }
+    """
+    let v1Doc = try JSONCodec.makeDecoder().decode(WorkspaceDocument.self, from: Data(v1JSON.utf8))
+    expect(v1Doc.zones.count == 1, "T01: v1 doc loads one zone")
+    let v1Zone = v1Doc.zones[0]
+    expect(v1Zone.projectId?.uuidString == "E5E5E5E5-E5E5-4E5E-8E5E-E5E5E5E5E5E5", "T01: v1 migration preserves projectId")
+    expect(v1Zone.name == "", "T01: v1 migration defaults name to empty string")
+    expect(v1Zone.navKey == nil, "T01: v1 migration defaults navKey to nil")
+
+    // 4. Mixed document: one project zone + one group zone round-trips intact
+    let mixedZoneId1 = UUID(uuidString: "F6F6F6F6-F6F6-4F6F-8F6F-F6F6F6F6F6F6")!
+    let mixedZoneId2 = UUID(uuidString: "07070707-0707-4070-8070-070707070707")!
+    let mixedProjectId = UUID(uuidString: "18181818-1818-4181-8181-181818181818")!
+    let mixedDoc = WorkspaceDocument(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        zones: [
+            ZonePlacement(
+                zoneId: mixedZoneId1,
+                projectId: mixedProjectId,
+                origin: ZonePoint(x: 0, y: 0),
+                size: ZoneSize(width: 1280, height: 720),
+                color: "blue",
+                collapsed: false,
+                hydrationPolicy: .automatic,
+                name: "Work",
+                navKey: "w"
+            ),
+            ZonePlacement(
+                zoneId: mixedZoneId2,
+                projectId: nil,
+                origin: ZonePoint(x: 1400, y: 0),
+                size: ZoneSize(width: 800, height: 600),
+                color: "orange",
+                collapsed: false,
+                hydrationPolicy: .automatic,
+                name: "Notes",
+                navKey: nil
+            )
+        ],
+        zoneZOrder: [mixedZoneId1, mixedZoneId2],
+        lastActiveZoneId: mixedZoneId1
+    )
+    let mixedData = try JSONCodec.makeEncoder().encode(mixedDoc)
+    let mixedDecoded = try JSONCodec.makeDecoder().decode(WorkspaceDocument.self, from: mixedData)
+    expect(mixedDecoded == mixedDoc, "T01: mixed document round-trips")
+    expect(mixedDecoded.zones.count == 2, "T01: mixed document has 2 zones")
+    expect(mixedDecoded.zones[0].projectId == mixedProjectId, "T01: mixed document project zone has projectId")
+    expect(mixedDecoded.zones[1].projectId == nil, "T01: mixed document group zone projectId is nil")
 }
 
 // MARK: - TerminalSessionDescriptor round trip
