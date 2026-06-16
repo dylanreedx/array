@@ -60,11 +60,28 @@ you drag region splits and ratios to define a pattern that fits a workflow.
 Tile Gap. Presets are a layer *on top of* selection/distribute, so Feature 1 is the
 prerequisite primitive.
 
+## Feature 3 — Keyboard resize-with-snap (open idea, 2026-06-15)
+
+Dogfooding the `⌥`+arrow keyboard *dock* (docs/30 Phase D) surfaced that
+precisely **positioning** tiles by keyboard feels marginal — once tiles snap into
+clean corners, you rarely want to relocate one by keyboard. The more useful
+keyboard primitive is likely **resize**: grow/shrink the focused tile from the
+keyboard and have it snap/adhere to neighbors (match a neighbor's dimension, butt
+gap-adjacent) exactly like the mouse resize does.
+
+**Reuses:** `TileArrangement.resizeEdgeSnap` (already the live mouse-resize snap) +
+the leader's existing focused-tile + arrow-key plumbing — so an `⌥`+arrow (or a
+resize sub-mode of the leader) could nudge an edge and snap it to neighbors, rather
+than move the whole tile. This may *supersede* keyboard dock as the leader's arrow
+behavior; evaluate against dock before building.
+
 ## Sequencing
 
 1. Selection model + align/distribute (Feature 1) — the primitive.
 2. Built-in layout presets that call distribute (Feature 2 defaults).
 3. Custom preset creator (Feature 2 authoring) — last, lowest demand.
+4. Keyboard resize-with-snap (Feature 3) — evaluate vs. keyboard dock; reuses
+   `resizeEdgeSnap`.
 
 Related: docs/30 (keyboard nav / command registry these verbs hang off),
 docs/31 (program roadmap — this is Canvas-UX follow-on work), docs/29 (keybind

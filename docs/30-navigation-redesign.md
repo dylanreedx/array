@@ -4,6 +4,13 @@ Status: spec, 2026-06-15. Durable record of the brainstormed design + phased pla
 so intent survives compaction. Scope = **canvas UX only**; zones/workspaces
 jumping is deferred to the later workspace pass (docs/23 keystone).
 
+**Shipped state lives in `docs/33`** (the consolidated navigation + snapping
+reference). Phases A–E shipped; **C** (jump) and **D** (`⌥`+arrow dock) shipped this
+arc. **Phase F (retire `⌃Space`) is deferred** — not pursued yet; gated on the
+leader proving out in daily use and likely informed by the workspaces/zones pass.
+Keyboard *positioning* (Phase D) felt marginal in dogfooding; keyboard
+*resize-with-snap* is the more promising follow-on (docs/32 Feature 3).
+
 ## Why
 
 Dogfooding exposed canvas navigation as both **broken** and **wonky**:
