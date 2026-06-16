@@ -25,6 +25,9 @@ with no relaunch and no manual hydrate. This is what makes a large multi-zone wo
 stay responsive: only on-screen (plus a margin band) work is live. CON-51 (zone hydration
 gate) lands here.
 
+## ⚠ ORCHESTRATOR CARRY-FORWARD (added mid-sprint from the T09 review — IN SCOPE for T10)
+T09's `switchWorkspace` acquire loop tier-filters to `.live`, which the T09 reviewer found can LEAK ref-counts: a target project whose zone is budget-demoted to a non-live tier falls in neither `departing` nor `newlyAcquired`, so it drops from `acquiredProjectIds` while its registry refCount stays > 0 — never released by a later switch/teardown. Since T10 OWNS tier transitions (promote/demote), T10 MUST keep registry ref-count bookkeeping correct across demote: a demoted (Snapshot/Cold) controller must remain tracked + releasable (refCount reflects that the workspace still holds it), and re-promotion must not double-acquire. Add a check assertion: demote a zone via a viewport change so it's non-live, then tear down the workspace (closeAll) and assert the demoted project's controller is released exactly once (refCount → 0), not leaked. (Note: like T07–T09, T10's live behavior is gated on T20 wiring the boot registry factory; the check injects a real registry.)
+
 ## Exact scope — files & symbols
 - **`Sources/ContinuumRevived/App/WorkspaceRuntime.swift`** (created in T06) — add the
   public entry point `onViewportChanged()` and its debounced internal
