@@ -1,0 +1,25 @@
+{
+  "task": "T03",
+  "title": "ZoneHydrationOrchestrator (pure planner)",
+  "verdict": "PASS",
+  "iterations": 0,
+  "redProven": true,
+  "green": true,
+  "matrixFast": "green",
+  "guards": "ContinuumRevivedCoreChecks --zone-hydration-plan-check do-block (9 plan + 4 config assertions); plan() composed with production CanvasEngine.hydrationTier",
+  "filesTouched": [
+    "Sources/ContinuumRevivedCore/ZoneHydrationOrchestrator.swift (new)",
+    "Sources/ContinuumRevivedCore/ZoneHydrationBudgetConfig.swift (new)",
+    "Sources/ContinuumRevivedCore/SettingsSchema.swift",
+    "Sources/ContinuumRevivedCoreChecks/main.swift"
+  ],
+  "risks": [
+    "R1 design: --zone-hydration-plan-check is a tagged Core do-block, not a discrete CLI flag (correct for a pure planner; spec-flagged).",
+    "R2 downstream (IMPORTANT for T06/T10): planner is dead code until T06/T10; the budget resolver ZoneHydrationBudgetConfig.maxLiveZones is not yet passed into plan(maxLiveZones:). T06/T10 must wire it or the configurable threshold is decorative — the T06 reviewer MUST confirm the wiring.",
+    "R3 cosmetic: proximity tiebreak uses float != on squared distance, exact only for the integer fixture coords."
+  ],
+  "needsHuman": [
+    "Confirm the Core-table interpretation of --zone-hydration-plan-check (no discrete CLI flag).",
+    "Settings 'Max Live Zones' is a free-text field; resolver guards >0 but there is no numeric/min UI validation — product/visual call when the Settings UI is reviewed."
+  ]
+}

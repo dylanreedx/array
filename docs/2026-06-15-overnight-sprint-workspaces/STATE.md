@@ -10,8 +10,8 @@ Legend: ⬜ todo · ✍️ spec-written · 🔨 building · 🔍 review · ✅ d
 | # | Task | Tag | Deps | Status | Commit | Note |
 |---|------|-----|------|--------|--------|------|
 | T01 | Zone model: optional projectId + name + navKey | overnight [pure] | — | ✅ | 6aa283d | built+reviewed PASS (0 iters); navKey config split→T18 (confirm) |
-| T02 | Group-zone tile storage (workspace store) | overnight [pure] | T01 | ✅ | (T02) | built+reviewed PASS (0 iters); storage-shape choice flagged |
-| T03 | ZoneHydrationOrchestrator (S1) | overnight [pure] | — | ✍️ | — | spec reviewed+fixed |
+| T02 | Group-zone tile storage (workspace store) | overnight [pure] | T01 | ✅ | 390079a | built+reviewed PASS (0 iters); storage-shape choice flagged |
+| T03 | ZoneHydrationOrchestrator (S1) | overnight [pure] | — | ✅ | (T03) | built+reviewed PASS (0 iters); planner wiring deferred→T06/T10 |
 | T04 | ZoneRuntimeRegistry ref-counted (S2) | overnight [pure] | — | ✍️ | — | spec reviewed+fixed |
 | T05 | Mutable canvas / ZoneLayer (S3) | overnight [appkit-chk] | T01 | ✍️ | — | spec written (review folds into build) |
 | T06 | WorkspaceRuntime shell + proxy (S4) | overnight [appkit-chk] | T03,T04,T05 | ✍️ | — | spec written (review folds into build) |

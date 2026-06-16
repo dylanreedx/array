@@ -74,6 +74,11 @@ public enum SettingsSchema {
                         label: "Drag Snapping",
                         default: DragMagnetizeConfig.defaultEnabled
                     ),
+                    .text(
+                        key: ZoneHydrationBudgetConfig.maxLiveZonesKey,
+                        label: "Max Live Zones",
+                        default: String(ZoneHydrationBudgetConfig.defaultMaxLiveZones)
+                    ),
                 ]
             ),
             SettingsSection(

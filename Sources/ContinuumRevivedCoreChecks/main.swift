@@ -4243,6 +4243,7 @@ do {
         FocusBorderConfig.gapKey,
         FocusBorderConfig.speedKey,
         DragMagnetizeConfig.enabledKey,
+        ZoneHydrationBudgetConfig.maxLiveZonesKey,
     ]
     expect(expectedKeys.isSubset(of: Set(fieldKeys)), "settings schema must represent every existing pref key")
 
@@ -4309,6 +4310,246 @@ do {
     expect(
         ZoneChromeFeature.resolvedFromDefaults(standardDefaults: chromeDefaults, legacyDefaults: nil).isEnabled == false,
         "zone-chrome field written through the schema is observed by ZoneChromeFeature.resolvedFromDefaults"
+    )
+}
+
+// MARK: - zone-hydration-plan-check (T03)
+
+do {
+    // Fixtures: viewport (0,0,zoom:1), visibleSize 800x600, zone size 200x120.
+    // Visible world rect = (0,0,800,600). Visible center = (400,300).
+    let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
+    let visibleSize = CGSize(width: 800, height: 600)
+    let projectId = UUID(uuidString: "bbbbbbbb-0000-4000-8000-000000000001")!
+
+    let zZ1 = UUID(uuidString: "cc000001-0000-4000-8000-000000000001")!
+    let zZ2 = UUID(uuidString: "cc000002-0000-4000-8000-000000000002")!
+    let zZ3 = UUID(uuidString: "cc000003-0000-4000-8000-000000000003")!
+    let zZ4 = UUID(uuidString: "cc000004-0000-4000-8000-000000000004")!
+    let zZ5 = UUID(uuidString: "cc000005-0000-4000-8000-000000000005")!
+    let zZ6 = UUID(uuidString: "cc000006-0000-4000-8000-000000000006")!
+
+    func makeZone(_ id: UUID, originX: Double, originY: Double, policy: ZoneHydrationPolicy = .automatic) -> ZonePlacement {
+        ZonePlacement(
+            zoneId: id,
+            projectId: projectId,
+            origin: ZonePoint(x: originX, y: originY),
+            size: ZoneSize(width: 200, height: 120),
+            color: "blue",
+            collapsed: false,
+            hydrationPolicy: policy
+        )
+    }
+
+    // Z1 origin (100,100) → intersects visible rect → base .live; center (200,160); dist²=59600
+    let Z1 = makeZone(zZ1, originX: 100, originY: 100)
+    // Z2 origin (300,100) → intersects → base .live; center (400,160); dist²=19600 (closest)
+    let Z2 = makeZone(zZ2, originX: 300, originY: 100)
+    // Z3 origin (550,100) → intersects → base .live; center (650,160); dist²=82100
+    let Z3 = makeZone(zZ3, originX: 550, originY: 100)
+    // Z4 origin (100,300) → intersects → base .live; center (200,360); dist²=43600
+    let Z4 = makeZone(zZ4, originX: 100, originY: 300)
+    // Z5 origin (1200,100) → well past snapshot band → base .cold
+    let Z5 = makeZone(zZ5, originX: 1200, originY: 100)
+    // Z6 origin (1200,100) pinnedLive → base .live by pin (hard-pinned)
+    let Z6 = makeZone(zZ6, originX: 1200, originY: 100, policy: .pinnedLive)
+
+    let sixZones = [Z1, Z2, Z3, Z4, Z5, Z6]
+
+    // Assertion 1: empty input is total-empty.
+    let emptyPlan = ZoneHydrationOrchestrator.plan(
+        zones: [],
+        viewport: viewport,
+        visibleSize: visibleSize,
+        focusedTileZone: nil,
+        maxLiveZones: 4
+    )
+    expect(emptyPlan.tiers.isEmpty, "zone hydration plan: empty input produces empty tiers")
+    expect(emptyPlan.order.isEmpty, "zone hydration plan: empty input produces empty order")
+
+    // Assertion 2: totality.
+    let totalPlan = ZoneHydrationOrchestrator.plan(
+        zones: sixZones,
+        viewport: viewport,
+        visibleSize: visibleSize,
+        focusedTileZone: nil,
+        maxLiveZones: 4
+    )
+    expect(totalPlan.tiers.count == 6, "zone hydration plan: tiers.count == zones.count")
+    expect(totalPlan.order == [zZ1, zZ2, zZ3, zZ4, zZ5, zZ6], "zone hydration plan: order preserves input order")
+    expect(totalPlan.tiers[zZ1] != nil && totalPlan.tiers[zZ2] != nil && totalPlan.tiers[zZ3] != nil
+        && totalPlan.tiers[zZ4] != nil && totalPlan.tiers[zZ5] != nil && totalPlan.tiers[zZ6] != nil,
+        "zone hydration plan: every zoneId present in tiers")
+
+    // Assertion 3: budget non-binding passthrough (maxLiveZones: 6).
+    let passthroughPlan = ZoneHydrationOrchestrator.plan(
+        zones: sixZones,
+        viewport: viewport,
+        visibleSize: visibleSize,
+        focusedTileZone: nil,
+        maxLiveZones: 6
+    )
+    expect(passthroughPlan.tiers[zZ1] == .live, "zone hydration plan: passthrough Z1 live")
+    expect(passthroughPlan.tiers[zZ2] == .live, "zone hydration plan: passthrough Z2 live")
+    expect(passthroughPlan.tiers[zZ3] == .live, "zone hydration plan: passthrough Z3 live")
+    expect(passthroughPlan.tiers[zZ4] == .live, "zone hydration plan: passthrough Z4 live")
+    expect(passthroughPlan.tiers[zZ5] == .cold, "zone hydration plan: passthrough Z5 cold")
+    expect(passthroughPlan.tiers[zZ6] == .live, "zone hydration plan: passthrough Z6 live (pinned)")
+
+    // Assertion 4: budget demotes farthest visibility-live zones first (maxLiveZones: 2).
+    // P=1 (Z6 pinned), eligible budget = max(0,2-1)=1.
+    // Ranked by proximity: Z2(19600), Z4(43600), Z1(59600), Z3(82100). Keep top 1 → Z2.
+    let budget2Plan = ZoneHydrationOrchestrator.plan(
+        zones: sixZones,
+        viewport: viewport,
+        visibleSize: visibleSize,
+        focusedTileZone: nil,
+        maxLiveZones: 2
+    )
+    expect(budget2Plan.tiers[zZ2] == .live, "zone hydration plan: budget=2 keeps Z2 (closest)")
+    expect(budget2Plan.tiers[zZ4] == .snapshot, "zone hydration plan: budget=2 demotes Z4")
+    expect(budget2Plan.tiers[zZ1] == .snapshot, "zone hydration plan: budget=2 demotes Z1")
+    expect(budget2Plan.tiers[zZ3] == .snapshot, "zone hydration plan: budget=2 demotes Z3")
+    expect(budget2Plan.tiers[zZ6] == .live, "zone hydration plan: budget=2 pin Z6 survives")
+    expect(budget2Plan.tiers[zZ5] == .cold, "zone hydration plan: budget=2 Z5 stays cold")
+
+    // Assertion 5: pinned zones are never demoted even when over budget (maxLiveZones: 1).
+    // B=1, P=1 (Z6), eligible budget=max(0,1-1)=0. All of Z1..Z4 demote to .snapshot.
+    let budget1Plan = ZoneHydrationOrchestrator.plan(
+        zones: sixZones,
+        viewport: viewport,
+        visibleSize: visibleSize,
+        focusedTileZone: nil,
+        maxLiveZones: 1
+    )
+    expect(budget1Plan.tiers[zZ1] == .snapshot, "zone hydration plan: budget=1 Z1 snapshot")
+    expect(budget1Plan.tiers[zZ2] == .snapshot, "zone hydration plan: budget=1 Z2 snapshot")
+    expect(budget1Plan.tiers[zZ3] == .snapshot, "zone hydration plan: budget=1 Z3 snapshot")
+    expect(budget1Plan.tiers[zZ4] == .snapshot, "zone hydration plan: budget=1 Z4 snapshot")
+    expect(budget1Plan.tiers[zZ6] == .live, "zone hydration plan: budget=1 pin Z6 stays live")
+    expect(budget1Plan.tiers[zZ5] == .cold, "zone hydration plan: budget=1 Z5 stays cold")
+
+    // Assertion 6: focused zone is hard-pinned (focusedTileZone: Z1, maxLiveZones: 1).
+    // P=2 (Z1 focused + Z6 pinned), eligible budget=max(0,1-2)=0. Z2,Z3,Z4 all .snapshot.
+    let focusPlan = ZoneHydrationOrchestrator.plan(
+        zones: sixZones,
+        viewport: viewport,
+        visibleSize: visibleSize,
+        focusedTileZone: zZ1,
+        maxLiveZones: 1
+    )
+    expect(focusPlan.tiers[zZ1] == .live, "zone hydration plan: focused Z1 survives budget")
+    expect(focusPlan.tiers[zZ6] == .live, "zone hydration plan: pinned Z6 survives budget")
+    expect(focusPlan.tiers[zZ2] == .snapshot, "zone hydration plan: Z2 snapshot when focus+pin fill budget")
+    expect(focusPlan.tiers[zZ3] == .snapshot, "zone hydration plan: Z3 snapshot when focus+pin fill budget")
+    expect(focusPlan.tiers[zZ4] == .snapshot, "zone hydration plan: Z4 snapshot when focus+pin fill budget")
+
+    // Assertion 7: tiebreak is input order on equal proximity.
+    let zZa = UUID(uuidString: "cc000007-0000-4000-8000-000000000007")!
+    let zZb = UUID(uuidString: "cc000008-0000-4000-8000-000000000008")!
+    // Both origins (300,240), center (400,300), dist²=0. Budget=1, no pins.
+    let Za = makeZone(zZa, originX: 300, originY: 240)
+    let Zb = makeZone(zZb, originX: 300, originY: 240)
+    let tiePlan1 = ZoneHydrationOrchestrator.plan(
+        zones: [Za, Zb],
+        viewport: viewport,
+        visibleSize: visibleSize,
+        focusedTileZone: nil,
+        maxLiveZones: 1
+    )
+    expect(tiePlan1.tiers[zZa] == .live, "zone hydration plan: tiebreak keeps first in input order (Za)")
+    expect(tiePlan1.tiers[zZb] == .snapshot, "zone hydration plan: tiebreak demotes second in input order (Zb)")
+    let tiePlan2 = ZoneHydrationOrchestrator.plan(
+        zones: [Zb, Za],
+        viewport: viewport,
+        visibleSize: visibleSize,
+        focusedTileZone: nil,
+        maxLiveZones: 1
+    )
+    expect(tiePlan2.tiers[zZb] == .live, "zone hydration plan: tiebreak flips when input order swapped (Zb first)")
+    expect(tiePlan2.tiers[zZa] == .snapshot, "zone hydration plan: tiebreak demotes Za when Zb is first")
+
+    // Assertion 8: maxLiveZones <= 0 clamps to 1.
+    // Single zone Z2 (base .live), maxLiveZones: 0 → B=1, keep 1 → .live.
+    let clampPlan0 = ZoneHydrationOrchestrator.plan(
+        zones: [Z2],
+        viewport: viewport,
+        visibleSize: visibleSize,
+        focusedTileZone: nil,
+        maxLiveZones: 0
+    )
+    expect(clampPlan0.tiers[zZ2] == .live, "zone hydration plan: maxLiveZones=0 clamps to 1, Z2 stays live")
+    // Two visibility-live zones Z1,Z2 + maxLiveZones:0: B=1, P=0, keep=1, Z2 closer → Z2 live, Z1 snapshot.
+    let clampPlanTwo = ZoneHydrationOrchestrator.plan(
+        zones: [Z1, Z2],
+        viewport: viewport,
+        visibleSize: visibleSize,
+        focusedTileZone: nil,
+        maxLiveZones: 0
+    )
+    expect(clampPlanTwo.tiers[zZ2] == .live, "zone hydration plan: maxLiveZones=0 two-zone keeps closer Z2")
+    expect(clampPlanTwo.tiers[zZ1] == .snapshot, "zone hydration plan: maxLiveZones=0 two-zone demotes Z1")
+    // maxLiveZones: -3 same result.
+    let clampPlanNeg = ZoneHydrationOrchestrator.plan(
+        zones: [Z1, Z2],
+        viewport: viewport,
+        visibleSize: visibleSize,
+        focusedTileZone: nil,
+        maxLiveZones: -3
+    )
+    expect(clampPlanNeg.tiers[zZ2] == .live, "zone hydration plan: maxLiveZones=-3 clamps identical to 0")
+    expect(clampPlanNeg.tiers[zZ1] == .snapshot, "zone hydration plan: maxLiveZones=-3 Z1 snapshot")
+
+    // Assertion 9: budget never promotes .cold to .live.
+    let promotePlan = ZoneHydrationOrchestrator.plan(
+        zones: [Z5],
+        viewport: viewport,
+        visibleSize: visibleSize,
+        focusedTileZone: nil,
+        maxLiveZones: 99
+    )
+    expect(promotePlan.tiers[zZ5] == .cold, "zone hydration plan: budget never promotes cold Z5")
+}
+
+// MARK: - zone hydration budget config (T03)
+
+do {
+    // Assertions 10-13: ZoneHydrationBudgetConfig resolver.
+    let suiteName = "ZoneHydrationBudgetChecks-\(UUID().uuidString)"
+    let budgetDefaults = UserDefaults(suiteName: suiteName)!
+    defer { budgetDefaults.removePersistentDomain(forName: suiteName) }
+    budgetDefaults.removePersistentDomain(forName: suiteName)
+
+    // Assertion 10: scrubbed suite returns defaultMaxLiveZones (4).
+    expect(
+        ZoneHydrationBudgetConfig.maxLiveZones(defaults: budgetDefaults) == ZoneHydrationBudgetConfig.defaultMaxLiveZones,
+        "zone hydration budget config: empty defaults returns defaultMaxLiveZones"
+    )
+
+    // Assertion 11: set(2) → returns 2.
+    budgetDefaults.set(2, forKey: ZoneHydrationBudgetConfig.maxLiveZonesKey)
+    expect(
+        ZoneHydrationBudgetConfig.maxLiveZones(defaults: budgetDefaults) == 2,
+        "zone hydration budget config: Int override 2 is returned"
+    )
+
+    // Assertion 12: bogus value (0) falls back to default (4).
+    budgetDefaults.set(0, forKey: ZoneHydrationBudgetConfig.maxLiveZonesKey)
+    expect(
+        ZoneHydrationBudgetConfig.maxLiveZones(defaults: budgetDefaults) == ZoneHydrationBudgetConfig.defaultMaxLiveZones,
+        "zone hydration budget config: zero value falls back to default"
+    )
+    budgetDefaults.set(-3, forKey: ZoneHydrationBudgetConfig.maxLiveZonesKey)
+    expect(
+        ZoneHydrationBudgetConfig.maxLiveZones(defaults: budgetDefaults) == ZoneHydrationBudgetConfig.defaultMaxLiveZones,
+        "zone hydration budget config: negative value falls back to default"
+    )
+
+    // Assertion 13: string override "3" resolves to 3.
+    budgetDefaults.set("3", forKey: ZoneHydrationBudgetConfig.maxLiveZonesKey)
+    expect(
+        ZoneHydrationBudgetConfig.maxLiveZones(defaults: budgetDefaults) == 3,
+        "zone hydration budget config: string override \"3\" resolves to 3"
     )
 }
 
