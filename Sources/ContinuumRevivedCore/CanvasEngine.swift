@@ -80,6 +80,50 @@ public enum CanvasEngine {
         TileFrame(x: zone.origin.x, y: zone.origin.y, width: zone.size.width, height: zone.size.height)
     }
 
+    /// Returns the world-space outer rectangle of the zone chrome (the *adaptive*
+    /// drawn rect, NOT the stored `zoneWorldFrame`). Origin = top-left, y-DOWN.
+    ///
+    /// Non-empty: union of `memberFrames` padded by `padding` on all sides, with
+    /// a `headerHeight`-tall band prepended above the union (smaller y = above in
+    /// y-down coords). Empty: returns a rect of `minSize` at origin (0,0); the
+    /// caller offsets to the zone's stored origin.
+    ///
+    /// All inputs are clamped: padding ≥ 0, headerHeight ≥ 0, minSize ≥ 1×1.
+    public static func zoneBounds(
+        memberFrames: [TileFrame],
+        padding: Double,
+        minSize: CGSize,
+        headerHeight: Double
+    ) -> TileFrame {
+        let p = max(0, padding)
+        let hh = max(0, headerHeight)
+        let mw = max(1, minSize.width)
+        let mh = max(1, minSize.height)
+
+        guard !memberFrames.isEmpty else {
+            return TileFrame(x: 0, y: 0, width: mw, height: mh)
+        }
+
+        var minX = memberFrames[0].x
+        var minY = memberFrames[0].y
+        var maxX = memberFrames[0].x + memberFrames[0].width
+        var maxY = memberFrames[0].y + memberFrames[0].height
+        for f in memberFrames.dropFirst() {
+            minX = Swift.min(minX, f.x)
+            minY = Swift.min(minY, f.y)
+            maxX = Swift.max(maxX, f.x + f.width)
+            maxY = Swift.max(maxY, f.y + f.height)
+        }
+        let uW = maxX - minX
+        let uH = maxY - minY
+        return TileFrame(
+            x: minX - p,
+            y: minY - p - hh,
+            width: uW + 2 * p,
+            height: uH + 2 * p + hh
+        )
+    }
+
     // MARK: - Hydration tiers
 
     public static let defaultHydrationSnapshotMargin: Double = 256

@@ -69,6 +69,9 @@ public enum SettingsSchema {
                         label: "Tile Gap",
                         default: String(Int(TileGapResolver.defaultGap))
                     ),
+                    .text(key: ZoneBoundsConfig.paddingKey, label: "Zone Padding", default: String(Int(ZoneBoundsConfig.defaultPadding))),
+                    .text(key: ZoneBoundsConfig.emptyMinWidthKey, label: "Zone Empty Min Width", default: String(Int(ZoneBoundsConfig.defaultEmptyMinWidth))),
+                    .text(key: ZoneBoundsConfig.emptyMinHeightKey, label: "Zone Empty Min Height", default: String(Int(ZoneBoundsConfig.defaultEmptyMinHeight))),
                     .toggle(
                         key: DragMagnetizeConfig.enabledKey,
                         label: "Drag Snapping",

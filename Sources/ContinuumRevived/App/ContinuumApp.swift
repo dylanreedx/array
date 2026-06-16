@@ -323,6 +323,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--zone-adaptive-bounds-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try CanvasNSView.runZoneAdaptiveBoundsSelfCheck()
+                print("ContinuumRevivedZoneAdaptiveBoundsChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--agent-status-check") {
             do {
                 _ = NSApplication.shared

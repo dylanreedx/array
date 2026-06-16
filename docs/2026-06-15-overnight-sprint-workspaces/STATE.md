@@ -13,13 +13,13 @@ Legend: ⬜ todo · ✍️ spec-written · 🔨 building · 🔍 review · ✅ d
 | T02 | Group-zone tile storage (workspace store) | overnight [pure] | T01 | ✅ | 390079a | built+reviewed PASS (0 iters); storage-shape choice flagged |
 | T03 | ZoneHydrationOrchestrator (S1) | overnight [pure] | — | ✅ | 0b39c8c | built+reviewed PASS (0 iters); planner wiring deferred→T06/T10 |
 | T04 | ZoneRuntimeRegistry ref-counted (S2) | overnight [pure→app] | — | ✅ | 974c2fa | built, reviewed PASS-WITH-RISKS (0 iters); closeOnZero design knob flagged |
-| T05 | Mutable canvas / ZoneLayer (S3) | overnight [appkit-chk] | T01 | ✅ | (T05) | built PASS-WITH-RISKS; storage-shape B + morning visual gate flagged |
-| T06 | WorkspaceRuntime shell + proxy (S4) | overnight [appkit-chk] | T03,T04,T05 | ✍️ | — | spec written (review folds into build) |
+| T05 | Mutable canvas / ZoneLayer (S3) | overnight [appkit-chk] | T01 | ✅ | 70a77e1 | built PASS-WITH-RISKS; storage-shape B + morning visual gate flagged |
+| T06 | WorkspaceRuntime shell + proxy (S4) | overnight [appkit-chk] | T03,T04,T05 | ✍️ | — | spec written; ⚠CARRY-FWD: wire T11 adaptive bounds into ZoneLayer chrome (+guard) & feed T03 budget into plan() |
 | T07 | BrowserRuntimeBudget union (S5) | overnight | T06 | ✍️ | — | spec reviewed+fixed |
 | T08 | addZone + ambient controller (S6) | overnight [appkit-chk] | T06,T02 | ✍️ | — | spec written (review folds into build) |
 | T09 | switchWorkspace in-process (S7) ⚠ | overnight [appkit-chk] | T06 | ✍️ | — | spec written (exemplar) |
 | T10 | Viewport-driven tier transitions (S8) | overnight | T06 | ✍️ | — | spec written (review folds into build) |
-| T11 | Adaptive zone bounds (union+padding) | overnight [pure+wiring] | T05 | ✍️ | — | spec written (review folds into build) |
+| T11 | Adaptive zone bounds (union+padding) | overnight [pure+wiring] | T05 | ✅ | (T11) | built PASS-WITH-RISKS; legacy chrome only — ZoneLayer-chrome gap→T06 |
 | T12 | Bulletproof restore (atomic, crash-safe) | overnight | T01,T02 | ✍️ | — | spec written (review folds into build) |
 | T13 | Live-session resume (terminal/browser) | overnight | T12 | ✍️ | — | spec written (review folds into build) |
 | T14 | Profiles/snapshots (store + apply-modes) | overnight | T12 | ✍️ | — | spec written (review folds into build) |

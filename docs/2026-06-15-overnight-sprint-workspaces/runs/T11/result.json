@@ -1,0 +1,29 @@
+{
+  "task": "T11",
+  "title": "Adaptive zone bounds (union+padding, live)",
+  "verdict": "PASS WITH RISKS",
+  "iterations": 0,
+  "redProven": true,
+  "green": true,
+  "matrixFast": "green",
+  "buildClean": true,
+  "guards": "--zone-adaptive-bounds-check (runZoneAdaptiveBoundsSelfCheck, 9 assertions; synthesized move+resize NSEvents → updateTile → layoutZoneChromeViews → qaZoneDrawnWorldBounds reads the DRAWN chrome frame) + Core zoneBounds Part-A table. Bypass disproved by removing the updateTile hook line → RED.",
+  "filesTouched": [
+    "Sources/ContinuumRevivedCore/CanvasEngine.swift (zoneBounds)",
+    "Sources/ContinuumRevivedCore/ZoneBoundsConfig.swift (new)",
+    "Sources/ContinuumRevivedCore/SettingsSchema.swift",
+    "Sources/ContinuumRevived/Canvas/CanvasNSView.swift",
+    "Sources/ContinuumRevived/App/ContinuumApp.swift",
+    "Sources/ContinuumRevivedCoreChecks/main.swift",
+    "scripts/run-matrix.sh"
+  ],
+  "risks": [
+    "R1: the QA reader's inverse transform is only exercised at zoom=1/origin 0 (identity); non-unit-zoom reader inverse not independently checked (production tileScreenFrame IS driven).",
+    "R2: builder used tile height 170 (spec implied 150, below the .note 160 min which would clamp). Re-derived Part-B expected values are internally correct but not copied from spec.",
+    "R3: legacy zoneMemberWorldFrames returns [] for non-active zones, so a real multi-zone canvas would draw inactive zones at empty min-size (member source deferred to T02/T05 per spec)."
+  ],
+  "needsHuman": [
+    "BIG / carry-forward to T06: T11 adaptive-ized ONLY the legacy activeZone chrome path. T05's ZoneLayer chrome still uses the STORED zoneWorldFrame (setZonePlacement). Dormant today (ZoneLayer has 0 production callers) but T06 makes it live — T06 MUST drive zoneBounds into the ZoneLayer chrome path AND add a check (T05's check asserts only tile frames, so this gap is invisible to CI). Decide: fold into T06 (recommended) or a dedicated follow-up.",
+    "Morning eyeball: header title visual fit in the band that now sits above the tiles."
+  ]
+}

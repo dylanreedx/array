@@ -4553,4 +4553,107 @@ do {
     )
 }
 
+// MARK: - Zone adaptive bounds (T11)
+
+do {
+    // Group 1: Single member, default padding/header.
+    let f1 = TileFrame(x: 100, y: 100, width: 200, height: 150)
+    let b1 = CanvasEngine.zoneBounds(memberFrames: [f1], padding: 24, minSize: CGSize(width: 480, height: 320), headerHeight: 34)
+    expect(b1 == TileFrame(x: 76, y: 42, width: 248, height: 232), "zoneBounds group1: expected (76,42,248,232), got \(b1)")
+
+    // Group 2: Two members → union spans both.
+    let f2a = TileFrame(x: 100, y: 100, width: 200, height: 150)
+    let f2b = TileFrame(x: 400, y: 300, width: 100, height: 100)
+    let b2 = CanvasEngine.zoneBounds(memberFrames: [f2a, f2b], padding: 24, minSize: CGSize(width: 480, height: 320), headerHeight: 34)
+    expect(b2 == TileFrame(x: 76, y: 42, width: 448, height: 382), "zoneBounds group2: expected (76,42,448,382), got \(b2)")
+
+    // Group 3: Negative-coordinate member.
+    let f3 = TileFrame(x: -50, y: -80, width: 60, height: 40)
+    let b3 = CanvasEngine.zoneBounds(memberFrames: [f3], padding: 24, minSize: CGSize(width: 480, height: 320), headerHeight: 34)
+    expect(b3 == TileFrame(x: -74, y: -138, width: 108, height: 122), "zoneBounds group3: expected (-74,-138,108,122), got \(b3)")
+
+    // Group 4: Empty group zone → min size at anchor (0,0), header NOT double-added.
+    let b4 = CanvasEngine.zoneBounds(memberFrames: [], padding: 24, minSize: CGSize(width: 480, height: 320), headerHeight: 34)
+    expect(b4 == TileFrame(x: 0, y: 0, width: 480, height: 320), "zoneBounds group4: expected (0,0,480,320), got \(b4)")
+    expect(b4.width == 480 && b4.height == 320, "zoneBounds group4: height must be exactly 320, not 354 (header not double-added)")
+
+    // Group 5: Header sits ABOVE the union.
+    // For case 1: bounds.y (42) + headerHeight (34) == 76 == unionMinY (100) - padding (24).
+    let unionMinY1: Double = 100
+    let padding5: Double = 24
+    let headerHeight5: Double = 34
+    expect(b1.y == unionMinY1 - padding5 - headerHeight5, "zoneBounds group5a: y must equal unionMinY - padding - headerHeight")
+    expect(b1.y + headerHeight5 == unionMinY1 - padding5, "zoneBounds group5b: header bottom must be exactly padding above topmost tile")
+
+    // Group 6: Padding scales the rect, not the union. Re-run case 1 with padding=0.
+    let b6 = CanvasEngine.zoneBounds(memberFrames: [f1], padding: 0, minSize: CGSize(width: 480, height: 320), headerHeight: 34)
+    expect(b6 == TileFrame(x: 100, y: 66, width: 200, height: 184), "zoneBounds group6: expected (100,66,200,184), got \(b6)")
+
+    // Group 7: Config guard table.
+    let suiteName7 = "ZoneBoundsConfigChecks-\(UUID().uuidString)"
+    let d7 = UserDefaults(suiteName: suiteName7)!
+    defer { d7.removePersistentDomain(forName: suiteName7) }
+    d7.removePersistentDomain(forName: suiteName7)
+
+    // Absent keys → defaults.
+    expect(ZoneBoundsConfig.padding(defaults: d7) == 24, "zoneBoundsConfig: absent paddingKey returns 24")
+    let minSize7 = ZoneBoundsConfig.emptyMinSize(defaults: d7)
+    expect(minSize7.width == 480, "zoneBoundsConfig: absent emptyMinWidthKey returns 480")
+    expect(minSize7.height == 320, "zoneBoundsConfig: absent emptyMinHeightKey returns 320")
+
+    // set(0, paddingKey) → 0 is valid.
+    d7.set(0.0, forKey: ZoneBoundsConfig.paddingKey)
+    expect(ZoneBoundsConfig.padding(defaults: d7) == 0, "zoneBoundsConfig: padding=0 is valid")
+
+    // set(-5) → default.
+    d7.set(-5.0, forKey: ZoneBoundsConfig.paddingKey)
+    expect(ZoneBoundsConfig.padding(defaults: d7) == 24, "zoneBoundsConfig: negative padding falls back to default")
+
+    // set(nan) → default.
+    d7.set(Double.nan, forKey: ZoneBoundsConfig.paddingKey)
+    expect(ZoneBoundsConfig.padding(defaults: d7) == 24, "zoneBoundsConfig: NaN padding falls back to default")
+
+    // emptyMinWidthKey=0 → fallback (≤0 rejected).
+    d7.set(0.0, forKey: ZoneBoundsConfig.emptyMinWidthKey)
+    expect(ZoneBoundsConfig.emptyMinSize(defaults: d7).width == 480, "zoneBoundsConfig: width=0 falls back to default")
+
+    // emptyMinWidthKey=640 → 640.
+    d7.set(640.0, forKey: ZoneBoundsConfig.emptyMinWidthKey)
+    expect(ZoneBoundsConfig.emptyMinSize(defaults: d7).width == 640, "zoneBoundsConfig: width=640 returned")
+
+    // Group 8: SettingsSchema wiring.
+    let sections = SettingsSchema.sections()
+    guard let general = sections.first(where: { $0.id == "general" }) else {
+        fputs("FAIL: zoneBoundsConfig group8: no general section in SettingsSchema\n", stderr)
+        Foundation.exit(1)
+    }
+    func field(key: String) -> SettingsField? {
+        general.fields.first {
+            if case let .text(k, _, _) = $0 { return k == key }
+            return false
+        }
+    }
+    guard let paddingField = field(key: ZoneBoundsConfig.paddingKey) else {
+        fputs("FAIL: zoneBoundsConfig group8: missing paddingKey in general section\n", stderr)
+        Foundation.exit(1)
+    }
+    guard let minWField = field(key: ZoneBoundsConfig.emptyMinWidthKey) else {
+        fputs("FAIL: zoneBoundsConfig group8: missing emptyMinWidthKey in general section\n", stderr)
+        Foundation.exit(1)
+    }
+    guard let minHField = field(key: ZoneBoundsConfig.emptyMinHeightKey) else {
+        fputs("FAIL: zoneBoundsConfig group8: missing emptyMinHeightKey in general section\n", stderr)
+        Foundation.exit(1)
+    }
+    if case let .text(_, _, d) = paddingField {
+        expect(d == String(Int(ZoneBoundsConfig.defaultPadding)), "zoneBoundsConfig group8: paddingField default mismatch: \(d)")
+    }
+    if case let .text(_, _, d) = minWField {
+        expect(d == String(Int(ZoneBoundsConfig.defaultEmptyMinWidth)), "zoneBoundsConfig group8: emptyMinWidthField default mismatch: \(d)")
+    }
+    if case let .text(_, _, d) = minHField {
+        expect(d == String(Int(ZoneBoundsConfig.defaultEmptyMinHeight)), "zoneBoundsConfig group8: emptyMinHeightField default mismatch: \(d)")
+    }
+}
+
 print("ContinuumRevivedCoreChecks passed")
