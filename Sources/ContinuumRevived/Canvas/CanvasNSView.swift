@@ -125,6 +125,19 @@ final class CanvasNSView: NSView {
     func qaZoneHeaderGrabRect(_ zoneId: UUID) -> CGRect? {
         liveZones.first { $0.zoneId == zoneId }.flatMap { zoneHeaderScreenRect(for: $0) }
     }
+    /// QA reader: true iff the zone's chrome paints BEHIND all its member tiles
+    /// (lower subview index = painted first). Guards the chrome-over-tiles bug.
+    func qaZoneChromeIsBehindMembers(_ zoneId: UUID) -> Bool {
+        guard let chrome = zoneChromeViews[zoneId], let ci = subviews.firstIndex(of: chrome) else { return false }
+        let memberViews = canvasState.tiles
+            .filter { tileZoneMembership[$0.id] == zoneId }
+            .compactMap { tileViews[$0.id] }
+        guard !memberViews.isEmpty else { return true }
+        return memberViews.allSatisfy { tv in
+            guard let ti = subviews.firstIndex(of: tv) else { return false }
+            return ci < ti
+        }
+    }
 
     /// UserDefaults the zone-gesture threshold resolves from (ZoneGestureConfig).
     /// Overridable so `runZoneCreateGestureSelfCheck` can drive deterministically.
@@ -201,7 +214,8 @@ final class CanvasNSView: NSView {
             let model = zoneDisplayByZoneId[placement.zoneId] ?? ZoneRenderModel(placement: placement, displayName: "")
             let view = ZoneChromeNSView(model: model)
             zoneChromeViews[placement.zoneId] = view
-            addSubview(view)
+            // Chrome is the zone background — keep it BELOW every tile subview.
+            addSubview(view, positioned: .below, relativeTo: nil)
         }
         layoutZoneChromeViews()
     }
@@ -971,8 +985,16 @@ final class CanvasNSView: NSView {
             }
             return .orderedSame
         }, context: Unmanaged.passUnretained(ordering).toOpaque())
-        // The z-sort only orders tile subviews; keep the focus-border overlay
-        // above them so it isn't buried by a brought-to-front tile.
+        // The sort only orders tile subviews; the chrome comparator returns
+        // .orderedSame, so chrome z-position is otherwise undefined. Force every
+        // zone chrome to the BACK so tiles always paint on top of their zone
+        // background (while staying visually "in" the zone).
+        for chrome in zoneChromeViews.values {
+            chrome.removeFromSuperview()
+            addSubview(chrome, positioned: .below, relativeTo: nil)
+        }
+        // Keep the focus-border overlay above everything so a brought-to-front
+        // tile (or the chrome reordering above) never buries it.
         if let overlay = focusBorderOverlay, !overlay.isHidden {
             overlay.removeFromSuperview()
             addSubview(overlay, positioned: .above, relativeTo: nil)
@@ -1273,9 +1295,11 @@ final class CanvasNSView: NSView {
                 if showsZoneChrome, zoneChromeViews[newZoneId] == nil {
                     let view = ZoneChromeNSView(model: zoneDisplayByZoneId[newZoneId]!)
                     zoneChromeViews[newZoneId] = view
-                    addSubview(view)
+                    // Background: keep chrome below the tiles it encloses.
+                    addSubview(view, positioned: .below, relativeTo: nil)
                 }
                 layoutAllTiles()
+                reorderTileSubviewsByZIndex()
                 onZoneCreated?(placement)
             }
             return
@@ -2108,6 +2132,74 @@ final class CanvasNSView: NSView {
         try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
         let artifact = tempRoot.appendingPathComponent("manifest.json")
         try JSONSerialization.data(withJSONObject: ["check": "zone-close-keep-delete", "legs": ["group-keep", "group-delete", "project-delete-keeps"]], options: [.sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// zone-unify — the zone chrome (background) must paint BEHIND its member
+    /// tiles, both for a boot-seeded zone and a gesture-created one (the create
+    /// path added chrome on top of existing tiles → this guards that regression).
+    static func runZoneChromeZOrderSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(m): return m } }
+        }
+        func expect(_ c: @autoclosure () -> Bool, _ m: String) throws { if !c() { throw CheckError.failed(m) } }
+        func mouse(_ type: NSEvent.EventType, at p: NSPoint, window: NSWindow) throws -> NSEvent {
+            guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
+            else { throw CheckError.failed("could not synthesize \(type)") }
+            return e
+        }
+        func win(_ cx: CGFloat, _ cy: CGFloat) -> NSPoint { NSPoint(x: cx, y: 700 - cy) }
+        let vp = CanvasViewport(x: 0, y: 0, zoom: 1)
+
+        // Case A: boot-seeded zone with two members.
+        let zoneId = UUID(uuidString: "00000000-0000-0000-0000-0000000000E1")!
+        let aId = UUID(uuidString: "00000000-0000-0000-0000-0000000000E2")!
+        let bId = UUID(uuidString: "00000000-0000-0000-0000-0000000000E3")!
+        let zone = ZonePlacement(zoneId: zoneId, projectId: UUID(), origin: ZonePoint(x: 0, y: 0),
+                                 size: ZoneSize(width: 600, height: 400), color: "teal",
+                                 collapsed: false, hydrationPolicy: .automatic, name: "Z", navKey: nil)
+        let tA = Tile(id: aId, kind: .note, title: "a", frame: TileFrame(x: 80, y: 80, width: 140, height: 100), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tB = Tile(id: bId, kind: .note, title: "b", frame: TileFrame(x: 300, y: 120, width: 140, height: 100), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let cvA = CanvasNSView(canvasState: CanvasState(viewport: vp, tiles: [tA, tB], groups: [], lastActiveTileId: nil),
+                               activeZone: zone, zoneRenderModels: [ZoneRenderModel(placement: zone, displayName: "Z")], showsZoneChrome: true)
+        cvA.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let wA = NSWindow(contentRect: cvA.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        wA.contentView = cvA
+        for t in [tA, tB] { cvA.install(tileView: DescriptorTileNSView(tile: t), for: t) }
+        cvA.layoutSubtreeIfNeeded()
+        try expect(cvA.qaZoneChromeIsBehindMembers(zoneId), "boot-seeded zone chrome must paint behind its member tiles")
+
+        // Case B: gesture-created zone over two existing bare tiles (the regression path).
+        let in1 = Tile(id: UUID(), kind: .note, title: "i1", frame: TileFrame(x: 150, y: 150, width: 100, height: 80), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let in2 = Tile(id: UUID(), kind: .note, title: "i2", frame: TileFrame(x: 280, y: 170, width: 100, height: 80), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let cvB = CanvasNSView(canvasState: CanvasState(viewport: vp, tiles: [in1, in2], groups: [], lastActiveTileId: nil), showsZoneChrome: true)
+        cvB.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let wB = NSWindow(contentRect: cvB.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        wB.contentView = cvB
+        for t in [in1, in2] { cvB.install(tileView: DescriptorTileNSView(tile: t), for: t) }
+        cvB.layoutSubtreeIfNeeded()
+        let suite = "chrome-zorder-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        cvB.zoneGestureDefaults = defaults
+        defer { defaults.removePersistentDomain(forName: suite) }
+        // Drag-create a marquee enclosing both tiles.
+        cvB.mouseDown(with: try mouse(.leftMouseDown, at: win(100, 100), window: wB))
+        cvB.mouseDragged(with: try mouse(.leftMouseDragged, at: win(450, 320), window: wB))
+        cvB.mouseUp(with: try mouse(.leftMouseUp, at: win(450, 320), window: wB))
+        guard let createdId = cvB.qaLiveZoneIds.first else { throw CheckError.failed("no zone created in case B") }
+        try expect(cvB.qaZoneChromeIsBehindMembers(createdId), "gesture-created zone chrome must paint behind the tiles it enclosed (chrome-over-tiles regression guard)")
+
+        let fm = FileManager.default
+        let tempRoot = URL(fileURLWithPath: fm.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("zone-chrome-zorder-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        let artifact = tempRoot.appendingPathComponent("manifest.json")
+        try JSONSerialization.data(withJSONObject: ["check": "zone-chrome-zorder", "cases": ["boot-seeded", "gesture-created"]], options: [.sortedKeys]).write(to: artifact, options: .atomic)
         return artifact
     }
 
