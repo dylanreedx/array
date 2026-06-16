@@ -20,6 +20,11 @@ keystone — no relaunch); **clicking a zone row pans/focuses that zone**. This 
 that makes the whole sprint's model legible and operable without ⌘K. ⌘K (T17) stays the
 keyboard-fast path; this is the pointer path.
 
+## ⚠ ORCHESTRATOR CARRY-FORWARD (added mid-sprint — IN SCOPE for T16's headless check)
+Two facts the sprint surfaced after T16's spec was written:
+1. **`switchWorkspace` is INERT in the live app until T20.** Clicking a workspace row calls the REAL `WorkspaceRuntime.switchWorkspace` (T09) — but at boot that runtime has a throwing placeholder registry factory, so the actual switch no-ops live until **T20** wires the per-project controller factory. Your `--sidebar-check` MUST therefore assert the **CALL** (spy/observe that clicking a workspace row INVOKES `switchWorkspace` with the right workspace id) — NOT that the live switch completed. The live in-process switch is a morning visual gate, explicitly **blocked-pending-T20**; say so in the eyeball list.
+2. **Profiles are LAYOUT-ONLY (T14).** If T16 surfaces any "Save as profile" affordance, it must NOT assume session-state lives on `WorkspaceDocument` (it doesn't — session-state is in ProjectStore sibling stores). Use `WorkspaceProfileStore` (T14) as-is (layout-only); do not invent a session capture here.
+
 ## Exact scope — files & symbols
 - **`Sources/ContinuumRevived/App/WorkspaceSidebar.swift`** (NEW file) — the entire AppKit
   shell, `@MainActor final class WorkspaceSidebar: NSObject, NSOutlineViewDataSource,
