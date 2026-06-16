@@ -2982,43 +2982,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func addProjectZone(projectId: UUID) {
-        guard let registryStore else { return }
+        guard let workspaceRuntime else { return }
         do {
-            var registry = try registryStore.loadOrEmpty()
-            guard let projectEntry = registry.projects.first(where: { $0.id == projectId }) else {
-                fputs("Add Project to Canvas failed: unknown project \(projectId)\n", stderr)
-                return
-            }
-            let workspaceId = activeProject.flatMap { active in registry.projects.first(where: { $0.id == active.id })?.workspaceId }
-                ?? registry.lastActiveWorkspaceId
-                ?? projectEntry.workspaceId
-            guard let workspaceId else {
-                fputs("Add Project to Canvas failed: no active workspace\n", stderr)
-                return
-            }
-            let appSupport = registryStore.registryFile.deletingLastPathComponent()
-            let workspaceStore = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
-            var document = try workspaceStore.load()
-            if document.zones.contains(where: { $0.projectId == projectId }) {
-                document.lastActiveZoneId = document.zones.first(where: { $0.projectId == projectId })?.zoneId
-            } else {
-                _ = document.appendProjectZone(projectId: projectId)
-            }
-            if let workspaceIndex = registry.workspaces.firstIndex(where: { $0.id == workspaceId }) {
-                if !registry.workspaces[workspaceIndex].projectIds.contains(projectId) {
-                    registry.workspaces[workspaceIndex].projectIds.append(projectId)
+            // Update registry workspace membership (AppDelegate-level concern).
+            if let registryStore {
+                var registry = try registryStore.loadOrEmpty()
+                guard registry.projects.first(where: { $0.id == projectId }) != nil else {
+                    fputs("Add Project to Canvas failed: unknown project \(projectId)\n", stderr)
+                    return
                 }
-                registry.workspaces[workspaceIndex].updatedAt = Date()
+                let wId = workspaceRuntime.workspaceId
+                if let workspaceIndex = registry.workspaces.firstIndex(where: { $0.id == wId }) {
+                    if !registry.workspaces[workspaceIndex].projectIds.contains(projectId) {
+                        registry.workspaces[workspaceIndex].projectIds.append(projectId)
+                    }
+                    registry.workspaces[workspaceIndex].updatedAt = Date()
+                }
+                if let projectIndex = registry.projects.firstIndex(where: { $0.id == projectId }) {
+                    registry.projects[projectIndex].workspaceId = wId
+                }
+                try registryStore.save(registry)
             }
-            if let projectIndex = registry.projects.firstIndex(where: { $0.id == projectId }) {
-                registry.projects[projectIndex].workspaceId = workspaceId
-            }
-            workspaceRuntime?.flushAll()
-            let workspaceSaveController = WorkspaceDocumentSaveController(store: workspaceStore)
-            workspaceSaveController.scheduleZoneLayoutSave(document)
-            try workspaceSaveController.flushPendingSave()
-            try registryStore.save(registry)
-            fputs("Added project zone for \(projectEntry.name) (\(projectId))\n", stderr)
+            // Delegate zone creation + canvas install + document save to the runtime.
+            try workspaceRuntime.addZone(projectId: projectId)
+            fputs("Added project zone for \(projectId)\n", stderr)
         } catch {
             fputs("Add Project to Canvas failed: \(error)\n", stderr)
         }
@@ -3719,63 +3706,287 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         let fm = FileManager.default
-        let tempRoot = fm.temporaryDirectory.appendingPathComponent("continuum-add-zone-check-\(UUID().uuidString)", isDirectory: true)
+        let now = Date()
+
+        // Fixed UUIDs for determinism.
+        let workspaceW = UUID(uuidString: "00000000-0000-0000-0000-000000004800")!
+        let projectP   = UUID(uuidString: "00000000-0000-0000-0000-000000004801")!
+
+        // Temp directories.
+        let tempRoot   = fm.temporaryDirectory
+            .appendingPathComponent("continuum-add-zone-check-\(UUID().uuidString)", isDirectory: true)
+        let pRoot      = tempRoot.appendingPathComponent("ProjectP", isDirectory: true)
         let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        let hgroup     = tempRoot.appendingPathComponent("Hgroup", isDirectory: true)
+        try fm.createDirectory(at: pRoot, withIntermediateDirectories: true)
         try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        try fm.createDirectory(at: hgroup, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
 
-        let workspaceId = UUID(uuidString: "00000000-0000-0000-0000-000000004700")!
-        let projectA = UUID(uuidString: "00000000-0000-0000-0000-000000004701")!
-        let projectB = UUID(uuidString: "00000000-0000-0000-0000-000000004702")!
-        let zoneA = UUID(uuidString: "00000000-0000-0000-0000-0000000047A1")!
-        let zoneB = UUID(uuidString: "00000000-0000-0000-0000-0000000047B2")!
-        var document = WorkspaceDocument(
+        // Seed project P.
+        let pStore = ProjectStore(projectRoot: pRoot)
+        let projectObj = Project(
+            id: projectP,
+            name: "Project P",
+            rootPath: pRoot.path,
+            createdAt: now,
+            updatedAt: now,
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning
+            )
+        )
+        try pStore.saveProject(projectObj)
+
+        // Seed registry.
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        var reg = Registry.empty()
+        reg.lastActiveWorkspaceId = workspaceW
+        reg.workspaces = [WorkspaceEntry(id: workspaceW, name: "W", projectIds: [projectP], createdAt: now, updatedAt: now)]
+        reg.projects = [
+            ProjectEntry(id: projectP, name: "Project P", rootPath: pRoot.path, workspaceId: workspaceW, lastOpenedAt: now, pinned: false, missing: false)
+        ]
+        try registryStore.save(reg)
+
+        // Seed empty WorkspaceDocument for W.
+        let workspaceStore = WorkspaceStore(workspaceId: workspaceW, applicationSupportDirectory: appSupport)
+        let emptyDoc = WorkspaceDocument(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-            zones: [ZonePlacement(
-                zoneId: zoneA,
-                projectId: projectA,
-                origin: ZonePoint(x: 0, y: 0),
-                size: ZoneSize(width: 1000, height: 700),
-                color: "blue",
-                collapsed: false,
-                hydrationPolicy: .automatic
-            )],
-            zoneZOrder: [zoneA],
-            lastActiveZoneId: zoneA
+            zones: [],
+            zoneZOrder: [],
+            lastActiveZoneId: nil
         )
-        let inserted = document.appendProjectZone(
-            projectId: projectB,
-            zoneId: zoneB,
-            defaultSize: ZoneSize(width: 900, height: 600),
-            gap: 80,
-            color: "mint"
-        )
-        try expect(inserted.projectId == projectB, "inserted zone references project B")
-        try expect(inserted.origin == ZonePoint(x: 1080, y: 0), "inserted zone lands to the right with gap")
-        try expect(document.zones.count == 2, "workspace has two zones")
-        try expect(document.zoneZOrder == [zoneA, zoneB], "new zone appended to z-order")
-        try expect(document.lastActiveZoneId == zoneB, "new zone becomes active")
+        try workspaceStore.save(emptyDoc)
 
-        let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
-        try store.save(document)
-        let reloaded = try store.load()
-        try expect(reloaded == document, "workspace add-zone document round trips")
-        try expect(reloaded.zones[0].projectId == projectA, "existing project zone preserved")
-        try expect(reloaded.zones[1].projectId == projectB, "new project zone persisted")
+        // Registry factory: creates a real (lock-free) controller for P.
+        let zoneRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { id in
+            if id == projectP {
+                return ZoneRuntimeController(projectRoot: pRoot, projectStore: pStore, project: projectObj)
+            }
+            throw CheckFailure(description: "unexpected projectId in factory: \(id)")
+        })
 
-        let worktreeRoot = tempRoot.appendingPathComponent("ProjectBWorktree", isDirectory: true).path
-        let agentSpec = LaunchProfileSpec(id: "claude", displayName: "Claude", kind: .shell, title: "Agent · Claude", agentKind: "claude")
-        let worktreeProfile = LaunchProfile(command: "/bin/zsh", arguments: [], cwd: worktreeRoot, title: "Agent · Claude")
-        let descriptor = TileSpawner.makeTerminalSessionDescriptor(
-            runtimeId: UUID(uuidString: "00000000-0000-0000-0000-0000000047C1")!,
-            tileId: UUID(uuidString: "00000000-0000-0000-0000-0000000047C2")!,
-            spec: agentSpec,
-            profile: worktreeProfile,
-            projectRoot: worktreeRoot,
-            now: Date(timeIntervalSince1970: 1_780_000_000)
+        // Infrastructure.
+        let focusBroker = FocusBroker()
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+
+        // Construct WorkspaceRuntime for workspace W.
+        let runtime = WorkspaceRuntime(
+            workspaceId: workspaceW,
+            document: emptyDoc,
+            registry: zoneRegistry,
+            focusBroker: focusBroker,
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
         )
-        try expect(descriptor.cwd == worktreeRoot, "worktree agent spawn descriptor uses worktree cwd")
-        try expect(descriptor.agentDescriptor?.worktreePath == worktreeRoot, "worktree agent spawn descriptor persists worktree path")
-        return store.layout.canvasFile
+
+        // Build canvas.
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil),
+            activeZone: nil,
+            zoneRenderModels: [],
+            showsZoneChrome: false
+        )
+        canvas.frame = CGRect(x: 0, y: 0, width: 2000, height: 1200)
+        canvas.focusBroker = focusBroker
+
+        // Install the empty workspace (no zones yet; wires canvasView ref).
+        try runtime.install(into: canvas, appRegistry: reg)
+
+        // Wire AppDelegate for Part A (delegate.addProjectZone → runtime.addZone).
+        let delegate = AppDelegate()
+        delegate.workspaceRuntime = runtime
+        delegate.registryStore = registryStore
+
+        // Set AmbientZoneHome override to hgroup (for Part B).
+        let ambientKey = AmbientZoneHome.userDefaultsKey
+        let originalAmbient = UserDefaults.standard.string(forKey: ambientKey)
+        UserDefaults.standard.set(hgroup.path, forKey: ambientKey)
+        defer {
+            if let original = originalAmbient {
+                UserDefaults.standard.set(original, forKey: ambientKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: ambientKey)
+            }
+        }
+
+        // ── Part A: project zone ──────────────────────────────────────────────
+
+        delegate.addProjectZone(projectId: projectP)
+
+        // 1. Registry acquired: refCount for P == 1.
+        let refCountAfterAdd = zoneRegistry.refCount(for: projectP)
+        try expect(refCountAfterAdd == 1, "assertion 1: registry refCount(P) should be 1 after addProjectZone, got \(refCountAfterAdd)")
+
+        // 2. Controller's projectRoot == P's rootPath.
+        let controllerP = zoneRegistry.controller(for: projectP)
+        try expect(controllerP != nil, "assertion 2: registry must hold a controller for P")
+        try expect(controllerP!.projectRoot.path == pRoot.path,
+                   "assertion 2: controller.projectRoot.path should be \(pRoot.path), got \(controllerP!.projectRoot.path)")
+
+        // 3. Layer installed on canvas: exactly one layer with placement.projectId == P.
+        let installedIds = canvas.installedZoneLayerIds
+        try expect(installedIds.count == 1, "assertion 3: canvas should have exactly 1 installed zone layer after addProjectZone, got \(installedIds.count)")
+        let newZoneId = installedIds[0]
+        let layerPlacement = runtime.installedZonePlacement(for: newZoneId)
+        try expect(layerPlacement != nil, "assertion 3: installedZonePlacement must be non-nil")
+        try expect(layerPlacement!.projectId == projectP,
+                   "assertion 3: layer placement.projectId should be P, got \(String(describing: layerPlacement!.projectId))")
+
+        // 4. Document persisted: reload from fresh WorkspaceStore.
+        let reloadedDoc1 = try WorkspaceStore(workspaceId: workspaceW, applicationSupportDirectory: appSupport).load()
+        let persistedZone = reloadedDoc1.zones.first(where: { $0.projectId == projectP })
+        try expect(persistedZone != nil, "assertion 4: reloaded document must contain a zone for P")
+        try expect(reloadedDoc1.lastActiveZoneId == persistedZone!.zoneId,
+                   "assertion 4: lastActiveZoneId should be the new P zone")
+        try expect(reloadedDoc1.zoneZOrder.last == persistedZone!.zoneId,
+                   "assertion 4: zoneZOrder should end with the new P zone")
+
+        // 5. Idempotent: second addProjectZone(P) → refCount stays 1, same controller instance, no duplicate zone.
+        delegate.addProjectZone(projectId: projectP)
+        let refCountAfterDup = zoneRegistry.refCount(for: projectP)
+        try expect(refCountAfterDup == 1,
+                   "assertion 5: refCount(P) should still be 1 after duplicate add, got \(refCountAfterDup)")
+        let controllerP2 = zoneRegistry.controller(for: projectP)
+        try expect(controllerP2 === controllerP,
+                   "assertion 5: second add must return the SAME controller instance (===)")
+        let installedIds2 = canvas.installedZoneLayerIds
+        let pZoneCount = runtime.document.zones.filter { $0.projectId == projectP }.count
+        try expect(pZoneCount == 1,
+                   "assertion 5: document must have exactly 1 zone for P after duplicate add, got \(pZoneCount)")
+        try expect(installedIds2.count == 1,
+                   "assertion 5: canvas should still have exactly 1 layer after duplicate add, got \(installedIds2.count)")
+
+        // ── Part B: group zone ────────────────────────────────────────────────
+
+        // AmbientZoneHome.current should now resolve to hgroup (set above).
+        try expect(AmbientZoneHome.current == hgroup.path,
+                   "Part B pre-check: AmbientZoneHome.current should be \(hgroup.path), got \(AmbientZoneHome.current)")
+
+        try runtime.addZone(projectId: nil)
+
+        // 6. Ambient controller created with projectRoot == Hgroup; registry for projectId keys is unchanged.
+        let ambientControllers = runtime.ambientControllers
+        try expect(ambientControllers.count == 1,
+                   "assertion 6: runtime should have 1 ambient controller after addZone(nil), got \(ambientControllers.count)")
+        try expect(ambientControllers[0].projectRoot.path == hgroup.path,
+                   "assertion 6: ambient controller.projectRoot.path should be \(hgroup.path), got \(ambientControllers[0].projectRoot.path)")
+        // ProjectId-keyed registry count must still be just P.
+        try expect(zoneRegistry.liveProjectIds == Set([projectP]),
+                   "assertion 6: projectId-keyed registry should only contain P (not polluted by group zone)")
+        // acquireLock: false — no lock file must materialise in the ambient root.
+        // (acquireLock: true would create <root>/.continuum-revived/lock via ProjectLock.acquire().)
+        let ambientLockFile = hgroup.appendingPathComponent(".continuum-revived/lock")
+        try expect(!fm.fileExists(atPath: ambientLockFile.path),
+                   "assertion 6: group/ambient controller must NOT hold a project lock (acquireLock:false); lock file unexpectedly exists at \(ambientLockFile.path)")
+
+        // 7. Group placement persisted with projectId == nil.
+        let reloadedDoc2 = try WorkspaceStore(workspaceId: workspaceW, applicationSupportDirectory: appSupport).load()
+        let groupZone = reloadedDoc2.zones.first(where: { $0.projectId == nil })
+        try expect(groupZone != nil, "assertion 7: reloaded document must contain a zone with projectId == nil")
+        try expect(!groupZone!.name.isEmpty, "assertion 7: group zone must have a non-empty name, got '\(groupZone!.name)'")
+
+        // 8. Group tiles in workspace store (T02): real round-trip + isolation.
+        //
+        // The old assertion just checked tiles(forZone:) == [] which is tautological —
+        // it returns [] for ANY unknown UUID, so it proves nothing about routing. Instead:
+        // (a) store a tile into the group zone via the workspace document/store API,
+        // (b) save + reload from disk, assert the tile round-trips, and
+        // (c) assert the tile does NOT appear in the ambient controller's ProjectStore
+        //     canvas (group tiles live in the workspace store, not the project canvas).
+        let groupZoneId = groupZone!.zoneId
+        let sentinelTileId = UUID(uuidString: "00000000-0000-0000-0000-000000004880")!
+        let sentinelTile = Tile(
+            id: sentinelTileId,
+            kind: .note,
+            title: "group-zone-sentinel",
+            frame: TileFrame(x: 10, y: 10, width: 300, height: 200),
+            zIndex: 1,
+            runtimeRef: nil,
+            metadata: TileMetadata(noteId: sentinelTileId)
+        )
+        // Write the tile into the live runtime document, then flush to disk.
+        let groupWsStore = WorkspaceStore(workspaceId: workspaceW, applicationSupportDirectory: appSupport)
+        var docForGroupTile = try groupWsStore.load()
+        docForGroupTile.setTiles([sentinelTile], forZone: groupZoneId)
+        try groupWsStore.save(docForGroupTile)
+
+        // (a) Reload from a FRESH store (proves the tile persisted in the workspace store).
+        let reloadedDoc3 = try WorkspaceStore(workspaceId: workspaceW, applicationSupportDirectory: appSupport).load()
+        let roundTrippedTiles = reloadedDoc3.tiles(forZone: groupZoneId)
+        try expect(roundTrippedTiles.count == 1,
+                   "assertion 8a: reloaded workspace doc must have exactly 1 tile for the group zone (round-trip), got \(roundTrippedTiles.count)")
+        try expect(roundTrippedTiles[0].id == sentinelTileId,
+                   "assertion 8a: round-tripped tile id should be \(sentinelTileId), got \(roundTrippedTiles[0].id)")
+
+        // (b) Isolation: the sentinel tile must NOT appear in the ambient controller's
+        // ProjectStore canvas (group tiles live in the workspace store, not the project canvas).
+        let ambientProjectCanvas = try ambientControllers[0].projectStore.tryLoadCanvas()
+        let sentinelInProjectCanvas = ambientProjectCanvas?.tiles.contains(where: { $0.id == sentinelTileId }) ?? false
+        try expect(!sentinelInProjectCanvas,
+                   "assertion 8b: group tile must NOT be routed to the ambient controller's ProjectStore canvas (isolation failure)")
+
+        // 9. Group layer installed on canvas: count == 2, group layer has projectId == nil.
+        let installedIds3 = canvas.installedZoneLayerIds
+        try expect(installedIds3.count == 2,
+                   "assertion 9: canvas should have 2 installed zone layers (P + group), got \(installedIds3.count)")
+        let groupLayerPlacement = runtime.installedZonePlacement(for: groupZoneId)
+        try expect(groupLayerPlacement != nil, "assertion 9: installedZonePlacement for group zone must be non-nil")
+        try expect(groupLayerPlacement!.projectId == nil,
+                   "assertion 9: group layer placement.projectId should be nil")
+
+        // ── Part C: configurable ambient home ────────────────────────────────
+
+        let cSuiteName = "continuum-ambient-zone-home-check-\(UUID().uuidString)"
+        let cDefaults = UserDefaults(suiteName: cSuiteName)!
+        defer { cDefaults.removePersistentDomain(forName: cSuiteName) }
+        cDefaults.removePersistentDomain(forName: cSuiteName)
+
+        // 10a. Empty defaults → fallback to $HOME.
+        let resA = AmbientZoneHome.resolvedFromDefaults(standardDefaults: cDefaults, directoryExists: { _ in true })
+        try expect(resA.path == NSHomeDirectory(),
+                   "assertion 10a: empty defaults → path should be $HOME (\(NSHomeDirectory())), got \(resA.path)")
+        try expect(resA.source == .fallbackDefault, "assertion 10a: source should be .fallbackDefault")
+
+        // 10b. Valid override dir → that dir.
+        cDefaults.set(hgroup.path, forKey: AmbientZoneHome.userDefaultsKey)
+        let resB = AmbientZoneHome.resolvedFromDefaults(standardDefaults: cDefaults, directoryExists: { _ in true })
+        try expect(resB.path == hgroup.path,
+                   "assertion 10b: valid override → path should be \(hgroup.path), got \(resB.path)")
+        try expect(resB.source == .standardDomain, "assertion 10b: source should be .standardDomain")
+
+        // 10c. Non-existent path → fall back to $HOME (bogus override rejected).
+        let bogusPath = "/nonexistent-\(UUID().uuidString)"
+        cDefaults.set(bogusPath, forKey: AmbientZoneHome.userDefaultsKey)
+        let resC = AmbientZoneHome.resolvedFromDefaults(standardDefaults: cDefaults, directoryExists: { _ in false })
+        try expect(resC.path == NSHomeDirectory(),
+                   "assertion 10c: non-existent override → path should be $HOME (\(NSHomeDirectory())), got \(resC.path)")
+        try expect(resC.source == .fallbackDefault, "assertion 10c: source should be .fallbackDefault on bogus path")
+
+        // Write manifest artifact.
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let artifactDir = URL(fileURLWithPath: fm.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("add-zone", isDirectory: true)
+        try fm.createDirectory(at: artifactDir, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "check": "add-zone",
+            "assertions": 10,
+            "refCountP": 1,
+            "installedLayerCount": 2,
+            "ambientControllerRoot": ambientControllers[0].projectRoot.path,
+            "groupZoneName": groupZone!.name
+        ]
+        let manifestURL = artifactDir.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: manifestURL, options: .atomic)
+        return manifestURL
     }
 
     static func runProjectRootResolutionSelfCheck() throws {

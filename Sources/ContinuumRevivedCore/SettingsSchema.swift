@@ -92,6 +92,11 @@ public enum SettingsSchema {
                         label: "Close Project Runtime When Unused",
                         default: ZoneRuntimeBudgetConfig.defaultCloseOnZero
                     ),
+                    .text(
+                        key: AmbientZoneHome.userDefaultsKey,
+                        label: "Ambient Zone Home Directory",
+                        default: AmbientZoneHome.fallback
+                    ),
                 ]
             ),
             SettingsSection(

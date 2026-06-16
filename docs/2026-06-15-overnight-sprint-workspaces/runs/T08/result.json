@@ -1,0 +1,32 @@
+{
+  "task": "T08",
+  "title": "addZone — project controller via registry + ambient group controller (docs/23 S6)",
+  "verdict": "PASS WITH RISKS",
+  "iterations": 0,
+  "fixerApplied": [
+    "R2: assert the ambient/group controller takes NO project lock (no .continuum-revived/lock in the ambient root) — RED-confirmed by flipping acquireLock:true",
+    "R3: replaced the tautological assertion 8 with a real group-tile workspace-store round-trip + ProjectStore isolation assertion — RED-confirmed by mis-routing the tile to the ProjectStore"
+  ],
+  "redProvenOriginally": false,
+  "redStatus": "R2 + R3 now RED-confirmed by the fixer; builder's 5 mutation tests cover the controller/layer/de-dupe/persistence paths.",
+  "green": true,
+  "matrixFast": "green",
+  "buildClean": true,
+  "guards": "--add-zone-check (Parts A project-zone, B group-zone, C AmbientZoneHome resolver round-trip; ~12 assertions incl. fixer's lock + tile-routing). Drives the REAL delegate.addProjectZone → workspaceRuntime.addZone → registry.acquire + upsertZoneLayer + on-disk reload. Bypass disproved (5 builder mutations + 2 fixer mutations all RED).",
+  "filesTouched": [
+    "Sources/ContinuumRevivedCore/AmbientZoneHome.swift (new, configurable resolver)",
+    "Sources/ContinuumRevived/App/WorkspaceRuntime.swift (addZone)",
+    "Sources/ContinuumRevived/App/ContinuumApp.swift (forwarders + strengthened check)",
+    "Sources/ContinuumRevivedCore/SettingsSchema.swift",
+    "Sources/ContinuumRevivedCoreChecks/main.swift"
+  ],
+  "risks": [
+    "R1 DESIGN (needsHuman): a group/ambient zone created with NO AmbientZoneHome override roots its ambient ZoneRuntimeController at $HOME, materializing $HOME/.continuum-revived/project.json (a project named after the user). DORMANT — nothing creates a group zone in the live app until creation is wired (T17/sidebar/T19). Decide: intended+document, or sandbox the ambient root.",
+    "R4 low: AppDelegate addProjectZone forwarder now resolves workspace via workspaceRuntime.workspaceId (was active-project / lastActiveWorkspaceId); equivalent in the single-active-workspace world until T09."
+  ],
+  "needsHuman": [
+    "R1: should group-zone creation with no override write into the real $HOME? intended+document, or sandbox the ambient root.",
+    "VISUAL gate: a group zone's installed ZoneLayer on the live canvas (header chrome, empty bounds, z-order vs project zones) — eyeball on a rebuilt bundle.",
+    "TDD note: T08's original RED was not separately confirmed (check+impl in one pass); the fixer retro-established RED for R2/R3 and the builder ran 5 mutations for the rest."
+  ]
+}

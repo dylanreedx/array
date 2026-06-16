@@ -4245,6 +4245,7 @@ do {
         DragMagnetizeConfig.enabledKey,
         ZoneHydrationBudgetConfig.maxLiveZonesKey,
         BrowserRuntimeBudget.defaultsKey,
+        AmbientZoneHome.userDefaultsKey,
     ]
     expect(expectedKeys.isSubset(of: Set(fieldKeys)), "settings schema must represent every existing pref key")
 
@@ -4256,6 +4257,28 @@ do {
     expect(DragMagnetizeConfig.enabled(defaults: dragDefaults) == true, "drag magnetize defaults to enabled")
     dragDefaults.set(false, forKey: DragMagnetizeConfig.enabledKey)
     expect(DragMagnetizeConfig.enabled(defaults: dragDefaults) == false, "drag magnetize reads a disabled override")
+
+    // AmbientZoneHome resolver: isolated suite round-trip (conflict-guard coverage for the new key).
+    let ambientSuiteName = "AmbientZoneHomeChecks-\(UUID().uuidString)"
+    let ambientDefaults = UserDefaults(suiteName: ambientSuiteName)!
+    defer { ambientDefaults.removePersistentDomain(forName: ambientSuiteName) }
+    ambientDefaults.removePersistentDomain(forName: ambientSuiteName)
+    // Empty defaults → fallback to $HOME.
+    let emptyResolution = AmbientZoneHome.resolvedFromDefaults(standardDefaults: ambientDefaults, directoryExists: { _ in true })
+    expect(emptyResolution.path == NSHomeDirectory(), "ambient zone home: empty defaults resolves to $HOME")
+    expect(emptyResolution.source == .fallbackDefault, "ambient zone home: empty defaults source is .fallbackDefault")
+    // Valid override dir → that dir.
+    let validPath = NSHomeDirectory()
+    ambientDefaults.set(validPath, forKey: AmbientZoneHome.userDefaultsKey)
+    let validResolution = AmbientZoneHome.resolvedFromDefaults(standardDefaults: ambientDefaults, directoryExists: { _ in true })
+    expect(validResolution.path == validPath, "ambient zone home: valid override honored")
+    expect(validResolution.source == .standardDomain, "ambient zone home: valid override source is .standardDomain")
+    // Bogus/non-existent override → fallback to $HOME.
+    let bogusPath = "/nonexistent-\(UUID().uuidString)"
+    ambientDefaults.set(bogusPath, forKey: AmbientZoneHome.userDefaultsKey)
+    let bogusResolution = AmbientZoneHome.resolvedFromDefaults(standardDefaults: ambientDefaults, directoryExists: { _ in false })
+    expect(bogusResolution.path == NSHomeDirectory(), "ambient zone home: bogus override rejected, fallback to $HOME")
+    expect(bogusResolution.source == .fallbackDefault, "ambient zone home: bogus override source is .fallbackDefault")
 
     // The Keybindings section renders the ShortcutCatalog via a .shortcuts field.
     expect(allFields.contains { if case .shortcuts = $0 { return true } else { return false } }, "settings schema must include a .shortcuts field")
