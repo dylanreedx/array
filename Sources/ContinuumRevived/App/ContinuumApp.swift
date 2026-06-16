@@ -239,6 +239,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--leader-snap-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runLeaderSnapSelfCheck()
+                print("ContinuumRevivedLeaderSnapChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--palette-browser-spawn-check") {
             do {
                 _ = NSApplication.shared
@@ -1004,6 +1016,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// the default keymap so it matches before `navKeymap` is assigned. Overridable
     /// so the self-check can arm synchronously (0) — the `dragGhostDelay` pattern.
     var leaderDwell: TimeInterval = TimeInterval(NavKeymap.default.leaderDwellMs) / 1000
+    /// Live ⌥+arrow keyboard-dock session (Phase D). The focused tile's frame when
+    /// the session began (restored on Esc), the tile being moved, and the current
+    /// leapfrog direction + index. nil between sessions; committed (kept) on ⌥ release.
+    private var leaderSnapOriginalFrame: TileFrame?
+    private var leaderSnapTileId: UUID?
+    private var leaderSnapDirection: TileArrangement.Direction?
+    private var leaderSnapIndex = 0
     private var passThroughNavModeLeaderEvent: NSEvent?
     private var lastNeedsAttentionCount = 0
     private var tileFocusMonitor: Any?
@@ -1962,7 +1981,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     /// Cancel a pending dwell and exit the leader if open (modifier released or a
-    /// second modifier joined). Always hides the HUD (no-op if not shown).
+    /// second modifier joined). Always hides the HUD (no-op if not shown). Releasing
+    /// the leader COMMITS an in-flight ⌥+arrow dock — the tile keeps where it landed.
     private func disarmLeader() {
         leaderDwellWorkItem?.cancel()
         leaderDwellWorkItem = nil
@@ -1970,14 +1990,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             focusBroker.closeModal(.leader)
         }
         canvasView?.setLeaderOverlayVisible(false)
+        clearLeaderSnapSession()
     }
 
-    /// Keys while the leader is held. Esc exits; a label key jumps to + centers
-    /// the labeled tile (Phase C); arrow-snap (Phase D) lands here too.
-    /// Everything is swallowed so nothing leaks to content.
+    /// Keys while the leader is held. Esc exits (restoring an in-flight dock); an
+    /// arrow key docks/leapfrogs the focused tile (Phase D); a label key jumps to +
+    /// centers the labeled tile (Phase C). Everything is swallowed so nothing leaks
+    /// to content.
     private func handleLeaderKey(_ event: NSEvent) -> Bool {
         if event.keyCode == 53 { // Esc
+            cancelLeaderSnap() // restore the tile if a dock is in flight (no-op otherwise)
             disarmLeader()
+            return true
+        }
+        if let direction = leaderArrowDirection(event.keyCode) {
+            leaderSnapStep(direction: direction)
             return true
         }
         let key = (event.charactersIgnoringModifiers ?? "").lowercased()
@@ -1988,6 +2015,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return true
         }
         return true
+    }
+
+    private func leaderArrowDirection(_ keyCode: UInt16) -> TileArrangement.Direction? {
+        switch keyCode {
+        case 123: return .left
+        case 124: return .right
+        case 125: return .down
+        case 126: return .up
+        default: return nil
+        }
+    }
+
+    /// One ⌥+arrow press: dock the focused tile gap-adjacent + corner-aligned to the
+    /// directional neighbor. A repeat in the same direction leapfrogs to the next
+    /// tile further; the opposite direction steps back (and past the origin, docks
+    /// the other way); a perpendicular direction restarts from the origin. Always
+    /// computed against the tile's ORIGINAL frame so the leapfrog index is stable.
+    private func leaderSnapStep(direction: TileArrangement.Direction) {
+        guard let canvas = canvasView,
+              let tileId = canvas.canvasState.lastActiveTileId,
+              let tile = canvas.canvasState.tiles.first(where: { $0.id == tileId }) else { return }
+
+        if leaderSnapTileId != tileId || leaderSnapOriginalFrame == nil {
+            leaderSnapTileId = tileId
+            leaderSnapOriginalFrame = tile.frame
+            leaderSnapDirection = direction
+            leaderSnapIndex = 0
+        } else if leaderSnapDirection == direction {
+            leaderSnapIndex += 1
+        } else if leaderSnapDirection == direction.opposite {
+            leaderSnapIndex -= 1
+            if leaderSnapIndex < 0 {
+                leaderSnapDirection = direction
+                leaderSnapIndex = 0
+            }
+        } else {
+            leaderSnapDirection = direction
+            leaderSnapIndex = 0
+        }
+
+        guard let original = leaderSnapOriginalFrame, let dir = leaderSnapDirection else { return }
+        let others = canvas.canvasState.tiles.filter { $0.id != tileId }.map(\.frame)
+        let candidates = TileArrangement.dockCandidates(ahead: original, direction: dir, among: others)
+        guard !candidates.isEmpty else { leaderSnapIndex = 0; return }
+        let index = min(max(leaderSnapIndex, 0), candidates.count - 1)
+        leaderSnapIndex = index
+        let dest = TileArrangement.dockDestination(original, direction: dir, against: candidates[index], gap: TileGapResolver.resolvedGap())
+        var moved = tile
+        moved.frame = dest
+        canvas.updateTile(moved)
+    }
+
+    /// Esc during a dock: restore the focused tile to where the session began.
+    private func cancelLeaderSnap() {
+        if let canvas = canvasView,
+           let tileId = leaderSnapTileId,
+           let original = leaderSnapOriginalFrame,
+           var tile = canvas.canvasState.tiles.first(where: { $0.id == tileId }) {
+            tile.frame = original
+            canvas.updateTile(tile)
+        }
+        clearLeaderSnapSession()
+    }
+
+    private func clearLeaderSnapSession() {
+        leaderSnapTileId = nil
+        leaderSnapOriginalFrame = nil
+        leaderSnapDirection = nil
+        leaderSnapIndex = 0
     }
 
     private func handleNavModeKey(_ event: NSEvent) {
@@ -6054,6 +6150,109 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("palette-jump", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// Phase D — ⌥+arrow keyboard dock + leapfrog, driven through the REAL input
+    /// path: open the leader, synth arrow `keyDown`s through `handleHotkey` →
+    /// `handleLeaderKey`, asserting the focused tile's COMMITTED frame docks
+    /// gap-adjacent + corner-aligned to the directional neighbor, that a repeat
+    /// leapfrogs to the next tile, the opposite arrow steps back, Esc restores the
+    /// original, and ⌥ release commits the dock.
+    static func runLeaderSnapSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func flagsEvent(_ mods: NSEvent.ModifierFlags, keyCode: UInt16) throws -> NSEvent {
+            guard let e = NSEvent.keyEvent(with: .flagsChanged, location: .zero, modifierFlags: mods, timestamp: 0, windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: keyCode) else {
+                throw CheckError.failed("could not synthesize .flagsChanged for \(mods)")
+            }
+            return e
+        }
+        func arrow(_ keyCode: UInt16) throws -> NSEvent {
+            guard let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.option], timestamp: 0, windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: keyCode) else {
+                throw CheckError.failed("could not synthesize arrow keyDown \(keyCode)")
+            }
+            return e
+        }
+
+        let aId = UUID(uuidString: "00000000-0000-0000-0000-0000000000A1")!
+        let bId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B2")!
+        let cId = UUID(uuidString: "00000000-0000-0000-0000-0000000000C3")!
+        let aFrame = TileFrame(x: 300, y: 200, width: 100, height: 100)
+        let bFrame = TileFrame(x: 600, y: 210, width: 100, height: 120) // nearer ahead-right
+        let cFrame = TileFrame(x: 900, y: 190, width: 100, height: 100) // farther right
+        let tileA = Tile(id: aId, kind: .note, title: "A", frame: aFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: bId, kind: .note, title: "B", frame: bFrame, zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let tileC = Tile(id: cId, kind: .note, title: "C", frame: cFrame, zIndex: 3, runtimeRef: nil, metadata: TileMetadata())
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileA, tileB, tileC], groups: [], lastActiveTileId: nil))
+        canvas.frame = NSRect(x: 0, y: 0, width: 1400, height: 900)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        let app = AppDelegate()
+        app.canvasView = canvas
+        canvas.focusBroker = app.focusBroker
+        app.focusBroker.onAcceptedTileFocus = { [weak canvas] id in canvas?.markActive(tileId: id) }
+        canvas.install(tileView: TileNSView(tile: tileA), for: tileA)
+        canvas.install(tileView: TileNSView(tile: tileB), for: tileB)
+        canvas.install(tileView: TileNSView(tile: tileC), for: tileC)
+        _ = app.focusBroker.enterScope(.tile(aId), reason: .userClick)
+        app.leaderDwell = 0
+
+        func frameOf(_ id: UUID) -> TileFrame? { canvas.canvasState.tiles.first(where: { $0.id == id })?.frame }
+        let gap = TileGapResolver.resolvedGap()
+        let dockB = TileArrangement.dockDestination(aFrame, direction: .right, against: bFrame, gap: gap)
+        let dockC = TileArrangement.dockDestination(aFrame, direction: .right, against: cFrame, gap: gap)
+
+        app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        try expect(app.focusBroker.activeSurface == .modal(.leader), "precondition: leader open with A focused")
+
+        // ⌥→ docks A gap-adjacent + corner-aligned to its nearest right neighbor (B).
+        _ = app.handleHotkey(try arrow(124))
+        try expect(frameOf(aId) == dockB, "⌥→ should dock the focused tile to the nearest right neighbor; got \(String(describing: frameOf(aId))) want \(dockB)")
+
+        // ⌥→ again leapfrogs past B to the next tile right (C).
+        _ = app.handleHotkey(try arrow(124))
+        try expect(frameOf(aId) == dockC, "a repeat ⌥→ should leapfrog to the next tile; got \(String(describing: frameOf(aId))) want \(dockC)")
+
+        // ⌥← steps back to docking against B.
+        _ = app.handleHotkey(try arrow(123))
+        try expect(frameOf(aId) == dockB, "⌥← should step the leapfrog back to B; got \(String(describing: frameOf(aId)))")
+
+        // Esc restores the original frame and exits to the prior scope.
+        _ = app.handleHotkey(try { guard let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.option], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{1B}", charactersIgnoringModifiers: "\u{1B}", isARepeat: false, keyCode: 53) else { throw CheckError.failed("esc synth") }; return e }())
+        try expect(frameOf(aId) == aFrame, "Esc should restore the dragged tile to its original frame; got \(String(describing: frameOf(aId)))")
+        try expect(app.focusBroker.activeSurface == .tile(aId), "Esc should restore the prior tile scope; got \(String(describing: app.focusBroker.activeSurface))")
+
+        // ⌥ release COMMITS an in-flight dock (tile keeps its docked frame).
+        app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        _ = app.handleHotkey(try arrow(124))
+        try expect(frameOf(aId) == dockB, "precondition: dock applied before release")
+        app.handleFlagsChanged(try flagsEvent([], keyCode: 58))
+        try expect(frameOf(aId) == dockB, "releasing ⌥ should commit the dock (no restore); got \(String(describing: frameOf(aId)))")
+        try expect(app.focusBroker.activeSurface == .tile(aId), "release exits the leader to the prior tile scope")
+
+        let manifest: [String: Any] = [
+            "check": "leader-snap",
+            "path": "synthesized .flagsChanged + arrow .keyDown NSEvents → handleHotkey → handleLeaderKey (real input path)",
+            "dockNearest": ["x": dockB.x, "y": dockB.y],
+            "leapfrog": ["x": dockC.x, "y": dockC.y],
+            "gap": gap,
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("leader-snap", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

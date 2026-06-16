@@ -12,6 +12,15 @@ public enum TileArrangement {
         public static func fromKey(_ key: String, keymap: NavKeymap = .default) -> Direction? {
             keymap.direction(for: key)
         }
+
+        public var opposite: Direction {
+            switch self {
+            case .up: return .down
+            case .down: return .up
+            case .left: return .right
+            case .right: return .left
+            }
+        }
     }
 
     public enum SnapGuide: Equatable, Sendable {

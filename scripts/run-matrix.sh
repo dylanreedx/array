@@ -80,6 +80,7 @@ run_app_check .build/debug/continuum-revived --nav-mode-check
 run_app_check .build/debug/continuum-revived --leader-activation-check
 run_app_check .build/debug/continuum-revived --leader-jump-check
 run_app_check .build/debug/continuum-revived --palette-jump-check
+run_app_check .build/debug/continuum-revived --leader-snap-check
 run_app_check .build/debug/continuum-revived --palette-captures-keys-over-browser-check
 run_app_check .build/debug/continuum-revived --zindex-relaunch-hit-test-check
 run_app_check .build/debug/continuum-revived --single-zone-compat-check

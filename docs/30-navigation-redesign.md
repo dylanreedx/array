@@ -117,12 +117,17 @@ D-snap**, not A→B→C→D→E.
   (`LaunchPaletteAction.jumpToTile`, enters with the spawn-during-modal reason so
   focus survives the palette close). → `--leader-jump-check` + `--palette-jump-check`
   + Core `jumpLabels`/`centeredViewport` + palette `jumpToTile` tables.
-- **D — Keyboard snap (SECONDARY).** Inside the leader: `⌥`+arrow → ghost at nearest
-  dockable tile; same arrow again → advance to the next tile further (leapfrog);
-  release commits, Esc cancels. Ghost overlay clones `FocusBorderOverlayView`. The
-  candidate-list + park math builds fresh from `throwDestination`/`nearestTile`;
-  resize rule C layers on after the positioning feel is blessed.
-  → Core candidate-order table + `--leader-snap-check`.
+- **D — Keyboard snap (SECONDARY).** ✅ shipped (positioning). Inside the leader,
+  `⌥`+**arrow** docks the focused tile gap-adjacent + corner-aligned to the nearest
+  tile in that direction (`TileArrangement.dockDestination` = `moved` + unconditional
+  perpendicular align); a repeat in the same direction leapfrogs to the next tile
+  (`dockCandidates`, indexed against the ORIGINAL frame); the opposite arrow steps
+  back (and past the origin docks the other way); the tile moves live; **⌥ release
+  commits**, **Esc restores**. Arrow keys (not the vim h/j/k/l) drive snap so they
+  never collide with the letter jump labels. → Core `dockDestination`/`dockCandidates`
+  table + `--leader-snap-check` (real arrow-key path: dock, leapfrog, step-back,
+  restore, commit). **Deferred:** a pre-commit ghost overlay (the live move is the
+  preview today) and resize rule C (equalize shared dimension on keyboard snap).
 - **F — Retire old nav.** Remove the `⌃Space` toggle; migrate fit-all/cycle-agent/
   delete-focused/focus-mode to registry commands; update `ShortcutCatalog` layer +
   exhaustiveness + conflict-guard.
