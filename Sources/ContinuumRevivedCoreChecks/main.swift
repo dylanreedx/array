@@ -4248,6 +4248,10 @@ do {
         BrowserRuntimeBudget.defaultsKey,
         AmbientZoneHome.userDefaultsKey,
         AutosaveConfig.debounceMsKey,
+        // WorkspaceProfileConfig.defaultCaptureModeKey and defaultApplyModeKey are
+        // intentionally excluded: captureMode/applyMode have no behavioral effect yet
+        // (WorkspaceDocument is layout-only; T13 session-state is in ProjectStore sibling
+        // stores). Settings entries will be added when the session-state bridge lands.
     ]
     expect(expectedKeys.isSubset(of: Set(fieldKeys)), "settings schema must represent every existing pref key")
 
@@ -4361,6 +4365,145 @@ do {
         ZoneChromeFeature.resolvedFromDefaults(standardDefaults: chromeDefaults, legacyDefaults: nil).isEnabled == false,
         "zone-chrome field written through the schema is observed by ZoneChromeFeature.resolvedFromDefaults"
     )
+}
+
+// MARK: - WorkspaceProfileStore
+
+do {
+    // Fixed IDs / timestamps for determinism.
+    let profileId1 = UUID(uuidString: "14000001-0000-4000-8000-000000000001")!
+    let profileId2 = UUID(uuidString: "14000002-0000-4000-8000-000000000002")!
+    let zoneId1    = UUID(uuidString: "14000003-0000-4000-8000-000000000003")!
+    let zoneId2    = UUID(uuidString: "14000004-0000-4000-8000-000000000004")!
+    let projectId1 = UUID(uuidString: "14000005-0000-4000-8000-000000000005")!
+    let nowBase    = Date(timeIntervalSince1970: 1_800_000_000)
+    let now1       = nowBase
+    let now2       = nowBase.addingTimeInterval(60)
+
+    let fm = FileManager.default
+    let appSupport = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("continuum-profile-core-check-\(UUID().uuidString)", isDirectory: true)
+    try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: appSupport) }
+
+    // Source document with two zones. WorkspaceDocument is layout-only; T13 session-state
+    // (scrollback on TerminalSessionDescriptor, interactionState on BrowserTile) lives in
+    // ProjectStore sibling stores, not here. Snapshot and template produce layout-identical
+    // profiles; captureMode is persisted for future session-state bridge work.
+    let srcDoc = WorkspaceDocument(
+        viewport: CanvasViewport(x: 10, y: 20, zoom: 1.5),
+        zones: [
+            ZonePlacement(
+                zoneId: zoneId1,
+                projectId: projectId1,
+                origin: ZonePoint(x: 0, y: 0),
+                size: ZoneSize(width: 800, height: 600),
+                color: "blue",
+                collapsed: false,
+                hydrationPolicy: .automatic,
+                name: "API",
+                navKey: "a"
+            ),
+            ZonePlacement(
+                zoneId: zoneId2,
+                projectId: nil,
+                origin: ZonePoint(x: 900, y: 0),
+                size: ZoneSize(width: 600, height: 400),
+                color: "green",
+                collapsed: false,
+                hydrationPolicy: .automatic,
+                name: "Scratch",
+                navKey: nil
+            ),
+        ],
+        zoneZOrder: [zoneId1, zoneId2],
+        lastActiveZoneId: zoneId1
+    )
+
+    let store = WorkspaceProfileStore(applicationSupportDirectory: appSupport)
+
+    // 1. Capture snapshot Codable round-trip.
+    let snap = store.captureProfile(name: "Snap", from: srcDoc, mode: .snapshot, id: profileId1, now: now1)
+    try store.saveProfile(snap)
+    let loaded1 = try store.loadProfile(id: profileId1)
+    expect(loaded1 == snap, "WorkspaceProfile Codable round-trip: loaded == captured (snapshot)")
+    expect(loaded1.captureMode == .snapshot, "WorkspaceProfile round-trip: captureMode == .snapshot")
+    expect(loaded1.name == "Snap", "WorkspaceProfile round-trip: name preserved")
+    expect(loaded1.createdAt == now1, "WorkspaceProfile round-trip: createdAt preserved")
+    expect(loaded1.schemaVersion == 1, "WorkspaceProfile round-trip: schemaVersion == 1")
+    expect(fm.fileExists(atPath: store.profileFile(id: profileId1).path), "WorkspaceProfile file exists on disk after save")
+
+    // 2. Capture template Codable round-trip — captureMode == .template, layout fields intact.
+    // ARCHITECTURE-NOTE: snapshot and template are layout-identical (WorkspaceDocument has no
+    // session-state fields; session-state lives in ProjectStore sibling stores). The strip
+    // assertion (template.document != srcDoc) becomes provable when a session-state bridge lands.
+    let tmpl = store.captureProfile(name: "Tmpl", from: srcDoc, mode: .template, id: profileId2, now: now2)
+    try store.saveProfile(tmpl)
+    let loaded2 = try store.loadProfile(id: profileId2)
+    expect(loaded2.captureMode == .template, "WorkspaceProfile template round-trip: captureMode == .template")
+    let apiZone = loaded2.document.zones.first(where: { $0.zoneId == zoneId1 })!
+    expect(apiZone.name == "API", "template: project zone name preserved")
+    expect(apiZone.navKey == "a", "template: project zone navKey preserved")
+    expect(apiZone.origin == ZonePoint(x: 0, y: 0), "template: project zone origin preserved")
+    expect(apiZone.size == ZoneSize(width: 800, height: 600), "template: project zone size preserved")
+    let scratchZone = loaded2.document.zones.first(where: { $0.zoneId == zoneId2 })!
+    expect(scratchZone.projectId == nil, "template: group zone projectId nil")
+    expect(scratchZone.name == "Scratch", "template: group zone name preserved")
+    expect(loaded2.document.viewport == srcDoc.viewport, "template: viewport preserved (10,20,1.5)")
+    expect(loaded2.document.zoneZOrder == srcDoc.zoneZOrder, "template: zoneZOrder preserved")
+
+    // 3. listProfiles — both profiles, sorted by createdAt, junk skipped.
+    let junkURL = appSupport.appendingPathComponent("profiles/notjson.json")
+    try "not valid json".write(to: junkURL, atomically: true, encoding: .utf8)
+    let listed = try store.listProfiles()
+    expect(listed.count == 2, "listProfiles returns exactly 2 profiles (junk skipped)")
+    expect(listed[0].id == profileId1, "listProfiles[0] is P1 (earlier createdAt)")
+    expect(listed[1].id == profileId2, "listProfiles[1] is P2 (later createdAt)")
+
+    // 4. Future-schema refused.
+    let futureProfileId = UUID(uuidString: "14000009-0000-4000-8000-000000000009")!
+    let futureProfile = WorkspaceProfile(
+        schemaVersion: 2,
+        id: futureProfileId,
+        name: "Future",
+        createdAt: now2,
+        captureMode: .snapshot,
+        document: srcDoc
+    )
+    let futureData = try JSONCodec.makeEncoder().encode(futureProfile)
+    let futureURL = store.profileFile(id: futureProfileId)
+    try futureData.write(to: futureURL)
+    var caughtFutureSchema = false
+    do {
+        _ = try store.loadProfile(id: futureProfileId)
+    } catch WorkspaceProfileApplicationError.unknownFutureSchema(_, let version, let supported) {
+        caughtFutureSchema = true
+        expect(version == 2, "future-schema error: version == 2")
+        expect(supported == 1, "future-schema error: supported == 1")
+    }
+    expect(caughtFutureSchema, "loadProfile throws unknownFutureSchema for schemaVersion:2")
+
+    // 5. WorkspaceProfileConfig resolver: default/override/bogus.
+    let profileSuiteName = "WorkspaceProfileConfigChecks-\(UUID().uuidString)"
+    let profileDefaults = UserDefaults(suiteName: profileSuiteName)!
+    defer { profileDefaults.removePersistentDomain(forName: profileSuiteName) }
+    profileDefaults.removePersistentDomain(forName: profileSuiteName)
+    expect(WorkspaceProfileConfig.captureMode(defaults: profileDefaults) == .snapshot,
+           "WorkspaceProfileConfig.captureMode: empty defaults returns .snapshot")
+    expect(WorkspaceProfileConfig.applyMode(defaults: profileDefaults) == .restoreOver,
+           "WorkspaceProfileConfig.applyMode: empty defaults returns .restoreOver")
+    profileDefaults.set(WorkspaceProfileCaptureMode.template.rawValue, forKey: WorkspaceProfileConfig.defaultCaptureModeKey)
+    expect(WorkspaceProfileConfig.captureMode(defaults: profileDefaults) == .template,
+           "WorkspaceProfileConfig.captureMode: override 'template' returns .template")
+    profileDefaults.set(WorkspaceProfileApplyMode.instantiateAsNew.rawValue, forKey: WorkspaceProfileConfig.defaultApplyModeKey)
+    expect(WorkspaceProfileConfig.applyMode(defaults: profileDefaults) == .instantiateAsNew,
+           "WorkspaceProfileConfig.applyMode: override 'instantiateAsNew' returns .instantiateAsNew")
+    profileDefaults.set("bogus-capture", forKey: WorkspaceProfileConfig.defaultCaptureModeKey)
+    expect(WorkspaceProfileConfig.captureMode(defaults: profileDefaults) == .snapshot,
+           "WorkspaceProfileConfig.captureMode: bogus string falls back to .snapshot")
+    profileDefaults.set("bogus-apply", forKey: WorkspaceProfileConfig.defaultApplyModeKey)
+    expect(WorkspaceProfileConfig.applyMode(defaults: profileDefaults) == .restoreOver,
+           "WorkspaceProfileConfig.applyMode: bogus string falls back to .restoreOver")
 }
 
 // MARK: - zone-hydration-plan-check (T03)

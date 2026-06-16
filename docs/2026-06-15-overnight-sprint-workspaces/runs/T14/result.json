@@ -1,0 +1,30 @@
+{
+  "task": "T14",
+  "title": "Profiles/snapshots: store + restore-over / instantiate-as-new + session toggle",
+  "verdict": "PASS WITH RISKS",
+  "iterations": 1,
+  "redStatus": "store + apply recipes RED-confirmed (corrupt layout field → FAIL assertion 1; remove validateSchema → FAIL assertion 10). The capture-mode strip is architecturally inert (disclosed), not RED-able.",
+  "green": true,
+  "matrixFast": "green",
+  "buildClean": true,
+  "namedCheck": "--workspace-profile-check passed",
+  "guards": "--workspace-profile-check: WorkspaceProfileStore save/load/list/delete (RED-confirmed) + both apply recipes reading real WorkspaceStore/RegistryStore from disk (restore-over: registry count 1, W0 untouched, real backup canvas.*.json present; instantiate-as-new: registry count 2) + config resolvers.",
+  "filesTouched": [
+    "Sources/ContinuumRevivedCore/WorkspaceProfileStore.swift (new)",
+    "Sources/ContinuumRevivedCore/WorkspaceProfileConfig.swift (new)",
+    "Sources/ContinuumRevivedCore/SettingsSchema.swift",
+    "Sources/ContinuumRevivedCoreChecks/main.swift",
+    "Sources/ContinuumRevived/App/ContinuumApp.swift",
+    "scripts/run-matrix.sh"
+  ],
+  "architecturalFinding": "WorkspaceDocument is LAYOUT-ONLY (schemaVersion/viewport/zones/zoneZOrder/lastActiveZoneId/groupZoneTiles; Tile carries only runtimeRef + launch metadata). T13 session-state (scrollback on TerminalSessionDescriptor, interactionState on BrowserTile) lives in ProjectStore SIBLING stores keyed by tile id, NOT on WorkspaceDocument. A profile therefore captures layout only.",
+  "risks": [
+    "R1: captureMode snapshot/template ships as DEAD CONFIG — captureProfile(.template) is a verified no-op, byte-identical to .snapshot. Architecturally forced (nothing to strip). The two Settings .choice entries + their expectedKeys were removed (resolvers/keys remain for future). assertion 4 honestly flipped from the spec's != to ==.",
+    "R2: two T14 spec acceptance criteria intentionally unmet (the session-strip != assertion; the two config keys in SettingsSchema + conflict-guard) — deliberate, disclosed scope reduction (option c).",
+    "R3 CARRY-FORWARD: the T14 spec assumed session-state on WorkspaceDocument (false). T16 sidebar 'Save as profile' will re-assume it — profiles are layout-only."
+  ],
+  "needsHuman": [
+    "Accept option (c) — profiles land layout-only, snapshot/template inert — OR scope a session-bundle bridge (new capture; forbidden inside T14) so snapshot is meaningful. Decide where that bridge lands.",
+    "Record (sprint carry-forward) that WorkspaceDocument is layout-only so T16 + future profile tasks don't re-assume session-state lives on it."
+  ]
+}

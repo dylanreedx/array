@@ -117,6 +117,12 @@ public enum SettingsSchema {
                         label: "Scrollback Resume Max Lines",
                         default: String(SessionResumeConfig.scrollbackMaxLinesDefault)
                     ),
+                    // WorkspaceProfileConfig.defaultCaptureModeKey and defaultApplyModeKey
+                    // are intentionally not in SettingsSchema yet. The captureMode/applyMode
+                    // distinction has no behavioral effect: T13 session-state fields live in
+                    // ProjectStore sibling stores (not WorkspaceDocument), so snapshot and
+                    // template produce byte-identical profiles. Settings entries will be added
+                    // when a session-state bridge is designed.
                 ]
             ),
             SettingsSection(
