@@ -19,11 +19,11 @@ Legend: ⬜ todo · ✍️ spec-written · 🔨 building · 🔍 review · ✅ d
 | T08 | addZone + ambient controller (S6) | overnight [appkit-chk] | T06,T02 | ✍️ | — | spec written (review folds into build) |
 | T09 | switchWorkspace in-process (S7) ⚠ | overnight [appkit-chk] | T06 | ✍️ | — | spec written (exemplar) |
 | T10 | Viewport-driven tier transitions (S8) | overnight | T06 | ✍️ | — | spec written (review folds into build) |
-| T11 | Adaptive zone bounds (union+padding) | overnight [pure+wiring] | T05 | ✅ | (T11) | built PASS-WITH-RISKS; legacy chrome only — ZoneLayer-chrome gap→T06 |
+| T11 | Adaptive zone bounds (union+padding) | overnight [pure+wiring] | T05 | ✅ | 16806b1 | built PASS-WITH-RISKS; legacy chrome only — ZoneLayer-chrome gap→T06 |
 | T12 | Bulletproof restore (atomic, crash-safe) | overnight | T01,T02 | ✍️ | — | spec written (review folds into build) |
 | T13 | Live-session resume (terminal/browser) | overnight | T12 | ✍️ | — | spec written (review folds into build) |
 | T14 | Profiles/snapshots (store + apply-modes) | overnight | T12 | ✍️ | — | spec written (review folds into build) |
-| T15 | Sidebar view-model (pure tree) | overnight [pure] | T01 | ✍️ | — | spec reviewed+fixed |
+| T15 | Sidebar view-model (pure tree) | overnight [pure] | T01 | ✅ | (T15) | built PASS-WITH-RISKS (0 iters); ?? "" vs "Project" fallback to ratify before T16 |
 | T16 | Sidebar NSOutlineView | morning [appkit] | T15,T09 | ✍️ | — | spec written (review folds into build) |
 | T17 | ⌘K zone rows (jump/create) | overnight | T01 | ✍️ | — | spec written (review folds into build) |
 | T18 | Per-zone nav keybind + leader zone-jump | overnight | T01 | ✍️ | — | spec written (review folds into build) |

@@ -4656,4 +4656,181 @@ do {
     }
 }
 
+// MARK: - Sidebar view-model
+
+do {
+    let fixedDate = Date(timeIntervalSince1970: 0)
+    let settings = RegistrySettings(preferredEditor: .auto, zoomModifier: .command, openLastProjectOnLaunch: true)
+
+    let wsAId = UUID(uuidString: "0000000A-0000-0000-0000-000000000001")!
+    let wsBId = UUID(uuidString: "0000000B-0000-0000-0000-000000000001")!
+    let wsCId = UUID(uuidString: "0000000C-0000-0000-0000-000000000001")!
+    let wsDId = UUID(uuidString: "0000000D-0000-0000-0000-000000000001")!
+
+    let projXId    = UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000001")!
+    let projYId    = UUID(uuidString: "BBBBBBBB-0000-0000-0000-000000000001")!
+    let projGhostId = UUID(uuidString: "CCCCCCCC-0000-0000-0000-000000000001")!
+
+    let wsA = WorkspaceEntry(id: wsAId, name: "Alpha", projectIds: [], createdAt: fixedDate, updatedAt: fixedDate)
+    let wsB = WorkspaceEntry(id: wsBId, name: "Beta",  projectIds: [], createdAt: fixedDate, updatedAt: fixedDate)
+    let wsC = WorkspaceEntry(id: wsCId, name: "Gamma", projectIds: [], createdAt: fixedDate, updatedAt: fixedDate)
+    let wsD = WorkspaceEntry(id: wsDId, name: "Delta", projectIds: [], createdAt: fixedDate, updatedAt: fixedDate)
+
+    let projX = ProjectEntry(id: projXId, name: "continuum-revived", rootPath: "/tmp/x", workspaceId: nil, lastOpenedAt: fixedDate, pinned: false)
+    let projY = ProjectEntry(id: projYId, name: "docs",              rootPath: "/tmp/x", workspaceId: nil, lastOpenedAt: fixedDate, pinned: false)
+
+    let registry = Registry(
+        lastActiveWorkspaceId: nil,
+        lastActiveProjectId: nil,
+        workspaces: [wsA, wsB, wsC, wsD],
+        projects: [projX, projY],
+        settings: settings
+    )
+
+    let zoneA1Id = UUID(uuidString: "00000000-0000-0000-0000-0000000000A2")!
+    let zoneA2Id = UUID(uuidString: "00000000-0000-0000-0000-0000000000A3")!
+    let zonePlacementA1 = ZonePlacement(
+        zoneId: zoneA1Id,
+        projectId: projXId,
+        origin: ZonePoint(x: 0, y: 0),
+        size: ZoneSize(width: 100, height: 100),
+        color: "blue",
+        collapsed: false,
+        hydrationPolicy: .automatic,
+        name: "",
+        navKey: "a"
+    )
+    let zonePlacementA2 = ZonePlacement(
+        zoneId: zoneA2Id,
+        projectId: nil,
+        origin: ZonePoint(x: 0, y: 0),
+        size: ZoneSize(width: 100, height: 100),
+        color: "mint",
+        collapsed: true,
+        hydrationPolicy: .automatic,
+        name: "Scratch",
+        navKey: nil
+    )
+    let docA = WorkspaceDocument(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        zones: [zonePlacementA1, zonePlacementA2],
+        zoneZOrder: [zoneA2Id, zoneA1Id],
+        lastActiveZoneId: nil
+    )
+
+    let zoneBId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B2")!
+    let zonePlacementB1 = ZonePlacement(
+        zoneId: zoneBId,
+        projectId: projGhostId,
+        origin: ZonePoint(x: 0, y: 0),
+        size: ZoneSize(width: 100, height: 100),
+        color: "orange",
+        collapsed: false,
+        hydrationPolicy: .automatic,
+        name: "",
+        navKey: "b"
+    )
+    let docB = WorkspaceDocument(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        zones: [zonePlacementB1],
+        zoneZOrder: [zoneBId],
+        lastActiveZoneId: nil
+    )
+
+    let zoneC1Id = UUID(uuidString: "00000000-0000-0000-0000-0000000000C2")!
+    let zoneC2Id = UUID(uuidString: "00000000-0000-0000-0000-0000000000C1")!
+    let zonePlacementC1 = ZonePlacement(
+        zoneId: zoneC1Id,
+        projectId: nil,
+        origin: ZonePoint(x: 0, y: 0),
+        size: ZoneSize(width: 100, height: 100),
+        color: "gray",
+        collapsed: false,
+        hydrationPolicy: .automatic,
+        name: "GroupC1",
+        navKey: nil
+    )
+    let zonePlacementC2 = ZonePlacement(
+        zoneId: zoneC2Id,
+        projectId: nil,
+        origin: ZonePoint(x: 0, y: 0),
+        size: ZoneSize(width: 100, height: 100),
+        color: "gray",
+        collapsed: false,
+        hydrationPolicy: .automatic,
+        name: "GroupC2",
+        navKey: nil
+    )
+    let docC = WorkspaceDocument(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        zones: [zonePlacementC1, zonePlacementC2],
+        zoneZOrder: [],
+        lastActiveZoneId: nil
+    )
+
+    let documents: [UUID: WorkspaceDocument] = [
+        wsAId: docA,
+        wsBId: docB,
+        wsCId: docC,
+    ]
+
+    let tree = SidebarTreeBuilder.build(registry: registry, documents: documents)
+
+    // 1. Top-level count & order
+    expect(tree.workspaces.count == 4, "sidebar tree: expected 4 workspace rows, got \(tree.workspaces.count)")
+    expect(tree.workspaces.map(\.workspaceId) == [wsAId, wsBId, wsCId, wsDId],
+           "sidebar tree: workspace order must mirror registry.workspaces array order")
+
+    // 2. Workspace names
+    expect(tree.workspaces.map(\.name) == ["Alpha", "Beta", "Gamma", "Delta"],
+           "sidebar tree: workspace names must come from WorkspaceEntry.name")
+
+    // 3. WS_A zone order (z-order, not storage)
+    expect(tree.workspaces[0].zones.map(\.zoneId) == [zoneA2Id, zoneA1Id],
+           "sidebar tree: WS_A zones must be ordered by zoneZOrder, not storage order")
+
+    // 4. Project zone backfill (resolved)
+    let wsAZoneA1Row = tree.workspaces[0].zones.first(where: { $0.zoneId == zoneA1Id })!
+    expect(wsAZoneA1Row.projectId == projXId, "sidebar tree: zoneA1 projectId must be PROJ_X")
+    expect(wsAZoneA1Row.name == "continuum-revived",
+           "sidebar tree: project zone name must be backfilled from registry.projects, got '\(wsAZoneA1Row.name)'")
+
+    // 5. Group zone uses stored name
+    let wsAZoneA2Row = tree.workspaces[0].zones.first(where: { $0.zoneId == zoneA2Id })!
+    expect(wsAZoneA2Row.projectId == nil, "sidebar tree: zoneA2 must be a group zone (projectId == nil)")
+    expect(wsAZoneA2Row.name == "Scratch",
+           "sidebar tree: group zone name must be its stored name, got '\(wsAZoneA2Row.name)'")
+
+    // 6. Color / navKey / collapsed pass through
+    expect(wsAZoneA1Row.color == "blue",    "sidebar tree: zoneA1 color must be blue")
+    expect(wsAZoneA1Row.navKey == "a",      "sidebar tree: zoneA1 navKey must be 'a'")
+    expect(wsAZoneA1Row.collapsed == false, "sidebar tree: zoneA1 collapsed must be false")
+    expect(wsAZoneA2Row.color == "mint",    "sidebar tree: zoneA2 color must be mint")
+    expect(wsAZoneA2Row.navKey == nil,      "sidebar tree: zoneA2 navKey must be nil")
+    expect(wsAZoneA2Row.collapsed == true,  "sidebar tree: zoneA2 collapsed must be true")
+
+    // 7. Unresolved project zone falls back to ""
+    let wsBZoneB1Row = tree.workspaces[1].zones[0]
+    expect(wsBZoneB1Row.projectId == projGhostId, "sidebar tree: zoneB1 projectId must be PROJ_GHOST")
+    expect(wsBZoneB1Row.name == "",
+           "sidebar tree: unresolved project zone name must fall back to '', got '\(wsBZoneB1Row.name)'")
+
+    // 8. Tiebreak ordering when absent from z-order
+    let wsCZoneIds = tree.workspaces[2].zones.map(\.zoneId.uuidString)
+    expect(wsCZoneIds == ["00000000-0000-0000-0000-0000000000C1", "00000000-0000-0000-0000-0000000000C2"],
+           "sidebar tree: WS_C zones with empty zoneZOrder must sort by uuidString ascending, got \(wsCZoneIds)")
+
+    // 9. Missing document => empty children, no crash
+    expect(tree.workspaces[3].zones.isEmpty,
+           "sidebar tree: workspace with no document entry must have empty zones")
+
+    // 10. Empty registry is empty tree
+    let emptyTree = SidebarTreeBuilder.build(registry: Registry.empty(), documents: [:])
+    expect(emptyTree.workspaces.isEmpty, "sidebar tree: empty registry must yield empty tree")
+
+    // 11. Determinism (cheap regression net)
+    let tree2 = SidebarTreeBuilder.build(registry: registry, documents: documents)
+    expect(tree == tree2, "sidebar tree: build must be deterministic — two calls on same inputs must be equal")
+}
+
 print("ContinuumRevivedCoreChecks passed")

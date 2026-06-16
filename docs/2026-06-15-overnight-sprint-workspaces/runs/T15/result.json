@@ -1,0 +1,23 @@
+{
+  "task": "T15",
+  "title": "Sidebar view-model (pure tree)",
+  "verdict": "PASS WITH RISKS",
+  "iterations": 0,
+  "redProven": true,
+  "green": true,
+  "matrixFast": "green",
+  "buildClean": true,
+  "guards": "ContinuumRevivedCoreChecks 'Sidebar view-model' do-block (11 assertions); SidebarTreeBuilder.build(registry:documents:) drives the real path. Bypass disproved 3 ways (empty-tree stub, removed uuid tiebreak, replaced name-backfill).",
+  "filesTouched": [
+    "Sources/ContinuumRevivedCore/SidebarTree.swift (new)",
+    "Sources/ContinuumRevivedCoreChecks/main.swift"
+  ],
+  "risks": [
+    "Assertion 11 (build == build) is a weak determinism net (acknowledged in spec); mitigated by assertions 1/3/8.",
+    "Tiebreak: assertion 8's RED was shown via a strict-weak-order-violating variant leaning on sorted() behavior; the correct green path is unaffected.",
+    "SidebarTree.swift untracked → no git baseline; restore verified via diff -q vs a review-start backup + re-grep + green-after-restore."
+  ],
+  "needsHuman": [
+    "Ratify the fallback literal: T15 uses ?? \"\" for an unresolved project-zone name; the live canvas backfill (ContinuumApp.swift:3569) uses ?? \"Project\". Intentional per spec (T16 owns empty-name presentation). Unify or keep before T16 consumes the tree — one line either way."
+  ]
+}
