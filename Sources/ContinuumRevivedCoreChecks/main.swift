@@ -4244,6 +4244,7 @@ do {
         FocusBorderConfig.speedKey,
         DragMagnetizeConfig.enabledKey,
         ZoneHydrationBudgetConfig.maxLiveZonesKey,
+        ZoneHydrationReconcileConfig.intervalKey,
         BrowserRuntimeBudget.defaultsKey,
         AmbientZoneHome.userDefaultsKey,
     ]
@@ -4257,6 +4258,15 @@ do {
     expect(DragMagnetizeConfig.enabled(defaults: dragDefaults) == true, "drag magnetize defaults to enabled")
     dragDefaults.set(false, forKey: DragMagnetizeConfig.enabledKey)
     expect(DragMagnetizeConfig.enabled(defaults: dragDefaults) == false, "drag magnetize reads a disabled override")
+
+    // ZoneHydrationReconcileConfig resolver round-trip.
+    let reconcileSuiteName = "ZoneHydrationReconcileConfigChecks-\(UUID().uuidString)"
+    let reconcileDefaults = UserDefaults(suiteName: reconcileSuiteName)!
+    defer { reconcileDefaults.removePersistentDomain(forName: reconcileSuiteName) }
+    reconcileDefaults.removePersistentDomain(forName: reconcileSuiteName)
+    expect(ZoneHydrationReconcileConfig.intervalMs(defaults: reconcileDefaults) == ZoneHydrationReconcileConfig.defaultIntervalMs, "reconcile debounce: empty defaults returns 200")
+    reconcileDefaults.set("50", forKey: ZoneHydrationReconcileConfig.intervalKey)
+    expect(ZoneHydrationReconcileConfig.intervalMs(defaults: reconcileDefaults) == 50, "reconcile debounce: string override '50' reads back 50")
 
     // AmbientZoneHome resolver: isolated suite round-trip (conflict-guard coverage for the new key).
     let ambientSuiteName = "AmbientZoneHomeChecks-\(UUID().uuidString)"

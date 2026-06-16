@@ -17,8 +17,8 @@ Legend: ⬜ todo · ✍️ spec-written · 🔨 building · 🔍 review · ✅ d
 | T06 | WorkspaceRuntime shell + proxy (S4) | overnight [appkit-chk] | T03,T04,T05 | ✅ | 93c68f4 | built PASS-WITH-RISKS; 3 carry-fwds done (budget+chrome probed; shape-B→T09); windowWillClose-order/attachUI risks→🔴 |
 | T07 | BrowserRuntimeBudget union (S5) | overnight | T06 | ✅ | 4ba7eac | built PASS-WITH-RISKS; focus-mode protect regression→🔴(R1); cross-zone full after T08(R2) |
 | T08 | addZone + ambient controller (S6) | overnight [appkit-chk] | T06,T02 | ✅ | a18b1ac | built PASS-WITH-RISKS; +fixer (R2 lock + R3 tile-routing, RED-confirmed); $HOME-write design→🔴 |
-| T09 | switchWorkspace in-process (S7) ⚠ | overnight [appkit-chk] | T06 | ✅ | (T09) | built PASS-WITH-RISKS (1 iter); HIGH: prod switch INERT (throwing boot registry)→T20+🔴; shape-B descriptor-active→🔴 |
-| T10 | Viewport-driven tier transitions (S8) | overnight | T06 | ✍️ | — | spec written (review folds into build) |
+| T09 | switchWorkspace in-process (S7) ⚠ | overnight [appkit-chk] | T06 | ✅ | 1818510 | built PASS-WITH-RISKS (1 iter); HIGH: prod switch INERT (throwing boot registry)→T20+🔴; shape-B descriptor-active→🔴 |
+| T10 | Viewport-driven tier transitions (S8) | overnight | T06 | ✅ | (T10) | built PASS-WITH-RISKS; +fixer (debounce-coalescing + planner-pin checks, RED-confirmed); T09 ref-count leak fixed; live gated on T20 |
 | T11 | Adaptive zone bounds (union+padding) | overnight [pure+wiring] | T05 | ✅ | 16806b1 | built PASS-WITH-RISKS; legacy chrome only — ZoneLayer-chrome gap→T06 |
 | T12 | Bulletproof restore (atomic, crash-safe) | overnight | T01,T02 | ✍️ | — | spec written (review folds into build) |
 | T13 | Live-session resume (terminal/browser) | overnight | T12 | ✍️ | — | spec written (review folds into build) |

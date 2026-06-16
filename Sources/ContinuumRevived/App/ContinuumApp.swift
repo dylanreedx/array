@@ -621,6 +621,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--zone-tier-transition-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runZoneTierTransitionSelfCheck()
+                print("ContinuumRevivedZoneTierTransitionChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--file-tree-boot-persistence-check") {
             do {
                 _ = NSApplication.shared
@@ -3216,7 +3228,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     func canvasDidChange(_ canvas: CanvasNSView) {
         workspaceRuntime?.activeController?.scheduleCanvasSave()
+        // Viewport-delta gate: only trigger reconcile when the viewport actually moved.
+        let currentViewport = canvas.viewport
+        if currentViewport != lastReconciledViewport {
+            lastReconciledViewport = currentViewport
+            workspaceRuntime?.onViewportChanged()
+        }
     }
+
+    private var lastReconciledViewport: CanvasViewport?
 
     private func scheduleBrowserSave() {
         workspaceRuntime?.activeController?.scheduleBrowserSave()
@@ -5912,6 +5932,857 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let artifact = dir.appendingPathComponent("browser-lru-budget-check.txt")
         try "firstEviction=\(firstEviction.map(\.uuidString))\nsecondEviction=\(secondEviction.map(\.uuidString))\nliveAfterHydration=\(liveAfterHydration.map(\.uuidString))\nsnapshotTileIds=\(snapshotTileIds.map(\.uuidString))\nmaxLive=2\nmzTotalLive=\(mzTotalLive)\nmzControllerALive=\(mzControllerA.browserRuntimes.count)\nmzControllerBLive=\(mzControllerB.browserRuntimes.count)\n".write(to: artifact, atomically: true, encoding: .utf8)
         return artifact
+    }
+
+    // MARK: - T10: Viewport-driven tier transitions self-check
+
+    static func runZoneTierTransitionSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(m): return m } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fileManager = FileManager.default
+        let now = Date()
+
+        // Fixed UUIDs for determinism.
+        let workspaceW  = UUID(uuidString: "00000000-0000-0000-a100-000000000010")!
+        let projectPa   = UUID(uuidString: "00000000-0000-0000-a100-000000000011")!
+        let projectPb   = UUID(uuidString: "00000000-0000-0000-a100-000000000012")!
+        let zoneA       = UUID(uuidString: "00000000-0000-0000-a100-000000000021")!
+        let zoneB       = UUID(uuidString: "00000000-0000-0000-a100-000000000022")!
+        let browserA    = UUID(uuidString: "00000000-0000-0000-a100-000000000031")!
+        let browserB    = UUID(uuidString: "00000000-0000-0000-a100-000000000032")!
+
+        // Temp directories.
+        let tempRoot   = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-zone-tier-transition-\(UUID().uuidString)", isDirectory: true)
+        let paRoot     = tempRoot.appendingPathComponent("Pa", isDirectory: true)
+        let pbRoot     = tempRoot.appendingPathComponent("Pb", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        try fileManager.createDirectory(at: paRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: pbRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        // Helper: seed a project + store with one browser tile.
+        func seedProject(root: URL, id: UUID, name: String, tileId: UUID) throws -> (ProjectStore, Project) {
+            let store = ProjectStore(projectRoot: root)
+            let project = Project(
+                id: id, name: name, rootPath: root.path, createdAt: now, updatedAt: now,
+                defaultLaunchProfileId: "shell", editorPreference: .auto,
+                settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
+            )
+            let canvas = CanvasState(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                tiles: [Tile(
+                    id: tileId, kind: .browser, title: "\(name) browser",
+                    frame: TileFrame(x: 10, y: 10, width: 300, height: 200),
+                    zIndex: 1, runtimeRef: nil,
+                    metadata: TileMetadata(url: "data:text/html;charset=utf-8,<title>\(name)</title>")
+                )],
+                groups: [], lastActiveTileId: nil
+            )
+            try store.saveProject(project)
+            try store.saveCanvas(canvas)
+            return (store, project)
+        }
+
+        let (storeA, projectA) = try seedProject(root: paRoot, id: projectPa, name: "Pa", tileId: browserA)
+        let (storeB, projectB) = try seedProject(root: pbRoot, id: projectPb, name: "Pb", tileId: browserB)
+
+        // Two separate zone-level canvases (one per project, matching the real architecture).
+        let zoneCanvasA = CanvasNSView(canvasState: try storeA.loadCanvas())
+        let zoneCanvasB = CanvasNSView(canvasState: try storeB.loadCanvas())
+        zoneCanvasA.frame = CGRect(x: 0, y: 0, width: 640, height: 480)
+        zoneCanvasB.frame = CGRect(x: 0, y: 0, width: 640, height: 480)
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+
+        let spawnerA = TileSpawner(canvasView: zoneCanvasA, ghostty: nil, browserEngine: browserEngine, projectStore: storeA, project: projectA)
+        let spawnerB = TileSpawner(canvasView: zoneCanvasB, ghostty: nil, browserEngine: browserEngine, projectStore: storeB, project: projectB)
+        let controllerA = ZoneRuntimeController(projectRoot: paRoot, projectStore: storeA, project: projectA)
+        let controllerB = ZoneRuntimeController(projectRoot: pbRoot, projectStore: storeB, project: projectB)
+        controllerA.attachUI(canvasView: zoneCanvasA, tileSpawner: spawnerA, focusBroker: FocusBroker())
+        controllerB.attachUI(canvasView: zoneCanvasB, tileSpawner: spawnerB, focusBroker: FocusBroker())
+
+        // Seed both browsers live.
+        switch spawnerA.restartBrowserTile(tileId: browserA) {
+        case let .restarted(r): controllerA.browserRuntimes.append(r)
+        case let .invalidURL(u): throw CheckError.failed("Pa URL rejected: \(u)")
+        case .tileNotFound: throw CheckError.failed("Pa tile not found")
+        case let .failure(e): throw CheckError.failed("Pa restart failed: \(e)")
+        }
+        switch spawnerB.restartBrowserTile(tileId: browserB) {
+        case let .restarted(r): controllerB.browserRuntimes.append(r)
+        case let .invalidURL(u): throw CheckError.failed("Pb URL rejected: \(u)")
+        case .tileNotFound: throw CheckError.failed("Pb tile not found")
+        case let .failure(e): throw CheckError.failed("Pb restart failed: \(e)")
+        }
+
+        // Build registry + WorkspaceRuntime.
+        // Fixture: workspace canvas 1000×1000 screen px, zoom=1.
+        // Zone A: world [0,400]×[0,400]; Zone B: world [2000,2400]×[0,400].
+        let placementA = ZonePlacement(
+            zoneId: zoneA, projectId: projectPa,
+            origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 400, height: 400),
+            color: "blue", collapsed: false, hydrationPolicy: .automatic
+        )
+        let placementB = ZonePlacement(
+            zoneId: zoneB, projectId: projectPb,
+            origin: ZonePoint(x: 2000, y: 0), size: ZoneSize(width: 400, height: 400),
+            color: "mint", collapsed: false, hydrationPolicy: .automatic
+        )
+        let document = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [placementA, placementB],
+            zoneZOrder: [zoneA, zoneB],
+            lastActiveZoneId: zoneA
+        )
+
+        let registry = ZoneRuntimeRegistry(closeOnZero: false, makeController: { _ in throw CheckError.failed("factory not expected in T10 check") })
+        registry.register(controllerA, for: projectPa)
+        registry.register(controllerB, for: projectPb)
+
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        let runtime = WorkspaceRuntime(
+            workspaceId: workspaceW,
+            document: document,
+            registry: registry,
+            focusBroker: FocusBroker(),
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+
+        // Wire onBrowserRuntimeHydrated → registerLiveBrowser (production pattern).
+        controllerA.onBrowserRuntimeHydrated = { [weak runtime] r in runtime?.registerLiveBrowser(tileId: r.tileId) }
+        controllerB.onBrowserRuntimeHydrated = { [weak runtime] r in runtime?.registerLiveBrowser(tileId: r.tileId) }
+
+        // Workspace canvas: 1000×1000 screen px, viewport at (0,0,1).
+        let workspaceCanvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [], groups: [], lastActiveTileId: nil
+        ))
+        workspaceCanvas.frame = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+
+        // Wire canvasView without calling install (check injects manually).
+        // Use the internal accessor: WorkspaceRuntime.install sets canvasView but we bypass
+        // it; instead we call the setter via the existing install() path would fail because
+        // no projectStore on disk. We expose a test-only path via the canvasView internal
+        // access. Since we're a static func on AppDelegate (same module as WorkspaceRuntime),
+        // we can't reach `private` directly. Use install() with an empty app registry.
+        let appRegistry = Registry.empty()
+        // To bypass install's controller-acquire logic, we need to wire canvasView manually.
+        // WorkspaceRuntime.canvasView is private. We use a different approach:
+        // We install via WorkspaceRuntime.install() but the registry already has controllers
+        // registered (refCount=1), so acquire() will just bump refCount.
+        // We wrap the registry factory to block factory-creation calls.
+        // Actually, install() calls registry.acquire(projectId:) which calls the factory
+        // only if the controller doesn't exist. Since we pre-registered both, acquire() will
+        // just bump refCount (ref=2). We'll release them afterward.
+
+        // Save workspace document so install can find it.
+        let workspaceStore = WorkspaceStore(workspaceId: workspaceW, applicationSupportDirectory: appSupport)
+        try workspaceStore.save(document)
+
+        // install() requires project canvases loadable; storeA and storeB already have canvases saved.
+        try runtime.install(into: workspaceCanvas, appRegistry: appRegistry)
+        // install() acquired both controllers (refCount: 2 each). Release the install's extra ref.
+        // Actually install sets acquiredProjectIds = newlyAcquired. Since both were already at
+        // refCount=1 before install (from register()), acquire() bumps to 2. We accept refCount=2
+        // for this check; closeAll() will release once (→1), not fully close. That's fine because
+        // we don't assert on closeAll in assertions 1-9.
+
+        // Re-seed browsers: install() replaced tile views with DescriptorTileNSViews on the
+        // workspace canvas, but zone-level canvases (zoneCanvasA/B) still have the original
+        // tileViews. The controllers reference their own zoneCanvases. After install, the
+        // zoneCanvasA.canvasState.tiles should still have browserA.
+        // But install() may have swapped the controller's canvasView to the workspace canvas!
+        // Actually no — install() calls `active.attachUI(canvasView: canvasView, ...)` only for
+        // the ACTIVE controller (Pa). So controllerA gets the workspace canvas. controllerB
+        // still has zoneCanvasB. This is a problem: setTier on controllerA now uses the
+        // workspace canvas for tile operations.
+
+        // To avoid this complication, skip install() and wire canvasView manually using
+        // a different approach: tear down + re-attach.
+        runtime.closeAll()
+        // After closeAll, refCounts are reduced. Re-register for the actual check.
+        // (registry had refCount 2 each; closeAll releases once → refCount 1 each. Controllers still live.)
+        // But wait: registry.release() decrements. After register(once) + install's acquire() = refCount 2,
+        // then closeAll releases once → refCount 1. Controllers still alive. Good.
+
+        // Re-attach zone canvases to their controllers (install may have replaced controllerA's canvasView).
+        controllerA.attachUI(canvasView: zoneCanvasA, tileSpawner: spawnerA, focusBroker: FocusBroker())
+        controllerB.attachUI(canvasView: zoneCanvasB, tileSpawner: spawnerB, focusBroker: FocusBroker())
+
+        // Re-seed browsers (install may have dehydrated or they're still live if setTier wasn't called).
+        // Check current state: if not live, re-seed.
+        if controllerA.browserRuntimes.isEmpty {
+            switch spawnerA.restartBrowserTile(tileId: browserA) {
+            case let .restarted(r): controllerA.browserRuntimes.append(r)
+            default: throw CheckError.failed("Pa re-seed failed after install/closeAll")
+            }
+        }
+        if controllerB.browserRuntimes.isEmpty {
+            switch spawnerB.restartBrowserTile(tileId: browserB) {
+            case let .restarted(r): controllerB.browserRuntimes.append(r)
+            default: throw CheckError.failed("Pb re-seed failed after install/closeAll")
+            }
+        }
+
+        // Build a fresh runtime with the workspace canvas wired directly.
+        // We use a fresh WorkspaceRuntime that we wire manually without install().
+        let freshRegistry = ZoneRuntimeRegistry(closeOnZero: false, makeController: { _ in throw CheckError.failed("T10: factory not expected") })
+        freshRegistry.register(controllerA, for: projectPa)
+        freshRegistry.register(controllerB, for: projectPb)
+
+        let freshRuntime = WorkspaceRuntime(
+            workspaceId: workspaceW,
+            document: document,
+            registry: freshRegistry,
+            focusBroker: FocusBroker(),
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+        controllerA.onBrowserRuntimeHydrated = { [weak freshRuntime] r in freshRuntime?.registerLiveBrowser(tileId: r.tileId) }
+        controllerB.onBrowserRuntimeHydrated = { [weak freshRuntime] r in freshRuntime?.registerLiveBrowser(tileId: r.tileId) }
+
+        // Wire canvasView: install with empty canvas state (no tiles), then re-attach zone canvases.
+        let freshWorkspaceCanvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [], groups: [], lastActiveTileId: nil
+        ))
+        freshWorkspaceCanvas.frame = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+
+        // Wire freshRuntime's canvasView by calling install(). The freshRegistry has both controllers
+        // at refCount=1. install() calls acquire() which bumps to 2. That's acceptable.
+        try freshRuntime.install(into: freshWorkspaceCanvas, appRegistry: appRegistry)
+        // Re-attach zone canvases + tileSpawners to controllers.
+        controllerA.attachUI(canvasView: zoneCanvasA, tileSpawner: spawnerA, focusBroker: FocusBroker())
+        controllerB.attachUI(canvasView: zoneCanvasB, tileSpawner: spawnerB, focusBroker: FocusBroker())
+        // Re-seed if emptied by install.
+        if controllerA.browserRuntimes.isEmpty {
+            switch spawnerA.restartBrowserTile(tileId: browserA) {
+            case let .restarted(r): controllerA.browserRuntimes.append(r)
+            default: throw CheckError.failed("Pa second re-seed failed")
+            }
+        }
+        if controllerB.browserRuntimes.isEmpty {
+            switch spawnerB.restartBrowserTile(tileId: browserB) {
+            case let .restarted(r): controllerB.browserRuntimes.append(r)
+            default: throw CheckError.failed("Pb second re-seed failed")
+            }
+        }
+
+        // ── Assertion 1: initial reconcile at (0,0,1) matches the planner. ──
+        // Hand-derived: A at [0,400]×[0,400] intersects visible [0,1000]×[0,1000] → live.
+        // B at [2000,2400]×[0,400]: snapshot band x∈[-256,1256] → B not in band → cold.
+        let expectedATierInitial: HydrationTier = .live
+        let expectedBTierInitial: HydrationTier = CanvasEngine.hydrationTier(
+            zone: placementB,
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            visibleSize: CGSize(width: 1000, height: 1000),
+            focusedTileZone: nil
+        )
+        // B is far off-screen (x=2000), snapshot band ends at x=1256 → cold.
+
+        freshRuntime.onViewportChanged()
+        freshRuntime.flushPendingHydrationReconcile()
+
+        try expect(
+            controllerA.hydrationTier == expectedATierInitial,
+            "assertion 1: Pa tier after initial reconcile at (0,0,1) should be \(expectedATierInitial), got \(controllerA.hydrationTier)"
+        )
+        try expect(
+            controllerB.hydrationTier == expectedBTierInitial,
+            "assertion 1: Pb tier after initial reconcile at (0,0,1) should be \(expectedBTierInitial), got \(controllerB.hydrationTier)"
+        )
+        // Verify hand-derivation: B cold means it was demoted from live.
+        try expect(expectedBTierInitial == .cold, "assertion 1 geometry: B should be cold at viewport (0,0,1) with margin 256, band ends at 1256 < 2000")
+
+        // After initial reconcile: B was seeded live but plan says cold → setTier(.cold).
+        // B's browser was dehydrated. Re-check.
+        try expect(
+            controllerB.browserRuntimes.isEmpty,
+            "assertion 1b: after initial reconcile B should have 0 live browsers (dehydrated to cold)"
+        )
+
+        // ── Assertion 2 & 3: demote on pan-away (pan to (2000,0,1)). ──
+        // At (2000,0,1): visible [2000,3000]×[0,1000]. A at [0,400] → snapshot band x∈[1744,3256], 400 < 1744 → cold.
+        // But wait — A currently has 1 live browser. After pan to (2000,0,1), A demotes.
+        // First re-seed A's browser (if it was demoted by initial reconcile — it shouldn't be since A was .live).
+        try expect(
+            controllerA.browserRuntimes.count == 1,
+            "pre-assertion-2: Pa should have 1 live browser before pan-away, got \(controllerA.browserRuntimes.count)"
+        )
+        // Also re-hydrate B so we can check symmetric (assertion 5). B needs a browser for assertion 5.
+        // B is now cold; for assertion 5 we need it to promote to live. That happens when pan goes to (2000,0,1).
+        // But B's tileSpawner needs the zoneCanvasB tile to be in snapshot state (runtimeRef == nil).
+        // B was dehydrated by initial reconcile. Its tile should now be BrowserSnapshotTileNSView.
+        try expect(
+            zoneCanvasB.tileView(for: browserB) is BrowserSnapshotTileNSView,
+            "pre-assertion-5: B tile should be BrowserSnapshotTileNSView after initial demote, got \(String(describing: type(of: zoneCanvasB.tileView(for: browserB))))"
+        )
+
+        let expectedATier2: HydrationTier = CanvasEngine.hydrationTier(
+            zone: placementA,
+            viewport: CanvasViewport(x: 2000, y: 0, zoom: 1),
+            visibleSize: CGSize(width: 1000, height: 1000),
+            focusedTileZone: nil
+        )
+        let expectedBTier2: HydrationTier = CanvasEngine.hydrationTier(
+            zone: placementB,
+            viewport: CanvasViewport(x: 2000, y: 0, zoom: 1),
+            visibleSize: CGSize(width: 1000, height: 1000),
+            focusedTileZone: nil
+        )
+        // Hand-verify: at (2000,0,1), A at x=[0,400]: snapshot band x=[1744,3256]. 400 < 1744 → cold.
+        // B at x=[2000,2400]: visible=[2000,3000] → B intersects → live.
+        try expect(expectedATier2 == .cold, "assertion 2 geometry: A should be cold at viewport (2000,0,1)")
+        try expect(expectedBTier2 == .live, "assertion 5 geometry: B should be live at viewport (2000,0,1)")
+
+        // Drive the real path: pan to (2000,0,1) via setViewport, then onViewportChanged+flush.
+        freshWorkspaceCanvas.setViewport(CanvasViewport(x: 2000, y: 0, zoom: 1))
+        freshRuntime.onViewportChanged()
+        freshRuntime.flushPendingHydrationReconcile()
+
+        // Assertion 2: A demoted (non-live after pan-away).
+        try expect(
+            controllerA.hydrationTier != .live,
+            "assertion 2: Pa should be demoted after pan to (2000,0,1), got \(controllerA.hydrationTier)"
+        )
+        try expect(
+            controllerA.hydrationTier == expectedATier2,
+            "assertion 2: Pa tier should equal re-derived \(expectedATier2), got \(controllerA.hydrationTier)"
+        )
+
+        // Assertion 3: demote tore down live browser runtime.
+        try expect(
+            controllerA.browserRuntimes.isEmpty,
+            "assertion 3: Pa.browserRuntimes should be empty after demote, got \(controllerA.browserRuntimes.count)"
+        )
+        let aTile2 = zoneCanvasA.canvasState.tiles.first(where: { $0.id == browserA })
+        try expect(
+            aTile2?.runtimeRef == nil,
+            "assertion 3: Pa tile runtimeRef should be nil after demote, got \(String(describing: aTile2?.runtimeRef))"
+        )
+        try expect(
+            zoneCanvasA.tileView(for: browserA) is BrowserSnapshotTileNSView,
+            "assertion 3: Pa tile should be BrowserSnapshotTileNSView after demote, got \(String(describing: type(of: zoneCanvasA.tileView(for: browserA))))"
+        )
+
+        // Assertion 5: B promoted to live when pan brought it into view.
+        try expect(
+            controllerB.hydrationTier == .live,
+            "assertion 5: Pb should be live after pan to (2000,0,1), got \(controllerB.hydrationTier)"
+        )
+        try expect(
+            controllerB.browserRuntimes.count == 1,
+            "assertion 5: Pb.browserRuntimes.count should be 1, got \(controllerB.browserRuntimes.count)"
+        )
+
+        // ── Assertion 4: promote on pan-back (pan back to (0,0,1)). ──
+        // A: re-seed was done by reconcile (setTier(.live) on A calls hydrateToLive).
+        freshWorkspaceCanvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        freshRuntime.onViewportChanged()
+        freshRuntime.flushPendingHydrationReconcile()
+
+        try expect(
+            controllerA.hydrationTier == .live,
+            "assertion 4: Pa should be live after pan back to (0,0,1), got \(controllerA.hydrationTier)"
+        )
+        try expect(
+            controllerA.browserRuntimes.count == 1,
+            "assertion 4: Pa.browserRuntimes.count should be 1 after promote, got \(controllerA.browserRuntimes.count)"
+        )
+        let aTile4 = zoneCanvasA.canvasState.tiles.first(where: { $0.id == browserA })
+        try expect(
+            aTile4?.runtimeRef?.kind == .browserTile,
+            "assertion 4: Pa tile runtimeRef.kind should be .browserTile after promote, got \(String(describing: aTile4?.runtimeRef?.kind))"
+        )
+        try expect(
+            zoneCanvasA.tileView(for: browserA) is BrowserTileNSView,
+            "assertion 4: Pa tile should be BrowserTileNSView after promote, got \(String(describing: type(of: zoneCanvasA.tileView(for: browserA))))"
+        )
+
+        // ── Assertion 6: pinnedLive respected. ──
+        // Rebuild with zone B as pinnedLive.
+        let placementBPinned = ZonePlacement(
+            zoneId: zoneB, projectId: projectPb,
+            origin: ZonePoint(x: 2000, y: 0), size: ZoneSize(width: 400, height: 400),
+            color: "mint", collapsed: false, hydrationPolicy: .pinnedLive
+        )
+        let documentPinned = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [placementA, placementBPinned],
+            zoneZOrder: [zoneA, zoneB],
+            lastActiveZoneId: zoneA
+        )
+        // Re-seed both controllers to live.
+        try controllerA.setTier(.live)
+        if controllerA.browserRuntimes.isEmpty {
+            switch spawnerA.restartBrowserTile(tileId: browserA) {
+            case let .restarted(r): controllerA.browserRuntimes.append(r)
+            default: throw CheckError.failed("Pa pinned re-seed failed")
+            }
+        }
+        // Ensure B is live before pinned test.
+        if controllerB.hydrationTier != .live {
+            try controllerB.setTier(.live)
+            if controllerB.browserRuntimes.isEmpty {
+                switch spawnerB.restartBrowserTile(tileId: browserB) {
+                case let .restarted(r): controllerB.browserRuntimes.append(r)
+                default: throw CheckError.failed("Pb pinned re-seed failed")
+                }
+            }
+        }
+        let pinnedRegistry = ZoneRuntimeRegistry(closeOnZero: false, makeController: { _ in throw CheckError.failed("pinned factory not expected") })
+        pinnedRegistry.register(controllerA, for: projectPa)
+        pinnedRegistry.register(controllerB, for: projectPb)
+        let pinnedWorkspaceCanvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [], groups: [], lastActiveTileId: nil
+        ))
+        pinnedWorkspaceCanvas.frame = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        let pinnedRuntime = WorkspaceRuntime(
+            workspaceId: workspaceW,
+            document: documentPinned,
+            registry: pinnedRegistry,
+            focusBroker: FocusBroker(),
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+        try pinnedRuntime.install(into: pinnedWorkspaceCanvas, appRegistry: appRegistry)
+        controllerA.attachUI(canvasView: zoneCanvasA, tileSpawner: spawnerA, focusBroker: FocusBroker())
+        controllerB.attachUI(canvasView: zoneCanvasB, tileSpawner: spawnerB, focusBroker: FocusBroker())
+        // Re-seed if install dehydrated.
+        if controllerA.browserRuntimes.isEmpty {
+            switch spawnerA.restartBrowserTile(tileId: browserA) {
+            case let .restarted(r): controllerA.browserRuntimes.append(r)
+            default: throw CheckError.failed("Pa pinned install re-seed failed")
+            }
+        }
+        if controllerB.browserRuntimes.isEmpty {
+            switch spawnerB.restartBrowserTile(tileId: browserB) {
+            case let .restarted(r): controllerB.browserRuntimes.append(r)
+            default: throw CheckError.failed("Pb pinned install re-seed failed")
+            }
+        }
+        // Pan A into view (already in view at 0,0,1) and B fully off-screen → reconcile.
+        // At (0,0,1): A is live, B is pinnedLive → must stay live regardless of geometry.
+        pinnedWorkspaceCanvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        pinnedRuntime.onViewportChanged()
+        pinnedRuntime.flushPendingHydrationReconcile()
+
+        try expect(
+            controllerB.hydrationTier == .live,
+            "assertion 6: pinnedLive Pb should stay live when off-screen, got \(controllerB.hydrationTier)"
+        )
+        // A should still be live (it's in-view).
+        try expect(
+            controllerA.hydrationTier == .live,
+            "assertion 6: Pa should remain live when in-view, got \(controllerA.hydrationTier)"
+        )
+        pinnedRuntime.closeAll()
+
+        // ── Assertion 7: Budget respected (maxLive: 1 browser). ──
+        // Reset controllers for budget test.
+        controllerA.attachUI(canvasView: zoneCanvasA, tileSpawner: spawnerA, focusBroker: FocusBroker())
+        controllerB.attachUI(canvasView: zoneCanvasB, tileSpawner: spawnerB, focusBroker: FocusBroker())
+        // Ensure both are live with browsers.
+        if controllerA.hydrationTier != .live { try controllerA.setTier(.live) }
+        if controllerA.browserRuntimes.isEmpty {
+            switch spawnerA.restartBrowserTile(tileId: browserA) {
+            case let .restarted(r): controllerA.browserRuntimes.append(r)
+            default: throw CheckError.failed("Pa budget re-seed failed")
+            }
+        }
+        if controllerB.hydrationTier != .live { try controllerB.setTier(.live) }
+        if controllerB.browserRuntimes.isEmpty {
+            switch spawnerB.restartBrowserTile(tileId: browserB) {
+            case let .restarted(r): controllerB.browserRuntimes.append(r)
+            default: throw CheckError.failed("Pb budget re-seed failed")
+            }
+        }
+        // Override BrowserRuntimeBudget to maxLive: 1.
+        let budgetPrevValue = UserDefaults.standard.object(forKey: BrowserRuntimeBudget.defaultsKey)
+        UserDefaults.standard.set("1", forKey: BrowserRuntimeBudget.defaultsKey)
+        defer {
+            if let prev = budgetPrevValue { UserDefaults.standard.set(prev, forKey: BrowserRuntimeBudget.defaultsKey) }
+            else { UserDefaults.standard.removeObject(forKey: BrowserRuntimeBudget.defaultsKey) }
+        }
+
+        let budgetRegistry = ZoneRuntimeRegistry(closeOnZero: false, makeController: { _ in throw CheckError.failed("budget factory not expected") })
+        budgetRegistry.register(controllerA, for: projectPa)
+        budgetRegistry.register(controllerB, for: projectPb)
+        let budgetRuntime = WorkspaceRuntime(
+            workspaceId: workspaceW,
+            document: document,
+            registry: budgetRegistry,
+            focusBroker: FocusBroker(),
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+        controllerA.onBrowserRuntimeHydrated = { [weak budgetRuntime] r in budgetRuntime?.registerLiveBrowser(tileId: r.tileId) }
+        controllerB.onBrowserRuntimeHydrated = { [weak budgetRuntime] r in budgetRuntime?.registerLiveBrowser(tileId: r.tileId) }
+        let budgetWorkspaceCanvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [], groups: [], lastActiveTileId: nil
+        ))
+        budgetWorkspaceCanvas.frame = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        try budgetRuntime.install(into: budgetWorkspaceCanvas, appRegistry: appRegistry)
+        controllerA.attachUI(canvasView: zoneCanvasA, tileSpawner: spawnerA, focusBroker: FocusBroker())
+        controllerB.attachUI(canvasView: zoneCanvasB, tileSpawner: spawnerB, focusBroker: FocusBroker())
+        // Re-seed if install dehydrated.
+        if controllerA.browserRuntimes.isEmpty {
+            switch spawnerA.restartBrowserTile(tileId: browserA) {
+            case let .restarted(r): controllerA.browserRuntimes.append(r)
+            default: throw CheckError.failed("Pa budget install re-seed failed")
+            }
+        }
+        if controllerB.browserRuntimes.isEmpty {
+            switch spawnerB.restartBrowserTile(tileId: browserB) {
+            case let .restarted(r): controllerB.browserRuntimes.append(r)
+            default: throw CheckError.failed("Pb budget install re-seed failed")
+            }
+        }
+        // Register both as live in the budget tracker.
+        budgetRuntime.registerLiveBrowser(tileId: browserA)
+        budgetRuntime.registerLiveBrowser(tileId: browserB)
+        // Mark A as active (focused).
+        zoneCanvasA.markActive(tileId: browserA)
+
+        // Zoom out to 0.4 so both zones are within visible band:
+        // visible world width = 1000/0.4 = 2500. At viewport (0,0,0.4): visible x=[0,2500].
+        // Zone A: [0,400] → intersects → live. Zone B: [2000,2400] → intersects [0,2500] → live.
+        // Budget = 1. Active = browserA → protected. Budget eviction should keep A, evict B.
+        budgetWorkspaceCanvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 0.4))
+        budgetRuntime.onViewportChanged()
+        budgetRuntime.flushPendingHydrationReconcile()
+
+        let budgetTotal = controllerA.browserRuntimes.count + controllerB.browserRuntimes.count
+        try expect(
+            budgetTotal == 1,
+            "assertion 7: total live browsers should be 1 (maxLive:1), got \(budgetTotal)"
+        )
+        try expect(
+            controllerA.browserRuntimes.count == 1,
+            "assertion 7: focused Pa browser should survive budget cap, got \(controllerA.browserRuntimes.count)"
+        )
+        budgetRuntime.closeAll()
+
+        // ── Assertion 8: Focused zone never demoted (planner focusedTileZone pin). ──
+        // Use a FRESH zone canvas for Pa with lastActiveTileId=nil so setTier's dehydrate
+        // guard cannot protect A. Only the planner's focusedTileZone pin keeps A live.
+        // RED path: with workspace canvas active tile unset → focusedTileZone=nil → planner
+        // returns .cold for off-screen A → setTier(.cold, allowDehydratingFocusedZone:false)
+        // called on A with zone-canvas lastActiveTileId=nil → dehydrate proceeds → A demotes.
+        let focusedZoneCanvasA = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: (try storeA.loadCanvas()).tiles,
+            groups: [],
+            lastActiveTileId: nil   // explicitly nil — dehydrate guard must NOT fire
+        ))
+        focusedZoneCanvasA.frame = CGRect(x: 0, y: 0, width: 640, height: 480)
+        let focusedSpawnerA = TileSpawner(canvasView: focusedZoneCanvasA, ghostty: nil, browserEngine: browserEngine, projectStore: storeA, project: projectA)
+        controllerA.attachUI(canvasView: focusedZoneCanvasA, tileSpawner: focusedSpawnerA, focusBroker: FocusBroker())
+        controllerB.attachUI(canvasView: zoneCanvasB, tileSpawner: spawnerB, focusBroker: FocusBroker())
+        // Re-seed Pa to live with browser.
+        if controllerA.hydrationTier != .live { try controllerA.setTier(.live) }
+        if controllerA.browserRuntimes.isEmpty {
+            switch focusedSpawnerA.restartBrowserTile(tileId: browserA) {
+            case let .restarted(r): controllerA.browserRuntimes.append(r)
+            default: throw CheckError.failed("Pa focused re-seed failed")
+            }
+        }
+        let focusedRegistry = ZoneRuntimeRegistry(closeOnZero: false, makeController: { _ in throw CheckError.failed("focused factory not expected") })
+        focusedRegistry.register(controllerA, for: projectPa)
+        focusedRegistry.register(controllerB, for: projectPb)
+        let focusedWorkspaceCanvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [], groups: [], lastActiveTileId: nil
+        ))
+        focusedWorkspaceCanvas.frame = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        let focusedRuntime = WorkspaceRuntime(
+            workspaceId: workspaceW,
+            document: document,
+            registry: focusedRegistry,
+            focusBroker: FocusBroker(),
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+        try focusedRuntime.install(into: focusedWorkspaceCanvas, appRegistry: appRegistry)
+        // Re-attach zone canvases after install (install may replace canvasView on active controller).
+        controllerA.attachUI(canvasView: focusedZoneCanvasA, tileSpawner: focusedSpawnerA, focusBroker: FocusBroker())
+        controllerB.attachUI(canvasView: zoneCanvasB, tileSpawner: spawnerB, focusBroker: FocusBroker())
+        if controllerA.browserRuntimes.isEmpty {
+            switch focusedSpawnerA.restartBrowserTile(tileId: browserA) {
+            case let .restarted(r): controllerA.browserRuntimes.append(r)
+            default: throw CheckError.failed("Pa focused install re-seed failed")
+            }
+        }
+        // Mark A's browser tile active on the WORKSPACE canvas so reconcileHydration
+        // resolves focusedTileZone = zoneA and the planner pins zone A to .live.
+        // The zone canvas (focusedZoneCanvasA) has lastActiveTileId=nil → setTier's dehydrate
+        // guard is NOT the protector; only the planner's focusedTileZone pin prevents demote.
+        focusedWorkspaceCanvas.markActive(tileId: browserA)
+        // Pan A off-screen → without focusedTileZone pin, A would demote to cold.
+        focusedWorkspaceCanvas.setViewport(CanvasViewport(x: 2000, y: 0, zoom: 1))
+        focusedRuntime.onViewportChanged()
+        focusedRuntime.flushPendingHydrationReconcile()
+
+        // Verify the planner correctly pins when focusedTileZone is set.
+        let expectedFocusedTierA = CanvasEngine.hydrationTier(
+            zone: placementA,
+            viewport: CanvasViewport(x: 2000, y: 0, zoom: 1),
+            visibleSize: CGSize(width: 1000, height: 1000),
+            focusedTileZone: zoneA   // planner pins it → .live
+        )
+        try expect(
+            expectedFocusedTierA == .live,
+            "assertion 8 geometry: CanvasEngine.hydrationTier with focusedTileZone=zoneA should return .live, got \(expectedFocusedTierA)"
+        )
+        try expect(
+            controllerA.hydrationTier == .live,
+            "assertion 8: Pa pinned by planner's focusedTileZone should stay live even when off-screen (zone-canvas active tile is nil — only planner pin protects), got \(controllerA.hydrationTier)"
+        )
+        try expect(
+            controllerA.browserRuntimes.count == 1,
+            "assertion 8: focused Pa browser runtime should be intact (planner-pinned), got \(controllerA.browserRuntimes.count)"
+        )
+        focusedRuntime.closeAll()
+
+        // ── Assertion 9: Debounce coalesces (config-driven). ──
+        controllerA.attachUI(canvasView: zoneCanvasA, tileSpawner: spawnerA, focusBroker: FocusBroker())
+        controllerB.attachUI(canvasView: zoneCanvasB, tileSpawner: spawnerB, focusBroker: FocusBroker())
+        if controllerA.hydrationTier != .live { try controllerA.setTier(.live) }
+        if controllerA.browserRuntimes.isEmpty {
+            switch spawnerA.restartBrowserTile(tileId: browserA) {
+            case let .restarted(r): controllerA.browserRuntimes.append(r)
+            default: throw CheckError.failed("Pa debounce re-seed failed")
+            }
+        }
+        let debounceRegistry = ZoneRuntimeRegistry(closeOnZero: false, makeController: { _ in throw CheckError.failed("debounce factory not expected") })
+        debounceRegistry.register(controllerA, for: projectPa)
+        debounceRegistry.register(controllerB, for: projectPb)
+        let debounceWorkspaceCanvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [], groups: [], lastActiveTileId: nil
+        ))
+        debounceWorkspaceCanvas.frame = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        let debounceRuntime = WorkspaceRuntime(
+            workspaceId: workspaceW,
+            document: document,
+            registry: debounceRegistry,
+            focusBroker: FocusBroker(),
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+        try debounceRuntime.install(into: debounceWorkspaceCanvas, appRegistry: appRegistry)
+        controllerA.attachUI(canvasView: zoneCanvasA, tileSpawner: spawnerA, focusBroker: FocusBroker())
+        controllerB.attachUI(canvasView: zoneCanvasB, tileSpawner: spawnerB, focusBroker: FocusBroker())
+
+        // Capture baseline BEFORE the burst.
+        let reconcileBaseline = debounceRuntime.reconcileCount
+        // Call onViewportChanged() 3× in a tight burst WITHOUT flushing.
+        debounceRuntime.onViewportChanged()
+        debounceRuntime.onViewportChanged()
+        debounceRuntime.onViewportChanged()
+        // The burst must be debounced — no synchronous reconcile yet.
+        // RED if debounce is removed (each call reconciles immediately → count = baseline+3 here).
+        let reconcileBeforeFlush = debounceRuntime.reconcileCount
+        try expect(
+            reconcileBeforeFlush == reconcileBaseline,
+            "assertion 9 (pre-flush): burst of 3 onViewportChanged() should NOT reconcile synchronously; reconcileCount should still be \(reconcileBaseline) (baseline), got \(reconcileBeforeFlush)"
+        )
+        // Flush once → exactly one reconcile (burst coalesced).
+        debounceRuntime.flushPendingHydrationReconcile()
+        let reconcileAfterFlush = debounceRuntime.reconcileCount
+        try expect(
+            reconcileAfterFlush == reconcileBaseline + 1,
+            "assertion 9 (post-flush): burst+flush should produce exactly 1 reconcile (baseline+1=\(reconcileBaseline + 1)), got \(reconcileAfterFlush)"
+        )
+
+        // Resolver round-trip assertions (from spec section 9).
+        let reconcileSuiteName9 = "T10DebounceConfig-\(UUID().uuidString)"
+        let reconcileDefaults9 = UserDefaults(suiteName: reconcileSuiteName9)!
+        defer { reconcileDefaults9.removePersistentDomain(forName: reconcileSuiteName9) }
+        try expect(
+            ZoneHydrationReconcileConfig.intervalMs(defaults: reconcileDefaults9) == 200,
+            "assertion 9: resolver default on empty suite should be 200ms"
+        )
+        reconcileDefaults9.set("50", forKey: ZoneHydrationReconcileConfig.intervalKey)
+        try expect(
+            ZoneHydrationReconcileConfig.intervalMs(defaults: reconcileDefaults9) == 50,
+            "assertion 9: resolver should read override '50' as 50ms"
+        )
+        debounceRuntime.closeAll()
+
+        // ── Assertion 10: Idempotence — no setTier on unchanged viewport. ──
+        controllerA.attachUI(canvasView: zoneCanvasA, tileSpawner: spawnerA, focusBroker: FocusBroker())
+        controllerB.attachUI(canvasView: zoneCanvasB, tileSpawner: spawnerB, focusBroker: FocusBroker())
+        if controllerA.hydrationTier != .live { try controllerA.setTier(.live) }
+        if controllerA.browserRuntimes.isEmpty {
+            switch spawnerA.restartBrowserTile(tileId: browserA) {
+            case let .restarted(r): controllerA.browserRuntimes.append(r)
+            default: throw CheckError.failed("Pa idempotent re-seed failed")
+            }
+        }
+        let idempotentRegistry = ZoneRuntimeRegistry(closeOnZero: false, makeController: { _ in throw CheckError.failed("idempotent factory not expected") })
+        idempotentRegistry.register(controllerA, for: projectPa)
+        idempotentRegistry.register(controllerB, for: projectPb)
+        let idempotentWorkspaceCanvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [], groups: [], lastActiveTileId: nil
+        ))
+        idempotentWorkspaceCanvas.frame = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        let idempotentRuntime = WorkspaceRuntime(
+            workspaceId: workspaceW,
+            document: document,
+            registry: idempotentRegistry,
+            focusBroker: FocusBroker(),
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+        try idempotentRuntime.install(into: idempotentWorkspaceCanvas, appRegistry: appRegistry)
+        controllerA.attachUI(canvasView: zoneCanvasA, tileSpawner: spawnerA, focusBroker: FocusBroker())
+        controllerB.attachUI(canvasView: zoneCanvasB, tileSpawner: spawnerB, focusBroker: FocusBroker())
+        if controllerA.browserRuntimes.isEmpty {
+            switch spawnerA.restartBrowserTile(tileId: browserA) {
+            case let .restarted(r): controllerA.browserRuntimes.append(r)
+            default: throw CheckError.failed("Pa idempotent install re-seed failed")
+            }
+        }
+        // First reconcile at (0,0,1) — sets stable state.
+        idempotentRuntime.onViewportChanged()
+        idempotentRuntime.flushPendingHydrationReconcile()
+        let paRuntimesAfterFirst = controllerA.browserRuntimes.map(\.id)
+        let reconcileAfterFirst = idempotentRuntime.reconcileCount
+        // Second reconcile at SAME viewport — no tier change expected.
+        idempotentRuntime.onViewportChanged()
+        idempotentRuntime.flushPendingHydrationReconcile()
+        let paRuntimesAfterSecond = controllerA.browserRuntimes.map(\.id)
+        let reconcileAfterSecond = idempotentRuntime.reconcileCount
+
+        try expect(
+            reconcileAfterSecond - reconcileAfterFirst == 1,
+            "assertion 10: second reconcile at same viewport should still run (counter increments), got delta=\(reconcileAfterSecond - reconcileAfterFirst)"
+        )
+        try expect(
+            paRuntimesAfterSecond == paRuntimesAfterFirst,
+            "assertion 10: Pa browser runtimes should be identical (no re-hydrate) on no-op reconcile"
+        )
+        // Pa should still be live and have same runtime identity.
+        try expect(
+            controllerA.hydrationTier == .live,
+            "assertion 10: Pa should remain live after no-op reconcile"
+        )
+        idempotentRuntime.closeAll()
+
+        // ── T09 Carry-forward: demoted controller refCount → 0 after closeAll (no leak). ──
+        // Build a fresh registry using the factory (no pre-register), so install() gives refCount=1.
+        // Use zoom=0.1 so both zones are visible at install time (both acquired at refCount=1).
+        // Then reconcile at (0,0,1) demotes B to cold. Then closeAll releases both → refCount=0 (no leak).
+        let cfRegistry = ZoneRuntimeRegistry(closeOnZero: false, makeController: { projectId in
+            if projectId == projectPa {
+                return ZoneRuntimeController(projectRoot: paRoot, projectStore: storeA, project: projectA)
+            } else if projectId == projectPb {
+                return ZoneRuntimeController(projectRoot: pbRoot, projectStore: storeB, project: projectB)
+            }
+            throw CheckError.failed("cf factory: unexpected projectId \(projectId)")
+        })
+        // Wide viewport: zoom=0.1 → visible world width = 1000/0.1 = 10000. Both zones visible.
+        let cfDocumentWide = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 0.1),
+            zones: [placementA, placementB],
+            zoneZOrder: [zoneA, zoneB],
+            lastActiveZoneId: zoneA
+        )
+        let cfWorkspaceCanvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 0.1), tiles: [], groups: [], lastActiveTileId: nil
+        ))
+        cfWorkspaceCanvas.frame = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        let cfRuntime = WorkspaceRuntime(
+            workspaceId: workspaceW, document: cfDocumentWide, registry: cfRegistry,
+            focusBroker: FocusBroker(), registryStore: registryStore, ghostty: nil, browserEngine: browserEngine
+        )
+        // install() at zoom=0.1 acquires both A and B (both live-eligible) → refCount=1 each.
+        try cfRuntime.install(into: cfWorkspaceCanvas, appRegistry: appRegistry)
+        let cfControllerA = cfRegistry.controller(for: projectPa)!
+        let cfControllerB = cfRegistry.controller(for: projectPb)!
+        let cfZoneCanvasA = CanvasNSView(canvasState: try storeA.loadCanvas())
+        let cfZoneCanvasB = CanvasNSView(canvasState: try storeB.loadCanvas())
+        cfZoneCanvasA.frame = CGRect(x: 0, y: 0, width: 640, height: 480)
+        cfZoneCanvasB.frame = CGRect(x: 0, y: 0, width: 640, height: 480)
+        let cfSpawnerA = TileSpawner(canvasView: cfZoneCanvasA,
+                                      ghostty: nil, browserEngine: browserEngine, projectStore: storeA, project: projectA)
+        let cfSpawnerB = TileSpawner(canvasView: cfZoneCanvasB,
+                                      ghostty: nil, browserEngine: browserEngine, projectStore: storeB, project: projectB)
+        cfControllerA.attachUI(canvasView: cfZoneCanvasA, tileSpawner: cfSpawnerA, focusBroker: FocusBroker())
+        cfControllerB.attachUI(canvasView: cfZoneCanvasB, tileSpawner: cfSpawnerB, focusBroker: FocusBroker())
+        // Seed both browsers live.
+        switch cfSpawnerA.restartBrowserTile(tileId: browserA) {
+        case let .restarted(r): cfControllerA.browserRuntimes.append(r)
+        default: throw CheckError.failed("cf Pa seed failed")
+        }
+        switch cfSpawnerB.restartBrowserTile(tileId: browserB) {
+        case let .restarted(r): cfControllerB.browserRuntimes.append(r)
+        default: throw CheckError.failed("cf Pb seed failed")
+        }
+        let cfRefA_before = cfRegistry.refCount(for: projectPa)
+        let cfRefB_before = cfRegistry.refCount(for: projectPb)
+        // Reconcile at (0,0,1) where B is cold: B gets demoted by reconcile.
+        cfWorkspaceCanvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        cfRuntime.onViewportChanged()
+        cfRuntime.flushPendingHydrationReconcile()
+        // B should now be cold (demoted by reconcile) — but still in acquiredProjectIds.
+        try expect(
+            cfControllerB.hydrationTier != .live,
+            "carry-forward: Pb should be demoted after reconcile at (0,0,1)"
+        )
+        // closeAll releases both (refCount 1→0 for each), even the demoted-tier B.
+        cfRuntime.closeAll()
+        let cfRefA_after = cfRegistry.refCount(for: projectPa)
+        let cfRefB_after = cfRegistry.refCount(for: projectPb)
+        try expect(cfRefA_before == 1, "carry-forward: refCount(Pa) should be 1 before closeAll, got \(cfRefA_before)")
+        try expect(cfRefB_before == 1, "carry-forward: refCount(Pb) should be 1 before closeAll, got \(cfRefB_before)")
+        try expect(cfRefA_after == 0, "carry-forward: refCount(Pa) → 0 after closeAll (no leak), got \(cfRefA_after)")
+        try expect(cfRefB_after == 0, "carry-forward: refCount(Pb) → 0 after closeAll (demoted controller not leaked), got \(cfRefB_after)")
+
+        // ── Manifest ──
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("zone-tier-transition", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "check": "zone-tier-transition",
+            "assertions": 10,
+            "a1_Pa_initial_tier": controllerA.hydrationTier.rawValue,
+            "a1_Pb_initial_tier": expectedBTierInitial.rawValue,
+            "a2_Pa_after_pan_away_tier": expectedATier2.rawValue,
+            "a5_Pb_after_pan_away_tier": expectedBTier2.rawValue,
+            "a9_reconcile_before_flush": reconcileBeforeFlush,
+            "a9_reconcile_after_flush": reconcileAfterFlush,
+            "a10_reconcile_after_first": reconcileAfterFirst,
+            "a10_reconcile_after_second": reconcileAfterSecond,
+            "a10_pa_runtime_ids_stable": paRuntimesAfterFirst == paRuntimesAfterSecond,
+        ]
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: manifestURL, options: .atomic)
+        return manifestURL
     }
 
     static func runViewportSanitizeSelfCheck() throws -> URL {

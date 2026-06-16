@@ -1,0 +1,34 @@
+{
+  "task": "T10",
+  "title": "Viewport-driven tier transitions (docs/23 S8)",
+  "verdict": "PASS WITH RISKS",
+  "iterations": 0,
+  "fixerApplied": [
+    "removed orphan WorkspaceRuntime.swift:558 (lastReconciledViewport never used)",
+    "R-A: assertion 9 now proves debounce COALESCING — captures baseline before a burst, asserts pre-flush count==baseline (burst not synchronous), +1 after flush. RED-confirmed (synchronous reconcile → +3 pre-flush → FAIL).",
+    "R-B: assertion 8 now exercises the planner's focusedTileZone PIN branch — workspace-canvas active tile set, zone-canvas active tile nil so setTier's guard can't fire; only the planner pin keeps the off-screen focused zone live. RED-confirmed (focusedTileZone=nil → cold → FAIL)."
+  ],
+  "redProven": true,
+  "green": true,
+  "matrixFast": "green",
+  "buildClean": true,
+  "namedCheck": "--zone-tier-transition-check passed",
+  "guards": "--zone-tier-transition-check: drives the real onViewportChanged → flushPendingHydrationReconcile path; 10 assertions + the T09 carry-forward (demoted controller refCount → 0 on closeAll, no leak). Bypass disproved (no-op reconcile stub → RED assertion 1).",
+  "filesTouched": [
+    "Sources/ContinuumRevivedCore/ZoneHydrationReconcileConfig.swift (new, debounce interval resolver)",
+    "Sources/ContinuumRevived/App/WorkspaceRuntime.swift (onViewportChanged/reconcileHydration/flushPendingHydrationReconcile/reconcileCount)",
+    "Sources/ContinuumRevived/App/ContinuumApp.swift (arg dispatch + canvasDidChange viewport-delta wiring)",
+    "Sources/ContinuumRevivedCore/SettingsSchema.swift",
+    "Sources/ContinuumRevivedCoreChecks/main.swift",
+    "scripts/run-matrix.sh"
+  ],
+  "risks": [
+    "Live behavior gated on T20 (like T07-T09): the check injects a real registry; in production the throwing boot registry means tier transitions only take effect once T20 wires the per-project factory.",
+    "Real interactive pan/zoom (the 200ms Timer firing on a live run loop) is not exercised by any headless check — only the synchronous flush path. The production debounce Timer is correctly implemented but its run-loop firing is unverified.",
+    "Assertion 10 idempotence is partly masked by setTier's own internal guard (the observable no-flicker invariant still holds)."
+  ],
+  "needsHuman": [
+    "Real-feel gate (blocked-pending-T20): confirm pan/zoom keeps off-screen zones demoting and on-screen promoting without flicker, with the debounce Timer firing on real pan.",
+    "Group-zone (projectId==nil) skip is correct per spec but not asserted by the check."
+  ]
+}

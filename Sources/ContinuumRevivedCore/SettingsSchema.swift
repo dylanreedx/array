@@ -83,6 +83,11 @@ public enum SettingsSchema {
                         default: String(ZoneHydrationBudgetConfig.defaultMaxLiveZones)
                     ),
                     .text(
+                        key: ZoneHydrationReconcileConfig.intervalKey,
+                        label: "Zone Hydration Debounce (ms)",
+                        default: String(ZoneHydrationReconcileConfig.defaultIntervalMs)
+                    ),
+                    .text(
                         key: BrowserRuntimeBudget.defaultsKey,
                         label: "Max Live Web Views",
                         default: String(BrowserRuntimeBudget.defaultMaxLive)

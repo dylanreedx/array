@@ -552,6 +552,71 @@ final class WorkspaceRuntime {
         }
     }
 
+    // MARK: - Viewport-driven tier transitions (T10)
+
+    private var hydrationReconcileTimer: Timer?
+
+    /// Counter bumped each time `reconcileHydration()` runs; exposed for check assertions.
+    private(set) var reconcileCount: Int = 0
+
+    /// Called when the canvas viewport changes (pan/zoom). Schedules a debounced
+    /// `reconcileHydration()`. Callers: `canvasDidChange` viewport-delta gate.
+    func onViewportChanged() {
+        let intervalMs = ZoneHydrationReconcileConfig.intervalMs()
+        hydrationReconcileTimer?.invalidate()
+        if intervalMs == 0 {
+            reconcileHydration()
+        } else {
+            let interval = Double(intervalMs) / 1000.0
+            hydrationReconcileTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+                Task { @MainActor in self?.reconcileHydration() }
+            }
+        }
+    }
+
+    /// Synchronous drain: cancels any pending debounce timer and runs `reconcileHydration()`
+    /// immediately. Use in checks/tests for deterministic assertions (mirrors `flushCanvasSave`).
+    func flushPendingHydrationReconcile() {
+        hydrationReconcileTimer?.invalidate()
+        hydrationReconcileTimer = nil
+        reconcileHydration()
+    }
+
+    /// Re-plan + apply hydration tiers across the registry based on the current viewport.
+    func reconcileHydration() {
+        reconcileCount += 1
+        guard let canvasView else { return }
+        let viewport = canvasView.viewport
+        let visibleSize = CGSize(
+            width: canvasView.bounds.width > 0 ? canvasView.bounds.width : 1280,
+            height: canvasView.bounds.height > 0 ? canvasView.bounds.height : 720
+        )
+        let focusedTileZone: UUID? = {
+            guard let activeTileId = canvasView.canvasState.lastActiveTileId else { return nil }
+            return document.zones.first(where: { zone in
+                guard let projectId = zone.projectId,
+                      let controller = registry.controller(for: projectId) else { return false }
+                return controller.canvasView?.canvasState.tiles.contains { $0.id == activeTileId } ?? false
+            })?.zoneId
+        }()
+        let plan = ZoneHydrationOrchestrator.plan(
+            zones: document.zones,
+            viewport: viewport,
+            visibleSize: visibleSize,
+            focusedTileZone: focusedTileZone,
+            maxLiveZones: ZoneHydrationBudgetConfig.maxLiveZones()
+        )
+        for zone in document.zones {
+            guard let projectId = zone.projectId,
+                  let controller = registry.controller(for: projectId),
+                  let plannedTier = plan.tier(for: zone.zoneId) else { continue }
+            guard plannedTier != controller.hydrationTier else { continue }
+            try? controller.setTier(plannedTier, allowDehydratingFocusedZone: false)
+        }
+        // Layer budget eviction over the live set (T07 cross-zone cap).
+        enforceBrowserRuntimeBudget()
+    }
+
     // MARK: - Private
 
     private func restoreFocus(from canvasView: CanvasNSView) {
