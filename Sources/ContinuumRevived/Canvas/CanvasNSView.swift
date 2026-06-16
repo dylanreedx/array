@@ -773,8 +773,7 @@ final class CanvasNSView: NSView {
                 _layoutLayerTile(tile, in: layer)
             }
             if let chrome = layer.chrome {
-                let worldFrame = CanvasEngine.zoneWorldFrame(layer.placement)
-                chrome.frame = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport)
+                chrome.frame = _zoneLayerChromeScreenFrame(layer)
                 chrome.needsDisplay = true
             }
         }
@@ -1047,10 +1046,36 @@ final class CanvasNSView: NSView {
             _layoutLayerTile(tile, in: layer)
         }
         if let chrome = layer.chrome {
-            let worldFrame = CanvasEngine.zoneWorldFrame(placement)
-            chrome.frame = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport)
+            chrome.frame = _zoneLayerChromeScreenFrame(layer)
             chrome.needsDisplay = true
         }
+    }
+
+    /// Shared chrome-layout helper for ZoneLayer chrome: adaptive bounds derived
+    /// from member world frames (mirrors `layoutZoneChromeViews` for T05 layers).
+    private func _zoneLayerChromeScreenFrame(_ layer: ZoneLayer) -> CGRect {
+        let memberFrames = layer.tiles.map { CanvasEngine.worldFrame(tile: $0, in: layer.placement) }
+        var adaptiveBounds = CanvasEngine.zoneBounds(
+            memberFrames: memberFrames,
+            padding: ZoneBoundsConfig.padding(),
+            minSize: ZoneBoundsConfig.emptyMinSize(),
+            headerHeight: ZoneChromeNSView.headerHeight
+        )
+        if memberFrames.isEmpty {
+            let origin = layer.placement.origin
+            adaptiveBounds = TileFrame(
+                x: origin.x + adaptiveBounds.x,
+                y: origin.y + adaptiveBounds.y,
+                width: adaptiveBounds.width,
+                height: adaptiveBounds.height
+            )
+        }
+        return CanvasEngine.tileScreenFrame(adaptiveBounds, viewport: canvasState.viewport)
+    }
+
+    /// Test introspection: screen frame of a ZoneLayer's chrome view.
+    func zoneLayerChromeFrame(for zoneId: UUID) -> CGRect? {
+        zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.chrome?.frame
     }
 
     /// Test introspection: zoneIds of installed layers in z-order (back-to-front).

@@ -58,9 +58,18 @@ final class ZoneRuntimeRegistry {
 
     // MARK: Introspection (for the check / WorkspaceRuntime)
     var liveCount: Int { boxes.count }
+    var liveProjectIds: Set<UUID> { Set(boxes.keys) }
     func refCount(for projectId: UUID) -> Int { boxes[projectId]?.refCount ?? 0 }
     func isLive(_ projectId: UUID) -> Bool { boxes[projectId] != nil }
     func controller(for projectId: UUID) -> ZoneRuntimeController? { boxes[projectId]?.controller }
+
+    /// Register an already-built controller at refCount 1. Used by the boot
+    /// convenience init so the boot controller is ref-counted consistently
+    /// without going through the factory. No-op if projectId is already live.
+    func register(_ controller: ZoneRuntimeController, for projectId: UUID) {
+        guard boxes[projectId] == nil else { return }
+        boxes[projectId] = Box(controller: controller, refCount: 1)
+    }
 
     // MARK: Self-check
     static func runZoneRegistryRefcountSelfCheck() throws -> URL {

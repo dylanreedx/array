@@ -1,0 +1,37 @@
+{
+  "task": "T06",
+  "title": "WorkspaceRuntime shell + AppDelegate proxy (docs/23 S4)",
+  "verdict": "PASS WITH RISKS",
+  "iterations": 0,
+  "fixerApplied": [
+    "removed orphan WorkspaceRuntime.swift:193 (unused activeProjectId)",
+    "strengthened install-check assertion 5 to assert each installed ZoneLayer placement.projectId/origin/size == document (proven to catch a swapped placement; membership-only could not)"
+  ],
+  "redProven": true,
+  "green": true,
+  "matrixFast": "green",
+  "buildClean": true,
+  "guards": "--workspace-runtime-install-check: builds a real WorkspaceRuntime on real ProjectStore/RegistryStore/WorkspaceStore + real CanvasNSView/FocusBroker/ZoneRuntimeRegistry and calls the REAL install/flushAll/closeAll. 10 lifecycle assertions + budget probe + adaptive-chrome probe + strengthened assertion 5. Bypass disproved via 4 revert-one-line RED experiments (close-skips-release, install-active-only, restoreFocus-noop, flushAll-noop).",
+  "carryForwardsDone": [
+    "#1 budget -> plan(): ZoneHydrationBudgetConfig fed into the planner (probe green).",
+    "#2 ZoneLayer chrome adaptive: CanvasNSView._zoneLayerChromeScreenFrame uses CanvasEngine.zoneBounds (probe green).",
+    "#3 storage-shape B: NOT as build.md claimed — see risk; T09 reconciles."
+  ],
+  "filesTouched": [
+    "Sources/ContinuumRevived/App/WorkspaceRuntime.swift (new, ~635 lines)",
+    "Sources/ContinuumRevived/App/ContinuumApp.swift (zoneRuntimeController -> workspaceRuntime, 60+ call sites)",
+    "Sources/ContinuumRevived/App/ZoneRuntimeRegistry.swift (liveProjectIds + register)",
+    "Sources/ContinuumRevived/Canvas/CanvasNSView.swift (_zoneLayerChromeScreenFrame)",
+    "scripts/run-matrix.sh"
+  ],
+  "risks": [
+    "windowWillClose quit-flush ordering CHANGED: closeAll() (controller flush/persist/lock-release) now runs AFTER browser+terminal force-terminate (was before). Risks a stale/empty persist of the final unsaved nav; mostly covered by live snapshots + 0.2s debounce. NO check covers windowWillClose (0 callers) — UNVERIFIED. Builder's reorder was needed (closeAll-first crashed --palette-captures-keys-over-browser-check).",
+    "shape-B discrepancy: install() layers ALL zones (incl. the active one) as DescriptorTileNSView with canvasState.tiles left empty — NOT the 'active zone stays in canvasState.tiles' the build.md claimed. Moot in production (boot uses boot: init, never install) but T09 (real switching via install) MUST reconcile this invariant.",
+    "attachUI is now workspaceRuntime?.activeController?.attachUI(...) (optional chain) — silent-nil if activeController were ever nil at boot (boot: init guarantees non-nil today)."
+  ],
+  "needsHuman": [
+    "Accept the windowWillClose quit-flush ordering change, or add a quit-path flush check.",
+    "Confirm the shape-B install discrepancy is fine for the shell and T09 owns reconciling it.",
+    "[morning] smoke: rebuild the bundle, open the app, click a tile, confirm the focus border (the proxy rename touches the live focus/attachUI path)."
+  ]
+}

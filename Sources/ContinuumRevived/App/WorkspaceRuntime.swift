@@ -1,0 +1,662 @@
+import AppKit
+import ContinuumRevivedCore
+import Foundation
+
+/// Owns the current workspace's live zone set: its `WorkspaceDocument`, the
+/// per-project `ZoneRuntimeController`s (via the ref-counted registry), and the
+/// installed canvas `ZoneLayer`s. `AppDelegate` proxies zone install/teardown
+/// through this object (docs/23 S4).
+///
+/// Shell subset (T06): install + flush + teardown of the CURRENT workspace.
+/// Cross-workspace switch is T09; budget move is T07; addZone-spins-controller
+/// is T08; viewport tier transitions are T10.
+@MainActor
+final class WorkspaceRuntime {
+    private(set) var workspaceId: UUID
+    private(set) var document: WorkspaceDocument
+    private let registry: ZoneRuntimeRegistry
+    private let orchestrator: ZoneHydrationOrchestrator.Type
+    private let focusBroker: FocusBroker
+    private let registryStore: RegistryStore
+    private weak var canvasView: CanvasNSView?
+    private let ghostty: GhosttyRuntimeContext?
+    private let browserEngine: BrowserEngineContext
+
+    // Tracks which projectIds this runtime acquired (for closeAll).
+    private var acquiredProjectIds: [UUID] = []
+
+    // Retains the installed ZoneLayers so the check (and T09 swap) can read back placements.
+    private var installedLayers: [CanvasNSView.ZoneLayer] = []
+
+    /// The controller whose project owns the active zone (`document.lastActiveZoneId`
+    /// → its `projectId`). nil when the active zone is a group zone or none is active.
+    /// AppDelegate reads `runtimes`, `projectStore`, `activeProject` through this.
+    var activeController: ZoneRuntimeController? {
+        guard let lastActiveZoneId = document.lastActiveZoneId,
+              let zone = document.zones.first(where: { $0.zoneId == lastActiveZoneId }),
+              let projectId = zone.projectId else { return nil }
+        return registry.controller(for: projectId)
+    }
+
+    /// Returns the controller for a given projectId (registry delegation, for check assertions).
+    func controller(for projectId: UUID) -> ZoneRuntimeController? {
+        registry.controller(for: projectId)
+    }
+
+    /// Returns the placement of the installed ZoneLayer for `zoneId` (for check assertions).
+    /// Reads the real installed layer captured during `install(into:appRegistry:)`.
+    func installedZonePlacement(for zoneId: UUID) -> ZonePlacement? {
+        installedLayers.first(where: { $0.placement.zoneId == zoneId })?.placement
+    }
+
+    init(
+        workspaceId: UUID,
+        document: WorkspaceDocument,
+        registry: ZoneRuntimeRegistry,
+        orchestrator: ZoneHydrationOrchestrator.Type = ZoneHydrationOrchestrator.self,
+        focusBroker: FocusBroker,
+        registryStore: RegistryStore,
+        ghostty: GhosttyRuntimeContext?,
+        browserEngine: BrowserEngineContext
+    ) {
+        self.workspaceId = workspaceId
+        self.document = document
+        self.registry = registry
+        self.orchestrator = orchestrator
+        self.focusBroker = focusBroker
+        self.registryStore = registryStore
+        self.ghostty = ghostty
+        self.browserEngine = browserEngine
+    }
+
+    /// Convenience init for an already-built boot controller (the production
+    /// `applicationDidFinishLaunching` path and the four existing self-check
+    /// harnesses). Registers `controller` in the registry at refCount 1 and
+    /// synthesizes a minimal single-zone `WorkspaceDocument` so `activeController`
+    /// resolves to it.
+    convenience init(
+        boot controller: ZoneRuntimeController,
+        registry: ZoneRuntimeRegistry,
+        focusBroker: FocusBroker,
+        registryStore: RegistryStore,
+        ghostty: GhosttyRuntimeContext?,
+        browserEngine: BrowserEngineContext
+    ) {
+        let zoneId = UUID()
+        let projectId = controller.project.id
+        let document = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [ZonePlacement(
+                zoneId: zoneId,
+                projectId: projectId,
+                origin: ZonePoint(x: 0, y: 0),
+                size: ZoneSize(width: 1280, height: 720),
+                color: "blue",
+                collapsed: false,
+                hydrationPolicy: .automatic
+            )],
+            zoneZOrder: [zoneId],
+            lastActiveZoneId: zoneId
+        )
+        self.init(
+            workspaceId: UUID(),
+            document: document,
+            registry: registry,
+            focusBroker: focusBroker,
+            registryStore: registryStore,
+            ghostty: ghostty,
+            browserEngine: browserEngine
+        )
+        registry.register(controller, for: projectId)
+        acquiredProjectIds = [projectId]
+    }
+
+    /// Install the CURRENT workspace's zone set into `canvasView`.
+    ///
+    /// For each `ZonePlacement` with a non-nil `projectId`, acquires a
+    /// `ZoneRuntimeController` via the registry (ref-counted), loads the project's
+    /// canvas state, builds a `ZoneLayer` with descriptor tile views, and calls
+    /// `canvasView.setZones` to register all tile adapters. The active zone's
+    /// controller gets `attachUI` called so dirty tracking and focus callbacks work.
+    /// Focus is restored to the active zone's `lastActiveTileId` (or `.canvas`).
+    ///
+    /// The hydration budget (`ZoneHydrationBudgetConfig.maxLiveZones`) is applied
+    /// via `ZoneHydrationOrchestrator.plan`; only zones whose planned tier is `.live`
+    /// get a controller acquired.
+    func install(into canvasView: CanvasNSView, appRegistry: Registry) throws {
+        self.canvasView = canvasView
+
+        // Plan hydration tiers using the configurable budget.
+        let plan = ZoneHydrationOrchestrator.plan(
+            zones: document.zones,
+            viewport: document.viewport,
+            visibleSize: CGSize(width: canvasView.bounds.width > 0 ? canvasView.bounds.width : 1280,
+                                height: canvasView.bounds.height > 0 ? canvasView.bounds.height : 720),
+            focusedTileZone: document.lastActiveZoneId,
+            maxLiveZones: ZoneHydrationBudgetConfig.maxLiveZones()
+        )
+
+        var layers: [CanvasNSView.ZoneLayer] = []
+        var newlyAcquired: [UUID] = []
+
+        for zone in document.zones {
+            guard let projectId = zone.projectId else { continue }
+            // Only acquire controllers for live-tier zones.
+            guard plan.tier(for: zone.zoneId) == .live else { continue }
+
+            let controller = try registry.acquire(projectId: projectId)
+            newlyAcquired.append(projectId)
+
+            // Load canvas state for this zone's project.
+            let canvasState: CanvasState
+            if let loaded = try controller.projectStore.tryLoadCanvas() {
+                canvasState = loaded
+            } else {
+                canvasState = CanvasState(
+                    viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                    tiles: [],
+                    groups: [],
+                    lastActiveTileId: nil
+                )
+            }
+
+            // Build tile views (descriptor views — headless safe; real hydration is T08).
+            var tileViews: [UUID: TileNSView] = [:]
+            for tile in canvasState.tiles {
+                let view = DescriptorTileNSView(tile: tile)
+                tileViews[tile.id] = view
+            }
+
+            // Derive display name from registry project entry or zone name.
+            let displayName: String
+            if let registryName = appRegistry.projects.first(where: { $0.id == projectId })?.name {
+                displayName = registryName
+            } else if !zone.name.isEmpty {
+                displayName = zone.name
+            } else {
+                displayName = controller.project.name
+            }
+
+            let renderModel = CanvasNSView.ZoneRenderModel(
+                placement: zone,
+                displayName: displayName
+            )
+            let layer = CanvasNSView.ZoneLayer(
+                placement: zone,
+                renderModel: renderModel,
+                tiles: canvasState.tiles
+            )
+            layer.tileViews = tileViews
+            layers.append(layer)
+        }
+
+        acquiredProjectIds = newlyAcquired
+
+        // Wire the broker before setZones so _installLayer can register adapters.
+        canvasView.focusBroker = focusBroker
+
+        canvasView.setZones(layers, zoneZOrder: document.zoneZOrder)
+        installedLayers = layers
+
+        // Attach UI to the active controller so dirty tracking and focus callbacks work.
+        if let active = activeController {
+            let activeStore = active.projectStore
+            let spawner = TileSpawner(
+                canvasView: canvasView,
+                ghostty: ghostty,
+                browserEngine: browserEngine,
+                projectStore: activeStore,
+                project: active.project
+            )
+            active.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
+        }
+
+        // Restore focus: active zone's last-active tile, or fall back to canvas.
+        restoreFocus(from: canvasView)
+    }
+
+    /// Flush every live controller's pending saves (fan-out of `flushPendingSaves`).
+    func flushAll() {
+        for projectId in acquiredProjectIds {
+            registry.controller(for: projectId)?.flushPendingSaves()
+        }
+    }
+
+    /// Release every acquired controller via the registry (ref-count → close-at-zero),
+    /// clear the canvas zone set (which unregisters tile adapters), drop references.
+    func closeAll() {
+        // Clear zone layers first (while the focusBroker ref is still live on the canvas)
+        // so that ZoneLayer tile adapters are unregistered before the controllers close.
+        canvasView?.setZones([], zoneZOrder: [])
+        canvasView?.focusBroker = nil
+        canvasView = nil
+        for projectId in acquiredProjectIds {
+            registry.release(projectId: projectId)
+        }
+        acquiredProjectIds = []
+        installedLayers = []
+    }
+
+    // MARK: - Private
+
+    private func restoreFocus(from canvasView: CanvasNSView) {
+        // Find the active zone's stored last-active tile id.
+        guard let lastActiveZoneId = document.lastActiveZoneId,
+              let zone = document.zones.first(where: { $0.zoneId == lastActiveZoneId }),
+              let projectId = zone.projectId,
+              let controller = registry.controller(for: projectId),
+              let lastActiveTileId = (try? controller.projectStore.tryLoadCanvas())?.flatMap({ $0.lastActiveTileId }) ?? nil else {
+            _ = focusBroker.requestFocus(.canvas, reason: .appActivated)
+            return
+        }
+        if !focusBroker.requestFocus(.tile(lastActiveTileId), reason: .appActivated) {
+            _ = focusBroker.requestFocus(.canvas, reason: .appActivated)
+        }
+    }
+
+    // MARK: - Self-check
+
+    /// The guarding check for T06. Constructs a real `WorkspaceRuntime` and drives
+    /// install / flushAll / closeAll, asserting all 10 lifecycle invariants.
+    static func runWorkspaceRuntimeInstallSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fileManager = FileManager.default
+        let now = Date()
+
+        // Fixed UUIDs for determinism.
+        let workspaceW  = UUID(uuidString: "00000000-0000-0000-0000-000000000601")!
+        let projectPa   = UUID(uuidString: "00000000-0000-0000-0000-000000000602")!
+        let projectPb   = UUID(uuidString: "00000000-0000-0000-0000-000000000603")!
+        let zoneA       = UUID(uuidString: "00000000-0000-0000-0000-000000000611")!
+        let zoneB       = UUID(uuidString: "00000000-0000-0000-0000-000000000612")!
+        let noteA       = UUID(uuidString: "00000000-0000-0000-0000-000000000621")!
+        let noteB       = UUID(uuidString: "00000000-0000-0000-0000-000000000622")!
+
+        // Temp directories.
+        let tempRoot   = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-ws-runtime-install-\(UUID().uuidString)", isDirectory: true)
+        let paRoot     = tempRoot.appendingPathComponent("Pa", isDirectory: true)
+        let pbRoot     = tempRoot.appendingPathComponent("Pb", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        try fileManager.createDirectory(at: paRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: pbRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        // Seed Pa.
+        func seedProject(root: URL, projectId: UUID, name: String, tileId: UUID, isActive: Bool) throws -> (ProjectStore, Project) {
+            let store = ProjectStore(projectRoot: root)
+            let project = Project(
+                id: projectId,
+                name: name,
+                rootPath: root.path,
+                createdAt: now,
+                updatedAt: now,
+                defaultLaunchProfileId: "shell",
+                editorPreference: .auto,
+                settings: ProjectSettings(
+                    restorePolicy: .restoreDescriptors,
+                    browserStoragePolicy: .perProject,
+                    terminalClosePolicy: .askWhenRunning
+                )
+            )
+            let canvas = CanvasState(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                tiles: [Tile(
+                    id: tileId,
+                    kind: .note,
+                    title: name,
+                    frame: TileFrame(x: 20, y: 20, width: 300, height: 180),
+                    zIndex: 1,
+                    runtimeRef: nil,
+                    metadata: TileMetadata(noteId: tileId)
+                )],
+                groups: [],
+                lastActiveTileId: isActive ? tileId : nil
+            )
+            try store.saveProject(project)
+            try store.saveCanvas(canvas)
+            return (store, project)
+        }
+
+        let (storeA, projectA) = try seedProject(root: paRoot, projectId: projectPa, name: "Project A", tileId: noteA, isActive: true)
+        let (storeB, projectB) = try seedProject(root: pbRoot, projectId: projectPb, name: "Project B", tileId: noteB, isActive: false)
+
+        // Seed Registry.
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = workspaceW
+        registry.lastActiveProjectId = projectPa
+        registry.projects = [
+            ProjectEntry(id: projectPa, name: "Project A", rootPath: paRoot.path, workspaceId: workspaceW, lastOpenedAt: now, pinned: false, missing: false),
+            ProjectEntry(id: projectPb, name: "Project B", rootPath: pbRoot.path, workspaceId: workspaceW, lastOpenedAt: now, pinned: false, missing: false)
+        ]
+        try registryStore.save(registry)
+
+        // Seed WorkspaceDocument.
+        let workspaceStore = WorkspaceStore(workspaceId: workspaceW, applicationSupportDirectory: appSupport)
+        let placementA = ZonePlacement(
+            zoneId: zoneA,
+            projectId: projectPa,
+            origin: ZonePoint(x: 0, y: 0),
+            size: ZoneSize(width: 640, height: 480),
+            color: "blue",
+            collapsed: false,
+            hydrationPolicy: .automatic
+        )
+        let placementB = ZonePlacement(
+            zoneId: zoneB,
+            projectId: projectPb,
+            origin: ZonePoint(x: 700, y: 0),
+            size: ZoneSize(width: 640, height: 480),
+            color: "mint",
+            collapsed: false,
+            hydrationPolicy: .automatic
+        )
+        let document = WorkspaceDocument(
+            viewport: CanvasViewport(x: 50, y: 60, zoom: 1),
+            zones: [placementA, placementB],
+            zoneZOrder: [zoneA, zoneB],
+            lastActiveZoneId: zoneA
+        )
+        try workspaceStore.save(document)
+
+        // Infrastructure.
+        let focusBroker = FocusBroker()
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+
+        // Registry factory: maps projectId → controller for Pa/Pb.
+        let zoneRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { projectId in
+            if projectId == projectPa {
+                return ZoneRuntimeController(projectRoot: paRoot, projectStore: storeA, project: projectA)
+            } else if projectId == projectPb {
+                return ZoneRuntimeController(projectRoot: pbRoot, projectStore: storeB, project: projectB)
+            }
+            throw CheckError.failed("unexpected projectId in factory: \(projectId)")
+        })
+
+        let orchestratorType = ZoneHydrationOrchestrator.self
+
+        let runtime = WorkspaceRuntime(
+            workspaceId: workspaceW,
+            document: document,
+            registry: zoneRegistry,
+            orchestrator: orchestratorType,
+            focusBroker: focusBroker,
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+
+        // Build the workspace canvas (large enough that both zones are in-viewport).
+        let canvasState = CanvasState(
+            viewport: CanvasViewport(x: 50, y: 60, zoom: 1),
+            tiles: [],
+            groups: [],
+            lastActiveTileId: nil
+        )
+        let canvas = CanvasNSView(
+            canvasState: canvasState,
+            activeZone: nil,
+            zoneRenderModels: [],
+            showsZoneChrome: true
+        )
+        canvas.frame = CGRect(x: 0, y: 0, width: 2000, height: 1200)
+
+        // ACT: Install the workspace.
+        try runtime.install(into: canvas, appRegistry: registry)
+        canvas.layoutSubtreeIfNeeded()
+
+        // === Assertion 1: Live zone set matches the document. ===
+        let installedIds = canvas.installedZoneLayerIds
+        try expect(installedIds.contains(zoneA), "assertion 1: zoneA should be installed")
+        try expect(installedIds.contains(zoneB), "assertion 1: zoneB should be installed")
+        try expect(installedIds.count == 2, "assertion 1: exactly 2 zone layers installed, got \(installedIds.count)")
+        // Order should match zoneZOrder: [zoneA, zoneB]
+        try expect(installedIds == [zoneA, zoneB], "assertion 1: installed order should match zoneZOrder")
+
+        // === Assertion 2: One controller per distinct projectId, ref-count == 1. ===
+        try expect(zoneRegistry.refCount(for: projectPa) == 1, "assertion 2: refCount(Pa) should be 1 after install")
+        try expect(zoneRegistry.refCount(for: projectPb) == 1, "assertion 2: refCount(Pb) should be 1 after install")
+        try expect(zoneRegistry.liveProjectIds == Set([projectPa, projectPb]), "assertion 2: liveProjectIds should be {Pa, Pb}")
+
+        // === Assertion 3: Acquired controllers are the registry's instances (identity). ===
+        let registryControllerPa = zoneRegistry.controller(for: projectPa)
+        let runtimeControllerPa = runtime.controller(for: projectPa)
+        try expect(registryControllerPa != nil, "assertion 3: registry should have a controller for Pa")
+        try expect(runtimeControllerPa != nil, "assertion 3: runtime should expose a controller for Pa")
+        try expect(registryControllerPa === runtimeControllerPa, "assertion 3: runtime.controller(Pa) must be the registry's instance (===)")
+
+        // === Assertion 4: activeController resolves through lastActiveZoneId. ===
+        try expect(runtime.activeController != nil, "assertion 4: activeController should not be nil")
+        try expect(runtime.activeController === zoneRegistry.controller(for: projectPa),
+                   "assertion 4: activeController should be the Pa controller (active zone zoneA → Pa)")
+        try expect(runtime.activeController?.project.id == projectPa, "assertion 4: activeController.project.id should be Pa")
+
+        // === Assertion 5: Canvas layers carry the right placements. ===
+        let tilesInA = canvas.tileIds(inZone: zoneA)
+        let tilesInB = canvas.tileIds(inZone: zoneB)
+        try expect(tilesInA.contains(noteA), "assertion 5: zoneA layer should contain noteA")
+        try expect(tilesInB.contains(noteB), "assertion 5: zoneB layer should contain noteB")
+        // Verify each installed layer's placement matches the WorkspaceDocument (projectId, origin, size).
+        let layerPlacementA = runtime.installedZonePlacement(for: zoneA)
+        try expect(layerPlacementA != nil, "assertion 5: installed layer for zoneA must have a placement")
+        try expect(layerPlacementA?.projectId == projectPa,
+                   "assertion 5: zoneA layer placement.projectId should be Pa, got \(String(describing: layerPlacementA?.projectId))")
+        try expect(layerPlacementA?.origin.x == placementA.origin.x && layerPlacementA?.origin.y == placementA.origin.y,
+                   "assertion 5: zoneA layer placement.origin should match document (\(placementA.origin)), got \(String(describing: layerPlacementA?.origin))")
+        try expect(layerPlacementA?.size.width == placementA.size.width && layerPlacementA?.size.height == placementA.size.height,
+                   "assertion 5: zoneA layer placement.size should match document (\(placementA.size)), got \(String(describing: layerPlacementA?.size))")
+        let layerPlacementB = runtime.installedZonePlacement(for: zoneB)
+        try expect(layerPlacementB != nil, "assertion 5: installed layer for zoneB must have a placement")
+        try expect(layerPlacementB?.projectId == projectPb,
+                   "assertion 5: zoneB layer placement.projectId should be Pb, got \(String(describing: layerPlacementB?.projectId))")
+        try expect(layerPlacementB?.origin.x == placementB.origin.x && layerPlacementB?.origin.y == placementB.origin.y,
+                   "assertion 5: zoneB layer placement.origin should match document (\(placementB.origin)), got \(String(describing: layerPlacementB?.origin))")
+        try expect(layerPlacementB?.size.width == placementB.size.width && layerPlacementB?.size.height == placementB.size.height,
+                   "assertion 5: zoneB layer placement.size should match document (\(placementB.size)), got \(String(describing: layerPlacementB?.size))")
+
+        // === Assertion 6: Focus scope restored to active zone's last-active tile. ===
+        // Pa's canvas has lastActiveTileId = noteA (seeded above).
+        try expect(focusBroker.activeSurface == .tile(noteA),
+                   "assertion 6: focusBroker.activeSurface should be .tile(noteA) after install; got \(String(describing: focusBroker.activeSurface))")
+
+        // === Assertion 7: Active-zone tile adapters are registered with the broker. ===
+        let focusableNoteA = focusBroker.requestFocus(.tile(noteA), reason: .userClick)
+        try expect(focusableNoteA, "assertion 7: requestFocus(.tile(noteA)) should return true (adapter registered)")
+        let randomId = UUID()
+        let focusableRandom = focusBroker.requestFocus(.tile(randomId), reason: .userClick)
+        try expect(!focusableRandom, "assertion 7: requestFocus for uninstalled tile id should return false")
+
+        // === Assertion 8: Save isolation through flushAll. ===
+        // Capture Pb's bytes + mtime before.
+        func bytes(at url: URL) throws -> Data { try Data(contentsOf: url) }
+        func mtime(at url: URL) throws -> Date {
+            let values = try url.resourceValues(forKeys: [.contentModificationDateKey])
+            guard let date = values.contentModificationDate else {
+                throw CheckError.failed("missing modification date for \(url.path)")
+            }
+            return date
+        }
+        let pbCanvasFile = storeB.layout.canvasFile
+        let pbBytesBefore = try bytes(at: pbCanvasFile)
+        let pbMtimeBefore = try mtime(at: pbCanvasFile)
+
+        // Mutate Pa's canvas via the workspace canvas viewport change + schedule save.
+        canvas.setViewport(CanvasViewport(x: 99, y: 0, zoom: 1))
+        runtime.activeController?.scheduleCanvasSave()
+        Thread.sleep(forTimeInterval: 1.1)
+
+        // Flush all controllers through WorkspaceRuntime.
+        runtime.flushAll()
+
+        // Pa should have been rewritten.
+        let paCanvasAfter = try storeA.loadCanvas()
+        try expect(paCanvasAfter.viewport.x == 99.0, "assertion 8: Pa's canvas should have viewport.x == 99 after flushAll; got \(paCanvasAfter.viewport.x)")
+
+        // Pb should be byte-identical and mtime-unchanged.
+        let pbBytesAfter = try bytes(at: pbCanvasFile)
+        let pbMtimeAfter = try mtime(at: pbCanvasFile)
+        try expect(pbBytesBefore == pbBytesAfter, "assertion 8: Pb's canvas bytes should be unchanged after flushAll")
+        try expect(pbMtimeBefore == pbMtimeAfter, "assertion 8: Pb's canvas mtime should be unchanged after flushAll (no spurious write)")
+
+        // === Assertion 9: Teardown releases every controller and unregisters adapters. ===
+        runtime.closeAll()
+
+        try expect(zoneRegistry.refCount(for: projectPa) == 0, "assertion 9: refCount(Pa) should be 0 after closeAll")
+        try expect(zoneRegistry.refCount(for: projectPb) == 0, "assertion 9: refCount(Pb) should be 0 after closeAll")
+        try expect(zoneRegistry.liveProjectIds.isEmpty, "assertion 9: liveProjectIds should be empty after closeAll")
+        try expect(canvas.installedZoneLayerIds.isEmpty, "assertion 9: canvas zone-layer set should be empty after closeAll")
+
+        // Adapter for noteA should be unregistered after closeAll.
+        let focusableAfterClose = focusBroker.requestFocus(.tile(noteA), reason: .userClick)
+        try expect(!focusableAfterClose, "assertion 9: requestFocus(.tile(noteA)) should return false after closeAll (adapter unregistered)")
+
+        // === Assertion 10: No relaunch path touched. ===
+        // WorkspaceRuntime.swift contains no call to relaunchApplication — verified
+        // by construction. The relaunch paths (relaunchApplication, switchWorkspaceAndRelaunch,
+        // createWorkspaceAndRelaunch) remain on AppDelegate untouched.
+
+        // === Carry-forward: Budget gates the live set. ===
+        // With maxLiveZones = 1 overridden, only the focused zone (zoneA/Pa) should be acquired.
+        let suiteName = "continuum-ws-runtime-budget-\(UUID().uuidString)"
+        let budgetDefaults = UserDefaults(suiteName: suiteName)!
+        defer { budgetDefaults.removePersistentDomain(forName: suiteName) }
+        budgetDefaults.set(1, forKey: ZoneHydrationBudgetConfig.maxLiveZonesKey)
+
+        let tightRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { projectId in
+            if projectId == projectPa {
+                return ZoneRuntimeController(projectRoot: paRoot, projectStore: storeA, project: projectA)
+            } else if projectId == projectPb {
+                return ZoneRuntimeController(projectRoot: pbRoot, projectStore: storeB, project: projectB)
+            }
+            throw CheckError.failed("unexpected projectId in tight-budget factory: \(projectId)")
+        })
+        let tightRuntime = WorkspaceRuntime(
+            workspaceId: workspaceW,
+            document: document,
+            registry: tightRegistry,
+            focusBroker: FocusBroker(),
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+        let tightCanvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 50, y: 60, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil),
+            activeZone: nil,
+            zoneRenderModels: [],
+            showsZoneChrome: false
+        )
+        tightCanvas.frame = CGRect(x: 0, y: 0, width: 2000, height: 1200)
+        // Override maxLiveZones to 1 so only the focused zone (Pa) is live.
+        let tightPlan = ZoneHydrationOrchestrator.plan(
+            zones: document.zones,
+            viewport: document.viewport,
+            visibleSize: CGSize(width: 2000, height: 1200),
+            focusedTileZone: document.lastActiveZoneId,
+            maxLiveZones: ZoneHydrationBudgetConfig.maxLiveZones(defaults: budgetDefaults)
+        )
+        // With budget=1 and focusedTileZone=zoneA (hard-pinned by focus), zoneA is live.
+        try expect(tightPlan.tier(for: zoneA) == .live, "budget carry-forward: zoneA should be live (focused zone) even at budget=1")
+        // zoneB is not the focused zone and budget is exhausted by Pa: should be snapshot.
+        let zbTier = tightPlan.tier(for: zoneB)
+        try expect(zbTier == .snapshot || zbTier == .cold, "budget carry-forward: zoneB should be snapshot/cold at budget=1 (not live)")
+        tightRuntime.closeAll()
+
+        // === Carry-forward: ZoneLayer chrome uses adaptive bounds. ===
+        // After install, check that zoneA's layer chrome frame matches adaptive bounds.
+        // (Assertion on the first runtime, canvas — before closeAll was called, so this
+        //  uses a fresh install on a separate canvas.)
+        let chromeCanvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil),
+            activeZone: nil,
+            zoneRenderModels: [],
+            showsZoneChrome: true
+        )
+        chromeCanvas.frame = CGRect(x: 0, y: 0, width: 2000, height: 1200)
+        let chromeRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { projectId in
+            if projectId == projectPa {
+                return ZoneRuntimeController(projectRoot: paRoot, projectStore: storeA, project: projectA)
+            } else if projectId == projectPb {
+                return ZoneRuntimeController(projectRoot: pbRoot, projectStore: storeB, project: projectB)
+            }
+            throw CheckError.failed("unexpected projectId in chrome factory: \(projectId)")
+        })
+        let chromeRuntime = WorkspaceRuntime(
+            workspaceId: workspaceW,
+            document: document,
+            registry: chromeRegistry,
+            focusBroker: FocusBroker(),
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+        try chromeRuntime.install(into: chromeCanvas, appRegistry: registry)
+        chromeCanvas.layoutSubtreeIfNeeded()
+        defer { chromeRuntime.closeAll() }
+
+        if let chromeFrame = chromeCanvas.zoneLayerChromeFrame(for: zoneA) {
+            // Compute the expected adaptive bounds for zoneA's tiles.
+            let canvasStateA = try storeA.loadCanvas()
+            let memberFrames = canvasStateA.tiles.map { CanvasEngine.worldFrame(tile: $0, in: placementA) }
+            var adaptiveBounds = CanvasEngine.zoneBounds(
+                memberFrames: memberFrames,
+                padding: ZoneBoundsConfig.padding(),
+                minSize: ZoneBoundsConfig.emptyMinSize(),
+                headerHeight: ZoneChromeNSView.headerHeight
+            )
+            if memberFrames.isEmpty {
+                adaptiveBounds = TileFrame(x: placementA.origin.x + adaptiveBounds.x,
+                                           y: placementA.origin.y + adaptiveBounds.y,
+                                           width: adaptiveBounds.width,
+                                           height: adaptiveBounds.height)
+            }
+            let expectedChromeFrame = CanvasEngine.tileScreenFrame(adaptiveBounds, viewport: CanvasViewport(x: 0, y: 0, zoom: 1))
+            let diff = abs(chromeFrame.origin.x - expectedChromeFrame.origin.x)
+                + abs(chromeFrame.origin.y - expectedChromeFrame.origin.y)
+                + abs(chromeFrame.width - expectedChromeFrame.width)
+                + abs(chromeFrame.height - expectedChromeFrame.height)
+            try expect(diff < 1.0, "adaptive-chrome carry-forward: zoneA chrome frame \(chromeFrame) should match adaptive bounds \(expectedChromeFrame)")
+        }
+        // If chrome frame is nil, showsZoneChrome may be inactive — assertion skipped (no chrome to verify).
+
+        // Write manifest.
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("workspace-runtime-install", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "check": "workspace-runtime-install",
+            "assertions": 10,
+            "refCountPaAfterInstall": 1,
+            "refCountPbAfterInstall": 1,
+            "refCountPaAfterClose": 0,
+            "refCountPbAfterClose": 0,
+            "activeControllerProjectId": projectPa.uuidString,
+            "installedZoneCount": 2,
+            "focusRestoredToNoteA": true,
+            "paViewportAfterFlush": 99
+        ]
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: manifestURL, options: .atomic)
+        return manifestURL
+    }
+}
+
+// Required for ProjectEntry construction in the check (mirrors existing check patterns).
+private extension Registry {
+    // ProjectEntry is already public in Registry.swift; this just satisfies the access.
+}

@@ -14,7 +14,7 @@ Legend: ⬜ todo · ✍️ spec-written · 🔨 building · 🔍 review · ✅ d
 | T03 | ZoneHydrationOrchestrator (S1) | overnight [pure] | — | ✅ | 0b39c8c | built+reviewed PASS (0 iters); planner wiring deferred→T06/T10 |
 | T04 | ZoneRuntimeRegistry ref-counted (S2) | overnight [pure→app] | — | ✅ | 974c2fa | built, reviewed PASS-WITH-RISKS (0 iters); closeOnZero design knob flagged |
 | T05 | Mutable canvas / ZoneLayer (S3) | overnight [appkit-chk] | T01 | ✅ | 70a77e1 | built PASS-WITH-RISKS; storage-shape B + morning visual gate flagged |
-| T06 | WorkspaceRuntime shell + proxy (S4) | overnight [appkit-chk] | T03,T04,T05 | ✍️ | — | spec written; ⚠CARRY-FWD: wire T11 adaptive bounds into ZoneLayer chrome (+guard) & feed T03 budget into plan() |
+| T06 | WorkspaceRuntime shell + proxy (S4) | overnight [appkit-chk] | T03,T04,T05 | ✅ | (T06) | built PASS-WITH-RISKS; 3 carry-fwds done (budget+chrome probed; shape-B→T09); windowWillClose-order/attachUI risks→🔴 |
 | T07 | BrowserRuntimeBudget union (S5) | overnight | T06 | ✍️ | — | spec reviewed+fixed |
 | T08 | addZone + ambient controller (S6) | overnight [appkit-chk] | T06,T02 | ✍️ | — | spec written (review folds into build) |
 | T09 | switchWorkspace in-process (S7) ⚠ | overnight [appkit-chk] | T06 | ✍️ | — | spec written (exemplar) |
@@ -23,7 +23,7 @@ Legend: ⬜ todo · ✍️ spec-written · 🔨 building · 🔍 review · ✅ d
 | T12 | Bulletproof restore (atomic, crash-safe) | overnight | T01,T02 | ✍️ | — | spec written (review folds into build) |
 | T13 | Live-session resume (terminal/browser) | overnight | T12 | ✍️ | — | spec written (review folds into build) |
 | T14 | Profiles/snapshots (store + apply-modes) | overnight | T12 | ✍️ | — | spec written (review folds into build) |
-| T15 | Sidebar view-model (pure tree) | overnight [pure] | T01 | ✅ | (T15) | built PASS-WITH-RISKS (0 iters); ?? "" vs "Project" fallback to ratify before T16 |
+| T15 | Sidebar view-model (pure tree) | overnight [pure] | T01 | ✅ | b3728fc | built PASS-WITH-RISKS (0 iters); ?? "" vs "Project" fallback to ratify before T16 |
 | T16 | Sidebar NSOutlineView | morning [appkit] | T15,T09 | ✍️ | — | spec written (review folds into build) |
 | T17 | ⌘K zone rows (jump/create) | overnight | T01 | ✍️ | — | spec written (review folds into build) |
 | T18 | Per-zone nav keybind + leader zone-jump | overnight | T01 | ✍️ | — | spec written (review folds into build) |

@@ -597,6 +597,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-runtime-install-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try WorkspaceRuntime.runWorkspaceRuntimeInstallSelfCheck()
+                print("ContinuumRevivedWorkspaceRuntimeInstallChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-lru-budget-check") {
             do {
                 _ = NSApplication.shared
@@ -995,29 +1007,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var ghostty: GhosttyRuntimeContext?
     private var browserEngine: BrowserEngineContext?
     private var runtimes: [GhosttyTerminalRuntime] {
-        get { zoneRuntimeController?.runtimes ?? [] }
-        set { zoneRuntimeController?.runtimes = newValue }
+        get { workspaceRuntime?.activeController?.runtimes ?? [] }
+        set { workspaceRuntime?.activeController?.runtimes = newValue }
     }
     private var browserRuntimes: [WKWebViewBrowserRuntime] {
-        get { zoneRuntimeController?.browserRuntimes ?? [] }
-        set { zoneRuntimeController?.browserRuntimes = newValue }
+        get { workspaceRuntime?.activeController?.browserRuntimes ?? [] }
+        set { workspaceRuntime?.activeController?.browserRuntimes = newValue }
     }
     private var noteViews: [UUID: NoteTileNSView] {
-        get { zoneRuntimeController?.noteViews ?? [:] }
-        set { zoneRuntimeController?.noteViews = newValue }
+        get { workspaceRuntime?.activeController?.noteViews ?? [:] }
+        set { workspaceRuntime?.activeController?.noteViews = newValue }
     }
     private var fileTreeViews: [UUID: FileTreeTileNSView] {
-        get { zoneRuntimeController?.fileTreeViews ?? [:] }
-        set { zoneRuntimeController?.fileTreeViews = newValue }
+        get { workspaceRuntime?.activeController?.fileTreeViews ?? [:] }
+        set { workspaceRuntime?.activeController?.fileTreeViews = newValue }
     }
     private var canvasView: CanvasNSView?
     private var navSelectedZoneId: UUID?
     private var focusModeSession: FocusModeSession?
     private let smokeTestEnabled = ProcessInfo.processInfo.environment["CONTINUUM_SMOKE_TEST"] == "1"
     private var smokeTestExitCode: Int32?
-    private var zoneRuntimeController: ZoneRuntimeController?
-    private var projectStore: ProjectStore? { zoneRuntimeController?.projectStore }
-    private var activeProject: Project? { zoneRuntimeController?.project }
+    private var workspaceRuntime: WorkspaceRuntime?
+    private var projectStore: ProjectStore? { workspaceRuntime?.activeController?.projectStore }
+    private var activeProject: Project? { workspaceRuntime?.activeController?.project }
     private var registryStore: RegistryStore?
     private var tileSpawner: TileSpawner?
     private var profilePalette: LaunchProfilePalette?
@@ -1075,12 +1087,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let registryStore = RegistryStore(applicationSupportDirectory: appSupportDir)
             let registry = try registryStore.loadOrEmpty()
             let projectRoot = try Self.resolveProjectRoot(smokeTest: smokeTestEnabled, registry: registry)
-            let zoneRuntimeController = try presentLockContentionUXIfNeeded(projectRoot: projectRoot, registry: registry)
-            self.zoneRuntimeController = zoneRuntimeController
+            let bootController = try presentLockContentionUXIfNeeded(projectRoot: projectRoot, registry: registry)
             self.registryStore = registryStore
 
-            let projectStore = zoneRuntimeController.projectStore
-            let project = zoneRuntimeController.project
+            let projectStore = bootController.projectStore
+            let project = bootController.project
             try Self.recordProjectInRegistry(project: project, in: registryStore, preferredWorkspaceId: ProjectLaunchCoordinator.consumePendingWorkspaceSelection())
             let updatedRegistry = try registryStore.loadOrEmpty()
             let zoneRenderModels = try Self.loadActiveZoneRenderModels(from: registryStore)
@@ -1132,6 +1143,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.browserEngine = browserEngine
             self.canvasView = canvasView
 
+            // Wrap the boot controller in WorkspaceRuntime (T06).
+            let bootRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { _ in
+                throw NSError(domain: "WorkspaceRuntime", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "unexpected acquire on boot registry — T08 wires this"])
+            })
+            self.workspaceRuntime = WorkspaceRuntime(
+                boot: bootController,
+                registry: bootRegistry,
+                focusBroker: focusBroker,
+                registryStore: registryStore,
+                ghostty: ghostty,
+                browserEngine: browserEngine
+            )
+
             let spawner = TileSpawner(
                 canvasView: canvasView,
                 ghostty: ghostty,
@@ -1171,12 +1196,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self?.deleteBrowserProfile(tileId: tileId, profileId: profileId)
             }
             self.tileSpawner = spawner
-            zoneRuntimeController.onBrowserRuntimeHydrated = { [weak self] runtime in
+            workspaceRuntime?.activeController?.onBrowserRuntimeHydrated = { [weak self] runtime in
                 self?.wireContentProcessTerminationHandler(runtime)
                 self?.registerBrowserRuntimeForBudget(runtime)
                 self?.enforceBrowserRuntimeBudget()
             }
-            zoneRuntimeController.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
+            workspaceRuntime?.activeController?.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
             let recentProjectActions: [CanvasEmptyStateActions.RecentProject] = ProjectPickerModel.makeRows(registry: registry)
                 .filter { $0.isSelectable && $0.id != project.id }
                 .prefix(3)
@@ -1747,7 +1772,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func dispatchAgent(for row: LinearTicketQueueRow) {
         guard let spawner = tileSpawner else { return }
-        let activeProject = zoneRuntimeController?.project
+        let activeProject = workspaceRuntime?.activeController?.project
         let prompt = AgentKickoffPrompt.make(row: row, repoPath: activeProject?.rootPath ?? FileManager.default.currentDirectoryPath, projectName: activeProject?.name)
         switch spawner.spawnTerminal(profileId: "claude") {
         case let .spawned(runtime):
@@ -2583,7 +2608,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func openProfilePalette(initialQuery: String = "") {
-        guard let zoneRuntimeController,
+        guard let activeController = workspaceRuntime?.activeController,
               let host = window else { return }
         let palette = profilePalette ?? makeProfilePalette()
         let wasVisible = palette.isVisible
@@ -2591,7 +2616,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if !wasVisible {
             focusBroker.openModal(.palette)
         }
-        let rows = zoneRuntimeController.paletteRows(registryStore: registryStore)
+        let rows = activeController.paletteRows(registryStore: registryStore)
         let jumpTiles = (canvasView?.canvasState.tiles ?? []).map { tile in
             JumpTileRow(id: tile.id, title: tile.title.isEmpty ? "Untitled Tile" : tile.title)
         }
@@ -2599,7 +2624,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func harnessRolesForActiveProject() -> [HarnessRole] {
-        guard let rootPath = zoneRuntimeController?.project.rootPath else { return [] }
+        guard let rootPath = workspaceRuntime?.activeController?.project.rootPath else { return [] }
         let agentsDirectory = URL(fileURLWithPath: rootPath, isDirectory: true).appendingPathComponent(".pi/agents", isDirectory: true)
         let paths = ((try? FileManager.default.contentsOfDirectory(at: agentsDirectory, includingPropertiesForKeys: nil)) ?? [])
             .map(\.path)
@@ -2924,7 +2949,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     lastActiveZoneId: nil
                 )
             )
-            zoneRuntimeController?.flushPendingSaves()
+            workspaceRuntime?.flushAll()
             try registryStore.save(registry)
         } catch {
             fputs("Create Workspace failed: \(error)\n", stderr)
@@ -2952,7 +2977,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if FileManager.default.fileExists(atPath: store.layout.workspaceDirectory.path) {
                 try store.deleteDocument()
             }
-            zoneRuntimeController?.flushPendingSaves()
+            workspaceRuntime?.flushAll()
             try registryStore.save(registry)
             if let nextWorkspaceId = registry.lastActiveWorkspaceId {
                 switchWorkspaceAndRelaunch(workspaceId: nextWorkspaceId)
@@ -2973,7 +2998,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             registry.lastActiveWorkspaceId = workspaceId
             registry.lastActiveProjectId = projectEntry.id
-            zoneRuntimeController?.flushPendingSaves()
+            workspaceRuntime?.flushAll()
             try registryStore.save(registry)
             relaunchApplication(projectRoot: URL(fileURLWithPath: projectEntry.rootPath))
         } catch {
@@ -3013,7 +3038,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if let projectIndex = registry.projects.firstIndex(where: { $0.id == projectId }) {
                 registry.projects[projectIndex].workspaceId = workspaceId
             }
-            zoneRuntimeController?.flushPendingSaves()
+            workspaceRuntime?.flushAll()
             let workspaceSaveController = WorkspaceDocumentSaveController(store: workspaceStore)
             workspaceSaveController.scheduleZoneLayoutSave(document)
             try workspaceSaveController.flushPendingSave()
@@ -3037,7 +3062,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 fputs("Switch Project failed: unknown project \(projectId)\n", stderr)
                 return
             }
-            zoneRuntimeController?.flushPendingSaves()
+            workspaceRuntime?.flushAll()
             try registryStore.save(registry)
             relaunchApplication(projectRoot: projectRoot)
         } catch {
@@ -3178,8 +3203,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func windowWillClose(_ notification: Notification) {
-        zoneRuntimeController?.close()
-
         if let monitor = hotkeyMonitor {
             NSEvent.removeMonitor(monitor)
             hotkeyMonitor = nil
@@ -3216,6 +3239,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         for runtime in runtimes {
             runtime.terminate(policy: .force)
         }
+        // Release zone layers and controllers after terminating runtimes so that
+        // the runtimes/browserRuntimes computed properties (which proxy through
+        // workspaceRuntime?.activeController) are still readable during the loops above.
+        workspaceRuntime?.closeAll()
         canvasView = nil
         runtimes.removeAll()
         noteViews.removeAll()
@@ -3225,7 +3252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         ghostty = nil
         browserEngine?.shutdown()
         browserEngine = nil
-        zoneRuntimeController = nil
+        workspaceRuntime = nil
         if let exitCode = smokeTestExitCode {
             Foundation.exit(exitCode)
         }
@@ -3235,41 +3262,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     // MARK: - CanvasNSViewDelegate
 
     func canvasDidChange(_ canvas: CanvasNSView) {
-        zoneRuntimeController?.scheduleCanvasSave()
+        workspaceRuntime?.activeController?.scheduleCanvasSave()
     }
 
     private func scheduleBrowserSave() {
-        zoneRuntimeController?.scheduleBrowserSave()
+        workspaceRuntime?.activeController?.scheduleBrowserSave()
     }
 
     private func scheduleNoteSave() {
-        zoneRuntimeController?.scheduleNoteSave()
+        workspaceRuntime?.activeController?.scheduleNoteSave()
     }
 
     private func scheduleFileTreeSave() {
-        zoneRuntimeController?.scheduleFileTreeSave()
+        workspaceRuntime?.activeController?.scheduleFileTreeSave()
     }
 
     private func flushCanvasSave() {
-        zoneRuntimeController?.flushCanvasSave()
+        workspaceRuntime?.activeController?.flushCanvasSave()
     }
 
     private func flushBrowserSave() {
-        zoneRuntimeController?.flushBrowserSave()
+        workspaceRuntime?.activeController?.flushBrowserSave()
     }
 
     private func flushNoteSave() {
-        zoneRuntimeController?.flushNoteSave()
+        workspaceRuntime?.activeController?.flushNoteSave()
     }
 
     private func flushFileTreeSave() {
-        zoneRuntimeController?.flushFileTreeSave()
+        workspaceRuntime?.activeController?.flushFileTreeSave()
     }
 
     // MARK: - Persistence helpers
 
     private func activeZoneProjectEntry() -> ProjectEntry? {
-        guard let projectId = canvasView?.activeZone?.projectId ?? zoneRuntimeController?.project.id,
+        guard let projectId = canvasView?.activeZone?.projectId ?? workspaceRuntime?.activeController?.project.id,
               let registry = try? registryStore?.loadOrEmpty()
         else { return nil }
         return registry.projects.first(where: { $0.id == projectId })
@@ -3655,7 +3682,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         productionCanvas.tileView(for: needsTileId)?.agentStatus = AgentStatus.needsAttention
         let delegate = AppDelegate()
         delegate.canvasView = productionCanvas
-        delegate.zoneRuntimeController = ZoneRuntimeController(
+        let agentBrowserEngine = BrowserEngineContext()
+        let agentBootController = ZoneRuntimeController(
             projectRoot: projectRoot,
             projectStore: store,
             project: Project(
@@ -3668,6 +3696,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 editorPreference: .auto,
                 settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
             )
+        )
+        let agentBootRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { _ in
+            throw NSError(domain: "WorkspaceRuntime", code: 1, userInfo: nil)
+        })
+        delegate.workspaceRuntime = WorkspaceRuntime(
+            boot: agentBootController,
+            registry: agentBootRegistry,
+            focusBroker: delegate.focusBroker,
+            registryStore: RegistryStore(applicationSupportDirectory: appSupport),
+            ghostty: nil,
+            browserEngine: agentBrowserEngine
         )
         delegate.refreshAgentAttentionSurface(notify: false)
         try expect(NSApplication.shared.dockTile.badgeLabel == "1", "production refresh should count current needs-attention agent tiles")
@@ -5672,7 +5711,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let delegate = AppDelegate()
         delegate.canvasView = canvas
         delegate.browserEngine = browserEngine
-        delegate.zoneRuntimeController = ZoneRuntimeController(projectRoot: tempRoot, projectStore: store, project: project)
+        let paletteBrowserBootController = ZoneRuntimeController(projectRoot: tempRoot, projectStore: store, project: project)
+        let paletteBrowserBootRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { _ in
+            throw NSError(domain: "WorkspaceRuntime", code: 1, userInfo: nil)
+        })
+        delegate.workspaceRuntime = WorkspaceRuntime(
+            boot: paletteBrowserBootController,
+            registry: paletteBrowserBootRegistry,
+            focusBroker: delegate.focusBroker,
+            registryStore: RegistryStore(applicationSupportDirectory: tempRoot),
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
         delegate.tileSpawner = TileSpawner(
             canvasView: canvas,
             ghostty: nil,
@@ -5757,7 +5807,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let browserEngine = BrowserEngineContext()
         delegate.canvasView = canvas
         delegate.browserEngine = browserEngine
-        delegate.zoneRuntimeController = ZoneRuntimeController(projectRoot: tempRoot, projectStore: store, project: project)
+        let spawnFocusBootController = ZoneRuntimeController(projectRoot: tempRoot, projectStore: store, project: project)
+        let spawnFocusBootRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { _ in
+            throw NSError(domain: "WorkspaceRuntime", code: 1, userInfo: nil)
+        })
+        delegate.workspaceRuntime = WorkspaceRuntime(
+            boot: spawnFocusBootController,
+            registry: spawnFocusBootRegistry,
+            focusBroker: delegate.focusBroker,
+            registryStore: RegistryStore(applicationSupportDirectory: tempRoot),
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
         canvas.focusBroker = delegate.focusBroker
         delegate.tileSpawner = TileSpawner(
             canvasView: canvas,
@@ -6423,7 +6484,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             editorPreference: .auto,
             settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
         )
-        navApp.zoneRuntimeController = ZoneRuntimeController(projectRoot: tempProjectRoot, projectStore: tempStore, project: tempProject)
+        let navBootController = ZoneRuntimeController(projectRoot: tempProjectRoot, projectStore: tempStore, project: tempProject)
+        let navBootRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { _ in
+            throw NSError(domain: "WorkspaceRuntime", code: 1, userInfo: nil)
+        })
+        let navBrowserEngine = BrowserEngineContext()
+        navApp.workspaceRuntime = WorkspaceRuntime(
+            boot: navBootController,
+            registry: navBootRegistry,
+            focusBroker: navApp.focusBroker,
+            registryStore: RegistryStore(applicationSupportDirectory: tempProjectRoot),
+            ghostty: nil,
+            browserEngine: navBrowserEngine
+        )
         let agentTileA = UUID(uuidString: "00000000-0000-0000-0000-000000000067")!
         let agentTileB = UUID(uuidString: "00000000-0000-0000-0000-000000000068")!
         let plainTerminalTile = UUID(uuidString: "00000000-0000-0000-0000-000000000069")!
