@@ -15,14 +15,6 @@ final class GhosttyTerminalView: NSView {
     private var keyTextAccumulator: [String]?
     var reservedShortcutHandler: ((NSEvent) -> Bool)?
 
-    /// Canvas zoom pushed from `CanvasNSView.layoutTile`. The surface pixel size
-    /// already tracks zoom (the tile's frame/bounds transform flows through
-    /// `convertToBacking`), so the cell size must scale by zoom too — otherwise
-    /// the column grid reflows as you zoom (zoom should be navigation, not a
-    /// resize). Folding zoom into `content_scale` keeps `cols = surface_px /
-    /// cell_px` invariant and renders glyphs crisply at the displayed size.
-    private var canvasZoom: CGFloat = 1.0
-
     /// Last cwd reported by the shell via OSC 7 (GHOSTTY_ACTION_PWD). Nil until the
     /// first OSC 7 fires. Used by GhosttyTerminalRuntime.capturedCwd.
     private(set) var lastReportedCwd: String?
@@ -71,30 +63,8 @@ final class GhosttyTerminalView: NSView {
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         guard let surface else { return }
-        let scale = currentContentScale()
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
         ghostty_surface_set_content_scale(surface, scale, scale)
-        updateSurfaceSize()
-    }
-
-    /// Display scale ghostty renders cells at: the device backing scale folded
-    /// with the canvas zoom. The surface pixel size scales by zoom via
-    /// `convertToBacking`, so scaling the cell by the same factor keeps the
-    /// column count invariant across zoom.
-    private func currentContentScale() -> CGFloat {
-        let backing = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
-        return backing * canvasZoom
-    }
-
-    /// Push the current canvas zoom. Re-syncs content scale + surface size so the
-    /// grid stays put (no reflow) while glyphs re-render at the displayed size.
-    func setCanvasZoom(_ zoom: CGFloat) {
-        let next = max(0.01, zoom)
-        guard abs(next - canvasZoom) > 0.0001 else { return }
-        canvasZoom = next
-        if let surface {
-            let scale = currentContentScale()
-            ghostty_surface_set_content_scale(surface, scale, scale)
-        }
         updateSurfaceSize()
     }
 
@@ -444,7 +414,7 @@ final class GhosttyTerminalView: NSView {
     }
 
     private func createSurface(app: ghostty_app_t) {
-        let scale = currentContentScale()
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
         var config = ghostty_surface_config_new()
         config.platform_tag = GHOSTTY_PLATFORM_MACOS
         config.platform = ghostty_platform_u(

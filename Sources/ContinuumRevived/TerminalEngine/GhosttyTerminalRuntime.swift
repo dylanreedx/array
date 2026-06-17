@@ -103,9 +103,6 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         terminalView?.isProcessExited() ?? true
     }
 
-    /// QA hook: the live terminal view, for headless scale/geometry checks.
-    var qaTerminalView: GhosttyTerminalView? { terminalView }
-
     func focus() {
         guard let terminalView else { return }
         terminalView.window?.makeFirstResponder(terminalView)
@@ -118,12 +115,6 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
 
     func resize(cols: Int, rows: Int, pixelSize: CGSize) {
         terminalView?.setSurfacePixelSize(pixelSize)
-    }
-
-    /// Push the canvas zoom so the terminal keeps a stable column grid while
-    /// rendering crisply at the on-screen size. Called from CanvasNSView layout.
-    func setCanvasZoom(_ zoom: CGFloat) {
-        terminalView?.setCanvasZoom(zoom)
     }
 
     func sendInput(_ bytes: Data) {
@@ -390,170 +381,6 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)
-        return artifact
-    }
-
-    /// P0 scale diagnostic (real path). Installs a REAL ghostty terminal tile
-    /// inside a `CanvasNSView` in an `NSWindow`, sweeps the canvas zoom, and
-    /// records the divergence between the ghostty surface pixel width and the
-    /// tile content area's TRUE on-screen backing footprint. The half-tile dead
-    /// zone and the wrap-on-zoom drift both trace to that divergence: the surface
-    /// is sized off the WORLD bounds (`convertToBacking(bounds)`, which is
-    /// zoom-independent) while the canvas scales the tile on screen by
-    /// `viewport.zoom`. RED today at any zoom != 1. No `setFrameSize` bypass —
-    /// the size flows through the live install + layout path.
-    static func runTerminalScaleDiagnoseSelfCheck() throws -> URL {
-        struct CheckError: Error, CustomStringConvertible {
-            let message: String
-            var description: String { message }
-        }
-
-        let context = try GhosttyRuntimeContext()
-        defer { context.shutdown() }
-
-        let tile = Tile(
-            id: UUID(uuidString: "00000000-0000-0000-0000-0000000005CA")!,
-            kind: .terminal,
-            title: "SCALE_DIAGNOSE_PROBE",
-            frame: TileFrame(x: 0, y: 0, width: 800, height: 520),
-            zIndex: 1,
-            runtimeRef: nil,
-            metadata: TileMetadata()
-        )
-        let canvas = CanvasNSView(canvasState: CanvasState(
-            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-            tiles: [tile],
-            groups: [],
-            lastActiveTileId: nil
-        ))
-        canvas.frame = NSRect(x: 0, y: 0, width: 1200, height: 820)
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 100, y: 100, width: 1200, height: 820),
-            styleMask: [.titled],
-            backing: .buffered,
-            defer: false
-        )
-        window.contentView = canvas
-        window.orderFront(nil)
-        defer { window.close() }
-
-        let cwd = FileManager.default.currentDirectoryPath
-        let runtime = GhosttyTerminalRuntime(
-            tileId: tile.id,
-            title: "scale-diagnose",
-            launchProfile: LaunchProfile(command: "/bin/sh", arguments: [], cwd: cwd, title: "scale-diagnose"),
-            ghostty: context
-        )
-        let tileView = TerminalTileNSView(tile: tile, runtime: runtime)
-        canvas.install(tileView: tileView, for: tile)
-        tileView.layoutSubtreeIfNeeded()
-
-        func pump(_ seconds: TimeInterval) throws {
-            let deadline = Date().addingTimeInterval(seconds)
-            while Date() < deadline {
-                ghostty_app_tick(try context.app)
-                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
-            }
-        }
-        // Let the surface come up and take its initial size.
-        try pump(0.6)
-
-        struct Sample {
-            let zoom: Double
-            let surfaceWidthPx: Int
-            let columns: Int
-            let cellWidthPx: Int
-            let convertToBackingWidth: Double
-            let onScreenBackingWidth: Double
-            let backingScale: Double
-        }
-        var samples: [Sample] = []
-        let zooms: [Double] = [1.0, 0.6, 1.8]
-        for zoom in zooms {
-            canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
-            tileView.layoutSubtreeIfNeeded()
-            try pump(0.25)
-
-            guard let term = runtime.qaTerminalView, let surface = term.surface else {
-                throw CheckError(message: "zoom \(zoom): terminal surface missing")
-            }
-            let size = ghostty_surface_size(surface)
-            let convertToBackingW = term.convertToBacking(term.bounds).size.width
-            let onScreenPointRect = term.convert(term.bounds, to: nil)
-            let onScreenBackingW = window.convertToBacking(onScreenPointRect).width
-            samples.append(Sample(
-                zoom: zoom,
-                surfaceWidthPx: Int(size.width_px),
-                columns: Int(size.columns),
-                cellWidthPx: Int(size.cell_width_px),
-                convertToBackingWidth: Double(convertToBackingW),
-                onScreenBackingWidth: Double(onScreenBackingW),
-                backingScale: Double(window.backingScaleFactor)
-            ))
-        }
-
-        runtime.terminate(policy: .force)
-        tileView.hostView.detachRuntime()
-
-        // Always persist the captured numbers (even on RED) so the divergence is
-        // inspectable.
-        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
-        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("qa-runs", isDirectory: true)
-            .appendingPathComponent(timestamp, isDirectory: true)
-            .appendingPathComponent("terminal-scale-diagnose", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let manifest: [String: Any] = [
-            "check": "terminal-scale-diagnose",
-            "worldSize": ["width": tile.frame.width, "height": tile.frame.height],
-            "samples": samples.map { sample in
-                [
-                    "zoom": sample.zoom,
-                    "surfaceWidthPx": sample.surfaceWidthPx,
-                    "columns": sample.columns,
-                    "cellWidthPx": sample.cellWidthPx,
-                    "convertToBackingWidth": sample.convertToBackingWidth,
-                    "onScreenBackingWidth": sample.onScreenBackingWidth,
-                    "backingScale": sample.backingScale
-                ]
-            }
-        ]
-        let artifact = directory.appendingPathComponent("manifest.json")
-        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: artifact, options: .atomic)
-
-        let summary = samples.map {
-            String(format: "z=%.2f surf=%dpx onscreen=%.0fpx cvtb=%.0f cols=%d", $0.zoom, $0.surfaceWidthPx, $0.onScreenBackingWidth, $0.convertToBackingWidth, $0.columns)
-        }.joined(separator: " | ")
-
-        // RED assertion: the ghostty surface pixel width must equal the tile
-        // content area's true on-screen backing width at every zoom. Today it is
-        // sized off the world bounds (zoom-independent), so it diverges by ~1/zoom.
-        for sample in samples {
-            let reference = max(1.0, sample.onScreenBackingWidth)
-            let drift = abs(Double(sample.surfaceWidthPx) - sample.onScreenBackingWidth) / reference
-            if drift > 0.05 {
-                throw CheckError(message: "surface width != on-screen backing width at zoom \(sample.zoom): surface=\(sample.surfaceWidthPx)px on-screen=\(Int(sample.onScreenBackingWidth))px (drift \(Int(drift * 100))%). [\(summary)] artifact=\(artifact.path)")
-            }
-        }
-        // Columns must NOT scale with zoom (zoom = navigation, not reflow). A
-        // small residual is unavoidable: the cell pixel size is an integer, so at
-        // fractional content scales `floor(surface_px / cell_px)` wobbles by a few
-        // columns. The pre-fix bug scaled cols ~linearly with zoom (e.g. 73→220
-        // across 0.6→1.8); the band below still catches that decisively while
-        // tolerating integer-cell quantization (tightens as the font grows).
-        let baseline = samples.first(where: { $0.zoom == 1.0 })?.columns ?? samples.first?.columns
-        if let baseline {
-            let tolerance = max(4.0, Double(baseline) * 0.08)
-            for sample in samples {
-                let drift = abs(Double(sample.columns - baseline))
-                if drift > tolerance {
-                    throw CheckError(message: "columns scale with zoom (reflow) at zoom \(sample.zoom): \(sample.columns) cols vs baseline \(baseline) (drift \(Int(drift)) > tol \(Int(tolerance))). [\(summary)] artifact=\(artifact.path)")
-                }
-            }
-        }
-
         return artifact
     }
 }

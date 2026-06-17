@@ -1108,12 +1108,6 @@ final class CanvasNSView: NSView {
         // resize — the overlay lives on the canvas, not the tile, so it must be
         // repositioned here whenever the bordered tile's frame updates.
         repositionFocusBorderIfNeeded(for: tile.id)
-        // Zoom is navigation, not reflow: push it into terminal content so the
-        // column grid stays fixed while glyphs re-render at the displayed size.
-        // (No-op unless the zoom actually changed.)
-        if let terminalTile = view as? TerminalTileNSView {
-            terminalTile.runtime.setCanvasZoom(CGFloat(canvasState.viewport.zoom))
-        }
     }
 
     private func updateEmptyStateVisibility() {
