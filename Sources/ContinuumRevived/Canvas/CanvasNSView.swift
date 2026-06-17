@@ -817,22 +817,31 @@ final class CanvasNSView: NSView {
         guard let placement = liveZones.first(where: { $0.zoneId == zoneId }),
               let header = zoneHeaderScreenRect(for: placement) else { return nil }
         cancelZoneRename()
-        // Leave room for the ✕ close button at the top-right of the header.
+        // Sit over the header where the title draws (12px inset), leaving room for
+        // the ✕ close button at the top-right; vertically centered in the header.
+        let fieldHeight = max(18, header.height - 8)
         let field = NSTextField(frame: CGRect(
-            x: header.minX + 8,
-            y: header.minY + 3,
-            width: max(40, header.width - 8 - 34),
-            height: max(16, header.height - 6)
+            x: header.minX + 9,
+            y: header.minY + (header.height - fieldHeight) / 2,
+            width: max(40, header.width - 9 - 36),
+            height: fieldHeight
         ))
         field.stringValue = zoneDisplayByZoneId[zoneId]?.displayName ?? placement.name
         field.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        field.textColor = .white
-        field.backgroundColor = NSColor(white: 0.12, alpha: 1.0)
+        field.textColor = NSColor.white.withAlphaComponent(0.95)
+        field.backgroundColor = NSColor.black.withAlphaComponent(0.6)
         field.drawsBackground = true
         field.isBezeled = false
         field.isBordered = false
         field.focusRingType = .none
+        field.usesSingleLineMode = true
         field.lineBreakMode = .byTruncatingTail
+        // Blend with the chrome: rounded pill + a thin border in the zone's accent.
+        field.wantsLayer = true
+        field.layer?.cornerRadius = 6
+        field.layer?.masksToBounds = true
+        field.layer?.borderWidth = 1.5
+        field.layer?.borderColor = ZoneChromeNSView.color(named: placement.color).withAlphaComponent(0.9).cgColor
         field.delegate = self
         addSubview(field, positioned: .above, relativeTo: nil)
         zoneRenameField = field
@@ -5147,7 +5156,7 @@ final class ZoneChromeNSView: NSView {
         }
     }
 
-    private static func color(named name: String) -> NSColor {
+    static func color(named name: String) -> NSColor {
         switch name.lowercased() {
         case "mint": return NSColor.systemMint
         case "blue": return NSColor.systemBlue
