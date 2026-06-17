@@ -35,10 +35,20 @@ final class WorkspaceRuntime {
     /// → its `projectId`). nil when the active zone is a group zone or none is active.
     /// AppDelegate reads `runtimes`, `projectStore`, `activeProject` through this.
     var activeController: ZoneRuntimeController? {
-        guard let lastActiveZoneId = document.lastActiveZoneId,
-              let zone = document.zones.first(where: { $0.zoneId == lastActiveZoneId }),
-              let projectId = zone.projectId else { return nil }
-        return registry.controller(for: projectId)
+        if let lastActiveZoneId = document.lastActiveZoneId,
+           let zone = document.zones.first(where: { $0.zoneId == lastActiveZoneId }),
+           let projectId = zone.projectId,
+           let controller = registry.controller(for: projectId) {
+            return controller
+        }
+        // Production can intentionally close the visible project zone while the
+        // project remains the active backing store for bare/group-zone tiles.
+        // Keep app-level persistence APIs routed to the boot controller rather
+        // than making projectStore/activeProject disappear.
+        if acquiredProjectIds.count == 1, let projectId = acquiredProjectIds.first {
+            return registry.controller(for: projectId)
+        }
+        return nil
     }
 
     /// Returns the controller for a given projectId (registry delegation, for check assertions).
@@ -49,6 +59,15 @@ final class WorkspaceRuntime {
     /// Returns the ambient (group) controllers installed by addZone(projectId: nil) calls.
     /// These are NOT in the projectId-keyed registry (group zones have no projectId).
     var ambientControllers: [ZoneRuntimeController] { groupControllers }
+
+    /// Keep the runtime's in-memory document aligned with app-level canvas zone
+    /// callbacks that mutate the WorkspaceDocument directly. Without this, a later
+    /// runtime save (for example addZone(projectId:)) can rewrite stale zone state
+    /// back over disk.
+    func replaceDocument(_ newDocument: WorkspaceDocument, for workspaceId: UUID) {
+        guard self.workspaceId == workspaceId else { return }
+        document = newDocument
+    }
 
     /// Returns the placement of the installed ZoneLayer for `zoneId` (for check assertions).
     /// Reads the real installed layer captured during `install(into:appRegistry:)`.
@@ -106,6 +125,7 @@ final class WorkspaceRuntime {
             lastActiveZoneId: zoneId
         )
         self.init(
+            boot: controller,
             workspaceId: UUID(),
             document: document,
             registry: registry,
@@ -114,8 +134,33 @@ final class WorkspaceRuntime {
             ghostty: ghostty,
             browserEngine: browserEngine
         )
-        registry.register(controller, for: projectId)
-        acquiredProjectIds = [projectId]
+    }
+
+    /// Boot an already-built project controller against a real persisted
+    /// WorkspaceDocument. Production launch uses this path so zone create/move/
+    /// close callbacks write to the user's actual workspace id, not a synthetic
+    /// compatibility UUID.
+    convenience init(
+        boot controller: ZoneRuntimeController,
+        workspaceId: UUID,
+        document: WorkspaceDocument,
+        registry: ZoneRuntimeRegistry,
+        focusBroker: FocusBroker,
+        registryStore: RegistryStore,
+        ghostty: GhosttyRuntimeContext?,
+        browserEngine: BrowserEngineContext
+    ) {
+        self.init(
+            workspaceId: workspaceId,
+            document: document,
+            registry: registry,
+            focusBroker: focusBroker,
+            registryStore: registryStore,
+            ghostty: ghostty,
+            browserEngine: browserEngine
+        )
+        registry.register(controller, for: controller.project.id)
+        acquiredProjectIds = [controller.project.id]
     }
 
     /// Install the CURRENT workspace's zone set into `canvasView`.

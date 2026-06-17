@@ -347,6 +347,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-boot-persistence-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runWorkspaceBootPersistenceSelfCheck()
+                print("ContinuumRevivedWorkspaceBootPersistenceChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-move-unified-check") {
             do {
                 _ = NSApplication.shared
@@ -1358,7 +1370,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let project = bootController.project
             try Self.recordProjectInRegistry(project: project, in: registryStore, preferredWorkspaceId: ProjectLaunchCoordinator.consumePendingWorkspaceSelection())
             let updatedRegistry = try registryStore.loadOrEmpty()
-            let zoneRenderModels = try Self.loadActiveZoneRenderModels(from: registryStore)
+            let activeWorkspace = try Self.loadActiveWorkspaceDocument(from: registryStore)
+            let zoneRenderModels = Self.zoneRenderModels(from: activeWorkspace?.document, registry: updatedRegistry)
             let activeZone = zoneRenderModels.first(where: { $0.placement.projectId == project.id })?.placement
 
             let ghostty = try GhosttyRuntimeContext()
@@ -1427,14 +1440,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 throw NSError(domain: "WorkspaceRuntime", code: 1,
                               userInfo: [NSLocalizedDescriptionKey: "unexpected acquire on boot registry — T08 wires this"])
             })
-            self.workspaceRuntime = WorkspaceRuntime(
-                boot: bootController,
-                registry: bootRegistry,
-                focusBroker: focusBroker,
-                registryStore: registryStore,
-                ghostty: ghostty,
-                browserEngine: browserEngine
-            )
+            if let activeWorkspace {
+                self.workspaceRuntime = WorkspaceRuntime(
+                    boot: bootController,
+                    workspaceId: activeWorkspace.workspaceId,
+                    document: activeWorkspace.document,
+                    registry: bootRegistry,
+                    focusBroker: focusBroker,
+                    registryStore: registryStore,
+                    ghostty: ghostty,
+                    browserEngine: browserEngine
+                )
+            } else {
+                self.workspaceRuntime = WorkspaceRuntime(
+                    boot: bootController,
+                    registry: bootRegistry,
+                    focusBroker: focusBroker,
+                    registryStore: registryStore,
+                    ghostty: ghostty,
+                    browserEngine: browserEngine
+                )
+            }
 
             let spawner = TileSpawner(
                 canvasView: canvasView,
@@ -3245,6 +3271,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let saveController = WorkspaceDocumentSaveController(store: store)
             saveController.scheduleZoneLayoutSave(document)
             try saveController.flushPendingSave()
+            workspaceRuntime?.replaceDocument(document, for: workspaceId)
             try registryStore.save(registry)
         } catch {
             fputs("Create Zone failed: \(error)\n", stderr)
@@ -3288,10 +3315,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             var document = try store.load()
             document.zones.removeAll { $0.zoneId == zoneId }
             document.zoneZOrder.removeAll { $0 == zoneId }
+            if document.lastActiveZoneId == zoneId {
+                document.lastActiveZoneId = document.zoneZOrder.last ?? document.zones.first?.zoneId
+            }
             document.setTiles([], forZone: zoneId)
             let saveController = WorkspaceDocumentSaveController(store: store)
             saveController.scheduleZoneLayoutSave(document)
             try saveController.flushPendingSave()
+            workspaceRuntime?.replaceDocument(document, for: workspaceId)
         } catch {
             fputs("persistClosedZone failed: \(error)\n", stderr)
         }
@@ -3318,9 +3349,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             document.zones.append(placement)
             document.zoneZOrder.removeAll { $0 == placement.zoneId }
             document.zoneZOrder.append(placement.zoneId)
+            document.lastActiveZoneId = placement.zoneId
             let saveController = WorkspaceDocumentSaveController(store: store)
             saveController.scheduleZoneLayoutSave(document)
             try saveController.flushPendingSave()
+            workspaceRuntime?.replaceDocument(document, for: workspaceId)
         } catch {
             fputs("persistCreatedGroupZone failed: \(error)\n", stderr)
         }
@@ -3352,6 +3385,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let saveController = WorkspaceDocumentSaveController(store: store)
             saveController.scheduleZoneLayoutSave(document)
             try saveController.flushPendingSave()
+            workspaceRuntime?.replaceDocument(document, for: workspaceId)
         } catch {
             fputs("persistMovedZone failed: \(error)\n", stderr)
         }
@@ -3382,6 +3416,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let saveController = WorkspaceDocumentSaveController(store: store)
             saveController.scheduleZoneLayoutSave(document)
             try saveController.flushPendingSave()
+            workspaceRuntime?.replaceDocument(document, for: workspaceId)
         } catch {
             fputs("persistRenamedZone failed: \(error)\n", stderr)
         }
@@ -4055,12 +4090,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     static func loadActiveZoneRenderModels(from store: RegistryStore) throws -> [CanvasNSView.ZoneRenderModel] {
         let registry = try store.loadOrEmpty()
-        guard let workspaceId = registry.lastActiveWorkspaceId else { return [] }
+        let activeWorkspace = try loadActiveWorkspaceDocument(from: store, registry: registry)
+        return zoneRenderModels(from: activeWorkspace?.document, registry: registry)
+    }
+
+    static func loadActiveWorkspaceDocument(from store: RegistryStore) throws -> (workspaceId: UUID, document: WorkspaceDocument)? {
+        try loadActiveWorkspaceDocument(from: store, registry: try store.loadOrEmpty())
+    }
+
+    private static func loadActiveWorkspaceDocument(from store: RegistryStore, registry: Registry) throws -> (workspaceId: UUID, document: WorkspaceDocument)? {
+        guard let workspaceId = registry.lastActiveWorkspaceId else { return nil }
         let workspaceStore = WorkspaceStore(
             workspaceId: workspaceId,
             applicationSupportDirectory: store.registryFile.deletingLastPathComponent()
         )
-        let document = try workspaceStore.load()
+        return (workspaceId, try workspaceStore.load())
+    }
+
+    static func zoneRenderModels(from document: WorkspaceDocument?, registry: Registry) -> [CanvasNSView.ZoneRenderModel] {
+        guard let document else { return [] }
         let zOrder = Dictionary(uniqueKeysWithValues: document.zoneZOrder.enumerated().map { ($0.element, $0.offset) })
         let orderedZones = document.zones.sorted { lhs, rhs in
             let lhsOrder = zOrder[lhs.zoneId] ?? Int.min
@@ -4070,11 +4118,148 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         return orderedZones.map { zone in
             let projectEntry = registry.projects.first(where: { $0.id == zone.projectId })
-            let name = projectEntry?.name ?? "Project"
+            let name = projectEntry?.name ?? (zone.name.isEmpty ? "Zone" : zone.name)
             let rollup = projectEntry.map(Self.agentStatusRollup(for:)) ?? .empty
             let qaVerdict = projectEntry.flatMap { QARunManifestReader.latest(projectRoot: URL(fileURLWithPath: $0.rootPath, isDirectory: true)) }
             return CanvasNSView.ZoneRenderModel(placement: zone, displayName: name, agentStatusRollup: rollup, qaVerdict: qaVerdict)
         }
+    }
+
+    static func runWorkspaceBootPersistenceSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fileManager = FileManager.default
+        let now = Date(timeIntervalSince1970: 1_780_000_000)
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-workspace-boot-persistence-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = root.appendingPathComponent("AppSupport", isDirectory: true)
+        let projectRoot = root.appendingPathComponent("Project", isDirectory: true)
+        try fileManager.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let workspaceId = UUID(uuidString: "00000000-0000-0000-0000-000000003401")!
+        let projectId = UUID(uuidString: "00000000-0000-0000-0000-000000003402")!
+        let projectZoneId = UUID(uuidString: "00000000-0000-0000-0000-000000003403")!
+        let groupZoneId = UUID(uuidString: "00000000-0000-0000-0000-000000003404")!
+        let projectTileId = UUID(uuidString: "00000000-0000-0000-0000-000000003405")!
+        let groupTileId = UUID(uuidString: "00000000-0000-0000-0000-000000003406")!
+
+        let project = Project(
+            id: projectId,
+            name: "Boot Project",
+            rootPath: projectRoot.path,
+            createdAt: now,
+            updatedAt: now,
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
+        )
+        let projectStore = ProjectStore(projectRoot: projectRoot)
+        try projectStore.saveProject(project)
+        try projectStore.saveCanvas(CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [
+                Tile(id: projectTileId, kind: .note, title: "project-tile", frame: TileFrame(x: 100, y: 100, width: 200, height: 120), zIndex: 1, runtimeRef: nil, metadata: TileMetadata(noteId: projectTileId)),
+                Tile(id: groupTileId, kind: .note, title: "group-tile", frame: TileFrame(x: 2250, y: 120, width: 200, height: 120), zIndex: 2, runtimeRef: nil, metadata: TileMetadata(noteId: groupTileId))
+            ],
+            groups: [],
+            lastActiveTileId: groupTileId
+        ))
+
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        let registry = Registry(
+            lastActiveWorkspaceId: workspaceId,
+            lastActiveProjectId: projectId,
+            workspaces: [WorkspaceEntry(id: workspaceId, name: "Boot Workspace", projectIds: [projectId], createdAt: now, updatedAt: now)],
+            projects: [ProjectEntry(id: projectId, name: "Boot Project", rootPath: projectRoot.path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false)],
+            settings: RegistrySettings(preferredEditor: .auto, zoomModifier: .command, openLastProjectOnLaunch: true)
+        )
+        try registryStore.save(registry)
+        let document = WorkspaceDocument(
+            viewport: CanvasViewport(x: 10, y: 20, zoom: 1.2),
+            zones: [
+                ZonePlacement(zoneId: projectZoneId, projectId: projectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 1000, height: 700), color: "blue", collapsed: false, hydrationPolicy: .automatic, name: ""),
+                ZonePlacement(zoneId: groupZoneId, projectId: nil, origin: ZonePoint(x: 2000, y: 0), size: ZoneSize(width: 1000, height: 700), color: "teal", collapsed: false, hydrationPolicy: .automatic, name: "Review")
+            ],
+            zoneZOrder: [projectZoneId, groupZoneId],
+            lastActiveZoneId: projectZoneId
+        )
+        try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport).save(document)
+
+        var bootRegistry = try registryStore.loadOrEmpty()
+        try recordProjectInRegistry(project: project, in: registryStore)
+        bootRegistry = try registryStore.loadOrEmpty()
+        let loadedWorkspace = try loadActiveWorkspaceDocument(from: registryStore)
+        try expect(loadedWorkspace?.workspaceId == workspaceId, "boot must preserve the registry's active workspace id")
+        let renderModels = zoneRenderModels(from: loadedWorkspace?.document, registry: bootRegistry)
+        try expect(renderModels.map(\.placement.zoneId) == [projectZoneId, groupZoneId], "boot render models should preserve workspace zones/order")
+        try expect(renderModels.first(where: { $0.placement.zoneId == groupZoneId })?.displayName == "Review", "group zone display name should come from persisted zone.name")
+
+        let canvas = CanvasNSView(
+            canvasState: try projectStore.loadCanvas(),
+            activeZone: renderModels.first(where: { $0.placement.projectId == projectId })?.placement,
+            zoneRenderModels: renderModels,
+            showsZoneChrome: false
+        )
+        try expect(canvas.qaZoneMembership(of: projectTileId) == projectZoneId, "project tile should seed into the containing project zone")
+        try expect(canvas.qaZoneMembership(of: groupTileId) == groupZoneId, "group tile should seed into the containing group zone, not the active project zone")
+
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+        let controller = ZoneRuntimeController(projectRoot: projectRoot, projectStore: projectStore, project: project)
+        let runtimeRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { _ in
+            throw CheckError.failed("boot check should reuse the registered boot controller")
+        })
+        let runtime = WorkspaceRuntime(
+            boot: controller,
+            workspaceId: loadedWorkspace!.workspaceId,
+            document: loadedWorkspace!.document,
+            registry: runtimeRegistry,
+            focusBroker: FocusBroker(),
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+        try expect(runtime.workspaceId == workspaceId, "WorkspaceRuntime boot should use persisted workspace id, not a synthetic UUID")
+        try expect(runtime.activeController === controller, "WorkspaceRuntime active controller should be the boot controller")
+
+        let delegate = AppDelegate()
+        delegate.registryStore = registryStore
+        delegate.workspaceRuntime = runtime
+        var movedGroup = document.zones[1]
+        movedGroup.origin = ZonePoint(x: 2100, y: 50)
+        delegate.persistMovedZone(movedGroup)
+        let runtimeMoved = runtime.document.zones.first(where: { $0.zoneId == groupZoneId })
+        try expect(runtimeMoved?.origin == movedGroup.origin, "runtime document should stay in sync after persistMovedZone")
+        let diskMoved = try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport).load().zones.first(where: { $0.zoneId == groupZoneId })
+        try expect(diskMoved?.origin == movedGroup.origin, "disk document should persist moved group zone")
+        delegate.persistClosedZone(groupZoneId)
+        try expect(!runtime.document.zones.contains(where: { $0.zoneId == groupZoneId }), "runtime document should drop closed group zone")
+        let diskAfterClose = try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport).load()
+        try expect(!diskAfterClose.zones.contains(where: { $0.zoneId == groupZoneId }), "disk document should drop closed group zone")
+
+        let artifactDir = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: ""), isDirectory: true)
+            .appendingPathComponent("workspace-boot-persistence", isDirectory: true)
+        try fileManager.createDirectory(at: artifactDir, withIntermediateDirectories: true)
+        let artifact = artifactDir.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "workspace-boot-persistence",
+            "workspaceId": workspaceId.uuidString,
+            "zones": renderModels.map { ["zoneId": $0.placement.zoneId.uuidString, "displayName": $0.displayName] },
+            "projectTileZone": canvas.qaZoneMembership(of: projectTileId)?.uuidString as Any,
+            "groupTileZone": canvas.qaZoneMembership(of: groupTileId)?.uuidString as Any
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
     }
 
     private static func agentStatusRollup(for projectEntry: ProjectEntry) -> CanvasNSView.AgentStatusRollup {

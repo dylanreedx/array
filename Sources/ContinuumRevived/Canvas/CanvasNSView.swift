@@ -208,12 +208,13 @@ final class CanvasNSView: NSView {
         registerForDraggedTypes([.fileURL])
         // zone-unify P0: seed the unified live model from the boot zone set.
         // `liveZones` is the authoritative placement; display metadata is kept
-        // by zoneId; the active project zone owns all current tiles.
+        // by zoneId. Tile membership is derived from persisted geometry, not
+        // blindly assigned to the active project zone; otherwise relaunch makes
+        // every tile belong to the default project zone and loses group-zone
+        // organization.
         liveZones = self.zoneRenderModels.map { $0.placement }
         zoneDisplayByZoneId = Dictionary(self.zoneRenderModels.map { ($0.placement.zoneId, $0) }, uniquingKeysWith: { first, _ in first })
-        if let activeZone {
-            for tile in canvasState.tiles { tileZoneMembership[tile.id] = activeZone.zoneId }
-        }
+        seedTileZoneMembershipFromGeometry()
         if showsZoneChrome {
             installZoneChromeViews()
         }
@@ -229,6 +230,19 @@ final class CanvasNSView: NSView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
+    }
+
+    private func seedTileZoneMembershipFromGeometry() {
+        tileZoneMembership.removeAll()
+        for tile in canvasState.tiles {
+            let cx = tile.frame.x + tile.frame.width / 2
+            let cy = tile.frame.y + tile.frame.height / 2
+            guard let zone = liveZones.reversed().first(where: { placement in
+                let f = CanvasEngine.zoneWorldFrame(placement)
+                return cx >= f.x && cx <= f.x + f.width && cy >= f.y && cy <= f.y + f.height
+            }) else { continue }
+            tileZoneMembership[tile.id] = zone.zoneId
+        }
     }
 
     private func installZoneChromeViews() {
