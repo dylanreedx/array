@@ -986,6 +986,19 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--terminal-tmux-persistence-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try TileSpawner.runTerminalTmuxPersistenceSelfCheck()
+                print("ContinuumRevivedTerminalTmuxPersistenceChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--terminal-snapshot-tier-check") {
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
@@ -10682,12 +10695,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let browserEngine = BrowserEngineContext()
         defer { browserEngine.shutdown() }
 
+        let tmuxDisabledDefaults = UserDefaults(suiteName: "continuum.test.sessionResumeTmuxDisabled.\(UUID().uuidString)")!
+        tmuxDisabledDefaults.set(false, forKey: TmuxPersistenceConfig.enabledKey)
         let spawner = TileSpawner(
             canvasView: canvas,
             ghostty: context,
             browserEngine: browserEngine,
             projectStore: store,
-            project: project
+            project: project,
+            defaults: tmuxDisabledDefaults,
+            tmuxPathResolver: { _ in nil }
         )
 
         let runtime = GhosttyTerminalRuntime(
