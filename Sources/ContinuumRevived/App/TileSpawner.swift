@@ -2194,6 +2194,195 @@ final class TileSpawner {
         return artifact
     }
 
+    // MARK: - tmux live integration check
+
+    static func runTerminalTmuxLiveIntegrationSelfCheck() throws -> (message: String, artifact: URL?) {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+        struct CommandResult {
+            let status: Int32
+            let stdout: String
+            let stderr: String
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func run(_ command: String, _ arguments: [String], allowFailure: Bool = false) throws -> CommandResult {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: command)
+            process.arguments = arguments
+            let out = Pipe()
+            let err = Pipe()
+            process.standardOutput = out
+            process.standardError = err
+            try process.run()
+            process.waitUntilExit()
+            let result = CommandResult(
+                status: process.terminationStatus,
+                stdout: String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
+                stderr: String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            )
+            if !allowFailure && result.status != 0 {
+                throw CheckError.failed("command failed (\(result.status)): \(command) \(arguments.joined(separator: " ")) stdout=\(result.stdout) stderr=\(result.stderr)")
+            }
+            return result
+        }
+        func artifact(_ manifest: [String: Any]) throws -> URL {
+            let fileManager = FileManager.default
+            let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+            let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+                .appendingPathComponent("qa-runs", isDirectory: true)
+                .appendingPathComponent(timestamp, isDirectory: true)
+                .appendingPathComponent("terminal-tmux-live-integration", isDirectory: true)
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            let path = directory.appendingPathComponent("manifest.json")
+            try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: path, options: .atomic)
+            return path
+        }
+        func headlessArguments(from wrapped: LaunchProfile) -> [String] {
+            precondition(wrapped.arguments.first == "new-session")
+            return ["new-session", "-d"] + wrapped.arguments.dropFirst()
+        }
+        func comparablePath(_ path: String) -> String {
+            path.hasPrefix("/private/var/") ? String(path.dropFirst("/private".count)) : path
+        }
+        func paneState(tmuxPath: String, sessionName: String) throws -> (paneId: String, cwd: String) {
+            let result = try run(tmuxPath, ["list-panes", "-t", sessionName, "-F", "#{pane_id}\t#{pane_current_path}"])
+            let line = result.stdout.split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init) ?? ""
+            let parts = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+            guard parts.count == 2 else {
+                throw CheckError.failed("could not parse tmux pane state: \(result.stdout)")
+            }
+            return (parts[0], parts[1])
+        }
+        func waitForCwd(tmuxPath: String, sessionName: String, cwd: String) throws -> (paneId: String, cwd: String) {
+            var last: (paneId: String, cwd: String)?
+            for _ in 0..<30 {
+                last = try paneState(tmuxPath: tmuxPath, sessionName: sessionName)
+                if comparablePath(last?.cwd ?? "") == comparablePath(cwd) { return last! }
+                usleep(100_000)
+            }
+            throw CheckError.failed("pane cwd did not become \(cwd); last=\(String(describing: last))")
+        }
+        func looksLikeTmuxVersion(_ output: String) -> Bool {
+            guard output.lowercased().hasPrefix("tmux") else { return false }
+            let suffix = output.dropFirst(4)
+            return suffix.first.map { $0.isWhitespace } ?? true
+        }
+        func shellSingleQuoted(_ value: String) -> String {
+            "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+
+        guard let tmuxPath = TmuxLocator.resolve() else {
+            let path = try artifact([
+                "check": "terminal-tmux-live-integration",
+                "status": "skipped",
+                "reason": "tmux did not resolve from configured path, PATH, or standard fallback paths"
+            ])
+            return ("SKIP: terminal-tmux-live-integration-check no real tmux resolved; artifact: \(path.path)", path)
+        }
+
+        let fileManager = FileManager.default
+        guard fileManager.isExecutableFile(atPath: tmuxPath) else {
+            let path = try artifact([
+                "check": "terminal-tmux-live-integration",
+                "status": "skipped",
+                "reason": "resolved tmux path is not executable",
+                "tmuxPath": tmuxPath
+            ])
+            return ("SKIP: terminal-tmux-live-integration-check resolved tmux path is not executable; artifact: \(path.path)", path)
+        }
+
+        let version = try run(tmuxPath, ["-V"], allowFailure: true)
+        guard version.status == 0 && looksLikeTmuxVersion(version.stdout.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            let path = try artifact([
+                "check": "terminal-tmux-live-integration",
+                "status": "skipped",
+                "reason": "resolved executable did not behave like tmux -V",
+                "tmuxPath": tmuxPath,
+                "tmuxVersionStatus": version.status,
+                "tmuxVersionStdout": version.stdout,
+                "tmuxVersionStderr": version.stderr
+            ])
+            return ("SKIP: terminal-tmux-live-integration-check resolved executable is not real tmux; artifact: \(path.path)", path)
+        }
+
+        let tileId = UUID()
+        let sessionName = TmuxSession.sessionName(tileId: tileId)
+        let root = fileManager.temporaryDirectory.appendingPathComponent("continuum-tmux-live-\(tileId.uuidString)", isDirectory: true)
+        let startCwd = root.appendingPathComponent("start", isDirectory: true)
+        let changedCwd = root.appendingPathComponent("changed", isDirectory: true)
+        let restartCwd = root.appendingPathComponent("restart", isDirectory: true)
+        try [startCwd, changedCwd, restartCwd].forEach { try fileManager.createDirectory(at: $0, withIntermediateDirectories: true) }
+        let startCwdPath = (startCwd.path as NSString).resolvingSymlinksInPath
+        let changedCwdPath = (changedCwd.path as NSString).resolvingSymlinksInPath
+        let restartCwdPath = (restartCwd.path as NSString).resolvingSymlinksInPath
+        let kill = TmuxSession.killSessionCommand(tileId: tileId, tmuxPath: tmuxPath)
+        defer {
+            _ = try? run(kill.command, kill.arguments, allowFailure: true)
+            try? fileManager.removeItem(at: root)
+        }
+
+        let profile = LaunchProfile(command: "/bin/sh", arguments: [], cwd: startCwdPath, title: "Shell")
+        let wrapped = TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath)
+        let createArgs = headlessArguments(from: wrapped)
+        try expect(wrapped.command == tmuxPath, "wrapped profile should use resolved tmux path")
+        try expect(!createArgs.contains("-L"), "live integration check must use the default tmux server and no -L socket")
+        try expect(createArgs.contains("-A") && createArgs.contains("-s") && createArgs.contains(sessionName) && createArgs.contains("-c") && createArgs.contains(startCwdPath), "create args should preserve new-session -A -s name -c cwd semantics: \(createArgs)")
+        _ = try run(tmuxPath, createArgs)
+        let createdPane = try waitForCwd(tmuxPath: tmuxPath, sessionName: sessionName, cwd: startCwdPath)
+
+        _ = try run(tmuxPath, ["send-keys", "-t", sessionName, "cd \(shellSingleQuoted(changedCwdPath))", "C-m"])
+        let changedPane = try waitForCwd(tmuxPath: tmuxPath, sessionName: sessionName, cwd: changedCwdPath)
+        try expect(changedPane.paneId == createdPane.paneId, "pane id should survive cwd change")
+
+        let restartProfile = LaunchProfile(command: "/bin/sh", arguments: [], cwd: restartCwdPath, title: "Shell")
+        let restartWrapped = TmuxSession.wrap(profile: restartProfile, tileId: tileId, tmuxPath: tmuxPath)
+        let restartArgs = restartWrapped.arguments
+        let scriptedReattachArgs = ["-q", "/dev/null", tmuxPath] + restartArgs + [";", "detach-client"]
+        try expect(!restartArgs.contains("-L"), "restart/reattach args must use default tmux server and no -L socket")
+        _ = try run("/usr/bin/script", scriptedReattachArgs)
+        let reattachedPane = try waitForCwd(tmuxPath: tmuxPath, sessionName: sessionName, cwd: changedCwdPath)
+        try expect(reattachedPane.paneId == createdPane.paneId, "reattach should preserve the existing pane id")
+        try expect(comparablePath(reattachedPane.cwd) == comparablePath(changedCwdPath), "reattach should preserve live pane cwd and ignore restart -c cwd")
+
+        let killResult = try run(kill.command, kill.arguments)
+        let postKill = try run(tmuxPath, ["has-session", "-t", sessionName], allowFailure: true)
+        try expect(postKill.status != 0, "cleanup should remove the isolated test session")
+
+        let manifestPath = try artifact([
+            "check": "terminal-tmux-live-integration",
+            "status": "passed",
+            "tmuxPath": tmuxPath,
+            "tmuxVersion": version.stdout.trimmingCharacters(in: .whitespacesAndNewlines),
+            "usesDefaultTmuxServer": true,
+            "socketFlagPresent": createArgs.contains("-L") || restartArgs.contains("-L"),
+            "headlessDetachedFlag": "-d is inserted for initial creation because tmux new-session without -d requires an interactive controlling terminal. The simulated restart uses /usr/bin/script to provide a pseudo-terminal for the real new-session -A -s name -c cwd reattach path, then immediately detaches the tmux client.",
+            "tileId": tileId.uuidString,
+            "sessionName": sessionName,
+            "createArgs": createArgs,
+            "restartArgs": restartArgs,
+            "scriptedReattachCommand": ["/usr/bin/script"] + scriptedReattachArgs,
+            "createdPaneId": createdPane.paneId,
+            "changedPaneId": changedPane.paneId,
+            "reattachedPaneId": reattachedPane.paneId,
+            "startCwd": startCwdPath,
+            "changedCwd": changedCwdPath,
+            "restartCwdIgnoredOnAttach": restartCwdPath,
+            "reattachedCwd": reattachedPane.cwd,
+            "killCommand": [kill.command] + kill.arguments,
+            "killExitStatus": killResult.status,
+            "postKillHasSessionStatus": postKill.status
+        ])
+        return ("ContinuumRevivedTerminalTmuxLiveIntegrationChecks passed: \(manifestPath.path)", manifestPath)
+    }
+
     // MARK: - File tree tiles
 
     func spawnFileTree(rootPath: String, at worldPoint: CGPoint? = nil) -> FileTreeOutcome {

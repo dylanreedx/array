@@ -39,18 +39,34 @@ run() {
 
 run_app_check() {
   local project_root app_support status
+  local tmux_args=()
   project_root=$(mktemp -d "${TMPDIR:-/tmp}/continuum-matrix-project.XXXXXX")
   app_support=$(mktemp -d "${TMPDIR:-/tmp}/continuum-matrix-appsupport.XXXXXX")
 
-  printf '\n==> CONTINUUM_PROJECT_ROOT=%s CONTINUUM_APP_SUPPORT=%s %s\n' \
+  case " $* " in
+    *" --terminal-tmux-"*) ;;
+    *) tmux_args=(-continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path "") ;;
+  esac
+
+  printf '\n==> CONTINUUM_PROJECT_ROOT=%s CONTINUUM_APP_SUPPORT=%s %s' \
     "$project_root" \
     "$app_support" \
     "$*"
+  if [[ ${#tmux_args[@]} -gt 0 ]]; then
+    printf ' %q' "${tmux_args[@]}"
+  fi
+  printf '\n'
 
   set +e
-  CONTINUUM_PROJECT_ROOT="$project_root" \
-    CONTINUUM_APP_SUPPORT="$app_support" \
-    "$@"
+  if [[ ${#tmux_args[@]} -gt 0 ]]; then
+    CONTINUUM_PROJECT_ROOT="$project_root" \
+      CONTINUUM_APP_SUPPORT="$app_support" \
+      "$@" "${tmux_args[@]}"
+  else
+    CONTINUUM_PROJECT_ROOT="$project_root" \
+      CONTINUUM_APP_SUPPORT="$app_support" \
+      "$@"
+  fi
   status=$?
   set -e
 
@@ -142,6 +158,7 @@ run_app_check .build/debug/continuum-revived --project-root-resolution-check
 run_app_check .build/debug/continuum-revived --project-picker-resolution-check
 run_app_check .build/debug/continuum-revived --terminal-tmux-persistence-check
 run_app_check .build/debug/continuum-revived --terminal-tmux-delete-lifecycle-check
+run_app_check .build/debug/continuum-revived --terminal-tmux-live-integration-check
 run_app_check .build/debug/continuum-revived --terminal-snapshot-tier-check
 run_app_check .build/debug/continuum-revived --terminal-fills-tile-check
 run_app_check .build/debug/continuum-revived --session-resume-check

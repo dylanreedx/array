@@ -1012,6 +1012,19 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--terminal-tmux-live-integration-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let result = try TileSpawner.runTerminalTmuxLiveIntegrationSelfCheck()
+                print(result.message)
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--terminal-snapshot-tier-check") {
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
