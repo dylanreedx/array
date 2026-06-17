@@ -527,6 +527,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--zone-rename-inline-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try CanvasNSView.runZoneRenameInlineSelfCheck()
+                print("ContinuumRevivedZoneRenameInlineChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--bring-to-front-focus-check") {
             do {
                 _ = NSApplication.shared
@@ -1352,6 +1364,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             canvasView.onZoneClosed = { [weak self] zoneId in
                 self?.persistClosedZone(zoneId)
+            }
+            canvasView.onZoneRenamed = { [weak self] zoneId, name in
+                self?.persistRenamedZone(zoneId, name: name)
             }
 
             self.ghostty = ghostty
@@ -3270,6 +3285,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try saveController.flushPendingSave()
         } catch {
             fputs("persistMovedZone failed: \(error)\n", stderr)
+        }
+    }
+
+    /// Persist a zone rename: update the stored zone's name so it survives relaunch.
+    /// Mirrors `persistMovedZone` (full document load → mutate → save).
+    private func persistRenamedZone(_ zoneId: UUID, name: String) {
+        guard let registryStore else { return }
+        do {
+            let workspaceId: UUID
+            if let wId = workspaceRuntime?.workspaceId {
+                workspaceId = wId
+            } else if let wId = (try? registryStore.loadOrEmpty())?.lastActiveWorkspaceId {
+                workspaceId = wId
+            } else {
+                fputs("persistRenamedZone: no active workspace\n", stderr)
+                return
+            }
+            let appSupport = registryStore.registryFile.deletingLastPathComponent()
+            let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
+            var document = try store.load()
+            guard let i = document.zones.firstIndex(where: { $0.zoneId == zoneId }) else {
+                fputs("persistRenamedZone: zone \(zoneId) not in document\n", stderr)
+                return
+            }
+            document.zones[i].name = name
+            let saveController = WorkspaceDocumentSaveController(store: store)
+            saveController.scheduleZoneLayoutSave(document)
+            try saveController.flushPendingSave()
+        } catch {
+            fputs("persistRenamedZone failed: \(error)\n", stderr)
         }
     }
 

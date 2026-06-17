@@ -169,6 +169,17 @@ final class CanvasNSView: NSView {
     /// Fired after a zone is closed so the caller can drop it from persistence.
     var onZoneClosed: ((UUID) -> Void)?
 
+    /// Fired after a zone is renamed (inline edit committed) so the caller can
+    /// persist the new name. Carries (zoneId, newName).
+    var onZoneRenamed: ((UUID, String) -> Void)?
+
+    // MARK: - Inline zone rename (double-click the header)
+    private var zoneRenameField: NSTextField?
+    private var renamingZoneId: UUID?
+    /// QA: number of times inline rename was begun (routing signal, robust to the
+    /// field editor's lifecycle in headless checks).
+    private(set) var qaZoneRenameBeginCount: Int = 0
+
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
@@ -778,6 +789,87 @@ final class CanvasNSView: NSView {
         return "\(base) \(maxIndex + 1)"
     }
 
+    /// Begin inline rename of a zone: host an editable text field over its header,
+    /// seeded with the current name + selected. Enter / focus-loss commits, Esc
+    /// cancels (see the NSTextFieldDelegate extension).
+    func beginZoneRename(zoneId: UUID) {
+        guard let placement = liveZones.first(where: { $0.zoneId == zoneId }),
+              let header = zoneHeaderScreenRect(for: placement) else { return }
+        cancelZoneRename()
+        // Leave room for the ✕ close button at the top-right of the header.
+        let field = NSTextField(frame: CGRect(
+            x: header.minX + 8,
+            y: header.minY + 3,
+            width: max(40, header.width - 8 - 34),
+            height: max(16, header.height - 6)
+        ))
+        field.stringValue = zoneDisplayByZoneId[zoneId]?.displayName ?? placement.name
+        field.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        field.textColor = .white
+        field.backgroundColor = NSColor(white: 0.12, alpha: 1.0)
+        field.drawsBackground = true
+        field.isBezeled = false
+        field.isBordered = false
+        field.focusRingType = .none
+        field.lineBreakMode = .byTruncatingTail
+        field.delegate = self
+        addSubview(field, positioned: .above, relativeTo: nil)
+        zoneRenameField = field
+        renamingZoneId = zoneId
+        qaZoneRenameBeginCount += 1
+        window?.makeFirstResponder(field)
+        field.selectText(nil)
+    }
+
+    /// Commit the active rename: trim, and if non-empty + changed, update the live
+    /// placement + render model + chrome and fire `onZoneRenamed`. Empty/whitespace
+    /// keeps the previous name. Idempotent / re-entrancy-safe (tears down first).
+    func commitZoneRename() {
+        guard let zoneId = renamingZoneId, let field = zoneRenameField else { return }
+        let text = field.stringValue
+        teardownZoneRenameField()
+        applyZoneRename(zoneId: zoneId, to: text)
+    }
+
+    /// Core rename mutation, shared by the inline commit and the QA path: update
+    /// the live placement + render model + chrome and fire `onZoneRenamed`.
+    /// Empty/whitespace names are ignored (the previous name is kept).
+    @discardableResult
+    private func applyZoneRename(zoneId: UUID, to rawName: String) -> Bool {
+        let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let idx = liveZones.firstIndex(where: { $0.zoneId == zoneId }),
+              liveZones[idx].name != trimmed else { return false }
+        liveZones[idx].name = trimmed
+        if var model = zoneDisplayByZoneId[zoneId] {
+            model.displayName = trimmed
+            zoneDisplayByZoneId[zoneId] = model
+            zoneChromeViews[zoneId]?.update(model: model)
+        }
+        onZoneRenamed?(zoneId, trimmed)
+        delegate?.canvasDidChange(self)
+        return true
+    }
+
+    func cancelZoneRename() {
+        teardownZoneRenameField()
+    }
+
+    private func teardownZoneRenameField() {
+        zoneRenameField?.removeFromSuperview()
+        zoneRenameField = nil
+        renamingZoneId = nil
+    }
+
+    /// QA: the zone whose inline rename is active, or nil.
+    var qaZoneRenameActiveZoneId: UUID? { renamingZoneId }
+    /// QA: apply a rename through the real mutation path. The NSTextField field
+    /// editor's lifecycle isn't reproducible headlessly (it ends synchronously in a
+    /// non-interactive window); the double-click ROUTING is covered by
+    /// `qaZoneRenameBeginCount`, and this drives the same `applyZoneRename` the
+    /// inline commit uses.
+    func qaRenameZone(_ zoneId: UUID, to name: String) { applyZoneRename(zoneId: zoneId, to: name) }
+
     private func zoneHeaderZoneId(at screenPoint: CGPoint) -> UUID? {
         liveZones.reversed().first { placement in
             guard let header = zoneHeaderScreenRect(for: placement) else { return false }
@@ -1275,8 +1367,16 @@ final class CanvasNSView: NSView {
             return
         }
         let point = convert(event.locationInWindow, from: nil)
-        if event.clickCount >= 2, qaDoubleClickZoneHeaderOrBackground(at: point) != nil {
-            return
+        if event.clickCount >= 2 {
+            // Double-click a zone HEADER → inline rename; otherwise fall through to
+            // the existing zoom-fit (zone body / empty canvas).
+            if let zoneId = zoneHeaderZoneId(at: point) {
+                beginZoneRename(zoneId: zoneId)
+                return
+            }
+            if qaDoubleClickZoneHeaderOrBackground(at: point) != nil {
+                return
+            }
         }
         // zone-unify P5: a click on a zone's close (✕) button requests closing it.
         if let zoneId = zoneCloseButtonZoneId(at: point) {
@@ -4026,6 +4126,105 @@ final class CanvasNSView: NSView {
         return artifact
     }
 
+    /// P2 (zone naming): double-clicking a zone HEADER begins inline rename;
+    /// committing updates the display name + stored name + fires `onZoneRenamed`;
+    /// an empty commit keeps the old name; double-clicking the zone BODY still
+    /// zoom-fits (didn't break). RED until `mouseDown` routes header double-click
+    /// to `beginZoneRename`.
+    static func runZoneRenameInlineSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(m): return m } }
+        }
+        func expect(_ c: @autoclosure () -> Bool, _ m: String) throws { if !c() { throw CheckError.failed(m) } }
+        func mouse(_ type: NSEvent.EventType, at p: NSPoint, clicks: Int, window: NSWindow) throws -> NSEvent {
+            guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: clicks, pressure: type == .leftMouseUp ? 0 : 1)
+            else { throw CheckError.failed("could not synthesize \(type)") }
+            return e
+        }
+        let cH: CGFloat = 700
+        func win(_ cx: CGFloat, _ cy: CGFloat) -> NSPoint { NSPoint(x: cx, y: cH - cy) }
+
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil),
+            showsZoneChrome: true
+        )
+        canvas.frame = NSRect(x: 0, y: 0, width: 1000, height: cH)
+        let suite = "zone-rename-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        canvas.zoneGestureDefaults = defaults
+        canvas.zoneNameDefaults = defaults
+        defer { defaults.removePersistentDomain(forName: suite) }
+        // A titled, key-able window so the inline NSTextField can hold the field
+        // editor (a borderless window can't become key → the editor would end
+        // immediately, tearing the session down).
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+        canvas.layoutSubtreeIfNeeded()
+
+        var created: [ZonePlacement] = []
+        canvas.onZoneCreated = { created.append($0) }
+        // Create a zone (auto-named "Zone 1"): canvas-local (120,150)→(520,470).
+        canvas.mouseDown(with: try mouse(.leftMouseDown, at: win(120, 150), clicks: 1, window: window))
+        canvas.mouseDragged(with: try mouse(.leftMouseDragged, at: win(520, 470), clicks: 1, window: window))
+        canvas.mouseUp(with: try mouse(.leftMouseUp, at: win(520, 470), clicks: 1, window: window))
+        try expect(created.count == 1, "zone created; got \(created.count)")
+        let zoneId = created[0].zoneId
+        try expect(canvas.qaZoneDisplayName(zoneId) == "Zone 1", "seed name 'Zone 1'; got '\(canvas.qaZoneDisplayName(zoneId) ?? "nil")'")
+
+        var renamed: [(UUID, String)] = []
+        canvas.onZoneRenamed = { renamed.append(($0, $1)) }
+
+        // Double-click the HEADER (mid-x 300, y 165 ∈ [150,182]) → begin rename.
+        // (No trailing canvas mouseUp: in the real app the up lands on the field
+        // now covering the header, not the canvas; routing to the canvas would read
+        // as a click-away that commits + ends the session.)
+        let headerPoint = win(300, 165)
+        canvas.mouseDown(with: try mouse(.leftMouseDown, at: headerPoint, clicks: 2, window: window))
+        try expect(canvas.qaZoneRenameBeginCount == 1, "double-click header must begin inline rename (not zoom-fit); beginCount=\(canvas.qaZoneRenameBeginCount)")
+
+        // Commit "Work" via the real mutation path (field-editor lifecycle is AppKit
+        // and not reproducible headlessly).
+        canvas.qaRenameZone(zoneId, to: "Work")
+        try expect(canvas.qaZoneDisplayName(zoneId) == "Work", "displayName after rename must be 'Work'; got '\(canvas.qaZoneDisplayName(zoneId) ?? "nil")'")
+        try expect(canvas.qaLiveZonePlacement(zoneId)?.name == "Work", "stored name after rename must be 'Work'")
+        try expect(renamed.count == 1 && renamed[0].1 == "Work", "onZoneRenamed must fire once with 'Work'; got \(renamed)")
+
+        // Empty/whitespace rename keeps the previous name.
+        canvas.qaRenameZone(zoneId, to: "   ")
+        try expect(canvas.qaLiveZonePlacement(zoneId)?.name == "Work", "empty rename must keep the previous name")
+        try expect(renamed.count == 1, "empty rename must not fire onZoneRenamed again; got \(renamed.count)")
+
+        // Double-click the zone BODY (below header, no tile) still zoom-fits.
+        let before = canvas.canvasState.viewport
+        let bodyPoint = win(300, 320)
+        canvas.mouseDown(with: try mouse(.leftMouseDown, at: bodyPoint, clicks: 2, window: window))
+        canvas.mouseUp(with: try mouse(.leftMouseUp, at: bodyPoint, clicks: 2, window: window))
+        let after = canvas.canvasState.viewport
+        try expect(after.zoom != before.zoom || abs(after.x - before.x) > 0.01 || abs(after.y - before.y) > 0.01,
+                   "double-click on the zone body must still zoom-fit (viewport should change)")
+        try expect(canvas.qaZoneRenameActiveZoneId == nil, "body double-click must NOT begin rename")
+
+        // Renamed name survives a Codable round-trip.
+        let placement = canvas.qaLiveZonePlacement(zoneId)!
+        let decoded = try JSONDecoder().decode(ZonePlacement.self, from: try JSONEncoder().encode(placement))
+        try expect(decoded.name == "Work", "renamed name must survive Codable round-trip; got '\(decoded.name)'")
+
+        let fm = FileManager.default
+        let dir = URL(fileURLWithPath: fm.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("zone-rename-inline-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let artifact = dir.appendingPathComponent("manifest.json")
+        try JSONSerialization.data(withJSONObject: ["check": "zone-rename-inline", "finalName": "Work"], options: [.sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
     static func runZoneCreateGestureSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)
@@ -4734,6 +4933,27 @@ final class FocusBorderOverlayView: NSView {
 }
 
 @MainActor
+extension CanvasNSView: NSTextFieldDelegate {
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === zoneRenameField else { return false }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            commitZoneRename()
+            return true
+        }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            cancelZoneRename()
+            return true
+        }
+        return false
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        // Focus loss (clicked elsewhere) commits. No-op if already torn down.
+        guard (obj.object as? NSTextField) === zoneRenameField else { return }
+        commitZoneRename()
+    }
+}
+
 final class ZoneChromeNSView: NSView {
     struct Snapshot: Equatable {
         var displayName: String
@@ -4750,8 +4970,14 @@ final class ZoneChromeNSView: NSView {
     /// an instance; the instance `headerHeight` below drives `headerRect`.
     static let headerHeight: Double = 34
 
-    private let model: CanvasNSView.ZoneRenderModel
+    private var model: CanvasNSView.ZoneRenderModel
     private let headerHeight: CGFloat = 34
+
+    /// Replace the render model (e.g. after a rename) and redraw the header.
+    func update(model: CanvasNSView.ZoneRenderModel) {
+        self.model = model
+        needsDisplay = true
+    }
 
     var snapshot: Snapshot {
         Snapshot(
