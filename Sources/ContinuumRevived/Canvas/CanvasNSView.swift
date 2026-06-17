@@ -551,6 +551,48 @@ final class CanvasNSView: NSView {
         return overlay
     }
 
+    // MARK: - Resize dimension HUD (live W×H readout near the cursor)
+
+    private var resizeDimensionsOverlay: ResizeDimensionsOverlayView?
+
+    /// UserDefaults the resize HUD's enabled toggle resolves from
+    /// (`ResizeHUDConfig`). Overridable so the self-check can drive it.
+    var resizeHUDDefaults: UserDefaults = .standard
+
+    private func resizeDimensionsOverlayView() -> ResizeDimensionsOverlayView {
+        if let overlay = resizeDimensionsOverlay { return overlay }
+        let overlay = ResizeDimensionsOverlayView(frame: bounds)
+        overlay.autoresizingMask = [.width, .height]
+        resizeDimensionsOverlay = overlay
+        addSubview(overlay, positioned: .above, relativeTo: nil)
+        return overlay
+    }
+
+    /// Show the live "W × H" pixel readout near `windowPoint` (the cursor during a
+    /// tile resize). `widthPx`/`heightPx` are the tile's content size in logical
+    /// pixels — uniform for every tile kind. No-op when disabled in Settings.
+    func showResizeDimensions(widthPx: Int, heightPx: Int, atWindowPoint windowPoint: CGPoint) {
+        guard ResizeHUDConfig.enabled(defaults: resizeHUDDefaults) else { return }
+        let overlay = resizeDimensionsOverlayView()
+        // Keep it topmost — tile installs/reorders can otherwise bury it.
+        overlay.removeFromSuperview()
+        overlay.frame = bounds
+        addSubview(overlay, positioned: .above, relativeTo: nil)
+        overlay.showDimensions(
+            widthPx: widthPx,
+            heightPx: heightPx,
+            atOverlayPoint: overlay.convert(windowPoint, from: nil)
+        )
+    }
+
+    func hideResizeDimensions() {
+        resizeDimensionsOverlay?.hideOverlay()
+    }
+
+    /// QA: resize HUD visibility + current text, for the real-path self-check.
+    var qaResizeHUDVisible: Bool { resizeDimensionsOverlay?.qaVisible ?? false }
+    var qaResizeHUDText: String { resizeDimensionsOverlay?.qaText ?? "" }
+
     /// Map a `FocusBorderConfig` color name to an `NSColor` (App layer — Core
     /// stays AppKit-free). Unknown names fall back to the system accent.
     private static func focusBorderColor(named name: String) -> NSColor {
@@ -3316,6 +3358,84 @@ final class CanvasNSView: NSView {
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// P2 (resize HUD): drives a REAL tile resize drag through
+    /// `TileNSView.mouseDown/Dragged/Up` and asserts the live "W × H" overlay
+    /// appears with the dragged dimensions mid-drag and is hidden on release.
+    /// RED until `TileNSView`'s resize branch calls `showResizeDimensions`.
+    static func runResizeDimensionsHUDSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(m): return m } }
+        }
+        func expect(_ c: @autoclosure () -> Bool, _ m: String) throws { if !c() { throw CheckError.failed(m) } }
+        func mouse(_ type: NSEvent.EventType, at p: NSPoint, window: NSWindow) throws -> NSEvent {
+            guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
+            else { throw CheckError.failed("could not synthesize \(type)") }
+            return e
+        }
+
+        let canvasH: CGFloat = 700
+        // Canvas-local (y-down, top-left) → window (y-up, bottom-left).
+        func win(_ cx: CGFloat, _ cy: CGFloat) -> NSPoint { NSPoint(x: cx, y: canvasH - cy) }
+
+        // Tile at world (100,100) size 400×300, zoom 1, viewport (0,0):
+        // its screen frame == world, so the right edge is canvas-local x=500.
+        let tile = Tile(
+            id: UUID(uuidString: "00000000-0000-0000-0000-0000000005CC")!,
+            kind: .note,
+            title: "HUD_PROBE",
+            frame: TileFrame(x: 100, y: 100, width: 400, height: 300),
+            zIndex: 1,
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [tile], groups: [], lastActiveTileId: nil
+        ))
+        canvas.frame = NSRect(x: 0, y: 0, width: 1000, height: canvasH)
+
+        let suite = "resize-hud-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        canvas.resizeHUDDefaults = defaults
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        let tileView = TileNSView(tile: tile)
+        tileView.setContentView(NSView(frame: .zero))
+        canvas.install(tileView: tileView, for: tile)
+        canvas.layoutSubtreeIfNeeded()
+
+        try expect(canvas.qaResizeHUDVisible == false, "HUD must be hidden before any resize")
+
+        // Grab the right edge mid-height (canvas-local x≈498, y=250 → tile-local
+        // (398,150), clear of the corner bands), drag +100 px wider.
+        tileView.mouseDown(with: try mouse(.leftMouseDown, at: win(498, 250), window: window))
+        tileView.mouseDragged(with: try mouse(.leftMouseDragged, at: win(598, 250), window: window))
+
+        try expect(canvas.qaResizeHUDVisible == true, "HUD must be visible during a resize drag")
+        let midText = canvas.qaResizeHUDText
+        try expect(midText.contains("500"), "HUD must show the live dragged width 500; got '\(midText)'")
+
+        tileView.mouseUp(with: try mouse(.leftMouseUp, at: win(598, 250), window: window))
+        try expect(canvas.qaResizeHUDVisible == false, "HUD must hide on mouseUp; still showing '\(canvas.qaResizeHUDText)'")
+
+        let fm = FileManager.default
+        let dir = URL(fileURLWithPath: fm.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("resize-dimensions-hud-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let artifact = dir.appendingPathComponent("manifest.json")
+        try JSONSerialization.data(withJSONObject: ["check": "resize-dimensions-hud", "midDragText": midText], options: [.sortedKeys]).write(to: artifact, options: .atomic)
         return artifact
     }
 

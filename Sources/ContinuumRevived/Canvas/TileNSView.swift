@@ -308,6 +308,14 @@ class TileNSView: NSView {
                 next.frame = snapped
             }
             canvas.updateTile(next)
+            // Live "W × H" readout near the cursor (sense of scale). Pixels =
+            // the tile's CONTENT size (world frame minus the chrome bar), uniform
+            // for every tile kind — e.g. a browser sized to 1280×720 reads as that.
+            canvas.showResizeDimensions(
+                widthPx: Int(next.frame.width.rounded()),
+                heightPx: Int(max(0, next.frame.height - Double(TileNSView.titleBarHeight)).rounded()),
+                atWindowPoint: event.locationInWindow
+            )
         case .none:
             super.mouseDragged(with: event)
         }
@@ -319,6 +327,8 @@ class TileNSView: NSView {
         dragKind = .none
         mouseDraggedSinceDown = false
         resizeFreeFrame = nil
+        // Tear down the live resize readout (no-op if it was never shown).
+        canvas?.hideResizeDimensions()
 
         // Commit the armed snap (if the dwell elapsed), then tear down the ghost.
         if case .move = completedDragKind, let target = dragSnapTarget {

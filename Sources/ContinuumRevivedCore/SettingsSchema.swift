@@ -149,6 +149,11 @@ public enum SettingsSchema {
                         label: "Focus Border",
                         default: FocusBorderConfig.defaultEnabled
                     ),
+                    .toggle(
+                        key: ResizeHUDConfig.enabledKey,
+                        label: "Resize Size Indicator",
+                        default: ResizeHUDConfig.defaultEnabled
+                    ),
                     .choice(
                         key: FocusBorderConfig.colorKey,
                         label: "Focus Border Color",
