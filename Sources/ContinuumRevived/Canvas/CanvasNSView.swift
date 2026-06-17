@@ -766,6 +766,15 @@ final class CanvasNSView: NSView {
             guard f.width > 0, f.height > 0 else { continue }
             guard screenPoint.x >= f.minX - m, screenPoint.x <= f.maxX + m,
                   screenPoint.y >= f.minY - m, screenPoint.y <= f.maxY + m else { continue }
+            // The header strip is the move affordance (like a window title bar):
+            // grabbing it — including within the corner band near a top corner —
+            // must move, never resize. Defer to header-move there. Resize stays on
+            // the outer border, the left/right/bottom edges, and the bottom corners
+            // (all below the header). Without this, the top corners/edge silently
+            // shadowed the header and a header drag near a corner resized instead.
+            if let header = zoneHeaderScreenRect(for: placement), header.contains(screenPoint) {
+                return nil
+            }
             let nearLeft = abs(screenPoint.x - f.minX) <= m, nearRight = abs(screenPoint.x - f.maxX) <= m
             let nearTop = abs(screenPoint.y - f.minY) <= m, nearBottom = abs(screenPoint.y - f.maxY) <= m
             let nlC = abs(screenPoint.x - f.minX) <= c, nrC = abs(screenPoint.x - f.maxX) <= c
