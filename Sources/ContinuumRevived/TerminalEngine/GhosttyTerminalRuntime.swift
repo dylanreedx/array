@@ -103,6 +103,18 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         terminalView?.isProcessExited() ?? true
     }
 
+    /// QA hook: the live terminal view, for headless scale/geometry checks.
+    var qaTerminalView: GhosttyTerminalView? { terminalView }
+
+    /// Authoritative surface sizing pushed by the canvas (CanvasNSView.layoutTile)
+    /// from the tile's WORLD content size × backing scale — independent of the
+    /// canvas zoom. Keeps the column grid tied to the tile's logical size so zoom
+    /// is pure navigation (no reflow) and the surface always fills the tile,
+    /// bypassing the stale-bounds-at-attach race.
+    func setSurfacePixelSize(_ size: CGSize) {
+        terminalView?.setSurfacePixelSize(size)
+    }
+
     func focus() {
         guard let terminalView else { return }
         terminalView.window?.makeFirstResponder(terminalView)
@@ -377,6 +389,127 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
             "terminalAttachedCount": attachedCount,
             "terminalDelta": terminalDelta,
             "samples": samples.map { ["label": $0.label, "windows": $0.windows] },
+        ]
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// P1 (terminal scale / Option B): installs a REAL terminal tile in a
+    /// CanvasNSView+window and asserts the navigation-zoom invariant — the ghostty
+    /// surface fills the tile (surface width ≈ tile world content width × backing)
+    /// and the column grid is INVARIANT across a canvas-zoom sweep (zoom is pure
+    /// navigation, not reflow). RED before the fix: today `updateSurfaceSize` uses
+    /// `convertToBacking(bounds)`, which composes the tile's zoom transform, so the
+    /// surface width scales with zoom (≠ world×backing) and columns reflow.
+    static func runTerminalFillsTileSelfCheck() throws -> URL {
+        struct CheckError: Error, CustomStringConvertible {
+            let message: String
+            var description: String { message }
+        }
+
+        let context = try GhosttyRuntimeContext()
+        defer { context.shutdown() }
+
+        let worldWidth: Double = 800
+        let worldHeight: Double = 520
+        let tile = Tile(
+            id: UUID(uuidString: "00000000-0000-0000-0000-0000000005CB")!,
+            kind: .terminal,
+            title: "FILLS_TILE_PROBE",
+            frame: TileFrame(x: 0, y: 0, width: worldWidth, height: worldHeight),
+            zIndex: 1,
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [tile],
+            groups: [],
+            lastActiveTileId: nil
+        ))
+        canvas.frame = NSRect(x: 0, y: 0, width: 1200, height: 820)
+        let window = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 1200, height: 820),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = canvas
+        window.orderFront(nil)
+        defer { window.close() }
+
+        let cwd = FileManager.default.currentDirectoryPath
+        let runtime = GhosttyTerminalRuntime(
+            tileId: tile.id,
+            title: "fills-tile",
+            launchProfile: LaunchProfile(command: "/bin/sh", arguments: [], cwd: cwd, title: "fills-tile"),
+            ghostty: context
+        )
+        let tileView = TerminalTileNSView(tile: tile, runtime: runtime)
+        canvas.install(tileView: tileView, for: tile)
+        tileView.layoutSubtreeIfNeeded()
+
+        func pump(_ seconds: TimeInterval) throws {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline {
+                ghostty_app_tick(try context.app)
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            }
+        }
+        try pump(0.6)
+
+        let backing = Double(window.backingScaleFactor)
+        // The terminal fills the full tile width (no horizontal inset), so the
+        // surface should be the tile WORLD width × backing — at EVERY zoom.
+        let expectedWidthPx = worldWidth * backing
+
+        struct Sample { let zoom: Double; let widthPx: Int; let columns: Int }
+        var samples: [Sample] = []
+        let zooms: [Double] = [1.0, 0.6, 1.8]
+        for zoom in zooms {
+            canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
+            tileView.layoutSubtreeIfNeeded()
+            try pump(0.25)
+            guard let term = runtime.qaTerminalView, let surface = term.surface else {
+                throw CheckError(message: "zoom \(zoom): terminal surface missing")
+            }
+            let size = ghostty_surface_size(surface)
+            samples.append(Sample(zoom: zoom, widthPx: Int(size.width_px), columns: Int(size.columns)))
+        }
+
+        runtime.terminate(policy: .force)
+        tileView.hostView.detachRuntime()
+
+        let summary = samples.map { String(format: "z=%.2f surf=%dpx cols=%d", $0.zoom, $0.widthPx, $0.columns) }.joined(separator: " | ")
+
+        // (1) Surface fills the tile width at every zoom (zoom-independent).
+        for sample in samples {
+            let drift = abs(Double(sample.widthPx) - expectedWidthPx) / max(1.0, expectedWidthPx)
+            if drift > 0.03 {
+                throw CheckError(message: "surface width != tile world width × backing at zoom \(sample.zoom): got \(sample.widthPx)px, expected ≈\(Int(expectedWidthPx))px (drift \(Int(drift * 100))%). zoom must not resize the grid. [\(summary)]")
+            }
+        }
+        // (2) Columns invariant across the zoom sweep (navigation, not reflow).
+        if let baseline = samples.first?.columns {
+            for sample in samples where abs(sample.columns - baseline) > 1 {
+                throw CheckError(message: "columns reflow with zoom: \(sample.columns) vs baseline \(baseline). [\(summary)]")
+            }
+        }
+
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("terminal-fills-tile", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "check": "terminal-fills-tile",
+            "worldWidth": worldWidth,
+            "backing": backing,
+            "expectedWidthPx": expectedWidthPx,
+            "samples": samples.map { ["zoom": $0.zoom, "widthPx": $0.widthPx, "columns": $0.columns] }
         ]
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

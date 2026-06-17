@@ -138,6 +138,7 @@ run_app_check .build/debug/continuum-revived --project-lock-check
 run_app_check .build/debug/continuum-revived --project-root-resolution-check
 run_app_check .build/debug/continuum-revived --project-picker-resolution-check
 run_app_check .build/debug/continuum-revived --terminal-snapshot-tier-check
+run_app_check .build/debug/continuum-revived --terminal-fills-tile-check
 run_app_check .build/debug/continuum-revived --session-resume-check
 run_app_check .build/debug/continuum-revived --stray-window-audit-check
 if [[ "$FAST" -eq 0 ]]; then

@@ -1108,6 +1108,19 @@ final class CanvasNSView: NSView {
         // resize — the overlay lives on the canvas, not the tile, so it must be
         // repositioned here whenever the bordered tile's frame updates.
         repositionFocusBorderIfNeeded(for: tile.id)
+        // Authoritatively size the terminal surface from the tile's WORLD content
+        // size × backing — independent of canvas zoom. The canvas knows the real
+        // size synchronously, so this fills the tile (no dead-zone), bypasses the
+        // stale-bounds-at-attach race, and keeps the column grid fixed across zoom
+        // (zoom = navigation, not reflow).
+        if let terminalTile = view as? TerminalTileNSView {
+            let backing = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+            let contentWorldWidth = max(0, tile.frame.width)
+            let contentWorldHeight = max(0, tile.frame.height - Double(TileNSView.titleBarHeight))
+            terminalTile.runtime.setSurfacePixelSize(
+                CGSize(width: contentWorldWidth * backing, height: contentWorldHeight * backing)
+            )
+        }
     }
 
     private func updateEmptyStateVisibility() {

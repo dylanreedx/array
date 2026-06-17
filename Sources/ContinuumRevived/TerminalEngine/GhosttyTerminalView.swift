@@ -341,8 +341,15 @@ final class GhosttyTerminalView: NSView {
 
     func updateSurfaceSize() {
         guard surface != nil else { return }
-        let backingSize = convertToBacking(bounds).size
-        setSurfacePixelSize(backingSize)
+        // Size the surface to the view's WORLD bounds × backing scale — NOT
+        // `convertToBacking(bounds)`, which composes the tile's frame/bounds zoom
+        // transform and would make the column grid reflow as the canvas zooms.
+        // Canvas zoom is navigation: it bitmap-scales the rendered tile; the grid
+        // stays tied to the tile's logical size. (In the live canvas the
+        // authoritative size is pushed from CanvasNSView.layoutTile; this path
+        // covers resize + standalone/non-canvas hosts.)
+        let backing = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        setSurfacePixelSize(CGSize(width: bounds.width * backing, height: bounds.height * backing))
     }
 
     func requestClose(force: Bool) {
