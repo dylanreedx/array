@@ -2065,6 +2065,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// NSScrollView/NSTextView, WKWebView/browser host, or Ghostty terminal host
     /// are passed through so tile content keeps native trackpad scrolling.
     static func routeTileClickFocus(at windowPoint: NSPoint, in canvas: CanvasNSView, focusBroker: FocusBroker) {
+        // A click while an inline zone rename is open must not reroute focus out
+        // from under the editing field. A click on the renamed zone's header keeps
+        // editing (this is the mouse-up of the very double-click that opened it);
+        // a click elsewhere commits the rename, then falls through to route focus
+        // to whatever was clicked.
+        if canvas.consumeZoneRenameClick(atWindowPoint: windowPoint) { return }
         let pointInCanvas = canvas.convert(windowPoint, from: nil)
         // Resolve the owning tile from the click point, falling back to the
         // live first responder so clicks inside body content (WKWebView, note,
