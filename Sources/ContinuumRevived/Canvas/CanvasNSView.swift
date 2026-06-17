@@ -122,6 +122,8 @@ final class CanvasNSView: NSView {
     func qaZoneMembership(of tileId: UUID) -> UUID? { tileZoneMembership[tileId] }
     /// QA reader: the current (mutable) placement of a live zone, or nil.
     func qaLiveZonePlacement(_ zoneId: UUID) -> ZonePlacement? { liveZones.first { $0.zoneId == zoneId } }
+    /// QA reader: the rendered display name of a live zone, or nil.
+    func qaZoneDisplayName(_ zoneId: UUID) -> String? { zoneDisplayByZoneId[zoneId]?.displayName }
     /// QA reader: the move-grab header rect for a live zone (screen coords).
     func qaZoneHeaderGrabRect(_ zoneId: UUID) -> CGRect? {
         liveZones.first { $0.zoneId == zoneId }.flatMap { zoneHeaderScreenRect(for: $0) }
@@ -147,6 +149,10 @@ final class CanvasNSView: NSView {
     /// UserDefaults the zone break-out distance resolves from (ZoneBreakoutConfig).
     /// Overridable so the break-out check can drive a deterministic threshold.
     var breakoutDefaults: UserDefaults = .standard
+
+    /// UserDefaults the default group-zone name base resolves from
+    /// (`DefaultGroupZoneName`). Overridable so the auto-name check is deterministic.
+    var zoneNameDefaults: UserDefaults = .standard
 
     /// Fired when a drag-to-create gesture commits a new group zone.
     /// The placement is passed; the caller persists it (e.g. via WorkspaceDocument).
@@ -756,6 +762,20 @@ final class CanvasNSView: NSView {
         guard var bounds = rects.first else { return nil }
         for rect in rects.dropFirst() { bounds = bounds.union(rect) }
         return bounds
+    }
+
+    /// Next auto-name for a drag-created group zone: "<base> N", where base comes
+    /// from `DefaultGroupZoneName` (default "Zone") and N is one past the highest
+    /// "<base> K" index already used by a group zone (so deletions don't collide).
+    private func nextDefaultGroupZoneName() -> String {
+        let base = DefaultGroupZoneName.resolve(defaults: zoneNameDefaults)
+        let prefix = base + " "
+        var maxIndex = 0
+        for zone in liveZones where zone.projectId == nil {
+            guard zone.name.hasPrefix(prefix), let n = Int(zone.name.dropFirst(prefix.count)) else { continue }
+            maxIndex = max(maxIndex, n)
+        }
+        return "\(base) \(maxIndex + 1)"
     }
 
     private func zoneHeaderZoneId(at screenPoint: CGPoint) -> UUID? {
@@ -1407,6 +1427,10 @@ final class CanvasNSView: NSView {
                 let aw = CanvasEngine.screenToWorld(originScreen, viewport: vp)
                 let bw = CanvasEngine.screenToWorld(point, viewport: vp)
                 let newZoneId = UUID()
+                // Auto-name silently: "<base> N" (base from DefaultGroupZoneName,
+                // default "Zone"; N = next unused index). Computed before append so
+                // the new zone isn't counted against itself.
+                let zoneName = nextDefaultGroupZoneName()
                 let placement = ZonePlacement(
                     zoneId: newZoneId,
                     projectId: nil,
@@ -1415,7 +1439,7 @@ final class CanvasNSView: NSView {
                     color: "teal",
                     collapsed: false,
                     hydrationPolicy: .automatic,
-                    name: "",
+                    name: zoneName,
                     navKey: nil
                 )
                 // Unified live path (zone-unify P2): register the zone in the
@@ -1426,7 +1450,7 @@ final class CanvasNSView: NSView {
                 // new zone (frame converted world→zone-local so its world position
                 // is preserved).
                 liveZones.append(placement)
-                zoneDisplayByZoneId[newZoneId] = ZoneRenderModel(placement: placement, displayName: "")
+                zoneDisplayByZoneId[newZoneId] = ZoneRenderModel(placement: placement, displayName: zoneName)
                 let ox = placement.origin.x, oy = placement.origin.y
                 let ow = placement.size.width, oh = placement.size.height
                 for i in canvasState.tiles.indices {
@@ -3921,6 +3945,87 @@ final class CanvasNSView: NSView {
 
     // MARK: - Zone create/move gesture check (T19)
 
+    /// P1 (zone naming): a drag-created zone is auto-named "<base> N" (default
+    /// "Zone 1", "Zone 2", …), the name shows in the chrome (displayName) and the
+    /// stored placement, is carried by `onZoneCreated`, and round-trips through
+    /// Codable. RED today (drag-create leaves the name blank).
+    static func runZoneAutoNameSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(m): return m } }
+        }
+        func expect(_ c: @autoclosure () -> Bool, _ m: String) throws { if !c() { throw CheckError.failed(m) } }
+        func mouse(_ type: NSEvent.EventType, at p: NSPoint, window: NSWindow) throws -> NSEvent {
+            guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
+            else { throw CheckError.failed("could not synthesize \(type)") }
+            return e
+        }
+        let cH: CGFloat = 700
+        func win(_ cx: CGFloat, _ cy: CGFloat) -> NSPoint { NSPoint(x: cx, y: cH - cy) }
+        func createDrag(_ canvas: CanvasNSView, _ window: NSWindow, from a: NSPoint, to b: NSPoint) throws {
+            canvas.mouseDown(with: try mouse(.leftMouseDown, at: a, window: window))
+            canvas.mouseDragged(with: try mouse(.leftMouseDragged, at: b, window: window))
+            canvas.mouseUp(with: try mouse(.leftMouseUp, at: b, window: window))
+        }
+
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil),
+            showsZoneChrome: true
+        )
+        canvas.frame = NSRect(x: 0, y: 0, width: 1000, height: cH)
+
+        let gestureSuite = "autoname-gesture-\(UUID().uuidString)"
+        let gestureDefaults = UserDefaults(suiteName: gestureSuite)!
+        gestureDefaults.removePersistentDomain(forName: gestureSuite)
+        canvas.zoneGestureDefaults = gestureDefaults
+        defer { gestureDefaults.removePersistentDomain(forName: gestureSuite) }
+
+        let nameSuite = "autoname-name-\(UUID().uuidString)"
+        let nameDefaults = UserDefaults(suiteName: nameSuite)!
+        nameDefaults.removePersistentDomain(forName: nameSuite)
+        canvas.zoneNameDefaults = nameDefaults
+        defer { nameDefaults.removePersistentDomain(forName: nameSuite) }
+
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        canvas.layoutSubtreeIfNeeded()
+
+        var created: [ZonePlacement] = []
+        canvas.onZoneCreated = { created.append($0) }
+
+        // First zone: canvas-local (120,150)→(520,470).
+        try createDrag(canvas, window, from: win(120, 150), to: win(520, 470))
+        try expect(created.count == 1, "first create should fire onZoneCreated once; got \(created.count)")
+        let z1 = created[0].zoneId
+        try expect(canvas.qaZoneDisplayName(z1) == "Zone 1", "first zone displayName must be 'Zone 1'; got '\(canvas.qaZoneDisplayName(z1) ?? "nil")'")
+        try expect(canvas.qaLiveZonePlacement(z1)?.name == "Zone 1", "first zone stored name must be 'Zone 1'; got '\(canvas.qaLiveZonePlacement(z1)?.name ?? "nil")'")
+        try expect(created[0].name == "Zone 1", "onZoneCreated placement must carry the name")
+
+        // Second zone in a different empty region: (600,200)→(900,500).
+        try createDrag(canvas, window, from: win(600, 200), to: win(900, 500))
+        try expect(created.count == 2, "second create should fire onZoneCreated; got \(created.count)")
+        let z2 = created[1].zoneId
+        try expect(canvas.qaZoneDisplayName(z2) == "Zone 2", "second zone displayName must be 'Zone 2'; got '\(canvas.qaZoneDisplayName(z2) ?? "nil")'")
+
+        // Persist round-trip: the name survives encode → decode.
+        let data = try JSONEncoder().encode(created[0])
+        let decoded = try JSONDecoder().decode(ZonePlacement.self, from: data)
+        try expect(decoded.name == "Zone 1", "zone name must survive Codable round-trip; got '\(decoded.name)'")
+
+        let fm = FileManager.default
+        let dir = URL(fileURLWithPath: fm.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent("zone-autoname-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let artifact = dir.appendingPathComponent("manifest.json")
+        try JSONSerialization.data(withJSONObject: ["check": "zone-autoname", "names": [canvas.qaZoneDisplayName(z1) ?? "", canvas.qaZoneDisplayName(z2) ?? ""]], options: [.sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
     static func runZoneCreateGestureSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)
@@ -3962,6 +4067,8 @@ final class CanvasNSView: NSView {
         let gestureDefaultsA = UserDefaults(suiteName: suiteNameA)!
         gestureDefaultsA.removePersistentDomain(forName: suiteNameA)
         canvasA.zoneGestureDefaults = gestureDefaultsA
+        // Same isolated suite for the auto-name base (no override → base "Zone").
+        canvasA.zoneNameDefaults = gestureDefaultsA
         defer { gestureDefaultsA.removePersistentDomain(forName: suiteNameA) }
 
         var createdPlacements: [ZonePlacement] = []
@@ -3995,7 +4102,7 @@ final class CanvasNSView: NSView {
         try expect(created.projectId == nil, "assertion 2: created zone must have projectId == nil (group zone)")
         try expect(created.collapsed == false, "assertion 2: created zone collapsed == false")
         try expect(created.hydrationPolicy == .automatic, "assertion 2: created zone hydrationPolicy == .automatic")
-        try expect(created.name == "", "assertion 2: created zone name == \"\"")
+        try expect(created.name == "Zone 1", "assertion 2: created zone auto-named \"Zone 1\"; got \"\(created.name)\"")
         try expect(created.navKey == nil, "assertion 2: created zone navKey == nil")
         try expect(created.color == "teal", "assertion 2: created zone color == \"teal\"")
         try expect(canvasA.qaLiveZoneIds == [created.zoneId], "assertion 2: created zone registered in the live zone set (not a ZoneLayer)")

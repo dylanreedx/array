@@ -90,6 +90,7 @@ run_app_check .build/debug/continuum-revived --unified-model-boot-check
 run_app_check .build/debug/continuum-revived --zone-move-unified-check
 run_app_check .build/debug/continuum-revived --multi-zone-render-check
 run_app_check .build/debug/continuum-revived --zone-create-gesture-check
+run_app_check .build/debug/continuum-revived --zone-autoname-check
 run_app_check .build/debug/continuum-revived --zone-create-encloses-check
 run_app_check .build/debug/continuum-revived --zone-breakout-check
 run_app_check .build/debug/continuum-revived --zone-close-keep-delete-check
