@@ -4318,6 +4318,8 @@ do {
         DefaultGroupZoneName.userDefaultsKey,
         AutosaveConfig.debounceMsKey,
         ZoneGestureConfig.minCreateDragScreenPointsKey,
+        TmuxPersistenceConfig.enabledKey,
+        TmuxPersistenceConfig.pathKey,
         // WorkspaceProfileConfig.defaultCaptureModeKey and defaultApplyModeKey are
         // intentionally excluded: captureMode/applyMode have no behavioral effect yet
         // (WorkspaceDocument is layout-only; T13 session-state is in ProjectStore sibling

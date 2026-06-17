@@ -141,6 +141,22 @@ public enum SettingsSchema {
                 ]
             ),
             SettingsSection(
+                id: "terminal",
+                title: "Terminal",
+                fields: [
+                    .toggle(
+                        key: TmuxPersistenceConfig.enabledKey,
+                        label: "Keep Shells Alive (tmux)",
+                        default: TmuxPersistenceConfig.defaultEnabled
+                    ),
+                    .text(
+                        key: TmuxPersistenceConfig.pathKey,
+                        label: "tmux Path",
+                        default: TmuxPersistenceConfig.defaultPath
+                    ),
+                ]
+            ),
+            SettingsSection(
                 id: "appearance",
                 title: "Appearance",
                 fields: [

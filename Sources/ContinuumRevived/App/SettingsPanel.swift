@@ -579,6 +579,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         case noGeneralToggle
         case blankRender(colors: Int, width: Int, height: Int)
         case leakedPanel
+        case missingTerminalTmuxFields
 
         var description: String {
             switch self {
@@ -594,6 +595,8 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
                 return "panel render is blank/uniform (grey-screen guard): \(colors) sampled colors at \(width)x\(height)"
             case .leakedPanel:
                 return "settings panel window leaked after close"
+            case .missingTerminalTmuxFields:
+                return "SettingsSchema missing Terminal section with tmux enabled/path fields"
             }
         }
     }
@@ -606,6 +609,18 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         defer { defaults.removePersistentDomain(forName: suite) }
 
         let sections = SettingsSchema.sections()
+        guard let terminalSection = sections.first(where: { $0.id == "terminal" }),
+              terminalSection.fields.contains(where: { field in
+                  if case .toggle(TmuxPersistenceConfig.enabledKey, "Keep Shells Alive (tmux)", TmuxPersistenceConfig.defaultEnabled) = field { return true }
+                  return false
+              }),
+              terminalSection.fields.contains(where: { field in
+                  if case .text(TmuxPersistenceConfig.pathKey, "tmux Path", TmuxPersistenceConfig.defaultPath) = field { return true }
+                  return false
+              }) else {
+            throw SettingsPanelSelfCheckError.missingTerminalTmuxFields
+        }
+
         let panel = SettingsPanel(sections: sections, defaults: defaults)
         panel.show(near: nil)
 
