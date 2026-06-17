@@ -14,6 +14,53 @@ func approximatelyEqual(_ a: CGPoint, _ b: CGPoint, tolerance: Double = 0.001) -
     abs(a.x - b.x) < tolerance && abs(a.y - b.y) < tolerance
 }
 
+// MARK: - Tmux shell persistence P1
+
+do {
+    let tileId = UUID(uuidString: "A0000000-0000-4000-8000-000000000034")!
+    let otherTileId = UUID(uuidString: "A0000000-0000-4000-8000-000000000035")!
+    let tmuxPath = "/opt/test/bin/tmux"
+    let profile = LaunchProfile(
+        command: "/usr/bin/env",
+        arguments: ["bash", "-lc", "printf '%s\\n' hello && sleep 1"],
+        cwd: "/tmp/Continuum Project",
+        title: "Scripted Shell"
+    )
+
+    let name = TmuxSession.sessionName(tileId: tileId)
+    expect(name == "continuum-\(tileId.uuidString)", "tmux session name should be continuum-prefixed tile UUID")
+    expect(TmuxSession.sessionName(tileId: tileId) == name, "tmux session name should be stable for a tile id")
+    expect(TmuxSession.sessionName(tileId: otherTileId) != name, "tmux session name should be unique across tile ids")
+
+    let wrapped = TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath)
+    expect(wrapped.command == tmuxPath, "tmux wrap command should use resolved tmux path")
+    expect(wrapped.arguments == [
+        "new-session", "-A", "-s", name, "-c", "/tmp/Continuum Project",
+        "/usr/bin/env", "bash", "-lc", "printf '%s\\n' hello && sleep 1"
+    ], "tmux wrap argv should preserve attach/create flags, stable name, cwd, and inner command")
+    expect(wrapped.cwd == profile.cwd, "tmux wrap should preserve launch cwd")
+    expect(wrapped.title == profile.title, "tmux wrap should preserve title")
+
+    let shellProfile = LaunchProfile(command: "/bin/zsh", arguments: [], cwd: "/tmp/plain", title: "Shell")
+    let wrappedShell = TmuxSession.wrap(profile: shellProfile, tileId: tileId, tmuxPath: tmuxPath)
+    expect(wrappedShell.arguments == ["new-session", "-A", "-s", name, "-c", "/tmp/plain"], "plain shell tmux wrap should omit inner command")
+
+    let kill = TmuxSession.killSessionCommand(tileId: tileId, tmuxPath: tmuxPath)
+    expect(kill.command == tmuxPath, "tmux kill command should use resolved tmux path")
+    expect(kill.arguments == ["kill-session", "-t", name], "tmux kill command argv should target stable session name")
+
+    let suiteName = "continuum.tmux-p1-check.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defaults.removePersistentDomain(forName: suiteName)
+    expect(TmuxPersistenceConfig.enabled(defaults: defaults), "tmux persistence should default enabled")
+    expect(TmuxPersistenceConfig.path(defaults: defaults) == "", "tmux persistence path should default empty")
+    defaults.set(false, forKey: TmuxPersistenceConfig.enabledKey)
+    defaults.set("/custom/tmux", forKey: TmuxPersistenceConfig.pathKey)
+    expect(!TmuxPersistenceConfig.enabled(defaults: defaults), "tmux persistence enabled should read persisted false")
+    expect(TmuxPersistenceConfig.path(defaults: defaults) == "/custom/tmux", "tmux persistence path should read persisted path")
+    expect(TmuxLocator.resolve(defaults: defaults) == "/custom/tmux", "tmux locator should prefer explicit configured path")
+}
+
 do {
     let resolver = ShellLaunchResolver(environment: ["SHELL": "/bin/zsh"])
     let profile = try resolver.resolveShell(cwd: "/tmp/continuum")
