@@ -176,6 +176,11 @@ final class CanvasNSView: NSView {
     // MARK: - Inline zone rename (double-click the header)
     private var zoneRenameField: NSTextField?
     private var renamingZoneId: UUID?
+    /// True only while `beginZoneRename` is installing + selecting the field.
+    /// `selectText(_:)` posts a synchronous end-editing notification during setup
+    /// (via `-[NSWindow endEditingFor:]`); this gate makes the delegate ignore it
+    /// so the rename isn't committed + torn down before the user can type.
+    private var isOpeningZoneRename = false
     /// QA: number of times inline rename was begun (routing signal, robust to the
     /// field editor's lifecycle in headless checks).
     private(set) var qaZoneRenameBeginCount: Int = 0
@@ -794,15 +799,20 @@ final class CanvasNSView: NSView {
     /// cancels (see the NSTextFieldDelegate extension).
     func beginZoneRename(zoneId: UUID) {
         guard let field = installZoneRenameField(zoneId: zoneId) else { return }
+        // selectText(_:) ends any current editing via -[NSWindow endEditingFor:],
+        // which posts a synchronous end-editing notification for the field editor we
+        // just attached. Gate the delegate so that transient end doesn't commit +
+        // tear the rename down during its own setup.
+        isOpeningZoneRename = true
         window?.makeFirstResponder(field)
         field.selectText(nil)
+        isOpeningZoneRename = false
     }
 
     /// Build + install the inline rename field over the zone header and set the
     /// rename state. Shared by `beginZoneRename` (which then makes it first
-    /// responder + selects) and the QA seam — the field editor's first-responder
-    /// lifecycle isn't reproducible headlessly, so tests install without focusing.
-    @discardableResult
+    /// responder + selects). Extracted so the field's geometry/styling/state has a
+    /// single source of truth.
     private func installZoneRenameField(zoneId: UUID) -> NSTextField? {
         guard let placement = liveZones.first(where: { $0.zoneId == zoneId }),
               let header = zoneHeaderScreenRect(for: placement) else { return nil }
@@ -895,12 +905,6 @@ final class CanvasNSView: NSView {
     /// `qaZoneRenameBeginCount`, and this drives the same `applyZoneRename` the
     /// inline commit uses.
     func qaRenameZone(_ zoneId: UUID, to name: String) { applyZoneRename(zoneId: zoneId, to: name) }
-    /// QA: open an inline rename WITHOUT making the field first responder. The
-    /// field editor's focus lifecycle ends synchronously in a headless window, so
-    /// this drives the same field/state `beginZoneRename` installs, letting checks
-    /// exercise `consumeZoneRenameClick` / `routeTileClickFocus` against a real
-    /// open rename.
-    func qaBeginZoneRenameForTest(zoneId: UUID) { installZoneRenameField(zoneId: zoneId) }
 
     private func zoneHeaderZoneId(at screenPoint: CGPoint) -> UUID? {
         liveZones.reversed().first { placement in
@@ -4220,28 +4224,27 @@ final class CanvasNSView: NSView {
         canvas.mouseDown(with: try mouse(.leftMouseDown, at: headerPoint, clicks: 2, window: window))
         try expect(canvas.qaZoneRenameBeginCount == 1, "double-click header must begin inline rename (not zoom-fit); beginCount=\(canvas.qaZoneRenameBeginCount)")
 
-        // REGRESSION — the live double-click opened a field that vanished instantly.
-        // The app installs a `.leftMouseUp` monitor that routes click-focus on EVERY
-        // up via `routeTileClickFocus` — including the up of the very double-click that
-        // just opened the rename. A zone header has no tile under it, so the router
-        // fell to `enterScope(.canvas)` → `makeFirstResponder(canvas)`; the field
-        // resigned, `controlTextDidEndEditing` committed, and the session tore down
-        // before a key could be typed. The router must NOT reroute focus when the up
-        // lands on the renamed zone's header.
-        //
-        // The AppKit field editor's first-responder lifecycle is not reproducible in a
-        // headless window (makeFirstResponder + selectText end the session
-        // synchronously), so open the rename deterministically and assert the router's
-        // decision via a broker spy rather than the field's teardown.
-        canvas.qaBeginZoneRenameForTest(zoneId: zoneId)
-        try expect(canvas.qaZoneRenameActiveZoneId == zoneId, "test rename must be open; got \(String(describing: canvas.qaZoneRenameActiveZoneId))")
+        // PRIMARY REGRESSION (live double-click never began editing): `selectText(_:)`
+        // ends current editing via `-[NSWindow endEditingFor:]`, which posts a
+        // synchronous end-editing notification for the field editor `beginZoneRename`
+        // just attached. Without the `isOpeningZoneRename` gate the delegate treated
+        // that as a commit and tore the field down inside `beginZoneRename` itself, so
+        // the rename never survived its own opening gesture. It must stay OPEN.
+        try expect(canvas.qaZoneRenameActiveZoneId == zoneId,
+                   "double-click must leave the rename OPEN (selectText must not self-commit); got \(String(describing: canvas.qaZoneRenameActiveZoneId))")
+
+        // SECONDARY REGRESSION: the app's `.leftMouseUp` monitor routes click-focus on
+        // the up of that same double-click via `routeTileClickFocus`. Over a zone
+        // header (no tile) it would `enterScope(.canvas)` → `makeFirstResponder(canvas)`,
+        // stealing the field's first responder and ending the rename. The router must
+        // leave an open rename alone when the up lands on the renamed zone's header.
         let focusBroker = FocusBroker()
         focusBroker.register(canvas)  // CanvasNSView is its own `.canvas` adapter.
         var routedToCanvas = false
         focusBroker.onAcceptedCanvasScope = { routedToCanvas = true }
         AppDelegate.routeTileClickFocus(at: headerPoint, in: canvas, focusBroker: focusBroker)
         try expect(!routedToCanvas, "click-focus over an open rename header must NOT reroute focus (would tear the rename down)")
-        try expect(canvas.qaZoneRenameActiveZoneId == zoneId, "rename must stay open after a click on its own header")
+        try expect(canvas.qaZoneRenameActiveZoneId == zoneId, "rename must stay open after the opening double-click's mouse-up")
         // A click-away (off the header) commits the rename, THEN routes focus normally.
         AppDelegate.routeTileClickFocus(at: win(800, 600), in: canvas, focusBroker: focusBroker)
         try expect(canvas.qaZoneRenameActiveZoneId == nil, "a click-away must commit + end the rename")
@@ -5007,6 +5010,9 @@ extension CanvasNSView: NSTextFieldDelegate {
     }
 
     func controlTextDidEndEditing(_ obj: Notification) {
+        // Ignore the transient end-editing that `selectText(_:)` posts while
+        // `beginZoneRename` is still installing the field (see `isOpeningZoneRename`).
+        guard !isOpeningZoneRename else { return }
         // Focus loss (clicked elsewhere) commits. No-op if already torn down.
         guard (obj.object as? NSTextField) === zoneRenameField else { return }
         commitZoneRename()
