@@ -81,6 +81,109 @@ private func runChromeIntegrationGuardrailsSelfCheck() throws -> URL {
     return artifact
 }
 
+private func runBrowserCredentialGuardrailsSelfCheck() throws -> URL {
+    let fm = FileManager.default
+    func pathTreeContains(_ root: URL, needle: String, excludedPathFragments: [String] = []) -> Bool {
+        guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else { return false }
+        for case let file as URL in enumerator {
+            if excludedPathFragments.contains(where: { file.path.contains($0) }) { continue }
+            guard (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
+                  let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            if text.contains(needle) { return true }
+        }
+        return false
+    }
+
+    let fixtureSecret = "T04-Fixture-" + UUID().uuidString
+    let generatedScript = "document.querySelector('#password').value = '\(fixtureSecret)'"
+    let redacted = SecretRedactor.redact(
+        "password=\(fixtureSecret)&token=fixture-token Authorization: Bearer fixture-token \(generatedScript)",
+        explicitSecrets: [fixtureSecret, "fixture-token"]
+    )
+
+    let timestamp = Int(Date().timeIntervalSince1970)
+    let dir = URL(fileURLWithPath: "qa-runs/\(timestamp)/browser-credential-guardrails", isDirectory: true)
+    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+
+    let sourcesRoot = URL(fileURLWithPath: "Sources", isDirectory: true)
+    let swiftFiles = (fm.enumerator(at: sourcesRoot, includingPropertiesForKeys: [.isRegularFileKey])?.compactMap { entry -> URL? in
+        guard let url = entry as? URL, url.pathExtension == "swift" else { return nil }
+        return url
+    } ?? []).sorted { $0.path < $1.path }
+
+    let suspicious = [
+        "Login" + " Data",
+        "Cook" + "ies",
+        "Local" + " State",
+        "User" + " Data/Default",
+        "Chrome" + "/Default"
+    ]
+    var productionHits: [[String: String]] = []
+    for file in swiftFiles {
+        let path = file.path
+        let text = try String(contentsOf: file, encoding: .utf8)
+        for needle in suspicious where text.contains(needle) {
+            if !path.hasSuffix("ChromeIntegrationMatrix.swift") && !path.hasSuffix("BrowserCredentialIntegrationMatrix.swift") && !path.hasSuffix("ContinuumApp.swift") && !path.hasSuffix("main.swift") {
+                productionHits.append(["file": path, "needle": needle])
+            }
+        }
+    }
+
+    let chromeLoginDataReadRejected = BrowserCredentialIntegrationMatrix.default[.chromePasswords]?.isRejected == true
+    let chromeCookieReadRejected = BrowserCredentialIntegrationMatrix.default[.chromeCookies]?.isRejected == true
+    let chromeProfileReuseRejected = BrowserCredentialIntegrationMatrix.default[.chromeProfileReuse]?.isRejected == true
+    let chromeSyncPasswordReuseRejected = BrowserCredentialIntegrationMatrix.default[.chromeSyncPasswords] == .unavailable(reason: "Chrome Sync is not an available third-party app integration path and must not be treated as supported.")
+    let policy = BrowserCredentialPolicy.default
+    let localhost3000 = CredentialOrigin(scheme: "http", host: "localhost", port: 3000)
+    let localhost8080 = CredentialOrigin(scheme: "http", host: "localhost", port: 8080)
+    let loopbackPolicy = BrowserCredentialPolicy(publicHTTPFill: .allow, loopbackHTTPExceptionEnabled: true)
+    let localhostPortsDistinct = CredentialOriginMatcher.fillDecision(savedOrigin: localhost3000, documentOrigin: localhost8080, policy: loopbackPolicy) == .deny
+    let https = CredentialOrigin(scheme: "https", host: "example.test", port: 443)
+    let crossOriginFrameDenied = CredentialOriginMatcher.fillDecision(savedOrigin: https, documentOrigin: https, frameOrigin: CredentialOrigin(scheme: "https", host: "evil.test", port: 443)) == .deny
+    let crossOriginActionDenied = CredentialOriginMatcher.fillDecision(savedOrigin: https, documentOrigin: https, formActionOrigin: CredentialOrigin(scheme: "https", host: "evil.test", port: 443)) == .deny
+    let inspectabilityDefaultOff = BrowserInspectionPolicy.resolved(defaults: UserDefaults(suiteName: "continuum.credential-guardrails.\(UUID().uuidString)")!, environment: [:]).isEnabled == false
+
+    let fixtureSecretAbsentFromWorkspace = !pathTreeContains(URL(fileURLWithPath: ".", isDirectory: true), needle: fixtureSecret, excludedPathFragments: ["/.build/", "/.git/", "/qa-runs/"])
+    let fixtureSecretAbsentFromQARuns = !pathTreeContains(dir, needle: fixtureSecret)
+
+    var manifest: [String: Any] = [
+        "check": "browser-credential-guardrails",
+        "chromeLoginDataReadRejected": chromeLoginDataReadRejected,
+        "chromeCookieReadRejected": chromeCookieReadRejected,
+        "chromeProfileReuseRejected": chromeProfileReuseRejected,
+        "chromeSyncPasswordReuseRejected": chromeSyncPasswordReuseRejected,
+        "publicHTTPFillDefault": policy.publicHTTPFill.rawValue,
+        "loopbackHTTPExceptionDefaultEnabled": policy.loopbackHTTPExceptionEnabled,
+        "localhostPortsDistinct": localhostPortsDistinct,
+        "crossOriginFrameDenied": crossOriginFrameDenied,
+        "crossOriginActionDenied": crossOriginActionDenied,
+        "inspectabilityDefaultOff": inspectabilityDefaultOff,
+        "fixtureSecretAbsentFromWorkspace": fixtureSecretAbsentFromWorkspace,
+        "fixtureSecretAbsentFromQARuns": fixtureSecretAbsentFromQARuns,
+        "sourceGrepScope": ["Sources/**/*.swift"],
+        "qaArtifactGrepScope": dir.path,
+        "allowlistedSuspiciousHits": [],
+        "fixtureSecretAbsentAfterManifestWrite": true,
+        "suspiciousChromePathProductionHits": productionHits
+    ]
+    let artifact = dir.appendingPathComponent("manifest.json")
+    var data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+    manifest["fixtureSecretAbsentAfterManifestWrite"] = !String(data: data, encoding: .utf8)!.contains(fixtureSecret)
+    data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+    try data.write(to: artifact, options: .atomic)
+    let written = try String(contentsOf: artifact, encoding: .utf8)
+    let fixtureSecretAbsentAfterManifestWrite = !written.contains(fixtureSecret)
+    let fixtureSecretAbsentFromQARunsAfterWrite = !pathTreeContains(dir, needle: fixtureSecret)
+    guard chromeLoginDataReadRejected, chromeCookieReadRejected, chromeProfileReuseRejected, chromeSyncPasswordReuseRejected,
+          policy.publicHTTPFill == .deny, policy.loopbackHTTPExceptionEnabled == false, localhostPortsDistinct,
+          crossOriginFrameDenied, crossOriginActionDenied, inspectabilityDefaultOff, !redacted.contains(fixtureSecret),
+          fixtureSecretAbsentFromWorkspace, fixtureSecretAbsentFromQARuns, fixtureSecretAbsentAfterManifestWrite,
+          fixtureSecretAbsentFromQARunsAfterWrite, productionHits.isEmpty else {
+        throw NSError(domain: "ContinuumRevived.BrowserCredentialGuardrails", code: 1, userInfo: [NSLocalizedDescriptionKey: "browser credential guardrails failed; see \(artifact.path)"])
+    }
+    return artifact
+}
+
 @main
 enum ContinuumApp {
     @MainActor
@@ -224,6 +327,17 @@ enum ContinuumApp {
             do {
                 let artifact = try runChromeIntegrationGuardrailsSelfCheck()
                 print("ContinuumRevivedChromeIntegrationGuardrailsChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-credential-guardrails-check") {
+            do {
+                let artifact = try runBrowserCredentialGuardrailsSelfCheck()
+                print("ContinuumRevivedBrowserCredentialGuardrailsChecks passed: \(artifact.path)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)

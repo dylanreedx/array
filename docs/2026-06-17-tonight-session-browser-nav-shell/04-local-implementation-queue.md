@@ -25,7 +25,7 @@ Rules:
 - [x] T05 — Chrome integration guardrails matrix  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T05-chrome-profile-sync-feasibility.md`
 
-- [ ] T04 — Password/autofill security guardrails and policy tests  
+- [x] T04 — Password/autofill security guardrails and policy tests  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T04-password-autofill-safe-plan.md`
 
 - [ ] T04b — Keychain PasswordVaultService  

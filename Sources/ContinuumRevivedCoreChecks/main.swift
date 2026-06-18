@@ -38,6 +38,45 @@ do {
     expect(ChromeIntegrationMatrix.verdict(for: .cdpDefaultProfile, via: .isolatedChromeCDPAppOwnedUserDataDir) == .conditionallySafe(requirement: "Developer automation may use only an isolated app-owned --user-data-dir, never the default user profile."), "isolated CDP must require app-owned user data dir")
 }
 
+// MARK: - Browser credential guardrails
+
+do {
+    expect(BrowserCredentialIntegrationMatrix.default[.chromePasswords]?.isRejected == true, "Chrome password profile reads must be rejected")
+    expect(BrowserCredentialIntegrationMatrix.default[.chromeCookies]?.isRejected == true, "Chrome cookie profile reads must be rejected")
+    expect(BrowserCredentialIntegrationMatrix.default[.chromeProfileReuse]?.isRejected == true, "Chrome live profile reuse must be rejected")
+    expect(BrowserCredentialIntegrationMatrix.default[.chromeSyncPasswords] == .unavailable(reason: "Chrome Sync is not an available third-party app integration path and must not be treated as supported."), "Chrome Sync password reuse must be unavailable")
+
+    let policy = BrowserCredentialPolicy.default
+    expect(policy.publicHTTPFill == .deny, "public HTTP fill must default deny")
+    expect(policy.loopbackHTTPExceptionEnabled == false, "loopback HTTP exception must default disabled")
+
+    let https = CredentialOrigin(scheme: "https", host: "Example.COM", port: 443)
+    expect(CredentialOriginMatcher.fillDecision(savedOrigin: https, documentOrigin: CredentialOrigin(scheme: "https", host: "example.com", port: 443)) == .allow, "exact HTTPS origin should allow")
+    expect(CredentialOriginMatcher.fillDecision(savedOrigin: https, documentOrigin: CredentialOrigin(scheme: "http", host: "example.com", port: 443)) == .deny, "HTTPS to HTTP downgrade should deny")
+    expect(CredentialOriginMatcher.fillDecision(savedOrigin: https, documentOrigin: CredentialOrigin(scheme: "https", host: "evil-example.com", port: 443)) == .deny, "different host should deny")
+    expect(CredentialOriginMatcher.fillDecision(savedOrigin: https, documentOrigin: https, frameOrigin: CredentialOrigin(scheme: "https", host: "login.example.com", port: 443)) == .deny, "cross-origin frame should deny")
+    expect(CredentialOriginMatcher.fillDecision(savedOrigin: https, documentOrigin: https, formActionOrigin: CredentialOrigin(scheme: "https", host: "pay.example.com", port: 443)) == .deny, "cross-origin form action should deny")
+
+    let loopbackPolicy = BrowserCredentialPolicy(publicHTTPFill: .allow, loopbackHTTPExceptionEnabled: true)
+    let localhost3000 = CredentialOrigin(scheme: "http", host: "localhost", port: 3000)
+    expect(CredentialOriginMatcher.fillDecision(savedOrigin: localhost3000, documentOrigin: localhost3000, policy: loopbackPolicy) == .allow, "enabled loopback exact port should allow")
+    expect(CredentialOriginMatcher.fillDecision(savedOrigin: localhost3000, documentOrigin: CredentialOrigin(scheme: "http", host: "localhost", port: 8080), policy: loopbackPolicy) == .deny, "loopback ports must be distinct")
+    expect(!CredentialOriginMatcher.isLoopbackHost("192.168.1.10"), "LAN addresses must not be loopback")
+    expect(!CredentialOriginMatcher.isLoopbackHost("10.0.0.1"), "private 10/8 addresses must not be loopback")
+    expect(!CredentialOriginMatcher.isLoopbackHost("172.16.0.1"), "private 172.16/12 addresses must not be loopback")
+
+    let fixtureSecret = "T04-Fixture-Password-123"
+    let generatedScript = "document.querySelector('#password').value = '\(fixtureSecret)'"
+    let redacted = SecretRedactor.redact("password=\(fixtureSecret)&token=abc123 Authorization: Bearer abc.def \(generatedScript) https://example.test/login?credential=\(fixtureSecret)", explicitSecrets: [fixtureSecret, "abc123", "abc.def"])
+    expect(!redacted.contains(fixtureSecret), "redactor must remove explicit fixture secret")
+    expect(!redacted.contains("abc123") && !redacted.contains("abc.def"), "redactor must remove token-like values")
+    expect(!redacted.contains(generatedScript), "redactor must remove generated fill-script secret strings")
+
+    let genericRedacted = SecretRedactor.redact("Authorization: Bearer generic.token.value https://example.test/login?credential=querySecret&apikey=queryKey")
+    expect(!genericRedacted.contains("generic.token.value"), "redactor must remove bearer token values without explicit secrets")
+    expect(!genericRedacted.contains("querySecret") && !genericRedacted.contains("queryKey"), "redactor must remove query values without explicit secrets")
+}
+
 // MARK: - Tmux shell persistence P1
 
 do {
