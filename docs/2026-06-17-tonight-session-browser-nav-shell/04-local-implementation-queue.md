@@ -39,7 +39,7 @@ Rules:
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T01b-browser-tab-ui-runtime-single-live-webview.md`  
   Prerequisite: T01 done.
 
-- [ ] T03 — Browser tab session restore for single-live-webview tabs  
+- [x] T03 — Browser tab session restore for single-live-webview tabs  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T03-browser-tab-session-restore.md`  
   Prerequisites: T01 and T01b done.
 

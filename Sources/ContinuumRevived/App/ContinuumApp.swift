@@ -1138,6 +1138,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-tab-restore-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try TileSpawner.runBrowserTabRestoreSelfCheck()
+                print("ContinuumRevivedBrowserTabRestoreChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-restore-state-check") {
             do {
                 _ = NSApplication.shared

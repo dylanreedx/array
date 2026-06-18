@@ -1500,6 +1500,116 @@ final class TileSpawner {
         return artifact
     }
 
+    static func runBrowserTabRestoreSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { if case let .failed(message) = self { return message }; return "failed" }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("continuum-browser-tab-restore-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        let now = Date()
+        let project = Project(
+            id: UUID(), name: "browser-tab-restore-check", rootPath: tempRoot.path,
+            createdAt: now, updatedAt: now, defaultLaunchProfileId: "shell", editorPreference: .auto,
+            settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        let tileId = UUID()
+        let profileId = BrowserProfile.defaultProfileId
+        let storageGroupId = BrowserState.storageGroupIdentifier(for: project)
+        let tabs = (0..<20).map { idx in
+            BrowserTab(
+                id: UUID(),
+                url: "data:text/html;charset=utf-8,<html><head><title>tab-\(idx)</title></head><body>tab-\(idx)</body></html>",
+                title: idx == 7 ? "Active Restored Tab" : "Restored Tab \(idx)",
+                faviconURL: nil,
+                createdAt: now.addingTimeInterval(Double(idx)),
+                lastAccessedAt: now.addingTimeInterval(Double(idx)),
+                interactionState: nil
+            )
+        }
+        let activeTab = tabs[7]
+        try store.saveCanvas(CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [Tile(id: tileId, kind: .browser, title: "canvas browser", frame: TileFrame(x: 20, y: 20, width: 640, height: 420), zIndex: 1, runtimeRef: nil, metadata: TileMetadata(url: "about:blank"))],
+            groups: [], lastActiveTileId: tileId
+        ))
+        try store.saveBrowserState(BrowserState(tiles: [BrowserTile(
+            id: UUID(), tileId: tileId, url: activeTab.url, title: activeTab.title,
+            storageGroupId: storageGroupId, profileId: profileId, createdAt: now, updatedAt: now,
+            interactionState: nil, tabs: tabs, activeTabId: activeTab.id
+        )]))
+
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        let engine = BrowserEngineContext()
+        let spawner = TileSpawner(canvasView: canvas, ghostty: nil, browserEngine: engine, projectStore: store, project: project)
+        let start = Date()
+        let creationsBefore = engine.webViewCreationCountForQA
+        switch spawner.restartBrowserTile(tileId: tileId) {
+        case .restarted: break
+        case let .invalidURL(url): throw CheckError.failed("restart rejected seeded URL: \(url)")
+        case .tileNotFound: throw CheckError.failed("restart did not find seeded tile")
+        case let .failure(error): throw CheckError.failed("restart failed: \(error)")
+        }
+        let restoreDurationMs = Int(Date().timeIntervalSince(start) * 1000)
+        let creationsAtBoot = engine.webViewCreationCountForQA - creationsBefore
+        guard let view = canvas.tileView(for: tileId) as? BrowserTileNSView else { throw CheckError.failed("restored BrowserTileNSView missing") }
+        let snapshot = view.restoredTabSnapshotForQA
+        let inactive = tabs[12]
+        view.selectTabForQA(tabId: inactive.id)
+        let postSwitchState = try store.loadBrowserState()
+        let postSwitchTile = postSwitchState.tiles.first(where: { $0.tileId == tileId })
+        let switchUpdated = postSwitchTile?.activeTabId == inactive.id && postSwitchTile?.url == inactive.url
+
+        let legacyTile = BrowserTile(id: UUID(), tileId: UUID(), url: "https://legacy.example/", title: "Legacy", storageGroupId: storageGroupId, profileId: profileId, createdAt: now, updatedAt: now)
+        let legacyOneTabMigrationStillWorks = legacyTile.tabs.count == 1 && legacyTile.activeTab.url == "https://legacy.example/"
+        let invalidActive = BrowserTile(id: UUID(), tileId: UUID(), url: tabs[0].url, title: tabs[0].title, storageGroupId: storageGroupId, profileId: profileId, createdAt: now, updatedAt: now, tabs: Array(tabs.prefix(3)), activeTabId: UUID())
+        let invalidActiveTabFallbackUsed = invalidActive.activeTabId == tabs[0].id
+
+        let manifest: [String: Any] = [
+            "check": "browser-tab-restore",
+            "seededTabCount": tabs.count,
+            "restoredTabCount": snapshot.count,
+            "activeTabURL": snapshot.activeURL,
+            "activeTabTitle": snapshot.activeTitle,
+            "webViewCreationCountAtBoot": creationsAtBoot,
+            "browserRuntimeCountAtBoot": creationsAtBoot,
+            "inactiveTabsHydratedAtBoot": max(0, creationsAtBoot - 1),
+            "switchInactiveUpdatedActiveTab": switchUpdated,
+            "legacyOneTabMigrationStillWorks": legacyOneTabMigrationStillWorks,
+            "invalidActiveTabFallbackUsed": invalidActiveTabFallbackUsed,
+            "usedTileSpawnerRestartBrowserTile": true,
+            "restoredBrowserTileNSView": true,
+            "seedStatePath": store.layout.browserFile.path,
+            "profileIdPreserved": postSwitchTile?.profileId == profileId,
+            "storageGroupIdPreserved": postSwitchTile?.storageGroupId == storageGroupId,
+            "restoreDurationMs": restoreDurationMs,
+            "restoreDurationWithinBudget": restoreDurationMs < 2000
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent("qa-runs", isDirectory: true).appendingPathComponent(timestamp, isDirectory: true).appendingPathComponent("browser-tab-restore", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+
+        try expect(snapshot.count == 20, "restored tab strip should expose all 20 tabs")
+        try expect(snapshot.activeTabId == activeTab.id, "seeded active tab should remain active")
+        try expect(snapshot.activeURL == activeTab.url && snapshot.activeTitle == activeTab.title, "active URL/title should be restored")
+        try expect(creationsAtBoot == 1, "restore should create exactly one WKWebView")
+        try expect(switchUpdated, "switching inactive restored tab should persist active tab")
+        try expect(legacyOneTabMigrationStillWorks, "legacy one-page BrowserState should still migrate")
+        try expect(invalidActiveTabFallbackUsed, "invalid active tab id should fall back to first tab")
+        try expect(postSwitchTile?.profileId == profileId && postSwitchTile?.storageGroupId == storageGroupId, "profile/storage group should be preserved")
+        try expect(restoreDurationMs < 2000, "20-tab restore exceeded budget")
+        return artifact
+    }
+
     static func runBrowserRestoreStateSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)

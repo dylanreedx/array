@@ -409,6 +409,22 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         window?.firstResponder === urlField.currentEditor() || window?.firstResponder === urlField
     }
 
+    var restoredTabSnapshotForQA: (count: Int, activeTabId: UUID, activeURL: String, activeTitle: String, titles: [String]) {
+        let active = tabModel.activeTab
+        return (tabModel.tabs.count, tabModel.activeTabId, active.url, active.title, tabModel.tabs.map(\.title))
+    }
+
+    func selectTabForQA(tabId: UUID) {
+        guard tabModel.tabs.contains(where: { $0.id == tabId }), tabId != tabModel.activeTabId else { return }
+        snapshotActiveTabFromRuntime()
+        tabModel.activate(tabId: tabId)
+        let active = tabModel.activeTab
+        onTabModelChange?(tabModel)
+        if let state = active.interactionState { runtime.restoreInteractionState(state) } else { runtime.loadURL(active.url) }
+        refresh()
+        urlField.stringValue = active.url
+    }
+
     private func hideFindBar() {
         findRow.isHidden = true
         findRowHeightConstraint.constant = 0
