@@ -742,6 +742,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--zone-framing-readability-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runZoneFramingReadabilitySelfCheck()
+                print("ContinuumRevivedZoneFramingReadabilityChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--leader-snap-check") {
             do {
                 _ = NSApplication.shared
@@ -9202,9 +9214,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Pre-derive expected target viewports using the production helper, never by hand.
         // viewportSize = 800×600 (window size set below).
         let vpSize = CGSize(width: 800, height: 600)
-        let expectedA = CanvasEngine.fit(worldRect: CGRect(x: 0, y: 0, width: 300, height: 200), viewportSize: vpSize)
-        let expectedB = CanvasEngine.fit(worldRect: CGRect(x: 1000, y: 0, width: 300, height: 200), viewportSize: vpSize)
-        let expectedC = CanvasEngine.fit(worldRect: CGRect(x: 0, y: 1000, width: 300, height: 200), viewportSize: vpSize)
+        let expectedA = CameraFraming.zoneOverviewViewport(for: CGRect(x: 0, y: 0, width: 300, height: 200), viewportSize: vpSize)
+        let expectedB = CameraFraming.zoneOverviewViewport(for: CGRect(x: 1000, y: 0, width: 300, height: 200), viewportSize: vpSize)
+        let expectedC = CameraFraming.zoneOverviewViewport(for: CGRect(x: 0, y: 1000, width: 300, height: 200), viewportSize: vpSize)
 
         let canvas = CanvasNSView(
             canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil),
@@ -9270,7 +9282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let tileId5 = UUID(uuidString: "00000000-0000-0000-0000-000000001851")!
         let tileFor5 = Tile(id: tileId5, kind: .note, title: "tile5", frame: TileFrame(x: 50, y: 50, width: 200, height: 150), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
         let placementD = ZonePlacement(zoneId: UUID(uuidString: "00000000-0000-0000-0000-00000000181D")!, projectId: pId, origin: ZonePoint(x: 2000, y: 0), size: ZoneSize(width: 300, height: 200), color: "orange", collapsed: false, hydrationPolicy: .automatic, navKey: "a")
-        let expectedD = CanvasEngine.fit(worldRect: CGRect(x: 2000, y: 0, width: 300, height: 200), viewportSize: vpSize)
+        let expectedD = CameraFraming.zoneOverviewViewport(for: CGRect(x: 2000, y: 0, width: 300, height: 200), viewportSize: vpSize)
         let canvas5 = CanvasNSView(
             canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileFor5], groups: [], lastActiveTileId: nil),
             activeZone: nil,
@@ -9467,6 +9479,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     /// T17 — ⌘K zone rows: jump-to-zone and create-zone.
+    static func runZoneFramingReadabilitySelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func vpEqual(_ a: CanvasViewport, _ b: CanvasViewport) -> Bool {
+            abs(a.x - b.x) < 0.001 && abs(a.y - b.y) < 0.001 && abs(a.zoom - b.zoom) < 0.001
+        }
+
+        let zoneAId = UUID(uuidString: "00000000-0000-0000-0000-0000000016A0")!
+        let zoneBId = UUID(uuidString: "00000000-0000-0000-0000-0000000016B0")!
+        let zoneA = ZonePlacement(zoneId: zoneAId, projectId: nil, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 1200, height: 800), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "Alpha")
+        let zoneB = ZonePlacement(zoneId: zoneBId, projectId: nil, origin: ZonePoint(x: 1600, y: 400), size: ZoneSize(width: 2200, height: 1200), color: "sky", collapsed: false, hydrationPolicy: .automatic, name: "Beta")
+        let tileA = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-0000000016A1")!, kind: .note, title: "A", frame: TileFrame(x: 100, y: 100, width: 300, height: 220), zIndex: 0, runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-0000000016B1")!, kind: .terminal, title: "B", frame: TileFrame(x: 1700, y: 500, width: 500, height: 320), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let startViewport = CanvasViewport(x: 0, y: 0, zoom: 1.0)
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: startViewport, tiles: [tileA, tileB], groups: [], lastActiveTileId: nil), zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: zoneA, displayName: "Alpha"), CanvasNSView.ZoneRenderModel(placement: zoneB, displayName: "Beta")])
+        canvas.frame = NSRect(x: 0, y: 0, width: 1200, height: 800)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        let app = AppDelegate()
+        app.canvasView = canvas
+        app.focusBroker.onAcceptedTileFocus = { [weak canvas] id in canvas?.markActive(tileId: id) }
+        canvas.focusBroker = app.focusBroker
+        canvas.install(tileView: TileNSView(tile: tileA), for: tileA)
+        canvas.install(tileView: TileNSView(tile: tileB), for: tileB)
+        app.focusBroker.openModal(.palette)
+        app.performPaletteAction(.jumpToZone(zoneBId))
+
+        let zoneFrame = CanvasEngine.zoneWorldFrame(zoneB)
+        let zoneRect = CGRect(x: zoneFrame.x, y: zoneFrame.y, width: zoneFrame.width, height: zoneFrame.height)
+        let expected = CameraFraming.zoneOverviewViewport(for: zoneRect, viewportSize: CGSize(width: 1200, height: 800))
+        try expect(vpEqual(canvas.viewport, expected), "palette zone jump must use shared zone overview framing")
+        try expect(canvas.viewport.zoom >= CameraFraming.zoneMinOverviewZoom && canvas.viewport.zoom <= CameraFraming.zoneMaxOverviewZoom, "zone jump zoom must be within overview clamp")
+        let screenFrame = CanvasEngine.tileScreenFrame(zoneFrame, viewport: canvas.viewport)
+        let containsZoneBounds = screenFrame.minX >= CameraFraming.zonePaddingScreenPx - 0.1
+            && screenFrame.maxX <= 1200 - CameraFraming.zonePaddingScreenPx + 0.1
+            && screenFrame.minY >= CameraFraming.zonePaddingScreenPx - 0.1
+            && screenFrame.maxY <= 800 - CameraFraming.zonePaddingScreenPx + 0.1
+        try expect(containsZoneBounds, "final viewport must contain zone bounds with padding")
+        let finalBand = ReadabilityPolicy.band(for: .zone, zoom: canvas.viewport.zoom)
+        try expect(!ReadabilityPolicy.editingReliable(for: .tile(.terminal), zoom: canvas.viewport.zoom), "overview zone zoom must not claim terminal detail editing")
+
+        let timestamp = Self.qaTimestamp()
+        let directory = URL(fileURLWithPath: "qa-runs/\(timestamp)/zone-framing-readability", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "check": "zone-framing-readability",
+            "zoneId": zoneBId.uuidString,
+            "zoneBounds": ["x": zoneFrame.x, "y": zoneFrame.y, "w": zoneFrame.width, "h": zoneFrame.height],
+            "startViewport": ["x": startViewport.x, "y": startViewport.y, "zoom": startViewport.zoom],
+            "finalViewport": ["x": canvas.viewport.x, "y": canvas.viewport.y, "zoom": canvas.viewport.zoom],
+            "zonePaddingScreenPx": CameraFraming.zonePaddingScreenPx,
+            "zoneZoomClamp": ["min": CameraFraming.zoneMinOverviewZoom, "max": CameraFraming.zoneMaxOverviewZoom],
+            "finalZoomBand": finalBand.rawValue,
+            "containsZoneBounds": containsZoneBounds,
+            "tileDetailEditingClaimedAtOverviewZoom": false,
+            "palettePath": "performPaletteAction(.jumpToZone)",
+            "semanticZoomDeferred": true,
+            "minimapDeferred": true
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        let artifact = directory.appendingPathComponent("manifest.json")
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
     /// Scenario 1: drives the REAL performPaletteAction(.jumpToZone) inside an open
     /// .palette modal; asserts viewport, navSelectedZoneId, focus survival after
     /// closeModal, and unknown-zone no-op.
@@ -9538,8 +9621,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         app.performPaletteAction(.jumpToZone(zoneBId))
 
         // Assert 3 — viewport == fitZoneToViewport(B).
-        let expectedViewport = CanvasEngine.fit(
-            worldRect: CGRect(x: 1400, y: 0, width: 800, height: 600),
+        let expectedViewport = CameraFraming.zoneOverviewViewport(
+            for: CGRect(x: 1400, y: 0, width: 800, height: 600),
             viewportSize: CGSize(width: 1400, height: 900)
         )
         try expect(vpEqual(canvas.viewport, expectedViewport), "palette jump-to-zone: viewport must fit zone B; got (\(canvas.viewport.x),\(canvas.viewport.y),\(canvas.viewport.zoom)) want (\(expectedViewport.x),\(expectedViewport.y),\(expectedViewport.zoom))")
@@ -9962,14 +10045,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(remappedSelection == downTileId, "remapped nav m key path should update selected tile; selected=\(String(describing: overlayCanvas.canvasState.lastActiveTileId))")
         navApp.navKeymap = .default
         navApp.focusBroker.navKeymap = .default
-        let expectedZoneBViewport = CanvasEngine.fit(
-            worldRect: CGRect(x: zoneB.origin.x, y: zoneB.origin.y, width: zoneB.size.width, height: zoneB.size.height),
+        let expectedZoneBViewport = CameraFraming.zoneOverviewViewport(
+            for: CGRect(x: zoneB.origin.x, y: zoneB.origin.y, width: zoneB.size.width, height: zoneB.size.height),
             viewportSize: overlayCanvas.bounds.size
         )
         navApp.handleNavModeKey(keyEvent("2", keyCode: 19))
         try expect(overlayCanvas.canvasState.viewport == expectedZoneBViewport, "nav ordinal 2 should fit zone B; viewport=\(overlayCanvas.canvasState.viewport) expected=\(expectedZoneBViewport)")
-        let expectedZoneAViewport = CanvasEngine.fit(
-            worldRect: CGRect(x: zoneA.origin.x, y: zoneA.origin.y, width: zoneA.size.width, height: zoneA.size.height),
+        let expectedZoneAViewport = CameraFraming.zoneOverviewViewport(
+            for: CGRect(x: zoneA.origin.x, y: zoneA.origin.y, width: zoneA.size.width, height: zoneA.size.height),
             viewportSize: overlayCanvas.bounds.size
         )
         navApp.handleNavModeKey(keyEvent("1", keyCode: 18))

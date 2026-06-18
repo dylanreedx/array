@@ -58,7 +58,7 @@ Rules:
 - [x] T06 — Camera-aware jump indicators  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T06-camera-aware-jump-indicators.md`
 
-- [ ] T16 — Zone navigation scale/readability  
+- [x] T16 — Zone navigation scale/readability  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T16-zone-navigation-scale-readability.md`
 
 - [x] T07 — Jump focus zoom/framing  

@@ -5458,4 +5458,29 @@ do {
     expect(CameraFraming.minimumReadableZoom(for: .fileTree) == 0.70, "file-tree readable zoom policy")
 }
 
+// MARK: - T16 readability policy and zone framing table
+
+do {
+    expect(ReadabilityPolicy.band(for: .zone, zoom: 0.20) == .overviewLabelOnly, "zone overview band")
+    expect(ReadabilityPolicy.band(for: .zone, zoom: 0.35) == .readableSummary, "zone readable summary band")
+    expect(ReadabilityPolicy.band(for: .tile(.note), zoom: 0.59) == .overviewLabelOnly, "note overview band")
+    expect(ReadabilityPolicy.band(for: .tile(.note), zoom: 0.60) == .readableSummary, "note readable band")
+    expect(ReadabilityPolicy.band(for: .tile(.note), zoom: 0.85) == .editableDetail, "note editable band")
+    expect(ReadabilityPolicy.band(for: .tile(.browser), zoom: 0.70) == .readableSummary, "browser readable band")
+    expect(ReadabilityPolicy.band(for: .tile(.browser), zoom: 0.90) == .editableDetail, "browser editable band")
+    expect(ReadabilityPolicy.band(for: .tile(.terminal), zoom: 0.85) == .readableSummary, "terminal readable band")
+    expect(ReadabilityPolicy.band(for: .tile(.terminal), zoom: 0.95) == .editableDetail, "terminal editable band")
+    expect(ReadabilityPolicy.band(for: .other, zoom: 0.70) == .readableSummary, "other readable band")
+    expect(!ReadabilityPolicy.editingReliable(for: .tile(.terminal), zoom: 0.90), "terminal editing not reliable in summary band")
+
+    let viewportSize = CGSize(width: 1200, height: 800)
+    let zoneRect = CGRect(x: 1000, y: 500, width: 2200, height: 1200)
+    let framed = CameraFraming.zoneOverviewViewport(for: zoneRect, viewportSize: viewportSize)
+    expect(framed.zoom >= CameraFraming.zoneMinOverviewZoom && framed.zoom <= CameraFraming.zoneMaxOverviewZoom, "zone framing clamps overview zoom")
+    expect(abs(framed.zoom - min(max(min((1200 - 192) / 2200, (800 - 192) / 1200), 0.20), 0.80)) < 0.0001, "zone framing uses 96px padding fit")
+    let screen = CanvasEngine.tileScreenFrame(TileFrame(x: 1000, y: 500, width: 2200, height: 1200), viewport: framed)
+    expect(screen.minX >= 95.9 && screen.maxX <= 1104.1, "zone framing contains width with padding")
+    expect(screen.minY >= 95.9 && screen.maxY <= 704.1, "zone framing contains height with padding")
+}
+
 print("ContinuumRevivedCoreChecks passed")

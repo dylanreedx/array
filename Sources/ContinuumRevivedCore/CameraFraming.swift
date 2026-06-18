@@ -7,6 +7,9 @@ public enum CameraFraming {
     public static let minJumpZoom = 0.25
     public static let maxJumpZoom = 1.25
     public static let finalViewportEpsilonScreenPx = 0.5
+    public static let zonePaddingScreenPx = 96.0
+    public static let zoneMinOverviewZoom = 0.20
+    public static let zoneMaxOverviewZoom = 0.80
 
     public static func minimumReadableZoom(for kind: TileKind) -> Double {
         switch kind {
@@ -37,6 +40,15 @@ public enum CameraFraming {
         let visible = screenRect.intersection(CGRect(origin: .zero, size: viewportSize))
         guard !visible.isNull else { return 0 }
         return Double((visible.width * visible.height) / (screenRect.width * screenRect.height))
+    }
+
+    public static func zoneOverviewViewport(for zoneRect: CGRect, viewportSize: CGSize) -> CanvasViewport {
+        CanvasEngine.fit(
+            worldRect: zoneRect,
+            viewportSize: viewportSize,
+            padding: zonePaddingScreenPx,
+            range: zoneMinOverviewZoom ... zoneMaxOverviewZoom
+        )
     }
 
     public static func jumpViewport(

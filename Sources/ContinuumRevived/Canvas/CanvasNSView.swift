@@ -755,8 +755,8 @@ final class CanvasNSView: NSView {
     func fitZoneToViewport(zoneId: UUID) -> CanvasViewport? {
         guard let model = zoneRenderModels.first(where: { $0.placement.zoneId == zoneId }) else { return nil }
         let frame = CanvasEngine.zoneWorldFrame(model.placement)
-        return CanvasEngine.fit(
-            worldRect: CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height),
+        return CameraFraming.zoneOverviewViewport(
+            for: CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height),
             viewportSize: bounds.size
         )
     }
@@ -2681,7 +2681,7 @@ final class CanvasNSView: NSView {
         let fitAll = try expectViewport(canvas.fitAllToViewport(), "fit-all viewport should be available for multi-zone canvas")
         try expect(viewportsNearlyEqual(fitAll, expectedFitAll), "fit-all should frame the union of all zones")
         let headerFit = try expectViewport(canvas.qaDoubleClickZoneHeaderOrBackground(at: CGPoint(x: 770, y: 10)), "double-clicking a zone header should fit that zone")
-        try expect(viewportsNearlyEqual(headerFit, CanvasEngine.fit(worldRect: Self.cgRect(from: CanvasEngine.zoneWorldFrame(beta)), viewportSize: canvas.bounds.size)), "header double-click should fit the clicked zone")
+        try expect(viewportsNearlyEqual(headerFit, CameraFraming.zoneOverviewViewport(for: Self.cgRect(from: CanvasEngine.zoneWorldFrame(beta)), viewportSize: canvas.bounds.size)), "header double-click should fit the clicked zone")
         canvas.setViewport(viewport)
         let backgroundFit = try expectViewport(canvas.qaDoubleClickZoneHeaderOrBackground(at: CGPoint(x: 2300, y: 500)), "double-clicking canvas background should fit all zones")
         try expect(viewportsNearlyEqual(backgroundFit, expectedFitAll), "background double-click should fit all zones")
