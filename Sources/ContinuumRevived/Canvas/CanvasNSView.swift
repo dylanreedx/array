@@ -1185,17 +1185,18 @@ final class CanvasNSView: NSView {
         leaderZoneJumpAssignments().first { $0.key == key.lowercased() }?.zoneId
     }
 
-    /// Pans (keeping the current zoom) so the tile sits centered; falls back to
-    /// `fit` when the tile is too large to fit at the current zoom.
-    func centerOnTile(_ tileId: UUID) {
-        guard let tile = canvasState.tiles.first(where: { $0.id == tileId }) else { return }
+    func framedViewportForTileJump(_ tileId: UUID) -> CanvasViewport? {
+        guard let tile = canvasState.tiles.first(where: { $0.id == tileId }) else { return nil }
         let worldFrame = activeZone.map { CanvasEngine.worldFrame(tile: tile, in: $0) } ?? tile.frame
         let rect = CGRect(x: worldFrame.x, y: worldFrame.y, width: worldFrame.width, height: worldFrame.height)
-        let zoom = canvasState.viewport.zoom
-        let fits = rect.width * zoom <= Double(bounds.width) && rect.height * zoom <= Double(bounds.height)
-        let viewport = fits
-            ? CanvasEngine.centeredViewport(worldRect: rect, viewportSize: bounds.size, zoom: zoom)
-            : CanvasEngine.fit(worldRect: rect, viewportSize: bounds.size)
+        return CameraFraming.jumpViewport(for: rect, kind: tile.kind, currentViewport: canvasState.viewport, viewportSize: bounds.size)
+    }
+
+    /// Frames the tile as a readable jump target. This first T07 slice snaps to
+    /// the computed camera target; animation remains out of scope until a
+    /// transition coordinator/recorder is added.
+    func centerOnTile(_ tileId: UUID) {
+        guard let viewport = framedViewportForTileJump(tileId) else { return }
         setViewport(viewport)
     }
 

@@ -61,7 +61,7 @@ Rules:
 - [ ] T16 — Zone navigation scale/readability  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T16-zone-navigation-scale-readability.md`
 
-- [ ] T07 — Jump focus zoom/framing  
+- [x] T07 — Jump focus zoom/framing  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T07-jump-focus-zoom-framing.md`  
   Prerequisite: T12 done for animation; otherwise keep animation default-off.
 

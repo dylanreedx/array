@@ -5435,4 +5435,27 @@ do {
     expect(offscreen == nil, "offscreen tile should not receive placement")
 }
 
+// MARK: - T07 camera framing table
+
+do {
+    let viewportSize = CGSize(width: 800, height: 600)
+    let terminalRect = CGRect(x: 1000, y: 800, width: 300, height: 200)
+    let lowZoom = CanvasViewport(x: 0, y: 0, zoom: 0.3)
+    let framedTerminal = CameraFraming.jumpViewport(for: terminalRect, kind: .terminal, currentViewport: lowZoom, viewportSize: viewportSize)
+    expect(abs(framedTerminal.zoom - 0.85) < 0.0001, "terminal jump below readable zoom should target 0.85")
+    let visibleRatio = CameraFraming.mostlyVisibleAreaRatio(worldRect: terminalRect, viewport: framedTerminal, viewportSize: viewportSize)
+    expect(visibleRatio >= CameraFraming.mostlyVisibleAreaRatio, "framed terminal should be mostly visible")
+
+    let alreadyReadable = CanvasEngine.centeredViewport(worldRect: terminalRect, viewportSize: viewportSize, zoom: 0.95)
+    let preserved = CameraFraming.jumpViewport(for: terminalRect, kind: .terminal, currentViewport: alreadyReadable, viewportSize: viewportSize)
+    expect(preserved == alreadyReadable, "already readable and mostly visible target should preserve viewport/zoom")
+
+    let offscreenReadable = CanvasViewport(x: 0, y: 0, zoom: 0.95)
+    let panned = CameraFraming.jumpViewport(for: terminalRect, kind: .terminal, currentViewport: offscreenReadable, viewportSize: viewportSize)
+    expect(abs(panned.zoom - 0.95) < 0.0001, "offscreen but readable target should pan without changing zoom")
+    expect(CameraFraming.minimumReadableZoom(for: .note) == 0.60, "note readable zoom policy")
+    expect(CameraFraming.minimumReadableZoom(for: .browser) == 0.70, "browser readable zoom policy")
+    expect(CameraFraming.minimumReadableZoom(for: .fileTree) == 0.70, "file-tree readable zoom policy")
+}
+
 print("ContinuumRevivedCoreChecks passed")

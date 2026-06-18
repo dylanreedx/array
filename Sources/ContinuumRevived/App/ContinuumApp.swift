@@ -682,7 +682,7 @@ enum ContinuumApp {
             }
         }
 
-        if CommandLine.arguments.contains("--leader-jump-check") {
+        if CommandLine.arguments.contains("--leader-jump-check") || CommandLine.arguments.contains("--leader-jump-framing-check") {
             do {
                 _ = NSApplication.shared
                 let artifact = try AppDelegate.runLeaderJumpSelfCheck()
@@ -718,7 +718,7 @@ enum ContinuumApp {
             }
         }
 
-        if CommandLine.arguments.contains("--palette-jump-check") {
+        if CommandLine.arguments.contains("--palette-jump-check") || CommandLine.arguments.contains("--palette-jump-framing-check") {
             do {
                 _ = NSApplication.shared
                 let artifact = try AppDelegate.runPaletteJumpSelfCheck()
@@ -8933,7 +8933,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let bId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B2")!
         let tileA = Tile(id: aId, kind: .note, title: "A", frame: TileFrame(x: 40, y: 40, width: 200, height: 170), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
         let tileB = Tile(id: bId, kind: .note, title: "B", frame: TileFrame(x: 400, y: 300, width: 240, height: 180), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
-        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 0.3), tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
         canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = canvas
@@ -8951,8 +8951,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         app.leaderDwell = 0
 
         // Spatial order top→bottom: A (y=40) → "a", B (y=300) → "s".
-        let expectedB = CanvasEngine.centeredViewport(worldRect: CGRect(x: 400, y: 300, width: 240, height: 180), viewportSize: CGSize(width: 800, height: 600), zoom: 1)
         let initialViewport = canvas.viewport
+        let expectedB = CameraFraming.jumpViewport(for: CGRect(x: 400, y: 300, width: 240, height: 180), kind: .note, currentViewport: initialViewport, viewportSize: CGSize(width: 800, height: 600))
 
         // 1) Open the leader → HUD installs.
         app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
@@ -8965,10 +8965,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(app.focusBroker.activeSurface == .modal(.leader), "an unmatched key must not exit the leader")
         try expect(vpEqual(canvas.viewport, initialViewport), "an unmatched key must not move the viewport")
 
-        // 3) A label key jumps: focus the labeled tile AND center the viewport on it.
+        // 3) A label key jumps: focus the labeled tile and apply the shared T07 framing policy.
         _ = app.handleHotkey(try keyDown("s", 1, mods: [.option]))
         try expect(app.focusBroker.activeSurface == .tile(bId), "label 's' should focus the second (lower) tile; got \(String(describing: app.focusBroker.activeSurface))")
-        try expect(vpEqual(canvas.viewport, expectedB), "jump should center the viewport on the chosen tile; got (\(canvas.viewport.x),\(canvas.viewport.y),\(canvas.viewport.zoom)) want (\(expectedB.x),\(expectedB.y),\(expectedB.zoom))")
+        try expect(vpEqual(canvas.viewport, expectedB), "jump should apply the framing policy to the chosen tile; got (\(canvas.viewport.x),\(canvas.viewport.y),\(canvas.viewport.zoom)) want (\(expectedB.x),\(expectedB.y),\(expectedB.zoom))")
         try expect(!canvas.navModeOverlayQASnapshot().isInstalled, "the jump HUD must dismiss after a jump")
 
         // 4) Releasing ⌥ after a jump leaves the focused tile intact (no snap-back).
@@ -9029,19 +9029,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(vpEqual(canvas2.viewport, expectedC), "jumping to a partially-visible focused tile centers it; got (\(canvas2.viewport.x),\(canvas2.viewport.y))")
         app2.handleFlagsChanged(try flagsEvent([], keyCode: 58))
 
+        let finalError = hypot((canvas.viewport.x - expectedB.x) * canvas.viewport.zoom, (canvas.viewport.y - expectedB.y) * canvas.viewport.zoom)
         let manifest: [String: Any] = [
-            "check": "leader-jump",
+            "check": "leader-jump-framing",
             "path": "synthesized .flagsChanged + .keyDown NSEvents → handleFlagsChanged / handleHotkey → handleLeaderKey (real input path)",
             "labeledTiles": 2,
             "jumpedTo": "second tile via label 's'",
-            "centeredViewport": ["x": expectedB.x, "y": expectedB.y, "zoom": expectedB.zoom],
+            "startViewport": ["x": initialViewport.x, "y": initialViewport.y, "zoom": initialViewport.zoom],
+            "targetViewport": ["x": expectedB.x, "y": expectedB.y, "zoom": expectedB.zoom],
+            "finalViewport": ["x": canvas.viewport.x, "y": canvas.viewport.y, "zoom": canvas.viewport.zoom],
+            "tileKind": "note",
+            "readableZoom": CameraFraming.minimumReadableZoom(for: .note),
+            "mostlyVisibleBefore": CameraFraming.mostlyVisibleAreaRatio(worldRect: CGRect(x: 400, y: 300, width: 240, height: 180), viewport: initialViewport, viewportSize: CGSize(width: 800, height: 600)) >= CameraFraming.mostlyVisibleAreaRatio,
+            "finalViewportErrorScreenPx": finalError,
+            "durationMs": 0,
+            "frameCount": 1,
+            "cancelled": false,
+            "terminalAppliedResizeDelta": 0,
+            "webViewCreationDelta": 0,
+            "animationEnabled": false,
             "selfExclusion": "focused+fully-visible tile dropped; focused+partial and unfocused+partial stay jumpable",
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
-            .appendingPathComponent("leader-jump", isDirectory: true)
+            .appendingPathComponent("camera-framing", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
@@ -9335,7 +9348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(tileLabels7.contains(where: { $0.tileId == tileId7b && $0.label == "s" }),
                    "assertion 7: tile7b must be assigned label 's' by leaderJumpAssignments (ordering regression guard)")
         // The second tile (lower y) gets the second label "s".
-        let expectedTile7b = CanvasEngine.centeredViewport(worldRect: CGRect(x: 400, y: 300, width: 240, height: 180), viewportSize: vpSize, zoom: 1)
+        let expectedTile7b = CameraFraming.jumpViewport(for: CGRect(x: 400, y: 300, width: 240, height: 180), kind: .note, currentViewport: canvas7.viewport, viewportSize: vpSize)
         _ = app7.handleHotkey(try keyDown("s", 1, mods: [.option]))
         try expect(app7.focusBroker.activeSurface == .tile(tileId7b),
                    "assertion 7: tile label 's' must focus the tile (tile path not regressed); got \(String(describing: app7.focusBroker.activeSurface))")
@@ -9395,7 +9408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let bId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B2")!
         let tileA = Tile(id: aId, kind: .note, title: "A", frame: TileFrame(x: 40, y: 40, width: 200, height: 170), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
         let tileB = Tile(id: bId, kind: .note, title: "B", frame: TileFrame(x: 400, y: 300, width: 240, height: 180), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
-        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 0.3), tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
         canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = canvas
@@ -9414,24 +9427,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         app.performPaletteAction(.jumpToTile(bId))
         app.focusBroker.closeModal(.palette)
         try expect(app.focusBroker.activeSurface == .tile(bId), "palette Jump-to-tile must focus the target and survive the modal close; got \(String(describing: app.focusBroker.activeSurface))")
-        let expectedB = CanvasEngine.centeredViewport(worldRect: CGRect(x: 400, y: 300, width: 240, height: 180), viewportSize: CGSize(width: 800, height: 600), zoom: 1)
-        try expect(vpEqual(canvas.viewport, expectedB), "palette jump must center the target tile; got (\(canvas.viewport.x),\(canvas.viewport.y),\(canvas.viewport.zoom))")
+        let paletteStartViewport = CanvasViewport(x: 0, y: 0, zoom: 0.3)
+        let expectedB = CameraFraming.jumpViewport(for: CGRect(x: 400, y: 300, width: 240, height: 180), kind: .note, currentViewport: paletteStartViewport, viewportSize: CGSize(width: 800, height: 600))
+        try expect(vpEqual(canvas.viewport, expectedB), "palette jump must apply the framing policy to the target tile; got (\(canvas.viewport.x),\(canvas.viewport.y),\(canvas.viewport.zoom))")
 
         // An unknown tile id is a safe no-op (e.g. the tile was closed meanwhile).
         let beforeViewport = canvas.viewport
         app.performPaletteAction(.jumpToTile(UUID()))
         try expect(vpEqual(canvas.viewport, beforeViewport) && app.focusBroker.activeSurface == .tile(bId), "jumping to a missing tile is a no-op")
 
+        let finalError = hypot((canvas.viewport.x - expectedB.x) * canvas.viewport.zoom, (canvas.viewport.y - expectedB.y) * canvas.viewport.zoom)
         let manifest: [String: Any] = [
-            "check": "palette-jump",
+            "check": "palette-jump-framing",
             "path": "performPaletteAction(.jumpToTile) inside an open .palette modal → closeModal (real action + modal lifecycle)",
-            "centeredViewport": ["x": expectedB.x, "y": expectedB.y, "zoom": expectedB.zoom],
+            "startViewport": ["x": paletteStartViewport.x, "y": paletteStartViewport.y, "zoom": paletteStartViewport.zoom],
+            "targetViewport": ["x": expectedB.x, "y": expectedB.y, "zoom": expectedB.zoom],
+            "finalViewport": ["x": canvas.viewport.x, "y": canvas.viewport.y, "zoom": canvas.viewport.zoom],
+            "tileKind": "note",
+            "readableZoom": CameraFraming.minimumReadableZoom(for: .note),
+            "mostlyVisibleBefore": CameraFraming.mostlyVisibleAreaRatio(worldRect: CGRect(x: 400, y: 300, width: 240, height: 180), viewport: paletteStartViewport, viewportSize: CGSize(width: 800, height: 600)) >= CameraFraming.mostlyVisibleAreaRatio,
+            "finalViewportErrorScreenPx": finalError,
+            "durationMs": 0,
+            "frameCount": 1,
+            "cancelled": false,
+            "terminalAppliedResizeDelta": 0,
+            "webViewCreationDelta": 0,
+            "animationEnabled": false,
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
-            .appendingPathComponent("palette-jump", isDirectory: true)
+            .appendingPathComponent("camera-framing", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

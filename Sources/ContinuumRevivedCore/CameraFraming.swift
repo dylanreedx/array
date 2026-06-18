@@ -1,0 +1,63 @@
+import CoreGraphics
+import Foundation
+
+public enum CameraFraming {
+    public static let mostlyVisibleAreaRatio = 0.75
+    public static let tilePaddingScreenPx = 64.0
+    public static let minJumpZoom = 0.25
+    public static let maxJumpZoom = 1.25
+    public static let finalViewportEpsilonScreenPx = 0.5
+
+    public static func minimumReadableZoom(for kind: TileKind) -> Double {
+        switch kind {
+        case .note: return 0.60
+        case .browser: return 0.70
+        case .terminal: return 0.85
+        case .file, .fileTree, .diffReview, .ticketQueue, .conductorQueue, .runArtifacts:
+            return 0.70
+        }
+    }
+
+    public static func editableTargetZoom(for kind: TileKind) -> Double {
+        switch kind {
+        case .note: return 0.85
+        case .browser: return 0.90
+        case .terminal: return 0.95
+        case .file, .fileTree, .diffReview, .ticketQueue, .conductorQueue, .runArtifacts:
+            return 0.90
+        }
+    }
+
+    public static func mostlyVisibleAreaRatio(worldRect: CGRect, viewport: CanvasViewport, viewportSize: CGSize) -> Double {
+        let screenRect = CanvasEngine.tileScreenFrame(
+            TileFrame(x: worldRect.minX, y: worldRect.minY, width: worldRect.width, height: worldRect.height),
+            viewport: viewport
+        )
+        guard screenRect.width > 0, screenRect.height > 0 else { return 0 }
+        let visible = screenRect.intersection(CGRect(origin: .zero, size: viewportSize))
+        guard !visible.isNull else { return 0 }
+        return Double((visible.width * visible.height) / (screenRect.width * screenRect.height))
+    }
+
+    public static func jumpViewport(
+        for worldRect: CGRect,
+        kind: TileKind,
+        currentViewport: CanvasViewport,
+        viewportSize: CGSize
+    ) -> CanvasViewport {
+        let readableZoom = minimumReadableZoom(for: kind)
+        let currentZoom = min(max(currentViewport.zoom, minJumpZoom), maxJumpZoom)
+        let mostlyVisible = currentViewport.zoom >= readableZoom
+            && mostlyVisibleAreaRatio(worldRect: worldRect, viewport: currentViewport, viewportSize: viewportSize) >= mostlyVisibleAreaRatio
+        if mostlyVisible { return currentViewport }
+
+        var targetZoom = currentViewport.zoom >= readableZoom ? currentZoom : min(max(readableZoom, minJumpZoom), maxJumpZoom)
+        let paddedAvailableW = max(Double(viewportSize.width) - 2 * tilePaddingScreenPx, 1)
+        let paddedAvailableH = max(Double(viewportSize.height) - 2 * tilePaddingScreenPx, 1)
+        if Double(worldRect.width) * targetZoom > paddedAvailableW || Double(worldRect.height) * targetZoom > paddedAvailableH {
+            let fitZoom = min(paddedAvailableW / Double(worldRect.width), paddedAvailableH / Double(worldRect.height))
+            targetZoom = min(max(fitZoom, minJumpZoom), maxJumpZoom)
+        }
+        return CanvasEngine.centeredViewport(worldRect: worldRect, viewportSize: viewportSize, zoom: targetZoom)
+    }
+}
