@@ -5404,4 +5404,35 @@ do {
     expect(normWidth2 == 400 && normHeight2 == 320, "create-rect normalization reversed: size still (400, 320)")
 }
 
+// MARK: - T06 jump indicator placement table
+
+do {
+    let viewport = CGRect(x: 0, y: 0, width: 1200, height: 800)
+
+    let full = JumpIndicatorPlacementEngine.placement(tileScreenFrame: CGRect(x: 100, y: 100, width: 300, height: 200), viewportBounds: viewport)
+    expect(full?.kind == .normal, "fully visible tile should use normal badge placement")
+    expect(full?.point == CGPoint(x: 112, y: 112), "normal badge should sit inside padded visible intersection")
+
+    let clippedLeft = JumpIndicatorPlacementEngine.placement(tileScreenFrame: CGRect(x: -100, y: 40, width: 180, height: 120), viewportBounds: viewport)
+    expect(clippedLeft?.kind == .normal, "large partial intersection should keep normal badge")
+    expect(clippedLeft?.visibleIntersection == CGRect(x: 0, y: 40, width: 80, height: 120), "visible intersection should clip tile to viewport")
+    expect(clippedLeft?.point == CGPoint(x: 12, y: 52), "partial normal badge should be padded inside clipped intersection")
+
+    let sliver = JumpIndicatorPlacementEngine.placement(tileScreenFrame: CGRect(x: 1190, y: 300, width: 80, height: 200), viewportBounds: viewport)
+    expect(sliver?.kind == .edgePill(edge: .right), "tiny right sliver should use deterministic right edge pill")
+    expect(sliver?.visibleIntersection == CGRect(x: 1190, y: 300, width: 10, height: 200), "sliver intersection should be raw visible slice")
+    expect(sliver!.visibleIntersection.contains(sliver!.point), "edge pill point must be inside visible intersection")
+    let sliverRect = JumpIndicatorPlacementEngine.indicatorRect(for: sliver!, normalBadgeSize: CGSize(width: 24, height: 24))
+    expect(sliver!.visibleIntersection.contains(sliverRect), "edge pill drawn rect must fit inside visible intersection")
+
+    let corner = JumpIndicatorPlacementEngine.placement(tileScreenFrame: CGRect(x: -8, y: -6, width: 20, height: 20), viewportBounds: viewport)
+    expect(corner?.kind == .edgePill(edge: .left), "corner sliver tie should be deterministic")
+    expect(corner!.visibleIntersection.contains(corner!.point), "corner edge pill point must be inside visible intersection")
+    let cornerRect = JumpIndicatorPlacementEngine.indicatorRect(for: corner!, normalBadgeSize: CGSize(width: 24, height: 24))
+    expect(corner!.visibleIntersection.contains(cornerRect), "corner edge pill drawn rect must fit inside visible intersection")
+
+    let offscreen = JumpIndicatorPlacementEngine.placement(tileScreenFrame: CGRect(x: 1300, y: 0, width: 100, height: 100), viewportBounds: viewport)
+    expect(offscreen == nil, "offscreen tile should not receive placement")
+}
+
 print("ContinuumRevivedCoreChecks passed")

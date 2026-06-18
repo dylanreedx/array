@@ -694,6 +694,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--leader-jump-visible-indicators-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runLeaderJumpVisibleIndicatorsSelfCheck()
+                print("ContinuumRevivedLeaderJumpVisibleIndicatorsChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--leader-zone-jump-check") {
             do {
                 _ = NSApplication.shared
@@ -9030,6 +9042,101 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("leader-jump", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// T06 — camera-aware leader jump indicators. Drives real `.flagsChanged`
+    /// leader opening and reads the same production assignment/placement seam the
+    /// overlay draws from.
+    static func runLeaderJumpVisibleIndicatorsSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func flagsEvent(_ mods: NSEvent.ModifierFlags, keyCode: UInt16) throws -> NSEvent {
+            guard let e = NSEvent.keyEvent(with: .flagsChanged, location: .zero, modifierFlags: mods, timestamp: 0, windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: keyCode) else {
+                throw CheckError.failed("could not synthesize .flagsChanged")
+            }
+            return e
+        }
+        func rectJSON(_ r: CGRect) -> [String: CGFloat] { ["x": r.minX, "y": r.minY, "w": r.width, "h": r.height] }
+        func pointJSON(_ p: CGPoint) -> [String: CGFloat] { ["x": p.x, "y": p.y] }
+        func kindString(_ kind: JumpIndicatorPlacementKind) -> String {
+            switch kind {
+            case .normal: return "normal"
+            case let .edgePill(edge): return "edgePill.\(edge.rawValue)"
+            }
+        }
+
+        let viewportBounds = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        let tiles: [Tile] = [
+            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000601")!, kind: .note, title: "left", frame: TileFrame(x: -120, y: 100, width: 240, height: 180), zIndex: 1, runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000602")!, kind: .note, title: "right", frame: TileFrame(x: 1080, y: 100, width: 240, height: 180), zIndex: 2, runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000603")!, kind: .note, title: "top", frame: TileFrame(x: 300, y: -90, width: 240, height: 180), zIndex: 3, runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000604")!, kind: .note, title: "bottom", frame: TileFrame(x: 300, y: 720, width: 240, height: 180), zIndex: 4, runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000605")!, kind: .note, title: "corner sliver", frame: TileFrame(x: 1192, y: 792, width: 100, height: 100), zIndex: 5, runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000606")!, kind: .note, title: "offscreen", frame: TileFrame(x: 1400, y: 1400, width: 120, height: 120), zIndex: 6, runtimeRef: nil, metadata: TileMetadata()),
+        ]
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: tiles, groups: [], lastActiveTileId: nil))
+        canvas.frame = viewportBounds
+        let window = NSWindow(contentRect: viewportBounds, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+        let app = AppDelegate()
+        app.canvasView = canvas
+        canvas.focusBroker = app.focusBroker
+        app.leaderDwell = 0
+
+        app.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        try expect(canvas.navModeOverlayQASnapshot().isInstalled, "leader overlay should open through real flagsChanged path")
+        let assignments = canvas.leaderJumpAssignments()
+        let offscreenId = tiles.last!.id
+        try expect(!assignments.contains { $0.tileId == offscreenId }, "fully offscreen tile must not be labeled")
+        try expect(assignments.count == tiles.count - 1, "every visible/clipped tile should be labeled; got \(assignments.count)")
+        try expect(assignments.map(\.label) == ["a", "s", "d", "f", "g"], "placement must not reorder labels; got \(assignments.map(\.label))")
+        try expect(assignments.contains { if case .edgePill = $0.placement.kind { return true }; return false }, "tiny sliver should use edge pill")
+
+        let placements: [[String: Any]] = assignments.map { assignment in
+            let screenFrame = CanvasEngine.tileScreenFrame(assignment.worldFrame, viewport: canvas.viewport)
+            let indicatorRect = JumpIndicatorPlacementEngine.indicatorRect(for: assignment.placement, normalBadgeSize: CGSize(width: 24, height: 24))
+            let inside = assignment.placement.visibleIntersection.contains(assignment.placement.point) && viewportBounds.contains(assignment.placement.point)
+            let rectInside = assignment.placement.visibleIntersection.contains(indicatorRect) && viewportBounds.contains(indicatorRect)
+            return [
+                "tileId": assignment.tileId.uuidString,
+                "label": assignment.label,
+                "tileScreenFrame": rectJSON(screenFrame),
+                "visibleIntersection": rectJSON(assignment.placement.visibleIntersection),
+                "badgePoint": pointJSON(assignment.placement.point),
+                "indicatorRect": rectJSON(indicatorRect),
+                "kind": kindString(assignment.placement.kind),
+                "insideVisibleIntersection": inside,
+                "indicatorRectInsideVisibleIntersection": rectInside,
+            ]
+        }
+        for p in placements {
+            try expect((p["insideVisibleIntersection"] as? Bool) == true, "badge point must be inside visible intersection and viewport")
+            try expect((p["indicatorRectInsideVisibleIntersection"] as? Bool) == true, "drawn indicator rect must be inside visible intersection and viewport")
+        }
+
+        let manifest: [String: Any] = [
+            "check": "leader-jump-visible-indicators",
+            "path": "synthesized .flagsChanged -> production leaderJumpAssignments -> overlay placement seam",
+            "viewportBounds": rectJSON(viewportBounds),
+            "placements": placements,
+            "offscreenTilesLabeled": assignments.filter { $0.tileId == offscreenId }.count,
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("leader-jump-visible-indicators", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

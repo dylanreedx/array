@@ -55,7 +55,7 @@ Rules:
 - [x] T12 — Terminal zoom-pan stability  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T12-terminal-zoom-pan-flicker.md`
 
-- [ ] T06 — Camera-aware jump indicators  
+- [x] T06 — Camera-aware jump indicators  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T06-camera-aware-jump-indicators.md`
 
 - [ ] T16 — Zone navigation scale/readability  

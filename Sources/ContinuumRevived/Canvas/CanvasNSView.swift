@@ -1130,6 +1130,7 @@ final class CanvasNSView: NSView {
         let tileId: UUID
         let label: String
         let worldFrame: TileFrame
+        let placement: JumpIndicatorPlacement
     }
 
     /// The single source of truth for the jump HUD: the visible tiles (their
@@ -1152,7 +1153,9 @@ final class CanvasNSView: NSView {
         }
         return TileArrangement.jumpLabels(for: visible, alphabet: leaderLabelAlphabet).compactMap { label in
             guard let frame = worldFrames[label.id] else { return nil }
-            return LeaderJumpAssignment(tileId: label.id, label: label.label, worldFrame: frame)
+            let screenFrame = CanvasEngine.tileScreenFrame(frame, viewport: canvasState.viewport)
+            guard let placement = JumpIndicatorPlacementEngine.placement(tileScreenFrame: screenFrame, viewportBounds: bounds) else { return nil }
+            return LeaderJumpAssignment(tileId: label.id, label: label.label, worldFrame: frame, placement: placement)
         }
     }
 
@@ -5232,14 +5235,8 @@ private final class NavModeOverlayNSView: NSView {
     /// user sees is exactly the key that jumps there.
     private func drawTileLabels(in canvas: CanvasNSView) {
         for assignment in canvas.leaderJumpAssignments() {
-            let screenFrame = CanvasEngine.tileScreenFrame(assignment.worldFrame, viewport: canvas.viewport)
-            let badge = CGRect(
-                x: screenFrame.midX - badgeSize.width / 2,
-                y: screenFrame.midY - badgeSize.height / 2,
-                width: badgeSize.width,
-                height: badgeSize.height
-            )
-            let badgePath = NSBezierPath(roundedRect: badge, xRadius: 8, yRadius: 8)
+            let badge = JumpIndicatorPlacementEngine.indicatorRect(for: assignment.placement, normalBadgeSize: badgeSize)
+            let badgePath = NSBezierPath(roundedRect: badge, xRadius: min(8, badge.width / 2), yRadius: min(8, badge.height / 2))
             NSColor.controlAccentColor.withAlphaComponent(0.95).setFill()
             badgePath.fill()
             let text = assignment.label.uppercased()
@@ -5248,10 +5245,12 @@ private final class NavModeOverlayNSView: NSView {
                 .foregroundColor: NSColor.white
             ]
             let size = text.size(withAttributes: attributes)
-            text.draw(
-                at: CGPoint(x: badge.midX - size.width / 2, y: badge.midY - size.height / 2),
-                withAttributes: attributes
-            )
+            if badge.width >= size.width + 4, badge.height >= size.height + 2 {
+                text.draw(
+                    at: CGPoint(x: badge.midX - size.width / 2, y: badge.midY - size.height / 2),
+                    withAttributes: attributes
+                )
+            }
         }
     }
 
