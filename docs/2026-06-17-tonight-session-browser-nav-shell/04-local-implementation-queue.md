@@ -19,7 +19,7 @@ Rules:
 
 ## Browser queue
 
-- [ ] T02 — WKWebView Web Inspector developer enablement  
+- [x] T02 — WKWebView Web Inspector developer enablement  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T02-browser-inspect-element-devtools.md`
 
 - [ ] T05 — Chrome integration guardrails matrix  

@@ -594,6 +594,7 @@ final class TileSpawner {
         )
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        BrowserInspectionPolicy.resolved(defaults: defaults).apply(to: webView)
         let runtime = WKWebViewBrowserRuntime(
             id: UUID(),
             tileId: tile.id,
@@ -1033,6 +1034,114 @@ final class TileSpawner {
             profileId: profile.id,
             interactionState: interactionState
         )
+    }
+
+    static func runBrowserInspectionPolicySelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { if case let .failed(message) = self { return message }; return "failed" }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let supportsInspectableAPI: Bool
+        let defaultInspectable: Bool
+        let optInInspectableWhenSupported: Bool
+        let optInAttemptDidNotCrash: Bool
+        if #available(macOS 13.3, *) {
+            supportsInspectableAPI = true
+            defaultInspectable = BrowserEngineContext(inspectionPolicy: BrowserInspectionPolicy(isEnabled: false, source: "test"))
+                .makeWebView(storageGroupId: BrowserState.sharedStorageGroupId).isInspectable
+            optInInspectableWhenSupported = BrowserEngineContext(inspectionPolicy: BrowserInspectionPolicy(isEnabled: true, source: "test"))
+                .makeWebView(storageGroupId: BrowserState.sharedStorageGroupId).isInspectable
+            optInAttemptDidNotCrash = true
+        } else {
+            supportsInspectableAPI = false
+            defaultInspectable = false
+            optInInspectableWhenSupported = false
+            optInAttemptDidNotCrash = true
+        }
+        try expect(defaultInspectable == false, "default browser inspection policy must be non-inspectable")
+        if supportsInspectableAPI {
+            try expect(optInInspectableWhenSupported == true, "opt-in browser inspection policy must set isInspectable on supported OS")
+        }
+
+        let suiteName = "continuum-browser-inspection-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else { throw CheckError.failed("could not create isolated defaults") }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(true, forKey: BrowserInspectionPolicy.userDefaultsKey)
+
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuum-browser-inspection-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        let profile = BrowserProfile.builtInDefault()
+        let project = Project(
+            id: UUID(),
+            name: "browser-inspection-policy-check",
+            rootPath: tempRoot.path,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 1),
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning, defaultBrowserProfileId: profile.id)
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        let spawner = TileSpawner(
+            canvasView: canvas,
+            ghostty: nil,
+            browserEngine: BrowserEngineContext(inspectionPolicy: BrowserInspectionPolicy(isEnabled: true, source: "test")),
+            projectStore: store,
+            project: project,
+            defaults: defaults,
+            browserProfiles: [profile]
+        )
+        let opener: WKWebViewBrowserRuntime
+        switch spawner.spawnBrowser(url: "data:text/html;charset=utf-8,opener") {
+        case let .spawned(runtime): opener = runtime
+        case let .invalidURL(url): throw CheckError.failed("opener spawn invalid URL \(url)")
+        case let .failure(error): throw error
+        }
+        let request = URLRequest(url: URL(string: "data:text/html;charset=utf-8,target-blank-child")!)
+        let child = opener.onNewWindowRequest?(request, WKWebViewConfiguration(), WKNavigationAction(), WKWindowFeatures())
+        try expect(child != nil, "target blank seam should return child webview")
+        let targetBlankChildInspectableFollowsPolicy: Bool
+        if #available(macOS 13.3, *) {
+            targetBlankChildInspectableFollowsPolicy = child?.isInspectable == true
+        } else {
+            targetBlankChildInspectableFollowsPolicy = true
+        }
+        try expect(targetBlankChildInspectableFollowsPolicy, "target blank child should follow opt-in inspection policy")
+
+        let sourceRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Sources")
+        var unconditionalInspectableAssignments: [String] = []
+        var programmaticInspectorOpenAPIs: [String] = []
+        if let enumerator = FileManager.default.enumerator(at: sourceRoot, includingPropertiesForKeys: nil) {
+            for case let fileURL as URL in enumerator where fileURL.pathExtension == "swift" {
+                let text = (try? String(contentsOf: fileURL)) ?? ""
+                let relative = fileURL.path.replacingOccurrences(of: FileManager.default.currentDirectoryPath + "/", with: "")
+                if text.contains("isInspectable = " + "true") { unconditionalInspectableAssignments.append(relative) }
+                if text.contains("show" + "WebInspector") || text.contains("_" + "inspector") || text.contains("inspect" + "Element") {
+                    programmaticInspectorOpenAPIs.append(relative)
+                }
+            }
+        }
+        try expect(unconditionalInspectableAssignments.isEmpty, "unconditional isInspectable assignments found: \(unconditionalInspectableAssignments)")
+        try expect(programmaticInspectorOpenAPIs.isEmpty, "programmatic inspector APIs found: \(programmaticInspectorOpenAPIs)")
+
+        let artifactDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs/\(Int(Date().timeIntervalSince1970))/browser-inspection-policy", isDirectory: true)
+        try FileManager.default.createDirectory(at: artifactDir, withIntermediateDirectories: true)
+        let artifact = artifactDir.appendingPathComponent("manifest.json")
+        let payload = """
+        {"check":"browser-inspection-policy","supportsInspectableAPI":\(supportsInspectableAPI),"defaultInspectable":\(defaultInspectable),"optInInspectableWhenSupported":\(optInInspectableWhenSupported),"optInAttemptDidNotCrash":\(optInAttemptDidNotCrash),"targetBlankChildInspectableFollowsPolicy":\(targetBlankChildInspectableFollowsPolicy),"unconditionalInspectableAssignments":[],"programmaticInspectorOpenAPIs":[],"defaultSource":"defaults/env","manualSafariDevelopVerification":"PENDING"}
+        """
+        try payload.write(to: artifact, atomically: true, encoding: .utf8)
+        return artifact
     }
 
     static func runBrowserTargetBlankSelfCheck() throws -> URL {

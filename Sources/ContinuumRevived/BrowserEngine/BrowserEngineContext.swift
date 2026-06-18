@@ -7,8 +7,11 @@ import WebKit
 final class BrowserEngineContext {
     private var dataStores: [String: WKWebsiteDataStore] = [:]
     private(set) var webViewCreationCountForQA = 0
+    private let inspectionPolicy: BrowserInspectionPolicy
 
-    init() {}
+    init(inspectionPolicy: BrowserInspectionPolicy = .resolved()) {
+        self.inspectionPolicy = inspectionPolicy
+    }
 
     /// Returns (and lazily caches) the data store for a given storage group id.
     /// `BrowserState.sharedStorageGroupId` maps to `WKWebsiteDataStore.default()`;
@@ -41,7 +44,7 @@ final class BrowserEngineContext {
         configuration.preferences.isFraudulentWebsiteWarningEnabled = false
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.isInspectable = true
+        inspectionPolicy.apply(to: webView)
         return webView
     }
 
