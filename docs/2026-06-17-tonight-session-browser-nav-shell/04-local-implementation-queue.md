@@ -49,7 +49,7 @@ Rules:
 
 ## Navigation/terminal queue — optional after browser queue
 
-- [ ] T13 — Shell scroll ergonomics  
+- [x] T13 — Shell scroll ergonomics  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T13-shell-scroll-ergonomics.md`
 
 - [ ] T12 — Terminal zoom-pan stability  

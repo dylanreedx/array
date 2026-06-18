@@ -193,6 +193,26 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         terminalView?.scrollDirectly(deltaX: deltaX, deltaY: deltaY)
     }
 
+    @discardableResult
+    func dispatchScrollWheel(deltaX: Double, deltaY: Double, precise: Bool) -> TerminalWheelQASample? {
+        guard let terminalView else { return nil }
+        let before = terminalView.qaGhosttyScrollCallCount
+        let units: CGScrollEventUnit = precise ? .pixel : .line
+        guard let cgEvent = CGEvent(
+            scrollWheelEvent2Source: nil,
+            units: units,
+            wheelCount: 2,
+            wheel1: Int32(deltaY),
+            wheel2: Int32(deltaX),
+            wheel3: 0
+        ), let event = NSEvent(cgEvent: cgEvent) else {
+            return nil
+        }
+        terminalView.scrollWheel(with: event)
+        guard terminalView.qaGhosttyScrollCallCount == before + 1 else { return nil }
+        return terminalView.qaLastWheelSample
+    }
+
     func dispatchKeyDown(
         keyCode: UInt16,
         characters: String,

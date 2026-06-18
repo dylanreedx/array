@@ -2069,12 +2069,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
             if CommandLine.arguments.contains("--palette-captures-keys-over-browser-check") {
                 runPaletteCapturesKeysOverBrowserCheck(window: window)
+            } else if CommandLine.arguments.contains("--terminal-scroll-ergonomics-check") {
+                runTerminalScrollErgonomicsCheck(window: window, runtime: runtimes.first)
             } else if smokeTestEnabled {
                 runSmokeTest(window: window, runtime: runtimes.first)
             }
         } catch {
             presentFatalError(error)
         }
+    }
+
+    private func runTerminalScrollErgonomicsCheck(window: NSWindow, runtime: GhosttyTerminalRuntime?) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            do {
+                guard let runtime, let canvasView = self.canvasView else {
+                    throw NSError(domain: "TerminalScrollErgonomics", code: 1, userInfo: [NSLocalizedDescriptionKey: "missing terminal runtime or canvas"])
+                }
+                let startViewport = canvasView.viewport
+                let defaults = UserDefaults.standard
+                let oldPrecise = defaults.object(forKey: TerminalScrollConfig.preciseMultiplierKey)
+                defer {
+                    if let oldPrecise { defaults.set(oldPrecise, forKey: TerminalScrollConfig.preciseMultiplierKey) } else { defaults.removeObject(forKey: TerminalScrollConfig.preciseMultiplierKey) }
+                }
+
+                defaults.removeObject(forKey: TerminalScrollConfig.preciseMultiplierKey)
+                let defaultSample = runtime.dispatchScrollWheel(deltaX: 0, deltaY: -3, precise: true)
+                defaults.set("0.5", forKey: TerminalScrollConfig.preciseMultiplierKey)
+                let tunedSample = runtime.dispatchScrollWheel(deltaX: 0, deltaY: -3, precise: true)
+                let inputAfterScrollWorked = runtime.dispatchInsertedText("terminal-scroll-ergonomics-input")
+                let callCount = runtime.qaTerminalView?.qaGhosttyScrollCallCount ?? 0
+                let viewportChanged = canvasView.viewport != startViewport
+
+                guard let defaultSample, let tunedSample else { throw NSError(domain: "TerminalScrollErgonomics", code: 2) }
+                guard abs(defaultSample.normalizedDeltaY - -3) < 0.001 else { throw NSError(domain: "TerminalScrollErgonomics", code: 3) }
+                guard abs(tunedSample.normalizedDeltaY - -1.5) < 0.001 else { throw NSError(domain: "TerminalScrollErgonomics", code: 4) }
+                guard callCount == 2 else { throw NSError(domain: "TerminalScrollErgonomics", code: 5) }
+                guard !viewportChanged else { throw NSError(domain: "TerminalScrollErgonomics", code: 6) }
+                guard inputAfterScrollWorked else { throw NSError(domain: "TerminalScrollErgonomics", code: 7) }
+
+                let timestamp = Self.qaTimestamp()
+                let dir = URL(fileURLWithPath: "qa-runs/\(timestamp)/terminal-scroll-ergonomics", isDirectory: true)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let manifest: [String: Any] = [
+                    "check": "terminal-scroll-ergonomics",
+                    "settings": ["preciseMultiplier": 1.0, "lineMultiplier": 1.0, "maxAbsDeltaPerEvent": NSNull()],
+                    "samples": [try Self.jsonObject(defaultSample), try Self.jsonObject(tunedSample)],
+                    "ghosttyScrollCallCount": callCount,
+                    "canvasViewportChanged": viewportChanged,
+                    "inputAfterScrollWorked": inputAfterScrollWorked,
+                    "manualMatrixPending": true
+                ]
+                let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+                try data.write(to: dir.appendingPathComponent("manifest.json"), options: .atomic)
+                print("terminal-scroll-ergonomics artifact: \(dir.path)/manifest.json")
+                NSApp.terminate(nil)
+            } catch {
+                fputs("terminal-scroll-ergonomics check failed: \(error)\n", stderr)
+                self.smokeTestExitCode = 1
+                NSApp.terminate(nil)
+            }
+        }
+    }
+
+    private static func jsonObject<T: Encodable>(_ value: T) throws -> Any {
+        let data = try JSONEncoder().encode(value)
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
+    private static func qaTimestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter.string(from: Date())
     }
 
     private func installInitialTerminalTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {

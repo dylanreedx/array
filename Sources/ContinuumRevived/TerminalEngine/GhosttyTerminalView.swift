@@ -3,6 +3,15 @@ import ContinuumRevivedCore
 import Foundation
 import GhosttyKit
 
+struct TerminalWheelQASample: Codable, Equatable {
+    var rawDeltaX: Double
+    var rawDeltaY: Double
+    var precise: Bool
+    var normalizedDeltaX: Double
+    var normalizedDeltaY: Double
+    var deliveredViaProductionScrollWheel: Bool
+}
+
 @MainActor
 final class GhosttyTerminalView: NSView {
     private let ghosttyApp: ghostty_app_t
@@ -13,6 +22,8 @@ final class GhosttyTerminalView: NSView {
     private var previousModifierFlags: NSEvent.ModifierFlags = []
     private var markedText = NSMutableAttributedString()
     private var keyTextAccumulator: [String]?
+    private(set) var qaGhosttyScrollCallCount = 0
+    private(set) var qaLastWheelSample: TerminalWheelQASample?
     var reservedShortcutHandler: ((NSEvent) -> Bool)?
 
     /// Last cwd reported by the shell via OSC 7 (GHOSTTY_ACTION_PWD). Nil until the
@@ -265,15 +276,32 @@ final class GhosttyTerminalView: NSView {
 
     override func scrollWheel(with event: NSEvent) {
         guard let surface else { return }
-        var x = event.scrollingDeltaX
-        var y = event.scrollingDeltaY
-        // Match upstream's 2x speedup for precision deltas; it "feels right."
-        if event.hasPreciseScrollingDeltas {
-            x *= 2
-            y *= 2
-        }
-        ghostty_surface_mouse_scroll(surface, x, y, 0)
+        let sample = normalizedWheelSample(
+            deltaX: event.scrollingDeltaX,
+            deltaY: event.scrollingDeltaY,
+            precise: event.hasPreciseScrollingDeltas,
+            deliveredViaProductionScrollWheel: true
+        )
+        qaLastWheelSample = sample
+        qaGhosttyScrollCallCount += 1
+        ghostty_surface_mouse_scroll(surface, sample.normalizedDeltaX, sample.normalizedDeltaY, 0)
     }
+
+    func normalizedWheelSample(deltaX: Double, deltaY: Double, precise: Bool, deliveredViaProductionScrollWheel: Bool) -> TerminalWheelQASample {
+        let normalized = TerminalWheelNormalizer.normalize(
+            TerminalWheelInput(deltaX: deltaX, deltaY: deltaY, hasPreciseScrollingDeltas: precise),
+            settings: TerminalScrollConfig.settings()
+        )
+        return TerminalWheelQASample(
+            rawDeltaX: deltaX,
+            rawDeltaY: deltaY,
+            precise: precise,
+            normalizedDeltaX: normalized.deltaX,
+            normalizedDeltaY: normalized.deltaY,
+            deliveredViaProductionScrollWheel: deliveredViaProductionScrollWheel
+        )
+    }
+
 
     private func forwardMouseButton(
         event: NSEvent,
@@ -296,6 +324,7 @@ final class GhosttyTerminalView: NSView {
         )
     }
 
+    /// Raw lower-level QA/FFI path; intentionally bypasses terminal wheel normalization.
     func scrollDirectly(deltaX: Double, deltaY: Double) {
         guard let surface else { return }
         ghostty_surface_mouse_scroll(surface, deltaX, deltaY, 0)

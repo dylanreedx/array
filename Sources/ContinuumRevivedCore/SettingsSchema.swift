@@ -154,6 +154,16 @@ public enum SettingsSchema {
                         label: "tmux Path",
                         default: TmuxPersistenceConfig.defaultPath
                     ),
+                    .text(
+                        key: TerminalScrollConfig.preciseMultiplierKey,
+                        label: "Shell Scroll Precise Multiplier",
+                        default: String(TerminalScrollConfig.preciseMultiplierDefault)
+                    ),
+                    .text(
+                        key: TerminalScrollConfig.lineMultiplierKey,
+                        label: "Shell Scroll Wheel Multiplier",
+                        default: String(TerminalScrollConfig.lineMultiplierDefault)
+                    ),
                 ]
             ),
             SettingsSection(

@@ -14,6 +14,50 @@ func approximatelyEqual(_ a: CGPoint, _ b: CGPoint, tolerance: Double = 0.001) -
     abs(a.x - b.x) < tolerance && abs(a.y - b.y) < tolerance
 }
 
+// MARK: - Terminal wheel normalization
+
+do {
+    let precise = TerminalWheelNormalizer.normalize(
+        TerminalWheelInput(deltaX: 0, deltaY: -3, hasPreciseScrollingDeltas: true),
+        settings: .default
+    )
+    expect(abs(precise.deltaY - -3) < 0.001, "precise wheel is not secretly doubled by default")
+
+    let tuned = TerminalWheelNormalizer.normalize(
+        TerminalWheelInput(deltaX: 0, deltaY: -3, hasPreciseScrollingDeltas: true),
+        settings: TerminalWheelSettings(preciseMultiplier: 0.5, lineMultiplier: 1.0, maxAbsDeltaPerEvent: nil)
+    )
+    expect(abs(tuned.deltaY - -1.5) < 0.001, "lower precise multiplier reduces jumpiness")
+
+    let line = TerminalWheelNormalizer.normalize(
+        TerminalWheelInput(deltaX: 2, deltaY: -4, hasPreciseScrollingDeltas: false),
+        settings: TerminalWheelSettings(preciseMultiplier: 2.0, lineMultiplier: 0.5, maxAbsDeltaPerEvent: nil)
+    )
+    expect(abs(line.deltaX - 1) < 0.001 && abs(line.deltaY - -2) < 0.001, "line wheel uses line multiplier")
+
+    let nonFinite = TerminalWheelNormalizer.normalize(
+        TerminalWheelInput(deltaX: .nan, deltaY: .infinity, hasPreciseScrollingDeltas: true),
+        settings: .default
+    )
+    expect(nonFinite.deltaX == 0 && nonFinite.deltaY == 0, "non-finite deltas are sanitized")
+
+    let clamped = TerminalWheelNormalizer.normalize(
+        TerminalWheelInput(deltaX: 12, deltaY: -12, hasPreciseScrollingDeltas: true),
+        settings: TerminalWheelSettings(preciseMultiplier: 1.0, lineMultiplier: 1.0, maxAbsDeltaPerEvent: 5)
+    )
+    expect(clamped.deltaX == 5 && clamped.deltaY == -5, "maxAbsDeltaPerEvent clamps symmetrically")
+
+    let suiteName = "TerminalScrollConfigChecks-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    expect(TerminalScrollConfig.settings(defaults: defaults) == .default, "terminal scroll config defaults to 1x multipliers and no clamp")
+    defaults.set("0.05", forKey: TerminalScrollConfig.preciseMultiplierKey)
+    defaults.set("3.5", forKey: TerminalScrollConfig.lineMultiplierKey)
+    defaults.set("999", forKey: TerminalScrollConfig.maxAbsDeltaPerEventKey)
+    let parsed = TerminalScrollConfig.settings(defaults: defaults)
+    expect(parsed.preciseMultiplier == 0.1 && parsed.lineMultiplier == 2.0 && parsed.maxAbsDeltaPerEvent == 500, "terminal scroll config clamps user settings")
+}
+
 // MARK: - Chrome integration guardrail matrix
 
 do {
