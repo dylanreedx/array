@@ -14,6 +14,30 @@ func approximatelyEqual(_ a: CGPoint, _ b: CGPoint, tolerance: Double = 0.001) -
     abs(a.x - b.x) < tolerance && abs(a.y - b.y) < tolerance
 }
 
+// MARK: - Chrome integration guardrail matrix
+
+do {
+    expect(ChromeIntegrationMatrix.verdict(for: .passwords, via: .directProfileDatabaseRead).isRejected, "Chrome passwords direct database reads must be rejected")
+    expect(ChromeIntegrationMatrix.verdict(for: .cookies, via: .directProfileDatabaseRead).isRejected, "Chrome cookies direct database reads must be rejected")
+    expect(ChromeIntegrationMatrix.verdict(for: .bookmarks, via: .liveProfileReuseAsContinuumProfile).isRejected, "live Chrome profile reuse must be rejected")
+    expect(ChromeIntegrationMatrix.verdict(for: .passwords, via: .chromeSyncReuse) == .unavailable(reason: "Chrome Sync is not an available third-party app integration path and must not be treated as supported."), "Chrome Sync must be unavailable to third-party app sync")
+    expect(ChromeIntegrationMatrix.verdict(for: .cdpDefaultProfile, via: .cdpAttachDefaultUserProfile).isRejected, "CDP attach to default user profile must be rejected")
+    expect(ChromeIntegrationMatrix.verdict(for: .tabs, via: .externalBrowserHandoff) == .outOfScope(reason: "External-browser handoff is user-deferred and out of scope for this bundle."), "external browser handoff must be user-deferred/out of scope")
+
+    if case .conditionallySafe(let requirement) = ChromeIntegrationMatrix.verdict(for: .tabs, via: .companionExtensionNativeMessaging) {
+        expect(requirement.contains("explicit user action"), "extension/native messaging must require explicit user action")
+        expect(requirement.contains("extension ID allowlist"), "extension/native messaging must require extension ID allowlist")
+        expect(requirement.contains("constrained message schema"), "extension/native messaging must require message schema constraints")
+    } else {
+        expect(false, "active tab extension/native messaging should be conditionally safe only with explicit constraints")
+    }
+
+    expect(ChromeIntegrationMatrix.verdict(for: .bookmarks, via: .userChosenExportImportFile) == .conditionallySafe(requirement: "Only user-mediated import/export from a user-chosen file is allowed."), "bookmarks import must be user-mediated")
+    expect(ChromeIntegrationMatrix.verdict(for: .history, via: .userChosenExportImportFile) == .conditionallySafe(requirement: "Only user-mediated import/export from a user-chosen file is allowed."), "history import must be user-mediated")
+    expect(ChromeIntegrationMatrix.verdict(for: .cookies, via: .userChosenExportImportFile).isRejected, "cookie import/export must be rejected")
+    expect(ChromeIntegrationMatrix.verdict(for: .cdpDefaultProfile, via: .isolatedChromeCDPAppOwnedUserDataDir) == .conditionallySafe(requirement: "Developer automation may use only an isolated app-owned --user-data-dir, never the default user profile."), "isolated CDP must require app-owned user data dir")
+}
+
 // MARK: - Tmux shell persistence P1
 
 do {

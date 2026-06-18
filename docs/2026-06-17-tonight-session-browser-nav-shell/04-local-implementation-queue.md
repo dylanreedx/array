@@ -22,7 +22,7 @@ Rules:
 - [x] T02 — WKWebView Web Inspector developer enablement  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T02-browser-inspect-element-devtools.md`
 
-- [ ] T05 — Chrome integration guardrails matrix  
+- [x] T05 — Chrome integration guardrails matrix  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T05-chrome-profile-sync-feasibility.md`
 
 - [ ] T04 — Password/autofill security guardrails and policy tests  

@@ -4,6 +4,83 @@ import Foundation
 import GhosttyKit
 import WebKit
 
+private func runChromeIntegrationGuardrailsSelfCheck() throws -> URL {
+    let fm = FileManager.default
+    let sourcesRoot = URL(fileURLWithPath: "Sources", isDirectory: true)
+    let enumerator = fm.enumerator(at: sourcesRoot, includingPropertiesForKeys: [.isRegularFileKey])
+    let swiftFiles = (enumerator?.compactMap { entry -> URL? in
+        guard let url = entry as? URL, url.pathExtension == "swift" else { return nil }
+        return url
+    } ?? []).sorted { $0.path < $1.path }
+
+    let suspicious = [
+        "Login" + " Data",
+        "Cook" + "ies",
+        "Local" + " State",
+        "User" + " Data/Default",
+        "Chrome" + "/Default",
+        "~/Library/Application Support/Google/" + "Chrome",
+        "--remote-debugging-" + "port"
+    ]
+
+    var hits: [[String: String]] = []
+    for file in swiftFiles {
+        let text = try String(contentsOf: file, encoding: .utf8)
+        for needle in suspicious where text.contains(needle) {
+            hits.append(["file": file.path, "needle": needle])
+        }
+    }
+
+    let passwordDirectReadRejected = ChromeIntegrationMatrix.verdict(for: .passwords, via: .directProfileDatabaseRead).isRejected
+    let cookieDirectReadRejected = ChromeIntegrationMatrix.verdict(for: .cookies, via: .directProfileDatabaseRead).isRejected
+    let liveProfileReuseRejected = ChromeIntegrationMatrix.verdict(for: .bookmarks, via: .liveProfileReuseAsContinuumProfile).isRejected
+    let chromeSyncUnavailable = ChromeIntegrationMatrix.verdict(for: .chromeSync, via: .chromeSyncReuse) == .unavailable(reason: "Chrome Sync is not an available third-party app integration path and must not be treated as supported.")
+    let defaultProfileCDPRejected = ChromeIntegrationMatrix.verdict(for: .cdpDefaultProfile, via: .cdpAttachDefaultUserProfile).isRejected
+    let externalBrowserHandoffOutOfScope = ChromeIntegrationMatrix.verdict(for: .tabs, via: .externalBrowserHandoff) == .outOfScope(reason: "External-browser handoff is user-deferred and out of scope for this bundle.")
+    let extensionBridgeRequiresConsent: Bool
+    if case .conditionallySafe(let requirement) = ChromeIntegrationMatrix.verdict(for: .tabs, via: .companionExtensionNativeMessaging) {
+        extensionBridgeRequiresConsent = requirement.contains("explicit user action") && requirement.contains("extension ID allowlist") && requirement.contains("constrained message schema")
+    } else {
+        extensionBridgeRequiresConsent = false
+    }
+
+    let manifest: [String: Any] = [
+        "check": "chrome-integration-guardrails",
+        "passwordDirectReadRejected": passwordDirectReadRejected,
+        "cookieDirectReadRejected": cookieDirectReadRejected,
+        "liveProfileReuseRejected": liveProfileReuseRejected,
+        "chromeSyncUnavailable": chromeSyncUnavailable,
+        "defaultProfileCDPRejected": defaultProfileCDPRejected,
+        "externalBrowserHandoffOutOfScope": externalBrowserHandoffOutOfScope,
+        "extensionBridgeRequiresConsent": extensionBridgeRequiresConsent,
+        "sourceGrepScope": ["Sources/**/*.swift"],
+        "allowlistedDocTestHits": [],
+        "productionSwiftFilesScanned": !swiftFiles.isEmpty,
+        "suspiciousProductionHits": hits
+    ]
+
+    let timestamp = Int(Date().timeIntervalSince1970)
+    let dir = URL(fileURLWithPath: "qa-runs/\(timestamp)/chrome-integration-guardrails", isDirectory: true)
+    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    let artifact = dir.appendingPathComponent("manifest.json", isDirectory: false)
+    let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+    try data.write(to: artifact, options: .atomic)
+
+    guard passwordDirectReadRejected,
+          cookieDirectReadRejected,
+          liveProfileReuseRejected,
+          chromeSyncUnavailable,
+          defaultProfileCDPRejected,
+          externalBrowserHandoffOutOfScope,
+          extensionBridgeRequiresConsent,
+          !swiftFiles.isEmpty,
+          hits.isEmpty else {
+        throw NSError(domain: "ContinuumRevived.ChromeIntegrationGuardrails", code: 1, userInfo: [NSLocalizedDescriptionKey: "chrome integration guardrails failed; see \(artifact.path)"])
+    }
+
+    return artifact
+}
+
 @main
 enum ContinuumApp {
     @MainActor
@@ -136,6 +213,17 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 let artifact = try TileSpawner.runBrowserInspectionPolicySelfCheck()
                 print("ContinuumRevivedBrowserInspectionPolicyChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--chrome-integration-guardrails-check") {
+            do {
+                let artifact = try runChromeIntegrationGuardrailsSelfCheck()
+                print("ContinuumRevivedChromeIntegrationGuardrailsChecks passed: \(artifact.path)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
