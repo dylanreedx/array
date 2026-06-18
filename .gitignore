@@ -11,3 +11,8 @@ ThirdParty/
 .pi/tmp/
 qa-runs/
 .swiftpm/
+.env
+
+# Local Pi generated artifacts
+.pi/tmux-shell-persistence-artifacts.md
+.pi/tmux-shell-persistence-p4-artifact.md
