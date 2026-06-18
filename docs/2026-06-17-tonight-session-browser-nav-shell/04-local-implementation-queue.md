@@ -65,6 +65,6 @@ Rules:
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T07-jump-focus-zoom-framing.md`  
   Prerequisite: T12 done for animation; otherwise keep animation default-off.
 
-- [ ] T08 — Previous tile/zone navigation  
+- [x] T08 — Previous tile/zone navigation  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T08-previous-tile-zone-navigation.md`  
   Prerequisite: T07 done.

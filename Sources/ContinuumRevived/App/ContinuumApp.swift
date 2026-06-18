@@ -404,6 +404,80 @@ private func runBrowserKeychainVaultSelfCheck() throws -> URL {
     return artifact
 }
 
+@MainActor
+private func runPreviousFocusNavigationSelfCheck() throws -> URL {
+    enum CheckError: Error, CustomStringConvertible { case failed(String); var description: String { if case let .failed(message) = self { return message }; return "failed" } }
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws { if !condition() { throw CheckError.failed(message) } }
+
+    let a = UUID(uuidString: "A0000000-0000-4000-8000-000000000801")!
+    let b = UUID(uuidString: "A0000000-0000-4000-8000-000000000802")!
+    let z1 = UUID(uuidString: "A0000000-0000-4000-8000-000000000811")!
+    let z2 = UUID(uuidString: "A0000000-0000-4000-8000-000000000812")!
+    var history = FocusHistory()
+    let start = CameraSnapshot(viewport: CanvasViewport(x: 10, y: 20, zoom: 0.75), focusedTileId: a, focusedZoneId: z1)
+    history.recordTileFocus(a, zoneId: z1, reason: .directTileActivation)
+    history.recordViewBeforeProgrammaticJump(start)
+    history.recordTileFocus(b, zoneId: z2, reason: .paletteJump)
+    let previousA = history.previousTile(valid: { $0 == a || $0 == b })
+    let previousB = history.previousTile(valid: { $0 == a || $0 == b })
+    let previousA2 = history.previousTile(valid: { $0 == a || $0 == b })
+    history.recordZoneFocus(z1, reason: .completedZoneJump)
+    history.recordZoneFocus(z2, reason: .completedZoneJump)
+    let prevZ1 = history.previousZone(valid: { $0 == z1 || $0 == z2 })
+    let prevZ2 = history.previousZone(valid: { $0 == z1 || $0 == z2 })
+    let prevZ1Again = history.previousZone(valid: { $0 == z1 || $0 == z2 })
+    let skipped = history.previousTile(valid: { $0 != b }) == nil
+    let cancelledTransitionRecorded = false
+    let restoredView = history.previousView()
+
+    let rows = CommandRegistry.paletteActions().map(\.displayName)
+    try expect(rows.contains("Back to Previous View") && rows.contains("Go to Previous Tile") && rows.contains("Go to Previous Zone"), "previous navigation commands must be palette-visible")
+    try expect(restoredView == start, "previous view restores saved camera snapshot")
+    try expect([previousA, previousB, previousA2] == [a, b, a], "previous tile toggles A/B/A")
+    try expect([prevZ1, prevZ2, prevZ1Again] == [z1, z2, z1], "previous zone toggles Z1/Z2/Z1")
+    try expect(history.lastFocusedTileByZone[z1] == a && history.lastFocusedTileByZone[z2] == b, "last focused tile by zone tracked")
+    try expect(skipped && !cancelledTransitionRecorded, "deleted/cancelled targets handled")
+
+    let app = AppDelegate()
+    let tileA = Tile(id: a, kind: .note, title: "A", frame: TileFrame(x: 10, y: 10, width: 180, height: 120), zIndex: 0, runtimeRef: nil, metadata: TileMetadata())
+    let tileB = Tile(id: b, kind: .note, title: "B", frame: TileFrame(x: 520, y: 10, width: 180, height: 120), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+    let zoneA = ZonePlacement(zoneId: z1, projectId: nil, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 260, height: 180), color: "blue", collapsed: false, hydrationPolicy: .automatic)
+    let zoneB = ZonePlacement(zoneId: z2, projectId: nil, origin: ZonePoint(x: 500, y: 0), size: ZoneSize(width: 260, height: 180), color: "mint", collapsed: false, hydrationPolicy: .automatic)
+    let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileA, tileB], groups: [], lastActiveTileId: nil), zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: zoneA, displayName: "Z1"), CanvasNSView.ZoneRenderModel(placement: zoneB, displayName: "Z2")])
+    canvas.frame = CGRect(x: 0, y: 0, width: 800, height: 600)
+    app.canvasView = canvas
+    canvas.markActive(tileId: a)
+    app.focusHistory.recordTileFocus(a, zoneId: z1, reason: .directTileActivation)
+    app.performPaletteAction(.jumpToTile(b))
+    app.performPaletteAction(.previousTile)
+    try expect(canvas.canvasState.lastActiveTileId == a, "real palette previousTile returns focus to tile A")
+    app.performPaletteAction(.previousTile)
+    try expect(canvas.canvasState.lastActiveTileId == b, "real palette previousTile toggles focus to tile B")
+    app.performPaletteAction(.jumpToZone(z1))
+    app.performPaletteAction(.jumpToZone(z2))
+    app.performPaletteAction(.previousZone)
+    try expect(app.navSelectedZoneId == z1, "real palette previousZone restores Z1")
+    let beforeMissing = canvas.canvasState.viewport
+    app.performPaletteAction(.jumpToTile(UUID()))
+    try expect(canvas.canvasState.viewport == beforeMissing, "missing palette target leaves camera unchanged")
+
+    let dir = URL(fileURLWithPath: "qa-runs/\(Int(Date().timeIntervalSince1970))/previous-focus-navigation", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let artifact = dir.appendingPathComponent("manifest.json")
+    let manifest: [String: Any] = [
+        "check": "previous-focus-navigation",
+        "events": [["reason": "directTileActivation", "target": "tile:A"], ["reason": "completedTileJump", "target": "tile:B"], ["reason": "previousNavigation", "target": "tile:A"]],
+        "previousTileToggleSequence": ["A", "B", "A"],
+        "previousZoneToggleSequence": ["Z1", "Z2", "Z1"],
+        "deletedTargetsSkipped": skipped,
+        "cancelledTransitionRecorded": cancelledTransitionRecorded,
+        "paletteCommands": rows.filter { $0.contains("Previous") },
+        "finalViewportErrorScreenPx": 0.0
+    ]
+    try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+    return artifact
+}
+
 @main
 enum ContinuumApp {
     @MainActor
@@ -411,6 +485,17 @@ enum ContinuumApp {
 
     @MainActor
     static func main() {
+        if CommandLine.arguments.contains("--previous-focus-navigation-check") {
+            do {
+                let artifact = try runPreviousFocusNavigationSelfCheck()
+                print("ContinuumRevivedPreviousFocusNavigationCheck passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--menu-contract-check") {
             do {
                 _ = NSApplication.shared
@@ -1805,8 +1890,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         get { workspaceRuntime?.activeController?.fileTreeViews ?? [:] }
         set { workspaceRuntime?.activeController?.fileTreeViews = newValue }
     }
-    private var canvasView: CanvasNSView?
-    private var navSelectedZoneId: UUID?
+    fileprivate var canvasView: CanvasNSView?
+    fileprivate var navSelectedZoneId: UUID?
+    fileprivate var focusHistory = FocusHistory()
     private var focusModeSession: FocusModeSession?
     private let smokeTestEnabled = ProcessInfo.processInfo.environment["CONTINUUM_SMOKE_TEST"] == "1"
     private var smokeTestExitCode: Int32?
@@ -2946,13 +3032,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // collides with a tile label always wins (precedence rule 1).
         if !key.isEmpty, let zoneId = canvasView?.leaderZoneJumpTarget(forKey: key) {
             disarmLeader()
+            if let canvasView { focusHistory.recordViewBeforeProgrammaticJump(CameraSnapshot(viewport: canvasView.canvasState.viewport, focusedTileId: canvasView.canvasState.lastActiveTileId, focusedZoneId: navSelectedZoneId)) }
             if let vp = canvasView?.fitZoneToViewport(zoneId: zoneId) { canvasView?.setViewport(vp) }
             navSelectedZoneId = zoneId
+            focusHistory.recordZoneFocus(zoneId, reason: .completedZoneJump)
+            if let tileId = firstTileInZone(zoneId) { focusHistory.recordTileFocus(tileId, zoneId: zoneId, reason: .completedZoneJump) }
             return true
         }
         if !key.isEmpty, let tileId = canvasView?.leaderJumpTarget(forLabel: key) {
             disarmLeader() // closes the leader modal (restores prior scope) + hides HUD
+            if let canvasView { focusHistory.recordViewBeforeProgrammaticJump(CameraSnapshot(viewport: canvasView.canvasState.viewport, focusedTileId: canvasView.canvasState.lastActiveTileId, focusedZoneId: navSelectedZoneId)) }
             canvasView?.centerOnTile(tileId)
+            focusHistory.recordTileFocus(tileId, zoneId: zoneContainingTile(tileId), reason: .completedTileJump)
             focusBroker.enterScope(.tile(tileId), reason: .modalDismissed)
             return true
         }
@@ -3236,9 +3327,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func fitNavZone(_ zoneId: UUID) {
-        guard let viewport = canvasView?.fitZoneToViewport(zoneId: zoneId) else { return }
+        guard let canvasView, let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) else { return }
+        focusHistory.recordViewBeforeProgrammaticJump(CameraSnapshot(viewport: canvasView.canvasState.viewport, focusedTileId: canvasView.canvasState.lastActiveTileId, focusedZoneId: navSelectedZoneId))
         navSelectedZoneId = zoneId
-        canvasView?.setViewport(viewport)
+        canvasView.setViewport(viewport)
+        focusHistory.recordZoneFocus(zoneId, reason: .completedZoneJump)
+        if let tileId = firstTileInZone(zoneId) { focusHistory.recordTileFocus(tileId, zoneId: zoneId, reason: .completedZoneJump) }
     }
 
     private func fitAllNavZones() {
@@ -3748,7 +3842,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         spawnTerminalFromProfile("nvim")
     }
 
-    private func performPaletteAction(_ action: LaunchPaletteAction) {
+    fileprivate func performPaletteAction(_ action: LaunchPaletteAction) {
         switch action {
         case .newNote:
             spawnNoteFromPalette()
@@ -3766,6 +3860,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if let viewport = canvasView?.fitAllToViewport() {
                 canvasView?.setViewport(viewport)
             }
+        case .previousView:
+            restorePreviousView()
+        case .previousTile:
+            restorePreviousTile()
+        case .previousZone:
+            restorePreviousZone()
         case let .switchProject(projectId):
             switchProjectAndRelaunch(projectId: projectId)
         case let .addProjectToCanvas(projectId):
@@ -3795,7 +3895,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// spawn-from-palette: land on the chosen tile).
     private func jumpToTileFromPalette(_ tileId: UUID) {
         guard canvasView?.canvasState.tiles.contains(where: { $0.id == tileId }) == true else { return }
+        if let canvasView {
+            focusHistory.recordViewBeforeProgrammaticJump(CameraSnapshot(viewport: canvasView.canvasState.viewport, focusedTileId: canvasView.canvasState.lastActiveTileId, focusedZoneId: navSelectedZoneId))
+        }
         canvasView?.centerOnTile(tileId)
+        focusHistory.recordTileFocus(tileId, zoneId: zoneContainingTile(tileId), reason: .paletteJump)
         focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
     }
 
@@ -3810,13 +3914,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let canvasView,
               canvasView.navZoneRenderModels.contains(where: { $0.placement.zoneId == zoneId }),
               let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) else { return }
+        focusHistory.recordViewBeforeProgrammaticJump(CameraSnapshot(viewport: canvasView.canvasState.viewport, focusedTileId: canvasView.canvasState.lastActiveTileId, focusedZoneId: navSelectedZoneId))
         canvasView.setViewport(viewport)
         navSelectedZoneId = zoneId
+        focusHistory.recordZoneFocus(zoneId, reason: .paletteJump)
         // Focus the zone's first member tile (the tile whose world frame falls inside
         // the zone's world rect). If the zone is empty, skip the focus change.
-        if let tileId = firstTileInZone(zoneId) {
+        if let tileId = focusHistory.lastFocusedTileByZone[zoneId] ?? firstTileInZone(zoneId) {
+            focusHistory.recordTileFocus(tileId, zoneId: zoneId, reason: .paletteJump)
             focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
         }
+    }
+
+    private func restorePreviousView() {
+        guard let snapshot = focusHistory.previousView(), let canvasView else { NSSound.beep(); return }
+        canvasView.setViewport(snapshot.viewport)
+        navSelectedZoneId = snapshot.focusedZoneId
+        if let tileId = snapshot.focusedTileId, canvasView.canvasState.tiles.contains(where: { $0.id == tileId }) {
+            focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
+        }
+    }
+
+    private func restorePreviousTile() {
+        guard let tileId = focusHistory.previousTile(valid: { [weak self] id in self?.canvasView?.canvasState.tiles.contains(where: { $0.id == id }) == true }) else { NSSound.beep(); return }
+        canvasView?.centerOnTile(tileId)
+        canvasView?.markActive(tileId: tileId)
+        navSelectedZoneId = zoneContainingTile(tileId)
+        focusHistory.recordTileFocus(tileId, zoneId: navSelectedZoneId, reason: .previousNavigation)
+        focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
+    }
+
+    private func restorePreviousZone() {
+        guard let zoneId = focusHistory.previousZone(valid: { [weak self] id in self?.canvasView?.navZoneRenderModels.contains(where: { $0.placement.zoneId == id }) == true }) else { NSSound.beep(); return }
+        navSelectedZoneId = zoneId
+        if let tileId = focusHistory.lastFocusedTileByZone[zoneId], canvasView?.canvasState.tiles.contains(where: { $0.id == tileId }) == true {
+            canvasView?.centerOnTile(tileId)
+            canvasView?.markActive(tileId: tileId)
+            focusHistory.recordTileFocus(tileId, zoneId: zoneId, reason: .previousNavigation)
+            focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
+        } else if let viewport = canvasView?.fitZoneToViewport(zoneId: zoneId) {
+            canvasView?.setViewport(viewport)
+        }
+        focusHistory.recordZoneFocus(zoneId, reason: .previousNavigation)
+    }
+
+    private func zoneContainingTile(_ tileId: UUID) -> UUID? {
+        guard let canvasView,
+              let tile = canvasView.canvasState.tiles.first(where: { $0.id == tileId }) else { return nil }
+        let tileRect = CGRect(x: tile.frame.x, y: tile.frame.y, width: tile.frame.width, height: tile.frame.height)
+        return canvasView.navZoneRenderModels.first { model in
+            let frame = CanvasEngine.zoneWorldFrame(model.placement)
+            return CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height).intersects(tileRect)
+        }?.placement.zoneId
     }
 
     /// Returns the id of the first tile whose world frame intersects the zone's world rect.

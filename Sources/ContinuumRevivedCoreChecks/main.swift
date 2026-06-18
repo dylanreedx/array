@@ -14,6 +14,33 @@ func approximatelyEqual(_ a: CGPoint, _ b: CGPoint, tolerance: Double = 0.001) -
     abs(a.x - b.x) < tolerance && abs(a.y - b.y) < tolerance
 }
 
+// MARK: - Focus history previous navigation
+
+do {
+    let tileA = UUID(uuidString: "A0000000-0000-4000-8000-000000000801")!
+    let tileB = UUID(uuidString: "A0000000-0000-4000-8000-000000000802")!
+    let zone1 = UUID(uuidString: "A0000000-0000-4000-8000-000000000811")!
+    let zone2 = UUID(uuidString: "A0000000-0000-4000-8000-000000000812")!
+    var history = FocusHistory()
+    let snapshot = CameraSnapshot(viewport: CanvasViewport(x: 1, y: 2, zoom: 0.5), focusedTileId: tileA, focusedZoneId: zone1)
+    history.recordViewBeforeProgrammaticJump(snapshot)
+    history.recordTileFocus(tileA, zoneId: zone1, reason: .directTileActivation)
+    history.recordTileFocus(tileA, zoneId: zone1, reason: .directTileActivation)
+    history.recordTileFocus(tileB, zoneId: zone2, reason: .completedTileJump)
+    expect(history.previousView() == snapshot, "previous view restores exact saved snapshot")
+    expect(history.previousTile(valid: { $0 == tileA || $0 == tileB }) == tileA, "previous tile first toggle returns prior distinct tile")
+    expect(history.previousTile(valid: { $0 == tileA || $0 == tileB }) == tileB, "previous tile second toggle returns current distinct tile")
+    history.recordZoneFocus(zone1, reason: .completedZoneJump)
+    history.recordZoneFocus(zone2, reason: .completedZoneJump)
+    expect(history.previousZone(valid: { $0 == zone1 || $0 == zone2 }) == zone1, "previous zone first toggle returns prior distinct zone")
+    expect(history.previousZone(valid: { $0 == zone1 || $0 == zone2 }) == zone2, "previous zone second toggle returns current distinct zone")
+    expect(history.lastFocusedTileByZone[zone1] == tileA && history.lastFocusedTileByZone[zone2] == tileB, "last focused tile per zone is tracked")
+    var missingHistory = FocusHistory()
+    missingHistory.recordTileFocus(tileA, reason: .directTileActivation)
+    missingHistory.recordTileFocus(tileB, reason: .completedTileJump)
+    expect(missingHistory.previousTile(valid: { $0 != tileA }) == nil, "deleted/missing previous targets are skipped safely")
+}
+
 // MARK: - Terminal wheel normalization
 
 do {

@@ -33,6 +33,9 @@ public enum CommandRegistry {
             CanvasCommand(id: "tile.openFileTree", action: .openFileTree),
             CanvasCommand(id: "tile.newDiffReview", action: .newDiffReview),
             CanvasCommand(id: "view.fitCanvasToAll", action: .fitCanvasToAll),
+            CanvasCommand(id: "view.previousView", action: .previousView),
+            CanvasCommand(id: "view.previousTile", action: .previousTile),
+            CanvasCommand(id: "view.previousZone", action: .previousZone),
             CanvasCommand(id: "workspace.new", action: .newWorkspace),
         ]
     }

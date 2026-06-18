@@ -7,6 +7,9 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case openFileTree
     case newDiffReview
     case fitCanvasToAll
+    case previousView
+    case previousTile
+    case previousZone
     case openURL(String)
     case switchProject(UUID)
     case addProjectToCanvas(UUID)
@@ -33,6 +36,12 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "New Diff Review"
         case .fitCanvasToAll:
             return "Fit Canvas to All"
+        case .previousView:
+            return "Back to Previous View"
+        case .previousTile:
+            return "Go to Previous Tile"
+        case .previousZone:
+            return "Go to Previous Zone"
         case let .openURL(url):
             return "Open \"\(url)\"…"
         case .switchProject:
@@ -72,6 +81,12 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["new", "diff", "review", "git"]
         case .fitCanvasToAll:
             return ["fit", "zoom", "all", "canvas"]
+        case .previousView:
+            return ["back", "previous", "view", "camera"]
+        case .previousTile:
+            return ["go", "previous", "tile", "back"]
+        case .previousZone:
+            return ["go", "previous", "zone", "back"]
         case .openURL:
             return ["open", "url", "browser", "web"]
         case .switchProject:
@@ -181,6 +196,10 @@ public enum LaunchPaletteRow: Equatable, Sendable {
             return profile.displayName.lowercased().contains(query)
                 || profile.id.lowercased().contains(query)
         case let .action(action):
+            if action == .previousView || action == .previousTile || action == .previousZone {
+                let tokens = query.split(separator: " ").map(String.init)
+                guard tokens.contains(where: { ["previous", "prev", "back"].contains($0) }) else { return false }
+            }
             let displayName = action.displayName.lowercased()
             if displayName.contains(query) {
                 return true
