@@ -423,6 +423,153 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
     /// navigation, not reflow). RED before the fix: today `updateSurfaceSize` uses
     /// `convertToBacking(bounds)`, which composes the tile's zoom transform, so the
     /// surface width scales with zoom (≠ world×backing) and columns reflow.
+    static func runTerminalZoomPanStabilitySelfCheck() throws -> URL {
+        struct CheckError: Error, CustomStringConvertible {
+            let message: String
+            var description: String { message }
+        }
+
+        let started = Date()
+        let context = try GhosttyRuntimeContext()
+        defer { context.shutdown() }
+
+        let tileId = UUID(uuidString: "00000000-0000-0000-0000-000000001012")!
+        var tile = Tile(
+            id: tileId,
+            kind: .terminal,
+            title: "ZOOM_PAN_STABILITY_PROBE",
+            frame: TileFrame(x: 0, y: 0, width: 800, height: 520),
+            zIndex: 1,
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [tile],
+            groups: [],
+            lastActiveTileId: nil
+        ))
+        canvas.frame = NSRect(x: 0, y: 0, width: 1200, height: 820)
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 1200, height: 820), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFront(nil)
+        defer { window.close() }
+
+        let runtime = GhosttyTerminalRuntime(
+            tileId: tile.id,
+            title: "zoom-pan-stability",
+            launchProfile: LaunchProfile(command: "/bin/sh", arguments: [], cwd: FileManager.default.currentDirectoryPath, title: "zoom-pan-stability"),
+            ghostty: context
+        )
+        let tileView = TerminalTileNSView(tile: tile, runtime: runtime)
+        canvas.install(tileView: tileView, for: tile)
+
+        func pump(_ seconds: TimeInterval) throws {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline {
+                ghostty_app_tick(try context.app)
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            }
+        }
+        try pump(0.6)
+
+        guard let term = runtime.qaTerminalView, term.surface != nil else { throw CheckError(message: "terminal surface missing") }
+        let backing = Double(window.backingScaleFactor)
+        func surfaceSize() throws -> ghostty_surface_size_s {
+            guard let surface = term.surface else { throw CheckError(message: "terminal surface missing") }
+            return ghostty_surface_size(surface)
+        }
+        func assertExpected(_ label: String) throws -> ghostty_surface_size_s {
+            let got = try surfaceSize()
+            let expected = TerminalSurfacePixelSize.from(CGSize(
+                width: tile.frame.width * backing,
+                height: max(0, tile.frame.height - Double(tileView.chromeBarHeight)) * backing
+            ))
+            if got.width_px != expected.width || got.height_px != expected.height {
+                throw CheckError(message: "\(label): surface \(got.width_px)x\(got.height_px) != expected \(expected.width)x\(expected.height)")
+            }
+            return got
+        }
+
+        let baseline = try assertExpected("baseline")
+        let baselineRows = baseline.rows
+        let baselineColumns = baseline.columns
+        var samples: [[String: Any]] = []
+        func appendSample(_ viewport: CanvasViewport) throws {
+            let size = try assertExpected("zoom \(viewport.zoom)")
+            samples.append([
+                "viewport": ["x": viewport.x, "y": viewport.y, "zoom": viewport.zoom],
+                "chromeWorldHeight": Double(tileView.chromeBarHeight),
+                "expectedBodyWorldHeight": max(0, tile.frame.height - Double(tileView.chromeBarHeight)),
+                "surfaceSize": ["width": Int(size.width_px), "height": Int(size.height_px)],
+                "rows": Int(size.rows),
+                "columns": Int(size.columns),
+                "resizeRequestedCount": term.qaSurfaceResizeRequestedCount,
+                "resizeAppliedCount": term.qaSurfaceResizeAppliedCount,
+                "resizeSkippedUnchangedCount": term.qaSurfaceResizeSkippedUnchangedCount
+            ])
+        }
+
+        for viewport in [
+            CanvasViewport(x: 0, y: 0, zoom: 1.0),
+            CanvasViewport(x: 25, y: 35, zoom: 1.0),
+            CanvasViewport(x: 0, y: 0, zoom: 0.6),
+            CanvasViewport(x: 0, y: 0, zoom: 1.8)
+        ] {
+            canvas.setViewport(viewport)
+            tileView.layoutSubtreeIfNeeded()
+            try pump(0.15)
+            try appendSample(viewport)
+        }
+
+        let appliedBeforeSameSize = term.qaSurfaceResizeAppliedCount
+        let rowsBeforeSameSize = (try surfaceSize()).rows
+        let colsBeforeSameSize = (try surfaceSize()).columns
+        canvas.setViewport(CanvasViewport(x: 80, y: 60, zoom: 1.8))
+        canvas.setViewport(CanvasViewport(x: 120, y: 90, zoom: 1.8))
+        try pump(0.2)
+        let sameSizeCameraAppliedResizeDelta = term.qaSurfaceResizeAppliedCount - appliedBeforeSameSize
+        let sameSize = try surfaceSize()
+        if sameSizeCameraAppliedResizeDelta != 0 { throw CheckError(message: "same-size camera applied \(sameSizeCameraAppliedResizeDelta) resizes") }
+        if sameSize.rows != rowsBeforeSameSize || sameSize.columns != colsBeforeSameSize { throw CheckError(message: "rows/columns changed during same-size camera pan") }
+
+        let appliedBeforeTileResize = term.qaSurfaceResizeAppliedCount
+        tile.frame = TileFrame(x: 0, y: 0, width: 840, height: 560)
+        canvas.updateTile(tile)
+        try pump(0.2)
+        _ = try assertExpected("tile resize")
+        let tileResizeAppliedResizeDelta = term.qaSurfaceResizeAppliedCount - appliedBeforeTileResize
+        if tileResizeAppliedResizeDelta != 1 { throw CheckError(message: "tile resize applied delta \(tileResizeAppliedResizeDelta), expected 1") }
+
+        runtime.sendInput(Data("printf 't12-input-ok\\n'\n".utf8))
+        try tick(context: context, timeout: 4.0) { runtime.visibleText().contains("t12-input-ok") }
+        let inputWorked = runtime.visibleText().contains("t12-input-ok")
+        runtime.terminate(policy: .force)
+        tileView.hostView.detachRuntime()
+
+        let timestamp = ISO8601DateFormatter().string(from: started).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("terminal-zoom-pan-stability", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "check": "terminal-zoom-pan-stability",
+            "baselineSurfaceSize": ["width": Int(baseline.width_px), "height": Int(baseline.height_px)],
+            "baselineRows": Int(baselineRows),
+            "baselineColumns": Int(baselineColumns),
+            "samples": samples,
+            "sameSizeCameraAppliedResizeDelta": sameSizeCameraAppliedResizeDelta,
+            "tileResizeAppliedResizeDelta": tileResizeAppliedResizeDelta,
+            "inputAfterCameraSweepWorked": inputWorked,
+            "manualVideoPending": true
+        ]
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
     static func runTerminalFillsTileSelfCheck() throws -> URL {
         struct CheckError: Error, CustomStringConvertible {
             let message: String

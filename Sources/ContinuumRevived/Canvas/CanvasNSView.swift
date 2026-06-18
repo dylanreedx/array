@@ -1329,7 +1329,8 @@ final class CanvasNSView: NSView {
         if let terminalTile = view as? TerminalTileNSView {
             let backing = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
             let contentWorldWidth = max(0, tile.frame.width)
-            let contentWorldHeight = max(0, tile.frame.height - Double(TileNSView.titleBarHeight))
+            let chromeWorldHeight = Double(terminalTile.chromeBarHeight)
+            let contentWorldHeight = max(0, tile.frame.height - chromeWorldHeight)
             terminalTile.runtime.setSurfacePixelSize(
                 CGSize(width: contentWorldWidth * backing, height: contentWorldHeight * backing)
             )

@@ -52,7 +52,7 @@ Rules:
 - [x] T13 — Shell scroll ergonomics  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T13-shell-scroll-ergonomics.md`
 
-- [ ] T12 — Terminal zoom-pan stability  
+- [x] T12 — Terminal zoom-pan stability  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T12-terminal-zoom-pan-flicker.md`
 
 - [ ] T06 — Camera-aware jump indicators  

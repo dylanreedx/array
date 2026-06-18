@@ -12,6 +12,18 @@ struct TerminalWheelQASample: Codable, Equatable {
     var deliveredViaProductionScrollWheel: Bool
 }
 
+struct TerminalSurfacePixelSize: Equatable, Sendable {
+    var width: UInt32
+    var height: UInt32
+
+    static func from(_ size: CGSize) -> TerminalSurfacePixelSize {
+        TerminalSurfacePixelSize(
+            width: UInt32(max(0, size.width.rounded(.toNearestOrAwayFromZero))),
+            height: UInt32(max(0, size.height.rounded(.toNearestOrAwayFromZero)))
+        )
+    }
+}
+
 @MainActor
 final class GhosttyTerminalView: NSView {
     private let ghosttyApp: ghostty_app_t
@@ -24,6 +36,10 @@ final class GhosttyTerminalView: NSView {
     private var keyTextAccumulator: [String]?
     private(set) var qaGhosttyScrollCallCount = 0
     private(set) var qaLastWheelSample: TerminalWheelQASample?
+    private var lastAppliedSurfacePixelSize: TerminalSurfacePixelSize?
+    private(set) var qaSurfaceResizeRequestedCount = 0
+    private(set) var qaSurfaceResizeAppliedCount = 0
+    private(set) var qaSurfaceResizeSkippedUnchangedCount = 0
     var reservedShortcutHandler: ((NSEvent) -> Bool)?
 
     /// Last cwd reported by the shell via OSC 7 (GHOSTTY_ACTION_PWD). Nil until the
@@ -364,7 +380,15 @@ final class GhosttyTerminalView: NSView {
 
     func setSurfacePixelSize(_ size: CGSize) {
         guard let surface else { return }
-        ghostty_surface_set_size(surface, UInt32(size.width), UInt32(size.height))
+        qaSurfaceResizeRequestedCount += 1
+        let next = TerminalSurfacePixelSize.from(size)
+        guard next != lastAppliedSurfacePixelSize else {
+            qaSurfaceResizeSkippedUnchangedCount += 1
+            return
+        }
+        lastAppliedSurfacePixelSize = next
+        qaSurfaceResizeAppliedCount += 1
+        ghostty_surface_set_size(surface, next.width, next.height)
         reportSurfaceSize()
     }
 
