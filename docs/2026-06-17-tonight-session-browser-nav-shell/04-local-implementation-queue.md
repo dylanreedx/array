@@ -28,7 +28,7 @@ Rules:
 - [x] T04 — Password/autofill security guardrails and policy tests  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T04-password-autofill-safe-plan.md`
 
-- [ ] T04b — Keychain PasswordVaultService  
+- [x] T04b — Keychain PasswordVaultService  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T04b-keychain-password-vault-service.md`  
   Prerequisite: T04 done.
 

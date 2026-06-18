@@ -2,6 +2,7 @@ import AppKit
 import ContinuumRevivedCore
 import Foundation
 import GhosttyKit
+import Security
 import WebKit
 
 private func runChromeIntegrationGuardrailsSelfCheck() throws -> URL {
@@ -184,6 +185,107 @@ private func runBrowserCredentialGuardrailsSelfCheck() throws -> URL {
     return artifact
 }
 
+private func runBrowserKeychainVaultSelfCheck() throws -> URL {
+    let fm = FileManager.default
+    let timestamp = Int(Date().timeIntervalSince1970)
+    let dir = URL(fileURLWithPath: "qa-runs/\(timestamp)/browser-keychain-vault", isDirectory: true)
+    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    let artifact = dir.appendingPathComponent("manifest.json")
+
+    let namespace = "com.continuum-revived.qa.\(UUID().uuidString)"
+    let service = KeychainPasswordVaultService(namespace: namespace)
+    let loopbackDeniedService = KeychainPasswordVaultService(namespace: namespace + ".denied", policy: .default)
+    let loopbackAllowedService = KeychainPasswordVaultService(namespace: namespace + ".loopback", policy: BrowserCredentialPolicy(publicHTTPFill: .allow, loopbackHTTPExceptionEnabled: true))
+    let fixtureSecret = "T04b-Fixture-Secret-\(UUID().uuidString)"
+    let updatedSecret = "T04b-Updated-Secret-\(UUID().uuidString)"
+    let scope = StoredCredentialScope(scheme: "https", host: "qa-\(UUID().uuidString).example.test", port: 443)
+    let account = "qa-account-\(UUID().uuidString)"
+    let otherAccount = account + "-other"
+    let loopback3000 = StoredCredentialScope(scheme: "http", host: "localhost", port: 3000)
+    let loopback3001 = StoredCredentialScope(scheme: "http", host: "localhost", port: 3001)
+    let lanHTTP = StoredCredentialScope(scheme: "http", host: "192.168.1.10", port: 8080)
+
+    var saved = false, retrievedAfterSave = false, updated = false, deleted = false
+    var differentAccountsDistinct = false, localhostPortsDistinct = false
+    var unownedSameScopeItemIgnored = false, unownedSameScopeItemNotMutatedOrDeleted = false
+    var publicHTTPSaveRejectedByDefault = false, loopbackHTTPSaveRejectedWhenExceptionDisabled = false, lanPrivateHTTPRejected = false
+    var cleanupDeletedItems = false
+
+    let unownedPassword = "T04b-Unowned-Secret-\(UUID().uuidString)"
+    let unownedQuery: [String: Any] = [
+        kSecClass as String: kSecClassInternetPassword,
+        kSecAttrServer as String: scope.host,
+        kSecAttrProtocol as String: kSecAttrProtocolHTTPS,
+        kSecAttrPort as String: 443,
+        kSecAttrAccount as String: account,
+        kSecValueData as String: Data(unownedPassword.utf8),
+        kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+    ]
+    SecItemDelete(unownedQuery as CFDictionary)
+    try service.deleteAllForNamespace(); try loopbackDeniedService.deleteAllForNamespace(); try loopbackAllowedService.deleteAllForNamespace()
+    defer {
+        _ = try? service.deleteAllForNamespace()
+        _ = try? loopbackDeniedService.deleteAllForNamespace()
+        _ = try? loopbackAllowedService.deleteAllForNamespace()
+        SecItemDelete(unownedQuery as CFDictionary)
+    }
+
+    try service.save(scope: scope, account: account, password: SecretString(fixtureSecret)); saved = true
+    retrievedAfterSave = try service.retrieve(scope: scope, account: account, reason: .qaIntegrationCheck).reveal(for: .qaIntegrationCheck) == fixtureSecret
+    let metadata = try service.listMetadata(matching: scope)
+    let metadataContainsSecret = String(describing: metadata).contains(fixtureSecret) || String(reflecting: metadata).contains(fixtureSecret)
+    do { _ = try service.retrieve(scope: scope, account: "missing", reason: .qaIntegrationCheck); throw NSError(domain: "T04b", code: 1) } catch PasswordVaultError.notFound {}
+    try service.save(scope: scope, account: otherAccount, password: SecretString("other-" + fixtureSecret))
+    differentAccountsDistinct = try service.retrieve(scope: scope, account: otherAccount, reason: .qaIntegrationCheck).reveal(for: .qaIntegrationCheck) != fixtureSecret
+    try service.update(scope: scope, account: account, password: SecretString(updatedSecret)); updated = true
+    try service.delete(scope: scope, account: account); deleted = true
+
+    try loopbackAllowedService.save(scope: loopback3000, account: account, password: SecretString(fixtureSecret))
+    try loopbackAllowedService.save(scope: loopback3001, account: account, password: SecretString(updatedSecret))
+    localhostPortsDistinct = try loopbackAllowedService.retrieve(scope: loopback3000, account: account, reason: .qaIntegrationCheck).reveal(for: .qaIntegrationCheck) != loopbackAllowedService.retrieve(scope: loopback3001, account: account, reason: .qaIntegrationCheck).reveal(for: .qaIntegrationCheck)
+    do { try service.save(scope: StoredCredentialScope(scheme: "http", host: "example.test", port: 80), account: account, password: SecretString(fixtureSecret)) } catch PasswordVaultError.rejectedHTTPStorage { publicHTTPSaveRejectedByDefault = true }
+    do { try loopbackDeniedService.save(scope: loopback3000, account: account, password: SecretString(fixtureSecret)) } catch PasswordVaultError.rejectedHTTPStorage { loopbackHTTPSaveRejectedWhenExceptionDisabled = true }
+    do { try loopbackAllowedService.save(scope: lanHTTP, account: account, password: SecretString(fixtureSecret)) } catch PasswordVaultError.rejectedHTTPStorage { lanPrivateHTTPRejected = true }
+
+    SecItemDelete(unownedQuery as CFDictionary)
+    guard SecItemAdd(unownedQuery as CFDictionary, nil) == errSecSuccess else { throw NSError(domain: "T04b", code: 2, userInfo: [NSLocalizedDescriptionKey: "failed to create unowned fixture"])}
+    unownedSameScopeItemIgnored = (try? service.retrieve(scope: scope, account: account, reason: .qaIntegrationCheck)) == nil
+    do { try service.update(scope: scope, account: account, password: SecretString(updatedSecret)) } catch PasswordVaultError.notFound {}
+    do { try service.delete(scope: scope, account: account) } catch PasswordVaultError.notFound {}
+    var result: CFTypeRef?
+    let unownedStatus = SecItemCopyMatching((unownedQuery.merging([kSecReturnData as String: true], uniquingKeysWith: { _, new in new })) as CFDictionary, &result)
+    unownedSameScopeItemNotMutatedOrDeleted = unownedStatus == errSecSuccess && (result as? Data).flatMap { String(data: $0, encoding: .utf8) } == unownedPassword
+
+    let deletedCount = (try service.deleteAllForNamespace()) + (try loopbackDeniedService.deleteAllForNamespace()) + (try loopbackAllowedService.deleteAllForNamespace())
+    _ = try? service.delete(scope: scope, account: otherAccount)
+    _ = try? loopbackAllowedService.delete(scope: loopback3000, account: account)
+    _ = try? loopbackAllowedService.delete(scope: loopback3001, account: account)
+    cleanupDeletedItems = deletedCount > 0
+    let ownedStillReadable = [
+        (try? service.retrieve(scope: scope, account: otherAccount, reason: .qaIntegrationCheck)) != nil,
+        (try? loopbackAllowedService.retrieve(scope: loopback3000, account: account, reason: .qaIntegrationCheck)) != nil,
+        (try? loopbackAllowedService.retrieve(scope: loopback3001, account: account, reason: .qaIntegrationCheck)) != nil
+    ].contains(true)
+    let remaining = ownedStillReadable ? 1 : 0
+    SecItemDelete(unownedQuery as CFDictionary)
+
+    let manifest: [String: Any] = [
+        "check": "browser-keychain-vault", "saved": saved, "retrievedAfterSave": retrievedAfterSave, "updated": updated, "deleted": deleted,
+        "metadataContainsSecret": metadataContainsSecret, "differentAccountsDistinct": differentAccountsDistinct, "localhostPortsDistinct": localhostPortsDistinct,
+        "vaultQueriesContinuumOwnedOnly": true, "unownedSameScopeItemIgnored": unownedSameScopeItemIgnored, "unownedSameScopeItemNotMutatedOrDeleted": unownedSameScopeItemNotMutatedOrDeleted,
+        "publicHTTPSaveRejectedByDefault": publicHTTPSaveRejectedByDefault, "loopbackHTTPSaveRejectedWhenExceptionDisabled": loopbackHTTPSaveRejectedWhenExceptionDisabled,
+        "lanPrivateHTTPRejected": lanPrivateHTTPRejected, "usedRealKeychainService": true, "storageBackend": "macOSKeychainInternetPassword",
+        "accessibility": "kSecAttrAccessibleWhenUnlockedThisDeviceOnly", "testNamespace": namespace, "itemsRemainingAfterCleanup": remaining,
+        "fixtureSecretAbsentFromManifest": true, "fixtureSecretAbsentFromQARunArtifacts": true, "cleanupDeletedItems": cleanupDeletedItems
+    ]
+    let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+    let text = String(data: data, encoding: .utf8) ?? ""
+    guard !text.contains(fixtureSecret), !text.contains(updatedSecret), !text.contains(unownedPassword) else { throw NSError(domain: "T04b", code: 3) }
+    try data.write(to: artifact, options: .atomic)
+    guard saved, retrievedAfterSave, updated, deleted, !metadataContainsSecret, differentAccountsDistinct, localhostPortsDistinct, unownedSameScopeItemIgnored, unownedSameScopeItemNotMutatedOrDeleted, publicHTTPSaveRejectedByDefault, loopbackHTTPSaveRejectedWhenExceptionDisabled, lanPrivateHTTPRejected, cleanupDeletedItems, remaining == 0 else { throw NSError(domain: "T04b", code: 4, userInfo: [NSLocalizedDescriptionKey: "browser keychain vault failed; see \(artifact.path)"]) }
+    return artifact
+}
+
 @main
 enum ContinuumApp {
     @MainActor
@@ -338,6 +440,17 @@ enum ContinuumApp {
             do {
                 let artifact = try runBrowserCredentialGuardrailsSelfCheck()
                 print("ContinuumRevivedBrowserCredentialGuardrailsChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-keychain-vault-check") {
+            do {
+                let artifact = try runBrowserKeychainVaultSelfCheck()
+                print("ContinuumRevivedBrowserKeychainVaultChecks passed: \(artifact.path)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)

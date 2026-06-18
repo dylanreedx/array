@@ -75,6 +75,18 @@ do {
     let genericRedacted = SecretRedactor.redact("Authorization: Bearer generic.token.value https://example.test/login?credential=querySecret&apikey=queryKey")
     expect(!genericRedacted.contains("generic.token.value"), "redactor must remove bearer token values without explicit secrets")
     expect(!genericRedacted.contains("querySecret") && !genericRedacted.contains("queryKey"), "redactor must remove query values without explicit secrets")
+
+    let vaultScope = StoredCredentialScope(scheme: "HTTPS", host: "[Example.COM]", port: 443)
+    expect(vaultScope == StoredCredentialScope(scheme: "https", host: "example.com", port: 443), "vault scopes should canonicalize scheme/host")
+    let secret = SecretString("CoreCheck-Secret")
+    expect(String(describing: secret) == "<redacted-secret>", "SecretString description must redact plaintext")
+    expect(String(reflecting: secret) == "<redacted-secret>", "SecretString debug description must redact plaintext")
+    expect(secret.reveal(for: .qaIntegrationCheck) == "CoreCheck-Secret", "SecretString requires explicit access reason to reveal")
+    expect((try? PasswordVaultStoragePolicy.validateStorage(scope: vaultScope)) != nil, "HTTPS vault storage should be allowed")
+    expect((try? PasswordVaultStoragePolicy.validateStorage(scope: StoredCredentialScope(scheme: "http", host: "example.com", port: 80))) == nil, "public HTTP vault storage should default reject")
+    expect((try? PasswordVaultStoragePolicy.validateStorage(scope: StoredCredentialScope(scheme: "http", host: "localhost", port: 3000))) == nil, "loopback HTTP vault storage should reject when exception disabled")
+    expect((try? PasswordVaultStoragePolicy.validateStorage(scope: StoredCredentialScope(scheme: "http", host: "192.168.1.10", port: 8080), policy: loopbackPolicy)) == nil, "LAN/private HTTP vault storage should reject even when loopback exception enabled")
+    expect((try? PasswordVaultStoragePolicy.validateStorage(scope: StoredCredentialScope(scheme: "http", host: "127.0.0.1", port: 3000), policy: loopbackPolicy)) != nil, "loopback HTTP vault storage should allow only when exception enabled")
 }
 
 // MARK: - Tmux shell persistence P1
