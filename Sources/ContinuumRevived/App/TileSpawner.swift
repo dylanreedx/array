@@ -974,14 +974,9 @@ final class TileSpawner {
         }
         let now = Date()
         if let idx = state.tiles.firstIndex(where: { $0.tileId == tileId }) {
-            state.tiles[idx].url = url
-            state.tiles[idx].title = title
             state.tiles[idx].storageGroupId = storageGroupId
             state.tiles[idx].profileId = profileId
-            state.tiles[idx].updatedAt = now
-            if let interactionState {
-                state.tiles[idx].interactionState = interactionState
-            }
+            state.tiles[idx].updateActiveTab(url: url, title: title, interactionState: interactionState, now: now)
         } else {
             state.tiles.append(BrowserTile(
                 id: runtimeId,

@@ -185,6 +185,67 @@ private func runBrowserCredentialGuardrailsSelfCheck() throws -> URL {
     return artifact
 }
 
+private func runBrowserTabModelSchemaSelfCheck() throws -> URL {
+    enum CheckError: Error, CustomStringConvertible { case failed(String); var description: String { if case let .failed(message) = self { return message }; return "failed" } }
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws { if !condition() { throw CheckError.failed(message) } }
+    func unwrap<T>(_ value: T?, _ message: String) throws -> T { guard let value else { throw CheckError.failed(message) }; return value }
+
+    let fm = FileManager.default
+    let timestamp = Int(Date().timeIntervalSince1970)
+    let dir = URL(fileURLWithPath: "qa-runs/\(timestamp)/browser-tab-model-schema", isDirectory: true)
+    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    let artifact = dir.appendingPathComponent("manifest.json")
+
+    let root = fm.temporaryDirectory.appendingPathComponent("continuum-browser-tab-model-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: root) }
+    let store = ProjectStore(projectRoot: root)
+    try fm.createDirectory(at: store.layout.browserFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let seedStatePath = store.layout.browserFile.path
+    let legacyInteraction = Data([4, 5, 6])
+    let seed = """
+    {"schemaVersion":2,"tiles":[{"id":"B0000000-0000-4000-8000-000000000101","tileId":"B0000000-0000-4000-8000-000000000102","url":"https://legacy.example/","title":"Legacy","storageGroupId":"legacy-storage","profileId":"B0000000-0000-4000-8000-000000000103","createdAt":"2026-06-17T00:00:00Z","updatedAt":"2026-06-17T00:01:00Z","interactionState":"\(legacyInteraction.base64EncodedString())"}]}
+    """
+    try Data(seed.utf8).write(to: store.layout.browserFile, options: .atomic)
+    let legacy = try store.loadBrowserState()
+    let legacyTile = try unwrap(legacy.tiles.first, "legacy state should contain one tile")
+
+    var multi = legacyTile
+    let base = Date(timeIntervalSince1970: 1_800_000_000)
+    _ = multi.appendTab(url: "https://two.example/", title: "Two", now: base)
+    _ = multi.appendTab(url: "https://three.example/", title: "Three", now: base.addingTimeInterval(1))
+    let expectedActive = multi.activeTabId
+    try store.saveBrowserState(BrowserState(tiles: [multi]))
+    let roundTrip = try unwrap(store.loadBrowserState().tiles.first, "round-trip state should contain one tile")
+
+    var closeLast = BrowserTile(id: UUID(), tileId: UUID(), url: "https://only.example/", title: "Only", storageGroupId: BrowserState.sharedStorageGroupId, createdAt: base, updatedAt: base)
+    closeLast.close(tabId: closeLast.activeTabId, now: base.addingTimeInterval(2))
+
+    let legacyFieldsMirrorActiveTab = roundTrip.url == roundTrip.activeTab.url && roundTrip.title == roundTrip.activeTab.title && roundTrip.interactionState == roundTrip.activeTab.interactionState
+    let manifest: [String: Any] = [
+        "check": "browser-tab-model-schema",
+        "schemaVersion": BrowserState.currentSchemaVersion,
+        "legacyDecodeSynthesizedTabCount": legacyTile.tabs.count,
+        "legacyActiveURL": legacyTile.activeTab.url,
+        "multiTabRoundTripCount": roundTrip.tabs.count,
+        "activeTabIdStable": roundTrip.activeTabId == expectedActive,
+        "legacyFieldsMirrorActiveTab": legacyFieldsMirrorActiveTab,
+        "closeLastCreatesFallback": closeLast.tabs.count == 1 && closeLast.url == DefaultBrowserURL.fallback,
+        "usedProductionBrowserStateLoadPath": true,
+        "legacyProfileIdPreserved": legacyTile.profileId.uuidString == "B0000000-0000-4000-8000-000000000103",
+        "legacyStorageGroupIdPreserved": legacyTile.storageGroupId == "legacy-storage",
+        "seedStatePath": seedStatePath,
+        "artifactWrittenAfterAppFlag": true
+    ]
+    try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+
+    try expect(BrowserState.currentSchemaVersion == 3, "schema version must be 3")
+    try expect(legacyTile.tabs.count == 1 && legacyTile.activeTab.url == "https://legacy.example/", "legacy tile should synthesize active tab")
+    try expect(roundTrip.tabs.count == 3 && roundTrip.activeTabId == expectedActive, "multi-tab round trip should preserve active tab")
+    try expect(legacyFieldsMirrorActiveTab, "legacy fields should mirror active tab")
+    try expect(closeLast.tabs.count == 1 && closeLast.url == DefaultBrowserURL.fallback, "closing last tab creates fallback")
+    return artifact
+}
+
 private func runBrowserKeychainVaultSelfCheck() throws -> URL {
     let fm = FileManager.default
     let timestamp = Int(Date().timeIntervalSince1970)
@@ -451,6 +512,17 @@ enum ContinuumApp {
             do {
                 let artifact = try runBrowserKeychainVaultSelfCheck()
                 print("ContinuumRevivedBrowserKeychainVaultChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-tab-model-schema-check") {
+            do {
+                let artifact = try runBrowserTabModelSchemaSelfCheck()
+                print("ContinuumRevivedBrowserTabModelSchemaChecks passed: \(artifact.path)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)

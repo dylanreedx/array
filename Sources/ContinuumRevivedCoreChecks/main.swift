@@ -89,6 +89,52 @@ do {
     expect((try? PasswordVaultStoragePolicy.validateStorage(scope: StoredCredentialScope(scheme: "http", host: "127.0.0.1", port: 3000), policy: loopbackPolicy)) != nil, "loopback HTTP vault storage should allow only when exception enabled")
 }
 
+// MARK: - Browser tab model/schema
+
+do {
+    expect(BrowserState.currentSchemaVersion == 3, "BrowserState schema version should be 3")
+
+    let decoder = JSONCodec.makeDecoder()
+    let encoder = JSONCodec.makeEncoder()
+    let legacyInteraction = Data([1, 2, 3])
+    let legacyJSON = """
+    {"schemaVersion":2,"tiles":[{"id":"A0000000-0000-4000-8000-000000000101","tileId":"A0000000-0000-4000-8000-000000000102","url":"https://legacy.example/","title":"Legacy","storageGroupId":"legacy-storage","createdAt":"2026-06-17T00:00:00Z","updatedAt":"2026-06-17T00:01:00Z","interactionState":"\(legacyInteraction.base64EncodedString())"}]}
+    """.data(using: .utf8)!
+    let legacy = try decoder.decode(BrowserState.self, from: legacyJSON)
+    expect(legacy.tiles.count == 1, "legacy BrowserState decodes")
+    let legacyTile = legacy.tiles[0]
+    expect(legacyTile.profileId == BrowserProfile.defaultProfileId, "v1/v2 tile missing profileId gets default profile")
+    expect(legacyTile.tabs.count == 1, "legacy tile synthesizes exactly one tab")
+    expect(legacyTile.activeTabId == legacyTile.tabs[0].id, "legacy synthesized tab is active")
+    expect(legacyTile.tabs[0].url == "https://legacy.example/" && legacyTile.tabs[0].title == "Legacy", "legacy url/title migrate into synthesized tab")
+    expect(legacyTile.tabs[0].interactionState == legacyInteraction && legacyTile.interactionState == legacyInteraction, "legacy interactionState migrates into tab and mirror")
+    expect(legacyTile.storageGroupId == "legacy-storage", "legacy storageGroupId is preserved")
+
+    let base = Date(timeIntervalSince1970: 1_800_000_000)
+    let tabA = BrowserTab(id: UUID(uuidString: "A0000000-0000-4000-8000-000000000201")!, url: "https://a.example/", title: "A", createdAt: base, lastAccessedAt: base)
+    let tabB = BrowserTab(id: UUID(uuidString: "A0000000-0000-4000-8000-000000000202")!, url: "https://b.example/", title: "B", createdAt: base, lastAccessedAt: base)
+    let tabC = BrowserTab(id: UUID(uuidString: "A0000000-0000-4000-8000-000000000203")!, url: "https://c.example/", title: "C", createdAt: base, lastAccessedAt: base)
+    var tile = BrowserTile(id: UUID(uuidString: "A0000000-0000-4000-8000-000000000204")!, tileId: UUID(uuidString: "A0000000-0000-4000-8000-000000000205")!, url: "ignored", title: "ignored", storageGroupId: "shared", profileId: BrowserProfile.defaultProfileId, createdAt: base, updatedAt: base, tabs: [tabA, tabB, tabC], activeTabId: tabB.id)
+    expect(tile.url == tabB.url && tile.title == tabB.title, "legacy mirror follows active tab")
+    let roundTrip = try decoder.decode(BrowserState.self, from: encoder.encode(BrowserState(tiles: [tile])))
+    expect(roundTrip.tiles[0].tabs.count == 3, "v3 tile round-trips multiple tabs")
+    expect(roundTrip.tiles[0].activeTabId == tabB.id, "v3 activeTabId is stable")
+
+    let invalidActive = BrowserTile(id: UUID(uuidString: "A0000000-0000-4000-8000-000000000204")!, tileId: UUID(uuidString: "A0000000-0000-4000-8000-000000000205")!, url: "ignored", title: "ignored", storageGroupId: "shared", profileId: BrowserProfile.defaultProfileId, createdAt: base, updatedAt: base, tabs: [tabA, tabB, tabC], activeTabId: UUID(uuidString: "A0000000-0000-4000-8000-000000000299")!)
+    expect(invalidActive.activeTabId == tabA.id, "invalid activeTabId deterministically falls back to first tab")
+
+    tile.close(tabId: tabB.id, now: base.addingTimeInterval(1))
+    expect(tile.activeTabId == tabC.id, "closing active tab selects right neighbor")
+    tile.close(tabId: tabC.id, now: base.addingTimeInterval(2))
+    expect(tile.activeTabId == tabA.id, "closing rightmost active tab selects left neighbor")
+    tile.updateActiveTab(url: "https://updated.example/", title: "Updated", interactionState: Data([9]), now: base.addingTimeInterval(3))
+    expect(tile.url == "https://updated.example/" && tile.interactionState == Data([9]), "active-tab update refreshes legacy mirror")
+    tile.updateActiveTab(url: "https://updated.example/", title: "Updated", interactionState: nil, now: base.addingTimeInterval(4))
+    expect(tile.interactionState == nil && tile.tabs[tile.activeTabIndex].interactionState == nil, "nil active-tab interactionState clears stale state")
+    tile.close(tabId: tabA.id, now: base.addingTimeInterval(5))
+    expect(tile.tabs.count == 1 && tile.url == DefaultBrowserURL.fallback, "closing last tab creates about:blank fallback")
+}
+
 // MARK: - Tmux shell persistence P1
 
 do {

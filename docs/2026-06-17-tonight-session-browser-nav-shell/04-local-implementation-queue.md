@@ -32,7 +32,7 @@ Rules:
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T04b-keychain-password-vault-service.md`  
   Prerequisite: T04 done.
 
-- [ ] T01 — Browser tab model + schema migration  
+- [x] T01 — Browser tab model + schema migration  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T01-browser-tab-model.md`
 
 - [ ] T01b — Browser tab strip + single-live-WKWebView runtime slice  
