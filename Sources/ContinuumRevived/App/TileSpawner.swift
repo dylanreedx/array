@@ -527,6 +527,7 @@ final class TileSpawner {
 
         let view = BrowserTileNSView(tile: tile, runtime: runtime)
         view.onAfterRefresh = { [weak self] in self?.browserPersistenceHandler?() }
+        view.onTabModelChange = { [weak self] model in try? self?.writeBrowserTabModel(tileId: tile.id, runtimeId: runtime.id, model: model, storageGroupId: storageGroupId, profileId: profile.id) }
         configureBrowserProfileMenu(view, tileId: tile.id)
         canvasView.install(tileView: view, for: tile)
 
@@ -606,6 +607,7 @@ final class TileSpawner {
 
         let view = BrowserTileNSView(tile: tile, runtime: runtime)
         view.onAfterRefresh = { [weak self] in self?.browserPersistenceHandler?() }
+        view.onTabModelChange = { [weak self] model in try? self?.writeBrowserTabModel(tileId: tile.id, runtimeId: runtime.id, model: model, storageGroupId: profile.dataStoreIdentifier, profileId: profile.id) }
         configureBrowserProfileMenu(view, tileId: tile.id)
         canvasView.install(tileView: view, for: tile)
 
@@ -684,8 +686,9 @@ final class TileSpawner {
             tile.title = persistedTitle
         }
 
-        let view = BrowserTileNSView(tile: tile, runtime: runtime)
+        let view = BrowserTileNSView(tile: tile, runtime: runtime, browserTile: persistedBrowserTile)
         view.onAfterRefresh = { [weak self] in self?.browserPersistenceHandler?() }
+        view.onTabModelChange = { [weak self] model in try? self?.writeBrowserTabModel(tileId: tile.id, runtimeId: runtime.id, model: model, storageGroupId: storageGroupId, profileId: profile.id) }
         configureBrowserProfileMenu(view, tileId: tile.id)
         canvasView.install(tileView: view, for: tile)
 
@@ -755,8 +758,9 @@ final class TileSpawner {
         tile.metadata.url = urlString
         tile.metadata.browserProfileId = selectedProfile.id
 
-        let view = BrowserTileNSView(tile: tile, runtime: runtime)
+        let view = BrowserTileNSView(tile: tile, runtime: runtime, browserTile: persistedBrowserTile)
         view.onAfterRefresh = { [weak self] in self?.browserPersistenceHandler?() }
+        view.onTabModelChange = { [weak self] model in try? self?.writeBrowserTabModel(tileId: tile.id, runtimeId: runtime.id, model: model, storageGroupId: selectedProfile.dataStoreIdentifier, profileId: selectedProfile.id) }
         configureBrowserProfileMenu(view, tileId: tile.id)
         canvasView.install(tileView: view, for: tile)
 
@@ -952,6 +956,24 @@ final class TileSpawner {
     func installRunArtifactsTile(_ tile: Tile, in canvasView: CanvasNSView) {
         let view = RunArtifactsTileNSView(tile: tile)
         canvasView.install(tileView: view, for: tile)
+    }
+
+    private func writeBrowserTabModel(tileId: UUID, runtimeId: UUID, model: BrowserTabModel, storageGroupId: String, profileId: UUID) throws {
+        var state = try loadBrowserStateIfAvailable() ?? BrowserState(tiles: [])
+        let now = Date()
+        if let idx = state.tiles.firstIndex(where: { $0.tileId == tileId }) {
+            state.tiles[idx].tabs = model.tabs
+            state.tiles[idx].activeTabId = model.activeTabId
+            state.tiles[idx].storageGroupId = storageGroupId
+            state.tiles[idx].profileId = profileId
+            state.tiles[idx].updatedAt = now
+            state.tiles[idx].withActiveTabMirrorUpdated()
+        } else {
+            let active = model.activeTab
+            state.tiles.append(BrowserTile(id: runtimeId, tileId: tileId, url: active.url, title: active.title, storageGroupId: storageGroupId, profileId: profileId, createdAt: now, updatedAt: now, interactionState: active.interactionState, tabs: model.tabs, activeTabId: model.activeTabId))
+        }
+        try projectStore.saveBrowserState(state)
+        browserPersistenceHandler?()
     }
 
     /// Upserts a BrowserTile entry into BrowserState by tileId so multiple

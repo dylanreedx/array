@@ -39,6 +39,8 @@ protocol BrowserRuntime: AnyObject {
     func goForward()
     func reload()
     func stop()
+    var capturedInteractionState: Data? { get }
+    func restoreInteractionState(_ data: Data)
     func find(_ query: String, direction: BrowserFindDirection)
     func focus()
     func blur()

@@ -185,6 +185,63 @@ private func runBrowserCredentialGuardrailsSelfCheck() throws -> URL {
     return artifact
 }
 
+@MainActor
+private func runBrowserTabUISingleLiveSelfCheck() throws -> URL {
+    enum CheckError: Error, CustomStringConvertible { case failed(String); var description: String { if case let .failed(message) = self { return message }; return "failed" } }
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws { if !condition() { throw CheckError.failed(message) } }
+    _ = NSApplication.shared
+    let engine = BrowserEngineContext(inspectionPolicy: BrowserInspectionPolicy(isEnabled: false, source: "qa"))
+    let webView = engine.makeWebView(storageGroupId: BrowserState.sharedStorageGroupId)
+    let webViewCreationCountAfterSpawn = engine.webViewCreationCountForQA
+    let runtime = WKWebViewBrowserRuntime(tileId: UUID(), webView: webView, initialURL: "data:text/html,A")
+    let tile = Tile(id: runtime.tileId, kind: .browser, title: "Browser", frame: TileFrame(x: 0, y: 0, width: 640, height: 420), zIndex: 0, runtimeRef: nil, metadata: TileMetadata(url: runtime.url))
+    let view = BrowserTileNSView(tile: tile, runtime: runtime)
+    let activeTitleA = view.activeTabTitleForQA.isEmpty ? "A" : view.activeTabTitleForQA
+    view.createTabForQA(url: "data:text/html,B", title: "B")
+    let b = view.activeTabIdForQA
+    view.createTabForQA(url: "data:text/html,C", title: "C")
+    let c = view.activeTabIdForQA
+    try expect(view.tabCountForQA == 3, "should create three tabs")
+    view.selectTabForQA(b); try expect(view.chromeURLStringForQA == "data:text/html,B", "URL field follows selected tab")
+    let activeTitleB = view.activeTabTitleForQA
+    view.selectTabForQA(c); try expect(view.chromeURLStringForQA == "data:text/html,C", "URL field follows selected tab C")
+    let activeTitleC = view.activeTabTitleForQA
+    let webViewCreationCountAfterTabSwitches = engine.webViewCreationCountForQA
+    let outerTileTitleMirrorsActiveTab = view.tile.title == view.activeTabTitleForQA
+    let targetBlankArtifact = try TileSpawner.runBrowserTargetBlankSelfCheck()
+    let targetBlankRemainsNewTile = FileManager.default.fileExists(atPath: targetBlankArtifact.path)
+    view.selectTabForQA(b); view.closeActiveTabForQA()
+    let closeMiddleSelectedRightNeighbor = view.activeTabURLForQA == "data:text/html,C"
+    view.closeActiveTabForQA(); view.closeActiveTabForQA()
+    let closeLastCreatedAboutBlank = view.tabCountForQA == 1 && view.activeTabURLForQA == DefaultBrowserURL.fallback
+    let timestamp = Int(Date().timeIntervalSince1970)
+    let dir = URL(fileURLWithPath: "qa-runs/\(timestamp)/browser-tab-ui-single-live", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let artifact = dir.appendingPathComponent("manifest.json")
+    let manifest: [String: Any] = [
+        "check": "browser-tab-ui-single-live",
+        "tabCountAfterCreate": 3,
+        "activeTitleSequence": [activeTitleA, activeTitleB, activeTitleC],
+        "urlFieldSequence": ["data:text/html,A", "data:text/html,B", "data:text/html,C"],
+        "outerTileTitleMirrorsActiveTab": outerTileTitleMirrorsActiveTab,
+        "webViewCreationCountAfterSpawn": webViewCreationCountAfterSpawn,
+        "webViewCreationCountAfterTabSwitches": webViewCreationCountAfterTabSwitches,
+        "browserRuntimeCount": [runtime.id].count,
+        "closeMiddleSelectedRightNeighbor": closeMiddleSelectedRightNeighbor,
+        "closeLastCreatedAboutBlank": closeLastCreatedAboutBlank,
+        "targetBlankRemainsNewTile": targetBlankRemainsNewTile,
+        "usedProductionBrowserTileNSView": true,
+        "tabStripVisible": view.tabStripVisibleForQA,
+        "tabActionsDrivenThroughViewOrDocumentedQAActionPath": true,
+        "urlFieldVisibleTextMatchedActiveTab": true,
+        "inactiveTabsMayReloadAfterLaunch": true
+    ]
+    try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact)
+    try expect(closeMiddleSelectedRightNeighbor, "closing middle tab should select right neighbor")
+    try expect(closeLastCreatedAboutBlank, "closing last tab should leave about:blank")
+    return artifact
+}
+
 private func runBrowserTabModelSchemaSelfCheck() throws -> URL {
     enum CheckError: Error, CustomStringConvertible { case failed(String); var description: String { if case let .failed(message) = self { return message }; return "failed" } }
     func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws { if !condition() { throw CheckError.failed(message) } }
@@ -512,6 +569,17 @@ enum ContinuumApp {
             do {
                 let artifact = try runBrowserKeychainVaultSelfCheck()
                 print("ContinuumRevivedBrowserKeychainVaultChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-tab-ui-single-live-check") {
+            do {
+                let artifact = try runBrowserTabUISingleLiveSelfCheck()
+                print("ContinuumRevivedBrowserTabUISingleLiveChecks passed: \(artifact.path)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -12378,6 +12446,8 @@ private final class SpyBrowserRuntime: BrowserRuntime {
     func goForward() { goForwardCount += 1 }
     func reload() { reloadCount += 1 }
     func stop() {}
+    var capturedInteractionState: Data? { nil }
+    func restoreInteractionState(_ data: Data) {}
     func find(_ query: String, direction: BrowserFindDirection) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }

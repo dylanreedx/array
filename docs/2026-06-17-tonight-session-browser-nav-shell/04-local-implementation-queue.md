@@ -35,7 +35,7 @@ Rules:
 - [x] T01 — Browser tab model + schema migration  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T01-browser-tab-model.md`
 
-- [ ] T01b — Browser tab strip + single-live-WKWebView runtime slice  
+- [x] T01b — Browser tab strip + single-live-WKWebView runtime slice  
   Ticket: `docs/2026-06-17-tonight-session-browser-nav-shell/T01b-browser-tab-ui-runtime-single-live-webview.md`  
   Prerequisite: T01 done.
 

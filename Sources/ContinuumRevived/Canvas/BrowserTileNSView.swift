@@ -40,10 +40,18 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     private let findRow: NSStackView
     private let findRowHeightConstraint: NSLayoutConstraint
     private let errorBanner: NSTextField
+    private let tabStrip: NSStackView
+    private let newTabButton: NSButton
+    private let closeTabButton: NSButton
+    private var tabModel: BrowserTabModel
+    private var tabButtonIds: [Int: UUID] = [:]
     private var lastPersistedURL: String
     private var lastPersistedTitle: String
 
-    init(tile: Tile, runtime: any BrowserRuntime) {
+    /// Fires after tab create/switch/close or active-tab snapshot changes.
+    var onTabModelChange: ((BrowserTabModel) -> Void)?
+
+    init(tile: Tile, runtime: any BrowserRuntime, browserTile: BrowserTile? = nil) {
         self.runtime = runtime
         self.hostView = BrowserHostView(frame: .zero)
         self.urlField = NSTextField()
@@ -61,6 +69,16 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         self.findRow = NSStackView()
         self.findRowHeightConstraint = findRow.heightAnchor.constraint(equalToConstant: 0)
         self.errorBanner = NSTextField(labelWithString: "")
+        self.tabStrip = NSStackView()
+        self.newTabButton = NSButton(title: "+", target: nil, action: nil)
+        self.closeTabButton = NSButton(title: "×", target: nil, action: nil)
+        let now = Date()
+        if let browserTile {
+            self.tabModel = BrowserTabModel(tabs: browserTile.tabs, activeTabId: browserTile.activeTabId)
+        } else {
+            let tab = BrowserTab(url: runtime.url, title: runtime.title, createdAt: now, lastAccessedAt: now)
+            self.tabModel = BrowserTabModel(tabs: [tab], activeTabId: tab.id)
+        }
         self.lastPersistedURL = runtime.url
         self.lastPersistedTitle = runtime.title
         super.init(tile: tile)
@@ -110,6 +128,18 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         progressIndicator.maxValue = 1
         progressIndicator.isIndeterminate = false
         progressIndicator.isDisplayedWhenStopped = false
+
+        newTabButton.target = self
+        newTabButton.action = #selector(handleNewTab(_:))
+        newTabButton.bezelStyle = .rounded
+        closeTabButton.target = self
+        closeTabButton.action = #selector(handleCloseTab(_:))
+        closeTabButton.bezelStyle = .rounded
+        tabStrip.orientation = .horizontal
+        tabStrip.spacing = 4
+        tabStrip.alignment = .centerY
+        tabStrip.distribution = .fill
+        tabStrip.translatesAutoresizingMaskIntoConstraints = false
 
         let navRow = NSStackView(views: [backButton, forwardButton, reloadButton, faviconLabel, urlField, progressIndicator, profileMenuButton])
         navRow.orientation = .horizontal
@@ -169,13 +199,19 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
 
         hostView.translatesAutoresizingMaskIntoConstraints = false
 
+        body.addSubview(tabStrip)
         body.addSubview(navRow)
         body.addSubview(findRow)
         body.addSubview(errorBanner)
         body.addSubview(hostView)
 
         NSLayoutConstraint.activate([
-            navRow.topAnchor.constraint(equalTo: body.topAnchor, constant: 4),
+            tabStrip.topAnchor.constraint(equalTo: body.topAnchor, constant: 4),
+            tabStrip.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 6),
+            tabStrip.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -6),
+            tabStrip.heightAnchor.constraint(equalToConstant: 24),
+
+            navRow.topAnchor.constraint(equalTo: tabStrip.bottomAnchor, constant: 4),
             navRow.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 6),
             navRow.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -6),
             navRow.heightAnchor.constraint(equalToConstant: 24),
@@ -206,6 +242,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
 
         runtime.onStateChange = { [weak self] in
             guard let self else { return }
+            self.snapshotActiveTabFromRuntime()
             self.refresh()
             if self.lastPersistedURL != self.runtime.url || self.lastPersistedTitle != self.runtime.title {
                 self.lastPersistedURL = self.runtime.url
@@ -217,6 +254,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
             self?.showFindResult(matchFound: matchFound)
         }
         refresh()
+        rebuildTabStrip()
     }
 
     required init?(coder: NSCoder) {
@@ -246,12 +284,36 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         return super.performKeyEquivalent(with: event)
     }
 
+    private func snapshotActiveTabFromRuntime() {
+        let currentTitle = tabModel.activeTab.title
+        let snapshotTitle = runtime.title.isEmpty ? currentTitle : runtime.title
+        tabModel.updateActiveTab(url: runtime.url, title: snapshotTitle, faviconURL: runtime.faviconURL, interactionState: runtime.capturedInteractionState)
+        onTabModelChange?(tabModel)
+    }
+
+    private func rebuildTabStrip() {
+        tabStrip.setViews([], in: .leading)
+        tabButtonIds.removeAll()
+        for (index, tab) in tabModel.tabs.enumerated() {
+            let title = tab.title.isEmpty ? (URL(string: tab.url)?.host ?? tab.url) : tab.title
+            let button = NSButton(title: title.isEmpty ? "Browser" : title, target: self, action: #selector(handleSelectTab(_:)))
+            button.tag = index
+            tabButtonIds[index] = tab.id
+            button.bezelStyle = tab.id == tabModel.activeTabId ? .regularSquare : .texturedRounded
+            tabStrip.addArrangedSubview(button)
+        }
+        tabStrip.addArrangedSubview(newTabButton)
+        tabStrip.addArrangedSubview(closeTabButton)
+    }
+
     private func refresh() {
         // Don't clobber a URL the user is actively typing.
         if urlField.currentEditor() == nil {
             urlField.stringValue = runtime.url
         }
-        let displayTitle = runtime.title.isEmpty ? tile.title : runtime.title
+        rebuildTabStrip()
+        let active = tabModel.activeTab
+        let displayTitle = active.title.isEmpty ? (active.url.isEmpty ? "Browser" : active.url) : active.title
         if tile.title != displayTitle {
             tile.title = displayTitle
             sync(tile: tile)
@@ -279,6 +341,37 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     @objc private func handleBack(_ sender: Any?) { runtime.goBack() }
     @objc private func handleForward(_ sender: Any?) { runtime.goForward() }
     @objc private func handleReload(_ sender: Any?) { runtime.reload() }
+    @objc private func handleNewTab(_ sender: Any?) {
+        snapshotActiveTabFromRuntime()
+        let tab = tabModel.appendTab(url: DefaultBrowserURL.fallback, title: "")
+        onTabModelChange?(tabModel)
+        runtime.loadURL(tab.url)
+        focusBrowserContent()
+        refresh()
+    }
+
+    @objc private func handleCloseTab(_ sender: Any?) {
+        tabModel.close(tabId: tabModel.activeTabId)
+        let active = tabModel.activeTab
+        onTabModelChange?(tabModel)
+        if let state = active.interactionState { runtime.restoreInteractionState(state) } else { runtime.loadURL(active.url) }
+        focusBrowserContent()
+        refresh()
+        urlField.stringValue = active.url
+    }
+
+    @objc private func handleSelectTab(_ sender: NSButton) {
+        guard let id = tabButtonIds[sender.tag], id != tabModel.activeTabId else { return }
+        snapshotActiveTabFromRuntime()
+        tabModel.activate(tabId: id)
+        let active = tabModel.activeTab
+        onTabModelChange?(tabModel)
+        if let state = active.interactionState { runtime.restoreInteractionState(state) } else { runtime.loadURL(active.url) }
+        focusBrowserContent()
+        refresh()
+        urlField.stringValue = active.url
+    }
+
     @objc private func handleFindPrevious(_ sender: Any?) { performFind(direction: .backward) }
     @objc private func handleFindNext(_ sender: Any?) { performFind(direction: .forward) }
     @objc private func handleFindClose(_ sender: Any?) { hideFindBar() }
@@ -403,6 +496,30 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     var findRowHeightForQA: CGFloat { findRowHeightConstraint.constant }
     var findFieldHasFocusForQA: Bool { window?.firstResponder === findField.currentEditor() || window?.firstResponder === findField }
     var findResultTextForQA: String { findResultLabel.stringValue }
+    var tabStripVisibleForQA: Bool { !tabStrip.isHidden }
+    var tabCountForQA: Int { tabModel.tabs.count }
+    var activeTabTitleForQA: String { tabModel.activeTab.title }
+    var activeTabURLForQA: String { tabModel.activeTab.url }
+    var activeTabIdForQA: UUID { tabModel.activeTabId }
+
+    func createTabForQA(url: String, title: String) {
+        snapshotActiveTabFromRuntime()
+        let tab = tabModel.appendTab(url: url, title: title)
+        onTabModelChange?(tabModel)
+        runtime.loadURL(tab.url)
+        refresh()
+        urlField.stringValue = tab.url
+    }
+
+    func selectTabForQA(_ id: UUID) {
+        guard let index = tabModel.tabs.firstIndex(where: { $0.id == id }) else { return }
+        let button = NSButton()
+        button.tag = index
+        tabButtonIds[index] = id
+        handleSelectTab(button)
+    }
+
+    func closeActiveTabForQA() { handleCloseTab(nil) }
 
     @discardableResult
     func performURLFieldCommandForQA(_ commandSelector: Selector) -> Bool {
