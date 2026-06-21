@@ -740,7 +740,10 @@ final class CanvasNSView: NSView {
 
     func setViewport(_ viewport: CanvasViewport) {
         canvasState.viewport = viewport
-        layoutAllTiles()
+        // Camera movement should reposition/scale existing tile layers, not mark
+        // every tile's content dirty. Terminal/browser redraw work during a
+        // trackpad pan or programmatic zoom is product-visible jank.
+        layoutAllTiles(invalidateTileDisplay: false)
         discardCursorRects()
         window?.invalidateCursorRects(for: self)
         delegate?.canvasDidChange(self)
@@ -1291,15 +1294,15 @@ final class CanvasNSView: NSView {
         layoutNavModeOverlay()
     }
 
-    private func layoutAllTiles() {
+    private func layoutAllTiles(invalidateTileDisplay: Bool = true) {
         layoutZoneChromeViews()
         for tile in canvasState.tiles {
-            layoutTile(tile)
+            layoutTile(tile, invalidateTileDisplay: invalidateTileDisplay)
         }
         // Lay out tiles for every installed ZoneLayer (T05).
         for layer in zoneLayers {
             for tile in layer.tiles {
-                _layoutLayerTile(tile, in: layer)
+                _layoutLayerTile(tile, in: layer, invalidateTileDisplay: invalidateTileDisplay)
             }
             if let chrome = layer.chrome {
                 chrome.frame = _zoneLayerChromeScreenFrame(layer)
@@ -1309,7 +1312,7 @@ final class CanvasNSView: NSView {
         navModeOverlayView?.needsDisplay = true
     }
 
-    private func layoutTile(_ tile: Tile) {
+    private func layoutTile(_ tile: Tile, invalidateTileDisplay: Bool = true) {
         guard let view = tileViews[tile.id] else { return }
         // zone-unify: tiles store WORLD frames (the project canvas stays
         // self-consistent). Zone membership is a pure overlay tag; a moved zone
@@ -1320,21 +1323,21 @@ final class CanvasNSView: NSView {
         view.frame = rect
         view.bounds = NSRect(x: 0, y: 0, width: tile.frame.width, height: tile.frame.height)
         view.tile = tile
-        view.setNeedsDisplay(view.bounds)
+        if invalidateTileDisplay {
+            view.invalidateForCanvasLayout()
+        }
         // Track the focus border with the tile's screen frame on pan/zoom/move/
         // resize — the overlay lives on the canvas, not the tile, so it must be
         // repositioned here whenever the bordered tile's frame updates.
         repositionFocusBorderIfNeeded(for: tile.id)
         // Authoritatively size the terminal surface from the tile's WORLD content
-        // size × backing — independent of canvas zoom. The canvas knows the real
-        // size synchronously, so this fills the tile (no dead-zone), bypasses the
-        // stale-bounds-at-attach race, and keeps the column grid fixed across zoom
-        // (zoom = navigation, not reflow).
+        // size × backing — independent of canvas zoom. Terminal chrome may grow
+        // visually at low zoom for a usable grab target, but that camera-only
+        // chrome floor must not resize/reflow the Ghostty grid.
         if let terminalTile = view as? TerminalTileNSView {
             let backing = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
             let contentWorldWidth = max(0, tile.frame.width)
-            let chromeWorldHeight = Double(terminalTile.chromeBarHeight)
-            let contentWorldHeight = max(0, tile.frame.height - chromeWorldHeight)
+            let contentWorldHeight = max(0, tile.frame.height - Double(terminalTile.contentTopInsetWorldHeight))
             terminalTile.runtime.setSurfacePixelSize(
                 CGSize(width: contentWorldWidth * backing, height: contentWorldHeight * backing)
             )
@@ -1845,7 +1848,7 @@ final class CanvasNSView: NSView {
     }
 
     // Layout a single tile belonging to a ZoneLayer.
-    private func _layoutLayerTile(_ tile: Tile, in layer: ZoneLayer) {
+    private func _layoutLayerTile(_ tile: Tile, in layer: ZoneLayer, invalidateTileDisplay: Bool = true) {
         guard let view = layer.tileViews[tile.id] else { return }
         let worldFrame = CanvasEngine.worldFrame(tile: tile, in: layer.placement)
         let rect = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport)
@@ -1853,7 +1856,9 @@ final class CanvasNSView: NSView {
         view.frame = rect
         view.bounds = NSRect(x: 0, y: 0, width: tile.frame.width, height: tile.frame.height)
         view.tile = tile
-        view.setNeedsDisplay(view.bounds)
+        if invalidateTileDisplay {
+            view.invalidateForCanvasLayout()
+        }
         repositionFocusBorderIfNeeded(for: tile.id)
     }
 

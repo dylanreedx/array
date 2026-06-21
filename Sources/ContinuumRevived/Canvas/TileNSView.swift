@@ -174,9 +174,12 @@ class TileNSView: NSView {
     }
 
     private func layoutContentView() {
-        // Track the (zoom-floored) bar height so the body never overlaps the bar
-        // or leaves a gap beneath it.
-        let barHeight = chromeBarHeight
+        // Most tile bodies track the (zoom-floored) bar height so the body never
+        // overlaps the bar or leaves a gap beneath it. Terminal tiles override
+        // this inset to keep the Ghostty grid stable while the camera zooms;
+        // their larger low-zoom grab strip is visual chrome over a stable body,
+        // not a terminal resize request.
+        let barHeight = contentTopInsetWorldHeight
         let nextFrame = NSRect(x: 0, y: barHeight, width: bounds.width, height: max(0, bounds.height - barHeight))
         if contentView?.frame != nextFrame {
             contentView?.frame = nextFrame
@@ -461,6 +464,17 @@ class TileNSView: NSView {
     /// floor so the visible bar and the grabbable strip are exactly the same
     /// region — no second divergent floor to drift out of sync.
     var chromeBarHeight: CGFloat { grabHeightInLocalCoordinates }
+
+    /// World y-offset for the content view. Defaults to the visual chrome height;
+    /// terminal tiles override this so camera zoom does not reflow the PTY grid.
+    var contentTopInsetWorldHeight: CGFloat { chromeBarHeight }
+
+    private(set) var qaCanvasLayoutInvalidationCount = 0
+
+    func invalidateForCanvasLayout() {
+        qaCanvasLayoutInvalidationCount += 1
+        setNeedsDisplay(bounds)
+    }
 
     /// World edge length for the close button, floored so its on-screen size
     /// stays `>= minScreenCloseButtonPx`. Mirrors the grab-strip floor pattern.

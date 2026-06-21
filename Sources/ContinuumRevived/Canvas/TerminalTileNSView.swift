@@ -22,6 +22,8 @@ final class TerminalTileNSView: TileNSView {
         fatalError("init(coder:) is not supported")
     }
 
+    override var contentTopInsetWorldHeight: CGFloat { TileNSView.titleBarHeight }
+
     override func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)
         runtime.focus()

@@ -17,10 +17,11 @@ Rules:
 
 ## Priority pain-point audits
 
-- [ ] A01 — Shell zoom/pan performance around terminal tiles  
-  Focus: T12/T07/T16/T06 interactions, `CanvasNSView` layout loops, `GhosttyTerminalView` resize behavior, expensive terminal invalidation during camera movement.  
-  Relevant commits: `e44c979`, `cddf716`, `3a959c9`, `db22a3b`.  
+- [x] A01 — Shell zoom/pan performance around terminal tiles
+  Focus: T12/T07/T16/T06 interactions, `CanvasNSView` layout loops, `GhosttyTerminalView` resize behavior, expensive terminal invalidation during camera movement.
+  Relevant commits: `e44c979`, `cddf716`, `3a959c9`, `db22a3b`.
   Required output: identify why zooming around shell tiles still feels bad; fix if scoped and safe, otherwise produce concrete reimplementation ticket.
+  Audit note: fixed camera-only terminal churn. Rows/columns now stay invariant across zoom sweep and pure viewport changes no longer mark tile content dirty; see `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260620T212451/audits/A01.md` and artifact `qa-runs/2026-06-21T013203Z/terminal-zoom-pan-stability/manifest.json`.
 
 - [ ] A02 — Shell default readability / Ghostty-tmux initial scale too small  
   Focus: default terminal font/cell sizing, tile dimensions, tmux profile startup, Ghostty surface scale, app settings defaults.  

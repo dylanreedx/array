@@ -479,12 +479,15 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
             guard let surface = term.surface else { throw CheckError(message: "terminal surface missing") }
             return ghostty_surface_size(surface)
         }
+        func expectedSurfacePixelSize() -> TerminalSurfacePixelSize {
+            TerminalSurfacePixelSize.from(CGSize(
+                width: tile.frame.width * backing,
+                height: max(0, tile.frame.height - Double(tileView.contentTopInsetWorldHeight)) * backing
+            ))
+        }
         func assertExpected(_ label: String) throws -> ghostty_surface_size_s {
             let got = try surfaceSize()
-            let expected = TerminalSurfacePixelSize.from(CGSize(
-                width: tile.frame.width * backing,
-                height: max(0, tile.frame.height - Double(tileView.chromeBarHeight)) * backing
-            ))
+            let expected = expectedSurfacePixelSize()
             if got.width_px != expected.width || got.height_px != expected.height {
                 throw CheckError(message: "\(label): surface \(got.width_px)x\(got.height_px) != expected \(expected.width)x\(expected.height)")
             }
@@ -497,10 +500,14 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         var samples: [[String: Any]] = []
         func appendSample(_ viewport: CanvasViewport) throws {
             let size = try assertExpected("zoom \(viewport.zoom)")
+            if size.rows != baselineRows || size.columns != baselineColumns {
+                throw CheckError(message: "zoom \(viewport.zoom): rows/columns changed to \(size.rows)x\(size.columns), baseline \(baselineRows)x\(baselineColumns)")
+            }
             samples.append([
                 "viewport": ["x": viewport.x, "y": viewport.y, "zoom": viewport.zoom],
                 "chromeWorldHeight": Double(tileView.chromeBarHeight),
-                "expectedBodyWorldHeight": max(0, tile.frame.height - Double(tileView.chromeBarHeight)),
+                "contentTopInsetWorldHeight": Double(tileView.contentTopInsetWorldHeight),
+                "expectedBodyWorldHeight": max(0, tile.frame.height - Double(tileView.contentTopInsetWorldHeight)),
                 "surfaceSize": ["width": Int(size.width_px), "height": Int(size.height_px)],
                 "rows": Int(size.rows),
                 "columns": Int(size.columns),
@@ -510,6 +517,8 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
             ])
         }
 
+        let appliedBeforeZoomSweep = term.qaSurfaceResizeAppliedCount
+        let displayInvalidationsBeforeZoomSweep = tileView.qaCanvasLayoutInvalidationCount
         for viewport in [
             CanvasViewport(x: 0, y: 0, zoom: 1.0),
             CanvasViewport(x: 25, y: 35, zoom: 1.0),
@@ -521,6 +530,10 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
             try pump(0.15)
             try appendSample(viewport)
         }
+        let zoomSweepAppliedResizeDelta = term.qaSurfaceResizeAppliedCount - appliedBeforeZoomSweep
+        if zoomSweepAppliedResizeDelta != 0 { throw CheckError(message: "zoom sweep applied \(zoomSweepAppliedResizeDelta) terminal resizes") }
+        let zoomSweepDisplayInvalidationDelta = tileView.qaCanvasLayoutInvalidationCount - displayInvalidationsBeforeZoomSweep
+        if zoomSweepDisplayInvalidationDelta != 0 { throw CheckError(message: "zoom sweep marked tile display dirty \(zoomSweepDisplayInvalidationDelta) times") }
 
         let appliedBeforeSameSize = term.qaSurfaceResizeAppliedCount
         let rowsBeforeSameSize = (try surfaceSize()).rows
@@ -559,6 +572,8 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
             "baselineRows": Int(baselineRows),
             "baselineColumns": Int(baselineColumns),
             "samples": samples,
+            "zoomSweepAppliedResizeDelta": zoomSweepAppliedResizeDelta,
+            "zoomSweepDisplayInvalidationDelta": zoomSweepDisplayInvalidationDelta,
             "sameSizeCameraAppliedResizeDelta": sameSizeCameraAppliedResizeDelta,
             "tileResizeAppliedResizeDelta": tileResizeAppliedResizeDelta,
             "inputAfterCameraSweepWorked": inputWorked,
