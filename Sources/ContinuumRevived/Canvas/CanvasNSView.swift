@@ -394,6 +394,7 @@ final class CanvasNSView: NSView {
     }
 
     func install(tileView: TileNSView, for tile: Tile) {
+        let previousTile = canvasState.tiles.first(where: { $0.id == tile.id })
         // Replacing an existing tile (e.g. restart placeholder → live terminal)
         // must remove the old NSView; otherwise the prior view stays on top
         // of the new one and intercepts hits.
@@ -420,6 +421,9 @@ final class CanvasNSView: NSView {
         }
         updateEmptyStateVisibility()
         reorderTileSubviewsByZIndex()
+        if previousTile == nil || previousTile?.title != tile.title || previousTile?.kind != tile.kind {
+            delegate?.canvasSidebarModelDidChange(self)
+        }
     }
 
     func configureEmptyStateActions(_ actions: CanvasEmptyStateActions, projectPath: String? = nil) {
@@ -453,6 +457,7 @@ final class CanvasNSView: NSView {
 
     func updateTile(_ tile: Tile, recalculateZoneBounds: Bool = true) {
         guard let idx = canvasState.tiles.firstIndex(where: { $0.id == tile.id }) else { return }
+        let previousTile = canvasState.tiles[idx]
         canvasState.tiles[idx] = tile
         // zone-unify P3: only a RESIZE grows the owning zone; a MOVE leaves the
         // zone frame fixed (the caller passes recalculateZoneBounds: false).
@@ -461,6 +466,9 @@ final class CanvasNSView: NSView {
         }
         layoutTile(tile)
         layoutZoneChromeViews()
+        if previousTile.title != tile.title || previousTile.kind != tile.kind {
+            delegate?.canvasSidebarModelDidChange(self)
+        }
         delegate?.canvasDidChange(self)
     }
 
@@ -551,6 +559,7 @@ final class CanvasNSView: NSView {
             borderedTileId = nil
         }
         updateEmptyStateVisibility()
+        delegate?.canvasSidebarModelDidChange(self)
         delegate?.canvasDidChange(self)
     }
 
@@ -4896,6 +4905,11 @@ final class CanvasNSView: NSView {
 @MainActor
 protocol CanvasNSViewDelegate: AnyObject {
     func canvasDidChange(_ canvas: CanvasNSView)
+    func canvasSidebarModelDidChange(_ canvas: CanvasNSView)
+}
+
+extension CanvasNSViewDelegate {
+    func canvasSidebarModelDidChange(_ canvas: CanvasNSView) {}
 }
 
 /// Canvas-owned marching-ants focus border. A `CAShapeLayer` strokes a dashed

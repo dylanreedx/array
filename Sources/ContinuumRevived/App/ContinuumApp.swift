@@ -846,6 +846,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-sidebar-live-status-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runWorkspaceSidebarLiveStatusSelfCheck()
+                print("ContinuumRevivedWorkspaceSidebarLiveStatusChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--chrome-integration-guardrails-check") {
             do {
                 let artifact = try runChromeIntegrationGuardrailsSelfCheck()
@@ -3782,6 +3794,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try? projectStore?.saveSession(sessions[index])
         }
         refreshAgentAttentionSurface()
+        reloadWorkspaceSidebar()
     }
 
     private static func dockBadgeLabel(needsAttentionCount count: Int) -> String? {
@@ -4264,7 +4277,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let workspaceRuntime {
             documents[workspaceRuntime.workspaceId] = workspaceRuntime.document
         }
-        return SidebarTreeBuilder.build(registry: registry, documents: documents)
+        let projectCanvases = workspaceSidebarProjectCanvasSnapshots(registry: registry)
+        let agentStatuses = workspaceSidebarAgentStatuses(registry: registry, projectCanvases: projectCanvases)
+        return SidebarTreeBuilder.build(
+            registry: registry,
+            documents: documents,
+            projectCanvases: projectCanvases,
+            agentStatusesByTileId: agentStatuses
+        )
+    }
+
+    private func workspaceSidebarProjectCanvasSnapshots(registry: Registry) -> [UUID: CanvasState] {
+        var snapshots: [UUID: CanvasState] = [:]
+        for project in registry.projects {
+            let store = ProjectStore(projectRoot: URL(fileURLWithPath: project.rootPath, isDirectory: true))
+            if let canvas = try? store.tryLoadCanvas() {
+                snapshots[project.id] = canvas
+            }
+        }
+        if let activeProjectId = workspaceRuntime?.activeController?.project.id,
+           let canvasView {
+            snapshots[activeProjectId] = canvasView.canvasState
+        }
+        return snapshots
+    }
+
+    private func workspaceSidebarAgentStatuses(registry: Registry, projectCanvases: [UUID: CanvasState]) -> [UUID: AgentStatus] {
+        var statuses: [UUID: AgentStatus] = [:]
+        for project in registry.projects {
+            let store = ProjectStore(projectRoot: URL(fileURLWithPath: project.rootPath, isDirectory: true))
+            let terminalTileIds = Set((projectCanvases[project.id]?.tiles ?? []).compactMap { tile in
+                tile.kind == .terminal ? tile.id : nil
+            })
+            guard !terminalTileIds.isEmpty else { continue }
+            let sessions = (try? store.listSessions()) ?? []
+            for session in sessions where terminalTileIds.contains(session.tileId) {
+                if let status = session.agentDescriptor?.status {
+                    statuses[session.tileId] = status
+                }
+            }
+        }
+        if let canvasView {
+            for tile in canvasView.canvasState.tiles where tile.kind == .terminal {
+                if let liveStatus = canvasView.agentStatus(for: tile.id) {
+                    statuses[tile.id] = liveStatus
+                }
+            }
+        }
+        return statuses
     }
 
     private func reloadWorkspaceSidebar() {
@@ -4756,6 +4816,215 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "currentZoneViewport": ["x": measuredZoneViewport.x, "y": measuredZoneViewport.y, "zoom": measuredZoneViewport.zoom],
             "expectedCurrentZoneViewport": ["x": expectedZoneViewport.x, "y": expectedZoneViewport.y, "zoom": expectedZoneViewport.zoom],
             "selectedRowAfterMissingTarget": String(describing: sidebar.selectedTargetForQA),
+            "artifactPath": artifact.path,
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runWorkspaceSidebarLiveStatusSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func tile(id: UUID, title: String, x: Double, y: Double, kind: TileKind = .terminal, zIndex: Int = 1) -> Tile {
+            Tile(
+                id: id,
+                kind: kind,
+                title: title,
+                frame: TileFrame(x: x, y: y, width: 180, height: 120),
+                zIndex: zIndex,
+                runtimeRef: nil,
+                metadata: kind == .note ? TileMetadata(noteId: id) : TileMetadata()
+            )
+        }
+        func saveSession(_ store: ProjectStore, tileId: UUID, status: AgentStatus, now: Date, root: URL) throws {
+            try store.saveSession(TerminalSessionDescriptor(
+                id: UUID(),
+                tileId: tileId,
+                launchProfileId: "agent",
+                command: "/bin/zsh",
+                args: [],
+                cwd: root.path,
+                env: [:],
+                title: "Agent",
+                createdAt: now,
+                lastStartedAt: now,
+                lastExit: nil,
+                agentDescriptor: AgentDescriptor(agentKind: "qa", worktreePath: root.path, status: status, statusUpdatedAt: now)
+            ))
+        }
+
+        let fm = FileManager.default
+        let now = Date(timeIntervalSince1970: 1_900_300_000)
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("continuum-workspace-sidebar-live-status-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        let projectRoot = tempRoot.appendingPathComponent("Project", isDirectory: true)
+        try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        try fm.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let workspaceId = UUID(uuidString: "00000000-0000-0000-0000-00000000E301")!
+        let projectId = UUID(uuidString: "00000000-0000-0000-0000-00000000E302")!
+        let projectZoneId = UUID(uuidString: "00000000-0000-0000-0000-00000000E303")!
+        let groupZoneId = UUID(uuidString: "00000000-0000-0000-0000-00000000E304")!
+        let workingTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000E311")!
+        let needsTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000E312")!
+        let doneTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000E313")!
+        let staleTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000E314")!
+        let createdTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000E315")!
+        let groupTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000E316")!
+
+        let workingTile = tile(id: workingTileId, title: "Working Agent", x: 40, y: 40, zIndex: 1)
+        let needsTile = tile(id: needsTileId, title: "Needs Agent", x: 260, y: 40, zIndex: 2)
+        let doneTile = tile(id: doneTileId, title: "Done Agent", x: 40, y: 220, zIndex: 3)
+        let staleTile = tile(id: staleTileId, title: "Stale Agent", x: 260, y: 220, zIndex: 4)
+        let createdTile = tile(id: createdTileId, title: "Created Live Tile", x: 500, y: 40, kind: .note, zIndex: 5)
+        let groupTile = tile(id: groupTileId, title: "Group Note", x: 940, y: 40, kind: .note, zIndex: 6)
+
+        let project = Project(
+            id: projectId,
+            name: "Live Status Project",
+            rootPath: projectRoot.path,
+            createdAt: now,
+            updatedAt: now,
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
+        )
+        let projectStore = ProjectStore(projectRoot: projectRoot)
+        try projectStore.saveProject(project)
+        try projectStore.saveCanvas(CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [workingTile, needsTile, doneTile, staleTile],
+            groups: [],
+            lastActiveTileId: workingTileId
+        ))
+        try saveSession(projectStore, tileId: workingTileId, status: .working, now: now, root: projectRoot)
+        try saveSession(projectStore, tileId: needsTileId, status: .needsAttention, now: now, root: projectRoot)
+        try saveSession(projectStore, tileId: doneTileId, status: .done, now: now, root: projectRoot)
+        try saveSession(projectStore, tileId: staleTileId, status: .stale, now: now, root: projectRoot)
+
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = workspaceId
+        registry.lastActiveProjectId = projectId
+        registry.workspaces = [
+            WorkspaceEntry(id: workspaceId, name: "Live Workspace", projectIds: [projectId], createdAt: now, updatedAt: now)
+        ]
+        registry.projects = [
+            ProjectEntry(id: projectId, name: "Live Status Project", rootPath: projectRoot.path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false)
+        ]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+
+        let projectZone = ZonePlacement(zoneId: projectZoneId, projectId: projectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 820, height: 520), color: "blue", collapsed: false, hydrationPolicy: .automatic, name: "", navKey: "1")
+        let groupZone = ZonePlacement(zoneId: groupZoneId, projectId: nil, origin: ZonePoint(x: 900, y: 0), size: ZoneSize(width: 360, height: 260), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "Review", navKey: "2")
+        let document = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [projectZone, groupZone],
+            zoneZOrder: [projectZoneId, groupZoneId],
+            lastActiveZoneId: projectZoneId,
+            groupZoneTiles: [GroupZoneTiles(zoneId: groupZoneId, tiles: [groupTile])]
+        )
+        try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport).save(document)
+
+        let app = AppDelegate()
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+        let controller = ZoneRuntimeController(projectRoot: projectRoot, projectStore: projectStore, project: project)
+        let zoneRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { id in
+            guard id == projectId else { throw CheckError.failed("unexpected project id \(id)") }
+            return controller
+        })
+        let runtime = WorkspaceRuntime(
+            boot: controller,
+            workspaceId: workspaceId,
+            document: document,
+            registry: zoneRegistry,
+            focusBroker: app.focusBroker,
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+        let renderModels = Self.zoneRenderModels(from: document, registry: registry)
+        let canvas = CanvasNSView(canvasState: try projectStore.loadCanvas(), activeZone: projectZone, zoneRenderModels: renderModels, showsZoneChrome: false)
+        canvas.delegate = app
+        canvas.frame = NSRect(x: 0, y: 0, width: 1_000, height: 700)
+        for tile in canvas.canvasState.tiles {
+            let view = TileNSView(tile: tile)
+            if tile.id == workingTileId { view.agentStatus = .working }
+            if tile.id == needsTileId { view.agentStatus = .needsAttention }
+            if tile.id == doneTileId { view.agentStatus = .done }
+            if tile.id == staleTileId { view.agentStatus = .stale }
+            canvas.install(tileView: view, for: tile)
+        }
+
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: 640))
+        let sidebarIdentity = ObjectIdentifier(sidebar)
+        app.registryStore = registryStore
+        app.workspaceRuntime = runtime
+        app.canvasView = canvas
+        app.workspaceSidebarView = sidebar
+        app.reloadWorkspaceSidebar()
+        sidebar.layoutSubtreeIfNeeded()
+
+        let initialGlyphsRendered = sidebar.tileStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId, tileId: workingTileId) == "working"
+            && sidebar.tileStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId, tileId: needsTileId) == "needs you"
+            && sidebar.tileStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId, tileId: doneTileId) == "done"
+            && sidebar.tileStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId, tileId: staleTileId) == "stale"
+            && sidebar.tileStatusTextForQA(workspaceId: workspaceId, zoneId: groupZoneId, tileId: groupTileId) == "no agent"
+        try expect(sidebar.tileStatusGlyphForQA(workspaceId: workspaceId, zoneId: projectZoneId, tileId: needsTileId) == "◆", "needs-attention tile should render the attention glyph")
+        try expect(initialGlyphsRendered, "sidebar should render working/needs/done/stale/no-agent status texts")
+        try expect(sidebar.zoneStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId)?.contains("1 working") == true, "zone row should include working rollup text")
+        try expect(sidebar.zoneStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId)?.contains("1 needs you") == true, "zone row should include needs-attention rollup text")
+
+        canvas.install(tileView: TileNSView(tile: createdTile), for: createdTile)
+        sidebar.layoutSubtreeIfNeeded()
+        let tileCreateUpdatedSidebar = sidebar.visibleDisplayNamesForQA.contains("Created Live Tile")
+        try expect(tileCreateUpdatedSidebar, "tile install should update the existing sidebar view")
+
+        canvas.removeTile(id: createdTileId)
+        sidebar.layoutSubtreeIfNeeded()
+        let tileDeleteUpdatedSidebar = !sidebar.visibleDisplayNamesForQA.contains("Created Live Tile")
+        try expect(tileDeleteUpdatedSidebar, "tile removal should update the existing sidebar view")
+
+        app.persistRenamedZone(groupZoneId, name: "Renamed Review")
+        sidebar.layoutSubtreeIfNeeded()
+        let zoneRenameUpdatedSidebar = sidebar.visibleDisplayNamesForQA.contains("Renamed Review")
+        try expect(zoneRenameUpdatedSidebar, "zone rename should update the existing sidebar view")
+
+        app.updateAgentStatus(tileId: workingTileId, status: .done, now: now.addingTimeInterval(60))
+        sidebar.layoutSubtreeIfNeeded()
+        let statusChangeUpdatedSidebar = sidebar.tileStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId, tileId: workingTileId) == "done"
+            && sidebar.zoneStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId)?.contains("2 done") == true
+        try expect(statusChangeUpdatedSidebar, "agent status update should refresh the sidebar row view model")
+
+        let agentStatusGlyphsRendered = initialGlyphsRendered && statusChangeUpdatedSidebar
+        let sidebarIdentityPreserved = ObjectIdentifier(sidebar) == sidebarIdentity
+        try expect(sidebarIdentityPreserved, "check must update the existing sidebar instance, not rebuild the app/window")
+
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let directory = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("workspace-sidebar-live-status", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "workspace-sidebar-live-status",
+            "tileCreateUpdatedSidebar": tileCreateUpdatedSidebar,
+            "tileDeleteUpdatedSidebar": tileDeleteUpdatedSidebar,
+            "zoneRenameUpdatedSidebar": zoneRenameUpdatedSidebar,
+            "agentStatusGlyphsRendered": agentStatusGlyphsRendered,
+            "noNewStatusPipeline": true,
+            "statusChangeUpdatedSidebar": statusChangeUpdatedSidebar,
+            "sidebarIdentityPreserved": sidebarIdentityPreserved,
+            "projectZoneStatusText": sidebar.zoneStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId) ?? "",
             "artifactPath": artifact.path,
         ]
         try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
@@ -5309,6 +5578,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try saveController.flushPendingSave()
             workspaceRuntime?.replaceDocument(document, for: workspaceId)
             try registryStore.save(registry)
+            reloadWorkspaceSidebar()
         } catch {
             fputs("Create Zone failed: \(error)\n", stderr)
         }
@@ -5359,6 +5629,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             saveController.scheduleZoneLayoutSave(document)
             try saveController.flushPendingSave()
             workspaceRuntime?.replaceDocument(document, for: workspaceId)
+            reloadWorkspaceSidebar()
         } catch {
             fputs("persistClosedZone failed: \(error)\n", stderr)
         }
@@ -5390,6 +5661,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             saveController.scheduleZoneLayoutSave(document)
             try saveController.flushPendingSave()
             workspaceRuntime?.replaceDocument(document, for: workspaceId)
+            reloadWorkspaceSidebar()
         } catch {
             fputs("persistCreatedGroupZone failed: \(error)\n", stderr)
         }
@@ -5453,6 +5725,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             saveController.scheduleZoneLayoutSave(document)
             try saveController.flushPendingSave()
             workspaceRuntime?.replaceDocument(document, for: workspaceId)
+            reloadWorkspaceSidebar()
         } catch {
             fputs("persistRenamedZone failed: \(error)\n", stderr)
         }
@@ -5814,6 +6087,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             lastReconciledViewport = currentViewport
             workspaceRuntime?.onViewportChanged()
         }
+    }
+
+    func canvasSidebarModelDidChange(_ canvas: CanvasNSView) {
+        reloadWorkspaceSidebar()
     }
 
     private var lastReconciledViewport: CanvasViewport?

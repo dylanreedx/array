@@ -51,7 +51,7 @@ Rules:
   Source ticket: `W02-workspace-sidebar-row-actions.md`.
   Required output: row click switch/focus/reveal using existing navigation paths, artifact.
 
-- [ ] W03 — Sidebar live updates and agent status glyphs
+- [x] W03 — Sidebar live updates and agent status glyphs
   Source ticket: `W03-workspace-sidebar-live-status.md`.
   Required output: tile/zone/workspace updates and existing status rollups in sidebar, artifact.
 

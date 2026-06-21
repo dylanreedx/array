@@ -144,11 +144,43 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         cell.textField = textField
         cell.identifier = NSUserInterfaceItemIdentifier(accessibilityIdentifier(for: item))
         cell.setAccessibilityIdentifier(accessibilityIdentifier(for: item))
-        NSLayoutConstraint.activate([
-            textField.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
-            textField.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
-            textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-        ])
+
+        if let status = statusPresentation(for: item) {
+            let glyphField = NSTextField(labelWithString: status.glyph)
+            glyphField.translatesAutoresizingMaskIntoConstraints = false
+            glyphField.font = .systemFont(ofSize: 10, weight: .semibold)
+            glyphField.textColor = status.color
+            glyphField.alignment = .center
+
+            let statusField = NSTextField(labelWithString: status.text)
+            statusField.translatesAutoresizingMaskIntoConstraints = false
+            statusField.font = .systemFont(ofSize: 10, weight: .regular)
+            statusField.textColor = status.color.withAlphaComponent(0.82)
+            statusField.lineBreakMode = .byTruncatingTail
+            statusField.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+            cell.addSubview(glyphField)
+            cell.addSubview(statusField)
+            NSLayoutConstraint.activate([
+                glyphField.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
+                glyphField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                glyphField.widthAnchor.constraint(equalToConstant: 12),
+
+                textField.leadingAnchor.constraint(equalTo: glyphField.trailingAnchor, constant: 4),
+                textField.trailingAnchor.constraint(lessThanOrEqualTo: statusField.leadingAnchor, constant: -8),
+                textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+
+                statusField.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+                statusField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                statusField.widthAnchor.constraint(lessThanOrEqualToConstant: 118),
+            ])
+        } else {
+            NSLayoutConstraint.activate([
+                textField.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
+                textField.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+                textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            ])
+        }
         return cell
     }
 
@@ -156,6 +188,8 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     var zoneRowsRenderedForQA: Int { visibleItems().filter { if case .zone = $0.kind { return true }; return false }.count }
     var tileRowsRenderedForQA: Int { visibleItems().filter { if case .tile = $0.kind { return true }; return false }.count }
     var visibleDisplayNamesForQA: [String] { visibleItems().map(displayTitle(for:)) }
+    var visibleStatusTextsForQA: [String] { visibleItems().compactMap { statusPresentation(for: $0)?.text } }
+    var visibleStatusGlyphsForQA: [String] { visibleItems().compactMap { statusPresentation(for: $0)?.glyph } }
     var selectedTargetForQA: WorkspaceSidebarSelection? {
         guard outlineView.selectedRow >= 0,
               let item = outlineView.item(atRow: outlineView.selectedRow) as? SidebarItem else { return nil }
@@ -200,6 +234,18 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         let key = TileItemKey(workspaceId: workspaceId, zoneId: zoneId, tileId: tileId)
         guard let item = tileItemsByKey[key] else { return false }
         return click(item: item)
+    }
+
+    func zoneStatusTextForQA(workspaceId: UUID, zoneId: UUID) -> String? {
+        statusPresentation(for: zoneItemsByKey[ZoneItemKey(workspaceId: workspaceId, zoneId: zoneId)])?.text
+    }
+
+    func tileStatusTextForQA(workspaceId: UUID, zoneId: UUID, tileId: UUID) -> String? {
+        statusPresentation(for: tileItemsByKey[TileItemKey(workspaceId: workspaceId, zoneId: zoneId, tileId: tileId)])?.text
+    }
+
+    func tileStatusGlyphForQA(workspaceId: UUID, zoneId: UUID, tileId: UUID) -> String? {
+        statusPresentation(for: tileItemsByKey[TileItemKey(workspaceId: workspaceId, zoneId: zoneId, tileId: tileId)])?.glyph
     }
 
     @objc private func outlineRowClicked(_ sender: NSOutlineView) {
@@ -358,6 +404,66 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
             return .labelColor
         case .tile:
             return .tertiaryLabelColor
+        }
+    }
+
+    private struct StatusPresentation {
+        let glyph: String
+        let text: String
+        let color: NSColor
+    }
+
+    private func statusPresentation(for item: SidebarItem?) -> StatusPresentation? {
+        guard let item else { return nil }
+        return statusPresentation(for: item)
+    }
+
+    private func statusPresentation(for item: SidebarItem) -> StatusPresentation? {
+        switch item.kind {
+        case .workspace:
+            return nil
+        case let .zone(zone, _):
+            guard let kind = zone.agentStatusRollup.dominantKind,
+                  let text = zone.agentStatusRollup.displayText else {
+                return StatusPresentation(glyph: glyph(for: .unknown), text: "no agent", color: color(for: .unknown))
+            }
+            return StatusPresentation(glyph: glyph(for: kind), text: text, color: color(for: kind))
+        case let .tile(tile, _, _):
+            guard let status = tile.agentStatus else {
+                return StatusPresentation(glyph: glyph(for: .unknown), text: "no agent", color: color(for: .unknown))
+            }
+            let kind = SidebarAgentStatusKind.kind(for: status)
+            return StatusPresentation(glyph: glyph(for: kind), text: text(for: kind), color: color(for: kind))
+        }
+    }
+
+    private func text(for kind: SidebarAgentStatusKind) -> String {
+        switch kind {
+        case .working: return "working"
+        case .needsAttention: return "needs you"
+        case .done: return "done"
+        case .stale: return "stale"
+        case .unknown: return "unknown"
+        }
+    }
+
+    private func glyph(for kind: SidebarAgentStatusKind) -> String {
+        switch kind {
+        case .working: return "●"
+        case .needsAttention: return "◆"
+        case .done: return "✓"
+        case .stale: return "◌"
+        case .unknown: return "○"
+        }
+    }
+
+    private func color(for kind: SidebarAgentStatusKind) -> NSColor {
+        switch kind {
+        case .working: return .systemBlue
+        case .needsAttention: return .systemOrange
+        case .done: return .systemGreen
+        case .stale: return .systemGray
+        case .unknown: return .tertiaryLabelColor
         }
     }
 
