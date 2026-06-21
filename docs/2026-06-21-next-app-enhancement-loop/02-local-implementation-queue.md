@@ -21,7 +21,7 @@ Rules:
   Source ticket: `T02-browser-inspector-dom-tree.md`.
   Required output: real WKWebView DOM snapshot, bounded tree, selected element temporary highlight, artifact.
 
-- [ ] I03 — Browser Inspector console log bridge
+- [x] I03 — Browser Inspector console log bridge
   Source ticket: `T03-browser-inspector-console.md`.
   Required output: display-only console logs from real WKWebView message handler, no eval, artifact.
 

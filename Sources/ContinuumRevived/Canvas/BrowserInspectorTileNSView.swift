@@ -16,6 +16,8 @@ final class BrowserInspectorTileNSView: TileNSView {
 
     typealias DOMSnapshotProvider = (@escaping (Result<BrowserDOMSnapshot, Error>) -> Void) -> Void
     typealias DOMHighlighter = (String, @escaping (Result<Bool, Error>) -> Void) -> Void
+    typealias ConsoleLogProvider = () -> [BrowserConsoleLogEntry]?
+    typealias ConsoleClearer = () -> Bool
 
     var onSelectedPanelChange: ((BrowserInspectorPanel) -> Void)?
 
@@ -23,14 +25,19 @@ final class BrowserInspectorTileNSView: TileNSView {
     private let inspectedBrowser: InspectedBrowserSummary?
     private let domSnapshotProvider: DOMSnapshotProvider?
     private let domHighlighter: DOMHighlighter?
+    private let consoleLogProvider: ConsoleLogProvider?
+    private let consoleClearer: ConsoleClearer?
     private let titleLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "")
     private let panelControl: NSSegmentedControl
     private let refreshButton = NSButton(title: "Refresh DOM", target: nil, action: nil)
+    private let consoleClearButton = NSButton(title: "Clear Console", target: nil, action: nil)
     private let placeholderLabel = NSTextField(labelWithString: "")
     private let elementsScrollView = NSScrollView()
     private let elementsStack = NSStackView()
+    private let consoleScrollView = NSScrollView()
+    private let consoleStack = NSStackView()
     private var selectedPanel: BrowserInspectorPanel
     private var domSnapshot: BrowserDOMSnapshot?
     private var selectedDOMNodeID: String?
@@ -41,12 +48,16 @@ final class BrowserInspectorTileNSView: TileNSView {
         inspectorState: BrowserInspectorState?,
         inspectedBrowser: InspectedBrowserSummary?,
         domSnapshotProvider: DOMSnapshotProvider? = nil,
-        domHighlighter: DOMHighlighter? = nil
+        domHighlighter: DOMHighlighter? = nil,
+        consoleLogProvider: ConsoleLogProvider? = nil,
+        consoleClearer: ConsoleClearer? = nil
     ) {
         self.inspectorState = inspectorState
         self.inspectedBrowser = inspectedBrowser
         self.domSnapshotProvider = domSnapshotProvider
         self.domHighlighter = domHighlighter
+        self.consoleLogProvider = consoleLogProvider
+        self.consoleClearer = consoleClearer
         self.selectedPanel = inspectorState?.selectedPanel ?? .elements
         self.panelControl = NSSegmentedControl(
             labels: BrowserInspectorPanel.allCases.map(Self.label(for:)),
@@ -85,6 +96,11 @@ final class BrowserInspectorTileNSView: TileNSView {
         refreshButton.bezelStyle = .rounded
         refreshButton.translatesAutoresizingMaskIntoConstraints = false
 
+        consoleClearButton.target = self
+        consoleClearButton.action = #selector(consoleClearButtonClicked(_:))
+        consoleClearButton.bezelStyle = .rounded
+        consoleClearButton.translatesAutoresizingMaskIntoConstraints = false
+
         placeholderLabel.font = .systemFont(ofSize: 13)
         placeholderLabel.textColor = .secondaryLabelColor
         placeholderLabel.alignment = .center
@@ -104,6 +120,19 @@ final class BrowserInspectorTileNSView: TileNSView {
         elementsScrollView.documentView = elementsStack
         elementsScrollView.translatesAutoresizingMaskIntoConstraints = false
 
+        consoleStack.orientation = .vertical
+        consoleStack.spacing = 4
+        consoleStack.alignment = .leading
+        consoleStack.distribution = .fill
+        consoleStack.translatesAutoresizingMaskIntoConstraints = false
+
+        consoleScrollView.drawsBackground = false
+        consoleScrollView.hasVerticalScroller = true
+        consoleScrollView.hasHorizontalScroller = true
+        consoleScrollView.borderType = .noBorder
+        consoleScrollView.documentView = consoleStack
+        consoleScrollView.translatesAutoresizingMaskIntoConstraints = false
+
         let headerStack = NSStackView(views: [titleLabel, detailLabel, statusLabel])
         headerStack.orientation = .vertical
         headerStack.spacing = 3
@@ -113,7 +142,9 @@ final class BrowserInspectorTileNSView: TileNSView {
         body.addSubview(headerStack)
         body.addSubview(panelControl)
         body.addSubview(refreshButton)
+        body.addSubview(consoleClearButton)
         body.addSubview(elementsScrollView)
+        body.addSubview(consoleScrollView)
         body.addSubview(placeholderLabel)
 
         NSLayoutConstraint.activate([
@@ -128,6 +159,9 @@ final class BrowserInspectorTileNSView: TileNSView {
             refreshButton.topAnchor.constraint(equalTo: panelControl.bottomAnchor, constant: 12),
             refreshButton.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16),
 
+            consoleClearButton.topAnchor.constraint(equalTo: panelControl.bottomAnchor, constant: 12),
+            consoleClearButton.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16),
+
             elementsScrollView.topAnchor.constraint(equalTo: refreshButton.bottomAnchor, constant: 8),
             elementsScrollView.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16),
             elementsScrollView.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -16),
@@ -136,6 +170,15 @@ final class BrowserInspectorTileNSView: TileNSView {
             elementsStack.topAnchor.constraint(equalTo: elementsScrollView.contentView.topAnchor),
             elementsStack.leadingAnchor.constraint(equalTo: elementsScrollView.contentView.leadingAnchor),
             elementsStack.trailingAnchor.constraint(greaterThanOrEqualTo: elementsScrollView.contentView.trailingAnchor),
+
+            consoleScrollView.topAnchor.constraint(equalTo: consoleClearButton.bottomAnchor, constant: 8),
+            consoleScrollView.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16),
+            consoleScrollView.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -16),
+            consoleScrollView.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -16),
+
+            consoleStack.topAnchor.constraint(equalTo: consoleScrollView.contentView.topAnchor),
+            consoleStack.leadingAnchor.constraint(equalTo: consoleScrollView.contentView.leadingAnchor),
+            consoleStack.trailingAnchor.constraint(greaterThanOrEqualTo: consoleScrollView.contentView.trailingAnchor),
 
             placeholderLabel.topAnchor.constraint(equalTo: panelControl.bottomAnchor, constant: 20),
             placeholderLabel.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 24),
@@ -161,6 +204,10 @@ final class BrowserInspectorTileNSView: TileNSView {
     var selectedDOMNodeIDForQA: String? { selectedDOMNodeID }
     var elementsStatusTextForQA: String { placeholderLabel.stringValue }
     var elementsRefreshEnabledForQA: Bool { refreshButton.isEnabled }
+    var consoleRowTextsForQA: [String] { consoleStack.arrangedSubviews.compactMap { ($0 as? NSTextField)?.stringValue } }
+    var consoleVisibleRowCountForQA: Int { consoleStack.arrangedSubviews.count }
+    var consoleStatusTextForQA: String { placeholderLabel.stringValue }
+    var consoleClearEnabledForQA: Bool { consoleClearButton.isEnabled }
 
     func selectPanelForQA(_ panel: BrowserInspectorPanel) {
         panelControl.selectedSegment = Self.segmentIndex(for: panel)
@@ -177,6 +224,11 @@ final class BrowserInspectorTileNSView: TileNSView {
         selectDOMNode(id: id, completion: completion)
     }
 
+    func clearConsoleForQA() {
+        selectPanelForQA(.console)
+        clearConsoleLogEntries()
+    }
+
     @objc private func panelControlChanged(_ sender: NSSegmentedControl) {
         guard sender.selectedSegment >= 0, sender.selectedSegment < BrowserInspectorPanel.allCases.count else { return }
         applySelectedPanel(BrowserInspectorPanel.allCases[sender.selectedSegment], notify: true)
@@ -184,6 +236,10 @@ final class BrowserInspectorTileNSView: TileNSView {
 
     @objc private func refreshButtonClicked(_ sender: NSButton) {
         refreshDOMSnapshot(completion: nil)
+    }
+
+    @objc private func consoleClearButtonClicked(_ sender: NSButton) {
+        clearConsoleLogEntries()
     }
 
     @objc private func elementRowSelected(_ sender: NSButton) {
@@ -195,7 +251,10 @@ final class BrowserInspectorTileNSView: TileNSView {
     }
 
     private func applySelectedPanel(_ panel: BrowserInspectorPanel, notify: Bool) {
-        guard selectedPanel != panel else { return }
+        guard selectedPanel != panel else {
+            refreshPanelPlaceholder()
+            return
+        }
         selectedPanel = panel
         refreshPanelPlaceholder()
         if notify { onSelectedPanelChange?(panel) }
@@ -290,9 +349,14 @@ final class BrowserInspectorTileNSView: TileNSView {
         switch selectedPanel {
         case .elements:
             renderElementsPanel()
+        case .console:
+            renderConsolePanel()
         default:
             refreshButton.isHidden = true
+            consoleClearButton.isHidden = true
             elementsScrollView.isHidden = true
+            consoleScrollView.isHidden = true
+            clearConsoleRows()
             placeholderLabel.isHidden = false
             placeholderLabel.stringValue = Self.placeholderText(for: selectedPanel)
         }
@@ -301,6 +365,9 @@ final class BrowserInspectorTileNSView: TileNSView {
     private func renderElementsPanel() {
         guard selectedPanel == .elements else { return }
         refreshButton.isHidden = false
+        consoleClearButton.isHidden = true
+        consoleScrollView.isHidden = true
+        clearConsoleRows()
         refreshButton.isEnabled = inspectedBrowser != nil && domSnapshotProvider != nil && refreshButton.isEnabled
         clearElementRows()
 
@@ -358,9 +425,71 @@ final class BrowserInspectorTileNSView: TileNSView {
         }
     }
 
+    private func renderConsolePanel() {
+        guard selectedPanel == .console else { return }
+        refreshButton.isHidden = true
+        elementsScrollView.isHidden = true
+        consoleClearButton.isHidden = false
+        clearElementRows()
+        clearConsoleRows()
+
+        guard inspectedBrowser != nil else {
+            consoleClearButton.isEnabled = false
+            consoleScrollView.isHidden = true
+            placeholderLabel.isHidden = false
+            placeholderLabel.stringValue = "Disconnected — linked browser tile is missing."
+            return
+        }
+        guard let consoleLogProvider else {
+            consoleClearButton.isEnabled = false
+            consoleScrollView.isHidden = true
+            placeholderLabel.isHidden = false
+            placeholderLabel.stringValue = "Console log bridge is unavailable until the live browser runtime is restored."
+            return
+        }
+        guard let entries = consoleLogProvider() else {
+            consoleClearButton.isEnabled = false
+            consoleScrollView.isHidden = true
+            placeholderLabel.isHidden = false
+            placeholderLabel.stringValue = "Console log bridge is unavailable until the linked WKWebView is live."
+            return
+        }
+        consoleClearButton.isEnabled = !entries.isEmpty && consoleClearer != nil
+        guard !entries.isEmpty else {
+            consoleScrollView.isHidden = true
+            placeholderLabel.isHidden = false
+            placeholderLabel.stringValue = "No console messages captured from the linked browser yet."
+            return
+        }
+
+        placeholderLabel.isHidden = true
+        consoleScrollView.isHidden = false
+        for entry in entries {
+            let label = NSTextField(labelWithString: Self.consoleRowText(for: entry))
+            label.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            label.textColor = Self.consoleColor(for: entry.level)
+            label.lineBreakMode = .byTruncatingTail
+            label.maximumNumberOfLines = 1
+            label.translatesAutoresizingMaskIntoConstraints = false
+            consoleStack.addArrangedSubview(label)
+        }
+    }
+
+    private func clearConsoleLogEntries() {
+        _ = consoleClearer?()
+        renderConsolePanel()
+    }
+
     private func clearElementRows() {
         for view in elementsStack.arrangedSubviews {
             elementsStack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+    }
+
+    private func clearConsoleRows() {
+        for view in consoleStack.arrangedSubviews {
+            consoleStack.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
     }
@@ -383,12 +512,45 @@ final class BrowserInspectorTileNSView: TileNSView {
         case .elements:
             return "Click Refresh DOM to read a bounded snapshot from the linked WKWebView."
         case .console:
-            return "Console panel placeholder — display-only logs arrive in I03."
+            return "Console messages from the linked browser WKWebView are displayed here; JavaScript evaluation is not available."
         case .styles:
             return "Styles panel placeholder — read-only computed styles arrive in I04."
         case .network:
             return "Network panel placeholder — navigation/download event log arrives in I05."
         }
+    }
+
+    private static func consoleRowText(for entry: BrowserConsoleLogEntry) -> String {
+        let timestamp = consoleTimestampString(for: entry.timestamp)
+        let urlPart: String
+        if let url = entry.url, !url.isEmpty {
+            urlPart = " — \(url)"
+        } else {
+            urlPart = ""
+        }
+        return "[\(timestamp)] \(entry.level.rawValue.uppercased()) \(entry.message)\(urlPart)"
+    }
+
+    private static func consoleColor(for level: BrowserConsoleLogLevel) -> NSColor {
+        switch level {
+        case .error: return .systemRed
+        case .warn: return .systemYellow
+        case .debug: return .secondaryLabelColor
+        case .info: return .systemBlue
+        case .log: return .labelColor
+        }
+    }
+
+    private static func consoleTimestampString(for date: Date) -> String {
+        let millisecondsInDay = 86_400_000.0
+        let rawMilliseconds = date.timeIntervalSince1970 * 1_000
+        let dayMilliseconds = rawMilliseconds.truncatingRemainder(dividingBy: millisecondsInDay)
+        let normalized = Int(dayMilliseconds < 0 ? dayMilliseconds + millisecondsInDay : dayMilliseconds)
+        let hours = normalized / 3_600_000
+        let minutes = (normalized / 60_000) % 60
+        let seconds = (normalized / 1_000) % 60
+        let milliseconds = normalized % 1_000
+        return String(format: "%02d:%02d:%02d.%03d", hours, minutes, seconds, milliseconds)
     }
 
     private static func rowText(for node: BrowserDOMNodeSnapshot) -> String {

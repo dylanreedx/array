@@ -197,6 +197,24 @@ do {
     expect((try? PasswordVaultStoragePolicy.validateStorage(scope: StoredCredentialScope(scheme: "https", host: "example.com", port: 0))) == nil, "invalid credential scope ports should reject")
 }
 
+// MARK: - Browser inspector console log buffer
+
+do {
+    let base = Date(timeIntervalSince1970: 1_800_000_000)
+    var buffer = BrowserConsoleLogBuffer(capacity: 3)
+    buffer.append(BrowserConsoleLogEntry(level: .debug, message: "evicted", timestamp: base, url: nil))
+    buffer.append(BrowserConsoleLogEntry(level: .log, message: "one", timestamp: base.addingTimeInterval(1), url: "https://example.test/one"))
+    buffer.append(BrowserConsoleLogEntry(level: .warn, message: "two", timestamp: base.addingTimeInterval(2), url: nil))
+    buffer.append(BrowserConsoleLogEntry(level: .error, message: "three", timestamp: base.addingTimeInterval(3), url: nil))
+    expect(buffer.entries.map(\.message) == ["one", "two", "three"], "console buffer keeps newest entries only")
+    expect(BrowserConsoleLogLevel.normalized("WARN") == .warn, "console levels normalize bridge payload case")
+    let consoleSecret = "CoreConsoleSecret-123"
+    let redacted = SecretRedactor.redact("console password=\(consoleSecret) token=abc123", explicitSecrets: [consoleSecret, "abc123"])
+    expect(!redacted.contains(consoleSecret) && !redacted.contains("abc123"), "console artifact redaction removes obvious secrets")
+    buffer.clear()
+    expect(buffer.entries.isEmpty, "console buffer clear empties entries")
+}
+
 // MARK: - Browser tab model/schema
 
 do {

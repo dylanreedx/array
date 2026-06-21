@@ -772,7 +772,9 @@ final class TileSpawner {
             inspectorState: inspectorState,
             inspectedBrowser: summary,
             domSnapshotProvider: browserInspectorDOMSnapshotProvider(for: browserTileId),
-            domHighlighter: browserInspectorDOMHighlighter(for: browserTileId)
+            domHighlighter: browserInspectorDOMHighlighter(for: browserTileId),
+            consoleLogProvider: browserInspectorConsoleLogProvider(for: browserTileId),
+            consoleClearer: browserInspectorConsoleClearer(for: browserTileId)
         )
         view.onSelectedPanelChange = { [weak self] panel in
             try? self?.updateBrowserInspectorPanel(inspectorTileId: inspectorTileId, selectedPanel: panel)
@@ -799,7 +801,9 @@ final class TileSpawner {
             inspectorState: inspectorState,
             inspectedBrowser: summary,
             domSnapshotProvider: inspectorState.map { browserInspectorDOMSnapshotProvider(for: $0.inspectedBrowserTileId) },
-            domHighlighter: inspectorState.map { browserInspectorDOMHighlighter(for: $0.inspectedBrowserTileId) }
+            domHighlighter: inspectorState.map { browserInspectorDOMHighlighter(for: $0.inspectedBrowserTileId) },
+            consoleLogProvider: inspectorState.map { browserInspectorConsoleLogProvider(for: $0.inspectedBrowserTileId) },
+            consoleClearer: inspectorState.map { browserInspectorConsoleClearer(for: $0.inspectedBrowserTileId) }
         )
         let inspectorTileId = tile.id
         view.onSelectedPanelChange = { [weak self] panel in
@@ -825,6 +829,20 @@ final class TileSpawner {
                 return
             }
             browserView.highlightDOMNodeForInspector(path: nodePath, completion: completion)
+        }
+    }
+
+    private func browserInspectorConsoleLogProvider(for browserTileId: UUID) -> BrowserInspectorTileNSView.ConsoleLogProvider {
+        { [weak self] in
+            guard let browserView = self?.canvasView?.tileView(for: browserTileId) as? BrowserTileNSView else { return nil }
+            return browserView.consoleLogEntriesForInspector()
+        }
+    }
+
+    private func browserInspectorConsoleClearer(for browserTileId: UUID) -> BrowserInspectorTileNSView.ConsoleClearer {
+        { [weak self] in
+            guard let browserView = self?.canvasView?.tileView(for: browserTileId) as? BrowserTileNSView else { return false }
+            return browserView.clearConsoleLogEntriesForInspector()
         }
     }
 
@@ -4402,6 +4420,187 @@ final class TileSpawner {
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runBrowserInspectorConsoleSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { if case let .failed(message) = self { return message }; return "failed" }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func waitUntil(_ timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if condition() { return true }
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.03))
+            }
+            return condition()
+        }
+        func timestamp() -> String {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyyMMdd-HHmmss"
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            return formatter.string(from: Date())
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-browser-inspector-console-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let profile = BrowserProfile.builtInDefault()
+        let project = Project(
+            id: UUID(),
+            name: "browser-inspector-console-check",
+            rootPath: tempRoot.path,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 1),
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning,
+                defaultBrowserProfileId: profile.id
+            )
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        canvas.frame = NSRect(x: 0, y: 0, width: 1_120, height: 620)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_120, height: 620),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+
+        let spawner = TileSpawner(
+            canvasView: canvas,
+            ghostty: nil,
+            browserEngine: BrowserEngineContext(),
+            projectStore: store,
+            project: project,
+            browserProfiles: [profile]
+        )
+
+        let fixtureSecret = "I03-Fixture-Secret-\(UUID().uuidString)"
+        let fixtureToken = "I03-Fixture-Token-\(UUID().uuidString)"
+        let html = """
+        <!doctype html>
+        <html>
+          <head><meta charset="utf-8"><title>Console QA</title></head>
+          <body>
+            <h1>Console QA</h1>
+            <script>
+              for (let i = 0; i < 20; i++) { console.debug('evicted-debug-' + i); }
+              console.log('captured-log ready');
+              console.warn('captured-warn warning-object', {kind: 'warning'});
+              console.error('captured-error password=\(fixtureSecret) token=\(fixtureToken)');
+              for (let i = 0; i < 497; i++) { console.info('tail-info-' + i); }
+            </script>
+          </body>
+        </html>
+        """
+        let fixtureURL = tempRoot.appendingPathComponent("console-fixture.html", isDirectory: false)
+        try Data(html.utf8).write(to: fixtureURL, options: .atomic)
+
+        let browserRuntime: WKWebViewBrowserRuntime
+        switch spawner.spawnBrowser(url: fixtureURL.absoluteString) {
+        case let .spawned(runtime):
+            browserRuntime = runtime
+        case let .invalidURL(url):
+            throw CheckError.failed("browser spawn rejected URL \(url)")
+        case let .failure(error):
+            throw error
+        }
+        defer { browserRuntime.terminate(policy: .requestClose) }
+
+        try expect(waitUntil { browserRuntime.title == "Console QA" || !browserRuntime.webView.isLoading }, "browser console fixture did not finish loading")
+        try expect(waitUntil { browserRuntime.consoleLogEntries.count == BrowserConsoleLogBuffer.defaultCapacity }, "console events did not reach the app buffer through WKScriptMessageHandler")
+        let entriesBeforeClear = browserRuntime.consoleLogEntries
+        let requiredLevels: [BrowserConsoleLogLevel] = [.log, .warn, .error]
+        let levelsCaptured = requiredLevels.filter { level in entriesBeforeClear.contains { $0.level == level } }.map(\.rawValue)
+        let eventsReachAppBuffer = requiredLevels.allSatisfy { level in entriesBeforeClear.contains { $0.level == level } }
+        let bufferCapEnforced = entriesBeforeClear.count == BrowserConsoleLogBuffer.defaultCapacity
+            && browserRuntime.consoleLogCapacity == BrowserConsoleLogBuffer.defaultCapacity
+            && entriesBeforeClear.first?.message.contains("captured-log") == true
+            && !entriesBeforeClear.contains { $0.message.contains("evicted-debug-") }
+        let realWKWebViewMessageHandler = browserRuntime.consoleBridgeUserScriptInstalledForQA
+            && browserRuntime.consoleMessageHandlerEventCountForQA >= BrowserConsoleLogBuffer.defaultCapacity
+            && browserRuntime.webView.url?.isFileURL == true
+        try expect(eventsReachAppBuffer, "log/warn/error messages were not captured in the app buffer")
+        try expect(bufferCapEnforced, "console buffer did not keep the newest 500 messages")
+        try expect(realWKWebViewMessageHandler, "console check did not use the real WKWebView message handler")
+
+        let inspectorTileId: UUID
+        switch spawner.spawnBrowserInspector(for: browserRuntime.tileId) {
+        case let .spawned(tileId):
+            inspectorTileId = tileId
+        case .notBrowserTile:
+            throw CheckError.failed("spawnBrowserInspector rejected the browser tile")
+        case let .failure(error):
+            throw error
+        }
+        guard let inspectorView = canvas.tileView(for: inspectorTileId) as? BrowserInspectorTileNSView else {
+            throw CheckError.failed("spawned inspector did not install BrowserInspectorTileNSView")
+        }
+        inspectorView.selectPanelForQA(.console)
+        let consolePanelDisplayedMessages = inspectorView.consoleVisibleRowCountForQA == BrowserConsoleLogBuffer.defaultCapacity
+            && inspectorView.consoleRowTextsForQA.contains(where: { $0.contains("captured-log ready") })
+            && inspectorView.consoleRowTextsForQA.contains(where: { $0.contains("captured-warn") })
+            && inspectorView.consoleRowTextsForQA.contains(where: { $0.contains("captured-error") })
+            && inspectorView.consoleClearEnabledForQA
+        try expect(consolePanelDisplayedMessages, "inspector Console panel did not render captured log/warn/error rows")
+
+        inspectorView.clearConsoleForQA()
+        let clearWorked = browserRuntime.consoleLogEntries.isEmpty
+            && inspectorView.consoleVisibleRowCountForQA == 0
+            && inspectorView.consoleStatusTextForQA.contains("No console messages")
+        try expect(clearWorked, "Console panel clear button did not clear the browser/inspector buffer")
+
+        let redactedSampleMessages = entriesBeforeClear
+            .filter { requiredLevels.contains($0.level) }
+            .prefix(10)
+            .map { SecretRedactor.redact($0.message, explicitSecrets: [fixtureSecret, fixtureToken]) }
+        let redactedContainsSecret = redactedSampleMessages.contains { $0.contains(fixtureSecret) || $0.contains(fixtureToken) }
+        try expect(!redactedContainsSecret, "redacted console samples still contain the fixture secret")
+
+        let artifactDir = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp(), isDirectory: true)
+            .appendingPathComponent("browser-inspector-console", isDirectory: true)
+        try fileManager.createDirectory(at: artifactDir, withIntermediateDirectories: true)
+        let artifact = artifactDir.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "browser-inspector-console",
+            "realWKWebViewMessageHandler": realWKWebViewMessageHandler,
+            "levelsCaptured": levelsCaptured,
+            "bufferCap": BrowserConsoleLogBuffer.defaultCapacity,
+            "bufferCountBeforeClear": entriesBeforeClear.count,
+            "messageHandlerEventCount": browserRuntime.consoleMessageHandlerEventCountForQA,
+            "consolePanelDisplayedMessages": consolePanelDisplayedMessages,
+            "clearWorked": clearWorked,
+            "artifactSecretFree": true,
+            "redactedSampleMessages": Array(redactedSampleMessages),
+            "rawConsoleLogsPersistedAcrossRestart": false,
+            "javascriptEvaluationPromptAvailable": false
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        let written = try String(contentsOf: artifact, encoding: .utf8)
+        let artifactSecretFree = !written.contains(fixtureSecret) && !written.contains(fixtureToken)
+        try expect(artifactSecretFree, "console QA artifact contains an unredacted fixture secret")
         return artifact
     }
 

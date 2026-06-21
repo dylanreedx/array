@@ -564,6 +564,18 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         runtime.highlightDOMNode(path: path, durationMilliseconds: 1_500, completion: completion)
     }
 
+    func consoleLogEntriesForInspector() -> [BrowserConsoleLogEntry]? {
+        guard let runtime = runtime as? WKWebViewBrowserRuntime else { return nil }
+        return runtime.consoleLogEntries
+    }
+
+    @discardableResult
+    func clearConsoleLogEntriesForInspector() -> Bool {
+        guard let runtime = runtime as? WKWebViewBrowserRuntime else { return false }
+        runtime.clearConsoleLogEntries()
+        return true
+    }
+
     private static func inspectorRuntimeError(_ message: String) -> NSError {
         NSError(domain: "ContinuumBrowserInspector", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }

@@ -24,6 +24,36 @@ protocol BrowserUIDialogPresenting: AnyObject {
     func presentTLSChallengePrompt(host: String, window: NSWindow?, completion: @escaping (Bool) -> Void)
 }
 
+private struct PendingBrowserConsoleLogPayload: Sendable {
+    var level: String
+    var message: String
+    var href: String?
+    var timestampMilliseconds: Double?
+}
+
+private func parsePendingBrowserConsoleLogPayload(_ body: Any) -> PendingBrowserConsoleLogPayload? {
+    guard let dictionary = body as? [String: Any] else { return nil }
+    let level = dictionary["level"] as? String ?? "log"
+    let message: String
+    if let args = dictionary["args"] as? String {
+        message = args
+    } else if let value = dictionary["message"] {
+        message = String(describing: value)
+    } else {
+        message = ""
+    }
+    let href = dictionary["href"] as? String
+    let timestampMilliseconds: Double?
+    if let number = dictionary["ts"] as? NSNumber {
+        timestampMilliseconds = number.doubleValue
+    } else if let double = dictionary["ts"] as? Double {
+        timestampMilliseconds = double
+    } else {
+        timestampMilliseconds = nil
+    }
+    return PendingBrowserConsoleLogPayload(level: level, message: message, href: href, timestampMilliseconds: timestampMilliseconds)
+}
+
 @MainActor
 final class AppKitBrowserUIDialogPresenter: BrowserUIDialogPresenting {
     func presentJavaScriptAlert(message: String, window: NSWindow?, completion: @escaping () -> Void) {
@@ -158,8 +188,13 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
     private let uiDialogPresenter: BrowserUIDialogPresenting
     private var observers: [NSKeyValueObservation] = []
     private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
+    private var consoleLogBuffer = BrowserConsoleLogBuffer()
+    private let consoleMessageHandlerName: String
     private(set) var domSnapshotEvaluationCountForQA = 0
     private(set) var domHighlightEvaluationCountForQA = 0
+    private(set) var consoleMessageHandlerEventCountForQA = 0
+    private(set) var consoleBridgeUserScriptInstalledForQA = false
+    var onConsoleLogBufferChange: (() -> Void)?
     var reservedShortcutHandler: ((NSEvent) -> Bool)? {
         didSet { hostView?.reservedShortcutHandler = reservedShortcutHandler }
     }
@@ -177,10 +212,67 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         self.uiDialogPresenter = uiDialogPresenter
         self.url = initialURL
         self.title = ""
+        self.consoleMessageHandlerName = Self.makeConsoleMessageHandlerName(id: id)
         super.init()
+        installConsoleBridge()
         webView.navigationDelegate = self
         webView.uiDelegate = self
         installObservers()
+    }
+
+    private func installConsoleBridge() {
+        let controller = webView.configuration.userContentController
+        let script = WKUserScript(
+            source: Self.consoleBridgeScript(handlerName: consoleMessageHandlerName),
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        )
+        controller.addUserScript(script)
+        controller.add(self, name: consoleMessageHandlerName)
+        consoleBridgeUserScriptInstalledForQA = true
+    }
+
+    private static func makeConsoleMessageHandlerName(id: BrowserRuntimeID) -> String {
+        "continuumConsole" + id.uuidString.replacingOccurrences(of: "-", with: "")
+    }
+
+    private static func consoleBridgeScript(handlerName: String) -> String {
+        """
+        (function() {
+          const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers['\(handlerName)'];
+          if (!handler || window.__continuumConsoleBridgeInstalled) return;
+          window.__continuumConsoleBridgeInstalled = true;
+          const levels = ['log', 'info', 'warn', 'error', 'debug'];
+          function stringify(value) {
+            try {
+              if (typeof value === 'string') return value;
+              if (value instanceof Error) return value.stack || value.message || String(value);
+              if (typeof value === 'object' && value !== null) {
+                const json = JSON.stringify(value);
+                return json === undefined ? String(value) : json;
+              }
+              return String(value);
+            } catch (_) {
+              try { return String(value); } catch (_) { return '<unprintable>'; }
+            }
+          }
+          for (const level of levels) {
+            const original = console[level];
+            if (typeof original !== 'function') continue;
+            console[level] = function(...args) {
+              try {
+                handler.postMessage({
+                  level: level,
+                  args: args.map(stringify).join(' '),
+                  href: location.href,
+                  ts: Date.now()
+                });
+              } catch (_) {}
+              return original.apply(console, args);
+            };
+          }
+        })();
+        """
     }
 
     private func installObservers() {
@@ -500,6 +592,33 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         NSError(domain: "ContinuumBrowserDOMSnapshot", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
+    var consoleLogEntries: [BrowserConsoleLogEntry] { consoleLogBuffer.entries }
+    var consoleLogCapacity: Int { consoleLogBuffer.capacity }
+
+    func clearConsoleLogEntries() {
+        consoleLogBuffer.clear()
+        onConsoleLogBufferChange?()
+    }
+
+    private func receiveConsoleMessage(name: String, payload: PendingBrowserConsoleLogPayload?) {
+        guard name == consoleMessageHandlerName, let payload else { return }
+        let timestamp: Date
+        if let milliseconds = payload.timestampMilliseconds, milliseconds.isFinite, milliseconds > 0 {
+            timestamp = Date(timeIntervalSince1970: milliseconds / 1_000)
+        } else {
+            timestamp = Date()
+        }
+        let entry = BrowserConsoleLogEntry(
+            level: BrowserConsoleLogLevel.normalized(payload.level),
+            message: payload.message,
+            timestamp: timestamp,
+            url: payload.href?.isEmpty == false ? payload.href : nil
+        )
+        consoleMessageHandlerEventCountForQA += 1
+        consoleLogBuffer.append(entry)
+        onConsoleLogBufferChange?()
+    }
+
     func focus() {
         webView.window?.makeFirstResponder(webView)
     }
@@ -530,11 +649,13 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         cancelActiveDownloads()
         observers.forEach { $0.invalidate() }
         observers.removeAll()
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: consoleMessageHandlerName)
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
         webView.removeFromSuperview()
         hostView = nil
         onStateChange = nil
+        onConsoleLogBufferChange = nil
     }
 
     /// Captures the opaque WKWebView interactionState blob (back/forward history,
@@ -547,6 +668,17 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
     /// restoring back/forward history, scroll position, and form state.
     func restoreInteractionState(_ data: Data) {
         webView.interactionState = data
+    }
+}
+
+extension WKWebViewBrowserRuntime: WKScriptMessageHandler {
+    nonisolated func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        MainActor.assumeIsolated {
+            self.receiveConsoleMessage(
+                name: message.name,
+                payload: parsePendingBrowserConsoleLogPayload(message.body)
+            )
+        }
     }
 }
 
