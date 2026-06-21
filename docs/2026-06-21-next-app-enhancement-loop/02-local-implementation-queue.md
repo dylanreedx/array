@@ -29,7 +29,7 @@ Rules:
   Source ticket: `T04-browser-inspector-styles.md`.
   Required output: selected-node computed style whitelist, read-only, artifact.
 
-- [ ] I05 — Browser Inspector Network-lite log
+- [x] I05 — Browser Inspector Network-lite log
   Source ticket: `T05-browser-inspector-network-lite.md`.
   Required output: honest navigation/download/child-open event log; no fake HTTP methods/status; artifact.
 

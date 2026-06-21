@@ -577,6 +577,11 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         return runtime.consoleLogEntries
     }
 
+    func networkLiteEventsForInspector() -> [BrowserNetworkLiteEvent]? {
+        guard let runtime = runtime as? WKWebViewBrowserRuntime else { return nil }
+        return runtime.networkLiteEvents
+    }
+
     @discardableResult
     func clearConsoleLogEntriesForInspector() -> Bool {
         guard let runtime = runtime as? WKWebViewBrowserRuntime else { return false }

@@ -188,14 +188,20 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
     private let uiDialogPresenter: BrowserUIDialogPresenting
     private var observers: [NSKeyValueObservation] = []
     private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
+    private var downloadsWithRecordedNetworkEvent: Set<ObjectIdentifier> = []
     private var consoleLogBuffer = BrowserConsoleLogBuffer()
+    private var networkLiteEventBuffer = BrowserNetworkLiteEventBuffer()
+    private var pendingMainFrameRequestURL: String?
+    private var pendingMainFrameStatusCode: Int?
     private let consoleMessageHandlerName: String
     private(set) var domSnapshotEvaluationCountForQA = 0
     private(set) var domHighlightEvaluationCountForQA = 0
     private(set) var domComputedStyleEvaluationCountForQA = 0
     private(set) var consoleMessageHandlerEventCountForQA = 0
+    private(set) var networkLiteDelegateEventCountForQA = 0
     private(set) var consoleBridgeUserScriptInstalledForQA = false
     var onConsoleLogBufferChange: (() -> Void)?
+    var onNetworkLiteEventBufferChange: (() -> Void)?
     var reservedShortcutHandler: ((NSEvent) -> Bool)? {
         didSet { hostView?.reservedShortcutHandler = reservedShortcutHandler }
     }
@@ -673,6 +679,47 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         onConsoleLogBufferChange?()
     }
 
+    var networkLiteEvents: [BrowserNetworkLiteEvent] { networkLiteEventBuffer.entries }
+    var networkLiteEventCapacity: Int { networkLiteEventBuffer.capacity }
+
+    func clearNetworkLiteEvents() {
+        networkLiteEventBuffer.clear()
+        onNetworkLiteEventBufferChange?()
+    }
+
+    private func appendNetworkLiteEvent(
+        kind: BrowserNetworkLiteEventKind,
+        url explicitURL: String? = nil,
+        statusCode: Int? = nil,
+        errorDescription: String? = nil
+    ) {
+        let event = BrowserNetworkLiteEvent(
+            tileId: tileId,
+            kind: kind,
+            url: networkLiteURL(explicitURL),
+            timestamp: Date(),
+            statusCode: statusCode,
+            errorDescription: errorDescription
+        )
+        networkLiteDelegateEventCountForQA += 1
+        networkLiteEventBuffer.append(event)
+        onNetworkLiteEventBufferChange?()
+    }
+
+    private func recordDownloadStartedIfNeeded(_ download: WKDownload, url: String?, statusCode: Int? = nil) {
+        let id = ObjectIdentifier(download)
+        guard !downloadsWithRecordedNetworkEvent.contains(id) else { return }
+        downloadsWithRecordedNetworkEvent.insert(id)
+        appendNetworkLiteEvent(kind: .downloadStarted, url: url, statusCode: statusCode)
+    }
+
+    private func networkLiteURL(_ explicitURL: String?) -> String {
+        if let explicitURL, !explicitURL.isEmpty { return explicitURL }
+        if let webViewURL = webView.url?.absoluteString, !webViewURL.isEmpty { return webViewURL }
+        if !url.isEmpty { return url }
+        return ""
+    }
+
     private func receiveConsoleMessage(name: String, payload: PendingBrowserConsoleLogPayload?) {
         guard name == consoleMessageHandlerName, let payload else { return }
         let timestamp: Date
@@ -729,6 +776,7 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         hostView = nil
         onStateChange = nil
         onConsoleLogBufferChange = nil
+        onNetworkLiteEventBufferChange = nil
     }
 
     /// Captures the opaque WKWebView interactionState blob (back/forward history,
@@ -756,8 +804,38 @@ extension WKWebViewBrowserRuntime: WKScriptMessageHandler {
 }
 
 extension WKWebViewBrowserRuntime: WKNavigationDelegate {
+    nonisolated func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
+        MainActor.assumeIsolated {
+            if navigationAction.targetFrame?.isMainFrame == true {
+                self.pendingMainFrameRequestURL = navigationAction.request.url?.absoluteString
+            }
+            if #available(macOS 11.3, *), navigationAction.shouldPerformDownload {
+                decisionHandler(.download)
+            } else {
+                decisionHandler(.allow)
+            }
+        }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        Task { @MainActor in
+            let startedURL = self.pendingMainFrameRequestURL
+            self.pendingMainFrameRequestURL = nil
+            self.pendingMainFrameStatusCode = nil
+            self.appendNetworkLiteEvent(kind: .navigationStarted, url: startedURL)
+        }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        Task { @MainActor in
+            self.appendNetworkLiteEvent(kind: .committed, statusCode: self.pendingMainFrameStatusCode)
+        }
+    }
+
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         Task { @MainActor in
+            self.appendNetworkLiteEvent(kind: .finished, statusCode: self.pendingMainFrameStatusCode)
+            self.pendingMainFrameStatusCode = nil
             self.loadingState = .idle
             self.refreshFaviconURL(for: self.url)
             self.onStateChange?()
@@ -767,6 +845,8 @@ extension WKWebViewBrowserRuntime: WKNavigationDelegate {
     nonisolated func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         let message = error.localizedDescription
         Task { @MainActor in
+            self.appendNetworkLiteEvent(kind: .failed, statusCode: self.pendingMainFrameStatusCode, errorDescription: message)
+            self.pendingMainFrameStatusCode = nil
             self.loadingState = .failed(message: message)
             self.onStateChange?()
         }
@@ -775,6 +855,10 @@ extension WKWebViewBrowserRuntime: WKNavigationDelegate {
     nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         let message = error.localizedDescription
         Task { @MainActor in
+            let failedURL = self.pendingMainFrameRequestURL
+            self.pendingMainFrameRequestURL = nil
+            self.appendNetworkLiteEvent(kind: .failed, url: failedURL, statusCode: self.pendingMainFrameStatusCode, errorDescription: message)
+            self.pendingMainFrameStatusCode = nil
             self.loadingState = .failed(message: message)
             self.onStateChange?()
         }
@@ -792,12 +876,22 @@ extension WKWebViewBrowserRuntime: WKNavigationDelegate {
 
     @available(macOS 11.3, *)
     nonisolated func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
-        MainActor.assumeIsolated { self.beginDownload(download) }
+        MainActor.assumeIsolated {
+            self.recordDownloadStartedIfNeeded(download, url: navigationAction.request.url?.absoluteString)
+            self.beginDownload(download)
+        }
     }
 
     @available(macOS 11.3, *)
     nonisolated func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
-        MainActor.assumeIsolated { self.beginDownload(download) }
+        MainActor.assumeIsolated {
+            self.recordDownloadStartedIfNeeded(
+                download,
+                url: navigationResponse.response.url?.absoluteString,
+                statusCode: (navigationResponse.response as? HTTPURLResponse)?.statusCode
+            )
+            self.beginDownload(download)
+        }
     }
 
     nonisolated func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping @MainActor @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
@@ -808,7 +902,10 @@ extension WKWebViewBrowserRuntime: WKNavigationDelegate {
 
     @available(macOS 11.3, *)
     nonisolated func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
-        Task { @MainActor in
+        MainActor.assumeIsolated {
+            if navigationResponse.isForMainFrame {
+                self.pendingMainFrameStatusCode = (navigationResponse.response as? HTTPURLResponse)?.statusCode
+            }
             if navigationResponse.response.suggestedFilename != nil, !navigationResponse.canShowMIMEType {
                 decisionHandler(.download)
             } else {
@@ -833,17 +930,22 @@ extension WKWebViewBrowserRuntime: WKDownloadDelegate {
     }
 
     func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String, completionHandler: @escaping @MainActor @Sendable (URL?) -> Void) {
+        recordDownloadStartedIfNeeded(download, url: response.url?.absoluteString, statusCode: (response as? HTTPURLResponse)?.statusCode)
         handleDownloadDestination(suggestedFilename: suggestedFilename, completion: completionHandler)
     }
 
     func downloadDidFinish(_ download: WKDownload) {
-        activeDownloads.removeValue(forKey: ObjectIdentifier(download))
+        let id = ObjectIdentifier(download)
+        activeDownloads.removeValue(forKey: id)
+        downloadsWithRecordedNetworkEvent.remove(id)
         loadingState = activeDownloads.isEmpty ? .idle : .loading(progress: 0)
         onStateChange?()
     }
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
-        activeDownloads.removeValue(forKey: ObjectIdentifier(download))
+        let id = ObjectIdentifier(download)
+        activeDownloads.removeValue(forKey: id)
+        downloadsWithRecordedNetworkEvent.remove(id)
         loadingState = .failed(message: error.localizedDescription)
         onStateChange?()
     }
@@ -858,6 +960,7 @@ extension WKWebViewBrowserRuntime {
             }
         }
         activeDownloads.removeAll()
+        downloadsWithRecordedNetworkEvent.removeAll()
     }
 
     func handleDownloadDestination(suggestedFilename: String, completion: @escaping (URL?) -> Void) {
@@ -956,7 +1059,11 @@ extension WKWebViewBrowserRuntime: WKUIDelegate {
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         guard navigationAction.targetFrame == nil else { return nil }
-        return onNewWindowRequest?(navigationAction.request, configuration, navigationAction, windowFeatures)
+        let childWebView = onNewWindowRequest?(navigationAction.request, configuration, navigationAction, windowFeatures)
+        if childWebView != nil {
+            appendNetworkLiteEvent(kind: .childOpened, url: navigationAction.request.url?.absoluteString)
+        }
+        return childWebView
     }
 }
 

@@ -19,6 +19,7 @@ final class BrowserInspectorTileNSView: TileNSView {
     typealias ComputedStyleProvider = (String, @escaping (Result<BrowserComputedStyleSnapshot, Error>) -> Void) -> Void
     typealias ConsoleLogProvider = () -> [BrowserConsoleLogEntry]?
     typealias ConsoleClearer = () -> Bool
+    typealias NetworkLiteEventProvider = () -> [BrowserNetworkLiteEvent]?
 
     var onSelectedPanelChange: ((BrowserInspectorPanel) -> Void)?
 
@@ -29,6 +30,7 @@ final class BrowserInspectorTileNSView: TileNSView {
     private let computedStyleProvider: ComputedStyleProvider?
     private let consoleLogProvider: ConsoleLogProvider?
     private let consoleClearer: ConsoleClearer?
+    private let networkLiteEventProvider: NetworkLiteEventProvider?
     private let titleLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "")
@@ -42,6 +44,8 @@ final class BrowserInspectorTileNSView: TileNSView {
     private let stylesStack = NSStackView()
     private let consoleScrollView = NSScrollView()
     private let consoleStack = NSStackView()
+    private let networkScrollView = NSScrollView()
+    private let networkStack = NSStackView()
     private var selectedPanel: BrowserInspectorPanel
     private var domSnapshot: BrowserDOMSnapshot?
     private var selectedDOMNodeID: String?
@@ -57,7 +61,8 @@ final class BrowserInspectorTileNSView: TileNSView {
         domHighlighter: DOMHighlighter? = nil,
         computedStyleProvider: ComputedStyleProvider? = nil,
         consoleLogProvider: ConsoleLogProvider? = nil,
-        consoleClearer: ConsoleClearer? = nil
+        consoleClearer: ConsoleClearer? = nil,
+        networkLiteEventProvider: NetworkLiteEventProvider? = nil
     ) {
         self.inspectorState = inspectorState
         self.inspectedBrowser = inspectedBrowser
@@ -66,6 +71,7 @@ final class BrowserInspectorTileNSView: TileNSView {
         self.computedStyleProvider = computedStyleProvider
         self.consoleLogProvider = consoleLogProvider
         self.consoleClearer = consoleClearer
+        self.networkLiteEventProvider = networkLiteEventProvider
         self.selectedPanel = inspectorState?.selectedPanel ?? .elements
         self.panelControl = NSSegmentedControl(
             labels: BrowserInspectorPanel.allCases.map(Self.label(for:)),
@@ -154,6 +160,19 @@ final class BrowserInspectorTileNSView: TileNSView {
         consoleScrollView.documentView = consoleStack
         consoleScrollView.translatesAutoresizingMaskIntoConstraints = false
 
+        networkStack.orientation = .vertical
+        networkStack.spacing = 4
+        networkStack.alignment = .leading
+        networkStack.distribution = .fill
+        networkStack.translatesAutoresizingMaskIntoConstraints = false
+
+        networkScrollView.drawsBackground = false
+        networkScrollView.hasVerticalScroller = true
+        networkScrollView.hasHorizontalScroller = true
+        networkScrollView.borderType = .noBorder
+        networkScrollView.documentView = networkStack
+        networkScrollView.translatesAutoresizingMaskIntoConstraints = false
+
         let headerStack = NSStackView(views: [titleLabel, detailLabel, statusLabel])
         headerStack.orientation = .vertical
         headerStack.spacing = 3
@@ -167,6 +186,7 @@ final class BrowserInspectorTileNSView: TileNSView {
         body.addSubview(elementsScrollView)
         body.addSubview(stylesScrollView)
         body.addSubview(consoleScrollView)
+        body.addSubview(networkScrollView)
         body.addSubview(placeholderLabel)
 
         NSLayoutConstraint.activate([
@@ -211,6 +231,15 @@ final class BrowserInspectorTileNSView: TileNSView {
             consoleStack.leadingAnchor.constraint(equalTo: consoleScrollView.contentView.leadingAnchor),
             consoleStack.trailingAnchor.constraint(greaterThanOrEqualTo: consoleScrollView.contentView.trailingAnchor),
 
+            networkScrollView.topAnchor.constraint(equalTo: panelControl.bottomAnchor, constant: 12),
+            networkScrollView.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16),
+            networkScrollView.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -16),
+            networkScrollView.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -16),
+
+            networkStack.topAnchor.constraint(equalTo: networkScrollView.contentView.topAnchor),
+            networkStack.leadingAnchor.constraint(equalTo: networkScrollView.contentView.leadingAnchor),
+            networkStack.trailingAnchor.constraint(greaterThanOrEqualTo: networkScrollView.contentView.trailingAnchor),
+
             placeholderLabel.topAnchor.constraint(equalTo: panelControl.bottomAnchor, constant: 20),
             placeholderLabel.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 24),
             placeholderLabel.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -24),
@@ -242,6 +271,9 @@ final class BrowserInspectorTileNSView: TileNSView {
     var consoleVisibleRowCountForQA: Int { consoleStack.arrangedSubviews.count }
     var consoleStatusTextForQA: String { placeholderLabel.stringValue }
     var consoleClearEnabledForQA: Bool { consoleClearButton.isEnabled }
+    var networkRowTextsForQA: [String] { networkStack.arrangedSubviews.compactMap { ($0 as? NSTextField)?.stringValue } }
+    var networkVisibleRowCountForQA: Int { networkStack.arrangedSubviews.count }
+    var networkStatusTextForQA: String { placeholderLabel.stringValue }
 
     func selectPanelForQA(_ panel: BrowserInspectorPanel) {
         panelControl.selectedSegment = Self.segmentIndex(for: panel)
@@ -395,16 +427,8 @@ final class BrowserInspectorTileNSView: TileNSView {
             renderConsolePanel()
         case .styles:
             renderStylesPanel()
-        default:
-            refreshButton.isHidden = true
-            consoleClearButton.isHidden = true
-            elementsScrollView.isHidden = true
-            stylesScrollView.isHidden = true
-            consoleScrollView.isHidden = true
-            clearStyleRows()
-            clearConsoleRows()
-            placeholderLabel.isHidden = false
-            placeholderLabel.stringValue = Self.placeholderText(for: selectedPanel)
+        case .network:
+            renderNetworkPanel()
         }
     }
 
@@ -414,8 +438,10 @@ final class BrowserInspectorTileNSView: TileNSView {
         consoleClearButton.isHidden = true
         stylesScrollView.isHidden = true
         consoleScrollView.isHidden = true
+        networkScrollView.isHidden = true
         clearStyleRows()
         clearConsoleRows()
+        clearNetworkRows()
         refreshButton.isEnabled = inspectedBrowser != nil && domSnapshotProvider != nil && refreshButton.isEnabled
         clearElementRows()
 
@@ -524,8 +550,10 @@ final class BrowserInspectorTileNSView: TileNSView {
         consoleClearButton.isHidden = true
         elementsScrollView.isHidden = true
         consoleScrollView.isHidden = true
+        networkScrollView.isHidden = true
         clearElementRows()
         clearConsoleRows()
+        clearNetworkRows()
         clearStyleRows()
 
         guard inspectedBrowser != nil else {
@@ -578,9 +606,11 @@ final class BrowserInspectorTileNSView: TileNSView {
         refreshButton.isHidden = true
         elementsScrollView.isHidden = true
         stylesScrollView.isHidden = true
+        networkScrollView.isHidden = true
         consoleClearButton.isHidden = false
         clearElementRows()
         clearStyleRows()
+        clearNetworkRows()
         clearConsoleRows()
 
         guard inspectedBrowser != nil else {
@@ -625,6 +655,59 @@ final class BrowserInspectorTileNSView: TileNSView {
         }
     }
 
+    private func renderNetworkPanel() {
+        guard selectedPanel == .network else { return }
+        refreshButton.isHidden = true
+        consoleClearButton.isHidden = true
+        elementsScrollView.isHidden = true
+        stylesScrollView.isHidden = true
+        consoleScrollView.isHidden = true
+        clearElementRows()
+        clearStyleRows()
+        clearConsoleRows()
+        clearNetworkRows()
+
+        guard inspectedBrowser != nil else {
+            networkScrollView.isHidden = true
+            placeholderLabel.isHidden = false
+            placeholderLabel.stringValue = "Disconnected — linked browser tile is missing."
+            return
+        }
+        guard let networkLiteEventProvider else {
+            networkScrollView.isHidden = true
+            placeholderLabel.isHidden = false
+            placeholderLabel.stringValue = "Network-lite events are unavailable until the live browser runtime is restored."
+            return
+        }
+        guard let events = networkLiteEventProvider() else {
+            networkScrollView.isHidden = true
+            placeholderLabel.isHidden = false
+            placeholderLabel.stringValue = "Network-lite events are unavailable until the linked WKWebView is live."
+            return
+        }
+
+        placeholderLabel.isHidden = true
+        networkScrollView.isHidden = false
+        addNetworkRow(Self.networkLiteScopeText(), color: .secondaryLabelColor)
+        guard !events.isEmpty else {
+            addNetworkRow("No navigation, download, or child-window events captured from the linked browser yet.", color: .secondaryLabelColor)
+            return
+        }
+        for event in events {
+            addNetworkRow(Self.networkRowText(for: event), color: Self.networkColor(for: event.kind))
+        }
+    }
+
+    private func addNetworkRow(_ text: String, color: NSColor) {
+        let label = NSTextField(labelWithString: text)
+        label.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        label.textColor = color
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+        label.translatesAutoresizingMaskIntoConstraints = false
+        networkStack.addArrangedSubview(label)
+    }
+
     private func clearConsoleLogEntries() {
         _ = consoleClearer?()
         renderConsolePanel()
@@ -651,6 +734,13 @@ final class BrowserInspectorTileNSView: TileNSView {
         }
     }
 
+    private func clearNetworkRows() {
+        for view in networkStack.arrangedSubviews {
+            networkStack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+    }
+
     private static func segmentIndex(for panel: BrowserInspectorPanel) -> Int {
         BrowserInspectorPanel.allCases.firstIndex(of: panel) ?? 0
     }
@@ -673,7 +763,7 @@ final class BrowserInspectorTileNSView: TileNSView {
         case .styles:
             return "Select an element in Elements to view read-only computed styles."
         case .network:
-            return "Network panel placeholder — navigation/download event log arrives in I05."
+            return networkLiteScopeText()
         }
     }
 
@@ -709,6 +799,32 @@ final class BrowserInspectorTileNSView: TileNSView {
             urlPart = ""
         }
         return "[\(timestamp)] \(entry.level.rawValue.uppercased()) \(entry.message)\(urlPart)"
+    }
+
+    private static func networkLiteScopeText() -> String {
+        "Network-lite: navigation/download/child-open events only; subresource waterfall unsupported; headers/bodies/timing/replay unavailable."
+    }
+
+    private static func networkRowText(for event: BrowserNetworkLiteEvent) -> String {
+        let timestamp = consoleTimestampString(for: event.timestamp)
+        let status = event.statusCode.map(String.init) ?? "unknown"
+        let url = event.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "unknown URL" : event.url
+        let errorPart: String
+        if let error = event.errorDescription, !error.isEmpty {
+            errorPart = " error=\(error)"
+        } else {
+            errorPart = ""
+        }
+        return "[\(timestamp)] \(event.kind) method=unknown status=\(status) \(url)\(errorPart)"
+    }
+
+    private static func networkColor(for kind: String) -> NSColor {
+        switch BrowserNetworkLiteEventKind(rawValue: kind) {
+        case .failed: return .systemRed
+        case .downloadStarted: return .systemPurple
+        case .childOpened: return .systemBlue
+        default: return .labelColor
+        }
     }
 
     private static func consoleColor(for level: BrowserConsoleLogLevel) -> NSColor {

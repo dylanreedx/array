@@ -215,6 +215,24 @@ do {
     expect(buffer.entries.isEmpty, "console buffer clear empties entries")
 }
 
+// MARK: - Browser inspector network-lite event buffer
+
+do {
+    let tileId = UUID(uuidString: "A0000000-0000-4000-8000-000000000301")!
+    let base = Date(timeIntervalSince1970: 1_800_000_100)
+    var buffer = BrowserNetworkLiteEventBuffer(capacity: 2)
+    buffer.append(BrowserNetworkLiteEvent(tileId: tileId, kind: .navigationStarted, url: "file:///tmp/one.html", timestamp: base))
+    buffer.append(BrowserNetworkLiteEvent(tileId: tileId, kind: .committed, url: "file:///tmp/one.html", timestamp: base.addingTimeInterval(1)))
+    buffer.append(BrowserNetworkLiteEvent(tileId: tileId, kind: .finished, url: "file:///tmp/one.html", timestamp: base.addingTimeInterval(2)))
+    expect(buffer.entries.map(\.kind) == [BrowserNetworkLiteEventKind.committed.rawValue, BrowserNetworkLiteEventKind.finished.rawValue], "network-lite buffer keeps newest entries only")
+    expect(buffer.entries.allSatisfy { $0.statusCode == nil }, "network-lite file/data events must not invent status codes")
+    let encoded = try JSONCodec.makeEncoder().encode(BrowserNetworkLiteEvent(tileId: tileId, kind: .failed, url: "https://example.test/fail", timestamp: base, errorDescription: "fixture failure"))
+    let decoded = try JSONCodec.makeDecoder().decode(BrowserNetworkLiteEvent.self, from: encoded)
+    expect(decoded.kind == BrowserNetworkLiteEventKind.failed.rawValue && decoded.errorDescription == "fixture failure", "network-lite event codable round-trip preserves honest kind/error fields")
+    buffer.clear()
+    expect(buffer.entries.isEmpty, "network-lite buffer clear empties entries")
+}
+
 // MARK: - Browser tab model/schema
 
 do {

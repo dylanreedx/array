@@ -775,7 +775,8 @@ final class TileSpawner {
             domHighlighter: browserInspectorDOMHighlighter(for: browserTileId),
             computedStyleProvider: browserInspectorComputedStyleProvider(for: browserTileId),
             consoleLogProvider: browserInspectorConsoleLogProvider(for: browserTileId),
-            consoleClearer: browserInspectorConsoleClearer(for: browserTileId)
+            consoleClearer: browserInspectorConsoleClearer(for: browserTileId),
+            networkLiteEventProvider: browserInspectorNetworkLiteEventProvider(for: browserTileId)
         )
         view.onSelectedPanelChange = { [weak self] panel in
             try? self?.updateBrowserInspectorPanel(inspectorTileId: inspectorTileId, selectedPanel: panel)
@@ -805,7 +806,8 @@ final class TileSpawner {
             domHighlighter: inspectorState.map { browserInspectorDOMHighlighter(for: $0.inspectedBrowserTileId) },
             computedStyleProvider: inspectorState.map { browserInspectorComputedStyleProvider(for: $0.inspectedBrowserTileId) },
             consoleLogProvider: inspectorState.map { browserInspectorConsoleLogProvider(for: $0.inspectedBrowserTileId) },
-            consoleClearer: inspectorState.map { browserInspectorConsoleClearer(for: $0.inspectedBrowserTileId) }
+            consoleClearer: inspectorState.map { browserInspectorConsoleClearer(for: $0.inspectedBrowserTileId) },
+            networkLiteEventProvider: inspectorState.map { browserInspectorNetworkLiteEventProvider(for: $0.inspectedBrowserTileId) }
         )
         let inspectorTileId = tile.id
         view.onSelectedPanelChange = { [weak self] panel in
@@ -855,6 +857,13 @@ final class TileSpawner {
         { [weak self] in
             guard let browserView = self?.canvasView?.tileView(for: browserTileId) as? BrowserTileNSView else { return false }
             return browserView.clearConsoleLogEntriesForInspector()
+        }
+    }
+
+    private func browserInspectorNetworkLiteEventProvider(for browserTileId: UUID) -> BrowserInspectorTileNSView.NetworkLiteEventProvider {
+        { [weak self] in
+            guard let browserView = self?.canvasView?.tileView(for: browserTileId) as? BrowserTileNSView else { return nil }
+            return browserView.networkLiteEventsForInspector()
         }
     }
 
@@ -4829,6 +4838,184 @@ final class TileSpawner {
         let written = try String(contentsOf: artifact, encoding: .utf8)
         let artifactSecretFree = !written.contains(fixtureSecret) && !written.contains(fixtureToken)
         try expect(artifactSecretFree, "console QA artifact contains an unredacted fixture secret")
+        return artifact
+    }
+
+    static func runBrowserInspectorNetworkLiteSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { if case let .failed(message) = self { return message }; return "failed" }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func waitUntil(_ timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if condition() { return true }
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.03))
+            }
+            return condition()
+        }
+        func timestamp() -> String {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyyMMdd-HHmmss"
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            return formatter.string(from: Date())
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-browser-inspector-network-lite-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let profile = BrowserProfile.builtInDefault()
+        let project = Project(
+            id: UUID(),
+            name: "browser-inspector-network-lite-check",
+            rootPath: tempRoot.path,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 1),
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning,
+                defaultBrowserProfileId: profile.id
+            )
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        canvas.frame = NSRect(x: 0, y: 0, width: 1_120, height: 620)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_120, height: 620),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+
+        let spawner = TileSpawner(
+            canvasView: canvas,
+            ghostty: nil,
+            browserEngine: BrowserEngineContext(),
+            projectStore: store,
+            project: project,
+            browserProfiles: [profile]
+        )
+
+        let html = """
+        <!doctype html>
+        <html>
+          <head><meta charset="utf-8"><title>Network Lite QA</title></head>
+          <body>
+            <h1>Network Lite QA</h1>
+            <img src="missing-subresource.png" alt="subresource intentionally unsupported">
+          </body>
+        </html>
+        """
+        let fixtureURL = tempRoot.appendingPathComponent("network-lite-fixture.html", isDirectory: false)
+        try Data(html.utf8).write(to: fixtureURL, options: .atomic)
+
+        let browserRuntime: WKWebViewBrowserRuntime
+        switch spawner.spawnBrowser(url: fixtureURL.absoluteString) {
+        case let .spawned(runtime):
+            browserRuntime = runtime
+        case let .invalidURL(url):
+            throw CheckError.failed("browser spawn rejected URL \(url)")
+        case let .failure(error):
+            throw error
+        }
+        defer { browserRuntime.terminate(policy: .requestClose) }
+
+        try expect(waitUntil { browserRuntime.title == "Network Lite QA" || !browserRuntime.webView.isLoading }, "browser network-lite fixture did not finish loading")
+        try expect(browserRuntime.webView.url?.isFileURL == true, "network-lite check must load a real local fixture in WKWebView")
+        try expect(waitUntil { browserRuntime.networkLiteEvents.contains { $0.kind == BrowserNetworkLiteEventKind.navigationStarted.rawValue } }, "network-lite navigation start event did not reach app buffer")
+
+        let events = browserRuntime.networkLiteEvents
+        let eventKinds = events.map(\.kind)
+        guard let startIndex = eventKinds.firstIndex(of: BrowserNetworkLiteEventKind.navigationStarted.rawValue) else {
+            throw CheckError.failed("navigationStarted event missing")
+        }
+        let committedIndex = eventKinds.firstIndex(of: BrowserNetworkLiteEventKind.committed.rawValue)
+        let finishedIndex = eventKinds.firstIndex(of: BrowserNetworkLiteEventKind.finished.rawValue)
+        let mainNavigationStarted = events[startIndex].url == fixtureURL.absoluteString
+        let mainNavigationFinishedOrCommitted = [committedIndex, finishedIndex]
+            .compactMap { $0 }
+            .contains { $0 > startIndex }
+        let noFakeStatusCodes = events
+            .filter { $0.url == fixtureURL.absoluteString || $0.url.hasPrefix("file://") }
+            .allSatisfy { $0.statusCode == nil }
+        let realWKWebViewNavigationEvents = browserRuntime.networkLiteDelegateEventCountForQA >= 2
+            && mainNavigationStarted
+            && mainNavigationFinishedOrCommitted
+        try expect(mainNavigationStarted, "network-lite log did not capture the fixture main navigation start URL")
+        try expect(mainNavigationFinishedOrCommitted, "network-lite log did not capture a committed or finished event after start")
+        try expect(noFakeStatusCodes, "network-lite log invented a status code for a file/data navigation")
+        try expect(realWKWebViewNavigationEvents, "network-lite log did not use real WKWebView delegate events")
+
+        let inspectorTileId: UUID
+        switch spawner.spawnBrowserInspector(for: browserRuntime.tileId) {
+        case let .spawned(tileId):
+            inspectorTileId = tileId
+        case .notBrowserTile:
+            throw CheckError.failed("spawnBrowserInspector rejected the browser tile")
+        case let .failure(error):
+            throw error
+        }
+        guard let inspectorView = canvas.tileView(for: inspectorTileId) as? BrowserInspectorTileNSView else {
+            throw CheckError.failed("spawned inspector did not install BrowserInspectorTileNSView")
+        }
+        inspectorView.selectPanelForQA(.network)
+        let networkRows = inspectorView.networkRowTextsForQA
+        let unsupportedSubresourceWaterfallDocumented = networkRows.contains { $0.contains("subresource waterfall unsupported") }
+        let networkPanelDisplayedNavigation = networkRows.contains { $0.contains("navigationStarted") && $0.contains(fixtureURL.absoluteString) }
+            && networkRows.contains { $0.contains("method=unknown") && $0.contains("status=unknown") }
+        try expect(unsupportedSubresourceWaterfallDocumented, "Network panel did not document unsupported subresource waterfall scope")
+        try expect(networkPanelDisplayedNavigation, "Network panel did not render the captured navigation event honestly")
+
+        let artifactDir = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp(), isDirectory: true)
+            .appendingPathComponent("browser-inspector-network-lite", isDirectory: true)
+        try fileManager.createDirectory(at: artifactDir, withIntermediateDirectories: true)
+        let artifact = artifactDir.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "browser-inspector-network-lite",
+            "mainNavigationStarted": mainNavigationStarted,
+            "mainNavigationFinishedOrCommitted": mainNavigationFinishedOrCommitted,
+            "unsupportedSubresourceWaterfallDocumented": unsupportedSubresourceWaterfallDocumented,
+            "noFakeStatusCodes": noFakeStatusCodes,
+            "realWKWebViewNavigationEvents": realWKWebViewNavigationEvents,
+            "networkPanelDisplayedNavigation": networkPanelDisplayedNavigation,
+            "eventKinds": eventKinds,
+            "events": events.map { event in
+                [
+                    "kind": event.kind,
+                    "url": event.url,
+                    "statusCode": event.statusCode.map { $0 as Any } ?? NSNull(),
+                    "errorDescription": event.errorDescription.map { $0 as Any } ?? NSNull()
+                ]
+            },
+            "sampleRows": Array(networkRows.prefix(8)),
+            "unsupportedCapabilities": [
+                "subresourceWaterfall",
+                "headers",
+                "responseBodies",
+                "timingBreakdown",
+                "requestReplay"
+            ]
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
         return artifact
     }
 
