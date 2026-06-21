@@ -95,5 +95,6 @@ Rules:
   Focus: inspectability applied everywhere, default-off, UX discoverability.
   Audit note: fixed a residual live-settings gap for `target=_blank` browser tiles. Settings reapply now scans installed browser tile views in addition to tracked runtimes, so existing popup tiles also opt in/out without restart; the browser inspection app flag now proves opener and target-blank child default-off, opt-in, and opt-out behavior. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260621T125737/audits/A14.md` and artifact `qa-runs/1782061376/browser-inspection-policy/manifest.json`.
 
-- [ ] A15 — Whole-branch revert/squash recommendation  
+- [x] A15 — Whole-branch revert/squash recommendation
   Focus: summarize all audit artifacts and recommend keep/fix/revert for each commit before merge.
+  Audit note: completed as a docs-only final recommendation after reverting an unrequested A05 tmux-evidence drift that failed `--terminal-tmux-live-integration-check`. Recommendation is keep/fix-forward rather than wholesale revert, but do not merge blindly: curate/squash by topic, run a final clean-tree fast matrix, and manually verify Safari Develop-menu Web Inspector visibility, browser tab restore, and terminal theme/readability. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260621T125737/audits/A15.md`.
