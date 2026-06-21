@@ -83,6 +83,20 @@ do {
     defaults.set("999", forKey: TerminalScrollConfig.maxAbsDeltaPerEventKey)
     let parsed = TerminalScrollConfig.settings(defaults: defaults)
     expect(parsed.preciseMultiplier == 0.1 && parsed.lineMultiplier == 2.0 && parsed.maxAbsDeltaPerEvent == 500, "terminal scroll config clamps user settings")
+
+    let displaySuiteName = "TerminalDisplayConfigChecks-\(UUID().uuidString)"
+    let displayDefaults = UserDefaults(suiteName: displaySuiteName)!
+    defer { displayDefaults.removePersistentDomain(forName: displaySuiteName) }
+    expect(TerminalDisplayConfig.fontSize(defaults: displayDefaults) == TerminalDisplayConfig.defaultFontSize, "terminal display config defaults to readable embedded-shell font size")
+    expect(TerminalDisplayConfig.surfaceFontSize(defaults: displayDefaults) == Float(TerminalDisplayConfig.defaultFontSize), "surface font size applies the readable default")
+    displayDefaults.set("0", forKey: TerminalDisplayConfig.fontSizeKey)
+    expect(TerminalDisplayConfig.fontSize(defaults: displayDefaults) == nil && TerminalDisplayConfig.surfaceFontSize(defaults: displayDefaults) == 0, "font size 0 inherits Ghostty config")
+    displayDefaults.set("12.5", forKey: TerminalDisplayConfig.fontSizeKey)
+    expect(TerminalDisplayConfig.fontSize(defaults: displayDefaults) == 12.5, "terminal display config parses fractional font size")
+    displayDefaults.set("99", forKey: TerminalDisplayConfig.fontSizeKey)
+    expect(TerminalDisplayConfig.fontSize(defaults: displayDefaults) == TerminalDisplayConfig.maxFontSize, "terminal display config clamps oversized font size")
+    displayDefaults.set("not-a-number", forKey: TerminalDisplayConfig.fontSizeKey)
+    expect(TerminalDisplayConfig.fontSize(defaults: displayDefaults) == TerminalDisplayConfig.defaultFontSize, "invalid font size falls back to readable default")
 }
 
 // MARK: - Chrome integration guardrail matrix
@@ -3212,13 +3226,13 @@ do {
 
 do {
     let terminal = TileGeometry.preset(for: .terminal)
-    expect(terminal.defaultSize == CGSize(width: 1080, height: 664), "Terminal default is 120x32 grid at 9x20 plus 24pt chrome, got \(terminal.defaultSize)")
+    expect(terminal.defaultSize == CGSize(width: 900, height: 584), "Terminal default is 100x28 grid at 9x20 plus 24pt chrome, got \(terminal.defaultSize)")
     expect(terminal.aspect == .free, "Terminal aspect is free")
     expect(terminal.sizeQuantum == CGSize(width: 9, height: 20), "Terminal quantum is cell size, got \(String(describing: terminal.sizeQuantum))")
     expect(TileGeometry.minimumSize(for: .terminal) == CGSize(width: 180, height: 124), "Terminal minimum is 20x5 cells plus chrome")
 
     let customTerminal = TileGeometry.preset(for: .terminal, terminalCell: TerminalCellSize(width: 10, height: 18))
-    expect(customTerminal.defaultSize == CGSize(width: 1200, height: 600), "Terminal grid math honors injectable cell size, got \(customTerminal.defaultSize)")
+    expect(customTerminal.defaultSize == CGSize(width: 1000, height: 528), "Terminal grid math honors injectable cell size, got \(customTerminal.defaultSize)")
     expect(customTerminal.sizeQuantum == CGSize(width: 10, height: 18), "Terminal quantum honors injectable cell size")
     expect(TileGeometry.minimumSize(for: .terminal, terminalCell: TerminalCellSize(width: 10, height: 18)) == CGSize(width: 200, height: 114), "Terminal min-cells floor honors injectable cell size")
 
@@ -3235,7 +3249,7 @@ do {
     }
 
     let cases: [TileGeometryPresetCase] = [
-        TileGeometryPresetCase(kind: .terminal, defaultSize: CGSize(width: 1080, height: 664), minimumSize: CGSize(width: 180, height: 124), aspect: .free, quantum: CGSize(width: 9, height: 20)),
+        TileGeometryPresetCase(kind: .terminal, defaultSize: CGSize(width: 900, height: 584), minimumSize: CGSize(width: 180, height: 124), aspect: .free, quantum: CGSize(width: 9, height: 20)),
         TileGeometryPresetCase(kind: .browser, defaultSize: CGSize(width: 1024, height: 640), minimumSize: CGSize(width: 320, height: 220), aspect: .free, quantum: nil),
         TileGeometryPresetCase(kind: .note, defaultSize: CGSize(width: 640, height: 400), minimumSize: CGSize(width: 240, height: 160), aspect: .free, quantum: nil),
         TileGeometryPresetCase(kind: .file, defaultSize: CGSize(width: 320, height: 480), minimumSize: CGSize(width: 200, height: 200), aspect: .free, quantum: nil),
@@ -4512,6 +4526,9 @@ do {
         ZoneGestureConfig.minCreateDragScreenPointsKey,
         TmuxPersistenceConfig.enabledKey,
         TmuxPersistenceConfig.pathKey,
+        TerminalDisplayConfig.fontSizeKey,
+        TerminalScrollConfig.preciseMultiplierKey,
+        TerminalScrollConfig.lineMultiplierKey,
         // WorkspaceProfileConfig.defaultCaptureModeKey and defaultApplyModeKey are
         // intentionally excluded: captureMode/applyMode have no behavioral effect yet
         // (WorkspaceDocument is layout-only; T13 session-state is in ProjectStore sibling

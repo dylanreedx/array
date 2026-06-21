@@ -11,6 +11,7 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
 
     private let ghostty: GhosttyRuntimeContext
     private let launchProfile: LaunchProfile
+    private let displayDefaults: UserDefaults
     private var state = TerminalRuntimeState()
     private weak var hostView: TerminalHostView?
     private var terminalView: GhosttyTerminalView?
@@ -31,13 +32,15 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         tileId: TileID = UUID(),
         title: String,
         launchProfile: LaunchProfile,
-        ghostty: GhosttyRuntimeContext
+        ghostty: GhosttyRuntimeContext,
+        displayDefaults: UserDefaults = .standard
     ) {
         self.id = id
         self.tileId = tileId
         self.title = title
         self.launchProfile = launchProfile
         self.ghostty = ghostty
+        self.displayDefaults = displayDefaults
     }
 
     func attach(to hostView: TerminalHostView) {
@@ -46,6 +49,7 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
         let view = GhosttyTerminalView(
             ghosttyApp: try! ghostty.app,
             launchProfile: launchProfile,
+            displayDefaults: displayDefaults,
             reservedShortcutHandler: reservedShortcutHandler
         ) { [weak self] status in
             guard let self else { return }

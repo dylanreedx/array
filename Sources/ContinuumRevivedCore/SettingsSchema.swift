@@ -155,6 +155,11 @@ public enum SettingsSchema {
                         default: TmuxPersistenceConfig.defaultPath
                     ),
                     .text(
+                        key: TerminalDisplayConfig.fontSizeKey,
+                        label: "Shell Font Size (0 = Ghostty default)",
+                        default: String(Int(TerminalDisplayConfig.defaultFontSize))
+                    ),
+                    .text(
                         key: TerminalScrollConfig.preciseMultiplierKey,
                         label: "Shell Scroll Precise Multiplier",
                         default: String(TerminalScrollConfig.preciseMultiplierDefault)

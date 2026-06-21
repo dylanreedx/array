@@ -78,8 +78,13 @@ public enum TileGeometry {
     }
 
     private static func terminalPreset(cell: TerminalCellSize) -> TilePreset {
-        let cols: Double = 120
-        let rows: Double = 32
+        // Keep new shell tiles usable at the default canvas zoom in a common
+        // 1000×700 viewport. The previous 120×32 estimate (1080×664pt) forced
+        // users to zoom out or pan immediately, which made embedded Ghostty/tmux
+        // text feel too small. A 100×28 tile still provides a useful terminal
+        // grid while fitting comfortably at zoom 1.
+        let cols: Double = 100
+        let rows: Double = 28
         return TilePreset(
             defaultSize: CGSize(width: cols * cell.width, height: rows * cell.height + terminalChromeHeight),
             aspect: .free,

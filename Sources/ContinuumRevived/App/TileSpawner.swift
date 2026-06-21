@@ -2,6 +2,7 @@ import AppKit
 import ContinuumRevivedCore
 import ContinuumRevivedFileTree
 import Foundation
+import GhosttyKit
 import WebKit
 
 @MainActor
@@ -180,7 +181,8 @@ final class TileSpawner {
             tileId: tile.id,
             title: profile.title,
             launchProfile: launchProfile,
-            ghostty: ghostty
+            ghostty: ghostty,
+            displayDefaults: defaults
         )
         runtime.reservedShortcutHandler = reservedShortcutHandler
         tile.runtimeRef = RuntimeRef(kind: .terminalSession, id: runtime.id)
@@ -314,7 +316,8 @@ final class TileSpawner {
             tileId: existing.id,
             title: profile.title,
             launchProfile: launchProfile,
-            ghostty: ghostty
+            ghostty: ghostty,
+            displayDefaults: defaults
         )
         runtime.reservedShortcutHandler = reservedShortcutHandler
         var tile = existing
@@ -2256,6 +2259,197 @@ final class TileSpawner {
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("spawn-placement", isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runTerminalDefaultReadabilitySelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func pump(_ context: GhosttyRuntimeContext, seconds: TimeInterval) throws {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline {
+                ghostty_app_tick(try context.app)
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            }
+        }
+        func pump(_ context: GhosttyRuntimeContext, timeout: TimeInterval, until condition: () -> Bool) throws {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if condition() { return }
+                try pump(context, seconds: 0.05)
+            }
+            throw CheckError.failed("timed out waiting for terminal readability probe")
+        }
+        func runProcess(_ command: String, _ arguments: [String]) throws -> Int32 {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: command)
+            process.arguments = arguments
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus
+        }
+
+        let fileManager = FileManager.default
+        let started = Date()
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-terminal-default-readability-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let project = Project(
+            id: UUID(),
+            name: "terminal-default-readability-check",
+            rootPath: tempRoot.path,
+            createdAt: started,
+            updatedAt: started,
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+
+        let defaultsSuiteName = "continuum.terminal.defaultReadability.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
+        defaults.removePersistentDomain(forName: defaultsSuiteName)
+        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+
+        let context = try GhosttyRuntimeContext()
+        defer { context.shutdown() }
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        canvas.setFrameSize(CGSize(width: 1000, height: 700))
+        let window = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 1000, height: 700),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = canvas
+        window.orderFront(nil)
+        defer { window.close() }
+
+        let tmuxPath = TmuxLocator.resolve(defaults: defaults)
+        let spawner = TileSpawner(
+            canvasView: canvas,
+            ghostty: context,
+            browserEngine: browserEngine,
+            projectStore: store,
+            project: project,
+            defaults: defaults
+        )
+
+        let runtime: GhosttyTerminalRuntime
+        switch spawner.spawnTerminal(profileId: "shell") {
+        case let .spawned(spawnedRuntime):
+            runtime = spawnedRuntime
+        case let .missingCommand(executable):
+            throw CheckError.failed("spawnTerminal(shell) missing command: \(executable)")
+        case let .notConfigured(profileId):
+            throw CheckError.failed("spawnTerminal(shell) not configured: \(profileId)")
+        case let .unknownProfile(id):
+            throw CheckError.failed("spawnTerminal(shell) unknown profile: \(id)")
+        case let .failure(error):
+            throw CheckError.failed("spawnTerminal(shell) failed: \(error)")
+        }
+
+        guard let tile = canvas.canvasState.tiles.first(where: { $0.id == runtime.tileId }) else {
+            throw CheckError.failed("spawned terminal tile missing from canvas state")
+        }
+        let expectedSize = CanvasEngine.defaultFrame(for: .terminal)
+        try expect(tile.frame.width == Double(expectedSize.width) && tile.frame.height == Double(expectedSize.height), "spawned shell should use terminal default size \(expectedSize), got \(tile.frame)")
+        let screenFrame = CanvasEngine.tileScreenFrame(tile.frame, viewport: canvas.viewport)
+        try expect(screenFrame.minX >= -0.001 && screenFrame.minY >= -0.001, "default shell should spawn in view at zoom 1, got \(screenFrame)")
+        try expect(screenFrame.maxX <= canvas.bounds.width + 0.001 && screenFrame.maxY <= canvas.bounds.height + 0.001, "default shell should fit a 1000×700 canvas at zoom 1, got \(screenFrame) in \(canvas.bounds)")
+        try expect(ReadabilityPolicy.editingReliable(for: .tile(.terminal), zoom: canvas.viewport.zoom), "spawned shell starts at editable terminal zoom, got \(canvas.viewport.zoom)")
+
+        try pump(context, seconds: 0.8)
+        guard let term = runtime.qaTerminalView, let surface = term.surface else {
+            throw CheckError.failed("spawned terminal surface missing")
+        }
+        let surfaceSize = ghostty_surface_size(surface)
+        let configuredFontSize = term.qaConfiguredFontSize.map(Double.init)
+        try expect(abs((configuredFontSize ?? -1) - TerminalDisplayConfig.defaultFontSize) < 0.01, "terminal surface should use readable font default \(TerminalDisplayConfig.defaultFontSize), got \(String(describing: configuredFontSize))")
+        try expect(surfaceSize.columns >= 80, "default terminal should provide at least 80 columns, got \(surfaceSize.columns)")
+        try expect(surfaceSize.rows >= 20, "default terminal should provide at least 20 rows, got \(surfaceSize.rows)")
+
+        let sentinel = "a02-default-readable-ok"
+        runtime.sendInput(Data("printf '\(sentinel)\\n'\n".utf8))
+        try pump(context, timeout: 5.0) { runtime.visibleText().contains(sentinel) }
+        let inputWorked = runtime.visibleText().contains(sentinel)
+
+        guard let descriptor = try store.listSessions().first(where: { $0.tileId == tile.id }) else {
+            throw CheckError.failed("spawned terminal session descriptor missing")
+        }
+        let tmuxWrapped = tmuxPath != nil && descriptor.command == tmuxPath
+        if let tmuxPath {
+            try expect(tmuxWrapped, "default shell should start through tmux when tmux is available at \(tmuxPath); descriptor command=\(descriptor.command)")
+        }
+
+        runtime.terminate(policy: .force)
+        if let terminalTile = canvas.tileView(for: tile.id) as? TerminalTileNSView {
+            terminalTile.hostView.detachRuntime()
+        }
+        try pump(context, seconds: 0.2)
+
+        var tmuxCleanup: [String: Any] = ["attempted": false]
+        if tmuxWrapped {
+            let kill = TmuxSession.killSessionCommand(tileId: tile.id, tmuxPath: descriptor.command)
+            do {
+                let status = try runProcess(kill.command, kill.arguments)
+                tmuxCleanup = ["attempted": true, "command": kill.command, "arguments": kill.arguments, "terminationStatus": Int(status)]
+            } catch {
+                tmuxCleanup = ["attempted": true, "command": kill.command, "arguments": kill.arguments, "error": String(describing: error)]
+            }
+        }
+
+        let timestamp = ISO8601DateFormatter().string(from: started).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("terminal-default-readability", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let viewportManifest: [String: Any] = ["x": canvas.viewport.x, "y": canvas.viewport.y, "zoom": canvas.viewport.zoom]
+        let canvasSizeManifest: [String: Any] = ["width": Double(canvas.bounds.width), "height": Double(canvas.bounds.height)]
+        let tileFrameManifest: [String: Any] = ["x": tile.frame.x, "y": tile.frame.y, "width": tile.frame.width, "height": tile.frame.height]
+        let screenFrameManifest: [String: Any] = ["x": Double(screenFrame.minX), "y": Double(screenFrame.minY), "width": Double(screenFrame.width), "height": Double(screenFrame.height)]
+        let surfaceSizeManifest: [String: Any] = [
+            "columns": Int(surfaceSize.columns),
+            "rows": Int(surfaceSize.rows),
+            "widthPx": Int(surfaceSize.width_px),
+            "heightPx": Int(surfaceSize.height_px),
+            "cellWidthPx": Int(surfaceSize.cell_width_px),
+            "cellHeightPx": Int(surfaceSize.cell_height_px)
+        ]
+        let manifest: [String: Any] = [
+            "check": "terminal-default-readability",
+            "viewport": viewportManifest,
+            "canvasSize": canvasSizeManifest,
+            "tileFrame": tileFrameManifest,
+            "screenFrame": screenFrameManifest,
+            "configuredFontSize": configuredFontSize ?? NSNull(),
+            "surfaceSize": surfaceSizeManifest,
+            "tmuxAvailable": tmuxPath != nil,
+            "tmuxWrapped": tmuxWrapped,
+            "descriptorCommand": (descriptor.command as NSString).lastPathComponent,
+            "descriptorArgsPrefix": Array(descriptor.args.prefix(5)),
+            "inputWorked": inputWorked,
+            "tmuxCleanup": tmuxCleanup
+        ]
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)

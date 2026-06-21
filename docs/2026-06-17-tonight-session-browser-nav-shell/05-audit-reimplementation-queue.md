@@ -23,10 +23,11 @@ Rules:
   Required output: identify why zooming around shell tiles still feels bad; fix if scoped and safe, otherwise produce concrete reimplementation ticket.
   Audit note: fixed camera-only terminal churn. Rows/columns now stay invariant across zoom sweep and pure viewport changes no longer mark tile content dirty; see `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260620T212451/audits/A01.md` and artifact `qa-runs/2026-06-21T013203Z/terminal-zoom-pan-stability/manifest.json`.
 
-- [ ] A02 — Shell default readability / Ghostty-tmux initial scale too small  
-  Focus: default terminal font/cell sizing, tile dimensions, tmux profile startup, Ghostty surface scale, app settings defaults.  
-  Relevant commits: terminal/tmux history plus T12/T13.  
+- [x] A02 — Shell default readability / Ghostty-tmux initial scale too small
+  Focus: default terminal font/cell sizing, tile dimensions, tmux profile startup, Ghostty surface scale, app settings defaults.
+  Relevant commits: terminal/tmux history plus T12/T13.
   Required output: make default shell tile usable without immediate zoom if scoped and safe, or write exact change plan.
+  Audit note: fixed new-shell defaults. Terminal tiles now default to 900×584 at zoom 1 with an embedded Ghostty font-size default of 16 (0 setting = inherit Ghostty); production spawner/tmux check measured 112×24 cells, tmux wrapping, and input in `qa-runs/2026-06-21T014507Z/terminal-default-readability/manifest.json`; see `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260620T212451/audits/A02.md`.
 
 - [ ] A03 — Browser inspect element / devtools product reality  
   Focus: T02 implementation, real context-menu/menu path, WebKit inspectability policy, `TileSpawner.spawnBrowserForNewWindow`, default-off developer setting.  

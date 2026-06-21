@@ -28,6 +28,7 @@ struct TerminalSurfacePixelSize: Equatable, Sendable {
 final class GhosttyTerminalView: NSView {
     private let ghosttyApp: ghostty_app_t
     private let launchProfile: LaunchProfile
+    private let displayDefaults: UserDefaults
     private let statusChanged: (TerminalStatus) -> Void
     private(set) var surface: ghostty_surface_t?
     private var processExitPoller: Timer?
@@ -40,6 +41,7 @@ final class GhosttyTerminalView: NSView {
     private(set) var qaSurfaceResizeRequestedCount = 0
     private(set) var qaSurfaceResizeAppliedCount = 0
     private(set) var qaSurfaceResizeSkippedUnchangedCount = 0
+    private(set) var qaConfiguredFontSize: Float?
     var reservedShortcutHandler: ((NSEvent) -> Bool)?
 
     /// Last cwd reported by the shell via OSC 7 (GHOSTTY_ACTION_PWD). Nil until the
@@ -57,11 +59,13 @@ final class GhosttyTerminalView: NSView {
     init(
         ghosttyApp: ghostty_app_t,
         launchProfile: LaunchProfile,
+        displayDefaults: UserDefaults = .standard,
         reservedShortcutHandler: ((NSEvent) -> Bool)? = nil,
         statusChanged: @escaping (TerminalStatus) -> Void
     ) {
         self.ghosttyApp = ghosttyApp
         self.launchProfile = launchProfile
+        self.displayDefaults = displayDefaults
         self.statusChanged = statusChanged
         self.reservedShortcutHandler = reservedShortcutHandler
         super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
@@ -482,7 +486,9 @@ final class GhosttyTerminalView: NSView {
         )
         config.userdata = Unmanaged.passUnretained(self).toOpaque()
         config.scale_factor = scale
-        config.font_size = 0
+        let configuredFontSize = TerminalDisplayConfig.surfaceFontSize(defaults: displayDefaults)
+        config.font_size = configuredFontSize
+        qaConfiguredFontSize = configuredFontSize
         config.env_vars = nil
         config.env_var_count = 0
         config.initial_input = nil
