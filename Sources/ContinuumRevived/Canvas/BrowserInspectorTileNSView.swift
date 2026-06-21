@@ -22,9 +22,10 @@ final class BrowserInspectorTileNSView: TileNSView {
     typealias NetworkLiteEventProvider = () -> [BrowserNetworkLiteEvent]?
 
     var onSelectedPanelChange: ((BrowserInspectorPanel) -> Void)?
+    var onRevealBrowser: (() -> Void)?
 
     private let inspectorState: BrowserInspectorState?
-    private let inspectedBrowser: InspectedBrowserSummary?
+    private var inspectedBrowser: InspectedBrowserSummary?
     private let domSnapshotProvider: DOMSnapshotProvider?
     private let domHighlighter: DOMHighlighter?
     private let computedStyleProvider: ComputedStyleProvider?
@@ -35,6 +36,7 @@ final class BrowserInspectorTileNSView: TileNSView {
     private let detailLabel = NSTextField(labelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "")
     private let panelControl: NSSegmentedControl
+    private let revealBrowserButton = NSButton(title: "Reveal browser tile", target: nil, action: nil)
     private let refreshButton = NSButton(title: "Refresh DOM", target: nil, action: nil)
     private let consoleClearButton = NSButton(title: "Clear Console", target: nil, action: nil)
     private let placeholderLabel = NSTextField(labelWithString: "")
@@ -104,6 +106,11 @@ final class BrowserInspectorTileNSView: TileNSView {
         panelControl.segmentStyle = .rounded
         panelControl.translatesAutoresizingMaskIntoConstraints = false
         panelControl.selectedSegment = Self.segmentIndex(for: selectedPanel)
+
+        revealBrowserButton.target = self
+        revealBrowserButton.action = #selector(revealBrowserButtonClicked(_:))
+        revealBrowserButton.bezelStyle = .rounded
+        revealBrowserButton.translatesAutoresizingMaskIntoConstraints = false
 
         refreshButton.target = self
         refreshButton.action = #selector(refreshButtonClicked(_:))
@@ -178,8 +185,19 @@ final class BrowserInspectorTileNSView: TileNSView {
         headerStack.spacing = 3
         headerStack.alignment = .leading
         headerStack.translatesAutoresizingMaskIntoConstraints = false
+        headerStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        headerStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        revealBrowserButton.setContentHuggingPriority(.required, for: .horizontal)
+        revealBrowserButton.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        body.addSubview(headerStack)
+        let headerRow = NSStackView(views: [headerStack, revealBrowserButton])
+        headerRow.orientation = .horizontal
+        headerRow.spacing = 12
+        headerRow.alignment = .top
+        headerRow.distribution = .fill
+        headerRow.translatesAutoresizingMaskIntoConstraints = false
+
+        body.addSubview(headerRow)
         body.addSubview(panelControl)
         body.addSubview(refreshButton)
         body.addSubview(consoleClearButton)
@@ -190,11 +208,11 @@ final class BrowserInspectorTileNSView: TileNSView {
         body.addSubview(placeholderLabel)
 
         NSLayoutConstraint.activate([
-            headerStack.topAnchor.constraint(equalTo: body.topAnchor, constant: 14),
-            headerStack.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16),
-            headerStack.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -16),
+            headerRow.topAnchor.constraint(equalTo: body.topAnchor, constant: 14),
+            headerRow.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16),
+            headerRow.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -16),
 
-            panelControl.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: 14),
+            panelControl.topAnchor.constraint(equalTo: headerRow.bottomAnchor, constant: 14),
             panelControl.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16),
             panelControl.trailingAnchor.constraint(lessThanOrEqualTo: body.trailingAnchor, constant: -16),
 
@@ -259,6 +277,7 @@ final class BrowserInspectorTileNSView: TileNSView {
     var selectedPanelForQA: BrowserInspectorPanel { selectedPanel }
     var headerTitleForQA: String { titleLabel.stringValue }
     var headerDetailForQA: String { detailLabel.stringValue }
+    var revealBrowserEnabledForQA: Bool { revealBrowserButton.isEnabled }
     var isDisconnectedForQA: Bool { inspectedBrowser == nil }
     var domSnapshotForQA: BrowserDOMSnapshot? { domSnapshot }
     var selectedDOMNodeIDForQA: String? { selectedDOMNodeID }
@@ -300,6 +319,16 @@ final class BrowserInspectorTileNSView: TileNSView {
         clearConsoleLogEntries()
     }
 
+    func revealBrowserForQA() {
+        revealBrowserButtonClicked(nil)
+    }
+
+    func updateInspectedBrowser(_ summary: InspectedBrowserSummary?) {
+        inspectedBrowser = summary
+        refreshHeader()
+        refreshPanelPlaceholder()
+    }
+
     @objc private func panelControlChanged(_ sender: NSSegmentedControl) {
         guard sender.selectedSegment >= 0, sender.selectedSegment < BrowserInspectorPanel.allCases.count else { return }
         applySelectedPanel(BrowserInspectorPanel.allCases[sender.selectedSegment], notify: true)
@@ -311,6 +340,10 @@ final class BrowserInspectorTileNSView: TileNSView {
 
     @objc private func consoleClearButtonClicked(_ sender: NSButton) {
         clearConsoleLogEntries()
+    }
+
+    @objc private func revealBrowserButtonClicked(_ sender: Any?) {
+        onRevealBrowser?()
     }
 
     @objc private func elementRowSelected(_ sender: NSButton) {
@@ -410,9 +443,11 @@ final class BrowserInspectorTileNSView: TileNSView {
             }
             statusLabel.stringValue = "Disconnected"
             statusLabel.textColor = .systemOrange
+            revealBrowserButton.isEnabled = false
             return
         }
 
+        revealBrowserButton.isEnabled = true
         titleLabel.stringValue = "Inspecting \(Self.displayName(title: inspectedBrowser.title, url: inspectedBrowser.url))"
         detailLabel.stringValue = inspectedBrowser.url?.isEmpty == false ? inspectedBrowser.url! : "No URL saved"
         statusLabel.stringValue = "Linked to browser tile \(inspectedBrowser.tileId.uuidString.prefix(8))"

@@ -489,6 +489,17 @@ final class TileSpawner {
         view.onDeleteBrowserProfile = { [weak self] profileId in self?.browserProfileDeleteHandler?(tileId, profileId) }
     }
 
+    private func configureBrowserInspectorMenu(_ view: BrowserTileNSView, tileId: UUID) {
+        view.onOpenInspector = { [weak self] in
+            _ = self?.spawnBrowserInspector(for: tileId)
+        }
+    }
+
+    private func browserTileDidRefresh(tileId: UUID) {
+        refreshBrowserInspectors(inspecting: tileId)
+        browserPersistenceHandler?()
+    }
+
     /// Spawns a live `WKWebView` browser tile. Defaults to the configured
     /// browser URL (`about:blank` unless overridden) if `url` is nil. Persists a BrowserTile entry into BrowserState alongside
     /// the canvas state. Returns the runtime so the caller can track it for
@@ -535,9 +546,10 @@ final class TileSpawner {
         tile.runtimeRef = RuntimeRef(kind: .browserTile, id: runtime.id)
 
         let view = BrowserTileNSView(tile: tile, runtime: runtime)
-        view.onAfterRefresh = { [weak self] in self?.browserPersistenceHandler?() }
+        view.onAfterRefresh = { [weak self] in self?.browserTileDidRefresh(tileId: tile.id) }
         view.onTabModelChange = { [weak self] model in try? self?.writeBrowserTabModel(tileId: tile.id, runtimeId: runtime.id, model: model, storageGroupId: storageGroupId, profileId: profile.id) }
         configureBrowserProfileMenu(view, tileId: tile.id)
+        configureBrowserInspectorMenu(view, tileId: tile.id)
         canvasView.install(tileView: view, for: tile)
 
         do {
@@ -615,9 +627,10 @@ final class TileSpawner {
         tile.runtimeRef = RuntimeRef(kind: .browserTile, id: runtime.id)
 
         let view = BrowserTileNSView(tile: tile, runtime: runtime)
-        view.onAfterRefresh = { [weak self] in self?.browserPersistenceHandler?() }
+        view.onAfterRefresh = { [weak self] in self?.browserTileDidRefresh(tileId: tile.id) }
         view.onTabModelChange = { [weak self] model in try? self?.writeBrowserTabModel(tileId: tile.id, runtimeId: runtime.id, model: model, storageGroupId: profile.dataStoreIdentifier, profileId: profile.id) }
         configureBrowserProfileMenu(view, tileId: tile.id)
+        configureBrowserInspectorMenu(view, tileId: tile.id)
         canvasView.install(tileView: view, for: tile)
 
         do {
@@ -698,9 +711,10 @@ final class TileSpawner {
         }
 
         let view = BrowserTileNSView(tile: tile, runtime: runtime, browserTile: persistedBrowserTile)
-        view.onAfterRefresh = { [weak self] in self?.browserPersistenceHandler?() }
+        view.onAfterRefresh = { [weak self] in self?.browserTileDidRefresh(tileId: tile.id) }
         view.onTabModelChange = { [weak self] model in try? self?.writeBrowserTabModel(tileId: tile.id, runtimeId: runtime.id, model: model, storageGroupId: storageGroupId, profileId: profile.id) }
         configureBrowserProfileMenu(view, tileId: tile.id)
+        configureBrowserInspectorMenu(view, tileId: tile.id)
         canvasView.install(tileView: view, for: tile)
 
         do {
@@ -742,6 +756,13 @@ final class TileSpawner {
             return .failure(error)
         }
 
+        if let existingInspectorId = existingBrowserInspectorTileId(inspecting: browserTileId, browserState: browserState, in: canvasView) {
+            refreshBrowserInspector(inspectorTileId: existingInspectorId, browserTileId: browserTileId, browserState: browserState)
+            _ = revealTile(existingInspectorId)
+            try? projectStore.saveCanvas(canvasView.canvasState)
+            return .spawned(tileId: existingInspectorId)
+        }
+
         let frame = makePlacement(
             worldPoint: worldPoint ?? CGPoint(x: browserTile.frame.x + browserTile.frame.width + 24, y: browserTile.frame.y),
             size: CanvasEngine.defaultFrame(for: .browserInspector),
@@ -778,15 +799,14 @@ final class TileSpawner {
             consoleClearer: browserInspectorConsoleClearer(for: browserTileId),
             networkLiteEventProvider: browserInspectorNetworkLiteEventProvider(for: browserTileId)
         )
-        view.onSelectedPanelChange = { [weak self] panel in
-            try? self?.updateBrowserInspectorPanel(inspectorTileId: inspectorTileId, selectedPanel: panel)
-        }
+        configureBrowserInspectorView(view, inspectorTileId: inspectorTileId, browserTileId: browserTileId)
         canvasView.install(tileView: view, for: tile)
 
         var nextState = browserState
         nextState.inspectorStates.append(inspectorState)
         do {
             try projectStore.saveBrowserState(nextState)
+            _ = revealTile(inspectorTileId)
             try projectStore.saveCanvas(canvasView.canvasState)
         } catch {
             return .failure(error)
@@ -810,10 +830,73 @@ final class TileSpawner {
             networkLiteEventProvider: inspectorState.map { browserInspectorNetworkLiteEventProvider(for: $0.inspectedBrowserTileId) }
         )
         let inspectorTileId = tile.id
+        if let browserTileId = inspectorState?.inspectedBrowserTileId {
+            configureBrowserInspectorView(view, inspectorTileId: inspectorTileId, browserTileId: browserTileId)
+        } else {
+            view.onSelectedPanelChange = { [weak self] panel in
+                try? self?.updateBrowserInspectorPanel(inspectorTileId: inspectorTileId, selectedPanel: panel)
+            }
+        }
+        canvasView.install(tileView: view, for: tile)
+    }
+
+    private func configureBrowserInspectorView(_ view: BrowserInspectorTileNSView, inspectorTileId: UUID, browserTileId: UUID) {
         view.onSelectedPanelChange = { [weak self] panel in
             try? self?.updateBrowserInspectorPanel(inspectorTileId: inspectorTileId, selectedPanel: panel)
         }
-        canvasView.install(tileView: view, for: tile)
+        view.onRevealBrowser = { [weak self] in
+            guard let self else { return }
+            _ = self.revealTile(browserTileId)
+            if let canvasView = self.canvasView {
+                try? self.projectStore.saveCanvas(canvasView.canvasState)
+            }
+        }
+    }
+
+    private func existingBrowserInspectorTileId(inspecting browserTileId: UUID, browserState: BrowserState, in canvasView: CanvasNSView) -> UUID? {
+        browserState.inspectorStates.first { state in
+            state.inspectedBrowserTileId == browserTileId
+                && canvasView.canvasState.tiles.contains { $0.id == state.inspectorTileId && $0.kind == .browserInspector }
+        }?.inspectorTileId
+    }
+
+    @discardableResult
+    private func revealTile(_ tileId: UUID) -> Bool {
+        guard let canvasView,
+              canvasView.canvasState.tiles.contains(where: { $0.id == tileId })
+        else { return false }
+        canvasView.centerOnTile(tileId)
+        if canvasView.focusBroker?.enterScope(.tile(tileId), reason: .userClick) != true {
+            canvasView.bringToFront(tileId: tileId)
+        }
+        return canvasView.canvasState.lastActiveTileId == tileId
+    }
+
+    private func refreshBrowserInspectors(inspecting browserTileId: UUID) {
+        guard let browserState = try? loadBrowserStateIfAvailable() else { return }
+        for inspectorState in browserState.inspectorStates where inspectorState.inspectedBrowserTileId == browserTileId {
+            refreshBrowserInspector(
+                inspectorTileId: inspectorState.inspectorTileId,
+                browserTileId: browserTileId,
+                browserState: browserState
+            )
+        }
+    }
+
+    private func refreshBrowserInspector(inspectorTileId: UUID, browserTileId: UUID, browserState: BrowserState) {
+        guard let canvasView else { return }
+        let summary = browserInspectorSummary(for: browserTileId, browserState: browserState)
+        if let inspectorView = canvasView.tileView(for: inspectorTileId) as? BrowserInspectorTileNSView {
+            inspectorView.updateInspectedBrowser(summary)
+        }
+        guard let summary,
+              let index = canvasView.canvasState.tiles.firstIndex(where: { $0.id == inspectorTileId && $0.kind == .browserInspector })
+        else { return }
+        var tile = canvasView.canvasState.tiles[index]
+        let title = "Inspector — \(Self.inspectorDisplayName(title: summary.title, url: summary.url))"
+        guard tile.title != title else { return }
+        tile.title = title
+        canvasView.updateTile(tile, recalculateZoneBounds: false)
     }
 
     private func browserInspectorDOMSnapshotProvider(for browserTileId: UUID) -> BrowserInspectorTileNSView.DOMSnapshotProvider {
@@ -907,14 +990,25 @@ final class TileSpawner {
         guard let canvasView,
               let tile = canvasView.canvasState.tiles.first(where: { $0.id == browserTileId && $0.kind == .browser })
         else { return nil }
+        let liveBrowser = canvasView.tileView(for: browserTileId) as? BrowserTileNSView
         let persisted = browserState?.tiles.first { $0.tileId == browserTileId }
+        let liveTitle = liveBrowser?.runtime.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let persistedTitle = persisted?.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let canvasTitle = tile.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let displayTitle = !persistedTitle.isEmpty ? persistedTitle : (canvasTitle == "Browser" ? "" : canvasTitle)
+        let displayTitle: String
+        if !liveTitle.isEmpty {
+            displayTitle = liveTitle
+        } else if !persistedTitle.isEmpty {
+            displayTitle = persistedTitle
+        } else {
+            displayTitle = canvasTitle == "Browser" ? "" : canvasTitle
+        }
+        let liveURL = liveBrowser?.runtime.url.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let displayURL = !liveURL.isEmpty ? liveURL : (persisted?.url ?? tile.metadata.url)
         return BrowserInspectorTileNSView.InspectedBrowserSummary(
             tileId: browserTileId,
             title: displayTitle,
-            url: persisted?.url ?? tile.metadata.url
+            url: displayURL
         )
     }
 
@@ -967,9 +1061,10 @@ final class TileSpawner {
         tile.metadata.browserProfileId = selectedProfile.id
 
         let view = BrowserTileNSView(tile: tile, runtime: runtime, browserTile: persistedBrowserTile)
-        view.onAfterRefresh = { [weak self] in self?.browserPersistenceHandler?() }
+        view.onAfterRefresh = { [weak self] in self?.browserTileDidRefresh(tileId: tile.id) }
         view.onTabModelChange = { [weak self] model in try? self?.writeBrowserTabModel(tileId: tile.id, runtimeId: runtime.id, model: model, storageGroupId: selectedProfile.dataStoreIdentifier, profileId: selectedProfile.id) }
         configureBrowserProfileMenu(view, tileId: tile.id)
+        configureBrowserInspectorMenu(view, tileId: tile.id)
         canvasView.install(tileView: view, for: tile)
 
         do {
@@ -5012,6 +5107,251 @@ final class TileSpawner {
                 "responseBodies",
                 "timingBreakdown",
                 "requestReplay"
+            ]
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runBrowserInspectorLinkLifecycleSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { if case let .failed(message) = self { return message }; return "failed" }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func waitUntil(_ timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if condition() { return true }
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.03))
+            }
+            return condition()
+        }
+        func timestamp() -> String {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyyMMdd-HHmmss"
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            return formatter.string(from: Date())
+        }
+        func attachFocusBroker(to canvas: CanvasNSView) -> FocusBroker {
+            let broker = FocusBroker()
+            canvas.focusBroker = broker
+            broker.onAcceptedTileFocus = { [weak canvas] id in canvas?.markActive(tileId: id) }
+            broker.onAcceptedCanvasScope = { [weak canvas] in canvas?.clearFocusBorder() }
+            return broker
+        }
+        func makeWindow(for canvas: CanvasNSView) -> NSWindow {
+            canvas.frame = NSRect(x: 0, y: 0, width: 1_120, height: 620)
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 1_120, height: 620),
+                styleMask: [.titled],
+                backing: .buffered,
+                defer: false
+            )
+            window.contentView = canvas
+            window.makeKeyAndOrderFront(nil)
+            return window
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-browser-inspector-link-lifecycle-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let profile = BrowserProfile.builtInDefault()
+        let project = Project(
+            id: UUID(),
+            name: "browser-inspector-link-lifecycle-check",
+            rootPath: tempRoot.path,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 1),
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning,
+                defaultBrowserProfileId: profile.id
+            )
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        let focusBroker = attachFocusBroker(to: canvas)
+        let window = makeWindow(for: canvas)
+        defer { window.close() }
+
+        let spawner = TileSpawner(
+            canvasView: canvas,
+            ghostty: nil,
+            browserEngine: BrowserEngineContext(),
+            projectStore: store,
+            project: project,
+            browserProfiles: [profile]
+        )
+
+        let htmlA = """
+        <!doctype html><html><head><meta charset=\"utf-8\"><title>Link Lifecycle A</title></head><body>A</body></html>
+        """
+        let htmlB = """
+        <!doctype html><html><head><meta charset=\"utf-8\"><title>Link Lifecycle B</title></head><body>B</body></html>
+        """
+        let fixtureAURL = tempRoot.appendingPathComponent("link-lifecycle-a.html", isDirectory: false)
+        let fixtureBURL = tempRoot.appendingPathComponent("link-lifecycle-b.html", isDirectory: false)
+        try Data(htmlA.utf8).write(to: fixtureAURL, options: .atomic)
+        try Data(htmlB.utf8).write(to: fixtureBURL, options: .atomic)
+
+        let browserRuntime: WKWebViewBrowserRuntime
+        switch spawner.spawnBrowser(url: fixtureAURL.absoluteString) {
+        case let .spawned(runtime):
+            browserRuntime = runtime
+        case let .invalidURL(url):
+            throw CheckError.failed("browser spawn rejected URL \(url)")
+        case let .failure(error):
+            throw error
+        }
+        defer { browserRuntime.terminate(policy: .requestClose) }
+        try expect(waitUntil { browserRuntime.title == "Link Lifecycle A" || !browserRuntime.webView.isLoading }, "browser lifecycle fixture A did not finish loading")
+        let browserTileId = browserRuntime.tileId
+
+        let browserContextMenuIncludesOpenInspector = (canvas.tileView(for: browserTileId) as? BrowserTileNSView)?
+            .contextMenuForQA()
+            .items
+            .contains(where: { $0.title == "Open Inspector Tile" }) == true
+        try expect(browserContextMenuIncludesOpenInspector, "browser context menu did not include Open Inspector Tile")
+
+        let inspectorTileId: UUID
+        switch spawner.spawnBrowserInspector(for: browserTileId) {
+        case let .spawned(tileId):
+            inspectorTileId = tileId
+        case .notBrowserTile:
+            throw CheckError.failed("spawnBrowserInspector rejected the browser tile")
+        case let .failure(error):
+            throw error
+        }
+        guard let inspectorView = canvas.tileView(for: inspectorTileId) as? BrowserInspectorTileNSView else {
+            throw CheckError.failed("spawned inspector did not install BrowserInspectorTileNSView")
+        }
+        try expect(inspectorView.revealBrowserEnabledForQA, "Reveal browser tile button was not enabled for a linked inspector")
+
+        _ = focusBroker.requestFocus(.tile(browserTileId), reason: .userClick)
+        let secondInspectorTileId: UUID
+        switch spawner.spawnBrowserInspector(for: browserTileId) {
+        case let .spawned(tileId):
+            secondInspectorTileId = tileId
+        case .notBrowserTile:
+            throw CheckError.failed("second spawnBrowserInspector rejected the browser tile")
+        case let .failure(error):
+            throw error
+        }
+        let inspectorTilesAfterSecondOpen = canvas.canvasState.tiles.filter { $0.kind == .browserInspector }
+        let duplicateInspectorPrevented = secondInspectorTileId == inspectorTileId
+            && inspectorTilesAfterSecondOpen.count == 1
+            && canvas.canvasState.lastActiveTileId == inspectorTileId
+            && focusBroker.activeSurface == .tile(inspectorTileId)
+        try expect(duplicateInspectorPrevented, "opening inspector twice did not reveal/focus the existing inspector")
+
+        canvas.setViewport(CanvasViewport(x: 5_000, y: 4_000, zoom: 1))
+        let viewportBeforeReveal = canvas.canvasState.viewport
+        inspectorView.revealBrowserForQA()
+        let viewportAfterReveal = canvas.canvasState.viewport
+        let revealBrowserWorked = canvas.canvasState.lastActiveTileId == browserTileId
+            && focusBroker.activeSurface == .tile(browserTileId)
+            && viewportAfterReveal != viewportBeforeReveal
+        try expect(revealBrowserWorked, "Reveal browser tile did not focus and frame the linked browser")
+
+        browserRuntime.loadURL(fixtureBURL.absoluteString)
+        let reloadUpdatedHeader = waitUntil(7) {
+            inspectorView.headerTitleForQA.contains("Link Lifecycle B")
+                && inspectorView.headerDetailForQA.contains("link-lifecycle-b.html")
+        }
+        try expect(reloadUpdatedHeader, "browser reload did not refresh inspector header URL/title")
+        try store.saveCanvas(canvas.canvasState)
+
+        let restoredCanvas = CanvasNSView(canvasState: try store.loadCanvas())
+        let restoredFocusBroker = attachFocusBroker(to: restoredCanvas)
+        let restoredWindow = makeWindow(for: restoredCanvas)
+        defer { restoredWindow.close() }
+        let restoredSpawner = TileSpawner(
+            canvasView: restoredCanvas,
+            ghostty: nil,
+            browserEngine: BrowserEngineContext(),
+            projectStore: store,
+            project: project,
+            browserProfiles: [profile]
+        )
+        var restoredRuntimeForCleanup: WKWebViewBrowserRuntime?
+        defer { restoredRuntimeForCleanup?.terminate(policy: .requestClose) }
+        switch restoredSpawner.restartBrowserTile(tileId: browserTileId) {
+        case let .restarted(runtime):
+            restoredRuntimeForCleanup = runtime
+        case let .invalidURL(url):
+            throw CheckError.failed("restored browser rejected URL \(url)")
+        case .tileNotFound:
+            throw CheckError.failed("restored canvas did not contain browser tile")
+        case let .failure(error):
+            throw error
+        }
+        guard let restoredInspectorTile = restoredCanvas.canvasState.tiles.first(where: { $0.id == inspectorTileId && $0.kind == .browserInspector }) else {
+            throw CheckError.failed("restored canvas did not contain inspector tile")
+        }
+        restoredSpawner.installBrowserInspectorTile(restoredInspectorTile, in: restoredCanvas)
+        guard let restoredInspectorView = restoredCanvas.tileView(for: inspectorTileId) as? BrowserInspectorTileNSView else {
+            throw CheckError.failed("restored inspector did not install BrowserInspectorTileNSView")
+        }
+        let restoredInspectorState = try store.loadBrowserState().inspectorStates.first { $0.inspectorTileId == inspectorTileId }
+        let restartPreservedLink = restoredInspectorState?.inspectedBrowserTileId == browserTileId
+            && !restoredInspectorView.isDisconnectedForQA
+            && restoredInspectorView.revealBrowserEnabledForQA
+            && restoredFocusBroker.requestFocus(.tile(inspectorTileId), reason: .userClick)
+        try expect(restartPreservedLink, "app restart did not preserve inspector/browser link")
+
+        let deletedInspectorIds = restoredSpawner.deleteBrowserInspectors(inspecting: browserTileId, in: restoredCanvas)
+        restoredCanvas.removeTile(id: browserTileId)
+        var browserStateAfterDelete = try store.loadBrowserState()
+        browserStateAfterDelete.tiles.removeAll { $0.tileId == browserTileId }
+        try store.saveBrowserState(browserStateAfterDelete)
+        try store.saveCanvas(restoredCanvas.canvasState)
+        let inspectorStateRemovedAfterDelete = !(try store.loadBrowserState().inspectorStates.contains { $0.inspectorTileId == inspectorTileId })
+        let deleteBrowserDeletedInspector = deletedInspectorIds.contains(inspectorTileId)
+            && !restoredCanvas.canvasState.tiles.contains(where: { $0.id == inspectorTileId })
+            && inspectorStateRemovedAfterDelete
+        try expect(deleteBrowserDeletedInspector, "deleting browser did not delete linked inspector")
+
+        let artifactDir = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp(), isDirectory: true)
+            .appendingPathComponent("browser-inspector-link-lifecycle", isDirectory: true)
+        try fileManager.createDirectory(at: artifactDir, withIntermediateDirectories: true)
+        let artifact = artifactDir.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "browser-inspector-link-lifecycle",
+            "duplicateInspectorPrevented": duplicateInspectorPrevented,
+            "revealBrowserWorked": revealBrowserWorked,
+            "deleteBrowserDeletedInspector": deleteBrowserDeletedInspector,
+            "restartPreservedLink": restartPreservedLink,
+            "reloadUpdatedHeader": reloadUpdatedHeader,
+            "browserContextMenuIncludesOpenInspector": browserContextMenuIncludesOpenInspector,
+            "browserTileId": browserTileId.uuidString,
+            "inspectorTileId": inspectorTileId.uuidString,
+            "headerTitleAfterReload": inspectorView.headerTitleForQA,
+            "headerDetailAfterReload": inspectorView.headerDetailForQA,
+            "viewportBeforeReveal": [
+                "x": viewportBeforeReveal.x,
+                "y": viewportBeforeReveal.y,
+                "zoom": viewportBeforeReveal.zoom
+            ],
+            "viewportAfterReveal": [
+                "x": viewportAfterReveal.x,
+                "y": viewportAfterReveal.y,
+                "zoom": viewportAfterReveal.zoom
             ]
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

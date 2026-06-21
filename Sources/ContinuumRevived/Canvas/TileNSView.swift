@@ -52,6 +52,12 @@ class TileNSView: NSView {
         titleBar?.setAccessory(accessory)
     }
 
+    func makeAdditionalTitleBarMenuItems() -> [NSMenuItem] { [] }
+
+    func titleBarContextMenuForQA() -> NSMenu {
+        titleBar?.makeTileContextMenu() ?? NSMenu(title: "Tile")
+    }
+
     /// Invoked when the user clicks the title bar's × button. The app sets
     /// this to its tile-delete orchestrator at install time.
     var onClose: (() -> Void)?
@@ -106,6 +112,7 @@ class TileNSView: NSView {
         bar.autoresizingMask = []
         bar.onCloseRequested = { [weak self] in self?.onClose?() }
         bar.onStopRunRequested = { [weak self] in self?.onStopRun?() }
+        bar.additionalMenuItemsProvider = { [weak self] in self?.makeAdditionalTitleBarMenuItems() ?? [] }
         addSubview(bar)
         self.titleBar = bar
 
@@ -583,6 +590,7 @@ private final class TitleBarView: NSView {
     var agentStatus: AgentStatus? { didSet { needsDisplay = true } }
     var onCloseRequested: (() -> Void)?
     var onStopRunRequested: (() -> Void)?
+    var additionalMenuItemsProvider: (() -> [NSMenuItem])?
     private var accessoryView: NSView?
 
     var snapshot: TileNSView.ChromeSnapshot {
@@ -722,7 +730,18 @@ private final class TitleBarView: NSView {
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
+        makeTileContextMenu()
+    }
+
+    func makeTileContextMenu() -> NSMenu {
         let menu = NSMenu(title: "Tile")
+        let additionalItems = additionalMenuItemsProvider?() ?? []
+        for item in additionalItems {
+            menu.addItem(item)
+        }
+        if !additionalItems.isEmpty {
+            menu.addItem(NSMenuItem.separator())
+        }
         let stop = NSMenuItem(title: "Stop run", action: #selector(handleStopRun(_:)), keyEquivalent: "")
         stop.target = self
         menu.addItem(stop)

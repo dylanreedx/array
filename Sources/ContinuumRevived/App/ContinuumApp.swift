@@ -798,6 +798,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-inspector-link-lifecycle-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try TileSpawner.runBrowserInspectorLinkLifecycleSelfCheck()
+                print("ContinuumRevivedBrowserInspectorLinkLifecycleChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--chrome-integration-guardrails-check") {
             do {
                 let artifact = try runChromeIntegrationGuardrailsSelfCheck()

@@ -33,7 +33,7 @@ Rules:
   Source ticket: `T05-browser-inspector-network-lite.md`.
   Required output: honest navigation/download/child-open event log; no fake HTTP methods/status; artifact.
 
-- [ ] I06 — Inspector/browser link lifecycle
+- [x] I06 — Inspector/browser link lifecycle
   Source ticket: `T06-browser-inspector-link-lifecycle.md`.
   Required output: duplicate prevention, reveal browser, delete lifecycle, restart-preserved link, artifact.
 

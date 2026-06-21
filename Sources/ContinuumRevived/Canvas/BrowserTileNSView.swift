@@ -24,6 +24,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     var onCreateBrowserProfile: (() -> Void)?
     var onRenameBrowserProfile: ((UUID) -> Void)?
     var onDeleteBrowserProfile: ((UUID) -> Void)?
+    var onOpenInspector: (() -> Void)?
 
     private let urlField: NSTextField
     private let backButton: NSButton
@@ -276,6 +277,20 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
 
     override func canHandleReservedShortcut(_ shortcut: ReservedShortcut) -> Bool {
         shortcut == .focusMode
+    }
+
+    override func makeAdditionalTitleBarMenuItems() -> [NSMenuItem] {
+        let openInspector = NSMenuItem(title: "Open Inspector Tile", action: #selector(openInspectorFromMenu(_:)), keyEquivalent: "")
+        openInspector.target = self
+        return [openInspector]
+    }
+
+    func contextMenuForQA() -> NSMenu {
+        titleBarContextMenuForQA()
+    }
+
+    @objc private func openInspectorFromMenu(_ sender: Any?) {
+        onOpenInspector?()
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
