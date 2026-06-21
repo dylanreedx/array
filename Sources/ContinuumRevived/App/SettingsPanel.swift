@@ -5,7 +5,7 @@ import Foundation
 /// The generic, type-driven settings surface (docs/24 S4). A floating dark/
 /// monospaced `NSPanel` — a sidebar of `SettingsSchema.sections()` titles plus a
 /// detail pane that renders each section's fields *by their kind*: toggle →
-/// checkbox, text → text field, choice → popup, shortcuts → read-only
+/// checkbox, text → text field, choice → popup, info → copy, shortcuts → read-only
 /// `ShortcutCatalog` guide. Adding a section/field changes nothing here — that is
 /// the extensibility contract. Field edits write LIVE through the bound
 /// `SettingsField.setValue` to UserDefaults (chord capture is A7, not here).
@@ -182,6 +182,8 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             return textRow(for: field)
         case .choice(_, _, let options, _):
             return choiceRow(for: field, options: options)
+        case .info:
+            return infoRow(for: field)
         case .shortcuts:
             return shortcutsRow(for: field)
         }
@@ -225,6 +227,15 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         }
         bindings[ObjectIdentifier(popup)] = field
         return vGroup([labelView, popup])
+    }
+
+    private func infoRow(for field: SettingsField) -> NSView {
+        let labelView = label(field.label, size: 11, weight: .regular, color: .secondaryLabelColor)
+        labelView.maximumNumberOfLines = 0
+        labelView.lineBreakMode = .byWordWrapping
+        labelView.translatesAutoresizingMaskIntoConstraints = false
+        labelView.widthAnchor.constraint(lessThanOrEqualToConstant: 360).isActive = true
+        return labelView
     }
 
     private func shortcutsRow(for field: SettingsField) -> NSView {
@@ -531,8 +542,8 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
 
     /// True when every field in the selected section produced at least one
     /// editable/displayable control of the kind its type demands (toggle →
-    /// NSButton, text → NSTextField, choice → NSPopUpButton, shortcuts → a
-    /// non-empty guide list).
+    /// NSButton, text → NSTextField, choice → NSPopUpButton, info → static
+    /// NSTextField, shortcuts → a non-empty guide list).
     func selectedSectionFieldsAllRenderedForQA() -> Bool {
         guard sections.indices.contains(selectedSectionIndex) else { return false }
         guard let stack = detailStack else { return false }
@@ -548,6 +559,8 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
                 if firstDescendant(of: row, ofType: NSTextField.self, where: { $0.isEditable }) == nil { return false }
             case .choice:
                 if firstDescendant(of: row, ofType: NSPopUpButton.self) == nil { return false }
+            case .info:
+                if firstDescendant(of: row, ofType: NSTextField.self, where: { !$0.stringValue.isEmpty && !$0.isEditable }) == nil { return false }
             case .shortcuts:
                 // Guide must list at least one catalog entry beyond the header.
                 if !ShortcutCatalog.entries().isEmpty, descendantCount(of: row, ofType: NSTextField.self) < 2 { return false }

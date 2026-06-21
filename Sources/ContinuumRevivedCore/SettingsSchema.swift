@@ -144,6 +144,9 @@ public enum SettingsSchema {
                 id: "browser",
                 title: "Browser",
                 fields: [
+                    .info(
+                        label: "Safari Web Inspector is advanced native WebKit inspection from Safari Develop. Continuum Inspector Tile opens inside Continuum with limited Elements, logs-only Console, Styles, and Network-lite panels."
+                    ),
                     .toggle(
                         key: BrowserWebInspectorConfig.userDefaultsKey,
                         label: "Enable Safari Web Inspector for Browser Tiles (open from Safari Develop)",

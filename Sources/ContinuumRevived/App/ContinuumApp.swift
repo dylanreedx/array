@@ -810,6 +810,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-inspector-actions-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runBrowserInspectorActionsSelfCheck()
+                print("ContinuumRevivedBrowserInspectorActionsChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--chrome-integration-guardrails-check") {
             do {
                 let artifact = try runChromeIntegrationGuardrailsSelfCheck()
@@ -2110,6 +2122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var registryStore: RegistryStore?
     private var tileSpawner: TileSpawner?
     private var profilePalette: LaunchProfilePalette?
+    private var paletteContextTileId: UUID?
     private var settingsPanel: SettingsPanel?
     private var settingsChangeObserver: NSObjectProtocol?
     private var tmuxDefaults: UserDefaults = .standard
@@ -4070,7 +4083,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
               let host = window else { return }
         let palette = profilePalette ?? makeProfilePalette()
         let wasVisible = palette.isVisible
+        let focusedTileId = focusedTileIdForPaletteContext()
+        let contextualActions = contextualPaletteActions(for: focusedTileId)
         profilePalette = palette
+        paletteContextTileId = focusedTileId
         if !wasVisible {
             focusBroker.openModal(.palette)
         }
@@ -4081,7 +4097,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let jumpZones = (canvasView?.navZoneRenderModels ?? []).map { model in
             JumpZoneRow(id: model.placement.zoneId, title: model.displayName)
         }
-        palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces, harnessRoles: harnessRolesForActiveProject(), jumpTiles: jumpTiles, jumpZones: jumpZones, initialQuery: initialQuery)
+        palette.show(near: host, profiles: rows.profiles, projects: rows.projects, workspaces: rows.workspaces, contextualActions: contextualActions, harnessRoles: harnessRolesForActiveProject(), jumpTiles: jumpTiles, jumpZones: jumpZones, initialQuery: initialQuery)
+    }
+
+    private func focusedTileIdForPaletteContext() -> UUID? {
+        guard let canvasView else { return nil }
+        guard case let .tile(tileId) = reservedDispatchScope(),
+              canvasView.canvasState.tiles.contains(where: { $0.id == tileId }) else { return nil }
+        return tileId
+    }
+
+    private func tileKind(for tileId: UUID?) -> TileKind? {
+        guard let tileId else { return nil }
+        return canvasView?.canvasState.tiles.first(where: { $0.id == tileId })?.kind
+    }
+
+    private func contextualPaletteActions(for focusedTileId: UUID?) -> [LaunchPaletteAction] {
+        guard tileKind(for: focusedTileId) == .browser else { return [] }
+        return [.openInspectorForFocusedBrowser]
+    }
+
+    private func contextualPaletteActionsForFocusedTile() -> [LaunchPaletteAction] {
+        contextualPaletteActions(for: focusedTileIdForPaletteContext())
     }
 
     private func harnessRolesForActiveProject() -> [HarnessRole] {
@@ -4103,6 +4140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         palette.onClose = { [weak self] in
             self?.focusBroker.closeModal(.palette)
             self?.profilePalette = nil
+            self?.paletteContextTileId = nil
         }
         return palette
     }
@@ -4526,6 +4564,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             deleteWorkspaceAndRelaunch(workspaceId: workspaceId)
         case let .switchWorkspace(workspaceId):
             switchWorkspaceAndRelaunch(workspaceId: workspaceId)
+        case .openInspectorForFocusedBrowser:
+            _ = openInspectorForFocusedBrowserFromPalette()
         case let .spawnHarnessRole(role):
             spawnHarnessRoleFromPalette(role)
         case let .jumpToTile(tileId):
@@ -4534,6 +4574,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             jumpToZoneFromPalette(zoneId)
         case .createZone:
             createGroupZoneFromPalette()
+        }
+    }
+
+    @discardableResult
+    private func openInspectorForFocusedBrowserFromPalette() -> Bool {
+        let browserTileId = paletteContextTileId ?? focusedTileIdForPaletteContext()
+        guard tileKind(for: browserTileId) == .browser,
+              let browserTileId,
+              let spawner = tileSpawner else { return false }
+        switch spawner.spawnBrowserInspector(for: browserTileId) {
+        case let .spawned(inspectorTileId):
+            focusBroker.enterScope(.tile(inspectorTileId), reason: .tileSpawned)
+            return true
+        case .notBrowserTile:
+            return false
+        case let .failure(error):
+            fputs("Open inspector for focused browser failed: \(error)\n", stderr)
+            return false
         }
     }
 
@@ -10609,6 +10667,173 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             .appendingPathComponent("palette-zone", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// T07 — in-app browser inspector actions in palette/title-bar menus.
+    static func runBrowserInspectorActionsSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-browser-inspector-actions-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let profile = BrowserProfile.builtInDefault()
+        let project = Project(
+            id: UUID(),
+            name: "browser-inspector-actions-check",
+            rootPath: tempRoot.path,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 1),
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning,
+                defaultBrowserProfileId: profile.id
+            )
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        canvas.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+
+        let app = AppDelegate()
+        app.window = window
+        app.canvasView = canvas
+        canvas.focusBroker = app.focusBroker
+        app.focusBroker.onAcceptedTileFocus = { [weak canvas] id in canvas?.markActive(tileId: id) }
+        let engine = BrowserEngineContext()
+        let spawner = TileSpawner(
+            canvasView: canvas,
+            ghostty: nil,
+            browserEngine: engine,
+            projectStore: store,
+            project: project,
+            browserProfiles: [profile]
+        )
+        app.tileSpawner = spawner
+
+        let browserTileId: UUID
+        switch spawner.spawnBrowser(url: "data:text/html;charset=utf-8,<html><head><title>Inspector Actions</title></head><body>ok</body></html>") {
+        case let .spawned(runtime):
+            browserTileId = runtime.tileId
+        case let .invalidURL(url):
+            throw CheckError.failed("browser spawn rejected fixture URL: \(url)")
+        case let .failure(error):
+            throw error
+        }
+        guard let browserView = canvas.tileView(for: browserTileId) as? BrowserTileNSView else {
+            throw CheckError.failed("spawned browser did not install BrowserTileNSView")
+        }
+        try expect(app.focusBroker.enterScope(.tile(browserTileId), reason: .userClick), "precondition: browser tile focus failed")
+
+        let browserContextMenuIncludesOpenInspector = browserView.contextMenuForQA().items.contains { $0.title == "Open Inspector Tile" }
+        let browserPaletteRows = LaunchPaletteModel.makeRows(profiles: [], contextualActions: app.contextualPaletteActionsForFocusedTile())
+        let browserPaletteActionVisible = browserPaletteRows.contains { row in
+            if case .action(.openInspectorForFocusedBrowser) = row { return true }
+            return false
+        }
+        let browserActionVisible = browserContextMenuIncludesOpenInspector && browserPaletteActionVisible
+        try expect(browserActionVisible, "browser focus did not expose Open Inspector actions")
+
+        let noteTile = Tile(
+            id: UUID(),
+            kind: .note,
+            title: "Non-browser",
+            frame: TileFrame(x: 30, y: 420, width: 220, height: 160),
+            zIndex: 2,
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+        let noteView = TileNSView(tile: noteTile)
+        canvas.install(tileView: noteView, for: noteTile)
+        try expect(app.focusBroker.enterScope(.tile(noteTile.id), reason: .userClick), "precondition: note tile focus failed")
+        let notePaletteRows = LaunchPaletteModel.makeRows(profiles: [], contextualActions: app.contextualPaletteActionsForFocusedTile())
+        let notePaletteActionHidden = !notePaletteRows.contains { row in
+            if case .action(.openInspectorForFocusedBrowser) = row { return true }
+            return false
+        }
+        let noteContextMenuActionHidden = !noteView.titleBarContextMenuForQA().items.contains { $0.title == "Open Inspector Tile" }
+        let nonBrowserActionHidden = notePaletteActionHidden && noteContextMenuActionHidden
+        try expect(nonBrowserActionHidden, "non-browser focus exposed the browser inspector action")
+
+        try expect(app.focusBroker.enterScope(.tile(browserTileId), reason: .userClick), "precondition: browser re-focus failed")
+        app.paletteContextTileId = browserTileId
+        app.focusBroker.openModal(.palette)
+        app.performPaletteAction(.openInspectorForFocusedBrowser)
+        app.focusBroker.closeModal(.palette)
+        app.paletteContextTileId = nil
+
+        let inspectorTiles = canvas.canvasState.tiles.filter { $0.kind == .browserInspector }
+        guard inspectorTiles.count == 1, let inspectorTile = inspectorTiles.first else {
+            throw CheckError.failed("palette action did not create exactly one inspector tile; count=\(inspectorTiles.count)")
+        }
+        let focusedBrowserPaletteActionWorked = app.focusBroker.activeSurface == .tile(inspectorTile.id)
+            && canvas.canvasState.lastActiveTileId == inspectorTile.id
+        try expect(focusedBrowserPaletteActionWorked, "palette action did not focus the opened inspector tile")
+        guard let inspectorView = canvas.tileView(for: inspectorTile.id) as? BrowserInspectorTileNSView else {
+            throw CheckError.failed("palette-created inspector did not install BrowserInspectorTileNSView")
+        }
+
+        let inspectorMenu = inspectorView.titleBarContextMenuForQA()
+        guard let revealItem = inspectorMenu.items.first(where: { $0.title == "Reveal Inspected Browser" }) else {
+            throw CheckError.failed("inspector context menu did not include Reveal Inspected Browser")
+        }
+        try expect(revealItem.isEnabled, "Reveal Inspected Browser menu item was disabled for a linked inspector")
+        guard let action = revealItem.action else {
+            throw CheckError.failed("Reveal Inspected Browser menu item had no action")
+        }
+        try expect(NSApp.sendAction(action, to: revealItem.target, from: revealItem), "Reveal Inspected Browser menu action was not dispatched")
+        let revealInspectedBrowserWorked = app.focusBroker.activeSurface == .tile(browserTileId)
+            && canvas.canvasState.lastActiveTileId == browserTileId
+        try expect(revealInspectedBrowserWorked, "Reveal Inspected Browser did not focus the linked browser tile")
+
+        let browserSection = SettingsSchema.sections().first { $0.id == "browser" }
+        let settingsCopy = browserSection?.fields.map(\.label).joined(separator: " ") ?? ""
+        let settingsCopyDistinguishesSafariAndContinuumInspector = settingsCopy.contains("Safari Web Inspector")
+            && settingsCopy.contains("Safari Develop")
+            && settingsCopy.contains("Continuum Inspector Tile")
+            && settingsCopy.contains("Elements")
+            && settingsCopy.contains("logs-only Console")
+            && settingsCopy.contains("Styles")
+            && settingsCopy.contains("Network-lite")
+        try expect(settingsCopyDistinguishesSafariAndContinuumInspector, "Browser settings copy does not distinguish Safari Web Inspector from Continuum Inspector Tile")
+
+        let timestamp = Self.qaTimestamp()
+        let directory = URL(fileURLWithPath: "qa-runs/\(timestamp)/browser-inspector-actions", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "browser-inspector-actions",
+            "browserActionVisible": browserActionVisible,
+            "browserContextMenuIncludesOpenInspector": browserContextMenuIncludesOpenInspector,
+            "browserPaletteActionVisible": browserPaletteActionVisible,
+            "nonBrowserActionHidden": nonBrowserActionHidden,
+            "focusedBrowserPaletteActionWorked": focusedBrowserPaletteActionWorked,
+            "inspectorMenuIncludesRevealInspectedBrowser": true,
+            "revealInspectedBrowserWorked": revealInspectedBrowserWorked,
+            "settingsCopyDistinguishesSafariAndContinuumInspector": settingsCopyDistinguishesSafariAndContinuumInspector,
+            "palettePath": "LaunchPaletteModel contextual action -> performPaletteAction(.openInspectorForFocusedBrowser) -> TileSpawner.spawnBrowserInspector",
+            "inspectorTileId": inspectorTile.id.uuidString,
+            "browserTileId": browserTileId.uuidString
+        ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)
         return artifact

@@ -3,9 +3,10 @@ import Foundation
 /// A typed, UserDefaults-bound preference descriptor. Adding a new preference to
 /// the settings surface is a one-line `SettingsField` in `SettingsSchema` — the
 /// generic renderer (docs/24 S4/S5) draws each field by its `kind`, so no UI
-/// surgery is needed. Each non-`.shortcuts` field carries the EXACT UserDefaults
-/// key of the existing resolver it drives (e.g. the zone-chrome toggle writes
-/// `continuum.zoneChrome.enabled`, which `ZoneChromeFeature` already reads).
+/// surgery is needed. Bound preference fields carry the EXACT UserDefaults key
+/// of the existing resolver they drive (e.g. the zone-chrome toggle writes
+/// `continuum.zoneChrome.enabled`, which `ZoneChromeFeature` already reads);
+/// static `.info` rows are copy-only and intentionally have no key.
 public enum SettingsField: Equatable, Sendable {
     /// A boolean preference (rendered as a switch).
     case toggle(key: String, label: String, default: Bool)
@@ -14,6 +15,9 @@ public enum SettingsField: Equatable, Sendable {
     /// A fixed-options preference (rendered as a popup). `setValue` rejects any
     /// value not in `options`, falling back to `default`.
     case choice(key: String, label: String, options: [String], default: String)
+    /// Static explanatory copy rendered in a settings section without binding a
+    /// UserDefaults key.
+    case info(label: String)
     /// The keybindings editor/guide, which renders `ShortcutCatalog` rather than
     /// binding a single key.
     case shortcuts(label: String)
@@ -24,6 +28,7 @@ public enum SettingsField: Equatable, Sendable {
         case .toggle(let key, _, _): return key
         case .text(let key, _, _): return key
         case .choice(let key, _, _, _): return key
+        case .info: return nil
         case .shortcuts: return nil
         }
     }
@@ -34,6 +39,7 @@ public enum SettingsField: Equatable, Sendable {
         case .toggle(_, let label, _): return label
         case .text(_, let label, _): return label
         case .choice(_, let label, _, _): return label
+        case .info(let label): return label
         case .shortcuts(let label): return label
         }
     }
@@ -51,6 +57,8 @@ public enum SettingsField: Equatable, Sendable {
             let raw = defaults.string(forKey: key)
             if let raw, options.contains(raw) { return .string(raw) }
             return .string(fallback)
+        case .info:
+            return nil
         case .shortcuts:
             return nil
         }
@@ -73,6 +81,8 @@ public enum SettingsField: Equatable, Sendable {
                 return
             }
             defaults.set(raw, forKey: key)
+        case .info:
+            break
         case .shortcuts:
             break
         }

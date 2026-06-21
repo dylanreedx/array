@@ -329,6 +329,17 @@ final class BrowserInspectorTileNSView: TileNSView {
         refreshPanelPlaceholder()
     }
 
+    override func makeAdditionalTitleBarMenuItems() -> [NSMenuItem] {
+        let reveal = NSMenuItem(title: "Reveal Inspected Browser", action: #selector(revealBrowserFromMenu(_:)), keyEquivalent: "")
+        reveal.target = self
+        reveal.isEnabled = revealBrowserButton.isEnabled
+        return [reveal]
+    }
+
+    @objc private func revealBrowserFromMenu(_ sender: Any?) {
+        onRevealBrowser?()
+    }
+
     @objc private func panelControlChanged(_ sender: NSSegmentedControl) {
         guard sender.selectedSegment >= 0, sender.selectedSegment < BrowserInspectorPanel.allCases.count else { return }
         applySelectedPanel(BrowserInspectorPanel.allCases[sender.selectedSegment], notify: true)

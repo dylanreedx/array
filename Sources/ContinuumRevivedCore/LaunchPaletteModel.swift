@@ -17,6 +17,7 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case renameWorkspace(UUID)
     case deleteWorkspace(UUID)
     case switchWorkspace(UUID)
+    case openInspectorForFocusedBrowser
     case spawnHarnessRole(HarnessRole)
     case jumpToTile(UUID)
     case jumpToZone(UUID)
@@ -56,6 +57,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "Delete Workspace…"
         case .switchWorkspace:
             return "Switch Workspace…"
+        case .openInspectorForFocusedBrowser:
+            return "Open Inspector for Focused Browser"
         case let .spawnHarnessRole(role):
             return "Run \(role.displayName) Agent…"
         case .jumpToTile:
@@ -101,6 +104,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["delete", "workspace", "canvas"]
         case .switchWorkspace:
             return ["switch", "workspace", "canvas"]
+        case .openInspectorForFocusedBrowser:
+            return ["open", "inspector", "focused", "browser", "continuum", "tile"]
         case let .spawnHarnessRole(role):
             return ["run", "spawn", "agent", "harness", "role", role.id, role.displayName.lowercased()]
         case .jumpToTile:
@@ -237,9 +242,10 @@ public enum LaunchPaletteRow: Equatable, Sendable {
 }
 
 public enum LaunchPaletteModel {
-    public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = []) -> [LaunchPaletteRow] {
+    public static func makeRows(profiles: [LaunchPaletteProfileRow], projects: [ProjectPickerRow] = [], workspaces: [WorkspaceEntry] = [], contextualActions: [LaunchPaletteAction] = [], harnessRoles: [HarnessRole] = [], jumpTiles: [JumpTileRow] = [], jumpZones: [JumpZoneRow] = []) -> [LaunchPaletteRow] {
         profiles.map(LaunchPaletteRow.profile)
             + CommandRegistry.paletteActions().map(LaunchPaletteRow.action)
+            + contextualActions.map(LaunchPaletteRow.action)
             + harnessRoles.map { LaunchPaletteRow.action(.spawnHarnessRole($0)) }
             + jumpTiles.map(LaunchPaletteRow.jumpToTile)
             + jumpZones.map(LaunchPaletteRow.jumpToZone)

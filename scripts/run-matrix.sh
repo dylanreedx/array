@@ -137,6 +137,7 @@ run_app_check .build/debug/continuum-revived --browser-inspector-console-check
 run_app_check .build/debug/continuum-revived --browser-inspector-styles-check
 run_app_check .build/debug/continuum-revived --browser-inspector-network-lite-check
 run_app_check .build/debug/continuum-revived --browser-inspector-link-lifecycle-check
+run_app_check .build/debug/continuum-revived --browser-inspector-actions-check
 run_app_check .build/debug/continuum-revived --browser-profile-persistence-check
 run_app_check .build/debug/continuum-revived --note-file-tile-spawn-check
 run_app_check .build/debug/continuum-revived --run-artifacts-tile-check

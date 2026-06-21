@@ -37,7 +37,7 @@ Rules:
   Source ticket: `T06-browser-inspector-link-lifecycle.md`.
   Required output: duplicate prevention, reveal browser, delete lifecycle, restart-preserved link, artifact.
 
-- [ ] I07 — Palette/menu actions for in-app inspector
+- [x] I07 — Palette/menu actions for in-app inspector
   Source ticket: `T07-browser-inspector-action-palette.md`.
   Required output: discoverable browser inspector actions and settings copy, artifact.
 

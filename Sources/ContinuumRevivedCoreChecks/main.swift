@@ -4685,6 +4685,10 @@ do {
 
     for field in allFields {
         switch field {
+        case .info:
+            expect(field.currentValue(in: defaults) == nil, ".info field has no bound value")
+            field.setValue(.string("ignored"), in: defaults)
+            expect(field.currentValue(in: defaults) == nil, ".info setValue is a no-op")
         case .shortcuts:
             expect(field.currentValue(in: defaults) == nil, ".shortcuts field has no bound value")
         case .toggle(_, _, let fallback):
