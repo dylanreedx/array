@@ -31,6 +31,9 @@ ROOT_PI_DIR="${ROOT_PI_DIR:-$HOME/.pi}"
 PROJECT_LOG_DIR="${PROJECT_LOG_DIR:-.pi/overnight-logs}"
 ENV_FILE="${ENV_FILE:-.env}"
 LOAD_DOTENV="${LOAD_DOTENV:-1}"
+PI_MODEL="${PI_MODEL:-}"
+PI_PROVIDER="${PI_PROVIDER:-}"
+PI_THINKING="${PI_THINKING:-}"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 REPO_NAME="$(basename "$REPO_ROOT")"
@@ -85,6 +88,9 @@ write_status() {
   "promptFile": "$(json_escape "$PROMPT_FILE")",
   "queueFile": "$(json_escape "$QUEUE_FILE")",
   "pushMode": "$(json_escape "$PUSH_MODE")",
+  "piModel": "$(json_escape "$PI_MODEL")",
+  "piProvider": "$(json_escape "$PI_PROVIDER")",
+  "piThinking": "$(json_escape "$PI_THINKING")",
   "iterations": $ITERATIONS,
   "softFailures": $failures,
   "updatedAt": "$(now_utc)"
@@ -108,6 +114,9 @@ write_report() {
     echo "- Prompt: \`$PROMPT_FILE\`"
     echo "- Queue: \`$QUEUE_FILE\`"
     echo "- Push mode: \`$PUSH_MODE\`"
+    echo "- Pi model: \`${PI_MODEL:-default}\`"
+    echo "- Pi provider: \`${PI_PROVIDER:-default}\`"
+    echo "- Pi thinking: \`${PI_THINKING:-default}\`"
     echo "- Iterations: \`$ITERATIONS\`"
     echo "- Soft failures: \`$failures\`"
     echo
@@ -178,7 +187,11 @@ EOF
 )
 $(cat "$PROMPT_FILE")"
 
-  pi -p --approve --session-id "overnight-$STAMP-$iter" -n "overnight-$iter" "$prompt" >"$out" 2>&1 &
+  local pi_args=(-p --approve --session-id "overnight-$STAMP-$iter" -n "overnight-$iter")
+  if [ -n "$PI_PROVIDER" ]; then pi_args+=(--provider "$PI_PROVIDER"); fi
+  if [ -n "$PI_MODEL" ]; then pi_args+=(--model "$PI_MODEL"); fi
+  if [ -n "$PI_THINKING" ]; then pi_args+=(--thinking "$PI_THINKING"); fi
+  pi "${pi_args[@]}" "$prompt" >"$out" 2>&1 &
   local pid=$!
   local watchdog=""
   if [ "$ITER_TIMEOUT_SECONDS" -gt 0 ]; then
