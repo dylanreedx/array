@@ -6,12 +6,31 @@ public struct StoredCredentialScope: Codable, Equatable, Hashable, Sendable {
     public var port: Int?
 
     public init(scheme: String, host: String, port: Int? = nil) {
-        self.scheme = scheme.lowercased()
+        let canonicalScheme = scheme.lowercased()
+        self.scheme = canonicalScheme
         self.host = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
-        self.port = port
+        self.port = CredentialOriginMatcher.canonicalPort(forScheme: canonicalScheme, explicitPort: port)
     }
 
     public var credentialOrigin: CredentialOrigin { CredentialOrigin(scheme: scheme, host: host, port: port) }
+
+    private enum CodingKeys: String, CodingKey { case scheme, host, port }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            scheme: container.decode(String.self, forKey: .scheme),
+            host: container.decode(String.self, forKey: .host),
+            port: container.decodeIfPresent(Int.self, forKey: .port)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(scheme, forKey: .scheme)
+        try container.encode(host, forKey: .host)
+        try container.encodeIfPresent(port, forKey: .port)
+    }
 }
 
 public struct WebsiteCredentialMetadata: Codable, Equatable, Sendable {
@@ -65,12 +84,15 @@ public protocol PasswordVaultService {
 
 public enum PasswordVaultStoragePolicy {
     public static func validateStorage(scope: StoredCredentialScope, policy: BrowserCredentialPolicy = .default) throws {
+        guard !scope.host.isEmpty, CredentialOriginMatcher.isValidPort(scope.port) else {
+            throw PasswordVaultError.invalidScope
+        }
+
         switch scope.scheme {
         case "https":
             return
         case "http":
             guard policy.loopbackHTTPExceptionEnabled,
-                  policy.publicHTTPFill == .allow,
                   CredentialOriginMatcher.isLoopbackHost(scope.host) else {
                 throw PasswordVaultError.rejectedHTTPStorage
             }

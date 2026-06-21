@@ -75,9 +75,10 @@ Rules:
   Focus: real user path, no over-broad `fileprivate`, focus history semantics, checks not self-fulfilling.  
   Audit note: fixed shallow previous-navigation wiring. Direct tile focus now records through the production FocusBroker user-click path without broadening AppDelegate state to `fileprivate`, previous tile/zone navigation records the viewport it leaves so previous-view remains meaningful after a back jump, and the app flag now launches the real app, drives `routeTileClickFocus` plus `LaunchPaletteModel` rows, verifies A/B/A tile toggle, Z1/Z2/Z1 zone toggle, deleted-target skip, and modal-restore non-pollution. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260621T113626/audits/A10.md` and artifact `qa-runs/20260621-161942/previous-focus-navigation/manifest.json`.
 
-- [ ] A11 — T04/T04b password/keychain guardrails audit  
+- [x] A11 — T04/T04b password/keychain guardrails audit  
   Commits: `5892973`, `a61ad02`.  
-  Focus: no credential leakage, namespace boundary, no accidental fill/save behavior.
+  Focus: no credential leakage, namespace boundary, no accidental fill/save behavior.  
+  Audit note: fixed shallow keychain namespace and HTTP guardrails. Credential origins/scopes now canonicalize default ports, reject invalid ports and invalid 127/8-looking hosts, and loopback HTTP can be enabled without ever allowing public HTTP fill/save. Keychain Internet Password items are additionally fenced by an app-owned `kSecAttrSecurityDomain`, cleanup/count queries use the same namespace, and the app check proves an unowned same-scope item is not read, overwritten, mutated, or deleted while manifests/QA artifacts stay secret-free. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260621T113626/audits/A11.md` and artifacts `qa-runs/1782059520/browser-credential-guardrails/manifest.json`, `qa-runs/1782059522/browser-keychain-vault/manifest.json`.
 
 - [ ] A12 — T05 Chrome integration guardrail audit  
   Commit: `993f630`.  

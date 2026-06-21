@@ -72,15 +72,20 @@ final class KeychainPasswordVaultService: PasswordVaultService {
         return SecretString(value)
     }
 
-    func deleteAllForNamespace() throws -> Int {
-        var query: [String: Any] = [kSecClass as String: kSecClassInternetPassword, kSecAttrLabel as String: namespace]
+    func countItemsForNamespace() throws -> Int {
+        var query = namespaceQuery()
         query[kSecMatchLimit as String] = kSecMatchLimitAll
         query[kSecReturnAttributes as String] = true
         var result: CFTypeRef?
-        let copyStatus = SecItemCopyMatching(query as CFDictionary, &result)
-        let count = (result as? [[String: Any]])?.count ?? 0
-        if copyStatus != errSecItemNotFound { try throwIfFailed(copyStatus) }
-        let deleteStatus = SecItemDelete([kSecClass as String: kSecClassInternetPassword, kSecAttrLabel as String: namespace] as CFDictionary)
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return 0 }
+        try throwIfFailed(status)
+        return (result as? [[String: Any]])?.count ?? 0
+    }
+
+    func deleteAllForNamespace() throws -> Int {
+        let count = try countItemsForNamespace()
+        let deleteStatus = SecItemDelete(namespaceQuery() as CFDictionary)
         if deleteStatus != errSecItemNotFound { try throwIfFailed(deleteStatus) }
         return count
     }
@@ -91,13 +96,18 @@ final class KeychainPasswordVaultService: PasswordVaultService {
         return query
     }
 
-    private func scopeQuery(_ scope: StoredCredentialScope) -> [String: Any] {
-        var query: [String: Any] = [
+    private func namespaceQuery() -> [String: Any] {
+        [
             kSecClass as String: kSecClassInternetPassword,
-            kSecAttrServer as String: scope.host,
-            kSecAttrProtocol as String: scope.scheme == "https" ? kSecAttrProtocolHTTPS : kSecAttrProtocolHTTP,
-            kSecAttrLabel as String: namespace
+            kSecAttrLabel as String: namespace,
+            kSecAttrSecurityDomain as String: namespace
         ]
+    }
+
+    private func scopeQuery(_ scope: StoredCredentialScope) -> [String: Any] {
+        var query = namespaceQuery()
+        query[kSecAttrServer as String] = scope.host
+        query[kSecAttrProtocol as String] = scope.scheme == "https" ? kSecAttrProtocolHTTPS : kSecAttrProtocolHTTP
         if let port = scope.port { query[kSecAttrPort as String] = port }
         return query
     }

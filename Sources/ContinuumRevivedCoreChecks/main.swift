@@ -142,13 +142,16 @@ do {
     expect(CredentialOriginMatcher.fillDecision(savedOrigin: https, documentOrigin: https, frameOrigin: CredentialOrigin(scheme: "https", host: "login.example.com", port: 443)) == .deny, "cross-origin frame should deny")
     expect(CredentialOriginMatcher.fillDecision(savedOrigin: https, documentOrigin: https, formActionOrigin: CredentialOrigin(scheme: "https", host: "pay.example.com", port: 443)) == .deny, "cross-origin form action should deny")
 
-    let loopbackPolicy = BrowserCredentialPolicy(publicHTTPFill: .allow, loopbackHTTPExceptionEnabled: true)
+    let loopbackPolicy = BrowserCredentialPolicy(loopbackHTTPExceptionEnabled: true)
     let localhost3000 = CredentialOrigin(scheme: "http", host: "localhost", port: 3000)
     expect(CredentialOriginMatcher.fillDecision(savedOrigin: localhost3000, documentOrigin: localhost3000, policy: loopbackPolicy) == .allow, "enabled loopback exact port should allow")
     expect(CredentialOriginMatcher.fillDecision(savedOrigin: localhost3000, documentOrigin: CredentialOrigin(scheme: "http", host: "localhost", port: 8080), policy: loopbackPolicy) == .deny, "loopback ports must be distinct")
+    expect(CredentialOriginMatcher.fillDecision(savedOrigin: CredentialOrigin(scheme: "http", host: "example.com", port: 80), documentOrigin: CredentialOrigin(scheme: "http", host: "example.com", port: 80), policy: BrowserCredentialPolicy(publicHTTPFill: .allow, loopbackHTTPExceptionEnabled: true)) == .deny, "public HTTP fill must remain denied even when loopback dev exception is enabled")
+    expect(CredentialOriginMatcher.isSameOrigin(CredentialOrigin(scheme: "https", host: "example.com"), CredentialOrigin(scheme: "https", host: "example.com", port: 443)), "default HTTPS port should canonicalize to exact origin")
     expect(!CredentialOriginMatcher.isLoopbackHost("192.168.1.10"), "LAN addresses must not be loopback")
     expect(!CredentialOriginMatcher.isLoopbackHost("10.0.0.1"), "private 10/8 addresses must not be loopback")
     expect(!CredentialOriginMatcher.isLoopbackHost("172.16.0.1"), "private 172.16/12 addresses must not be loopback")
+    expect(!CredentialOriginMatcher.isLoopbackHost("127.0.0.999"), "invalid 127/8-looking hosts must not be loopback")
 
     let fixtureSecret = "T04-Fixture-Password-123"
     let generatedScript = "document.querySelector('#password').value = '\(fixtureSecret)'"
@@ -163,6 +166,7 @@ do {
 
     let vaultScope = StoredCredentialScope(scheme: "HTTPS", host: "[Example.COM]", port: 443)
     expect(vaultScope == StoredCredentialScope(scheme: "https", host: "example.com", port: 443), "vault scopes should canonicalize scheme/host")
+    expect(StoredCredentialScope(scheme: "https", host: "example.com") == StoredCredentialScope(scheme: "https", host: "example.com", port: 443), "vault scopes should canonicalize default HTTPS port")
     let secret = SecretString("CoreCheck-Secret")
     expect(String(describing: secret) == "<redacted-secret>", "SecretString description must redact plaintext")
     expect(String(reflecting: secret) == "<redacted-secret>", "SecretString debug description must redact plaintext")
@@ -172,6 +176,8 @@ do {
     expect((try? PasswordVaultStoragePolicy.validateStorage(scope: StoredCredentialScope(scheme: "http", host: "localhost", port: 3000))) == nil, "loopback HTTP vault storage should reject when exception disabled")
     expect((try? PasswordVaultStoragePolicy.validateStorage(scope: StoredCredentialScope(scheme: "http", host: "192.168.1.10", port: 8080), policy: loopbackPolicy)) == nil, "LAN/private HTTP vault storage should reject even when loopback exception enabled")
     expect((try? PasswordVaultStoragePolicy.validateStorage(scope: StoredCredentialScope(scheme: "http", host: "127.0.0.1", port: 3000), policy: loopbackPolicy)) != nil, "loopback HTTP vault storage should allow only when exception enabled")
+    expect((try? PasswordVaultStoragePolicy.validateStorage(scope: StoredCredentialScope(scheme: "http", host: "127.0.0.999", port: 3000), policy: loopbackPolicy)) == nil, "invalid loopback-looking HTTP hosts should reject")
+    expect((try? PasswordVaultStoragePolicy.validateStorage(scope: StoredCredentialScope(scheme: "https", host: "example.com", port: 0))) == nil, "invalid credential scope ports should reject")
 }
 
 // MARK: - Browser tab model/schema
