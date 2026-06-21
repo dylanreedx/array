@@ -80,9 +80,10 @@ Rules:
   Focus: no credential leakage, namespace boundary, no accidental fill/save behavior.  
   Audit note: fixed shallow keychain namespace and HTTP guardrails. Credential origins/scopes now canonicalize default ports, reject invalid ports and invalid 127/8-looking hosts, and loopback HTTP can be enabled without ever allowing public HTTP fill/save. Keychain Internet Password items are additionally fenced by an app-owned `kSecAttrSecurityDomain`, cleanup/count queries use the same namespace, and the app check proves an unowned same-scope item is not read, overwritten, mutated, or deleted while manifests/QA artifacts stay secret-free. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260621T113626/audits/A11.md` and artifacts `qa-runs/1782059520/browser-credential-guardrails/manifest.json`, `qa-runs/1782059522/browser-keychain-vault/manifest.json`.
 
-- [ ] A12 — T05 Chrome integration guardrail audit  
+- [x] A12 — T05 Chrome integration guardrail audit  
   Commit: `993f630`.  
-  Focus: no open-in-Chrome/default-browser handoff, no Chrome profile scraping path.
+  Focus: no open-in-Chrome/default-browser handoff, no Chrome profile scraping path.  
+  Audit note: fixed the T05 guardrail evidence. The app flag now scans production Swift for Chrome profile path literals, forbidden Chrome/default-browser affordances, and NSWorkspace external launch calls, while allowlisting only Continuum self-relaunch and file-tree file opening; the pure matrix check now pins all ticket-required data kinds/methods. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260621T113626/audits/A12.md` and artifact `qa-runs/1782060087/chrome-integration-guardrails/manifest.json`.
 
 - [ ] A13 — T01/T01b/T03 browser architecture code audit  
   Commits: `0bf2934`, `b8a88c8`, `ddfd301`.  

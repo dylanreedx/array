@@ -102,12 +102,28 @@ do {
 // MARK: - Chrome integration guardrail matrix
 
 do {
+    expect(
+        ChromeIntegrationDataKind.allCases == [.bookmarks, .history, .cookies, .passwords, .extensions, .tabs, .chromeSync, .cdpDefaultProfile],
+        "Chrome integration matrix must enumerate every ticket-required data kind"
+    )
+    expect(
+        ChromeIntegrationMethod.allCases == [.directProfileDatabaseRead, .liveProfileReuseAsContinuumProfile, .chromeSyncReuse, .companionExtensionNativeMessaging, .userChosenExportImportFile, .cdpAttachDefaultUserProfile, .isolatedChromeCDPAppOwnedUserDataDir, .externalBrowserHandoff],
+        "Chrome integration matrix must enumerate every ticket-required method"
+    )
+
+    for kind in ChromeIntegrationDataKind.allCases {
+        expect(ChromeIntegrationMatrix.verdict(for: kind, via: .directProfileDatabaseRead).isRejected, "direct Chrome profile/database reads must be rejected for \(kind.rawValue)")
+        expect(ChromeIntegrationMatrix.verdict(for: kind, via: .liveProfileReuseAsContinuumProfile).isRejected, "live Chrome profile reuse must be rejected for \(kind.rawValue)")
+        expect(
+            ChromeIntegrationMatrix.verdict(for: kind, via: .externalBrowserHandoff) == .outOfScope(reason: "External-browser handoff is user-deferred and out of scope for this bundle."),
+            "external browser handoff must be user-deferred/out of scope for \(kind.rawValue)"
+        )
+    }
+
     expect(ChromeIntegrationMatrix.verdict(for: .passwords, via: .directProfileDatabaseRead).isRejected, "Chrome passwords direct database reads must be rejected")
     expect(ChromeIntegrationMatrix.verdict(for: .cookies, via: .directProfileDatabaseRead).isRejected, "Chrome cookies direct database reads must be rejected")
-    expect(ChromeIntegrationMatrix.verdict(for: .bookmarks, via: .liveProfileReuseAsContinuumProfile).isRejected, "live Chrome profile reuse must be rejected")
     expect(ChromeIntegrationMatrix.verdict(for: .passwords, via: .chromeSyncReuse) == .unavailable(reason: "Chrome Sync is not an available third-party app integration path and must not be treated as supported."), "Chrome Sync must be unavailable to third-party app sync")
     expect(ChromeIntegrationMatrix.verdict(for: .cdpDefaultProfile, via: .cdpAttachDefaultUserProfile).isRejected, "CDP attach to default user profile must be rejected")
-    expect(ChromeIntegrationMatrix.verdict(for: .tabs, via: .externalBrowserHandoff) == .outOfScope(reason: "External-browser handoff is user-deferred and out of scope for this bundle."), "external browser handoff must be user-deferred/out of scope")
 
     if case .conditionallySafe(let requirement) = ChromeIntegrationMatrix.verdict(for: .tabs, via: .companionExtensionNativeMessaging) {
         expect(requirement.contains("explicit user action"), "extension/native messaging must require explicit user action")
@@ -116,6 +132,7 @@ do {
     } else {
         expect(false, "active tab extension/native messaging should be conditionally safe only with explicit constraints")
     }
+    expect(ChromeIntegrationMatrix.verdict(for: .extensions, via: .companionExtensionNativeMessaging) == .outOfScope(reason: "Extension/native messaging is a later design spike, not automatic sync."), "extension/native messaging must stay a later design spike outside active-tab metadata")
 
     expect(ChromeIntegrationMatrix.verdict(for: .bookmarks, via: .userChosenExportImportFile) == .conditionallySafe(requirement: "Only user-mediated import/export from a user-chosen file is allowed."), "bookmarks import must be user-mediated")
     expect(ChromeIntegrationMatrix.verdict(for: .history, via: .userChosenExportImportFile) == .conditionallySafe(requirement: "Only user-mediated import/export from a user-chosen file is allowed."), "history import must be user-mediated")

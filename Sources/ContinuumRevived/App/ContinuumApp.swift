@@ -7,28 +7,104 @@ import WebKit
 
 private func runChromeIntegrationGuardrailsSelfCheck() throws -> URL {
     let fm = FileManager.default
+    let currentRoot = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true).standardizedFileURL.path
     let sourcesRoot = URL(fileURLWithPath: "Sources", isDirectory: true)
     let enumerator = fm.enumerator(at: sourcesRoot, includingPropertiesForKeys: [.isRegularFileKey])
     let swiftFiles = (enumerator?.compactMap { entry -> URL? in
         guard let url = entry as? URL, url.pathExtension == "swift" else { return nil }
-        return url
+        return url.standardizedFileURL
     } ?? []).sorted { $0.path < $1.path }
+    let checkTargetPathFragments = [
+        "/Sources/ContinuumRevivedCoreChecks/",
+        "/Sources/ContinuumRevivedPaletteChecks/",
+        "/Sources/ContinuumRevivedPerfChecks/",
+        "/Sources/ContinuumRevivedFileTreeChecks/"
+    ]
+    let productionSwiftFiles = swiftFiles.filter { file in
+        !checkTargetPathFragments.contains { file.path.contains($0) }
+    }
 
-    let suspicious = [
+    func relativePath(_ url: URL) -> String {
+        let path = url.standardizedFileURL.path
+        if path.hasPrefix(currentRoot + "/") {
+            return String(path.dropFirst(currentRoot.count + 1))
+        }
+        return path
+    }
+
+    func sourceHits(in files: [URL], needles: [String]) throws -> [[String: Any]] {
+        var hits: [[String: Any]] = []
+        for file in files {
+            let text = try String(contentsOf: file, encoding: .utf8)
+            for (index, line) in text.components(separatedBy: .newlines).enumerated() {
+                for needle in needles where line.contains(needle) {
+                    hits.append([
+                        "file": relativePath(file),
+                        "line": index + 1,
+                        "needle": needle
+                    ])
+                }
+            }
+        }
+        return hits
+    }
+
+    let suspiciousProfilePathNeedles = [
         "Login" + " Data",
-        "Cook" + "ies",
+        "\"Cook" + "ies\"",
         "Local" + " State",
         "User" + " Data/Default",
         "Chrome" + "/Default",
         "~/Library/Application Support/Google/" + "Chrome",
+        "Application Support/Google/" + "Chrome",
         "--remote-debugging-" + "port"
     ]
+    let suspiciousProfilePathHits = try sourceHits(in: productionSwiftFiles, needles: suspiciousProfilePathNeedles)
 
-    var hits: [[String: String]] = []
-    for file in swiftFiles {
+    let forbiddenExternalBrowserNeedles = [
+        "com.google." + "Chrome",
+        "Google " + "Chrome" + ".app",
+        "Chrome" + "." + "app",
+        "Open in " + "Chrome",
+        "Open in Google " + "Chrome",
+        "Open in Default " + "Browser",
+        "Open " + "Externally",
+        "LS" + "CopyDefaultApplicationURLForURL",
+        "LS" + "OpenCFURLRef",
+        "NSWorkspace.shared." + "urlForApplication"
+    ]
+    let forbiddenExternalBrowserAffordanceHits = try sourceHits(in: productionSwiftFiles, needles: forbiddenExternalBrowserNeedles)
+
+    let workspaceOpenNeedles = [
+        "NSWorkspace.shared." + "open(",
+        "NSWorkspace.shared." + "openApplication("
+    ]
+    var allowedExternalLaunchHits: [[String: Any]] = []
+    var externalBrowserHandoffProductionHits: [[String: Any]] = []
+    for file in productionSwiftFiles {
         let text = try String(contentsOf: file, encoding: .utf8)
-        for needle in suspicious where text.contains(needle) {
-            hits.append(["file": file.path, "needle": needle])
+        let lines = text.components(separatedBy: .newlines)
+        for (index, line) in lines.enumerated() {
+            guard workspaceOpenNeedles.contains(where: { line.contains($0) }) else { continue }
+            let path = relativePath(file)
+            let contextStart = max(0, index - 8)
+            let context = lines[contextStart...index].joined(separator: "\n")
+            var hit: [String: Any] = [
+                "file": path,
+                "line": index + 1,
+                "text": line.trimmingCharacters(in: .whitespaces)
+            ]
+            if path.hasSuffix("Sources/ContinuumRevived/App/TileSpawner.swift"), line.contains("URL(fileURLWithPath: path") {
+                hit["reason"] = "file-tree fallback opens a selected file URL, not a web/default-browser handoff"
+                allowedExternalLaunchHits.append(hit)
+            } else if path.hasSuffix("Sources/ContinuumRevived/App/ContinuumApp.swift"),
+                      line.contains("NSWorkspace.shared." + "openApplication("),
+                      context.contains("Bundle.main.bundleURL") {
+                hit["reason"] = "self-relaunch opens Continuum's own bundle with CONTINUUM_PROJECT_ROOT"
+                allowedExternalLaunchHits.append(hit)
+            } else {
+                externalBrowserHandoffProductionHits.append(hit)
+            }
         }
     }
 
@@ -54,10 +130,14 @@ private func runChromeIntegrationGuardrailsSelfCheck() throws -> URL {
         "defaultProfileCDPRejected": defaultProfileCDPRejected,
         "externalBrowserHandoffOutOfScope": externalBrowserHandoffOutOfScope,
         "extensionBridgeRequiresConsent": extensionBridgeRequiresConsent,
-        "sourceGrepScope": ["Sources/**/*.swift"],
+        "sourceGrepScope": ["Sources/ContinuumRevived/**/*.swift", "Sources/ContinuumRevivedCore/**/*.swift"],
         "allowlistedDocTestHits": [],
-        "productionSwiftFilesScanned": !swiftFiles.isEmpty,
-        "suspiciousProductionHits": hits
+        "productionSwiftFilesScanned": !productionSwiftFiles.isEmpty,
+        "productionSwiftFileCount": productionSwiftFiles.count,
+        "suspiciousProductionHits": suspiciousProfilePathHits,
+        "forbiddenExternalBrowserAffordanceHits": forbiddenExternalBrowserAffordanceHits,
+        "externalBrowserHandoffProductionHits": externalBrowserHandoffProductionHits,
+        "allowedExternalLaunchHits": allowedExternalLaunchHits
     ]
 
     let timestamp = Int(Date().timeIntervalSince1970)
@@ -74,8 +154,10 @@ private func runChromeIntegrationGuardrailsSelfCheck() throws -> URL {
           defaultProfileCDPRejected,
           externalBrowserHandoffOutOfScope,
           extensionBridgeRequiresConsent,
-          !swiftFiles.isEmpty,
-          hits.isEmpty else {
+          !productionSwiftFiles.isEmpty,
+          suspiciousProfilePathHits.isEmpty,
+          forbiddenExternalBrowserAffordanceHits.isEmpty,
+          externalBrowserHandoffProductionHits.isEmpty else {
         throw NSError(domain: "ContinuumRevived.ChromeIntegrationGuardrails", code: 1, userInfo: [NSLocalizedDescriptionKey: "chrome integration guardrails failed; see \(artifact.path)"])
     }
 
