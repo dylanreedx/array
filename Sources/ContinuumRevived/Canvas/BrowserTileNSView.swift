@@ -45,8 +45,11 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     private let closeTabButton: NSButton
     private var tabModel: BrowserTabModel
     private var tabButtonIds: [Int: UUID] = [:]
+    private var tabStripRenderSignature: [String] = []
     private var lastPersistedURL: String
     private var lastPersistedTitle: String
+    private(set) var lastTabActivationUsedInteractionStateForQA = false
+    private(set) var lastInvalidTabURLFallbackForQA: String?
 
     /// Fires after tab create/switch/close or active-tab snapshot changes.
     var onTabModelChange: ((BrowserTabModel) -> Void)?
@@ -297,11 +300,55 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         } else {
             snapshotInteractionState = runtime.capturedInteractionState
         }
+        let changed = current.url != runtime.url
+            || current.title != snapshotTitle
+            || current.faviconURL != runtime.faviconURL
+            || current.interactionState != snapshotInteractionState
+        guard changed else { return }
         tabModel.updateActiveTab(url: runtime.url, title: snapshotTitle, faviconURL: runtime.faviconURL, interactionState: snapshotInteractionState)
         onTabModelChange?(tabModel)
     }
 
+    private static func isLoadableBrowserURL(_ urlString: String) -> Bool {
+        guard let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
+        return !(url.scheme ?? "").isEmpty
+    }
+
+    private func activeTabPreparedForNavigation() -> BrowserTab {
+        let active = tabModel.activeTab
+        guard Self.isLoadableBrowserURL(active.url) else {
+            lastInvalidTabURLFallbackForQA = active.url
+            tabModel.updateActiveTab(url: DefaultBrowserURL.fallback, title: "", faviconURL: nil, interactionState: nil)
+            onTabModelChange?(tabModel)
+            return tabModel.activeTab
+        }
+        lastInvalidTabURLFallbackForQA = nil
+        return active
+    }
+
+    private func loadOrRestoreActiveTab(focus: Bool = true) {
+        let active = activeTabPreparedForNavigation()
+        if let state = active.interactionState {
+            lastTabActivationUsedInteractionStateForQA = true
+            runtime.restoreInteractionState(state)
+        } else {
+            lastTabActivationUsedInteractionStateForQA = false
+            runtime.loadURL(active.url)
+        }
+        if focus { focusBrowserContent() }
+        refresh()
+        urlField.stringValue = active.url
+    }
+
+    var tabModelForBrowserStatePersistence: BrowserTabModel { tabModel }
+
     private func rebuildTabStrip() {
+        let signature = tabModel.tabs.map { tab -> String in
+            let title = tab.title.isEmpty ? (URL(string: tab.url)?.host ?? tab.url) : tab.title
+            return "\(tab.id.uuidString)|\(title)|\(tab.id == tabModel.activeTabId)"
+        }
+        guard signature != tabStripRenderSignature else { return }
+        tabStripRenderSignature = signature
         tabStrip.setViews([], in: .leading)
         tabButtonIds.removeAll()
         for (index, tab) in tabModel.tabs.enumerated() {
@@ -353,33 +400,23 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     @objc private func handleReload(_ sender: Any?) { runtime.reload() }
     @objc private func handleNewTab(_ sender: Any?) {
         snapshotActiveTabFromRuntime()
-        let tab = tabModel.appendTab(url: DefaultBrowserURL.fallback, title: "")
+        _ = tabModel.appendTab(url: DefaultBrowserURL.fallback, title: "")
         onTabModelChange?(tabModel)
-        runtime.loadURL(tab.url)
-        focusBrowserContent()
-        refresh()
+        loadOrRestoreActiveTab()
     }
 
     @objc private func handleCloseTab(_ sender: Any?) {
         tabModel.close(tabId: tabModel.activeTabId)
-        let active = tabModel.activeTab
         onTabModelChange?(tabModel)
-        if let state = active.interactionState { runtime.restoreInteractionState(state) } else { runtime.loadURL(active.url) }
-        focusBrowserContent()
-        refresh()
-        urlField.stringValue = active.url
+        loadOrRestoreActiveTab()
     }
 
     @objc private func handleSelectTab(_ sender: NSButton) {
         guard let id = tabButtonIds[sender.tag], id != tabModel.activeTabId else { return }
         snapshotActiveTabFromRuntime()
         tabModel.activate(tabId: id)
-        let active = tabModel.activeTab
         onTabModelChange?(tabModel)
-        if let state = active.interactionState { runtime.restoreInteractionState(state) } else { runtime.loadURL(active.url) }
-        focusBrowserContent()
-        refresh()
-        urlField.stringValue = active.url
+        loadOrRestoreActiveTab()
     }
 
     @objc private func handleFindPrevious(_ sender: Any?) { performFind(direction: .backward) }
@@ -428,11 +465,8 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         guard tabModel.tabs.contains(where: { $0.id == tabId }), tabId != tabModel.activeTabId else { return }
         snapshotActiveTabFromRuntime()
         tabModel.activate(tabId: tabId)
-        let active = tabModel.activeTab
         onTabModelChange?(tabModel)
-        if let state = active.interactionState { runtime.restoreInteractionState(state) } else { runtime.loadURL(active.url) }
-        refresh()
-        urlField.stringValue = active.url
+        loadOrRestoreActiveTab(focus: false)
     }
 
     private func hideFindBar() {
@@ -753,11 +787,15 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
                 // refresh. Clear the tab title/snapshot first so chrome falls
                 // back to the typed URL until WebKit reports the destination
                 // title, instead of keeping the previous page title on the new
-                // URL or across app restart.
-                tabModel.updateActiveTab(url: next, title: "", faviconURL: nil, interactionState: nil)
+                // URL or across app restart. Malformed persisted/user-entered
+                // tab URLs degrade to about:blank instead of letting a failed
+                // load snapshot the previous tab's URL into this active tab.
+                let destination = Self.isLoadableBrowserURL(next) ? next : DefaultBrowserURL.fallback
+                if destination != next { lastInvalidTabURLFallbackForQA = next }
+                tabModel.updateActiveTab(url: destination, title: "", faviconURL: nil, interactionState: nil)
                 onTabModelChange?(tabModel)
                 refresh()
-                runtime.loadURL(next)
+                runtime.loadURL(destination)
             }
             focusBrowserContent()
             return true

@@ -85,9 +85,10 @@ Rules:
   Focus: no open-in-Chrome/default-browser handoff, no Chrome profile scraping path.  
   Audit note: fixed the T05 guardrail evidence. The app flag now scans production Swift for Chrome profile path literals, forbidden Chrome/default-browser affordances, and NSWorkspace external launch calls, while allowlisting only Continuum self-relaunch and file-tree file opening; the pure matrix check now pins all ticket-required data kinds/methods. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260621T113626/audits/A12.md` and artifact `qa-runs/1782060087/chrome-integration-guardrails/manifest.json`.
 
-- [ ] A13 — T01/T01b/T03 browser architecture code audit  
-  Commits: `0bf2934`, `b8a88c8`, `ddfd301`.  
+- [x] A13 — T01/T01b/T03 browser architecture code audit
+  Commits: `0bf2934`, `b8a88c8`, `ddfd301`.
   Focus: schema, runtime, snapshots, restore correctness, memory/live-webview budget.
+  Audit note: manually rescued the useful A13 diff after the iteration-7 harness hung with an empty log. Browser tab restore now validates restored tab URLs, repairs malformed restored active/inactive tabs to `about:blank`, restores inactive tab `interactionState` through the WebKit restore path, and persists the live `BrowserTileNSView` tab model rather than a stale runtime-only snapshot. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260621T113626/audits/A13.md` and artifact `qa-runs/2026-06-21T165540Z/browser-tab-restore/manifest.json`.
 
 - [ ] A14 — T02 Web Inspector code audit  
   Commit: `07c7d0b`.  

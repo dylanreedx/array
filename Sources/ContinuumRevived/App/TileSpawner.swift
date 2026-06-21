@@ -668,9 +668,11 @@ final class TileSpawner {
         } catch {
             return .failure(error)
         }
-        let urlString = persistedBrowserTile?.url ?? existing.metadata.url ?? Self.defaultBrowserURL
-        guard URL(string: urlString) != nil else {
-            return .invalidURL(urlString)
+        let requestedURLString = persistedBrowserTile?.url ?? existing.metadata.url ?? Self.defaultBrowserURL
+        let requestedScheme = URL(string: requestedURLString)?.scheme ?? ""
+        let urlString = requestedScheme.isEmpty ? DefaultBrowserURL.fallback : requestedURLString
+        guard let scheme = URL(string: urlString)?.scheme, !scheme.isEmpty else {
+            return .invalidURL(requestedURLString)
         }
 
         let profile = browserProfile(for: persistedBrowserTile?.profileId ?? existing.metadata.browserProfileId)
@@ -962,7 +964,7 @@ final class TileSpawner {
         canvasView.install(tileView: view, for: tile)
     }
 
-    private func writeBrowserTabModel(tileId: UUID, runtimeId: UUID, model: BrowserTabModel, storageGroupId: String, profileId: UUID) throws {
+    private func writeBrowserTabModel(tileId: UUID, runtimeId: UUID, model: BrowserTabModel, storageGroupId: String, profileId: UUID, notify: Bool = false) throws {
         var state = try loadBrowserStateIfAvailable() ?? BrowserState(tiles: [])
         let now = Date()
         if let idx = state.tiles.firstIndex(where: { $0.tileId == tileId }) {
@@ -977,7 +979,7 @@ final class TileSpawner {
             state.tiles.append(BrowserTile(id: runtimeId, tileId: tileId, url: active.url, title: active.title, storageGroupId: storageGroupId, profileId: profileId, createdAt: now, updatedAt: now, interactionState: active.interactionState, tabs: model.tabs, activeTabId: model.activeTabId))
         }
         try projectStore.saveBrowserState(state)
-        browserPersistenceHandler?()
+        if notify { browserPersistenceHandler?() }
     }
 
     /// Upserts a BrowserTile entry into BrowserState by tileId so multiple
@@ -1043,6 +1045,16 @@ final class TileSpawner {
         let persistedTile = try loadBrowserStateIfAvailable()?.tiles.first(where: { $0.tileId == tile.id })
         let profile = browserProfile(for: persistedTile?.profileId ?? tile.metadata.browserProfileId)
         let storageGroupId = persistedTile?.storageGroupId ?? profile.dataStoreIdentifier
+        if let browserView = canvasView.tileView(for: runtime.tileId) as? BrowserTileNSView {
+            try writeBrowserTabModel(
+                tileId: tile.id,
+                runtimeId: runtime.id,
+                model: browserView.tabModelForBrowserStatePersistence,
+                storageGroupId: storageGroupId,
+                profileId: profile.id
+            )
+            return
+        }
         let persistedTitle = persistedTile?.title
         let title = runtime.title.isEmpty ? (persistedTitle ?? runtime.title) : runtime.title
         let interactionState = runtime.capturedInteractionState
@@ -1591,6 +1603,18 @@ final class TileSpawner {
         func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
             if !condition() { throw CheckError.failed(message) }
         }
+        func waitUntil(_ timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if condition() { return true }
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.03))
+            }
+            return condition()
+        }
+        func dataPage(title: String) -> String {
+            let html = "<html><head><title>\(title)</title></head><body>\(title)</body></html>"
+            return "data:text/html;base64,\(Data(html.utf8).base64EncodedString())"
+        }
 
         let fm = FileManager.default
         let tempRoot = fm.temporaryDirectory.appendingPathComponent("continuum-browser-tab-restore-\(UUID().uuidString)", isDirectory: true)
@@ -1606,10 +1630,23 @@ final class TileSpawner {
         let tileId = UUID()
         let profileId = BrowserProfile.defaultProfileId
         let storageGroupId = BrowserState.storageGroupIdentifier(for: project)
-        let tabs = (0..<20).map { idx in
+        let engine = BrowserEngineContext()
+        defer { engine.shutdown() }
+        let interactionStateURL = dataPage(title: "Interaction Restored Tab")
+        let interactionRuntime = WKWebViewBrowserRuntime(
+            tileId: UUID(),
+            webView: engine.makeWebView(storageGroupId: storageGroupId),
+            initialURL: interactionStateURL
+        )
+        interactionRuntime.loadURL(interactionStateURL)
+        try expect(waitUntil { interactionRuntime.capturedInteractionState != nil }, "fixture interactionState should be captured from a real WKWebView")
+        let capturedInactiveInteractionState = interactionRuntime.capturedInteractionState
+        interactionRuntime.terminate(policy: .force)
+
+        var tabs = (0..<20).map { idx in
             BrowserTab(
                 id: UUID(),
-                url: "data:text/html;charset=utf-8,<html><head><title>tab-\(idx)</title></head><body>tab-\(idx)</body></html>",
+                url: dataPage(title: "tab-\(idx)"),
                 title: idx == 7 ? "Active Restored Tab" : "Restored Tab \(idx)",
                 faviconURL: nil,
                 createdAt: now.addingTimeInterval(Double(idx)),
@@ -1617,6 +1654,12 @@ final class TileSpawner {
                 interactionState: nil
             )
         }
+        tabs[12].url = interactionStateURL
+        tabs[12].title = "Interaction Restored Tab"
+        tabs[12].interactionState = capturedInactiveInteractionState
+        let invalidInactiveURL = "://invalid-restored-tab"
+        tabs[13].url = invalidInactiveURL
+        tabs[13].title = "Invalid Restored Tab"
         let activeTab = tabs[7]
         try store.saveCanvas(CanvasState(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
@@ -1630,12 +1673,12 @@ final class TileSpawner {
         )]))
 
         let canvas = CanvasNSView(canvasState: try store.loadCanvas())
-        let engine = BrowserEngineContext()
         let spawner = TileSpawner(canvasView: canvas, ghostty: nil, browserEngine: engine, projectStore: store, project: project)
         let start = Date()
         let creationsBefore = engine.webViewCreationCountForQA
+        let runtime: WKWebViewBrowserRuntime
         switch spawner.restartBrowserTile(tileId: tileId) {
-        case .restarted: break
+        case let .restarted(r): runtime = r
         case let .invalidURL(url): throw CheckError.failed("restart rejected seeded URL: \(url)")
         case .tileNotFound: throw CheckError.failed("restart did not find seeded tile")
         case let .failure(error): throw CheckError.failed("restart failed: \(error)")
@@ -1646,9 +1689,49 @@ final class TileSpawner {
         let snapshot = view.restoredTabSnapshotForQA
         let inactive = tabs[12]
         view.selectTabForQA(tabId: inactive.id)
+        let interactionStateRestoreInvoked = view.lastTabActivationUsedInteractionStateForQA
+        try spawner.writeBrowserTileSnapshotOrThrow(for: runtime)
         let postSwitchState = try store.loadBrowserState()
         let postSwitchTile = postSwitchState.tiles.first(where: { $0.tileId == tileId })
         let switchUpdated = postSwitchTile?.activeTabId == inactive.id && postSwitchTile?.url == inactive.url
+
+        let invalidInactive = tabs[13]
+        view.selectTabForQA(tabId: invalidInactive.id)
+        let invalidInactiveTabFallbackUsed = view.activeTabURLForQA == DefaultBrowserURL.fallback
+            && view.lastInvalidTabURLFallbackForQA == invalidInactiveURL
+        try spawner.writeBrowserTileSnapshotOrThrow(for: runtime)
+        let postInvalidTile = try store.loadBrowserState().tiles.first(where: { $0.tileId == tileId })
+        let invalidInactiveFallbackPersisted = postInvalidTile?.activeTabId == invalidInactive.id
+            && postInvalidTile?.url == DefaultBrowserURL.fallback
+
+        let invalidActiveTileId = UUID()
+        let invalidActiveURL = "://invalid-active-restored-tab"
+        let invalidActiveTile = Tile(
+            id: invalidActiveTileId,
+            kind: .browser,
+            title: "Invalid Active Browser",
+            frame: TileFrame(x: 700, y: 20, width: 640, height: 420),
+            zIndex: 2,
+            runtimeRef: nil,
+            metadata: TileMetadata(url: invalidActiveURL)
+        )
+        canvas.install(tileView: DescriptorTileNSView(tile: invalidActiveTile), for: invalidActiveTile)
+        let invalidActiveTab = BrowserTab(id: UUID(), url: invalidActiveURL, title: "Invalid Active", createdAt: now, lastAccessedAt: now)
+        var invalidActiveState = try store.loadBrowserState()
+        invalidActiveState.tiles.append(BrowserTile(
+            id: UUID(), tileId: invalidActiveTileId, url: invalidActiveURL, title: "Invalid Active",
+            storageGroupId: storageGroupId, profileId: profileId, createdAt: now, updatedAt: now,
+            tabs: [invalidActiveTab], activeTabId: invalidActiveTab.id
+        ))
+        try store.saveBrowserState(invalidActiveState)
+        switch spawner.restartBrowserTile(tileId: invalidActiveTileId) {
+        case .restarted: break
+        case let .invalidURL(url): throw CheckError.failed("invalid active restart should fall back, got invalid URL: \(url)")
+        case .tileNotFound: throw CheckError.failed("invalid active restart did not find seeded tile")
+        case let .failure(error): throw CheckError.failed("invalid active restart failed: \(error)")
+        }
+        let invalidActiveBootTile = try store.loadBrowserState().tiles.first(where: { $0.tileId == invalidActiveTileId })
+        let invalidActiveBootFallbackUsed = invalidActiveBootTile?.url == DefaultBrowserURL.fallback
 
         let legacyTile = BrowserTile(id: UUID(), tileId: UUID(), url: "https://legacy.example/", title: "Legacy", storageGroupId: storageGroupId, profileId: profileId, createdAt: now, updatedAt: now)
         let legacyOneTabMigrationStillWorks = legacyTile.tabs.count == 1 && legacyTile.activeTab.url == "https://legacy.example/"
@@ -1665,6 +1748,12 @@ final class TileSpawner {
             "browserRuntimeCountAtBoot": creationsAtBoot,
             "inactiveTabsHydratedAtBoot": max(0, creationsAtBoot - 1),
             "switchInactiveUpdatedActiveTab": switchUpdated,
+            "inactiveInteractionStateRestoredOnSelection": interactionStateRestoreInvoked,
+            "invalidInactiveTabFallbackUsed": invalidInactiveTabFallbackUsed,
+            "invalidInactiveFallbackPersisted": invalidInactiveFallbackPersisted,
+            "invalidActiveBootFallbackUsed": invalidActiveBootFallbackUsed,
+            "invalidTabFallbackURL": DefaultBrowserURL.fallback,
+            "invalidTabErrorNote": "Malformed restored tab URLs are repaired to about:blank instead of loading the previous active tab URL.",
             "legacyOneTabMigrationStillWorks": legacyOneTabMigrationStillWorks,
             "invalidActiveTabFallbackUsed": invalidActiveTabFallbackUsed,
             "usedTileSpawnerRestartBrowserTile": true,
@@ -1686,6 +1775,10 @@ final class TileSpawner {
         try expect(snapshot.activeURL == activeTab.url && snapshot.activeTitle == activeTab.title, "active URL/title should be restored")
         try expect(creationsAtBoot == 1, "restore should create exactly one WKWebView")
         try expect(switchUpdated, "switching inactive restored tab should persist active tab")
+        try expect(interactionStateRestoreInvoked, "selecting inactive restored tab with interactionState should use restore path")
+        try expect(invalidInactiveTabFallbackUsed, "invalid inactive restored tab URL should fall back to about:blank")
+        try expect(invalidInactiveFallbackPersisted, "invalid inactive restored tab fallback should persist")
+        try expect(invalidActiveBootFallbackUsed, "invalid active restored tab URL should fall back at boot")
         try expect(legacyOneTabMigrationStillWorks, "legacy one-page BrowserState should still migrate")
         try expect(invalidActiveTabFallbackUsed, "invalid active tab id should fall back to first tab")
         try expect(postSwitchTile?.profileId == profileId && postSwitchTile?.storageGroupId == storageGroupId, "profile/storage group should be preserved")
