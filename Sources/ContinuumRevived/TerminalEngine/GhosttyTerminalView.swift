@@ -549,9 +549,8 @@ final class GhosttyTerminalView: NSView {
     }
 
     private func reportSurfaceSize() {
-        guard let surface else { return }
-        let size = ghostty_surface_size(surface)
-        Swift.print("Ghostty size: \(size.columns)x\(size.rows), \(size.width_px)x\(size.height_px) px")
+        // Intentionally quiet in production/runtime checks; callers that need
+        // geometry evidence use explicit QA manifests instead of stdout noise.
     }
 
     struct ZoomScaleSample {

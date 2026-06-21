@@ -14,6 +14,7 @@ final class TerminalTileNSView: TileNSView {
         self.runtime = runtime
         self.hostView = TerminalHostView(frame: .zero)
         super.init(tile: tile)
+        applyThemeBackground(runtime.resolvedThemeSnapshot.backgroundColor)
         setContentView(hostView)
         hostView.attach(runtime: runtime)
     }
@@ -23,6 +24,12 @@ final class TerminalTileNSView: TileNSView {
     }
 
     override var contentTopInsetWorldHeight: CGFloat { TileNSView.titleBarHeight }
+
+    private func applyThemeBackground(_ color: NSColor?) {
+        guard let color else { return }
+        layer?.backgroundColor = color.cgColor
+        hostView.applyTerminalBackground(color)
+    }
 
     override func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)

@@ -2536,6 +2536,209 @@ final class TileSpawner {
         return artifact
     }
 
+    static func runTerminalThemeFidelitySelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func pump(_ context: GhosttyRuntimeContext, seconds: TimeInterval) throws {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline {
+                ghostty_app_tick(try context.app)
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+            }
+        }
+        func pump(_ context: GhosttyRuntimeContext, timeout: TimeInterval, until condition: () -> Bool) throws {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if condition() { return }
+                try pump(context, seconds: 0.05)
+            }
+            throw CheckError.failed("timed out waiting for terminal theme probe")
+        }
+        func runProcess(_ command: String, _ arguments: [String]) throws -> Int32 {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: command)
+            process.arguments = arguments
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus
+        }
+
+        let fileManager = FileManager.default
+        let started = Date()
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-terminal-theme-fidelity-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let project = Project(
+            id: UUID(),
+            name: "terminal-theme-fidelity-check",
+            rootPath: tempRoot.path,
+            createdAt: started,
+            updatedAt: started,
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+
+        let defaultsSuiteName = "continuum.terminal.themeFidelity.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: defaultsSuiteName)!
+        defaults.removePersistentDomain(forName: defaultsSuiteName)
+        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+
+        let context = try GhosttyRuntimeContext()
+        defer { context.shutdown() }
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        canvas.setFrameSize(CGSize(width: 1000, height: 700))
+        let window = NSWindow(
+            contentRect: NSRect(x: 120, y: 120, width: 1000, height: 700),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = canvas
+        window.orderFront(nil)
+        defer { window.close() }
+
+        let spawner = TileSpawner(
+            canvasView: canvas,
+            ghostty: context,
+            browserEngine: browserEngine,
+            projectStore: store,
+            project: project,
+            defaults: defaults
+        )
+
+        let runtime: GhosttyTerminalRuntime
+        switch spawner.spawnTerminal(profileId: "shell") {
+        case let .spawned(spawnedRuntime):
+            runtime = spawnedRuntime
+        case let .missingCommand(executable):
+            throw CheckError.failed("spawnTerminal(shell) missing command: \(executable)")
+        case let .notConfigured(profileId):
+            throw CheckError.failed("spawnTerminal(shell) not configured: \(profileId)")
+        case let .unknownProfile(id):
+            throw CheckError.failed("spawnTerminal(shell) unknown profile: \(id)")
+        case let .failure(error):
+            throw CheckError.failed("spawnTerminal(shell) failed: \(error)")
+        }
+
+        guard let tile = canvas.canvasState.tiles.first(where: { $0.id == runtime.tileId }),
+              let terminalTile = canvas.tileView(for: runtime.tileId) as? TerminalTileNSView
+        else {
+            throw CheckError.failed("spawned terminal tile missing from real canvas path")
+        }
+        try pump(context, seconds: 0.8)
+        guard runtime.qaTerminalView?.surface != nil else {
+            throw CheckError.failed("spawned terminal surface missing")
+        }
+
+        let theme = context.themeSnapshot
+        guard let expectedBackground = theme.backgroundHex else {
+            throw CheckError.failed("Ghostty config did not expose a resolved background color")
+        }
+        let tileLayerBackground = GhosttyThemeSnapshot.hexString(cgColor: terminalTile.layer?.backgroundColor)
+        let hostLayerBackground = GhosttyThemeSnapshot.hexString(cgColor: terminalTile.hostView.layer?.backgroundColor)
+        try expect(tileLayerBackground == expectedBackground, "terminal tile layer background should match Ghostty background \(expectedBackground), got \(String(describing: tileLayerBackground))")
+        try expect(hostLayerBackground == expectedBackground, "terminal host background should match Ghostty background \(expectedBackground), got \(String(describing: hostLayerBackground))")
+
+        guard let descriptor = try store.listSessions().first(where: { $0.tileId == tile.id }) else {
+            throw CheckError.failed("spawned terminal session descriptor missing")
+        }
+        let tmuxPath = TmuxLocator.resolve(defaults: defaults)
+        let tmuxWrapped = tmuxPath != nil && descriptor.command == tmuxPath
+
+        let sentinel = "a06-theme-\(String(UUID().uuidString.prefix(8)))"
+        let probeFile = tempRoot.appendingPathComponent("terminal-theme-probe.txt")
+        let probePath = probeFile.path.replacingOccurrences(of: "'", with: "'\\''")
+        let probe = """
+        {
+          printf '\(sentinel)-env TERM=%s COLORTERM=%s TMUX=%s\\n' "$TERM" "${COLORTERM:-}" "${TMUX:+yes}"
+          if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+            printf '\(sentinel)-tmux-status-style=%s\\n' "$(tmux show -gqv status-style)"
+            printf '\(sentinel)-tmux-default-terminal=%s\\n' "$(tmux show -gqv default-terminal)"
+            printf '\(sentinel)-tmux-terminal-overrides=%s\\n' "$(tmux show -gqv terminal-overrides)"
+          fi
+        } > '\(probePath)'
+        """
+        runtime.sendInput(Data((probe + "\n").utf8))
+        var capturedProbeText = ""
+        try pump(context, timeout: 8.0) {
+            guard let text = try? String(contentsOf: probeFile, encoding: .utf8), text.contains("\(sentinel)-env") else { return false }
+            if tmuxWrapped && !(text.contains("\(sentinel)-tmux-status-style=") && text.contains("\(sentinel)-tmux-default-terminal=")) {
+                return false
+            }
+            capturedProbeText = text
+            return true
+        }
+        let probeLines = capturedProbeText.components(separatedBy: .newlines).filter {
+            $0.contains(sentinel)
+        }
+        let envLine = probeLines.first { $0.contains("-env ") } ?? ""
+        try expect(envLine.contains("TERM=tmux-256color"), "theme fidelity shell should report TERM=tmux-256color, got: \(envLine)")
+        try expect(envLine.contains("COLORTERM=truecolor"), "theme fidelity shell should report COLORTERM=truecolor, got: \(envLine)")
+        if tmuxWrapped {
+            try expect(envLine.contains("TMUX=yes"), "tmux-wrapped shell should report TMUX=yes in the real terminal path, got: \(envLine)")
+            let defaultTerminalLine = probeLines.first { $0.contains("-tmux-default-terminal=") } ?? ""
+            try expect(defaultTerminalLine.contains("tmux-256color"), "tmux default-terminal should be tmux-256color, got: \(defaultTerminalLine)")
+            try expect(probeLines.contains(where: { $0.contains("-tmux-status-style=") }), "tmux status-style should be captured from the real pane")
+        }
+        try expect(theme.foregroundHex != nil, "Ghostty config should expose a resolved foreground color")
+        try expect(theme.paletteHex.count >= 16, "Ghostty config should expose at least ANSI palette colors 0-15")
+
+        runtime.terminate(policy: .force)
+        terminalTile.hostView.detachRuntime()
+        try pump(context, seconds: 0.2)
+
+        var tmuxCleanup: [String: Any] = ["attempted": false]
+        if tmuxWrapped {
+            let kill = TmuxSession.killSessionCommand(tileId: tile.id, tmuxPath: descriptor.command)
+            do {
+                let status = try runProcess(kill.command, kill.arguments)
+                tmuxCleanup = ["attempted": true, "command": kill.command, "arguments": kill.arguments, "terminationStatus": Int(status)]
+            } catch {
+                tmuxCleanup = ["attempted": true, "command": kill.command, "arguments": kill.arguments, "error": String(describing: error)]
+            }
+        }
+
+        let timestamp = ISO8601DateFormatter().string(from: started).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("terminal-theme-fidelity", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "check": "terminal-theme-fidelity",
+            "themeSnapshot": theme.manifestValue,
+            "tileLayerBackgroundHex": tileLayerBackground as Any,
+            "hostLayerBackgroundHex": hostLayerBackground as Any,
+            "descriptorCommand": (descriptor.command as NSString).lastPathComponent,
+            "descriptorArgsPrefix": Array(descriptor.args.prefix(5)),
+            "tmuxAvailable": tmuxPath != nil,
+            "tmuxWrapped": tmuxWrapped,
+            "probeLines": probeLines,
+            "tmuxCleanup": tmuxCleanup
+        ]
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
     // MARK: - tmux terminal persistence check
 
     static func runTerminalTmuxPersistenceSelfCheck() throws -> URL {

@@ -47,10 +47,11 @@ Rules:
   Required output: verify persistence in real app path; fix or precise handoff.  
   Audit note: fixed the evidence gap in the tmux live integration flag. The app check now spawns a real `TileSpawner` shell tile through Ghostty+tmux, detaches like app quit, prunes the descriptor like boot, reloads the canvas, restarts the same tile id, and verifies same pane/cwd/scrollback/input; see `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260620T212451/audits/A05.md` and artifact `qa-runs/2026-06-21T022212Z/terminal-tmux-live-integration/manifest.json`.
 
-- [ ] A06 — Shell theme fidelity vs Dylan's Ghostty/tmux theme  
-  Focus: Ghostty config/theme loading, tmux colors, TERM, default shell env, font/theme mismatch.  
-  Relevant files: terminal engine/runtime/settings.  
+- [x] A06 — Shell theme fidelity vs Dylan's Ghostty/tmux theme
+  Focus: Ghostty config/theme loading, tmux colors, TERM, default shell env, font/theme mismatch.
+  Relevant files: terminal engine/runtime/settings.
   Required output: concrete gap list and safe implementation if obvious.
+  Audit note: fixed hardcoded shell surround colors and added real app evidence. Continuum now captures the resolved Ghostty theme from the same config used by libghostty and applies the background to terminal tile/host layers; `--terminal-theme-fidelity-check` records Dylan's `#181616`/Kanagawa palette plus tmux `TERM=tmux-256color`, `COLORTERM=truecolor`, and status style. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260620T212451/audits/A06.md` and artifact `qa-runs/2026-06-21T024839Z/terminal-theme-fidelity/manifest.json`.
 
 ## Full branch audits
 

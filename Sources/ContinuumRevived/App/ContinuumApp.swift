@@ -1750,6 +1750,19 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--terminal-theme-fidelity-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let artifact = try TileSpawner.runTerminalThemeFidelitySelfCheck()
+                print("ContinuumRevivedTerminalThemeFidelityChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--stray-window-audit-check") {
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)

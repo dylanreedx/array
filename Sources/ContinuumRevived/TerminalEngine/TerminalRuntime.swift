@@ -41,6 +41,12 @@ final class TerminalHostView: NSView {
         fatalError("init(coder:) is not supported")
     }
 
+    func applyTerminalBackground(_ color: NSColor?) {
+        guard let color else { return }
+        wantsLayer = true
+        layer?.backgroundColor = color.cgColor
+    }
+
     func attach(runtime: TerminalRuntime) {
         self.runtime = runtime
         runtime.attach(to: self)

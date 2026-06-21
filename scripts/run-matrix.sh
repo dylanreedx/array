@@ -44,7 +44,7 @@ run_app_check() {
   app_support=$(mktemp -d "${TMPDIR:-/tmp}/continuum-matrix-appsupport.XXXXXX")
 
   case " $* " in
-    *" --terminal-tmux-"*) ;;
+    *" --terminal-tmux-"*|*" --terminal-theme-fidelity-check"*) ;;
     *) tmux_args=(-continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path "") ;;
   esac
 
@@ -160,6 +160,7 @@ run_app_check .build/debug/continuum-revived --project-picker-resolution-check
 run_app_check .build/debug/continuum-revived --terminal-tmux-persistence-check
 run_app_check .build/debug/continuum-revived --terminal-tmux-delete-lifecycle-check
 run_app_check .build/debug/continuum-revived --terminal-tmux-live-integration-check
+run_app_check .build/debug/continuum-revived --terminal-theme-fidelity-check
 run_app_check .build/debug/continuum-revived --terminal-snapshot-tier-check
 run_app_check .build/debug/continuum-revived --terminal-fills-tile-check
 run_app_check .build/debug/continuum-revived --session-resume-check

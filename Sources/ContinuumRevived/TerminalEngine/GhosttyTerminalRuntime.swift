@@ -45,6 +45,7 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
 
     func attach(to hostView: TerminalHostView) {
         self.hostView = hostView
+        hostView.applyTerminalBackground(ghostty.themeSnapshot.backgroundColor)
 
         let view = GhosttyTerminalView(
             ghosttyApp: try! ghostty.app,
@@ -161,6 +162,8 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
     var readVisibleText: String {
         visibleText()
     }
+
+    var resolvedThemeSnapshot: GhosttyThemeSnapshot { ghostty.themeSnapshot }
 
     /// Captures the current working directory for persistence. Returns the last cwd
     /// reported via OSC 7 (GHOSTTY_ACTION_PWD) if available, falling back to the
@@ -707,6 +710,7 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
 final class GhosttyRuntimeContext {
     private var appPointer: ghostty_app_t?
     private var configPointer: ghostty_config_t?
+    private(set) var themeSnapshot = GhosttyThemeSnapshot.empty
 
     var app: ghostty_app_t {
         get throws {
@@ -726,6 +730,7 @@ final class GhosttyRuntimeContext {
         ghostty_config_load_default_files(config)
         ghostty_config_load_recursive_files(config)
         ghostty_config_finalize(config)
+        themeSnapshot = GhosttyThemeSnapshot.capture(config: config)
 
         var runtimeConfig = ghostty_runtime_config_s(
             userdata: nil,
