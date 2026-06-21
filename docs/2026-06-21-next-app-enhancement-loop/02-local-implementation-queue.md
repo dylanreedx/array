@@ -25,7 +25,7 @@ Rules:
   Source ticket: `T03-browser-inspector-console.md`.
   Required output: display-only console logs from real WKWebView message handler, no eval, artifact.
 
-- [ ] I04 — Browser Inspector computed styles panel
+- [x] I04 — Browser Inspector computed styles panel
   Source ticket: `T04-browser-inspector-styles.md`.
   Required output: selected-node computed style whitelist, read-only, artifact.
 

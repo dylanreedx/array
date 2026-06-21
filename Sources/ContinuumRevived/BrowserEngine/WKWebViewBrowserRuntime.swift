@@ -192,6 +192,7 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
     private let consoleMessageHandlerName: String
     private(set) var domSnapshotEvaluationCountForQA = 0
     private(set) var domHighlightEvaluationCountForQA = 0
+    private(set) var domComputedStyleEvaluationCountForQA = 0
     private(set) var consoleMessageHandlerEventCountForQA = 0
     private(set) var consoleBridgeUserScriptInstalledForQA = false
     var onConsoleLogBufferChange: (() -> Void)?
@@ -517,6 +518,41 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         }
     }
 
+    func captureComputedStyles(path: String, completion: @escaping (Result<BrowserComputedStyleSnapshot, Error>) -> Void) {
+        let pathLiteral: String
+        do {
+            let data = try JSONSerialization.data(withJSONObject: [path], options: [])
+            let encoded = String(data: data, encoding: .utf8) ?? "[\"\"]"
+            pathLiteral = "(\(encoded))[0]"
+        } catch {
+            completion(.failure(error))
+            return
+        }
+        domComputedStyleEvaluationCountForQA += 1
+        webView.evaluateJavaScript(Self.domComputedStyleScript(pathLiteral: pathLiteral)) { result, error in
+            Task { @MainActor in
+                if let error {
+                    completion(.failure(error))
+                    return
+                }
+                guard let json = result as? String, let data = json.data(using: .utf8) else {
+                    completion(.failure(Self.domSnapshotError("computed style script returned non-JSON result")))
+                    return
+                }
+                do {
+                    if let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any], let error = payload["error"] as? String {
+                        completion(.failure(Self.domSnapshotError("computed style lookup failed: \(error)")))
+                        return
+                    }
+                    let snapshot = try JSONDecoder().decode(BrowserComputedStyleSnapshot.self, from: data)
+                    completion(.success(snapshot))
+                } catch {
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
     private static let domSnapshotScript = """
     (() => {
       const maxNodes = 800;
@@ -584,6 +620,43 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
           document.documentElement.appendChild(overlay);
           window.setTimeout(() => overlay.remove(), \(durationMilliseconds));
           return true;
+        })()
+        """
+    }
+
+    private static func domComputedStyleScript(pathLiteral: String) -> String {
+        """
+        (() => {
+          const nodeId = String(\(pathLiteral));
+          const path = nodeId.split('/').map(Number).slice(1);
+          let el = document.documentElement;
+          for (const i of path) {
+            if (!el || !el.children || !Number.isInteger(i) || i < 0 || i >= el.children.length) {
+              return JSON.stringify({ error: 'node-not-found', nodeId });
+            }
+            el = el.children[i];
+          }
+          if (!el) { return JSON.stringify({ error: 'node-not-found', nodeId }); }
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          const names = [
+            'display', 'position', 'width', 'height',
+            'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+            'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+            'color', 'background-color',
+            'font-family', 'font-size', 'font-weight', 'line-height',
+            'z-index', 'overflow'
+          ];
+          return JSON.stringify({
+            nodeId,
+            boundingRect: {
+              x: rect.x,
+              y: rect.y,
+              width: rect.width,
+              height: rect.height
+            },
+            properties: names.map(name => ({ name, value: style.getPropertyValue(name) || '' }))
+          });
         })()
         """
     }

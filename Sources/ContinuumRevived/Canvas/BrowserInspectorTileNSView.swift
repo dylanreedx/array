@@ -16,6 +16,7 @@ final class BrowserInspectorTileNSView: TileNSView {
 
     typealias DOMSnapshotProvider = (@escaping (Result<BrowserDOMSnapshot, Error>) -> Void) -> Void
     typealias DOMHighlighter = (String, @escaping (Result<Bool, Error>) -> Void) -> Void
+    typealias ComputedStyleProvider = (String, @escaping (Result<BrowserComputedStyleSnapshot, Error>) -> Void) -> Void
     typealias ConsoleLogProvider = () -> [BrowserConsoleLogEntry]?
     typealias ConsoleClearer = () -> Bool
 
@@ -25,6 +26,7 @@ final class BrowserInspectorTileNSView: TileNSView {
     private let inspectedBrowser: InspectedBrowserSummary?
     private let domSnapshotProvider: DOMSnapshotProvider?
     private let domHighlighter: DOMHighlighter?
+    private let computedStyleProvider: ComputedStyleProvider?
     private let consoleLogProvider: ConsoleLogProvider?
     private let consoleClearer: ConsoleClearer?
     private let titleLabel = NSTextField(labelWithString: "")
@@ -36,12 +38,16 @@ final class BrowserInspectorTileNSView: TileNSView {
     private let placeholderLabel = NSTextField(labelWithString: "")
     private let elementsScrollView = NSScrollView()
     private let elementsStack = NSStackView()
+    private let stylesScrollView = NSScrollView()
+    private let stylesStack = NSStackView()
     private let consoleScrollView = NSScrollView()
     private let consoleStack = NSStackView()
     private var selectedPanel: BrowserInspectorPanel
     private var domSnapshot: BrowserDOMSnapshot?
     private var selectedDOMNodeID: String?
+    private var computedStyleSnapshot: BrowserComputedStyleSnapshot?
     private var elementsMessage: String?
+    private var stylesMessage: String?
 
     init(
         tile: Tile,
@@ -49,6 +55,7 @@ final class BrowserInspectorTileNSView: TileNSView {
         inspectedBrowser: InspectedBrowserSummary?,
         domSnapshotProvider: DOMSnapshotProvider? = nil,
         domHighlighter: DOMHighlighter? = nil,
+        computedStyleProvider: ComputedStyleProvider? = nil,
         consoleLogProvider: ConsoleLogProvider? = nil,
         consoleClearer: ConsoleClearer? = nil
     ) {
@@ -56,6 +63,7 @@ final class BrowserInspectorTileNSView: TileNSView {
         self.inspectedBrowser = inspectedBrowser
         self.domSnapshotProvider = domSnapshotProvider
         self.domHighlighter = domHighlighter
+        self.computedStyleProvider = computedStyleProvider
         self.consoleLogProvider = consoleLogProvider
         self.consoleClearer = consoleClearer
         self.selectedPanel = inspectorState?.selectedPanel ?? .elements
@@ -120,6 +128,19 @@ final class BrowserInspectorTileNSView: TileNSView {
         elementsScrollView.documentView = elementsStack
         elementsScrollView.translatesAutoresizingMaskIntoConstraints = false
 
+        stylesStack.orientation = .vertical
+        stylesStack.spacing = 4
+        stylesStack.alignment = .leading
+        stylesStack.distribution = .fill
+        stylesStack.translatesAutoresizingMaskIntoConstraints = false
+
+        stylesScrollView.drawsBackground = false
+        stylesScrollView.hasVerticalScroller = true
+        stylesScrollView.hasHorizontalScroller = true
+        stylesScrollView.borderType = .noBorder
+        stylesScrollView.documentView = stylesStack
+        stylesScrollView.translatesAutoresizingMaskIntoConstraints = false
+
         consoleStack.orientation = .vertical
         consoleStack.spacing = 4
         consoleStack.alignment = .leading
@@ -144,6 +165,7 @@ final class BrowserInspectorTileNSView: TileNSView {
         body.addSubview(refreshButton)
         body.addSubview(consoleClearButton)
         body.addSubview(elementsScrollView)
+        body.addSubview(stylesScrollView)
         body.addSubview(consoleScrollView)
         body.addSubview(placeholderLabel)
 
@@ -170,6 +192,15 @@ final class BrowserInspectorTileNSView: TileNSView {
             elementsStack.topAnchor.constraint(equalTo: elementsScrollView.contentView.topAnchor),
             elementsStack.leadingAnchor.constraint(equalTo: elementsScrollView.contentView.leadingAnchor),
             elementsStack.trailingAnchor.constraint(greaterThanOrEqualTo: elementsScrollView.contentView.trailingAnchor),
+
+            stylesScrollView.topAnchor.constraint(equalTo: panelControl.bottomAnchor, constant: 12),
+            stylesScrollView.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16),
+            stylesScrollView.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -16),
+            stylesScrollView.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -16),
+
+            stylesStack.topAnchor.constraint(equalTo: stylesScrollView.contentView.topAnchor),
+            stylesStack.leadingAnchor.constraint(equalTo: stylesScrollView.contentView.leadingAnchor),
+            stylesStack.trailingAnchor.constraint(greaterThanOrEqualTo: stylesScrollView.contentView.trailingAnchor),
 
             consoleScrollView.topAnchor.constraint(equalTo: consoleClearButton.bottomAnchor, constant: 8),
             consoleScrollView.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16),
@@ -202,8 +233,11 @@ final class BrowserInspectorTileNSView: TileNSView {
     var isDisconnectedForQA: Bool { inspectedBrowser == nil }
     var domSnapshotForQA: BrowserDOMSnapshot? { domSnapshot }
     var selectedDOMNodeIDForQA: String? { selectedDOMNodeID }
+    var computedStyleSnapshotForQA: BrowserComputedStyleSnapshot? { computedStyleSnapshot }
     var elementsStatusTextForQA: String { placeholderLabel.stringValue }
     var elementsRefreshEnabledForQA: Bool { refreshButton.isEnabled }
+    var stylesStatusTextForQA: String { placeholderLabel.stringValue }
+    var stylesRowTextsForQA: [String] { stylesStack.arrangedSubviews.compactMap { ($0 as? NSTextField)?.stringValue } }
     var consoleRowTextsForQA: [String] { consoleStack.arrangedSubviews.compactMap { ($0 as? NSTextField)?.stringValue } }
     var consoleVisibleRowCountForQA: Int { consoleStack.arrangedSubviews.count }
     var consoleStatusTextForQA: String { placeholderLabel.stringValue }
@@ -222,6 +256,11 @@ final class BrowserInspectorTileNSView: TileNSView {
     func selectDOMNodeForQA(id: String, completion: @escaping (Result<Bool, Error>) -> Void) {
         selectPanelForQA(.elements)
         selectDOMNode(id: id, completion: completion)
+    }
+
+    func refreshSelectedNodeStylesForQA(completion: @escaping (Result<BrowserComputedStyleSnapshot, Error>) -> Void) {
+        selectPanelForQA(.styles)
+        refreshComputedStylesForSelectedNode(completion: completion)
     }
 
     func clearConsoleForQA() {
@@ -301,7 +340,10 @@ final class BrowserInspectorTileNSView: TileNSView {
             return
         }
         selectedDOMNodeID = id
+        computedStyleSnapshot = nil
+        stylesMessage = nil
         renderElementsPanel()
+        refreshComputedStyles(for: id, completion: nil)
         guard let domHighlighter else {
             let error = Self.inspectorError("Linked browser tile is disconnected.")
             completion?(.failure(error))
@@ -351,11 +393,15 @@ final class BrowserInspectorTileNSView: TileNSView {
             renderElementsPanel()
         case .console:
             renderConsolePanel()
+        case .styles:
+            renderStylesPanel()
         default:
             refreshButton.isHidden = true
             consoleClearButton.isHidden = true
             elementsScrollView.isHidden = true
+            stylesScrollView.isHidden = true
             consoleScrollView.isHidden = true
+            clearStyleRows()
             clearConsoleRows()
             placeholderLabel.isHidden = false
             placeholderLabel.stringValue = Self.placeholderText(for: selectedPanel)
@@ -366,7 +412,9 @@ final class BrowserInspectorTileNSView: TileNSView {
         guard selectedPanel == .elements else { return }
         refreshButton.isHidden = false
         consoleClearButton.isHidden = true
+        stylesScrollView.isHidden = true
         consoleScrollView.isHidden = true
+        clearStyleRows()
         clearConsoleRows()
         refreshButton.isEnabled = inspectedBrowser != nil && domSnapshotProvider != nil && refreshButton.isEnabled
         clearElementRows()
@@ -425,12 +473,114 @@ final class BrowserInspectorTileNSView: TileNSView {
         }
     }
 
+    private func refreshComputedStylesForSelectedNode(completion: ((Result<BrowserComputedStyleSnapshot, Error>) -> Void)?) {
+        guard let selectedDOMNodeID else {
+            let error = Self.inspectorError("Select an element before reading computed styles.")
+            renderStylesPanel()
+            completion?(.failure(error))
+            return
+        }
+        refreshComputedStyles(for: selectedDOMNodeID, completion: completion)
+    }
+
+    private func refreshComputedStyles(for nodeID: String, completion: ((Result<BrowserComputedStyleSnapshot, Error>) -> Void)?) {
+        guard inspectedBrowser != nil, let computedStyleProvider else {
+            let error = Self.inspectorError("Computed styles are unavailable until the linked WKWebView is live.")
+            computedStyleSnapshot = nil
+            stylesMessage = error.localizedDescription
+            renderStylesPanel()
+            completion?(.failure(error))
+            return
+        }
+
+        stylesMessage = "Fetching read-only computed styles…"
+        if selectedPanel == .styles { renderStylesPanel() }
+        computedStyleProvider(nodeID) { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                switch result {
+                case let .success(snapshot):
+                    guard self.selectedDOMNodeID == snapshot.nodeId else {
+                        completion?(.success(snapshot))
+                        return
+                    }
+                    self.computedStyleSnapshot = snapshot
+                    self.stylesMessage = nil
+                    self.renderStylesPanel()
+                    completion?(.success(snapshot))
+                case let .failure(error):
+                    self.computedStyleSnapshot = nil
+                    self.stylesMessage = "Computed styles unavailable: \(error.localizedDescription)"
+                    self.renderStylesPanel()
+                    completion?(.failure(error))
+                }
+            }
+        }
+    }
+
+    private func renderStylesPanel() {
+        guard selectedPanel == .styles else { return }
+        refreshButton.isHidden = true
+        consoleClearButton.isHidden = true
+        elementsScrollView.isHidden = true
+        consoleScrollView.isHidden = true
+        clearElementRows()
+        clearConsoleRows()
+        clearStyleRows()
+
+        guard inspectedBrowser != nil else {
+            stylesScrollView.isHidden = true
+            placeholderLabel.isHidden = false
+            placeholderLabel.stringValue = "Disconnected — linked browser tile is missing."
+            return
+        }
+        guard computedStyleProvider != nil else {
+            stylesScrollView.isHidden = true
+            placeholderLabel.isHidden = false
+            placeholderLabel.stringValue = "Computed styles are unavailable until the live browser runtime is restored."
+            return
+        }
+        guard selectedDOMNodeID != nil else {
+            stylesScrollView.isHidden = true
+            placeholderLabel.isHidden = false
+            placeholderLabel.stringValue = "Select an element in Elements to view read-only computed styles."
+            return
+        }
+        if let stylesMessage {
+            stylesScrollView.isHidden = true
+            placeholderLabel.isHidden = false
+            placeholderLabel.stringValue = stylesMessage
+            return
+        }
+        guard let snapshot = computedStyleSnapshot else {
+            stylesScrollView.isHidden = true
+            placeholderLabel.isHidden = false
+            placeholderLabel.stringValue = "Computed styles will appear after selecting an element in Elements."
+            return
+        }
+
+        placeholderLabel.isHidden = true
+        stylesScrollView.isHidden = false
+        let rows = Self.styleRows(for: snapshot)
+        for row in rows {
+            let label = NSTextField(labelWithString: row)
+            label.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            label.textColor = .labelColor
+            label.lineBreakMode = .byTruncatingTail
+            label.maximumNumberOfLines = 1
+            label.translatesAutoresizingMaskIntoConstraints = false
+            stylesStack.addArrangedSubview(label)
+        }
+    }
+
     private func renderConsolePanel() {
         guard selectedPanel == .console else { return }
         refreshButton.isHidden = true
         elementsScrollView.isHidden = true
+        stylesScrollView.isHidden = true
         consoleClearButton.isHidden = false
         clearElementRows()
+        clearStyleRows()
         clearConsoleRows()
 
         guard inspectedBrowser != nil else {
@@ -487,6 +637,13 @@ final class BrowserInspectorTileNSView: TileNSView {
         }
     }
 
+    private func clearStyleRows() {
+        for view in stylesStack.arrangedSubviews {
+            stylesStack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+    }
+
     private func clearConsoleRows() {
         for view in consoleStack.arrangedSubviews {
             consoleStack.removeArrangedSubview(view)
@@ -514,10 +671,33 @@ final class BrowserInspectorTileNSView: TileNSView {
         case .console:
             return "Console messages from the linked browser WKWebView are displayed here; JavaScript evaluation is not available."
         case .styles:
-            return "Styles panel placeholder — read-only computed styles arrive in I04."
+            return "Select an element in Elements to view read-only computed styles."
         case .network:
             return "Network panel placeholder — navigation/download event log arrives in I05."
         }
+    }
+
+    private static func styleRows(for snapshot: BrowserComputedStyleSnapshot) -> [String] {
+        let rect = snapshot.boundingRect
+        return [
+            "Selected node: \(snapshot.nodeId)",
+            "Layout: x=\(formatStyleNumber(rect.x)) y=\(formatStyleNumber(rect.y)) width=\(formatStyleNumber(rect.width)) height=\(formatStyleNumber(rect.height))",
+            "Display: \(styleValue("display", in: snapshot))  Position: \(styleValue("position", in: snapshot))  Z: \(styleValue("z-index", in: snapshot))  Overflow: \(styleValue("overflow", in: snapshot))",
+            "Size: width=\(styleValue("width", in: snapshot)) height=\(styleValue("height", in: snapshot))",
+            "Margin: top=\(styleValue("margin-top", in: snapshot)) right=\(styleValue("margin-right", in: snapshot)) bottom=\(styleValue("margin-bottom", in: snapshot)) left=\(styleValue("margin-left", in: snapshot))",
+            "Padding: top=\(styleValue("padding-top", in: snapshot)) right=\(styleValue("padding-right", in: snapshot)) bottom=\(styleValue("padding-bottom", in: snapshot)) left=\(styleValue("padding-left", in: snapshot))",
+            "Color: text=\(styleValue("color", in: snapshot)) background=\(styleValue("background-color", in: snapshot))",
+            "Font: family=\(styleValue("font-family", in: snapshot)) size=\(styleValue("font-size", in: snapshot)) weight=\(styleValue("font-weight", in: snapshot)) line-height=\(styleValue("line-height", in: snapshot))"
+        ]
+    }
+
+    private static func styleValue(_ name: String, in snapshot: BrowserComputedStyleSnapshot) -> String {
+        snapshot.value(for: name)?.isEmpty == false ? snapshot.value(for: name)! : "—"
+    }
+
+    private static func formatStyleNumber(_ value: Double) -> String {
+        if value.rounded() == value { return String(Int(value)) }
+        return String(format: "%.2f", value)
     }
 
     private static func consoleRowText(for entry: BrowserConsoleLogEntry) -> String {

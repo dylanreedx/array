@@ -773,6 +773,7 @@ final class TileSpawner {
             inspectedBrowser: summary,
             domSnapshotProvider: browserInspectorDOMSnapshotProvider(for: browserTileId),
             domHighlighter: browserInspectorDOMHighlighter(for: browserTileId),
+            computedStyleProvider: browserInspectorComputedStyleProvider(for: browserTileId),
             consoleLogProvider: browserInspectorConsoleLogProvider(for: browserTileId),
             consoleClearer: browserInspectorConsoleClearer(for: browserTileId)
         )
@@ -802,6 +803,7 @@ final class TileSpawner {
             inspectedBrowser: summary,
             domSnapshotProvider: inspectorState.map { browserInspectorDOMSnapshotProvider(for: $0.inspectedBrowserTileId) },
             domHighlighter: inspectorState.map { browserInspectorDOMHighlighter(for: $0.inspectedBrowserTileId) },
+            computedStyleProvider: inspectorState.map { browserInspectorComputedStyleProvider(for: $0.inspectedBrowserTileId) },
             consoleLogProvider: inspectorState.map { browserInspectorConsoleLogProvider(for: $0.inspectedBrowserTileId) },
             consoleClearer: inspectorState.map { browserInspectorConsoleClearer(for: $0.inspectedBrowserTileId) }
         )
@@ -829,6 +831,16 @@ final class TileSpawner {
                 return
             }
             browserView.highlightDOMNodeForInspector(path: nodePath, completion: completion)
+        }
+    }
+
+    private func browserInspectorComputedStyleProvider(for browserTileId: UUID) -> BrowserInspectorTileNSView.ComputedStyleProvider {
+        { [weak self] nodePath, completion in
+            guard let browserView = self?.canvasView?.tileView(for: browserTileId) as? BrowserTileNSView else {
+                completion(.failure(Self.browserInspectorConnectionError("linked browser tile is not live")))
+                return
+            }
+            browserView.captureComputedStylesForInspector(path: nodePath, completion: completion)
         }
     }
 
@@ -4417,6 +4429,222 @@ final class TileSpawner {
             "highlightReturnedTrue": highlightReturnedTrue,
             "disconnectedPanelRendered": disconnectedInspector.isDisconnectedForQA,
             "crossOriginIframeSupport": "out-of-scope"
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runBrowserInspectorStylesSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { if case let .failed(message) = self { return message }; return "failed" }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func waitUntil(_ timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if condition() { return true }
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.03))
+            }
+            return condition()
+        }
+        func timestamp() -> String {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyyMMdd-HHmmss"
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            return formatter.string(from: Date())
+        }
+        func normalizedCSSValue(_ value: String?) -> String {
+            (value ?? "")
+                .replacingOccurrences(of: " ", with: "")
+                .lowercased()
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-browser-inspector-styles-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let profile = BrowserProfile.builtInDefault()
+        let project = Project(
+            id: UUID(),
+            name: "browser-inspector-styles-check",
+            rootPath: tempRoot.path,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 1),
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning,
+                defaultBrowserProfileId: profile.id
+            )
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        canvas.frame = NSRect(x: 0, y: 0, width: 1_120, height: 620)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_120, height: 620),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+
+        let spawner = TileSpawner(
+            canvasView: canvas,
+            ghostty: nil,
+            browserEngine: BrowserEngineContext(),
+            projectStore: store,
+            project: project,
+            browserProfiles: [profile]
+        )
+
+        let html = """
+        <!doctype html>
+        <html>
+          <head>
+            <meta charset="utf-8">
+            <title>Styles QA</title>
+            <style>
+              body { margin: 0; }
+              #target {
+                display: inline-block;
+                position: relative;
+                width: 123px;
+                height: 45px;
+                margin: 7px 9px 11px 13px;
+                padding: 5px 11px 6px 12px;
+                color: rgb(12, 34, 56);
+                background-color: rgb(210, 220, 230);
+                font-family: Helvetica, Arial, sans-serif;
+                font-size: 19px;
+                font-weight: 700;
+                line-height: 23px;
+                z-index: 5;
+                overflow: hidden;
+              }
+            </style>
+          </head>
+          <body>
+            <main id="app"><div id="target" class="style-target">Styled target</div></main>
+          </body>
+        </html>
+        """
+        let fixtureURL = tempRoot.appendingPathComponent("styles-fixture.html", isDirectory: false)
+        try Data(html.utf8).write(to: fixtureURL, options: .atomic)
+
+        let browserRuntime: WKWebViewBrowserRuntime
+        switch spawner.spawnBrowser(url: fixtureURL.absoluteString) {
+        case let .spawned(runtime):
+            browserRuntime = runtime
+        case let .invalidURL(url):
+            throw CheckError.failed("browser spawn rejected URL \(url)")
+        case let .failure(error):
+            throw error
+        }
+        defer { browserRuntime.terminate(policy: .requestClose) }
+
+        try expect(waitUntil { browserRuntime.title == "Styles QA" || !browserRuntime.webView.isLoading }, "browser styles fixture did not finish loading")
+        try expect(browserRuntime.webView.url?.isFileURL == true, "styles check must evaluate a real WKWebView file URL")
+
+        let inspectorTileId: UUID
+        switch spawner.spawnBrowserInspector(for: browserRuntime.tileId) {
+        case let .spawned(tileId):
+            inspectorTileId = tileId
+        case .notBrowserTile:
+            throw CheckError.failed("spawnBrowserInspector rejected the browser tile")
+        case let .failure(error):
+            throw error
+        }
+        guard let inspectorView = canvas.tileView(for: inspectorTileId) as? BrowserInspectorTileNSView else {
+            throw CheckError.failed("spawned inspector did not install BrowserInspectorTileNSView")
+        }
+
+        inspectorView.selectPanelForQA(.styles)
+        let emptyStateVisible = inspectorView.stylesStatusTextForQA.contains("Select an element") && inspectorView.stylesRowTextsForQA.isEmpty
+        try expect(emptyStateVisible, "Styles panel did not show the no-selected-element empty state")
+
+        var snapshotResult: Result<BrowserDOMSnapshot, Error>?
+        inspectorView.refreshElementsForQA { result in snapshotResult = result }
+        try expect(waitUntil { snapshotResult != nil }, "DOM snapshot refresh timed out")
+        let snapshot = try snapshotResult?.get() ?? { throw CheckError.failed("DOM snapshot result missing") }()
+        let expectedNode = snapshot.nodes.first { node in
+            node.tagName == "div"
+                && node.idAttribute == "target"
+                && (node.className?.contains("style-target") == true)
+                && (node.textPreview?.contains("Styled target") == true)
+        }
+        let selectedNodeFound = expectedNode != nil
+        try expect(selectedNodeFound, "snapshot did not include expected div#target node")
+
+        var highlightResult: Result<Bool, Error>?
+        inspectorView.selectDOMNodeForQA(id: expectedNode!.id) { result in highlightResult = result }
+        try expect(waitUntil { highlightResult != nil }, "DOM selection/highlight timed out")
+        let highlightReturnedTrue = try highlightResult?.get() ?? false
+        try expect(highlightReturnedTrue, "selected node did not highlight before styles fetch")
+
+        var styleResult: Result<BrowserComputedStyleSnapshot, Error>?
+        inspectorView.refreshSelectedNodeStylesForQA { result in styleResult = result }
+        try expect(waitUntil { styleResult != nil }, "computed style fetch timed out")
+        let styleSnapshot = try styleResult?.get() ?? { throw CheckError.failed("computed style result missing") }()
+        let propertyValues = Dictionary(uniqueKeysWithValues: styleSnapshot.properties.map { ($0.name, $0.value) })
+        let expectedColorMatched = ["rgb(12,34,56)", "rgba(12,34,56,1)"].contains(normalizedCSSValue(propertyValues["color"]))
+        let expectedDisplayMatched = normalizedCSSValue(propertyValues["display"]) == "inline-block"
+        let expectedWidthMatched = normalizedCSSValue(propertyValues["width"]) == "123px"
+        let computedStyleFetched = browserRuntime.domComputedStyleEvaluationCountForQA > 0
+            && styleSnapshot.nodeId == expectedNode!.id
+            && styleSnapshot.properties.count >= 20
+            && expectedWidthMatched
+        let stylesPanelRendered = inspectorView.stylesRowTextsForQA.contains { $0.contains("Display: inline-block") }
+            && inspectorView.stylesRowTextsForQA.contains { $0.contains("Color: text=rgb(12, 34, 56)") }
+
+        try expect(computedStyleFetched, "computed styles were not fetched through WKWebView for the selected DOM path")
+        try expect(expectedColorMatched, "computed color did not match expected normalized rgb(12,34,56); got \(propertyValues["color"] ?? "missing")")
+        try expect(expectedDisplayMatched, "computed display did not match expected inline-block; got \(propertyValues["display"] ?? "missing")")
+        try expect(stylesPanelRendered, "Styles panel did not render the computed display/color rows")
+
+        let artifactDir = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp(), isDirectory: true)
+            .appendingPathComponent("browser-inspector-styles", isDirectory: true)
+        try fileManager.createDirectory(at: artifactDir, withIntermediateDirectories: true)
+        let artifact = artifactDir.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "browser-inspector-styles",
+            "selectedNodeFound": selectedNodeFound,
+            "computedStyleFetched": computedStyleFetched,
+            "expectedColorMatched": expectedColorMatched,
+            "expectedDisplayMatched": expectedDisplayMatched,
+            "styleEditing": "out-of-scope",
+            "emptyStateVisible": emptyStateVisible,
+            "stylesPanelRendered": stylesPanelRendered,
+            "computedStyleEvaluationCount": browserRuntime.domComputedStyleEvaluationCountForQA,
+            "selectedNodePath": expectedNode?.id ?? "missing",
+            "expectedComputedValues": [
+                "color": propertyValues["color"] ?? "missing",
+                "display": propertyValues["display"] ?? "missing",
+                "width": propertyValues["width"] ?? "missing",
+                "height": propertyValues["height"] ?? "missing",
+                "background-color": propertyValues["background-color"] ?? "missing"
+            ],
+            "boundingRect": [
+                "x": styleSnapshot.boundingRect.x,
+                "y": styleSnapshot.boundingRect.y,
+                "width": styleSnapshot.boundingRect.width,
+                "height": styleSnapshot.boundingRect.height
+            ]
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)

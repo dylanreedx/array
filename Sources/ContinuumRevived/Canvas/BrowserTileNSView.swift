@@ -564,6 +564,14 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         runtime.highlightDOMNode(path: path, durationMilliseconds: 1_500, completion: completion)
     }
 
+    func captureComputedStylesForInspector(path: String, completion: @escaping (Result<BrowserComputedStyleSnapshot, Error>) -> Void) {
+        guard let runtime = runtime as? WKWebViewBrowserRuntime else {
+            completion(.failure(Self.inspectorRuntimeError("live browser runtime is unavailable")))
+            return
+        }
+        runtime.captureComputedStyles(path: path, completion: completion)
+    }
+
     func consoleLogEntriesForInspector() -> [BrowserConsoleLogEntry]? {
         guard let runtime = runtime as? WKWebViewBrowserRuntime else { return nil }
         return runtime.consoleLogEntries
