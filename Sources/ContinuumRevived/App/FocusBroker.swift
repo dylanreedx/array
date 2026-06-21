@@ -20,6 +20,9 @@ final class FocusBroker {
     var navKeymap: NavKeymap = .default
     private(set) var activeSurface: FocusSurfaceID?
     var onAcceptedTileFocus: ((UUID) -> Void)?
+    /// Reason-aware mirror for app-level history. The canvas lockstep hook stays
+    /// reason-agnostic; history must be able to ignore modal restores/recovery.
+    var onAcceptedTileFocusWithReason: ((UUID, FocusRequest) -> Void)?
     /// Fires whenever scope settles on the canvas (i.e. leaves all tiles).
     /// Mirrors `onAcceptedTileFocus`; lets the canvas clear the focus border
     /// when the scope is no longer a tile (`onAcceptedTileFocus` covers the
@@ -47,7 +50,7 @@ final class FocusBroker {
             }
             activeSurface = id
             if case let .tile(tileId) = id {
-                onAcceptedTileFocus?(tileId)
+                notifyAcceptedTileFocus(tileId, reason: reason)
             } else {
                 onAcceptedCanvasScope?()
             }
@@ -78,11 +81,16 @@ final class FocusBroker {
         }
         activeSurface = id
         if case let .tile(tileId) = id {
-            onAcceptedTileFocus?(tileId)
+            notifyAcceptedTileFocus(tileId, reason: reason)
         } else {
             onAcceptedCanvasScope?()
         }
         return true
+    }
+
+    private func notifyAcceptedTileFocus(_ tileId: UUID, reason: FocusRequest) {
+        onAcceptedTileFocus?(tileId)
+        onAcceptedTileFocusWithReason?(tileId, reason)
     }
 
     /// The single funnel for entering a non-modal focus scope. Routes through

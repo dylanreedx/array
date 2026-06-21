@@ -70,9 +70,10 @@ Rules:
   Focus: camera readability, jump indicators, animation defaults, shell tile interactions.
   Audit note: fixed readable framing and stale coordinate paths. Large/default terminal jumps now preserve terminal-readable zoom and reveal the useful top-left area instead of fitting down to an unreadable overview; leader/palette navigation now share a `navigationTileSnapshots` path that matches rendered world frames, including ZoneLayer descriptor tiles; previous-view snapshots are only pushed when the camera actually changes. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260621T113626/audits/A09.md` and artifacts `qa-runs/2026-06-21T160209Z/camera-framing/manifest.json`, `qa-runs/2026-06-21T160212Z/leader-jump-visible-indicators/manifest.json`, and `qa-runs/20260621-160214/zone-framing-readability/manifest.json`.
 
-- [ ] A10 — T08 previous navigation audit  
+- [x] A10 — T08 previous navigation audit  
   Commit: `118dc28`.  
-  Focus: real user path, no over-broad `fileprivate`, focus history semantics, checks not self-fulfilling.
+  Focus: real user path, no over-broad `fileprivate`, focus history semantics, checks not self-fulfilling.  
+  Audit note: fixed shallow previous-navigation wiring. Direct tile focus now records through the production FocusBroker user-click path without broadening AppDelegate state to `fileprivate`, previous tile/zone navigation records the viewport it leaves so previous-view remains meaningful after a back jump, and the app flag now launches the real app, drives `routeTileClickFocus` plus `LaunchPaletteModel` rows, verifies A/B/A tile toggle, Z1/Z2/Z1 zone toggle, deleted-target skip, and modal-restore non-pollution. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260621T113626/audits/A10.md` and artifact `qa-runs/20260621-161942/previous-focus-navigation/manifest.json`.
 
 - [ ] A11 — T04/T04b password/keychain guardrails audit  
   Commits: `5892973`, `a61ad02`.  
