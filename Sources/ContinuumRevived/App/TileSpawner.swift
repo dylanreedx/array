@@ -703,6 +703,7 @@ final class TileSpawner {
                 title: persistedBrowserTile?.title ?? tile.title,
                 storageGroupId: storageGroupId,
                 profileId: profile.id,
+                interactionState: persistedBrowserTile?.interactionState,
                 in: browserState ?? BrowserState(tiles: [])
             )
             try projectStore.saveCanvas(canvasView.canvasState)

@@ -290,6 +290,11 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
             return
         }
         self.url = urlString
+        // A WKWebView keeps reporting the previous document title until the new
+        // load commits. Clear the runtime title at navigation start so tab
+        // snapshots do not stamp the previous page title onto a newly selected
+        // or newly-created tab before the destination page has a title.
+        self.title = ""
         faviconRequestGeneration += 1
         faviconURL = nil
         loadingState = .loading(progress: 0)

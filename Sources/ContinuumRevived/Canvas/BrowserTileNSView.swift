@@ -285,9 +285,19 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     }
 
     private func snapshotActiveTabFromRuntime() {
-        let currentTitle = tabModel.activeTab.title
-        let snapshotTitle = runtime.title.isEmpty ? currentTitle : runtime.title
-        tabModel.updateActiveTab(url: runtime.url, title: snapshotTitle, faviconURL: runtime.faviconURL, interactionState: runtime.capturedInteractionState)
+        let current = tabModel.activeTab
+        let snapshotTitle = runtime.title.isEmpty ? current.title : runtime.title
+        let snapshotInteractionState: Data?
+        if case .loading = runtime.loadingState, runtime.url == current.url {
+            // WKWebView can still expose the previous document's interactionState
+            // during the synchronous load-start callback. Keep the tab's current
+            // snapshot while the destination is loading; the finished/idle state
+            // change captures the new page state when WebKit has one.
+            snapshotInteractionState = current.interactionState
+        } else {
+            snapshotInteractionState = runtime.capturedInteractionState
+        }
+        tabModel.updateActiveTab(url: runtime.url, title: snapshotTitle, faviconURL: runtime.faviconURL, interactionState: snapshotInteractionState)
         onTabModelChange?(tabModel)
     }
 
@@ -739,6 +749,14 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         case #selector(NSResponder.insertNewline(_:)):
             let next = urlField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if !next.isEmpty {
+                // This is a real navigation of the active tab, not a title-only
+                // refresh. Clear the tab title/snapshot first so chrome falls
+                // back to the typed URL until WebKit reports the destination
+                // title, instead of keeping the previous page title on the new
+                // URL or across app restart.
+                tabModel.updateActiveTab(url: next, title: "", faviconURL: nil, interactionState: nil)
+                onTabModelChange?(tabModel)
+                refresh()
                 runtime.loadURL(next)
             }
             focusBrowserContent()

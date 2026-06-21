@@ -189,56 +189,129 @@ private func runBrowserCredentialGuardrailsSelfCheck() throws -> URL {
 private func runBrowserTabUISingleLiveSelfCheck() throws -> URL {
     enum CheckError: Error, CustomStringConvertible { case failed(String); var description: String { if case let .failed(message) = self { return message }; return "failed" } }
     func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws { if !condition() { throw CheckError.failed(message) } }
+    func waitUntil(_ timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.03))
+        }
+        return condition()
+    }
+    func dataPage(title: String) -> String {
+        let html = "<html><head><title>\(title)</title></head><body>\(title)</body></html>"
+        return "data:text/html;base64,\(Data(html.utf8).base64EncodedString())"
+    }
+
     _ = NSApplication.shared
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("continuum-browser-tab-ui-\(UUID().uuidString)", isDirectory: true)
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: root) }
+
+    let now = Date()
+    let project = Project(
+        id: UUID(), name: "browser-tab-ui-single-live-check", rootPath: root.path,
+        createdAt: now, updatedAt: now, defaultLaunchProfileId: "shell", editorPreference: .auto,
+        settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
+    )
+    let store = ProjectStore(projectRoot: root)
+    try store.saveProject(project)
+    let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
     let engine = BrowserEngineContext(inspectionPolicy: BrowserInspectionPolicy(isEnabled: false, source: "qa"))
-    let webView = engine.makeWebView(storageGroupId: BrowserState.sharedStorageGroupId)
-    let webViewCreationCountAfterSpawn = engine.webViewCreationCountForQA
-    let runtime = WKWebViewBrowserRuntime(tileId: UUID(), webView: webView, initialURL: "data:text/html,A")
-    let tile = Tile(id: runtime.tileId, kind: .browser, title: "Browser", frame: TileFrame(x: 0, y: 0, width: 640, height: 420), zIndex: 0, runtimeRef: nil, metadata: TileMetadata(url: runtime.url))
-    let view = BrowserTileNSView(tile: tile, runtime: runtime)
-    let activeTitleA = view.activeTabTitleForQA.isEmpty ? "A" : view.activeTabTitleForQA
-    view.createTabForQA(url: "data:text/html,B", title: "B")
+    defer { engine.shutdown() }
+    let spawner = TileSpawner(canvasView: canvas, ghostty: nil, browserEngine: engine, projectStore: store, project: project)
+
+    let pageA = dataPage(title: "A")
+    let pageB = dataPage(title: "B")
+    let pageC = dataPage(title: "C")
+    let creationsBefore = engine.webViewCreationCountForQA
+    let runtime: WKWebViewBrowserRuntime
+    switch spawner.spawnBrowser(url: pageA) {
+    case let .spawned(spawned): runtime = spawned
+    case let .invalidURL(url): throw CheckError.failed("spawn rejected seeded URL: \(url)")
+    case let .failure(error): throw CheckError.failed("spawn failed: \(error)")
+    }
+    let webViewCreationCountAfterSpawn = engine.webViewCreationCountForQA - creationsBefore
+    guard let view = canvas.tileView(for: runtime.tileId) as? BrowserTileNSView else {
+        throw CheckError.failed("spawned BrowserTileNSView missing")
+    }
+
+    try expect(waitUntil { runtime.title == "A" && view.activeTabTitleForQA == "A" }, "initial tab should load and title itself A through TileSpawner path")
+    let activeTitleA = view.activeTabTitleForQA
+
+    view.createTabForQA(url: pageB, title: "B")
     let b = view.activeTabIdForQA
-    view.createTabForQA(url: "data:text/html,C", title: "C")
+    let activeTitleBImmediate = view.activeTabTitleForQA
+    try expect(activeTitleBImmediate == "B", "new tab should not inherit previous page title while destination loads")
+    try expect(waitUntil { runtime.title == "B" && view.activeTabTitleForQA == "B" }, "tab B should keep/display its own title after load")
+
+    view.createTabForQA(url: pageC, title: "C")
     let c = view.activeTabIdForQA
-    try expect(view.tabCountForQA == 3, "should create three tabs")
-    view.selectTabForQA(b); try expect(view.chromeURLStringForQA == "data:text/html,B", "URL field follows selected tab")
+    let activeTitleCImmediate = view.activeTabTitleForQA
+    try expect(activeTitleCImmediate == "C", "second new tab should not inherit previous page title while destination loads")
+    try expect(waitUntil { runtime.title == "C" && view.activeTabTitleForQA == "C" }, "tab C should keep/display its own title after load")
+
+    let persistedAfterCreate = try store.loadBrowserState().tiles.first(where: { $0.tileId == runtime.tileId })
+    let tabModelPersistedViaTileSpawner = persistedAfterCreate?.tabs.count == 3 && persistedAfterCreate?.activeTabId == c
+    try expect(view.tabCountForQA == 3, "should create three visible tabs")
+    try expect(tabModelPersistedViaTileSpawner, "tab creates should persist through TileSpawner onTabModelChange")
+
+    view.selectTabForQA(b)
+    try expect(view.chromeURLStringForQA == pageB, "URL field follows selected tab B")
     let activeTitleB = view.activeTabTitleForQA
-    view.selectTabForQA(c); try expect(view.chromeURLStringForQA == "data:text/html,C", "URL field follows selected tab C")
+    view.selectTabForQA(c)
+    try expect(view.chromeURLStringForQA == pageC, "URL field follows selected tab C")
     let activeTitleC = view.activeTabTitleForQA
-    let webViewCreationCountAfterTabSwitches = engine.webViewCreationCountForQA
+    let webViewCreationCountAfterTabSwitches = engine.webViewCreationCountForQA - creationsBefore
     let outerTileTitleMirrorsActiveTab = view.tile.title == view.activeTabTitleForQA
     let targetBlankArtifact = try TileSpawner.runBrowserTargetBlankSelfCheck()
     let targetBlankRemainsNewTile = FileManager.default.fileExists(atPath: targetBlankArtifact.path)
-    view.selectTabForQA(b); view.closeActiveTabForQA()
-    let closeMiddleSelectedRightNeighbor = view.activeTabURLForQA == "data:text/html,C"
-    view.closeActiveTabForQA(); view.closeActiveTabForQA()
+
+    view.selectTabForQA(b)
+    view.closeActiveTabForQA()
+    let closeMiddleSelectedRightNeighbor = view.activeTabURLForQA == pageC
+    view.closeActiveTabForQA()
+    view.closeActiveTabForQA()
     let closeLastCreatedAboutBlank = view.tabCountForQA == 1 && view.activeTabURLForQA == DefaultBrowserURL.fallback
+    let persistedAfterClose = try store.loadBrowserState().tiles.first(where: { $0.tileId == runtime.tileId })
+    let closeLastPersistedFallback = persistedAfterClose?.tabs.count == 1 && persistedAfterClose?.url == DefaultBrowserURL.fallback
+
     let timestamp = Int(Date().timeIntervalSince1970)
     let dir = URL(fileURLWithPath: "qa-runs/\(timestamp)/browser-tab-ui-single-live", isDirectory: true)
-    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
     let artifact = dir.appendingPathComponent("manifest.json")
     let manifest: [String: Any] = [
         "check": "browser-tab-ui-single-live",
         "tabCountAfterCreate": 3,
         "activeTitleSequence": [activeTitleA, activeTitleB, activeTitleC],
-        "urlFieldSequence": ["data:text/html,A", "data:text/html,B", "data:text/html,C"],
+        "activeTitleDidNotInheritPreviousPageOnNewTab": activeTitleBImmediate == "B" && activeTitleCImmediate == "C",
+        "urlFieldSequence": [pageA, pageB, pageC],
         "outerTileTitleMirrorsActiveTab": outerTileTitleMirrorsActiveTab,
         "webViewCreationCountAfterSpawn": webViewCreationCountAfterSpawn,
         "webViewCreationCountAfterTabSwitches": webViewCreationCountAfterTabSwitches,
         "browserRuntimeCount": [runtime.id].count,
         "closeMiddleSelectedRightNeighbor": closeMiddleSelectedRightNeighbor,
         "closeLastCreatedAboutBlank": closeLastCreatedAboutBlank,
+        "closeLastPersistedFallback": closeLastPersistedFallback,
         "targetBlankRemainsNewTile": targetBlankRemainsNewTile,
+        "usedTileSpawnerSpawnBrowser": true,
         "usedProductionBrowserTileNSView": true,
+        "tabModelPersistedViaTileSpawner": tabModelPersistedViaTileSpawner,
         "tabStripVisible": view.tabStripVisibleForQA,
         "tabActionsDrivenThroughViewOrDocumentedQAActionPath": true,
-        "urlFieldVisibleTextMatchedActiveTab": true,
+        "urlFieldVisibleTextMatchedActiveTab": view.chromeURLStringForQA == DefaultBrowserURL.fallback,
         "inactiveTabsMayReloadAfterLaunch": true
     ]
     try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact)
+
+    try expect(outerTileTitleMirrorsActiveTab, "outer tile title should mirror active tab")
+    try expect(webViewCreationCountAfterSpawn == 1, "spawn should create exactly one WKWebView")
+    try expect(webViewCreationCountAfterTabSwitches == 1, "tab create/switch/close must not create extra WKWebViews")
+    try expect(targetBlankRemainsNewTile, "target=_blank should remain a new browser tile")
+    try expect(view.tabStripVisibleForQA, "tab strip should be visible")
     try expect(closeMiddleSelectedRightNeighbor, "closing middle tab should select right neighbor")
     try expect(closeLastCreatedAboutBlank, "closing last tab should leave about:blank")
+    try expect(closeLastPersistedFallback, "closing last tab should persist about:blank fallback")
     return artifact
 }
 

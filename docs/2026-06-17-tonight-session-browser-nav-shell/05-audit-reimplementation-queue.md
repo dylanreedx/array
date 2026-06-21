@@ -35,10 +35,11 @@ Rules:
   Required output: verify whether inspect element actually exists in app; implement/fix if missing.
   Audit note: fixed product-visible Web Inspector enablement without pretending public WebKit can open Inspect Element. Settings now exposes `Browser > Enable Safari Web Inspector for Browser Tiles (open from Safari Develop)`, live webviews re-apply the policy on settings change, and `target=_blank` children use `BrowserEngineContext` policy; artifact `qa-runs/1782007004/browser-inspection-policy/manifest.json`; see `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260620T212451/audits/A03.md`.
 
-- [ ] A04 — Browser tabs/session restore product reality  
+- [x] A04 — Browser tabs/session restore product reality  
   Focus: T01/T01b/T03, actual tab UI, one-live-webview runtime behavior, restore semantics, user-visible behavior.  
   Relevant commits: `0bf2934`, `b8a88c8`, `ddfd301`.  
-  Required output: determine whether browser was truly touched and useful; fix or mark revert-candidate.
+  Required output: determine whether browser was truly touched and useful; fix or mark revert-candidate.  
+  Audit note: fixed stale title/interaction-state stamping during tab loads and hardened the app check to use `TileSpawner.spawnBrowser` with real WKWebView title changes plus persisted tab-model evidence; see `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260620T212451/audits/A04.md` and artifact `qa-runs/1782007704/browser-tab-ui-single-live/manifest.json`.
 
 - [ ] A05 — tmux shell tile persistence reality check  
   Focus: tmux session lifecycle, restart/reload behavior, delete lifecycle, app support roots, shell identity.  
