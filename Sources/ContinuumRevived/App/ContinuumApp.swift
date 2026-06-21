@@ -834,6 +834,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-sidebar-actions-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runWorkspaceSidebarActionsSelfCheck()
+                print("ContinuumRevivedWorkspaceSidebarActionsChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--chrome-integration-guardrails-check") {
             do {
                 let artifact = try runChromeIntegrationGuardrailsSelfCheck()
@@ -4217,6 +4229,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let divider = splitView.dividerThickness
         let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: width, height: frame.height))
         sidebar.autoresizingMask = [.height]
+        sidebar.onSelection = { [weak self] selection in
+            self?.handleWorkspaceSidebarSelection(selection)
+        }
         canvasView.frame = NSRect(x: width + divider, y: 0, width: max(0, frame.width - width - divider), height: frame.height)
         canvasView.autoresizingMask = [.width, .height]
 
@@ -4256,11 +4271,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let sidebar = workspaceSidebarView else { return }
         do {
             let tree = try buildWorkspaceSidebarTree()
-            sidebar.reload(tree: tree, currentWorkspaceId: currentWorkspaceIdForSidebar())
+            sidebar.reload(
+                tree: tree,
+                currentWorkspaceId: currentWorkspaceIdForSidebar(),
+                selectedZoneId: navSelectedZoneId,
+                selectedTileId: canvasView?.canvasState.lastActiveTileId
+            )
         } catch {
             fputs("Workspace sidebar reload failed: \(error)\n", stderr)
             sidebar.reload(tree: SidebarTree(workspaces: []), currentWorkspaceId: nil)
         }
+    }
+
+    private func handleWorkspaceSidebarSelection(_ selection: WorkspaceSidebarSelection) {
+        switch selection {
+        case let .workspace(workspaceId):
+            guard switchWorkspaceFromSidebarIfNeeded(workspaceId) else { return }
+            workspaceSidebarView?.select(workspaceId: workspaceId)
+        case let .zone(workspaceId, zoneId):
+            guard switchWorkspaceFromSidebarIfNeeded(workspaceId) else { return }
+            if focusZoneFromSidebar(zoneId) {
+                workspaceSidebarView?.select(workspaceId: workspaceId, zoneId: zoneId)
+            } else {
+                workspaceSidebarView?.select(workspaceId: workspaceId)
+            }
+        case let .tile(workspaceId, zoneId, tileId):
+            guard switchWorkspaceFromSidebarIfNeeded(workspaceId) else { return }
+            if focusTileFromSidebar(tileId) {
+                workspaceSidebarView?.select(workspaceId: workspaceId, zoneId: zoneId, tileId: tileId)
+            } else {
+                workspaceSidebarView?.select(workspaceId: workspaceId)
+            }
+        }
+    }
+
+    @discardableResult
+    private func switchWorkspaceFromSidebarIfNeeded(_ workspaceId: UUID) -> Bool {
+        if currentWorkspaceIdForSidebar() == workspaceId { return true }
+        do {
+            guard let workspaceRuntime else { return false }
+            try workspaceRuntime.switchWorkspace(to: workspaceId)
+            navSelectedZoneId = nil
+            reloadWorkspaceSidebar()
+            return workspaceRuntime.workspaceId == workspaceId
+        } catch {
+            fputs("Workspace sidebar switch failed: \(error)\n", stderr)
+            return false
+        }
+    }
+
+    @discardableResult
+    private func focusZoneFromSidebar(_ zoneId: UUID) -> Bool {
+        guard let canvasView,
+              let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) else { return false }
+        recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: viewport)
+        canvasView.setViewport(viewport)
+        navSelectedZoneId = zoneId
+        focusHistory.recordZoneFocus(zoneId, reason: .paletteJump)
+        return true
+    }
+
+    @discardableResult
+    private func focusTileFromSidebar(_ tileId: UUID) -> Bool {
+        guard let canvasView,
+              canvasView.navigationTileSnapshot(for: tileId) != nil else { return false }
+        jumpToTileFromPalette(tileId)
+        navSelectedZoneId = zoneContainingTile(tileId)
+        return focusBroker.activeSurface == .tile(tileId) || canvasView.canvasState.lastActiveTileId == tileId
     }
 
     @objc func toggleWorkspaceSidebarFromMenu(_ sender: Any?) {
@@ -4448,6 +4525,237 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "widthPersistenceWorked": widthPersistenceWorked,
             "visibilityPersistenceWorked": visibilityPersistenceWorked,
             "paletteActionDiscoverable": paletteActionDiscoverable,
+            "artifactPath": artifact.path,
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runWorkspaceSidebarActionsSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func tile(id: UUID, title: String, x: Double = 40, y: Double = 40, zIndex: Int = 1) -> Tile {
+            Tile(
+                id: id,
+                kind: .note,
+                title: title,
+                frame: TileFrame(x: x, y: y, width: 260, height: 180),
+                zIndex: zIndex,
+                runtimeRef: nil,
+                metadata: TileMetadata(noteId: id)
+            )
+        }
+        func viewportsNearlyEqual(_ lhs: CanvasViewport, _ rhs: CanvasViewport) -> Bool {
+            max(abs(lhs.x - rhs.x), abs(lhs.y - rhs.y), abs(lhs.zoom - rhs.zoom)) < 0.001
+        }
+
+        let fm = FileManager.default
+        let now = Date(timeIntervalSince1970: 1_900_100_000)
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("continuum-workspace-sidebar-actions-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        let projectARoot = tempRoot.appendingPathComponent("ProjectA", isDirectory: true)
+        let projectBRoot = tempRoot.appendingPathComponent("ProjectB", isDirectory: true)
+        let projectCRoot = tempRoot.appendingPathComponent("ProjectC", isDirectory: true)
+        try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        try fm.createDirectory(at: projectARoot, withIntermediateDirectories: true)
+        try fm.createDirectory(at: projectBRoot, withIntermediateDirectories: true)
+        try fm.createDirectory(at: projectCRoot, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let workspaceA = UUID(uuidString: "00000000-0000-0000-0000-00000000D201")!
+        let workspaceB = UUID(uuidString: "00000000-0000-0000-0000-00000000D202")!
+        let projectA = UUID(uuidString: "00000000-0000-0000-0000-00000000D211")!
+        let projectB = UUID(uuidString: "00000000-0000-0000-0000-00000000D212")!
+        let projectC = UUID(uuidString: "00000000-0000-0000-0000-00000000D213")!
+        let zoneA = UUID(uuidString: "00000000-0000-0000-0000-00000000D221")!
+        let zoneB = UUID(uuidString: "00000000-0000-0000-0000-00000000D222")!
+        let zoneC = UUID(uuidString: "00000000-0000-0000-0000-00000000D223")!
+        let tileA = UUID(uuidString: "00000000-0000-0000-0000-00000000D231")!
+        let tileB = UUID(uuidString: "00000000-0000-0000-0000-00000000D232")!
+        let tileC = UUID(uuidString: "00000000-0000-0000-0000-00000000D233")!
+        let missingTile = UUID(uuidString: "00000000-0000-0000-0000-00000000D234")!
+
+        func makeProject(id: UUID, name: String, root: URL) -> Project {
+            Project(
+                id: id,
+                name: name,
+                rootPath: root.path,
+                createdAt: now,
+                updatedAt: now,
+                defaultLaunchProfileId: "shell",
+                editorPreference: .auto,
+                settings: ProjectSettings(
+                    restorePolicy: .restoreDescriptors,
+                    browserStoragePolicy: .perProject,
+                    terminalClosePolicy: .askWhenRunning
+                )
+            )
+        }
+
+        let tileAValue = tile(id: tileA, title: "Current Tile", x: 40, y: 40, zIndex: 1)
+        let tileBValue = tile(id: tileB, title: "Zone Tile", x: 60, y: 60, zIndex: 1)
+        let tileCValue = tile(id: tileC, title: "Cross Workspace Tile", x: 50, y: 50, zIndex: 1)
+        let missingTileValue = tile(id: missingTile, title: "Stale Missing Tile", x: 80, y: 80, zIndex: 2)
+
+        let projectAObject = makeProject(id: projectA, name: "Project A", root: projectARoot)
+        let projectBObject = makeProject(id: projectB, name: "Project B", root: projectBRoot)
+        let projectCObject = makeProject(id: projectC, name: "Project C", root: projectCRoot)
+        let storeA = ProjectStore(projectRoot: projectARoot)
+        let storeB = ProjectStore(projectRoot: projectBRoot)
+        let storeC = ProjectStore(projectRoot: projectCRoot)
+        try storeA.saveProject(projectAObject)
+        try storeA.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileAValue], groups: [], lastActiveTileId: nil))
+        try storeB.saveProject(projectBObject)
+        try storeB.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileBValue], groups: [], lastActiveTileId: nil))
+        try storeC.saveProject(projectCObject)
+        try storeC.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileCValue], groups: [], lastActiveTileId: nil))
+
+        let docA = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [
+                ZonePlacement(zoneId: zoneA, projectId: projectA, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 720, height: 520), color: "blue", collapsed: false, hydrationPolicy: .automatic, name: "Current Zone", navKey: "1"),
+                ZonePlacement(zoneId: zoneB, projectId: projectB, origin: ZonePoint(x: 1_200, y: 0), size: ZoneSize(width: 720, height: 520), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "Second Zone", navKey: "2"),
+            ],
+            zoneZOrder: [zoneA, zoneB],
+            lastActiveZoneId: zoneA,
+            groupZoneTiles: [
+                GroupZoneTiles(zoneId: zoneA, tiles: [tileAValue]),
+                GroupZoneTiles(zoneId: zoneB, tiles: [tileBValue]),
+            ]
+        )
+        let docB = WorkspaceDocument(
+            viewport: CanvasViewport(x: 10, y: 20, zoom: 1),
+            zones: [
+                ZonePlacement(zoneId: zoneC, projectId: projectC, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 720, height: 520), color: "orange", collapsed: false, hydrationPolicy: .automatic, name: "Other Zone", navKey: "3"),
+            ],
+            zoneZOrder: [zoneC],
+            lastActiveZoneId: zoneC,
+            groupZoneTiles: [GroupZoneTiles(zoneId: zoneC, tiles: [tileCValue, missingTileValue])]
+        )
+        try WorkspaceStore(workspaceId: workspaceA, applicationSupportDirectory: appSupport).save(docA)
+        try WorkspaceStore(workspaceId: workspaceB, applicationSupportDirectory: appSupport).save(docB)
+
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = workspaceA
+        registry.lastActiveProjectId = projectA
+        registry.workspaces = [
+            WorkspaceEntry(id: workspaceA, name: "Workspace A", projectIds: [projectA, projectB], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: workspaceB, name: "Workspace B", projectIds: [projectC], createdAt: now, updatedAt: now),
+        ]
+        registry.projects = [
+            ProjectEntry(id: projectA, name: "Project A", rootPath: projectARoot.path, workspaceId: workspaceA, lastOpenedAt: now, pinned: false, missing: false),
+            ProjectEntry(id: projectB, name: "Project B", rootPath: projectBRoot.path, workspaceId: workspaceA, lastOpenedAt: now, pinned: false, missing: false),
+            ProjectEntry(id: projectC, name: "Project C", rootPath: projectCRoot.path, workspaceId: workspaceB, lastOpenedAt: now, pinned: false, missing: false),
+        ]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+
+        let app = AppDelegate()
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+        let zoneRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { projectId in
+            if projectId == projectA { return ZoneRuntimeController(projectRoot: projectARoot, projectStore: storeA, project: projectAObject) }
+            if projectId == projectB { return ZoneRuntimeController(projectRoot: projectBRoot, projectStore: storeB, project: projectBObject) }
+            if projectId == projectC { return ZoneRuntimeController(projectRoot: projectCRoot, projectStore: storeC, project: projectCObject) }
+            throw CheckError.failed("unexpected project id \(projectId)")
+        })
+        let runtime = WorkspaceRuntime(
+            workspaceId: workspaceA,
+            document: docA,
+            registry: zoneRegistry,
+            focusBroker: app.focusBroker,
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+        let initialZoneRenderModels = Self.zoneRenderModels(from: docA, registry: registry)
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: docA.viewport, tiles: [], groups: [], lastActiveTileId: nil), activeZone: nil, zoneRenderModels: initialZoneRenderModels, showsZoneChrome: false)
+        canvas.frame = NSRect(x: 0, y: 0, width: 1_000, height: 700)
+        app.registryStore = registryStore
+        app.workspaceRuntime = runtime
+        app.canvasView = canvas
+        app.focusBroker.onAcceptedTileFocus = { [weak canvas] tileId in canvas?.markActive(tileId: tileId) }
+        app.focusBroker.onAcceptedCanvasScope = { [weak canvas] in canvas?.clearFocusBorder() }
+        app.installFocusHistoryHook()
+        try runtime.install(into: canvas, appRegistry: registry)
+        canvas.layoutSubtreeIfNeeded()
+
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: 640))
+        sidebar.onSelection = { selection in app.handleWorkspaceSidebarSelection(selection) }
+        app.workspaceSidebarView = sidebar
+        app.reloadWorkspaceSidebar()
+        sidebar.layoutSubtreeIfNeeded()
+
+        let currentTileClickDelivered = sidebar.clickTileRowForQA(workspaceId: workspaceA, zoneId: zoneA, tileId: tileA)
+        let currentTileFocusWorked = currentTileClickDelivered
+            && app.focusBroker.activeSurface == .tile(tileA)
+            && canvas.canvasState.lastActiveTileId == tileA
+            && sidebar.selectedTargetForQA == .tile(workspaceId: workspaceA, zoneId: zoneA, tileId: tileA)
+        try expect(currentTileFocusWorked, "current workspace tile row should focus tile and select its row")
+
+        guard let expectedZoneViewport = canvas.fitZoneToViewport(zoneId: zoneB) else {
+            throw CheckError.failed("current zone must be frameable before sidebar click")
+        }
+        let currentZoneClickDelivered = sidebar.clickZoneRowForQA(workspaceId: workspaceA, zoneId: zoneB)
+        let currentZoneFocusWorked = currentZoneClickDelivered
+            && app.navSelectedZoneId == zoneB
+            && viewportsNearlyEqual(canvas.viewport, expectedZoneViewport)
+            && sidebar.selectedTargetForQA == .zone(workspaceId: workspaceA, zoneId: zoneB)
+        let measuredZoneViewport = canvas.viewport
+        try expect(currentZoneFocusWorked, "current workspace zone row should frame zone and select its row")
+
+        let workspaceClickDelivered = sidebar.clickWorkspaceRowForQA(workspaceB)
+        let workspaceSwitchFromRowWorked = workspaceClickDelivered
+            && runtime.workspaceId == workspaceB
+            && sidebar.selectedTargetForQA == .workspace(workspaceB)
+        try expect(workspaceSwitchFromRowWorked, "non-current workspace row should switch workspace")
+
+        try expect(sidebar.clickWorkspaceRowForQA(workspaceA), "setup: workspace A row should switch back")
+        try expect(runtime.workspaceId == workspaceA, "setup: runtime should be back on workspace A")
+
+        let crossTileClickDelivered = sidebar.clickTileRowForQA(workspaceId: workspaceB, zoneId: zoneC, tileId: tileC)
+        let crossWorkspaceTileFocusWorked = crossTileClickDelivered
+            && runtime.workspaceId == workspaceB
+            && app.focusBroker.activeSurface == .tile(tileC)
+            && canvas.canvasState.lastActiveTileId == tileC
+            && sidebar.selectedTargetForQA == .tile(workspaceId: workspaceB, zoneId: zoneC, tileId: tileC)
+        try expect(crossWorkspaceTileFocusWorked, "non-current tile row should switch then focus tile")
+
+        try expect(sidebar.clickWorkspaceRowForQA(workspaceA), "setup: workspace A row should switch back before missing-target probe")
+        try expect(runtime.workspaceId == workspaceA, "setup: runtime should be back on workspace A before missing-target probe")
+        let missingClickDelivered = sidebar.clickTileRowForQA(workspaceId: workspaceB, zoneId: zoneC, tileId: missingTile)
+        let missingTargetHandled = missingClickDelivered
+            && runtime.workspaceId == workspaceB
+            && canvas.navigationTileSnapshot(for: missingTile) == nil
+            && app.focusBroker.activeSurface != .tile(missingTile)
+            && canvas.canvasState.lastActiveTileId != missingTile
+        try expect(missingTargetHandled, "stale non-current tile row should switch safely and not focus missing tile")
+
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let directory = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("workspace-sidebar-actions", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "workspace-sidebar-actions",
+            "path": "WorkspaceSidebarView row click -> AppDelegate.handleWorkspaceSidebarSelection -> WorkspaceRuntime.switchWorkspace / CanvasNSView focus APIs",
+            "workspaceSwitchFromRowWorked": workspaceSwitchFromRowWorked,
+            "currentZoneFocusWorked": currentZoneFocusWorked,
+            "currentTileFocusWorked": currentTileFocusWorked,
+            "crossWorkspaceTileFocusWorked": crossWorkspaceTileFocusWorked,
+            "missingTargetHandled": missingTargetHandled,
+            "currentZoneViewport": ["x": measuredZoneViewport.x, "y": measuredZoneViewport.y, "zoom": measuredZoneViewport.zoom],
+            "expectedCurrentZoneViewport": ["x": expectedZoneViewport.x, "y": expectedZoneViewport.y, "zoom": expectedZoneViewport.zoom],
+            "selectedRowAfterMissingTarget": String(describing: sidebar.selectedTargetForQA),
             "artifactPath": artifact.path,
         ]
         try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)

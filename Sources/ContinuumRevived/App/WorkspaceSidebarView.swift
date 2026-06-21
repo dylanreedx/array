@@ -3,7 +3,25 @@ import ContinuumRevivedCore
 import Foundation
 
 @MainActor
+enum WorkspaceSidebarSelection: Equatable {
+    case workspace(UUID)
+    case zone(workspaceId: UUID, zoneId: UUID)
+    case tile(workspaceId: UUID, zoneId: UUID, tileId: UUID)
+}
+
+@MainActor
 final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate {
+    private struct ZoneItemKey: Hashable {
+        let workspaceId: UUID
+        let zoneId: UUID
+    }
+
+    private struct TileItemKey: Hashable {
+        let workspaceId: UUID
+        let zoneId: UUID
+        let tileId: UUID
+    }
+
     private final class SidebarItem: NSObject {
         enum Kind {
             case workspace(SidebarWorkspaceRow)
@@ -29,6 +47,10 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     private var currentWorkspaceId: UUID?
     private var rootItems: [SidebarItem] = []
     private var workspaceItemsById: [UUID: SidebarItem] = [:]
+    private var zoneItemsByKey: [ZoneItemKey: SidebarItem] = [:]
+    private var tileItemsByKey: [TileItemKey: SidebarItem] = [:]
+
+    var onSelection: ((WorkspaceSidebarSelection) -> Void)?
 
     override init(frame frameRect: NSRect) {
         titleLabel = NSTextField(labelWithString: "Workspaces")
@@ -70,6 +92,7 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         outlineView.dataSource = self
         outlineView.delegate = self
         outlineView.target = self
+        outlineView.action = #selector(outlineRowClicked(_:))
 
         NSLayoutConstraint.activate([
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
@@ -87,12 +110,12 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         return nil
     }
 
-    func reload(tree: SidebarTree, currentWorkspaceId: UUID?) {
+    func reload(tree: SidebarTree, currentWorkspaceId: UUID?, selectedZoneId: UUID? = nil, selectedTileId: UUID? = nil) {
         self.tree = tree
         self.currentWorkspaceId = currentWorkspaceId
         rebuildItems()
         outlineView.reloadData()
-        applyDefaultExpansion()
+        applyDefaultExpansion(selectedZoneId: selectedZoneId, selectedTileId: selectedTileId)
     }
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
@@ -133,6 +156,11 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     var zoneRowsRenderedForQA: Int { visibleItems().filter { if case .zone = $0.kind { return true }; return false }.count }
     var tileRowsRenderedForQA: Int { visibleItems().filter { if case .tile = $0.kind { return true }; return false }.count }
     var visibleDisplayNamesForQA: [String] { visibleItems().map(displayTitle(for:)) }
+    var selectedTargetForQA: WorkspaceSidebarSelection? {
+        guard outlineView.selectedRow >= 0,
+              let item = outlineView.item(atRow: outlineView.selectedRow) as? SidebarItem else { return nil }
+        return selection(for: item)
+    }
 
     func isWorkspaceExpandedForQA(_ workspaceId: UUID) -> Bool {
         guard let item = workspaceItemsById[workspaceId] else { return false }
@@ -144,15 +172,57 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         return outlineView.row(forItem: item) == outlineView.selectedRow
     }
 
+    @discardableResult
+    func select(workspaceId: UUID, zoneId: UUID? = nil, tileId: UUID? = nil) -> Bool {
+        selectItem(workspaceId: workspaceId, zoneId: zoneId, tileId: tileId)
+    }
+
+    @discardableResult
+    func selectForQA(workspaceId: UUID, zoneId: UUID? = nil, tileId: UUID? = nil) -> Bool {
+        select(workspaceId: workspaceId, zoneId: zoneId, tileId: tileId)
+    }
+
+    @discardableResult
+    func clickWorkspaceRowForQA(_ workspaceId: UUID) -> Bool {
+        guard let item = workspaceItemsById[workspaceId] else { return false }
+        return click(item: item)
+    }
+
+    @discardableResult
+    func clickZoneRowForQA(workspaceId: UUID, zoneId: UUID) -> Bool {
+        let key = ZoneItemKey(workspaceId: workspaceId, zoneId: zoneId)
+        guard let item = zoneItemsByKey[key] else { return false }
+        return click(item: item)
+    }
+
+    @discardableResult
+    func clickTileRowForQA(workspaceId: UUID, zoneId: UUID, tileId: UUID) -> Bool {
+        let key = TileItemKey(workspaceId: workspaceId, zoneId: zoneId, tileId: tileId)
+        guard let item = tileItemsByKey[key] else { return false }
+        return click(item: item)
+    }
+
+    @objc private func outlineRowClicked(_ sender: NSOutlineView) {
+        let row = sender.clickedRow >= 0 ? sender.clickedRow : sender.selectedRow
+        guard row >= 0,
+              let item = sender.item(atRow: row) as? SidebarItem else { return }
+        performSelection(for: item)
+    }
+
     private func rebuildItems() {
         workspaceItemsById.removeAll()
+        zoneItemsByKey.removeAll()
+        tileItemsByKey.removeAll()
         rootItems = tree.workspaces.map { workspace in
             let workspaceItem = SidebarItem(kind: .workspace(workspace))
             workspaceItem.children = workspace.zones.map { zone in
                 let zoneItem = SidebarItem(kind: .zone(zone, workspaceId: workspace.workspaceId))
                 zoneItem.children = zone.tiles.map { tile in
-                    SidebarItem(kind: .tile(tile, zoneId: zone.zoneId, workspaceId: workspace.workspaceId))
+                    let tileItem = SidebarItem(kind: .tile(tile, zoneId: zone.zoneId, workspaceId: workspace.workspaceId))
+                    tileItemsByKey[TileItemKey(workspaceId: workspace.workspaceId, zoneId: zone.zoneId, tileId: tile.tileId)] = tileItem
+                    return tileItem
                 }
+                zoneItemsByKey[ZoneItemKey(workspaceId: workspace.workspaceId, zoneId: zone.zoneId)] = zoneItem
                 return zoneItem
             }
             workspaceItemsById[workspace.workspaceId] = workspaceItem
@@ -160,7 +230,7 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         }
     }
 
-    private func applyDefaultExpansion() {
+    private func applyDefaultExpansion(selectedZoneId: UUID?, selectedTileId: UUID?) {
         for item in rootItems {
             outlineView.collapseItem(item, collapseChildren: true)
         }
@@ -170,10 +240,80 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         for zoneItem in currentItem.children {
             outlineView.expandItem(zoneItem, expandChildren: false)
         }
-        let row = outlineView.row(forItem: currentItem)
-        if row >= 0 {
-            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            outlineView.scrollRowToVisible(row)
+        if let selectedTileId,
+           selectItem(workspaceId: currentWorkspaceId, zoneId: selectedZoneId, tileId: selectedTileId) {
+            return
+        }
+        if let selectedZoneId,
+           selectItem(workspaceId: currentWorkspaceId, zoneId: selectedZoneId, tileId: nil) {
+            return
+        }
+        _ = selectItem(workspaceId: currentWorkspaceId, zoneId: nil, tileId: nil)
+    }
+
+    @discardableResult
+    private func selectItem(workspaceId: UUID, zoneId: UUID?, tileId: UUID?) -> Bool {
+        let item: SidebarItem?
+        if let zoneId, let tileId {
+            item = tileItemsByKey[TileItemKey(workspaceId: workspaceId, zoneId: zoneId, tileId: tileId)]
+        } else if let tileId {
+            item = tileItemsByKey.first { entry in entry.key.workspaceId == workspaceId && entry.key.tileId == tileId }?.value
+        } else if let zoneId {
+            item = zoneItemsByKey[ZoneItemKey(workspaceId: workspaceId, zoneId: zoneId)]
+        } else {
+            item = workspaceItemsById[workspaceId]
+        }
+        guard let item else { return false }
+        reveal(item)
+        let row = outlineView.row(forItem: item)
+        guard row >= 0 else { return false }
+        outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        outlineView.scrollRowToVisible(row)
+        return true
+    }
+
+    @discardableResult
+    private func click(item: SidebarItem) -> Bool {
+        reveal(item)
+        let row = outlineView.row(forItem: item)
+        guard row >= 0 else { return false }
+        outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        outlineView.scrollRowToVisible(row)
+        performSelection(for: item)
+        return true
+    }
+
+    private func reveal(_ item: SidebarItem) {
+        switch item.kind {
+        case .workspace:
+            break
+        case let .zone(_, workspaceId):
+            if let workspaceItem = workspaceItemsById[workspaceId] {
+                outlineView.expandItem(workspaceItem, expandChildren: false)
+            }
+        case let .tile(_, zoneId, workspaceId):
+            if let workspaceItem = workspaceItemsById[workspaceId] {
+                outlineView.expandItem(workspaceItem, expandChildren: false)
+            }
+            if let zoneItem = zoneItemsByKey[ZoneItemKey(workspaceId: workspaceId, zoneId: zoneId)] {
+                outlineView.expandItem(zoneItem, expandChildren: false)
+            }
+        }
+    }
+
+    private func performSelection(for item: SidebarItem) {
+        guard let selection = selection(for: item) else { return }
+        onSelection?(selection)
+    }
+
+    private func selection(for item: SidebarItem) -> WorkspaceSidebarSelection? {
+        switch item.kind {
+        case let .workspace(workspace):
+            return .workspace(workspace.workspaceId)
+        case let .zone(zone, workspaceId):
+            return .zone(workspaceId: workspaceId, zoneId: zone.zoneId)
+        case let .tile(tile, zoneId, workspaceId):
+            return .tile(workspaceId: workspaceId, zoneId: zoneId, tileId: tile.tileId)
         }
     }
 

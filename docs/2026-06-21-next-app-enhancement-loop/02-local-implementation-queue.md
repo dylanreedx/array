@@ -47,7 +47,7 @@ Rules:
   Source ticket: `W01-workspace-sidebar-shell.md`.
   Required output: persistent left dock, all workspaces visible, current expanded, width/visibility persistence, artifact.
 
-- [ ] W02 — Sidebar row actions
+- [x] W02 — Sidebar row actions
   Source ticket: `W02-workspace-sidebar-row-actions.md`.
   Required output: row click switch/focus/reveal using existing navigation paths, artifact.
 

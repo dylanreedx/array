@@ -756,8 +756,11 @@ final class CanvasNSView: NSView {
     var navZoneRenderModels: [ZoneRenderModel] { zoneRenderModels }
 
     func fitZoneToViewport(zoneId: UUID) -> CanvasViewport? {
-        guard let model = zoneRenderModels.first(where: { $0.placement.zoneId == zoneId }) else { return nil }
-        let frame = CanvasEngine.zoneWorldFrame(model.placement)
+        let placement = zoneRenderModels.first(where: { $0.placement.zoneId == zoneId })?.placement
+            ?? liveZones.first(where: { $0.zoneId == zoneId })
+            ?? zoneLayers.first(where: { $0.placement.zoneId == zoneId })?.placement
+        guard let placement else { return nil }
+        let frame = CanvasEngine.zoneWorldFrame(placement)
         return CameraFraming.zoneOverviewViewport(
             for: CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height),
             viewportSize: bounds.size

@@ -139,6 +139,7 @@ run_app_check .build/debug/continuum-revived --browser-inspector-network-lite-ch
 run_app_check .build/debug/continuum-revived --browser-inspector-link-lifecycle-check
 run_app_check .build/debug/continuum-revived --browser-inspector-actions-check
 run_app_check .build/debug/continuum-revived --workspace-sidebar-shell-check
+run_app_check .build/debug/continuum-revived --workspace-sidebar-actions-check
 run_app_check .build/debug/continuum-revived --browser-profile-persistence-check
 run_app_check .build/debug/continuum-revived --note-file-tile-spawn-check
 run_app_check .build/debug/continuum-revived --run-artifacts-tile-check
