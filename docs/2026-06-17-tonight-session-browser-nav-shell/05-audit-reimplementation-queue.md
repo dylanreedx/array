@@ -60,9 +60,10 @@ Rules:
   Focus: scroll delta normalization, trackpad/mouse feel, no hidden regressions.
   Audit note: fixed shallow evidence in the app flag and a hidden-defaults read in the scroll path. The precise-scroll 2x multiplier is removed; `--terminal-scroll-ergonomics-check` now proves terminal hit-test routing, default/tuned normalized deltas, and visible post-scroll input; manual device/tmux/vim dogfood remains pending. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260621T113626/audits/A07.md` and artifact `qa-runs/20260621-154141/terminal-scroll-ergonomics/manifest.json`.
 
-- [ ] A08 — T12 terminal zoom-pan stability audit  
+- [x] A08 — T12 terminal zoom-pan stability audit  
   Commit: `e44c979`.  
-  Focus: body-height alignment, idempotent Ghostty resize, flicker/perf.
+  Focus: body-height alignment, idempotent Ghostty resize, flicker/perf.  
+  Audit note: kept after A01's reimplementation of the flawed original T12 body-height behavior. Current real app check drives `CanvasNSView` + live `TerminalTileNSView`/Ghostty through zoom/pan, tile resize, and post-sweep input; rows/columns and `1600x992` surface stayed stable with zero camera-applied resizes and zero canvas display invalidations. Remaining risk is manual visual flicker/top-chrome overlap review. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260621T113626/audits/A08.md` and artifact `qa-runs/2026-06-21T154803Z/terminal-zoom-pan-stability/manifest.json`.
 
 - [ ] A09 — T06/T16/T07 navigation framing audit  
   Commits: `cddf716`, `3a959c9`, `db22a3b`.  
