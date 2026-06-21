@@ -2,11 +2,31 @@ import ContinuumRevivedCore
 import Foundation
 
 @MainActor
+enum WorkspaceDocumentSaveState: String, Equatable {
+    case saved
+    case saving
+    case unsavedChanges
+    case saveFailed
+
+    var displayTitle: String {
+        switch self {
+        case .saved: return "Saved"
+        case .saving: return "Saving…"
+        case .unsavedChanges: return "Unsaved changes"
+        case .saveFailed: return "Save failed"
+        }
+    }
+}
+
+@MainActor
 final class WorkspaceDocumentSaveController {
     private let store: WorkspaceStore
     private let defaults: UserDefaults
     private var timer: Timer?
     private var pendingDocument: WorkspaceDocument?
+    private(set) var state: WorkspaceDocumentSaveState = .saved
+    private(set) var lastError: Error?
+    var onStateChange: ((WorkspaceDocumentSaveState) -> Void)?
 
     init(store: WorkspaceStore, defaults: UserDefaults = .standard) {
         self.store = store
@@ -15,6 +35,8 @@ final class WorkspaceDocumentSaveController {
 
     func scheduleZoneLayoutSave(_ document: WorkspaceDocument) {
         pendingDocument = document
+        lastError = nil
+        setState(.unsavedChanges)
         timer?.invalidate()
         timer = Timer.scheduledTimer(
             withTimeInterval: AutosaveConfig.debounceInterval(defaults: defaults),
@@ -28,7 +50,22 @@ final class WorkspaceDocumentSaveController {
         timer?.invalidate()
         timer = nil
         guard let document = pendingDocument else { return }
-        try store.save(document)
-        pendingDocument = nil
+        setState(.saving)
+        do {
+            try store.save(document)
+            pendingDocument = nil
+            lastError = nil
+            setState(.saved)
+        } catch {
+            lastError = error
+            setState(.saveFailed)
+            throw error
+        }
+    }
+
+    private func setState(_ newState: WorkspaceDocumentSaveState) {
+        guard state != newState else { return }
+        state = newState
+        onStateChange?(newState)
     }
 }

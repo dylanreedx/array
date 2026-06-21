@@ -55,7 +55,7 @@ Rules:
   Source ticket: `W03-workspace-sidebar-live-status.md`.
   Required output: tile/zone/workspace updates and existing status rollups in sidebar, artifact.
 
-- [ ] W04 — Workspace top bar/current identity
+- [x] W04 — Workspace top bar/current identity
   Source ticket: `W04-workspace-top-bar.md`.
   Required output: top workspace identity/counts/save-state-if-real/actions, artifact.
 

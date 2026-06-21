@@ -858,6 +858,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-top-bar-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runWorkspaceTopBarSelfCheck()
+                print("ContinuumRevivedWorkspaceTopBarChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--chrome-integration-guardrails-check") {
             do {
                 let artifact = try runChromeIntegrationGuardrailsSelfCheck()
@@ -2157,7 +2169,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
     private var canvasView: CanvasNSView?
     private var workspaceSidebarView: WorkspaceSidebarView?
+    private var workspaceTopBarView: WorkspaceTopBarView?
     private var workspaceSplitView: NSSplitView?
+    private var workspaceRenamePromptProvider: ((String) -> String?)?
     private var navSelectedZoneId: UUID?
     private var focusHistory = FocusHistory()
     private var focusModeSession: FocusModeSession?
@@ -4245,22 +4259,100 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.onSelection = { [weak self] selection in
             self?.handleWorkspaceSidebarSelection(selection)
         }
-        canvasView.frame = NSRect(x: width + divider, y: 0, width: max(0, frame.width - width - divider), height: frame.height)
-        canvasView.autoresizingMask = [.width, .height]
+
+        let contentPane = NSView(frame: NSRect(x: width + divider, y: 0, width: max(0, frame.width - width - divider), height: frame.height))
+        contentPane.autoresizingMask = [.width, .height]
+        let topBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: max(0, frame.height - 44), width: contentPane.bounds.width, height: 44))
+        configureWorkspaceTopBar(topBar)
+
+        topBar.translatesAutoresizingMaskIntoConstraints = false
+        canvasView.translatesAutoresizingMaskIntoConstraints = false
+        contentPane.addSubview(topBar)
+        contentPane.addSubview(canvasView)
+        NSLayoutConstraint.activate([
+            topBar.leadingAnchor.constraint(equalTo: contentPane.leadingAnchor),
+            topBar.trailingAnchor.constraint(equalTo: contentPane.trailingAnchor),
+            topBar.topAnchor.constraint(equalTo: contentPane.topAnchor),
+            topBar.heightAnchor.constraint(equalToConstant: 44),
+
+            canvasView.leadingAnchor.constraint(equalTo: contentPane.leadingAnchor),
+            canvasView.trailingAnchor.constraint(equalTo: contentPane.trailingAnchor),
+            canvasView.topAnchor.constraint(equalTo: topBar.bottomAnchor),
+            canvasView.bottomAnchor.constraint(equalTo: contentPane.bottomAnchor),
+        ])
 
         splitView.addSubview(sidebar)
-        splitView.addSubview(canvasView)
+        splitView.addSubview(contentPane)
         workspaceSidebarView = sidebar
+        workspaceTopBarView = topBar
         workspaceSplitView = splitView
         reloadWorkspaceSidebar()
         applyWorkspaceSidebarVisibility(WorkspaceSidebarConfig.resolveVisible())
         return splitView
     }
 
+    private func configureWorkspaceTopBar(_ topBar: WorkspaceTopBarView) {
+        topBar.onSwitchWorkspace = { [weak self] workspaceId in
+            self?.switchWorkspaceAndRelaunch(workspaceId: workspaceId)
+        }
+        topBar.onRenameWorkspace = { [weak self] workspaceId in
+            self?.renameWorkspaceFromTopBar(workspaceId: workspaceId)
+        }
+        topBar.onToggleSidebar = { [weak self] in
+            self?.toggleWorkspaceSidebar()
+        }
+    }
+
     private func currentWorkspaceIdForSidebar() -> UUID? {
         if let workspaceId = workspaceRuntime?.workspaceId { return workspaceId }
         guard let registryStore else { return nil }
         return (try? registryStore.loadOrEmpty())?.lastActiveWorkspaceId
+    }
+
+    private func buildWorkspaceTopBarModel() throws -> WorkspaceTopBarModel? {
+        guard let registryStore else { return nil }
+        let registry = try registryStore.loadOrEmpty()
+        guard let currentWorkspaceId = currentWorkspaceIdForSidebar() ?? registry.lastActiveWorkspaceId else { return nil }
+        let appSupport = registryStore.registryFile.deletingLastPathComponent()
+        let document: WorkspaceDocument
+        if let workspaceRuntime, workspaceRuntime.workspaceId == currentWorkspaceId {
+            document = workspaceRuntime.document
+        } else {
+            let store = WorkspaceStore(workspaceId: currentWorkspaceId, applicationSupportDirectory: appSupport)
+            document = try store.load()
+        }
+        let entry = registry.workspaces.first(where: { $0.id == currentWorkspaceId })
+        return WorkspaceTopBarModel(
+            currentWorkspaceId: currentWorkspaceId,
+            currentWorkspaceName: entry?.name ?? "Workspace",
+            projectCount: entry?.projectIds.count ?? 0,
+            zoneCount: document.zones.count,
+            saveState: workspaceDocumentSaveState(workspaceId: currentWorkspaceId, liveDocument: document),
+            workspaces: registry.workspaces
+        )
+    }
+
+    private func workspaceDocumentSaveState(workspaceId: UUID, liveDocument: WorkspaceDocument) -> WorkspaceDocumentSaveState {
+        guard let registryStore else { return .saved }
+        let appSupport = registryStore.registryFile.deletingLastPathComponent()
+        let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
+        do {
+            guard let persisted = try store.tryLoad() else { return .unsavedChanges }
+            return persisted == liveDocument ? .saved : .unsavedChanges
+        } catch {
+            return .saveFailed
+        }
+    }
+
+    private func reloadWorkspaceTopBar() {
+        guard let topBar = workspaceTopBarView else { return }
+        do {
+            if let model = try buildWorkspaceTopBarModel() {
+                topBar.reload(model)
+            }
+        } catch {
+            fputs("Workspace top bar reload failed: \(error)\n", stderr)
+        }
     }
 
     private func buildWorkspaceSidebarTree() throws -> SidebarTree {
@@ -4328,6 +4420,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func reloadWorkspaceSidebar() {
+        defer { reloadWorkspaceTopBar() }
         guard let sidebar = workspaceSidebarView else { return }
         do {
             let tree = try buildWorkspaceSidebarTree()
@@ -5025,6 +5118,152 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "statusChangeUpdatedSidebar": statusChangeUpdatedSidebar,
             "sidebarIdentityPreserved": sidebarIdentityPreserved,
             "projectZoneStatusText": sidebar.zoneStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId) ?? "",
+            "artifactPath": artifact.path,
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runWorkspaceTopBarSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        let fm = FileManager.default
+        let now = Date(timeIntervalSince1970: 1_900_400_000)
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("continuum-workspace-top-bar-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let workspaceA = UUID(uuidString: "00000000-0000-0000-0000-00000000F401")!
+        let workspaceB = UUID(uuidString: "00000000-0000-0000-0000-00000000F402")!
+        let projectA = UUID(uuidString: "00000000-0000-0000-0000-00000000F411")!
+        let projectB = UUID(uuidString: "00000000-0000-0000-0000-00000000F412")!
+        let projectC = UUID(uuidString: "00000000-0000-0000-0000-00000000F413")!
+        let zoneA1 = UUID(uuidString: "00000000-0000-0000-0000-00000000F421")!
+        let zoneA2 = UUID(uuidString: "00000000-0000-0000-0000-00000000F422")!
+        let zoneB1 = UUID(uuidString: "00000000-0000-0000-0000-00000000F423")!
+        let zoneB2 = UUID(uuidString: "00000000-0000-0000-0000-00000000F424")!
+
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = workspaceA
+        registry.workspaces = [
+            WorkspaceEntry(id: workspaceA, name: "Alpha Workspace", projectIds: [projectA, projectB], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: workspaceB, name: "Beta Workspace", projectIds: [projectC], createdAt: now, updatedAt: now),
+        ]
+        registry.projects = [
+            ProjectEntry(id: projectA, name: "Project A", rootPath: "/tmp/project-a", workspaceId: workspaceA, lastOpenedAt: now, pinned: false, missing: false),
+            ProjectEntry(id: projectB, name: "Project B", rootPath: "/tmp/project-b", workspaceId: workspaceA, lastOpenedAt: now, pinned: false, missing: false),
+            ProjectEntry(id: projectC, name: "Project C", rootPath: "/tmp/project-c", workspaceId: workspaceB, lastOpenedAt: now, pinned: false, missing: false),
+        ]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+
+        let documentA = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [
+                ZonePlacement(zoneId: zoneA1, projectId: nil, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 720, height: 520), color: "blue", collapsed: false, hydrationPolicy: .automatic, name: "Plan", navKey: "1"),
+                ZonePlacement(zoneId: zoneA2, projectId: nil, origin: ZonePoint(x: 760, y: 0), size: ZoneSize(width: 720, height: 520), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "Build", navKey: "2"),
+            ],
+            zoneZOrder: [zoneA1, zoneA2],
+            lastActiveZoneId: zoneA1
+        )
+        let documentB = WorkspaceDocument(
+            viewport: CanvasViewport(x: 10, y: 20, zoom: 1),
+            zones: [
+                ZonePlacement(zoneId: zoneB1, projectId: nil, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 640, height: 480), color: "orange", collapsed: false, hydrationPolicy: .automatic, name: "Review", navKey: "3"),
+            ],
+            zoneZOrder: [zoneB1],
+            lastActiveZoneId: zoneB1
+        )
+        try WorkspaceStore(workspaceId: workspaceA, applicationSupportDirectory: appSupport).save(documentA)
+        try WorkspaceStore(workspaceId: workspaceB, applicationSupportDirectory: appSupport).save(documentB)
+
+        let app = AppDelegate()
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+        let runtime = WorkspaceRuntime(
+            workspaceId: workspaceA,
+            document: documentA,
+            registry: ZoneRuntimeRegistry(closeOnZero: true, makeController: { _ in
+                throw CheckError.failed("workspace top bar check should not acquire project controllers")
+            }),
+            focusBroker: app.focusBroker,
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+        let topBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: 0, width: 900, height: 44))
+        app.registryStore = registryStore
+        app.workspaceRuntime = runtime
+        app.workspaceTopBarView = topBar
+        app.configureWorkspaceTopBar(topBar)
+        app.reloadWorkspaceTopBar()
+        topBar.layoutSubtreeIfNeeded()
+
+        let currentWorkspaceNameRendered = topBar.workspaceNameForQA == "Alpha Workspace"
+        let countsRendered = topBar.countsTextForQA == "2 projects · 2 zones"
+            && topBar.switchWorkspaceNamesForQA == ["Alpha Workspace", "Beta Workspace"]
+        try expect(currentWorkspaceNameRendered, "top bar should render the current workspace name")
+        try expect(countsRendered, "top bar should render project/zone counts and switch menu workspace names")
+
+        let switchDelivered = topBar.selectWorkspaceForQA(workspaceB)
+        topBar.layoutSubtreeIfNeeded()
+        let switchUpdatedName = switchDelivered
+            && runtime.workspaceId == workspaceB
+            && topBar.workspaceNameForQA == "Beta Workspace"
+            && topBar.countsTextForQA == "1 project · 1 zone"
+        try expect(switchUpdatedName, "top bar switch action should update rendered workspace identity/counts")
+
+        app.workspaceRenamePromptProvider = { currentName in
+            currentName == "Beta Workspace" ? "Beta Renamed" : nil
+        }
+        let renameDelivered = topBar.clickRenameForQA()
+        topBar.layoutSubtreeIfNeeded()
+        let renameUpdatedName = renameDelivered && topBar.workspaceNameForQA == "Beta Renamed"
+        try expect(renameUpdatedName, "top bar rename action should refresh rendered workspace name")
+
+        var unsavedDocument = documentB
+        unsavedDocument.zones.append(ZonePlacement(zoneId: zoneB2, projectId: nil, origin: ZonePoint(x: 700, y: 0), size: ZoneSize(width: 640, height: 480), color: "purple", collapsed: false, hydrationPolicy: .automatic, name: "Unsaved", navKey: nil))
+        unsavedDocument.zoneZOrder.append(zoneB2)
+        unsavedDocument.lastActiveZoneId = zoneB2
+        runtime.replaceDocument(unsavedDocument, for: workspaceB)
+        app.reloadWorkspaceTopBar()
+        let unsavedStateRendered = topBar.saveStateTextForQA == WorkspaceDocumentSaveState.unsavedChanges.displayTitle
+        let saveController = WorkspaceDocumentSaveController(store: WorkspaceStore(workspaceId: workspaceB, applicationSupportDirectory: appSupport))
+        saveController.scheduleZoneLayoutSave(unsavedDocument)
+        try expect(saveController.state == .unsavedChanges, "workspace save controller should expose unsaved state after scheduling")
+        try saveController.flushPendingSave()
+        app.reloadWorkspaceTopBar()
+        let savedStateRendered = topBar.saveStateTextForQA == WorkspaceDocumentSaveState.saved.displayTitle
+        let saveStateRendered = unsavedStateRendered && savedStateRendered && saveController.state == .saved
+        try expect(saveStateRendered, "top bar should render workspace save state before and after a real save")
+
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let directory = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("workspace-top-bar", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "workspace-top-bar",
+            "path": "WorkspaceTopBarView -> AppDelegate switch/rename/save-state reload paths",
+            "currentWorkspaceNameRendered": currentWorkspaceNameRendered,
+            "countsRendered": countsRendered,
+            "switchUpdatedName": switchUpdatedName,
+            "renameUpdatedName": renameUpdatedName,
+            "saveStateRendered": saveStateRendered,
+            "initialName": "Alpha Workspace",
+            "renamedName": topBar.workspaceNameForQA,
+            "finalCountsText": topBar.countsTextForQA,
             "artifactPath": artifact.path,
         ]
         try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
@@ -5789,6 +6028,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         } catch {
             fputs("Create Workspace failed: \(error)\n", stderr)
         }
+    }
+
+    private func renameWorkspaceFromTopBar(workspaceId: UUID) {
+        guard let registryStore else { return }
+        do {
+            let registry = try registryStore.loadOrEmpty()
+            guard let currentName = registry.workspaces.first(where: { $0.id == workspaceId })?.name else { return }
+            guard let newName = workspaceRenamePromptProvider?(currentName) ?? promptForWorkspaceRename(currentName: currentName) else { return }
+            renameWorkspace(workspaceId: workspaceId, name: newName)
+        } catch {
+            fputs("Rename Workspace failed: \(error)\n", stderr)
+        }
+    }
+
+    private func promptForWorkspaceRename(currentName: String) -> String? {
+        let alert = NSAlert()
+        alert.messageText = "Rename Workspace"
+        alert.informativeText = "Enter a new name for this workspace."
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(string: currentName)
+        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        alert.accessoryView = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func renameWorkspace(workspaceId: UUID, name: String) {
