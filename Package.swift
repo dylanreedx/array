@@ -25,6 +25,7 @@ let package = Package(
                 "App",
                 "BrowserEngine",
                 "TerminalEngine",
+                "Canvas/BrowserInspectorTileNSView.swift",
                 "Canvas/BrowserRestartTileNSView.swift",
                 "Canvas/BrowserSnapshotTileNSView.swift",
                 "Canvas/BrowserTileNSView.swift",

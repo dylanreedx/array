@@ -5,11 +5,57 @@ public struct BrowserState: Codable, Equatable, Sendable {
 
     public let schemaVersion: Int
     public var tiles: [BrowserTile]
+    public var inspectorStates: [BrowserInspectorState]
 
-    public init(schemaVersion: Int = BrowserState.currentSchemaVersion, tiles: [BrowserTile]) {
+    public init(
+        schemaVersion: Int = BrowserState.currentSchemaVersion,
+        tiles: [BrowserTile],
+        inspectorStates: [BrowserInspectorState] = []
+    ) {
         self.schemaVersion = schemaVersion
         self.tiles = tiles
+        self.inspectorStates = inspectorStates
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, tiles, inspectorStates
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        tiles = try container.decode([BrowserTile].self, forKey: .tiles)
+        inspectorStates = try container.decodeIfPresent([BrowserInspectorState].self, forKey: .inspectorStates) ?? []
+    }
+}
+
+public struct BrowserInspectorState: Codable, Equatable, Sendable {
+    public var inspectorTileId: UUID
+    public var inspectedBrowserTileId: UUID
+    public var selectedPanel: BrowserInspectorPanel
+    public var createdAt: Date
+    public var updatedAt: Date
+
+    public init(
+        inspectorTileId: UUID,
+        inspectedBrowserTileId: UUID,
+        selectedPanel: BrowserInspectorPanel,
+        createdAt: Date,
+        updatedAt: Date
+    ) {
+        self.inspectorTileId = inspectorTileId
+        self.inspectedBrowserTileId = inspectedBrowserTileId
+        self.selectedPanel = selectedPanel
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+public enum BrowserInspectorPanel: String, Codable, Equatable, Sendable, CaseIterable {
+    case elements
+    case console
+    case styles
+    case network
 }
 
 public struct BrowserTab: Codable, Equatable, Sendable, Identifiable {

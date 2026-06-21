@@ -13,7 +13,7 @@ Rules:
 
 ## Inspector epic
 
-- [ ] I01 — Browser Inspector Tile shell and persistence
+- [x] I01 — Browser Inspector Tile shell and persistence
   Source ticket: `T01-browser-inspector-tile-shell.md`.
   Required output: inspector tile linked to browser tile, auto-deletes when browser tile is deleted, persisted relationship/panel, artifact.
 

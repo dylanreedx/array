@@ -24,7 +24,7 @@ public enum ReadabilityPolicy {
             case .note:
                 if zoom < 0.60 { return .overviewLabelOnly }
                 return zoom < 0.85 ? .readableSummary : .editableDetail
-            case .browser:
+            case .browser, .browserInspector:
                 if zoom < 0.70 { return .overviewLabelOnly }
                 return zoom < 0.90 ? .readableSummary : .editableDetail
             case .terminal:

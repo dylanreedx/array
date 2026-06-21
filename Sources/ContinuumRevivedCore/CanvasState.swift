@@ -67,6 +67,7 @@ public struct Tile: Codable, Equatable, Sendable {
 public enum TileKind: String, Codable, Equatable, Sendable, CaseIterable {
     case terminal
     case browser
+    case browserInspector
     case note
     case file
     case fileTree

@@ -452,6 +452,12 @@ final class TileSpawner {
         case failure(Error)
     }
 
+    enum BrowserInspectorOutcome {
+        case spawned(tileId: UUID)
+        case notBrowserTile
+        case failure(Error)
+    }
+
     private static var defaultBrowserURL: String { DefaultBrowserURL.current }
 
     func updateBrowserProfiles(_ profiles: [BrowserProfile]) {
@@ -721,6 +727,127 @@ final class TileSpawner {
             runtime.loadURL(urlString)
         }
         return .restarted(runtime)
+    }
+
+    func spawnBrowserInspector(for browserTileId: UUID, at worldPoint: CGPoint? = nil) -> BrowserInspectorOutcome {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        guard let browserTile = canvasView.canvasState.tiles.first(where: { $0.id == browserTileId && $0.kind == .browser }) else {
+            return .notBrowserTile
+        }
+
+        let browserState: BrowserState
+        do {
+            browserState = try loadBrowserStateIfAvailable() ?? BrowserState(tiles: [])
+        } catch {
+            return .failure(error)
+        }
+
+        let frame = makePlacement(
+            worldPoint: worldPoint ?? CGPoint(x: browserTile.frame.x + browserTile.frame.width + 24, y: browserTile.frame.y),
+            size: CanvasEngine.defaultFrame(for: .browserInspector),
+            in: canvasView
+        )
+        let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
+        let now = Date()
+        let inspectorTileId = UUID()
+        let inspectorState = BrowserInspectorState(
+            inspectorTileId: inspectorTileId,
+            inspectedBrowserTileId: browserTileId,
+            selectedPanel: .elements,
+            createdAt: now,
+            updatedAt: now
+        )
+        let summary = browserInspectorSummary(for: browserTileId, browserState: browserState)
+        let tile = Tile(
+            id: inspectorTileId,
+            kind: .browserInspector,
+            title: "Inspector — \(Self.inspectorDisplayName(title: summary?.title, url: summary?.url))",
+            frame: frame,
+            zIndex: nextZ,
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+        let view = BrowserInspectorTileNSView(tile: tile, inspectorState: inspectorState, inspectedBrowser: summary)
+        view.onSelectedPanelChange = { [weak self] panel in
+            try? self?.updateBrowserInspectorPanel(inspectorTileId: inspectorTileId, selectedPanel: panel)
+        }
+        canvasView.install(tileView: view, for: tile)
+
+        var nextState = browserState
+        nextState.inspectorStates.append(inspectorState)
+        do {
+            try projectStore.saveBrowserState(nextState)
+            try projectStore.saveCanvas(canvasView.canvasState)
+        } catch {
+            return .failure(error)
+        }
+        return .spawned(tileId: inspectorTileId)
+    }
+
+    func installBrowserInspectorTile(_ tile: Tile, in canvasView: CanvasNSView) {
+        let browserState = try? loadBrowserStateIfAvailable()
+        let inspectorState = browserState?.inspectorStates.first { $0.inspectorTileId == tile.id }
+        let summary = inspectorState.flatMap { browserInspectorSummary(for: $0.inspectedBrowserTileId, browserState: browserState) }
+        let view = BrowserInspectorTileNSView(tile: tile, inspectorState: inspectorState, inspectedBrowser: summary)
+        let inspectorTileId = tile.id
+        view.onSelectedPanelChange = { [weak self] panel in
+            try? self?.updateBrowserInspectorPanel(inspectorTileId: inspectorTileId, selectedPanel: panel)
+        }
+        canvasView.install(tileView: view, for: tile)
+    }
+
+    @discardableResult
+    func deleteBrowserInspectors(inspecting browserTileId: UUID, in canvasView: CanvasNSView) -> [UUID] {
+        guard var browserState = try? loadBrowserStateIfAvailable() else { return [] }
+        let inspectorIds = Set(browserState.inspectorStates
+            .filter { $0.inspectedBrowserTileId == browserTileId }
+            .map(\.inspectorTileId))
+        guard !inspectorIds.isEmpty else { return [] }
+        browserState.inspectorStates.removeAll { inspectorIds.contains($0.inspectorTileId) }
+        try? projectStore.saveBrowserState(browserState)
+        for inspectorId in inspectorIds {
+            canvasView.removeTile(id: inspectorId)
+        }
+        return Array(inspectorIds)
+    }
+
+    func deleteBrowserInspector(tileId: UUID) {
+        guard var browserState = try? loadBrowserStateIfAvailable() else { return }
+        let originalCount = browserState.inspectorStates.count
+        browserState.inspectorStates.removeAll { $0.inspectorTileId == tileId }
+        if browserState.inspectorStates.count != originalCount {
+            try? projectStore.saveBrowserState(browserState)
+        }
+    }
+
+    private func updateBrowserInspectorPanel(inspectorTileId: UUID, selectedPanel: BrowserInspectorPanel) throws {
+        var browserState = try loadBrowserStateIfAvailable() ?? BrowserState(tiles: [])
+        guard let index = browserState.inspectorStates.firstIndex(where: { $0.inspectorTileId == inspectorTileId }) else { return }
+        browserState.inspectorStates[index].selectedPanel = selectedPanel
+        browserState.inspectorStates[index].updatedAt = Date()
+        try projectStore.saveBrowserState(browserState)
+    }
+
+    private func browserInspectorSummary(for browserTileId: UUID, browserState: BrowserState?) -> BrowserInspectorTileNSView.InspectedBrowserSummary? {
+        guard let canvasView,
+              let tile = canvasView.canvasState.tiles.first(where: { $0.id == browserTileId && $0.kind == .browser })
+        else { return nil }
+        let persisted = browserState?.tiles.first { $0.tileId == browserTileId }
+        let persistedTitle = persisted?.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let canvasTitle = tile.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayTitle = !persistedTitle.isEmpty ? persistedTitle : (canvasTitle == "Browser" ? "" : canvasTitle)
+        return BrowserInspectorTileNSView.InspectedBrowserSummary(
+            tileId: browserTileId,
+            title: displayTitle,
+            url: persisted?.url ?? tile.metadata.url
+        )
+    }
+
+    private static func inspectorDisplayName(title: String?, url: String?) -> String {
+        let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedTitle.isEmpty { return trimmedTitle }
+        if let url, let host = URL(string: url)?.host, !host.isEmpty { return host }
+        return "Browser"
     }
 
     /// Switches one browser tile to a different persisted profile by replacing
@@ -3887,6 +4014,174 @@ final class TileSpawner {
             .appendingPathComponent("file-tree-hardening", isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runBrowserInspectorTileShellSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { if case let .failed(message) = self { return message }; return "failed" }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func timestamp() -> String {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyyMMdd-HHmmss"
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            return formatter.string(from: Date())
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-browser-inspector-tile-shell-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let profile = BrowserProfile.builtInDefault()
+        let project = Project(
+            id: UUID(),
+            name: "browser-inspector-tile-shell-check",
+            rootPath: tempRoot.path,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 1),
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning,
+                defaultBrowserProfileId: profile.id
+            )
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        let spawner = TileSpawner(
+            canvasView: canvas,
+            ghostty: nil,
+            browserEngine: BrowserEngineContext(),
+            projectStore: store,
+            project: project,
+            browserProfiles: [profile]
+        )
+
+        let browserRuntime: WKWebViewBrowserRuntime
+        switch spawner.spawnBrowser(url: "data:text/html;charset=utf-8,<html><head><title>Inspector Source</title></head><body>ok</body></html>") {
+        case let .spawned(runtime):
+            browserRuntime = runtime
+        case let .invalidURL(url):
+            throw CheckError.failed("browser spawn rejected URL \(url)")
+        case let .failure(error):
+            throw error
+        }
+        let browserTileId = browserRuntime.tileId
+        var seededBrowserState = try store.loadBrowserState()
+        if let browserIndex = seededBrowserState.tiles.firstIndex(where: { $0.tileId == browserTileId }) {
+            seededBrowserState.tiles[browserIndex].updateActiveTab(
+                url: "https://example.test/inspected",
+                title: "Inspector Source",
+                interactionState: nil,
+                now: Date(timeIntervalSince1970: 2)
+            )
+            try store.saveBrowserState(seededBrowserState)
+        }
+
+        let inspectorTileId: UUID
+        switch spawner.spawnBrowserInspector(for: browserTileId) {
+        case let .spawned(tileId):
+            inspectorTileId = tileId
+        case .notBrowserTile:
+            throw CheckError.failed("spawnBrowserInspector rejected a browser tile")
+        case let .failure(error):
+            throw error
+        }
+
+        let spawnedInspectorTile = canvas.canvasState.tiles.first { $0.id == inspectorTileId }
+        let spawnedInspectorState = try store.loadBrowserState().inspectorStates.first { $0.inspectorTileId == inspectorTileId }
+        let spawnedForBrowserTile = spawnedInspectorTile?.kind == .browserInspector
+            && spawnedInspectorState?.inspectedBrowserTileId == browserTileId
+            && spawnedInspectorState?.selectedPanel == .elements
+            && spawnedInspectorTile?.frame.width ?? 0 >= 520
+            && spawnedInspectorTile?.frame.height ?? 0 >= 360
+        try expect(spawnedForBrowserTile, "browser tile did not spawn a linked inspector tile")
+
+        guard let inspectorView = canvas.tileView(for: inspectorTileId) as? BrowserInspectorTileNSView else {
+            throw CheckError.failed("spawned inspector tile did not install BrowserInspectorTileNSView")
+        }
+        inspectorView.selectPanelForQA(.network)
+        let panelSavedBeforeRestore = try store.loadBrowserState().inspectorStates.first { $0.inspectorTileId == inspectorTileId }?.selectedPanel == .network
+        try expect(panelSavedBeforeRestore, "selected inspector panel did not persist after view selection")
+        try store.saveCanvas(canvas.canvasState)
+
+        let restoredCanvas = CanvasNSView(canvasState: try store.loadCanvas())
+        let restoredSpawner = TileSpawner(
+            canvasView: restoredCanvas,
+            ghostty: nil,
+            browserEngine: BrowserEngineContext(),
+            projectStore: store,
+            project: project,
+            browserProfiles: [profile]
+        )
+        guard let restoredInspectorTile = restoredCanvas.canvasState.tiles.first(where: { $0.id == inspectorTileId }) else {
+            throw CheckError.failed("saved canvas did not restore inspector tile")
+        }
+        restoredSpawner.installBrowserInspectorTile(restoredInspectorTile, in: restoredCanvas)
+        let restoredInspectorState = try store.loadBrowserState().inspectorStates.first { $0.inspectorTileId == inspectorTileId }
+        let relationshipPersisted = restoredCanvas.canvasState.tiles.contains(where: { $0.id == inspectorTileId && $0.kind == .browserInspector })
+            && restoredInspectorState?.inspectedBrowserTileId == browserTileId
+        let panelSelectionPersisted = (restoredCanvas.tileView(for: inspectorTileId) as? BrowserInspectorTileNSView)?.selectedPanelForQA == .network
+            && restoredInspectorState?.selectedPanel == .network
+        try expect(relationshipPersisted, "inspector relationship did not persist across save/load")
+        try expect(panelSelectionPersisted, "inspector selected panel did not persist across save/load")
+
+        let deletedInspectorIds = restoredSpawner.deleteBrowserInspectors(inspecting: browserTileId, in: restoredCanvas)
+        restoredCanvas.removeTile(id: browserTileId)
+        var afterDeleteBrowserState = try store.loadBrowserState()
+        afterDeleteBrowserState.tiles.removeAll { $0.tileId == browserTileId }
+        try store.saveBrowserState(afterDeleteBrowserState)
+        try store.saveCanvas(restoredCanvas.canvasState)
+        let inspectorStateRemovedAfterDelete = !(try store.loadBrowserState().inspectorStates.contains { $0.inspectorTileId == inspectorTileId })
+        let deletedBrowserDeletesInspector = deletedInspectorIds.contains(inspectorTileId)
+            && !restoredCanvas.canvasState.tiles.contains(where: { $0.id == inspectorTileId })
+            && inspectorStateRemovedAfterDelete
+        try expect(deletedBrowserDeletesInspector, "deleting browser tile did not delete linked inspector tile")
+
+        let inspectorSource = try String(contentsOfFile: "Sources/ContinuumRevived/Canvas/BrowserInspectorTileNSView.swift", encoding: .utf8)
+        let forbiddenNativeInspectorNeedles = [
+            "isInspectable = true",
+            "show" + "WebInspector",
+            "inspect" + "Element",
+            "developerExtras",
+            "_" + "inspector"
+        ]
+        let nativeInspectorNeedleHits = forbiddenNativeInspectorNeedles.filter { inspectorSource.contains($0) }
+        let usesNativeSafariInspector = !nativeInspectorNeedleHits.isEmpty
+        try expect(!usesNativeSafariInspector, "browser inspector shell referenced native/private inspector APIs: \(nativeInspectorNeedleHits)")
+
+        let artifactDir = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp(), isDirectory: true)
+            .appendingPathComponent("browser-inspector-tile-shell", isDirectory: true)
+        try fileManager.createDirectory(at: artifactDir, withIntermediateDirectories: true)
+        let artifact = artifactDir.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "browser-inspector-tile-shell",
+            "spawnedForBrowserTile": spawnedForBrowserTile,
+            "relationshipPersisted": relationshipPersisted,
+            "panelSelectionPersisted": panelSelectionPersisted,
+            "deletedBrowserDeletesInspector": deletedBrowserDeletesInspector,
+            "usesNativeSafariInspector": usesNativeSafariInspector,
+            "browserTileId": browserTileId.uuidString,
+            "inspectorTileId": inspectorTileId.uuidString,
+            "selectedPanelAfterRestore": restoredInspectorState?.selectedPanel.rawValue ?? "missing",
+            "nativeInspectorNeedleHits": nativeInspectorNeedleHits
+        ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)
         return artifact

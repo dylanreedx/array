@@ -738,6 +738,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-inspector-tile-shell-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try TileSpawner.runBrowserInspectorTileShellSelfCheck()
+                print("ContinuumRevivedBrowserInspectorTileShellChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--chrome-integration-guardrails-check") {
             do {
                 let artifact = try runChromeIntegrationGuardrailsSelfCheck()
@@ -2290,6 +2302,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     installInitialTerminalTile(tile, in: canvasView, via: spawner)
                 case .browser:
                     installInitialBrowserTile(tile, in: canvasView, via: spawner)
+                case .browserInspector:
+                    installInitialBrowserInspectorTile(tile, in: canvasView, via: spawner)
                 case .note:
                     installInitialNoteTile(tile, in: canvasView, via: spawner)
                 case .file:
@@ -2879,13 +2893,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 browserRuntimes.removeAll { $0.id == runtime.id }
                 runtime.terminate(policy: .force)
             }
+            _ = tileSpawner?.deleteBrowserInspectors(inspecting: id, in: canvasView)
             // Drop the persisted browser tile snapshot so the boot loop won't
             // try to resurrect this tile from BrowserState on next launch.
             if let projectStore,
                var browserState = try? projectStore.tryLoadBrowserState() {
                 browserState.tiles.removeAll { $0.tileId == id }
+                browserState.inspectorStates.removeAll { $0.inspectedBrowserTileId == id }
                 try? projectStore.saveBrowserState(browserState)
             }
+        case .browserInspector:
+            tileSpawner?.deleteBrowserInspector(tileId: id)
         case .note:
             if let noteId = tile.metadata.noteId {
                 noteViews.removeValue(forKey: noteId)
@@ -2966,6 +2984,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case let .failure(error):
             fputs("Restart failed: \(error)\n", stderr)
         }
+    }
+
+    private func installInitialBrowserInspectorTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {
+        spawner.installBrowserInspectorTile(tile, in: canvasView)
     }
 
     private func installInitialBrowserTile(_ tile: Tile, in canvasView: CanvasNSView, via spawner: TileSpawner) {

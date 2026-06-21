@@ -22,6 +22,7 @@ public enum FocusSurfaceKind: String, Codable, Equatable, Hashable, Sendable {
     case canvas
     case terminal
     case browser
+    case browserInspector
     case note
     case file
     case fileTree

@@ -23,6 +23,7 @@ extension TileNSView: FocusSurfaceAdapter {
         switch tile.kind {
         case .terminal: return .terminal
         case .browser: return .browser
+        case .browserInspector: return .browserInspector
         case .note: return .note
         case .file: return .file
         case .fileTree: return .fileTree

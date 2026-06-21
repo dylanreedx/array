@@ -69,6 +69,8 @@ public enum DeleteConfirmPolicy: String, Sendable {
             informative = "The running session will be terminated."
         case .browser:
             informative = "The browser process and any unsaved page state will be lost."
+        case .browserInspector:
+            informative = "The linked inspector view will be closed."
         default:
             informative = "This action cannot be undone."
         }
