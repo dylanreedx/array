@@ -1,5 +1,17 @@
 import Foundation
 
+public struct SidebarTileRow: Equatable, Sendable {
+    public let tileId: UUID
+    public let title: String
+    public let kind: TileKind
+
+    public init(tileId: UUID, title: String, kind: TileKind) {
+        self.tileId = tileId
+        self.title = title
+        self.kind = kind
+    }
+}
+
 public struct SidebarZoneRow: Equatable, Sendable {
     public let zoneId: UUID
     public let name: String
@@ -7,14 +19,16 @@ public struct SidebarZoneRow: Equatable, Sendable {
     public let navKey: String?
     public let collapsed: Bool
     public let projectId: UUID?
+    public var tiles: [SidebarTileRow]
 
-    public init(zoneId: UUID, name: String, color: String, navKey: String?, collapsed: Bool, projectId: UUID?) {
+    public init(zoneId: UUID, name: String, color: String, navKey: String?, collapsed: Bool, projectId: UUID?, tiles: [SidebarTileRow] = []) {
         self.zoneId = zoneId
         self.name = name
         self.color = color
         self.navKey = navKey
         self.collapsed = collapsed
         self.projectId = projectId
+        self.tiles = tiles
     }
 }
 
@@ -59,13 +73,17 @@ public enum SidebarTreeBuilder {
                     } else {
                         name = placement.name
                     }
+                    let tiles = document.tiles(forZone: placement.zoneId).map { tile in
+                        SidebarTileRow(tileId: tile.id, title: tile.title, kind: tile.kind)
+                    }
                     return SidebarZoneRow(
                         zoneId: placement.zoneId,
                         name: name,
                         color: placement.color,
                         navKey: placement.navKey,
                         collapsed: placement.collapsed,
-                        projectId: placement.projectId
+                        projectId: placement.projectId,
+                        tiles: tiles
                     )
                 }
             } else {

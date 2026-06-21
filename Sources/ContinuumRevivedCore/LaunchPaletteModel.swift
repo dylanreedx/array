@@ -10,6 +10,7 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     case previousView
     case previousTile
     case previousZone
+    case toggleWorkspaceSidebar
     case openURL(String)
     case switchProject(UUID)
     case addProjectToCanvas(UUID)
@@ -43,6 +44,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "Go to Previous Tile"
         case .previousZone:
             return "Go to Previous Zone"
+        case .toggleWorkspaceSidebar:
+            return "Toggle Workspace Sidebar"
         case let .openURL(url):
             return "Open \"\(url)\"…"
         case .switchProject:
@@ -90,6 +93,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["go", "previous", "tile", "back"]
         case .previousZone:
             return ["go", "previous", "zone", "back"]
+        case .toggleWorkspaceSidebar:
+            return ["toggle", "show", "hide", "workspace", "sidebar", "view"]
         case .openURL:
             return ["open", "url", "browser", "web"]
         case .switchProject:

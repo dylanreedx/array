@@ -36,6 +36,7 @@ public enum CommandRegistry {
             CanvasCommand(id: "view.previousView", action: .previousView),
             CanvasCommand(id: "view.previousTile", action: .previousTile),
             CanvasCommand(id: "view.previousZone", action: .previousZone),
+            CanvasCommand(id: "view.toggleWorkspaceSidebar", action: .toggleWorkspaceSidebar),
             CanvasCommand(id: "workspace.new", action: .newWorkspace),
         ]
     }

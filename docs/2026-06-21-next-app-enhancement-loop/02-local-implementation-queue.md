@@ -43,7 +43,7 @@ Rules:
 
 ## Workspace UX epic
 
-- [ ] W01 — Workspace sidebar shell
+- [x] W01 — Workspace sidebar shell
   Source ticket: `W01-workspace-sidebar-shell.md`.
   Required output: persistent left dock, all workspaces visible, current expanded, width/visibility persistence, artifact.
 

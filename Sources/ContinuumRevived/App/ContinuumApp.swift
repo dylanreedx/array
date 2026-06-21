@@ -822,6 +822,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-sidebar-shell-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runWorkspaceSidebarShellSelfCheck()
+                print("ContinuumRevivedWorkspaceSidebarShellChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--chrome-integration-guardrails-check") {
             do {
                 let artifact = try runChromeIntegrationGuardrailsSelfCheck()
@@ -1975,6 +1987,12 @@ enum ContinuumApp {
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
+        let viewMenuItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
+        let viewMenu = NSMenu(title: "View")
+        viewMenu.addItem(NSMenuItem(title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: ""))
+        viewMenuItem.submenu = viewMenu
+        mainMenu.addItem(viewMenuItem)
+
         NSApp.mainMenu = mainMenu
     }
 
@@ -2006,6 +2024,9 @@ enum ContinuumApp {
         try expectMenuItem(editMenu, title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         try expectMenuItem(editMenu, title: "Delete", action: #selector(NSText.delete(_:)), keyEquivalent: "")
         try expectMenuItem(editMenu, title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        guard let viewMenu = mainMenu.item(withTitle: "View")?.submenu else { throw SelfCheckError("missing View menu") }
+        try expectMenuItem(viewMenu, title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "")
     }
 
     private static func expectMenuItem(
@@ -2090,7 +2111,7 @@ enum ContinuumApp {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, CanvasNSViewDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, CanvasNSViewDelegate, NSSplitViewDelegate {
     private var window: NSWindow?
     private var ghostty: GhosttyRuntimeContext?
     private var browserEngine: BrowserEngineContext?
@@ -2111,6 +2132,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         set { workspaceRuntime?.activeController?.fileTreeViews = newValue }
     }
     private var canvasView: CanvasNSView?
+    private var workspaceSidebarView: WorkspaceSidebarView?
+    private var workspaceSplitView: NSSplitView?
     private var navSelectedZoneId: UUID?
     private var focusHistory = FocusHistory()
     private var focusModeSession: FocusModeSession?
@@ -2405,7 +2428,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             )
             window.title = Self.mainWindowTitle(for: project, registry: updatedRegistry)
             window.center()
-            window.contentView = canvasView
+            let contentFrame = window.contentRect(forFrameRect: window.frame)
+            window.contentView = makeWorkspaceContentView(canvasView: canvasView, frame: NSRect(origin: .zero, size: contentFrame.size))
             window.delegate = self
             window.makeKeyAndOrderFront(nil)
             window.makeFirstResponder(canvasView)
@@ -4182,6 +4206,254 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return panel
     }
 
+    private func makeWorkspaceContentView(canvasView: CanvasNSView, frame: NSRect) -> NSView {
+        let splitView = NSSplitView(frame: frame)
+        splitView.isVertical = true
+        splitView.dividerStyle = .thin
+        splitView.autoresizingMask = [.width, .height]
+        splitView.delegate = self
+
+        let width = CGFloat(WorkspaceSidebarConfig.resolveWidth())
+        let divider = splitView.dividerThickness
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: width, height: frame.height))
+        sidebar.autoresizingMask = [.height]
+        canvasView.frame = NSRect(x: width + divider, y: 0, width: max(0, frame.width - width - divider), height: frame.height)
+        canvasView.autoresizingMask = [.width, .height]
+
+        splitView.addSubview(sidebar)
+        splitView.addSubview(canvasView)
+        workspaceSidebarView = sidebar
+        workspaceSplitView = splitView
+        reloadWorkspaceSidebar()
+        applyWorkspaceSidebarVisibility(WorkspaceSidebarConfig.resolveVisible())
+        return splitView
+    }
+
+    private func currentWorkspaceIdForSidebar() -> UUID? {
+        if let workspaceId = workspaceRuntime?.workspaceId { return workspaceId }
+        guard let registryStore else { return nil }
+        return (try? registryStore.loadOrEmpty())?.lastActiveWorkspaceId
+    }
+
+    private func buildWorkspaceSidebarTree() throws -> SidebarTree {
+        guard let registryStore else { return SidebarTree(workspaces: []) }
+        let registry = try registryStore.loadOrEmpty()
+        let appSupport = registryStore.registryFile.deletingLastPathComponent()
+        var documents: [UUID: WorkspaceDocument] = [:]
+        for workspace in registry.workspaces {
+            let store = WorkspaceStore(workspaceId: workspace.id, applicationSupportDirectory: appSupport)
+            if let document = try? store.tryLoad() {
+                documents[workspace.id] = document
+            }
+        }
+        if let workspaceRuntime {
+            documents[workspaceRuntime.workspaceId] = workspaceRuntime.document
+        }
+        return SidebarTreeBuilder.build(registry: registry, documents: documents)
+    }
+
+    private func reloadWorkspaceSidebar() {
+        guard let sidebar = workspaceSidebarView else { return }
+        do {
+            let tree = try buildWorkspaceSidebarTree()
+            sidebar.reload(tree: tree, currentWorkspaceId: currentWorkspaceIdForSidebar())
+        } catch {
+            fputs("Workspace sidebar reload failed: \(error)\n", stderr)
+            sidebar.reload(tree: SidebarTree(workspaces: []), currentWorkspaceId: nil)
+        }
+    }
+
+    @objc func toggleWorkspaceSidebarFromMenu(_ sender: Any?) {
+        toggleWorkspaceSidebar()
+    }
+
+    private func toggleWorkspaceSidebar() {
+        setWorkspaceSidebarVisible(!WorkspaceSidebarConfig.resolveVisible())
+    }
+
+    private func setWorkspaceSidebarVisible(_ visible: Bool) {
+        WorkspaceSidebarConfig.setVisible(visible)
+        applyWorkspaceSidebarVisibility(visible)
+        if visible { reloadWorkspaceSidebar() }
+    }
+
+    private func applyWorkspaceSidebarVisibility(_ visible: Bool) {
+        guard let splitView = workspaceSplitView,
+              let sidebar = workspaceSidebarView else { return }
+        sidebar.isHidden = !visible
+        splitView.adjustSubviews()
+        if visible {
+            splitView.setPosition(CGFloat(WorkspaceSidebarConfig.resolveWidth()), ofDividerAt: 0)
+        }
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(toggleWorkspaceSidebarFromMenu(_:)) {
+            menuItem.state = WorkspaceSidebarConfig.resolveVisible() ? .on : .off
+        }
+        return true
+    }
+
+    func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        guard splitView === workspaceSplitView, dividerIndex == 0 else { return proposedMinimumPosition }
+        return CGFloat(WorkspaceSidebarConfig.minWidth)
+    }
+
+    func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        guard splitView === workspaceSplitView, dividerIndex == 0 else { return proposedMaximumPosition }
+        return CGFloat(WorkspaceSidebarConfig.maxWidth)
+    }
+
+    func splitViewDidResizeSubviews(_ notification: Notification) {
+        guard let splitView = notification.object as? NSSplitView,
+              splitView === workspaceSplitView,
+              let sidebar = workspaceSidebarView,
+              !sidebar.isHidden else { return }
+        WorkspaceSidebarConfig.setWidth(Double(sidebar.frame.width))
+    }
+
+    static func runWorkspaceSidebarShellSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func tile(id: UUID, title: String, kind: TileKind, zIndex: Int) -> Tile {
+            Tile(
+                id: id,
+                kind: kind,
+                title: title,
+                frame: TileFrame(x: Double(zIndex) * 40, y: 0, width: 320, height: 220),
+                zIndex: zIndex,
+                runtimeRef: nil,
+                metadata: TileMetadata()
+            )
+        }
+
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("continuum-workspace-sidebar-shell-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let currentWorkspace = UUID(uuidString: "00000000-0000-0000-0000-00000000A001")!
+        let otherWorkspace = UUID(uuidString: "00000000-0000-0000-0000-00000000A002")!
+        let zoneOne = UUID(uuidString: "00000000-0000-0000-0000-00000000B001")!
+        let zoneTwo = UUID(uuidString: "00000000-0000-0000-0000-00000000B002")!
+        let otherZone = UUID(uuidString: "00000000-0000-0000-0000-00000000B003")!
+        let currentTiles = [
+            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000C001")!, title: "Shell Agent", kind: .terminal, zIndex: 1),
+            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000C002")!, title: "Docs Browser", kind: .browser, zIndex: 2),
+        ]
+        let secondZoneTiles = [
+            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000C003")!, title: "Scratch Note", kind: .note, zIndex: 3),
+        ]
+        let otherTiles = [
+            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000C004")!, title: "Collapsed Workspace Tile", kind: .terminal, zIndex: 4),
+        ]
+
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = currentWorkspace
+        registry.workspaces = [
+            WorkspaceEntry(id: currentWorkspace, name: "Current Workspace", projectIds: [], createdAt: Date(timeIntervalSince1970: 0), updatedAt: Date(timeIntervalSince1970: 0)),
+            WorkspaceEntry(id: otherWorkspace, name: "Other Workspace", projectIds: [], createdAt: Date(timeIntervalSince1970: 0), updatedAt: Date(timeIntervalSince1970: 0)),
+        ]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+
+        let currentDocument = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [
+                ZonePlacement(zoneId: zoneOne, projectId: nil, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 900, height: 600), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "Build", navKey: "1"),
+                ZonePlacement(zoneId: zoneTwo, projectId: nil, origin: ZonePoint(x: 940, y: 0), size: ZoneSize(width: 900, height: 600), color: "blue", collapsed: false, hydrationPolicy: .automatic, name: "Research", navKey: "2"),
+            ],
+            zoneZOrder: [zoneOne, zoneTwo],
+            lastActiveZoneId: zoneOne,
+            groupZoneTiles: [
+                GroupZoneTiles(zoneId: zoneOne, tiles: currentTiles),
+                GroupZoneTiles(zoneId: zoneTwo, tiles: secondZoneTiles),
+            ]
+        )
+        let otherDocument = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [
+                ZonePlacement(zoneId: otherZone, projectId: nil, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 900, height: 600), color: "orange", collapsed: false, hydrationPolicy: .automatic, name: "Collapsed Zone", navKey: nil),
+            ],
+            zoneZOrder: [otherZone],
+            lastActiveZoneId: otherZone,
+            groupZoneTiles: [GroupZoneTiles(zoneId: otherZone, tiles: otherTiles)]
+        )
+        try WorkspaceStore(workspaceId: currentWorkspace, applicationSupportDirectory: appSupport).save(currentDocument)
+        try WorkspaceStore(workspaceId: otherWorkspace, applicationSupportDirectory: appSupport).save(otherDocument)
+
+        let app = AppDelegate()
+        app.registryStore = registryStore
+        let tree = try app.buildWorkspaceSidebarTree()
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: 640))
+        sidebar.reload(tree: tree, currentWorkspaceId: app.currentWorkspaceIdForSidebar())
+        sidebar.layoutSubtreeIfNeeded()
+
+        let workspaceRowsRendered = sidebar.workspaceRowsRenderedForQA
+        let zoneRowsRendered = sidebar.zoneRowsRenderedForQA
+        let tileRowsRendered = sidebar.tileRowsRenderedForQA
+        let currentWorkspaceExpanded = sidebar.isWorkspaceExpandedForQA(currentWorkspace)
+        let nonCurrentWorkspaceCollapsed = !sidebar.isWorkspaceExpandedForQA(otherWorkspace)
+        let currentWorkspaceSelected = sidebar.isWorkspaceSelectedForQA(currentWorkspace)
+        let visibleNames = sidebar.visibleDisplayNamesForQA
+        try expect(workspaceRowsRendered == 2, "expected 2 visible workspace rows, got \(workspaceRowsRendered)")
+        try expect(currentWorkspaceExpanded, "current workspace should be expanded")
+        try expect(nonCurrentWorkspaceCollapsed, "non-current workspace should be collapsed")
+        try expect(currentWorkspaceSelected, "current workspace should be selected")
+        try expect(zoneRowsRendered == 2, "expected current workspace's 2 zones to render, got \(zoneRowsRendered)")
+        try expect(tileRowsRendered == 3, "expected current workspace's 3 tiles to render, got \(tileRowsRendered)")
+        try expect(visibleNames.contains("Current Workspace") && visibleNames.contains("Other Workspace"), "both workspace rows should be visible")
+        try expect(visibleNames.contains("Shell Agent") && visibleNames.contains("Scratch Note"), "current workspace tile rows should be visible")
+        try expect(!visibleNames.contains("Collapsed Workspace Tile"), "collapsed workspace tile row should not be visible")
+
+        let suiteName = "continuum-workspace-sidebar-shell-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else { throw CheckError.failed("could not create isolated defaults") }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        WorkspaceSidebarConfig.setWidth(333, defaults: defaults)
+        let widthPersistenceWorked = WorkspaceSidebarConfig.resolveWidth(defaults: defaults) == 333
+        WorkspaceSidebarConfig.setVisible(false, defaults: defaults)
+        let hiddenRoundTrip = WorkspaceSidebarConfig.resolveVisible(defaults: defaults) == false
+        WorkspaceSidebarConfig.setVisible(true, defaults: defaults)
+        let visibilityPersistenceWorked = hiddenRoundTrip && WorkspaceSidebarConfig.resolveVisible(defaults: defaults) == true
+        try expect(widthPersistenceWorked, "sidebar width should round-trip through UserDefaults")
+        try expect(visibilityPersistenceWorked, "sidebar visibility should round-trip through UserDefaults")
+
+        let paletteRows = LaunchPaletteModel.filterRows(LaunchPaletteModel.makeRows(profiles: []), query: "workspace sidebar")
+        let paletteActionDiscoverable = paletteRows.contains { $0.displayName == LaunchPaletteAction.toggleWorkspaceSidebar.displayName }
+        try expect(paletteActionDiscoverable, "workspace sidebar toggle should be command-palette discoverable")
+
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let directory = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("workspace-sidebar-shell", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "workspace-sidebar-shell",
+            "workspaceRowsRendered": workspaceRowsRendered,
+            "currentWorkspaceExpanded": currentWorkspaceExpanded,
+            "currentWorkspaceSelected": currentWorkspaceSelected,
+            "nonCurrentWorkspaceCollapsed": nonCurrentWorkspaceCollapsed,
+            "zoneRowsRendered": zoneRowsRendered,
+            "tileRowsRendered": tileRowsRendered,
+            "widthPersistenceWorked": widthPersistenceWorked,
+            "visibilityPersistenceWorked": visibilityPersistenceWorked,
+            "paletteActionDiscoverable": paletteActionDiscoverable,
+            "artifactPath": artifact.path,
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
     private func installSettingsChangeObserver() {
         guard settingsChangeObserver == nil else { return }
         settingsChangeObserver = NotificationCenter.default.addObserver(
@@ -4552,6 +4824,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             restorePreviousTile()
         case .previousZone:
             restorePreviousZone()
+        case .toggleWorkspaceSidebar:
+            toggleWorkspaceSidebar()
         case let .switchProject(projectId):
             switchProjectAndRelaunch(projectId: projectId)
         case let .addProjectToCanvas(projectId):
@@ -4930,6 +5204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try registryStore.save(registry)
             // Switch in-process to the new empty workspace (no relaunch).
             try workspaceRuntime?.switchWorkspace(to: workspace.id)
+            reloadWorkspaceSidebar()
         } catch {
             fputs("Create Workspace failed: \(error)\n", stderr)
         }
@@ -4941,6 +5216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             var registry = try registryStore.loadOrEmpty()
             guard registry.renameWorkspace(id: workspaceId, name: name, now: Date()) else { return }
             try registryStore.save(registry)
+            reloadWorkspaceSidebar()
         } catch {
             fputs("Rename Workspace failed: \(error)\n", stderr)
         }
@@ -4961,6 +5237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if let nextWorkspaceId = registry.lastActiveWorkspaceId {
                 switchWorkspaceAndRelaunch(workspaceId: nextWorkspaceId)
             }
+            reloadWorkspaceSidebar()
         } catch {
             fputs("Delete Workspace failed: \(error)\n", stderr)
         }
@@ -4970,6 +5247,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         do {
             // Switch in-process — no relaunch needed.
             try workspaceRuntime?.switchWorkspace(to: workspaceId)
+            reloadWorkspaceSidebar()
         } catch {
             fputs("Switch Workspace failed: \(error)\n", stderr)
         }
@@ -4999,6 +5277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             // Delegate zone creation + canvas install + document save to the runtime.
             try workspaceRuntime.addZone(projectId: projectId)
+            reloadWorkspaceSidebar()
             fputs("Added project zone for \(projectId)\n", stderr)
         } catch {
             fputs("Add Project to Canvas failed: \(error)\n", stderr)

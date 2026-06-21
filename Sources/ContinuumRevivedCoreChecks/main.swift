@@ -5261,11 +5261,31 @@ do {
         name: "Scratch",
         navKey: nil
     )
+    func sidebarTile(_ uuid: String, _ title: String, _ kind: TileKind, _ zIndex: Int) -> Tile {
+        Tile(
+            id: UUID(uuidString: uuid)!,
+            kind: kind,
+            title: title,
+            frame: TileFrame(x: Double(zIndex) * 10, y: 0, width: 120, height: 80),
+            zIndex: zIndex,
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+    }
     let docA = WorkspaceDocument(
         viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
         zones: [zonePlacementA1, zonePlacementA2],
         zoneZOrder: [zoneA2Id, zoneA1Id],
-        lastActiveZoneId: nil
+        lastActiveZoneId: nil,
+        groupZoneTiles: [
+            GroupZoneTiles(zoneId: zoneA2Id, tiles: [
+                sidebarTile("00000000-0000-0000-0000-0000000000E1", "Scratch Agent", .terminal, 1),
+                sidebarTile("00000000-0000-0000-0000-0000000000E2", "Scratch Note", .note, 2),
+            ]),
+            GroupZoneTiles(zoneId: zoneA1Id, tiles: [
+                sidebarTile("00000000-0000-0000-0000-0000000000E3", "Project Browser", .browser, 3),
+            ]),
+        ]
     )
 
     let zoneBId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B2")!
@@ -5338,6 +5358,10 @@ do {
     // 3. WS_A zone order (z-order, not storage)
     expect(tree.workspaces[0].zones.map(\.zoneId) == [zoneA2Id, zoneA1Id],
            "sidebar tree: WS_A zones must be ordered by zoneZOrder, not storage order")
+    expect(tree.workspaces[0].zones[0].tiles.map(\.title) == ["Scratch Agent", "Scratch Note"],
+           "sidebar tree: tile rows must be nested under their zone in stored order")
+    expect(tree.workspaces[0].zones[1].tiles.map(\.kind) == [.browser],
+           "sidebar tree: tile rows must carry TileKind")
 
     // 4. Project zone backfill (resolved)
     let wsAZoneA1Row = tree.workspaces[0].zones.first(where: { $0.zoneId == zoneA1Id })!
