@@ -2306,10 +2306,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func runTerminalScrollErgonomicsCheck(window: NSWindow, runtime: GhosttyTerminalRuntime?) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self else { return }
+            func waitUntil(_ timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+                let deadline = Date().addingTimeInterval(timeout)
+                while Date() < deadline {
+                    if condition() { return true }
+                    RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.03))
+                }
+                return condition()
+            }
+
             do {
                 guard let runtime, let canvasView = self.canvasView else {
                     throw NSError(domain: "TerminalScrollErgonomics", code: 1, userInfo: [NSLocalizedDescriptionKey: "missing terminal runtime or canvas"])
                 }
+                guard let terminalView = runtime.qaTerminalView, let terminalWindow = terminalView.window else {
+                    throw NSError(domain: "TerminalScrollErgonomics", code: 2, userInfo: [NSLocalizedDescriptionKey: "missing terminal view/window"])
+                }
+                let terminalCenterInWindow = terminalView.convert(
+                    NSPoint(x: terminalView.bounds.midX, y: terminalView.bounds.midY),
+                    to: nil
+                )
+                let terminalPointTargetsScrollableContent = self.pointTargetsScrollableTileContent(terminalCenterInWindow, in: terminalWindow)
                 let startViewport = canvasView.viewport
                 let defaults = UserDefaults.standard
                 let oldPrecise = defaults.object(forKey: TerminalScrollConfig.preciseMultiplierKey)
@@ -2321,16 +2338,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 let defaultSample = runtime.dispatchScrollWheel(deltaX: 0, deltaY: -3, precise: true)
                 defaults.set("0.5", forKey: TerminalScrollConfig.preciseMultiplierKey)
                 let tunedSample = runtime.dispatchScrollWheel(deltaX: 0, deltaY: -3, precise: true)
-                let inputAfterScrollWorked = runtime.dispatchInsertedText("terminal-scroll-ergonomics-input")
+                let inputMarker = "terminal_scroll_ergonomics_\(UUID().uuidString.prefix(8))"
+                let insertedInput = runtime.dispatchInsertedText("printf '\(inputMarker)\\n'\n")
+                let inputAfterScrollWorked = insertedInput && waitUntil {
+                    runtime.visibleText().contains(inputMarker)
+                }
                 let callCount = runtime.qaTerminalView?.qaGhosttyScrollCallCount ?? 0
                 let viewportChanged = canvasView.viewport != startViewport
 
-                guard let defaultSample, let tunedSample else { throw NSError(domain: "TerminalScrollErgonomics", code: 2) }
-                guard abs(defaultSample.normalizedDeltaY - -3) < 0.001 else { throw NSError(domain: "TerminalScrollErgonomics", code: 3) }
-                guard abs(tunedSample.normalizedDeltaY - -1.5) < 0.001 else { throw NSError(domain: "TerminalScrollErgonomics", code: 4) }
-                guard callCount == 2 else { throw NSError(domain: "TerminalScrollErgonomics", code: 5) }
-                guard !viewportChanged else { throw NSError(domain: "TerminalScrollErgonomics", code: 6) }
-                guard inputAfterScrollWorked else { throw NSError(domain: "TerminalScrollErgonomics", code: 7) }
+                guard let defaultSample, let tunedSample else { throw NSError(domain: "TerminalScrollErgonomics", code: 3) }
+                guard terminalPointTargetsScrollableContent else { throw NSError(domain: "TerminalScrollErgonomics", code: 4) }
+                guard defaultSample.deliveredViaProductionScrollWheel, tunedSample.deliveredViaProductionScrollWheel else { throw NSError(domain: "TerminalScrollErgonomics", code: 5) }
+                guard abs(defaultSample.rawDeltaY - -3) < 0.001, abs(defaultSample.normalizedDeltaY - -3) < 0.001 else { throw NSError(domain: "TerminalScrollErgonomics", code: 6) }
+                guard abs(tunedSample.rawDeltaY - -3) < 0.001, abs(tunedSample.normalizedDeltaY - -1.5) < 0.001 else { throw NSError(domain: "TerminalScrollErgonomics", code: 7) }
+                guard callCount == 2 else { throw NSError(domain: "TerminalScrollErgonomics", code: 8) }
+                guard !viewportChanged else { throw NSError(domain: "TerminalScrollErgonomics", code: 9) }
+                guard inputAfterScrollWorked else { throw NSError(domain: "TerminalScrollErgonomics", code: 10) }
 
                 let timestamp = Self.qaTimestamp()
                 let dir = URL(fileURLWithPath: "qa-runs/\(timestamp)/terminal-scroll-ergonomics", isDirectory: true)
@@ -2340,7 +2363,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     "settings": ["preciseMultiplier": 1.0, "lineMultiplier": 1.0, "maxAbsDeltaPerEvent": NSNull()],
                     "samples": [try Self.jsonObject(defaultSample), try Self.jsonObject(tunedSample)],
                     "ghosttyScrollCallCount": callCount,
+                    "terminalPointTargetsScrollableTileContent": terminalPointTargetsScrollableContent,
                     "canvasViewportChanged": viewportChanged,
+                    "inputMarker": inputMarker,
                     "inputAfterScrollWorked": inputAfterScrollWorked,
                     "manualMatrixPending": true
                 ]

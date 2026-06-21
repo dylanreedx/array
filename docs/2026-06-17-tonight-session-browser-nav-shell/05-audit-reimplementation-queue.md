@@ -55,9 +55,10 @@ Rules:
 
 ## Full branch audits
 
-- [ ] A07 — T13 shell scroll ergonomics audit  
-  Commit: `e5a7492`.  
+- [x] A07 — T13 shell scroll ergonomics audit
+  Commit: `e5a7492`.
   Focus: scroll delta normalization, trackpad/mouse feel, no hidden regressions.
+  Audit note: fixed shallow evidence in the app flag and a hidden-defaults read in the scroll path. The precise-scroll 2x multiplier is removed; `--terminal-scroll-ergonomics-check` now proves terminal hit-test routing, default/tuned normalized deltas, and visible post-scroll input; manual device/tmux/vim dogfood remains pending. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260621T113626/audits/A07.md` and artifact `qa-runs/20260621-154141/terminal-scroll-ergonomics/manifest.json`.
 
 - [ ] A08 — T12 terminal zoom-pan stability audit  
   Commit: `e44c979`.  

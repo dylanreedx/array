@@ -310,7 +310,7 @@ final class GhosttyTerminalView: NSView {
     func normalizedWheelSample(deltaX: Double, deltaY: Double, precise: Bool, deliveredViaProductionScrollWheel: Bool) -> TerminalWheelQASample {
         let normalized = TerminalWheelNormalizer.normalize(
             TerminalWheelInput(deltaX: deltaX, deltaY: deltaY, hasPreciseScrollingDeltas: precise),
-            settings: TerminalScrollConfig.settings()
+            settings: TerminalScrollConfig.settings(defaults: displayDefaults)
         )
         return TerminalWheelQASample(
             rawDeltaX: deltaX,
