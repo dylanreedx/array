@@ -3157,18 +3157,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Zone-jump is resolved BEFORE tile-jump so a configured zone navKey that
         // collides with a tile label always wins (precedence rule 1).
         if !key.isEmpty, let zoneId = canvasView?.leaderZoneJumpTarget(forKey: key) {
+            let targetViewport = canvasView?.fitZoneToViewport(zoneId: zoneId)
             disarmLeader()
-            if let canvasView { focusHistory.recordViewBeforeProgrammaticJump(CameraSnapshot(viewport: canvasView.canvasState.viewport, focusedTileId: canvasView.canvasState.lastActiveTileId, focusedZoneId: navSelectedZoneId)) }
-            if let vp = canvasView?.fitZoneToViewport(zoneId: zoneId) { canvasView?.setViewport(vp) }
+            if let targetViewport {
+                recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: targetViewport)
+                canvasView?.setViewport(targetViewport)
+            }
             navSelectedZoneId = zoneId
             focusHistory.recordZoneFocus(zoneId, reason: .completedZoneJump)
             if let tileId = firstTileInZone(zoneId) { focusHistory.recordTileFocus(tileId, zoneId: zoneId, reason: .completedZoneJump) }
             return true
         }
         if !key.isEmpty, let tileId = canvasView?.leaderJumpTarget(forLabel: key) {
+            let targetViewport = canvasView?.framedViewportForTileJump(tileId)
             disarmLeader() // closes the leader modal (restores prior scope) + hides HUD
-            if let canvasView { focusHistory.recordViewBeforeProgrammaticJump(CameraSnapshot(viewport: canvasView.canvasState.viewport, focusedTileId: canvasView.canvasState.lastActiveTileId, focusedZoneId: navSelectedZoneId)) }
-            canvasView?.centerOnTile(tileId)
+            if let targetViewport {
+                recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: targetViewport)
+                canvasView?.setViewport(targetViewport)
+            }
             focusHistory.recordTileFocus(tileId, zoneId: zoneContainingTile(tileId), reason: .completedTileJump)
             focusBroker.enterScope(.tile(tileId), reason: .modalDismissed)
             return true
@@ -3452,9 +3458,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         fitNavZone(models[nextIndex].placement.zoneId)
     }
 
+    private func recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: CanvasViewport) {
+        guard let canvasView else { return }
+        let current = canvasView.canvasState.viewport
+        guard Self.viewportChangeExceedsJumpEpsilon(from: current, to: targetViewport) else { return }
+        focusHistory.recordViewBeforeProgrammaticJump(CameraSnapshot(viewport: current, focusedTileId: canvasView.canvasState.lastActiveTileId, focusedZoneId: navSelectedZoneId))
+    }
+
+    private static func viewportChangeExceedsJumpEpsilon(from current: CanvasViewport, to target: CanvasViewport) -> Bool {
+        let zoom = max(max(abs(current.zoom), abs(target.zoom)), CameraFraming.minJumpZoom)
+        let dxScreen = abs(current.x - target.x) * zoom
+        let dyScreen = abs(current.y - target.y) * zoom
+        return dxScreen > CameraFraming.finalViewportEpsilonScreenPx
+            || dyScreen > CameraFraming.finalViewportEpsilonScreenPx
+            || abs(current.zoom - target.zoom) > 0.0001
+    }
+
     private func fitNavZone(_ zoneId: UUID) {
         guard let canvasView, let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) else { return }
-        focusHistory.recordViewBeforeProgrammaticJump(CameraSnapshot(viewport: canvasView.canvasState.viewport, focusedTileId: canvasView.canvasState.lastActiveTileId, focusedZoneId: navSelectedZoneId))
+        recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: viewport)
         navSelectedZoneId = zoneId
         canvasView.setViewport(viewport)
         focusHistory.recordZoneFocus(zoneId, reason: .completedZoneJump)
@@ -3731,8 +3753,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             focusBroker.openModal(.palette)
         }
         let rows = activeController.paletteRows(registryStore: registryStore)
-        let jumpTiles = (canvasView?.canvasState.tiles ?? []).map { tile in
-            JumpTileRow(id: tile.id, title: tile.title.isEmpty ? "Untitled Tile" : tile.title)
+        let jumpTiles = (canvasView?.navigationTileSnapshots() ?? []).map { tile in
+            JumpTileRow(id: tile.tileId, title: tile.title.isEmpty ? "Untitled Tile" : tile.title)
         }
         let jumpZones = (canvasView?.navZoneRenderModels ?? []).map { model in
             JumpZoneRow(id: model.placement.zoneId, title: model.displayName)
@@ -4040,11 +4062,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// doesn't bounce focus back to the pre-palette scope (same intent as a
     /// spawn-from-palette: land on the chosen tile).
     private func jumpToTileFromPalette(_ tileId: UUID) {
-        guard canvasView?.canvasState.tiles.contains(where: { $0.id == tileId }) == true else { return }
-        if let canvasView {
-            focusHistory.recordViewBeforeProgrammaticJump(CameraSnapshot(viewport: canvasView.canvasState.viewport, focusedTileId: canvasView.canvasState.lastActiveTileId, focusedZoneId: navSelectedZoneId))
+        guard let canvasView, canvasView.navigationTileSnapshot(for: tileId) != nil else { return }
+        if let targetViewport = canvasView.framedViewportForTileJump(tileId) {
+            recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: targetViewport)
+            canvasView.setViewport(targetViewport)
         }
-        canvasView?.centerOnTile(tileId)
         focusHistory.recordTileFocus(tileId, zoneId: zoneContainingTile(tileId), reason: .paletteJump)
         focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
     }
@@ -4060,7 +4082,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let canvasView,
               canvasView.navZoneRenderModels.contains(where: { $0.placement.zoneId == zoneId }),
               let viewport = canvasView.fitZoneToViewport(zoneId: zoneId) else { return }
-        focusHistory.recordViewBeforeProgrammaticJump(CameraSnapshot(viewport: canvasView.canvasState.viewport, focusedTileId: canvasView.canvasState.lastActiveTileId, focusedZoneId: navSelectedZoneId))
+        recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: viewport)
         canvasView.setViewport(viewport)
         navSelectedZoneId = zoneId
         focusHistory.recordZoneFocus(zoneId, reason: .paletteJump)
@@ -4105,8 +4127,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func zoneContainingTile(_ tileId: UUID) -> UUID? {
-        guard let canvasView,
-              let tile = canvasView.canvasState.tiles.first(where: { $0.id == tileId }) else { return nil }
+        guard let canvasView else { return nil }
+        if let zoneId = canvasView.navigationTileSnapshot(for: tileId)?.zoneId {
+            return zoneId
+        }
+        guard let tile = canvasView.canvasState.tiles.first(where: { $0.id == tileId }) else { return nil }
         let tileRect = CGRect(x: tile.frame.x, y: tile.frame.y, width: tile.frame.width, height: tile.frame.height)
         return canvasView.navZoneRenderModels.first { model in
             let frame = CanvasEngine.zoneWorldFrame(model.placement)
@@ -4118,6 +4143,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func firstTileInZone(_ zoneId: UUID) -> UUID? {
         guard let canvasView,
               let model = canvasView.navZoneRenderModels.first(where: { $0.placement.zoneId == zoneId }) else { return nil }
+        if let tileId = canvasView.firstNavigationTileId(inZone: zoneId) {
+            return tileId
+        }
         let zoneFrame = CanvasEngine.zoneWorldFrame(model.placement)
         let zoneRect = CGRect(x: zoneFrame.x, y: zoneFrame.y, width: zoneFrame.width, height: zoneFrame.height)
         return canvasView.canvasState.tiles.first { tile in
@@ -9332,9 +9360,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(canvas2.leaderJumpAssignments().contains { $0.tileId == cId }, "a focused but partially-visible tile must still get a jump label")
         _ = app2.handleHotkey(try keyDown("a", 0, mods: [.option]))
         try expect(app2.focusBroker.activeSurface == .tile(cId), "jumping to a focused, partially-visible tile keeps focus on it")
-        let expectedC = CanvasEngine.centeredViewport(worldRect: CGRect(x: 0, y: 0, width: 240, height: 180), viewportSize: CGSize(width: 800, height: 600), zoom: 1)
-        try expect(vpEqual(canvas2.viewport, expectedC), "jumping to a partially-visible focused tile centers it; got (\(canvas2.viewport.x),\(canvas2.viewport.y))")
+        let expectedC = CameraFraming.jumpViewport(for: CGRect(x: 0, y: 0, width: 240, height: 180), kind: .note, currentViewport: CanvasViewport(x: 100, y: 0, zoom: 1), viewportSize: CGSize(width: 800, height: 600))
+        try expect(vpEqual(canvas2.viewport, expectedC), "jumping to a partially-visible focused tile frames it; got (\(canvas2.viewport.x),\(canvas2.viewport.y))")
         app2.handleFlagsChanged(try flagsEvent([], keyCode: 58))
+
+        // 8) A default-sized terminal should not be zoomed below terminal
+        //    readability just to make the whole tile fit in a small window. Keep
+        //    the shell readable and reveal the useful top/left area with padding.
+        let terminalId = UUID(uuidString: "00000000-0000-0000-0000-0000000000D4")!
+        let terminalTile = Tile(id: terminalId, kind: .terminal, title: "Terminal", frame: TileFrame(x: 1000, y: 800, width: 900, height: 584), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let terminalStart = CanvasViewport(x: 0, y: 0, zoom: 0.3)
+        let terminalCanvas = CanvasNSView(canvasState: CanvasState(viewport: terminalStart, tiles: [terminalTile], groups: [], lastActiveTileId: nil))
+        terminalCanvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let terminalWindow = NSWindow(contentRect: terminalCanvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        terminalWindow.contentView = terminalCanvas
+        terminalWindow.orderFrontRegardless()
+        let terminalApp = AppDelegate()
+        terminalApp.canvasView = terminalCanvas
+        terminalCanvas.focusBroker = terminalApp.focusBroker
+        terminalApp.focusBroker.onAcceptedTileFocus = { [weak terminalCanvas] id in terminalCanvas?.markActive(tileId: id) }
+        terminalCanvas.install(tileView: TileNSView(tile: terminalTile), for: terminalTile)
+        _ = terminalApp.focusBroker.requestFocus(.canvas, reason: .userClick)
+        terminalApp.leaderDwell = 0
+        terminalApp.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        try expect(terminalCanvas.leaderJumpAssignments().contains { $0.tileId == terminalId && $0.label == "a" }, "terminal tile should receive a leader label through the real overlay path")
+        let terminalExpected = CameraFraming.jumpViewport(for: CGRect(x: 1000, y: 800, width: 900, height: 584), kind: .terminal, currentViewport: terminalStart, viewportSize: CGSize(width: 800, height: 600))
+        _ = terminalApp.handleHotkey(try keyDown("a", 0, mods: [.option]))
+        try expect(terminalApp.focusBroker.activeSurface == .tile(terminalId), "terminal leader label should focus the terminal tile")
+        try expect(vpEqual(terminalCanvas.viewport, terminalExpected), "terminal jump must apply readable framing; got (\(terminalCanvas.viewport.x),\(terminalCanvas.viewport.y),\(terminalCanvas.viewport.zoom)) want (\(terminalExpected.x),\(terminalExpected.y),\(terminalExpected.zoom))")
+        let terminalReadableZoom = CameraFraming.minimumReadableZoom(for: .terminal)
+        try expect(terminalCanvas.viewport.zoom >= terminalReadableZoom - 0.0001, "terminal jump should stay at readable zoom; got \(terminalCanvas.viewport.zoom)")
+        let terminalScreenFrame = CanvasEngine.tileScreenFrame(terminalTile.frame, viewport: terminalCanvas.viewport)
+        let terminalVisibleRect = terminalScreenFrame.intersection(terminalCanvas.bounds)
+        let terminalVisibleRatio = terminalVisibleRect.isNull ? 0 : Double((terminalVisibleRect.width * terminalVisibleRect.height) / (terminalScreenFrame.width * terminalScreenFrame.height))
+        try expect(!terminalVisibleRect.isNull && terminalVisibleRatio >= CameraFraming.mostlyVisibleAreaRatio, "terminal reveal should keep most of the tile visible")
+
+        // 9) Workspace ZoneLayer descriptor tiles use their rendered world frame
+        //    for labels and jump targets. This catches stale active-zone/local
+        //    coordinate math that made badges and camera jumps drift from tiles.
+        let layerZoneId = UUID(uuidString: "00000000-0000-0000-0000-0000000000E5")!
+        let layerTileId = UUID(uuidString: "00000000-0000-0000-0000-0000000000E6")!
+        let layerPlacement = ZonePlacement(zoneId: layerZoneId, projectId: nil, origin: ZonePoint(x: 2000, y: 2000), size: ZoneSize(width: 500, height: 360), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "Layer")
+        let layerTile = Tile(id: layerTileId, kind: .note, title: "Layer Tile", frame: TileFrame(x: 40, y: 50, width: 220, height: 160), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let layerStart = CanvasViewport(x: 2000, y: 2000, zoom: 1)
+        let layerCanvas = CanvasNSView(
+            canvasState: CanvasState(viewport: layerStart, tiles: [], groups: [], lastActiveTileId: nil),
+            activeZone: nil,
+            zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: layerPlacement, displayName: "Layer")],
+            showsZoneChrome: false
+        )
+        layerCanvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let layerWindow = NSWindow(contentRect: layerCanvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        layerWindow.contentView = layerCanvas
+        layerWindow.orderFrontRegardless()
+        let layerApp = AppDelegate()
+        layerApp.canvasView = layerCanvas
+        layerCanvas.focusBroker = layerApp.focusBroker
+        layerApp.focusBroker.onAcceptedTileFocus = { [weak layerCanvas] id in layerCanvas?.markActive(tileId: id) }
+        let layer = CanvasNSView.ZoneLayer(placement: layerPlacement, renderModel: CanvasNSView.ZoneRenderModel(placement: layerPlacement, displayName: "Layer"), tiles: [layerTile])
+        layer.tileViews = [layerTileId: TileNSView(tile: layerTile)]
+        layerCanvas.upsertZoneLayer(layer)
+        _ = layerApp.focusBroker.requestFocus(.canvas, reason: .userClick)
+        layerApp.leaderDwell = 0
+        layerApp.handleFlagsChanged(try flagsEvent([.option], keyCode: 58))
+        try expect(layerCanvas.leaderJumpAssignments().contains { $0.tileId == layerTileId && $0.label == "a" }, "visible ZoneLayer tile should receive a leader label")
+        let layerWorldRect = CGRect(x: 2040, y: 2050, width: 220, height: 160)
+        let layerExpected = CameraFraming.jumpViewport(for: layerWorldRect, kind: .note, currentViewport: layerStart, viewportSize: CGSize(width: 800, height: 600))
+        _ = layerApp.handleHotkey(try keyDown("a", 0, mods: [.option]))
+        try expect(layerApp.focusBroker.activeSurface == .tile(layerTileId), "ZoneLayer leader label should focus the layer tile")
+        try expect(vpEqual(layerCanvas.viewport, layerExpected), "ZoneLayer jump should frame the rendered world rect")
 
         let finalError = hypot((canvas.viewport.x - expectedB.x) * canvas.viewport.zoom, (canvas.viewport.y - expectedB.y) * canvas.viewport.zoom)
         let manifest: [String: Any] = [
@@ -9347,7 +9441,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "finalViewport": ["x": canvas.viewport.x, "y": canvas.viewport.y, "zoom": canvas.viewport.zoom],
             "tileKind": "note",
             "readableZoom": CameraFraming.minimumReadableZoom(for: .note),
-            "mostlyVisibleBefore": CameraFraming.mostlyVisibleAreaRatio(worldRect: CGRect(x: 400, y: 300, width: 240, height: 180), viewport: initialViewport, viewportSize: CGSize(width: 800, height: 600)) >= CameraFraming.mostlyVisibleAreaRatio,
+            "mostlyVisibleBefore": initialViewport.zoom >= CameraFraming.minimumReadableZoom(for: .note) && CameraFraming.mostlyVisibleAreaRatio(worldRect: CGRect(x: 400, y: 300, width: 240, height: 180), viewport: initialViewport, viewportSize: CGSize(width: 800, height: 600)) >= CameraFraming.mostlyVisibleAreaRatio,
             "finalViewportErrorScreenPx": finalError,
             "durationMs": 0,
             "frameCount": 1,
@@ -9355,6 +9449,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "terminalAppliedResizeDelta": 0,
             "webViewCreationDelta": 0,
             "animationEnabled": false,
+            "terminalLargeTile": [
+                "startViewport": ["x": terminalStart.x, "y": terminalStart.y, "zoom": terminalStart.zoom],
+                "targetViewport": ["x": terminalExpected.x, "y": terminalExpected.y, "zoom": terminalExpected.zoom],
+                "finalViewport": ["x": terminalCanvas.viewport.x, "y": terminalCanvas.viewport.y, "zoom": terminalCanvas.viewport.zoom],
+                "readableZoom": terminalReadableZoom,
+                "visibleAreaRatio": terminalVisibleRatio,
+                "readableZoomPreserved": terminalCanvas.viewport.zoom >= terminalReadableZoom - 0.0001,
+            ],
+            "zoneLayerTileJumped": true,
             "selfExclusion": "focused+fully-visible tile dropped; focused+partial and unfocused+partial stay jumpable",
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
@@ -9752,7 +9855,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "finalViewport": ["x": canvas.viewport.x, "y": canvas.viewport.y, "zoom": canvas.viewport.zoom],
             "tileKind": "note",
             "readableZoom": CameraFraming.minimumReadableZoom(for: .note),
-            "mostlyVisibleBefore": CameraFraming.mostlyVisibleAreaRatio(worldRect: CGRect(x: 400, y: 300, width: 240, height: 180), viewport: paletteStartViewport, viewportSize: CGSize(width: 800, height: 600)) >= CameraFraming.mostlyVisibleAreaRatio,
+            "mostlyVisibleBefore": paletteStartViewport.zoom >= CameraFraming.minimumReadableZoom(for: .note) && CameraFraming.mostlyVisibleAreaRatio(worldRect: CGRect(x: 400, y: 300, width: 240, height: 180), viewport: paletteStartViewport, viewportSize: CGSize(width: 800, height: 600)) >= CameraFraming.mostlyVisibleAreaRatio,
             "finalViewportErrorScreenPx": finalError,
             "durationMs": 0,
             "frameCount": 1,

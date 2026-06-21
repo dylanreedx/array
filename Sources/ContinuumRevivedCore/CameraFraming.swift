@@ -63,13 +63,37 @@ public enum CameraFraming {
             && mostlyVisibleAreaRatio(worldRect: worldRect, viewport: currentViewport, viewportSize: viewportSize) >= mostlyVisibleAreaRatio
         if mostlyVisible { return currentViewport }
 
-        var targetZoom = currentViewport.zoom >= readableZoom ? currentZoom : min(max(readableZoom, minJumpZoom), maxJumpZoom)
+        let targetZoom = currentViewport.zoom >= readableZoom ? currentZoom : min(max(readableZoom, minJumpZoom), maxJumpZoom)
+        return readableRevealViewport(for: worldRect, viewportSize: viewportSize, zoom: targetZoom)
+    }
+
+    private static func readableRevealViewport(
+        for worldRect: CGRect,
+        viewportSize: CGSize,
+        zoom: Double
+    ) -> CanvasViewport {
         let paddedAvailableW = max(Double(viewportSize.width) - 2 * tilePaddingScreenPx, 1)
         let paddedAvailableH = max(Double(viewportSize.height) - 2 * tilePaddingScreenPx, 1)
-        if Double(worldRect.width) * targetZoom > paddedAvailableW || Double(worldRect.height) * targetZoom > paddedAvailableH {
-            let fitZoom = min(paddedAvailableW / Double(worldRect.width), paddedAvailableH / Double(worldRect.height))
-            targetZoom = min(max(fitZoom, minJumpZoom), maxJumpZoom)
+        let screenW = Double(worldRect.width) * zoom
+        let screenH = Double(worldRect.height) * zoom
+
+        // If the whole tile fits at the readable zoom, center it. If not, keep
+        // the readable zoom and reveal the top/left useful area with padding
+        // instead of zooming terminals/browsers down into an unreadable overview.
+        let originX: Double
+        if screenW <= paddedAvailableW {
+            originX = Double(worldRect.midX) - Double(viewportSize.width) / 2 / zoom
+        } else {
+            originX = Double(worldRect.minX) - tilePaddingScreenPx / zoom
         }
-        return CanvasEngine.centeredViewport(worldRect: worldRect, viewportSize: viewportSize, zoom: targetZoom)
+
+        let originY: Double
+        if screenH <= paddedAvailableH {
+            originY = Double(worldRect.midY) - Double(viewportSize.height) / 2 / zoom
+        } else {
+            originY = Double(worldRect.minY) - tilePaddingScreenPx / zoom
+        }
+
+        return CanvasViewport(x: originX, y: originY, zoom: zoom)
     }
 }

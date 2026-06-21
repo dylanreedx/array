@@ -5497,6 +5497,16 @@ do {
     let offscreenReadable = CanvasViewport(x: 0, y: 0, zoom: 0.95)
     let panned = CameraFraming.jumpViewport(for: terminalRect, kind: .terminal, currentViewport: offscreenReadable, viewportSize: viewportSize)
     expect(abs(panned.zoom - 0.95) < 0.0001, "offscreen but readable target should pan without changing zoom")
+
+    let defaultTerminalRect = CGRect(x: 1000, y: 800, width: 900, height: 584)
+    let framedDefaultTerminal = CameraFraming.jumpViewport(for: defaultTerminalRect, kind: .terminal, currentViewport: lowZoom, viewportSize: viewportSize)
+    expect(abs(framedDefaultTerminal.zoom - CameraFraming.minimumReadableZoom(for: .terminal)) < 0.0001, "default terminal jump should keep terminal-readable zoom instead of fitting down")
+    let defaultTerminalScreen = CanvasEngine.tileScreenFrame(TileFrame(x: 1000, y: 800, width: 900, height: 584), viewport: framedDefaultTerminal)
+    expect(defaultTerminalScreen.minX >= CameraFraming.tilePaddingScreenPx - 0.1, "wide terminal should be revealed from the left with padding")
+    expect(defaultTerminalScreen.minY >= CameraFraming.tilePaddingScreenPx - 0.1, "tall terminal should be revealed from the top with padding")
+    let defaultVisible = defaultTerminalScreen.intersection(CGRect(origin: .zero, size: viewportSize))
+    expect(!defaultVisible.isNull && (defaultVisible.width * defaultVisible.height) / (defaultTerminalScreen.width * defaultTerminalScreen.height) >= CGFloat(CameraFraming.mostlyVisibleAreaRatio), "readable terminal reveal should keep most of the tile visible")
+
     expect(CameraFraming.minimumReadableZoom(for: .note) == 0.60, "note readable zoom policy")
     expect(CameraFraming.minimumReadableZoom(for: .browser) == 0.70, "browser readable zoom policy")
     expect(CameraFraming.minimumReadableZoom(for: .fileTree) == 0.70, "file-tree readable zoom policy")

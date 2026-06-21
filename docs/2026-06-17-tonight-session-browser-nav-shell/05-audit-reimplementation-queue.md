@@ -65,9 +65,10 @@ Rules:
   Focus: body-height alignment, idempotent Ghostty resize, flicker/perf.  
   Audit note: kept after A01's reimplementation of the flawed original T12 body-height behavior. Current real app check drives `CanvasNSView` + live `TerminalTileNSView`/Ghostty through zoom/pan, tile resize, and post-sweep input; rows/columns and `1600x992` surface stayed stable with zero camera-applied resizes and zero canvas display invalidations. Remaining risk is manual visual flicker/top-chrome overlap review. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260621T113626/audits/A08.md` and artifact `qa-runs/2026-06-21T154803Z/terminal-zoom-pan-stability/manifest.json`.
 
-- [ ] A09 — T06/T16/T07 navigation framing audit  
-  Commits: `cddf716`, `3a959c9`, `db22a3b`.  
+- [x] A09 — T06/T16/T07 navigation framing audit
+  Commits: `cddf716`, `3a959c9`, `db22a3b`.
   Focus: camera readability, jump indicators, animation defaults, shell tile interactions.
+  Audit note: fixed readable framing and stale coordinate paths. Large/default terminal jumps now preserve terminal-readable zoom and reveal the useful top-left area instead of fitting down to an unreadable overview; leader/palette navigation now share a `navigationTileSnapshots` path that matches rendered world frames, including ZoneLayer descriptor tiles; previous-view snapshots are only pushed when the camera actually changes. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260621T113626/audits/A09.md` and artifacts `qa-runs/2026-06-21T160209Z/camera-framing/manifest.json`, `qa-runs/2026-06-21T160212Z/leader-jump-visible-indicators/manifest.json`, and `qa-runs/20260621-160214/zone-framing-readability/manifest.json`.
 
 - [ ] A10 — T08 previous navigation audit  
   Commit: `118dc28`.  

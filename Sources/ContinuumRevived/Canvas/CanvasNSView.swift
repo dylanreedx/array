@@ -1136,6 +1136,53 @@ final class CanvasNSView: NSView {
         let placement: JumpIndicatorPlacement
     }
 
+    struct NavigationTileSnapshot: Equatable {
+        let tileId: UUID
+        let title: String
+        let kind: TileKind
+        let worldFrame: TileFrame
+        let zoneId: UUID?
+    }
+
+    /// The camera/navigation view of installed tiles. `layoutTile` treats
+    /// `canvasState.tiles` as world-frame tiles (zone membership is an overlay
+    /// tag), while `ZoneLayer` tiles remain zone-local and are projected through
+    /// their layer placement. Jump labels and jump framing must use the same
+    /// coordinates as layout/hit-testing, or badges and camera targets drift away
+    /// from what the user sees.
+    func navigationTileSnapshots() -> [NavigationTileSnapshot] {
+        var snapshots: [NavigationTileSnapshot] = []
+        var seen = Set<UUID>()
+        for tile in canvasState.tiles {
+            guard seen.insert(tile.id).inserted else { continue }
+            let zone = membershipPlacement(of: tile.id)
+            guard zone?.collapsed != true else { continue }
+            snapshots.append(NavigationTileSnapshot(tileId: tile.id, title: tile.title, kind: tile.kind, worldFrame: tile.frame, zoneId: zone?.zoneId))
+        }
+        for zoneId in zoneLayerOrder {
+            guard let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }), !layer.placement.collapsed else { continue }
+            for tile in layer.tiles {
+                guard seen.insert(tile.id).inserted else { continue }
+                snapshots.append(NavigationTileSnapshot(
+                    tileId: tile.id,
+                    title: tile.title,
+                    kind: tile.kind,
+                    worldFrame: CanvasEngine.worldFrame(tile: tile, in: layer.placement),
+                    zoneId: layer.placement.zoneId
+                ))
+            }
+        }
+        return snapshots
+    }
+
+    func navigationTileSnapshot(for tileId: UUID) -> NavigationTileSnapshot? {
+        navigationTileSnapshots().first { $0.tileId == tileId }
+    }
+
+    func firstNavigationTileId(inZone zoneId: UUID) -> UUID? {
+        navigationTileSnapshots().first { $0.zoneId == zoneId }?.tileId
+    }
+
     /// The single source of truth for the jump HUD: the visible tiles (their
     /// screen frame intersects the canvas) paired with their deterministic
     /// labels. Both the overlay's `drawTileLabels` and key resolution read this
@@ -1143,16 +1190,15 @@ final class CanvasNSView: NSView {
     func leaderJumpAssignments() -> [LeaderJumpAssignment] {
         var worldFrames: [UUID: TileFrame] = [:]
         let focusedId = canvasState.lastActiveTileId
-        let visible: [(id: UUID, frame: TileFrame)] = canvasState.tiles.compactMap { tile in
-            let worldFrame = activeZone.map { CanvasEngine.worldFrame(tile: tile, in: $0) } ?? tile.frame
-            let screenFrame = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvasState.viewport)
+        let visible: [(id: UUID, frame: TileFrame)] = navigationTileSnapshots().compactMap { snapshot in
+            let screenFrame = CanvasEngine.tileScreenFrame(snapshot.worldFrame, viewport: canvasState.viewport)
             guard screenFrame.intersects(bounds) else { return nil }
             // The tile you're already on AND fully seeing isn't a jump target —
             // you're there. A focused tile only partially in view stays a target
-            // (the jump centers it), as does any unfocused visible tile.
-            if tile.id == focusedId, bounds.contains(screenFrame) { return nil }
-            worldFrames[tile.id] = worldFrame
-            return (id: tile.id, frame: worldFrame)
+            // (the jump frames it), as does any unfocused visible tile.
+            if snapshot.tileId == focusedId, bounds.contains(screenFrame) { return nil }
+            worldFrames[snapshot.tileId] = snapshot.worldFrame
+            return (id: snapshot.tileId, frame: snapshot.worldFrame)
         }
         return TileArrangement.jumpLabels(for: visible, alphabet: leaderLabelAlphabet).compactMap { label in
             guard let frame = worldFrames[label.id] else { return nil }
@@ -1189,10 +1235,10 @@ final class CanvasNSView: NSView {
     }
 
     func framedViewportForTileJump(_ tileId: UUID) -> CanvasViewport? {
-        guard let tile = canvasState.tiles.first(where: { $0.id == tileId }) else { return nil }
-        let worldFrame = activeZone.map { CanvasEngine.worldFrame(tile: tile, in: $0) } ?? tile.frame
-        let rect = CGRect(x: worldFrame.x, y: worldFrame.y, width: worldFrame.width, height: worldFrame.height)
-        return CameraFraming.jumpViewport(for: rect, kind: tile.kind, currentViewport: canvasState.viewport, viewportSize: bounds.size)
+        guard let snapshot = navigationTileSnapshot(for: tileId) else { return nil }
+        let frame = snapshot.worldFrame
+        let rect = CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
+        return CameraFraming.jumpViewport(for: rect, kind: snapshot.kind, currentViewport: canvasState.viewport, viewportSize: bounds.size)
     }
 
     /// Frames the tile as a readable jump target. This first T07 slice snaps to
@@ -5263,11 +5309,10 @@ private final class NavModeOverlayNSView: NSView {
     private func drawSelectionRing(in canvas: CanvasNSView) {
         guard
             let selectedTileId,
-            let tile = canvas.canvasState.tiles.first(where: { $0.id == selectedTileId })
+            let snapshot = canvas.navigationTileSnapshot(for: selectedTileId)
         else { return }
 
-        let worldFrame = canvas.activeZone.map { CanvasEngine.worldFrame(tile: tile, in: $0) } ?? tile.frame
-        let screenFrame = CanvasEngine.tileScreenFrame(worldFrame, viewport: canvas.canvasState.viewport).insetBy(dx: -4, dy: -4)
+        let screenFrame = CanvasEngine.tileScreenFrame(snapshot.worldFrame, viewport: canvas.canvasState.viewport).insetBy(dx: -4, dy: -4)
         let path = NSBezierPath(roundedRect: screenFrame, xRadius: 12, yRadius: 12)
         NSColor.controlAccentColor.withAlphaComponent(0.95).setStroke()
         path.lineWidth = 3
