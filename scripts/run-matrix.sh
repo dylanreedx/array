@@ -132,6 +132,8 @@ run_app_check .build/debug/continuum-revived --browser-note-action-check
 run_app_check .build/debug/continuum-revived --focus-border-check
 run_app_check .build/debug/continuum-revived --browser-restore-state-check
 run_app_check .build/debug/continuum-revived --browser-inspector-tile-shell-check
+run_app_check .build/debug/continuum-revived --browser-inspector-dom-tree-check
+run_app_check .build/debug/continuum-revived --browser-inspector-console-check
 run_app_check .build/debug/continuum-revived --browser-profile-persistence-check
 run_app_check .build/debug/continuum-revived --note-file-tile-spawn-check
 run_app_check .build/debug/continuum-revived --run-artifacts-tile-check
