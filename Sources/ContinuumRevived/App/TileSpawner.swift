@@ -2788,6 +2788,32 @@ final class TileSpawner {
         func shellSingleQuoted(_ value: String) -> String {
             "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
         }
+        func pump(_ context: GhosttyRuntimeContext, seconds: TimeInterval) throws {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline {
+                ghostty_app_tick(try context.app)
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.03))
+            }
+        }
+        func pump(_ context: GhosttyRuntimeContext, timeout: TimeInterval, waitingFor label: String, until condition: () -> Bool) throws {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if condition() { return }
+                try pump(context, seconds: 0.06)
+            }
+            throw CheckError.failed("timed out waiting for \(label)")
+        }
+        func makeWindow(canvas: CanvasNSView, origin: CGPoint) -> NSWindow {
+            let window = NSWindow(
+                contentRect: NSRect(x: origin.x, y: origin.y, width: 1000, height: 700),
+                styleMask: [.titled],
+                backing: .buffered,
+                defer: false
+            )
+            window.contentView = canvas
+            window.orderFront(nil)
+            return window
+        }
 
         guard let tmuxPath = TmuxLocator.resolve() else {
             let path = try artifact([
@@ -2866,6 +2892,176 @@ final class TileSpawner {
         let postKill = try run(tmuxPath, ["has-session", "-t", sessionName], allowFailure: true)
         try expect(postKill.status != 0, "cleanup should remove the isolated test session")
 
+        // Product-path phase: spawn a terminal tile through TileSpawner + Ghostty,
+        // detach the Ghostty client like an app quit, prune the descriptor like boot,
+        // then reload the canvas and restart the same tile id. This catches checks
+        // that only exercise raw tmux CLI construction and never prove the app path.
+        let realRoot = fileManager.temporaryDirectory.appendingPathComponent("continuum-tmux-real-\(UUID().uuidString)", isDirectory: true)
+        let realChangedCwd = realRoot.appendingPathComponent("changed", isDirectory: true)
+        try [realRoot, realChangedCwd].forEach { try fileManager.createDirectory(at: $0, withIntermediateDirectories: true) }
+        let realRootPath = (realRoot.path as NSString).resolvingSymlinksInPath
+        let realChangedCwdPath = (realChangedCwd.path as NSString).resolvingSymlinksInPath
+        let realDefaultsSuiteName = "continuum.tmux-live-real.\(UUID().uuidString)"
+        let realDefaults = UserDefaults(suiteName: realDefaultsSuiteName)!
+        realDefaults.removePersistentDomain(forName: realDefaultsSuiteName)
+        realDefaults.set(true, forKey: TmuxPersistenceConfig.enabledKey)
+        realDefaults.set(tmuxPath, forKey: TmuxPersistenceConfig.pathKey)
+        defer {
+            realDefaults.removePersistentDomain(forName: realDefaultsSuiteName)
+            try? fileManager.removeItem(at: realRoot)
+        }
+
+        let realProject = Project(
+            id: UUID(),
+            name: "terminal-tmux-real-restart-check",
+            rootPath: realRootPath,
+            createdAt: Date(),
+            updatedAt: Date(),
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
+        )
+        let realStore = ProjectStore(projectRoot: realRoot)
+        try realStore.saveProject(realProject)
+        try realStore.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+
+        let realContext1 = try GhosttyRuntimeContext()
+        let realBrowser1 = BrowserEngineContext()
+        let realCanvas1 = CanvasNSView(canvasState: try realStore.loadCanvas())
+        realCanvas1.setFrameSize(CGSize(width: 1000, height: 700))
+        let realWindow1 = makeWindow(canvas: realCanvas1, origin: CGPoint(x: 120, y: 120))
+        let realSpawner1 = TileSpawner(
+            canvasView: realCanvas1,
+            ghostty: realContext1,
+            browserEngine: realBrowser1,
+            projectStore: realStore,
+            project: realProject,
+            defaults: realDefaults,
+            tmuxPathResolver: { _ in tmuxPath }
+        )
+
+        let realRuntime1: GhosttyTerminalRuntime
+        switch realSpawner1.spawnTerminal(profileId: "shell") {
+        case let .spawned(runtime): realRuntime1 = runtime
+        case let .unknownProfile(id): throw CheckError.failed("real app spawn unknown profile: \(id)")
+        case let .missingCommand(executable): throw CheckError.failed("real app spawn missing command: \(executable)")
+        case let .notConfigured(profileId): throw CheckError.failed("real app spawn not configured: \(profileId)")
+        case let .failure(error): throw error
+        }
+        guard let realTile = realCanvas1.canvasState.tiles.first(where: { $0.id == realRuntime1.tileId }) else {
+            throw CheckError.failed("real app spawn did not persist a terminal tile")
+        }
+        let realSessionName = TmuxSession.sessionName(tileId: realTile.id)
+        let realKill = TmuxSession.killSessionCommand(tileId: realTile.id, tmuxPath: tmuxPath)
+        var shouldRunRealDeferKill = true
+        defer {
+            if shouldRunRealDeferKill {
+                _ = try? run(realKill.command, realKill.arguments, allowFailure: true)
+            }
+        }
+
+        let realMarker = "a05-real-\(String(UUID().uuidString.prefix(8)))"
+        try pump(realContext1, timeout: 8.0, waitingFor: "initial real terminal surface") {
+            realRuntime1.qaTerminalView?.surface != nil
+        }
+        realRuntime1.sendInput(Data("printf '\(realMarker)-start-%s\\n' \"$(pwd)\"\n".utf8))
+        try pump(realContext1, timeout: 8.0, waitingFor: "initial real terminal input") {
+            realRuntime1.visibleText().contains("\(realMarker)-start-")
+        }
+        realRuntime1.sendInput(Data("cd \(shellSingleQuoted(realChangedCwdPath)) && printf '\(realMarker)-changed-%s\\n' \"$(pwd)\"\n".utf8))
+        try pump(realContext1, timeout: 8.0, waitingFor: "real terminal cwd change") {
+            realRuntime1.visibleText().contains("\(realMarker)-changed-")
+        }
+        let realPaneBeforeDetach = try waitForCwd(tmuxPath: tmuxPath, sessionName: realSessionName, cwd: realChangedCwdPath)
+
+        realRuntime1.terminate(policy: .force)
+        if let terminalTile = realCanvas1.tileView(for: realTile.id) as? TerminalTileNSView {
+            terminalTile.hostView.detachRuntime()
+        }
+        try pump(realContext1, seconds: 0.4)
+        realWindow1.close()
+        realBrowser1.shutdown()
+        realContext1.shutdown()
+
+        guard var descriptorBeforePrune = try realStore.listSessions().first(where: { $0.tileId == realTile.id }) else {
+            throw CheckError.failed("real app spawn did not save a terminal descriptor")
+        }
+        descriptorBeforePrune.lastExit = TerminalLastExit(exitCode: nil, signal: nil, at: Date())
+        try realStore.saveSession(descriptorBeforePrune)
+        pruneExitedSessions(in: realStore)
+        let descriptorsPrunedOnBoot = try !realStore.listSessions().contains { $0.tileId == realTile.id }
+        try expect(descriptorsPrunedOnBoot, "boot prune should remove app-close-stamped terminal descriptor before restart")
+        let sessionSurvivedAppDetach = try run(tmuxPath, ["has-session", "-t", realSessionName], allowFailure: true).status == 0
+        try expect(sessionSurvivedAppDetach, "tmux session should survive Ghostty/app detach for tile \(realTile.id)")
+
+        let realContext2 = try GhosttyRuntimeContext()
+        let realBrowser2 = BrowserEngineContext()
+        let realCanvas2 = CanvasNSView(canvasState: try realStore.loadCanvas())
+        realCanvas2.setFrameSize(CGSize(width: 1000, height: 700))
+        let realWindow2 = makeWindow(canvas: realCanvas2, origin: CGPoint(x: 180, y: 180))
+        let realSpawner2 = TileSpawner(
+            canvasView: realCanvas2,
+            ghostty: realContext2,
+            browserEngine: realBrowser2,
+            projectStore: realStore,
+            project: realProject,
+            defaults: realDefaults,
+            tmuxPathResolver: { _ in tmuxPath }
+        )
+        let realRuntime2: GhosttyTerminalRuntime
+        switch realSpawner2.restartTerminalTile(tileId: realTile.id) {
+        case let .restarted(runtime): realRuntime2 = runtime
+        case let .unknownProfile(id): throw CheckError.failed("real app restart unknown profile: \(id)")
+        case let .missingCommand(executable): throw CheckError.failed("real app restart missing command: \(executable)")
+        case let .notConfigured(profileId): throw CheckError.failed("real app restart not configured: \(profileId)")
+        case .tileNotFound: throw CheckError.failed("real app restart lost the terminal tile")
+        case let .failure(error): throw error
+        }
+        try pump(realContext2, timeout: 8.0, waitingFor: "restarted real terminal surface") {
+            realRuntime2.qaTerminalView?.surface != nil
+        }
+        try pump(realContext2, timeout: 8.0, waitingFor: "tmux scrollback in restarted terminal") {
+            realRuntime2.visibleText().contains("\(realMarker)-changed-")
+        }
+        let realPaneAfterRestart = try waitForCwd(tmuxPath: tmuxPath, sessionName: realSessionName, cwd: realChangedCwdPath)
+        try expect(realPaneAfterRestart.paneId == realPaneBeforeDetach.paneId, "real app restart should reattach the same tmux pane")
+        realRuntime2.sendInput(Data("printf '\(realMarker)-after-%s\\n' \"$(pwd)\"\n".utf8))
+        try pump(realContext2, timeout: 8.0, waitingFor: "input after real app restart") {
+            realRuntime2.visibleText().contains("\(realMarker)-after-")
+        }
+        let inputAfterRestartWorked = realRuntime2.visibleText().contains("\(realMarker)-after-")
+        let scrollbackVisibleAfterRestart = realRuntime2.visibleText().contains("\(realMarker)-changed-")
+
+        realRuntime2.terminate(policy: .force)
+        if let terminalTile = realCanvas2.tileView(for: realTile.id) as? TerminalTileNSView {
+            terminalTile.hostView.detachRuntime()
+        }
+        try pump(realContext2, seconds: 0.4)
+        realWindow2.close()
+        realBrowser2.shutdown()
+        realContext2.shutdown()
+        let realKillResult = try run(realKill.command, realKill.arguments)
+        shouldRunRealDeferKill = false
+        let realPostKill = try run(tmuxPath, ["has-session", "-t", realSessionName], allowFailure: true)
+        try expect(realPostKill.status != 0, "real app cleanup should remove tmux session \(realSessionName)")
+
+        let realAppManifest: [String: Any] = [
+            "status": "passed",
+            "projectRoot": realRootPath,
+            "tileId": realTile.id.uuidString,
+            "sessionName": realSessionName,
+            "marker": realMarker,
+            "descriptorPrunedOnBoot": descriptorsPrunedOnBoot,
+            "sessionSurvivedAppDetach": sessionSurvivedAppDetach,
+            "paneBeforeDetach": ["paneId": realPaneBeforeDetach.paneId, "cwd": realPaneBeforeDetach.cwd],
+            "paneAfterRestart": ["paneId": realPaneAfterRestart.paneId, "cwd": realPaneAfterRestart.cwd],
+            "scrollbackVisibleAfterRestart": scrollbackVisibleAfterRestart,
+            "inputAfterRestartWorked": inputAfterRestartWorked,
+            "killCommand": [realKill.command] + realKill.arguments,
+            "killExitStatus": realKillResult.status,
+            "postKillHasSessionStatus": realPostKill.status
+        ]
+
         let manifestPath = try artifact([
             "check": "terminal-tmux-live-integration",
             "status": "passed",
@@ -2888,7 +3084,8 @@ final class TileSpawner {
             "reattachedCwd": reattachedPane.cwd,
             "killCommand": [kill.command] + kill.arguments,
             "killExitStatus": killResult.status,
-            "postKillHasSessionStatus": postKill.status
+            "postKillHasSessionStatus": postKill.status,
+            "realAppRestart": realAppManifest
         ])
         return ("ContinuumRevivedTerminalTmuxLiveIntegrationChecks passed: \(manifestPath.path)", manifestPath)
     }
