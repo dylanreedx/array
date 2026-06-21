@@ -1916,6 +1916,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var tileSpawner: TileSpawner?
     private var profilePalette: LaunchProfilePalette?
     private var settingsPanel: SettingsPanel?
+    private var settingsChangeObserver: NSObjectProtocol?
     private var tmuxDefaults: UserDefaults = .standard
     private var tmuxPathResolver: (UserDefaults) -> String? = { TmuxLocator.resolve(defaults: $0) }
     private var tmuxProcessRunner: (String, [String]) throws -> Void = { command, arguments in
@@ -2116,6 +2117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self?.deleteBrowserProfile(tileId: tileId, profileId: profileId)
             }
             self.tileSpawner = spawner
+            installSettingsChangeObserver()
             workspaceRuntime?.activeController?.onBrowserRuntimeHydrated = { [weak self] runtime in
                 self?.wireContentProcessTerminationHandler(runtime)
                 self?.workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
@@ -3685,6 +3687,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self?.applyEditedNavKeymap(keymap)
         }
         return panel
+    }
+
+    private func installSettingsChangeObserver() {
+        guard settingsChangeObserver == nil else { return }
+        settingsChangeObserver = NotificationCenter.default.addObserver(
+            forName: .continuumSettingsChanged,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.applyBrowserInspectionPolicyToLiveWebViews()
+            }
+        }
+    }
+
+    private func applyBrowserInspectionPolicyToLiveWebViews() {
+        guard let browserEngine else { return }
+        for runtime in browserRuntimes {
+            browserEngine.applyInspectionPolicy(to: runtime.webView)
+        }
     }
 
     /// Live-applies a leader/nav rebind from the settings panel (no relaunch):

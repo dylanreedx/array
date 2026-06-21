@@ -29,10 +29,11 @@ Rules:
   Required output: make default shell tile usable without immediate zoom if scoped and safe, or write exact change plan.
   Audit note: fixed new-shell defaults. Terminal tiles now default to 900×584 at zoom 1 with an embedded Ghostty font-size default of 16 (0 setting = inherit Ghostty); production spawner/tmux check measured 112×24 cells, tmux wrapping, and input in `qa-runs/2026-06-21T014507Z/terminal-default-readability/manifest.json`; see `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260620T212451/audits/A02.md`.
 
-- [ ] A03 — Browser inspect element / devtools product reality  
-  Focus: T02 implementation, real context-menu/menu path, WebKit inspectability policy, `TileSpawner.spawnBrowserForNewWindow`, default-off developer setting.  
-  Relevant commit: `07c7d0b`.  
+- [x] A03 — Browser inspect element / devtools product reality
+  Focus: T02 implementation, real context-menu/menu path, WebKit inspectability policy, `TileSpawner.spawnBrowserForNewWindow`, default-off developer setting.
+  Relevant commit: `07c7d0b`.
   Required output: verify whether inspect element actually exists in app; implement/fix if missing.
+  Audit note: fixed product-visible Web Inspector enablement without pretending public WebKit can open Inspect Element. Settings now exposes `Browser > Enable Safari Web Inspector for Browser Tiles (open from Safari Develop)`, live webviews re-apply the policy on settings change, and `target=_blank` children use `BrowserEngineContext` policy; artifact `qa-runs/1782007004/browser-inspection-policy/manifest.json`; see `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260620T212451/audits/A03.md`.
 
 - [ ] A04 — Browser tabs/session restore product reality  
   Focus: T01/T01b/T03, actual tab UI, one-live-webview runtime behavior, restore semantics, user-visible behavior.  

@@ -141,6 +141,17 @@ public enum SettingsSchema {
                 ]
             ),
             SettingsSection(
+                id: "browser",
+                title: "Browser",
+                fields: [
+                    .toggle(
+                        key: BrowserWebInspectorConfig.userDefaultsKey,
+                        label: "Enable Safari Web Inspector for Browser Tiles (open from Safari Develop)",
+                        default: BrowserWebInspectorConfig.defaultEnabled
+                    ),
+                ]
+            ),
+            SettingsSection(
                 id: "terminal",
                 title: "Terminal",
                 fields: [

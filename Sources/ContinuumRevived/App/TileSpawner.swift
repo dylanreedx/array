@@ -598,7 +598,7 @@ final class TileSpawner {
         )
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
-        BrowserInspectionPolicy.resolved(defaults: defaults).apply(to: webView)
+        browserEngine.applyInspectionPolicy(to: webView)
         let runtime = WKWebViewBrowserRuntime(
             id: UUID(),
             tileId: tile.id,
@@ -1090,7 +1090,67 @@ final class TileSpawner {
         let suiteName = "continuum-browser-inspection-\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else { throw CheckError.failed("could not create isolated defaults") }
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.set(true, forKey: BrowserInspectionPolicy.userDefaultsKey)
+        defaults.removeObject(forKey: BrowserInspectionPolicy.userDefaultsKey)
+        let defaultPolicySource = BrowserInspectionPolicy.resolved(defaults: defaults, environment: [:]).source
+
+        let dynamicEngine = BrowserEngineContext(inspectionPolicyProvider: {
+            BrowserInspectionPolicy.resolved(defaults: defaults, environment: [:])
+        })
+        let dynamicDefaultInspectable: Bool
+        let dynamicOptInInspectable: Bool
+        let existingWebViewCanBeReappliedAfterPreferenceChange: Bool
+        if #available(macOS 13.3, *) {
+            let liveWebView = dynamicEngine.makeWebView(storageGroupId: BrowserState.sharedStorageGroupId)
+            dynamicDefaultInspectable = liveWebView.isInspectable
+            defaults.set(true, forKey: BrowserInspectionPolicy.userDefaultsKey)
+            let optInWebView = dynamicEngine.makeWebView(storageGroupId: BrowserState.sharedStorageGroupId)
+            dynamicOptInInspectable = optInWebView.isInspectable
+            dynamicEngine.applyInspectionPolicy(to: liveWebView)
+            existingWebViewCanBeReappliedAfterPreferenceChange = liveWebView.isInspectable == true
+        } else {
+            dynamicDefaultInspectable = false
+            defaults.set(true, forKey: BrowserInspectionPolicy.userDefaultsKey)
+            dynamicOptInInspectable = false
+            existingWebViewCanBeReappliedAfterPreferenceChange = true
+        }
+        try expect(dynamicDefaultInspectable == false, "dynamic default policy must be non-inspectable")
+        if supportsInspectableAPI {
+            try expect(dynamicOptInInspectable == true, "dynamic defaults opt-in must set isInspectable on supported OS")
+            try expect(existingWebViewCanBeReappliedAfterPreferenceChange, "existing webviews should be re-applicable after settings change")
+        }
+
+        let sections = SettingsSchema.sections()
+        guard let browserSectionIndex = sections.firstIndex(where: { $0.id == "browser" }) else {
+            throw CheckError.failed("Settings surface is missing Browser section")
+        }
+        let settingsSurfaceContainsWebInspectorToggle = sections[browserSectionIndex].fields.contains { field in
+            if case .toggle(BrowserWebInspectorConfig.userDefaultsKey, "Enable Safari Web Inspector for Browser Tiles (open from Safari Develop)", BrowserWebInspectorConfig.defaultEnabled) = field {
+                return true
+            }
+            return false
+        }
+        try expect(settingsSurfaceContainsWebInspectorToggle, "Settings surface is missing Safari Web Inspector toggle")
+        let settingsPanel = SettingsPanel(sections: sections, defaults: defaults)
+        settingsPanel.show(near: nil)
+        settingsPanel.selectSectionForQA(browserSectionIndex)
+        let settingsSurfaceRendered = settingsPanel.selectedSectionFieldsAllRenderedForQA()
+        guard let webInspectorToggle = settingsPanel.firstToggleControlForQA() else {
+            settingsPanel.close()
+            throw CheckError.failed("Settings Browser section did not render a toggle")
+        }
+        defaults.set(false, forKey: BrowserInspectionPolicy.userDefaultsKey)
+        webInspectorToggle.state = .off
+        webInspectorToggle.performClick(nil)
+        let settingsToggleRoundTrips = defaults.bool(forKey: BrowserInspectionPolicy.userDefaultsKey) == true
+        settingsPanel.close()
+        try expect(settingsSurfaceRendered, "Settings Browser section did not render controls")
+        try expect(settingsToggleRoundTrips, "Settings Web Inspector toggle did not round-trip through UserDefaults")
+
+        // Keep the target=_blank check deliberately asymmetric: defaults are false
+        // while the engine policy is true. A child that re-resolves UserDefaults
+        // instead of using BrowserEngineContext will fail here even though the old
+        // self-check (defaults true + engine true) passed.
+        defaults.set(false, forKey: BrowserInspectionPolicy.userDefaultsKey)
 
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("continuum-browser-inspection-\(UUID().uuidString)", isDirectory: true)
@@ -1111,10 +1171,11 @@ final class TileSpawner {
         try store.saveProject(project)
         try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
         let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        let fixedOptInEngine = BrowserEngineContext(inspectionPolicy: BrowserInspectionPolicy(isEnabled: true, source: "test"))
         let spawner = TileSpawner(
             canvasView: canvas,
             ghostty: nil,
-            browserEngine: BrowserEngineContext(inspectionPolicy: BrowserInspectionPolicy(isEnabled: true, source: "test")),
+            browserEngine: fixedOptInEngine,
             projectStore: store,
             project: project,
             defaults: defaults,
@@ -1135,7 +1196,7 @@ final class TileSpawner {
         } else {
             targetBlankChildInspectableFollowsPolicy = true
         }
-        try expect(targetBlankChildInspectableFollowsPolicy, "target blank child should follow opt-in inspection policy")
+        try expect(targetBlankChildInspectableFollowsPolicy, "target blank child should follow BrowserEngineContext inspection policy")
 
         let sourceRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Sources")
         var unconditionalInspectableAssignments: [String] = []
@@ -1157,10 +1218,28 @@ final class TileSpawner {
             .appendingPathComponent("qa-runs/\(Int(Date().timeIntervalSince1970))/browser-inspection-policy", isDirectory: true)
         try FileManager.default.createDirectory(at: artifactDir, withIntermediateDirectories: true)
         let artifact = artifactDir.appendingPathComponent("manifest.json")
-        let payload = """
-        {"check":"browser-inspection-policy","supportsInspectableAPI":\(supportsInspectableAPI),"defaultInspectable":\(defaultInspectable),"optInInspectableWhenSupported":\(optInInspectableWhenSupported),"optInAttemptDidNotCrash":\(optInAttemptDidNotCrash),"targetBlankChildInspectableFollowsPolicy":\(targetBlankChildInspectableFollowsPolicy),"unconditionalInspectableAssignments":[],"programmaticInspectorOpenAPIs":[],"defaultSource":"defaults/env","manualSafariDevelopVerification":"PENDING"}
-        """
-        try payload.write(to: artifact, atomically: true, encoding: .utf8)
+        let manifest: [String: Any] = [
+            "check": "browser-inspection-policy",
+            "supportsInspectableAPI": supportsInspectableAPI,
+            "defaultInspectable": defaultInspectable,
+            "optInInspectableWhenSupported": optInInspectableWhenSupported,
+            "optInAttemptDidNotCrash": optInAttemptDidNotCrash,
+            "dynamicDefaultInspectable": dynamicDefaultInspectable,
+            "dynamicOptInInspectable": dynamicOptInInspectable,
+            "existingWebViewCanBeReappliedAfterPreferenceChange": existingWebViewCanBeReappliedAfterPreferenceChange,
+            "settingsSurfacePath": "Continuum Revived > Settings… > Browser > Enable Safari Web Inspector for Browser Tiles (open from Safari Develop)",
+            "settingsSurfaceContainsWebInspectorToggle": settingsSurfaceContainsWebInspectorToggle,
+            "settingsSurfaceRendered": settingsSurfaceRendered,
+            "settingsToggleRoundTrips": settingsToggleRoundTrips,
+            "targetBlankChildInspectableFollowsPolicy": targetBlankChildInspectableFollowsPolicy,
+            "targetBlankPolicyRegression": "engine opt-in true while defaults false",
+            "unconditionalInspectableAssignments": unconditionalInspectableAssignments,
+            "programmaticInspectorOpenAPIs": programmaticInspectorOpenAPIs,
+            "defaultSource": defaultPolicySource,
+            "manualSafariDevelopVerification": "PENDING"
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
         return artifact
     }
 

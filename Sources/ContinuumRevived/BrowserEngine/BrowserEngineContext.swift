@@ -7,10 +7,14 @@ import WebKit
 final class BrowserEngineContext {
     private var dataStores: [String: WKWebsiteDataStore] = [:]
     private(set) var webViewCreationCountForQA = 0
-    private let inspectionPolicy: BrowserInspectionPolicy
+    private let inspectionPolicyProvider: () -> BrowserInspectionPolicy
 
-    init(inspectionPolicy: BrowserInspectionPolicy = .resolved()) {
-        self.inspectionPolicy = inspectionPolicy
+    init(inspectionPolicy: BrowserInspectionPolicy) {
+        self.inspectionPolicyProvider = { inspectionPolicy }
+    }
+
+    init(inspectionPolicyProvider: @escaping () -> BrowserInspectionPolicy = { .resolved() }) {
+        self.inspectionPolicyProvider = inspectionPolicyProvider
     }
 
     /// Returns (and lazily caches) the data store for a given storage group id.
@@ -44,9 +48,15 @@ final class BrowserEngineContext {
         configuration.preferences.isFraudulentWebsiteWarningEnabled = false
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         let webView = WKWebView(frame: .zero, configuration: configuration)
-        inspectionPolicy.apply(to: webView)
+        applyInspectionPolicy(to: webView)
         return webView
     }
+
+    func applyInspectionPolicy(to webView: WKWebView) {
+        inspectionPolicyProvider().apply(to: webView)
+    }
+
+    var inspectionPolicyForQA: BrowserInspectionPolicy { inspectionPolicyProvider() }
 
     /// Drops the data-store cache. Called after every browser runtime has
     /// torn down its web view so WebKit's process tree can fully release.

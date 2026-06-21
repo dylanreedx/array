@@ -1,8 +1,9 @@
+import ContinuumRevivedCore
 import Foundation
 import WebKit
 
 struct BrowserInspectionPolicy {
-    static let userDefaultsKey = "continuum.browser.webInspectorEnabled"
+    static let userDefaultsKey = BrowserWebInspectorConfig.userDefaultsKey
     static let environmentKey = "CONTINUUM_BROWSER_WEB_INSPECTOR"
 
     let isEnabled: Bool
@@ -21,7 +22,10 @@ struct BrowserInspectionPolicy {
                 return BrowserInspectionPolicy(isEnabled: false, source: "env")
             }
         }
-        return BrowserInspectionPolicy(isEnabled: defaults.bool(forKey: userDefaultsKey), source: "defaults/env")
+        if defaults.object(forKey: userDefaultsKey) == nil {
+            return BrowserInspectionPolicy(isEnabled: BrowserWebInspectorConfig.defaultEnabled, source: "default")
+        }
+        return BrowserInspectionPolicy(isEnabled: defaults.bool(forKey: userDefaultsKey), source: "defaults")
     }
 
     @MainActor
