@@ -1211,6 +1211,8 @@ final class TileSpawner {
         }
         try expect(targetBlankChildInspectableFollowsPolicy, "target blank child should follow BrowserEngineContext inspection policy")
 
+        let liveReapplyEvidence = try AppDelegate.runBrowserInspectionLiveReapplySelfCheck()
+
         let sourceRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Sources")
         var unconditionalInspectableAssignments: [String] = []
         var programmaticInspectorOpenAPIs: [String] = []
@@ -1246,6 +1248,7 @@ final class TileSpawner {
             "settingsToggleRoundTrips": settingsToggleRoundTrips,
             "targetBlankChildInspectableFollowsPolicy": targetBlankChildInspectableFollowsPolicy,
             "targetBlankPolicyRegression": "engine opt-in true while defaults false",
+            "liveReapplyEvidence": liveReapplyEvidence,
             "unconditionalInspectableAssignments": unconditionalInspectableAssignments,
             "programmaticInspectorOpenAPIs": programmaticInspectorOpenAPIs,
             "defaultSource": defaultPolicySource,

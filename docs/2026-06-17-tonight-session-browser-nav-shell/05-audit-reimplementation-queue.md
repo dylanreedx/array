@@ -90,9 +90,10 @@ Rules:
   Focus: schema, runtime, snapshots, restore correctness, memory/live-webview budget.
   Audit note: manually rescued the useful A13 diff after the iteration-7 harness hung with an empty log. Browser tab restore now validates restored tab URLs, repairs malformed restored active/inactive tabs to `about:blank`, restores inactive tab `interactionState` through the WebKit restore path, and persists the live `BrowserTileNSView` tab model rather than a stale runtime-only snapshot. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260621T113626/audits/A13.md` and artifact `qa-runs/2026-06-21T165540Z/browser-tab-restore/manifest.json`.
 
-- [ ] A14 — T02 Web Inspector code audit  
-  Commit: `07c7d0b`.  
+- [x] A14 — T02 Web Inspector code audit
+  Commit: `07c7d0b`.
   Focus: inspectability applied everywhere, default-off, UX discoverability.
+  Audit note: fixed a residual live-settings gap for `target=_blank` browser tiles. Settings reapply now scans installed browser tile views in addition to tracked runtimes, so existing popup tiles also opt in/out without restart; the browser inspection app flag now proves opener and target-blank child default-off, opt-in, and opt-out behavior. See `/Users/dylan/.pi/overnight-runs/continuum-revived/run-20260621T125737/audits/A14.md` and artifact `qa-runs/1782061376/browser-inspection-policy/manifest.json`.
 
 - [ ] A15 — Whole-branch revert/squash recommendation  
   Focus: summarize all audit artifacts and recommend keep/fix/revert for each commit before merge.

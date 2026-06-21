@@ -4075,11 +4075,169 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private func applyBrowserInspectionPolicyToLiveWebViews() {
-        guard let browserEngine else { return }
-        for runtime in browserRuntimes {
+    @discardableResult
+    private func applyBrowserInspectionPolicyToLiveWebViews() -> Int {
+        guard let browserEngine else { return 0 }
+        var appliedRuntimeIds: Set<ObjectIdentifier> = []
+        var appliedCount = 0
+
+        func apply(to runtime: WKWebViewBrowserRuntime) {
+            let identity = ObjectIdentifier(runtime)
+            guard appliedRuntimeIds.insert(identity).inserted else { return }
             browserEngine.applyInspectionPolicy(to: runtime.webView)
+            appliedCount += 1
         }
+
+        for runtime in browserRuntimes {
+            apply(to: runtime)
+        }
+
+        if let canvasView {
+            for tile in canvasView.canvasState.tiles where tile.kind == .browser {
+                guard let browserView = canvasView.tileView(for: tile.id) as? BrowserTileNSView,
+                      let runtime = browserView.runtime as? WKWebViewBrowserRuntime
+                else { continue }
+                apply(to: runtime)
+            }
+        }
+
+        return appliedCount
+    }
+
+    static func runBrowserInspectionLiveReapplySelfCheck() throws -> [String: Any] {
+        struct CheckError: Error, CustomStringConvertible {
+            let description: String
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError(description: message) }
+        }
+
+        let suiteName = "continuum-browser-inspection-live-reapply-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            throw CheckError(description: "could not create isolated defaults")
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(false, forKey: BrowserInspectionPolicy.userDefaultsKey)
+
+        let engine = BrowserEngineContext(inspectionPolicyProvider: {
+            BrowserInspectionPolicy.resolved(defaults: defaults, environment: [:])
+        })
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuum-browser-inspection-live-reapply-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let profile = BrowserProfile.builtInDefault()
+        let project = Project(
+            id: UUID(),
+            name: "browser-inspection-live-reapply-check",
+            rootPath: tempRoot.path,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 1),
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning,
+                defaultBrowserProfileId: profile.id
+            )
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        let spawner = TileSpawner(
+            canvasView: canvas,
+            ghostty: nil,
+            browserEngine: engine,
+            projectStore: store,
+            project: project,
+            defaults: defaults,
+            browserProfiles: [profile]
+        )
+
+        let opener: WKWebViewBrowserRuntime
+        switch spawner.spawnBrowser(url: "data:text/html;charset=utf-8,opener") {
+        case let .spawned(runtime): opener = runtime
+        case let .invalidURL(url): throw CheckError(description: "opener spawn invalid URL \(url)")
+        case let .failure(error): throw error
+        }
+        let request = URLRequest(url: URL(string: "data:text/html;charset=utf-8,target-blank-child")!)
+        let childWebView = opener.onNewWindowRequest?(request, WKWebViewConfiguration(), WKNavigationAction(), WKWindowFeatures())
+        try expect(childWebView != nil, "target blank seam should return child webview")
+        guard let childTile = canvas.canvasState.tiles.first(where: { $0.id != opener.tileId }) else {
+            throw CheckError(description: "target blank child tile missing")
+        }
+        guard let childView = canvas.tileView(for: childTile.id) as? BrowserTileNSView,
+              let childRuntime = childView.runtime as? WKWebViewBrowserRuntime
+        else {
+            throw CheckError(description: "target blank child runtime not discoverable from canvas tile view")
+        }
+
+        let supportsInspectableAPI: Bool
+        let initialOpenerInspectable: Bool
+        let initialChildInspectable: Bool
+        if #available(macOS 13.3, *) {
+            supportsInspectableAPI = true
+            initialOpenerInspectable = opener.webView.isInspectable
+            initialChildInspectable = childRuntime.webView.isInspectable
+        } else {
+            supportsInspectableAPI = false
+            initialOpenerInspectable = false
+            initialChildInspectable = false
+        }
+
+        defaults.set(true, forKey: BrowserInspectionPolicy.userDefaultsKey)
+        let delegate = AppDelegate()
+        delegate.browserEngine = engine
+        delegate.canvasView = canvas
+        let reappliedOnCount = delegate.applyBrowserInspectionPolicyToLiveWebViews()
+
+        let enabledOpenerInspectable: Bool
+        let enabledChildInspectable: Bool
+        if #available(macOS 13.3, *) {
+            enabledOpenerInspectable = opener.webView.isInspectable
+            enabledChildInspectable = childRuntime.webView.isInspectable
+        } else {
+            enabledOpenerInspectable = false
+            enabledChildInspectable = false
+        }
+
+        defaults.set(false, forKey: BrowserInspectionPolicy.userDefaultsKey)
+        let reappliedOffCount = delegate.applyBrowserInspectionPolicyToLiveWebViews()
+        let disabledOpenerInspectable: Bool
+        let disabledChildInspectable: Bool
+        if #available(macOS 13.3, *) {
+            disabledOpenerInspectable = opener.webView.isInspectable
+            disabledChildInspectable = childRuntime.webView.isInspectable
+        } else {
+            disabledOpenerInspectable = false
+            disabledChildInspectable = false
+        }
+
+        try expect(reappliedOnCount == 2, "settings reapply should visit opener and target blank child webviews; got \(reappliedOnCount)")
+        try expect(reappliedOffCount == 2, "settings disable reapply should visit opener and target blank child webviews; got \(reappliedOffCount)")
+        if supportsInspectableAPI {
+            try expect(initialOpenerInspectable == false, "opener should start non-inspectable by default")
+            try expect(initialChildInspectable == false, "target blank child should start non-inspectable by default")
+            try expect(enabledOpenerInspectable == true, "settings opt-in should make existing opener inspectable")
+            try expect(enabledChildInspectable == true, "settings opt-in should make existing target blank child inspectable")
+            try expect(disabledOpenerInspectable == false, "settings opt-out should make existing opener non-inspectable")
+            try expect(disabledChildInspectable == false, "settings opt-out should make existing target blank child non-inspectable")
+        }
+
+        return [
+            "supportsInspectableAPI": supportsInspectableAPI,
+            "liveCanvasBrowserWebViewsReappliedCount": reappliedOnCount,
+            "liveCanvasBrowserWebViewsDisabledCount": reappliedOffCount,
+            "initialOpenerInspectable": initialOpenerInspectable,
+            "initialTargetBlankChildInspectable": initialChildInspectable,
+            "existingOpenerReappliedAfterSettingsOptIn": enabledOpenerInspectable,
+            "existingTargetBlankChildReappliedAfterSettingsOptIn": enabledChildInspectable,
+            "existingOpenerReappliedAfterSettingsOptOut": disabledOpenerInspectable == false,
+            "existingTargetBlankChildReappliedAfterSettingsOptOut": disabledChildInspectable == false
+        ]
     }
 
     /// Live-applies a leader/nav rebind from the settings panel (no relaunch):
