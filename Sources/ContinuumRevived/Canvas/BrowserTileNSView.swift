@@ -548,6 +548,26 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         runtime.isSemanticContentResponder(window?.firstResponder)
     }
 
+    func captureDOMSnapshotForInspector(completion: @escaping (Result<BrowserDOMSnapshot, Error>) -> Void) {
+        guard let runtime = runtime as? WKWebViewBrowserRuntime else {
+            completion(.failure(Self.inspectorRuntimeError("live browser runtime is unavailable")))
+            return
+        }
+        runtime.captureDOMSnapshot(completion: completion)
+    }
+
+    func highlightDOMNodeForInspector(path: String, completion: @escaping (Result<Bool, Error>) -> Void) {
+        guard let runtime = runtime as? WKWebViewBrowserRuntime else {
+            completion(.failure(Self.inspectorRuntimeError("live browser runtime is unavailable")))
+            return
+        }
+        runtime.highlightDOMNode(path: path, durationMilliseconds: 1_500, completion: completion)
+    }
+
+    private static func inspectorRuntimeError(_ message: String) -> NSError {
+        NSError(domain: "ContinuumBrowserInspector", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
     var chromeURLStringForQA: String { urlField.stringValue }
     var chromeTitleForQA: String { chromeSnapshot?.title ?? "" }
     var chromeFaviconTooltipForQA: String? { faviconLabel.toolTip }

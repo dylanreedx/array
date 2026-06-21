@@ -158,6 +158,8 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
     private let uiDialogPresenter: BrowserUIDialogPresenting
     private var observers: [NSKeyValueObservation] = []
     private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
+    private(set) var domSnapshotEvaluationCountForQA = 0
+    private(set) var domHighlightEvaluationCountForQA = 0
     var reservedShortcutHandler: ((NSEvent) -> Bool)? {
         didSet { hostView?.reservedShortcutHandler = reservedShortcutHandler }
     }
@@ -375,6 +377,127 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
                 completion(.success(context))
             }
         }
+    }
+
+    func captureDOMSnapshot(completion: @escaping (Result<BrowserDOMSnapshot, Error>) -> Void) {
+        domSnapshotEvaluationCountForQA += 1
+        webView.evaluateJavaScript(Self.domSnapshotScript) { result, error in
+            Task { @MainActor in
+                if let error {
+                    completion(.failure(error))
+                    return
+                }
+                guard let json = result as? String, let data = json.data(using: .utf8) else {
+                    completion(.failure(Self.domSnapshotError("DOM snapshot script returned non-JSON result")))
+                    return
+                }
+                do {
+                    let snapshot = try JSONDecoder().decode(BrowserDOMSnapshot.self, from: data)
+                    completion(.success(snapshot))
+                } catch {
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    func highlightDOMNode(path: String, durationMilliseconds: Int = 1_500, completion: @escaping (Result<Bool, Error>) -> Void) {
+        let pathLiteral: String
+        do {
+            let data = try JSONSerialization.data(withJSONObject: [path], options: [])
+            let encoded = String(data: data, encoding: .utf8) ?? "[\"\"]"
+            pathLiteral = "(\(encoded))[0]"
+        } catch {
+            completion(.failure(error))
+            return
+        }
+        let boundedDuration = max(100, min(durationMilliseconds, 10_000))
+        let script = Self.domHighlightScript(pathLiteral: pathLiteral, durationMilliseconds: boundedDuration)
+        domHighlightEvaluationCountForQA += 1
+        webView.evaluateJavaScript(script) { result, error in
+            Task { @MainActor in
+                if let error {
+                    completion(.failure(error))
+                    return
+                }
+                completion(.success((result as? Bool) == true))
+            }
+        }
+    }
+
+    private static let domSnapshotScript = """
+    (() => {
+      const maxNodes = 800;
+      const maxDepth = 32;
+      const out = [];
+      function pathFor(parentPath, index) { return parentPath === '' ? String(index) : parentPath + '/' + index; }
+      function textPreviewFor(el) {
+        const raw = (el.innerText || el.textContent || '').trim();
+        return raw.length ? raw.slice(0, 80) : null;
+      }
+      function classNameFor(el) {
+        if (typeof el.className === 'string' && el.className.length) { return el.className; }
+        const attr = el.getAttribute && el.getAttribute('class');
+        return attr && attr.length ? attr : null;
+      }
+      function walk(node, depth, path) {
+        if (out.length >= maxNodes || depth > maxDepth) return;
+        if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+        const el = node;
+        out.push({
+          id: path,
+          tagName: (el.tagName || '').toLowerCase(),
+          nodeName: el.nodeName || '',
+          idAttribute: el.id || null,
+          className: classNameFor(el),
+          textPreview: textPreviewFor(el),
+          childCount: el.children ? el.children.length : 0,
+          depth
+        });
+        if (!el.children) return;
+        Array.from(el.children).forEach((child, i) => walk(child, depth + 1, pathFor(path, i)));
+      }
+      walk(document.documentElement, 0, '0');
+      return JSON.stringify({ nodes: out, truncated: out.length >= maxNodes, maxNodes, maxDepth });
+    })()
+    """
+
+    private static func domHighlightScript(pathLiteral: String, durationMilliseconds: Int) -> String {
+        """
+        (() => {
+          const path = String(\(pathLiteral)).split('/').map(Number).slice(1);
+          let el = document.documentElement;
+          for (const i of path) {
+            if (!el || !el.children || !Number.isInteger(i) || i < 0 || i >= el.children.length) { return false; }
+            el = el.children[i];
+          }
+          if (!el) { return false; }
+          const rect = el.getBoundingClientRect();
+          if (!rect) { return false; }
+          const existing = document.getElementById('__continuum_dom_highlight__');
+          if (existing) { existing.remove(); }
+          const overlay = document.createElement('div');
+          overlay.id = '__continuum_dom_highlight__';
+          overlay.setAttribute('aria-hidden', 'true');
+          overlay.style.position = 'fixed';
+          overlay.style.left = rect.left + 'px';
+          overlay.style.top = rect.top + 'px';
+          overlay.style.width = Math.max(rect.width, 1) + 'px';
+          overlay.style.height = Math.max(rect.height, 1) + 'px';
+          overlay.style.border = '2px solid rgba(0, 122, 255, 0.95)';
+          overlay.style.background = 'rgba(0, 122, 255, 0.16)';
+          overlay.style.boxSizing = 'border-box';
+          overlay.style.pointerEvents = 'none';
+          overlay.style.zIndex = '2147483647';
+          document.documentElement.appendChild(overlay);
+          window.setTimeout(() => overlay.remove(), \(durationMilliseconds));
+          return true;
+        })()
+        """
+    }
+
+    private static func domSnapshotError(_ message: String) -> NSError {
+        NSError(domain: "ContinuumBrowserDOMSnapshot", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
     func focus() {

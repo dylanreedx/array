@@ -767,7 +767,13 @@ final class TileSpawner {
             runtimeRef: nil,
             metadata: TileMetadata()
         )
-        let view = BrowserInspectorTileNSView(tile: tile, inspectorState: inspectorState, inspectedBrowser: summary)
+        let view = BrowserInspectorTileNSView(
+            tile: tile,
+            inspectorState: inspectorState,
+            inspectedBrowser: summary,
+            domSnapshotProvider: browserInspectorDOMSnapshotProvider(for: browserTileId),
+            domHighlighter: browserInspectorDOMHighlighter(for: browserTileId)
+        )
         view.onSelectedPanelChange = { [weak self] panel in
             try? self?.updateBrowserInspectorPanel(inspectorTileId: inspectorTileId, selectedPanel: panel)
         }
@@ -788,12 +794,42 @@ final class TileSpawner {
         let browserState = try? loadBrowserStateIfAvailable()
         let inspectorState = browserState?.inspectorStates.first { $0.inspectorTileId == tile.id }
         let summary = inspectorState.flatMap { browserInspectorSummary(for: $0.inspectedBrowserTileId, browserState: browserState) }
-        let view = BrowserInspectorTileNSView(tile: tile, inspectorState: inspectorState, inspectedBrowser: summary)
+        let view = BrowserInspectorTileNSView(
+            tile: tile,
+            inspectorState: inspectorState,
+            inspectedBrowser: summary,
+            domSnapshotProvider: inspectorState.map { browserInspectorDOMSnapshotProvider(for: $0.inspectedBrowserTileId) },
+            domHighlighter: inspectorState.map { browserInspectorDOMHighlighter(for: $0.inspectedBrowserTileId) }
+        )
         let inspectorTileId = tile.id
         view.onSelectedPanelChange = { [weak self] panel in
             try? self?.updateBrowserInspectorPanel(inspectorTileId: inspectorTileId, selectedPanel: panel)
         }
         canvasView.install(tileView: view, for: tile)
+    }
+
+    private func browserInspectorDOMSnapshotProvider(for browserTileId: UUID) -> BrowserInspectorTileNSView.DOMSnapshotProvider {
+        { [weak self] completion in
+            guard let browserView = self?.canvasView?.tileView(for: browserTileId) as? BrowserTileNSView else {
+                completion(.failure(Self.browserInspectorConnectionError("linked browser tile is not live")))
+                return
+            }
+            browserView.captureDOMSnapshotForInspector(completion: completion)
+        }
+    }
+
+    private func browserInspectorDOMHighlighter(for browserTileId: UUID) -> BrowserInspectorTileNSView.DOMHighlighter {
+        { [weak self] nodePath, completion in
+            guard let browserView = self?.canvasView?.tileView(for: browserTileId) as? BrowserTileNSView else {
+                completion(.failure(Self.browserInspectorConnectionError("linked browser tile is not live")))
+                return
+            }
+            browserView.highlightDOMNodeForInspector(path: nodePath, completion: completion)
+        }
+    }
+
+    private static func browserInspectorConnectionError(_ message: String) -> NSError {
+        NSError(domain: "ContinuumBrowserInspectorConnection", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
     @discardableResult
@@ -4181,6 +4217,188 @@ final class TileSpawner {
             "inspectorTileId": inspectorTileId.uuidString,
             "selectedPanelAfterRestore": restoredInspectorState?.selectedPanel.rawValue ?? "missing",
             "nativeInspectorNeedleHits": nativeInspectorNeedleHits
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runBrowserInspectorDOMTreeSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { if case let .failed(message) = self { return message }; return "failed" }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func waitUntil(_ timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if condition() { return true }
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.03))
+            }
+            return condition()
+        }
+        func timestamp() -> String {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyyMMdd-HHmmss"
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            return formatter.string(from: Date())
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-browser-inspector-dom-tree-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let profile = BrowserProfile.builtInDefault()
+        let project = Project(
+            id: UUID(),
+            name: "browser-inspector-dom-tree-check",
+            rootPath: tempRoot.path,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 1),
+            defaultLaunchProfileId: "shell",
+            editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning,
+                defaultBrowserProfileId: profile.id
+            )
+        )
+        let store = ProjectStore(projectRoot: tempRoot)
+        try store.saveProject(project)
+        try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+
+        let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+        canvas.frame = NSRect(x: 0, y: 0, width: 1_120, height: 620)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_120, height: 620),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = canvas
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+
+        let spawner = TileSpawner(
+            canvasView: canvas,
+            ghostty: nil,
+            browserEngine: BrowserEngineContext(),
+            projectStore: store,
+            project: project,
+            browserProfiles: [profile]
+        )
+
+        let html = """
+        <!doctype html>
+        <html>
+          <head><meta charset="utf-8"><title>DOM Tree QA</title></head>
+          <body>
+            <main id="app" class="shell primary">
+              <section class="card">
+                <p class="copy"><span id="target" class="target selected">Expected DOM text from WKWebView</span></p>
+              </section>
+              <iframe src="https://cross-origin.example.test/frame"></iframe>
+            </main>
+          </body>
+        </html>
+        """
+        let encodedHTML = html.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? html
+        let dataURL = "data:text/html;charset=utf-8,\(encodedHTML)"
+
+        let browserRuntime: WKWebViewBrowserRuntime
+        switch spawner.spawnBrowser(url: dataURL) {
+        case let .spawned(runtime):
+            browserRuntime = runtime
+        case let .invalidURL(url):
+            throw CheckError.failed("browser spawn rejected URL \(url)")
+        case let .failure(error):
+            throw error
+        }
+        try expect(waitUntil { browserRuntime.title == "DOM Tree QA" || !browserRuntime.webView.isLoading }, "browser data URL did not finish loading")
+        try expect(browserRuntime.webView.url?.absoluteString.hasPrefix("data:text/html") == true, "check must evaluate a real WKWebView data URL")
+
+        let inspectorTileId: UUID
+        switch spawner.spawnBrowserInspector(for: browserRuntime.tileId) {
+        case let .spawned(tileId):
+            inspectorTileId = tileId
+        case .notBrowserTile:
+            throw CheckError.failed("spawnBrowserInspector rejected the browser tile")
+        case let .failure(error):
+            throw error
+        }
+        guard let inspectorView = canvas.tileView(for: inspectorTileId) as? BrowserInspectorTileNSView else {
+            throw CheckError.failed("spawned inspector did not install BrowserInspectorTileNSView")
+        }
+
+        var snapshotResult: Result<BrowserDOMSnapshot, Error>?
+        inspectorView.refreshElementsForQA { result in snapshotResult = result }
+        try expect(waitUntil { snapshotResult != nil }, "DOM snapshot refresh timed out")
+        let snapshot = try snapshotResult?.get() ?? { throw CheckError.failed("DOM snapshot result missing") }()
+        let expectedNode = snapshot.nodes.first { node in
+            node.tagName == "span"
+                && node.idAttribute == "target"
+                && (node.className?.contains("target") == true)
+                && (node.textPreview?.contains("Expected DOM text") == true)
+        }
+        let expectedNodeFound = expectedNode != nil
+        try expect(expectedNodeFound, "snapshot did not include expected span#target node")
+        try expect(snapshot.maxNodes == 800 && snapshot.maxDepth == 32, "DOM snapshot did not expose node/depth cap metadata")
+        try expect(snapshot.nodes.contains(where: { $0.tagName == "main" && $0.idAttribute == "app" && $0.className?.contains("shell") == true }), "snapshot did not include expected main#app.shell node")
+
+        var highlightResult: Result<Bool, Error>?
+        inspectorView.selectDOMNodeForQA(id: expectedNode!.id) { result in highlightResult = result }
+        try expect(waitUntil { highlightResult != nil }, "DOM highlight timed out")
+        let highlightReturnedTrue = try highlightResult?.get() ?? false
+        try expect(highlightReturnedTrue, "highlight script did not return true for selected node")
+        try expect(browserRuntime.domSnapshotEvaluationCountForQA > 0, "DOM snapshot must use WKWebView.evaluateJavaScript")
+        try expect(browserRuntime.domHighlightEvaluationCountForQA > 0, "DOM highlight must use WKWebView.evaluateJavaScript")
+
+        guard let inspectorTile = canvas.canvasState.tiles.first(where: { $0.id == inspectorTileId }) else {
+            throw CheckError.failed("inspector tile missing before disconnected scenario")
+        }
+        canvas.removeTile(id: browserRuntime.tileId)
+        spawner.installBrowserInspectorTile(inspectorTile, in: canvas)
+        guard let disconnectedInspector = canvas.tileView(for: inspectorTileId) as? BrowserInspectorTileNSView else {
+            throw CheckError.failed("disconnected inspector did not reinstall")
+        }
+        try expect(disconnectedInspector.isDisconnectedForQA, "missing linked browser should render disconnected inspector state")
+        var disconnectedRefreshResult: Result<BrowserDOMSnapshot, Error>?
+        disconnectedInspector.refreshElementsForQA { result in disconnectedRefreshResult = result }
+        try expect(waitUntil { disconnectedRefreshResult != nil }, "disconnected refresh did not complete")
+        if let disconnectedRefreshResult {
+            switch disconnectedRefreshResult {
+            case .success:
+                throw CheckError.failed("disconnected inspector unexpectedly returned a DOM snapshot")
+            case .failure:
+                break
+            }
+        }
+
+        let realWKWebViewEvaluated = browserRuntime.domSnapshotEvaluationCountForQA > 0 && browserRuntime.domHighlightEvaluationCountForQA > 0
+        let artifactDir = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp(), isDirectory: true)
+            .appendingPathComponent("browser-inspector-dom-tree", isDirectory: true)
+        try fileManager.createDirectory(at: artifactDir, withIntermediateDirectories: true)
+        let artifact = artifactDir.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "browser-inspector-dom-tree",
+            "realWKWebViewEvaluated": realWKWebViewEvaluated,
+            "nodeCount": snapshot.nodes.count,
+            "truncated": snapshot.truncated,
+            "maxNodes": snapshot.maxNodes,
+            "maxDepth": snapshot.maxDepth,
+            "expectedNodeFound": expectedNodeFound,
+            "expectedNodePath": expectedNode?.id ?? "missing",
+            "highlightReturnedTrue": highlightReturnedTrue,
+            "disconnectedPanelRendered": disconnectedInspector.isDisconnectedForQA,
+            "crossOriginIframeSupport": "out-of-scope"
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)

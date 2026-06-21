@@ -17,7 +17,7 @@ Rules:
   Source ticket: `T01-browser-inspector-tile-shell.md`.
   Required output: inspector tile linked to browser tile, auto-deletes when browser tile is deleted, persisted relationship/panel, artifact.
 
-- [ ] I02 — Browser Inspector DOM tree snapshot and element highlight
+- [x] I02 — Browser Inspector DOM tree snapshot and element highlight
   Source ticket: `T02-browser-inspector-dom-tree.md`.
   Required output: real WKWebView DOM snapshot, bounded tree, selected element temporary highlight, artifact.
 

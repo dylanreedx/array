@@ -750,6 +750,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-inspector-dom-tree-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try TileSpawner.runBrowserInspectorDOMTreeSelfCheck()
+                print("ContinuumRevivedBrowserInspectorDOMTreeChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--chrome-integration-guardrails-check") {
             do {
                 let artifact = try runChromeIntegrationGuardrailsSelfCheck()
