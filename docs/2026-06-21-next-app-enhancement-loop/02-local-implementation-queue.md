@@ -59,7 +59,7 @@ Rules:
   Source ticket: `W04-workspace-top-bar.md`.
   Required output: top workspace identity/counts/save-state-if-real/actions, artifact.
 
-- [ ] W05 — Workspace create/rename/delete polish
+- [x] W05 — Workspace create/rename/delete polish
   Source ticket: `W05-workspace-create-rename-delete-polish.md`.
   Required output: create/rename/delete UX with validation/confirmation/last-workspace protection, artifact.
 

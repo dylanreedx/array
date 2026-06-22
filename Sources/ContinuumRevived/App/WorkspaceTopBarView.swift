@@ -10,6 +10,7 @@ struct WorkspaceTopBarModel: Equatable {
     var zoneCount: Int
     var saveState: WorkspaceDocumentSaveState
     var workspaces: [WorkspaceEntry]
+    var managementMessage: String?
 }
 
 @MainActor
@@ -17,14 +18,19 @@ final class WorkspaceTopBarView: NSView {
     private let nameLabel: NSTextField
     private let countsLabel: NSTextField
     private let saveStateLabel: NSTextField
+    private let managementMessageLabel: NSTextField
     private let switchWorkspaceButton: NSPopUpButton
+    private let createButton: NSButton
     private let renameButton: NSButton
+    private let deleteButton: NSButton
     private let toggleSidebarButton: NSButton
 
     private var currentWorkspaceId: UUID?
 
     var onSwitchWorkspace: ((UUID) -> Void)?
+    var onCreateWorkspace: (() -> Void)?
     var onRenameWorkspace: ((UUID) -> Void)?
+    var onDeleteWorkspace: ((UUID) -> Void)?
     var onToggleSidebar: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
@@ -44,14 +50,28 @@ final class WorkspaceTopBarView: NSView {
         saveStateLabel.textColor = .secondaryLabelColor
         saveStateLabel.lineBreakMode = .byTruncatingTail
 
+        managementMessageLabel = NSTextField(labelWithString: "")
+        managementMessageLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        managementMessageLabel.textColor = .systemOrange
+        managementMessageLabel.lineBreakMode = .byTruncatingTail
+        managementMessageLabel.isHidden = true
+
         switchWorkspaceButton = NSPopUpButton(frame: .zero, pullsDown: false)
         switchWorkspaceButton.toolTip = "Switch workspace"
         switchWorkspaceButton.bezelStyle = .rounded
         switchWorkspaceButton.setContentCompressionResistancePriority(.required, for: .horizontal)
 
+        createButton = NSButton(title: "New", target: nil, action: nil)
+        createButton.bezelStyle = .rounded
+        createButton.toolTip = "Create workspace"
+
         renameButton = NSButton(title: "Rename", target: nil, action: nil)
         renameButton.bezelStyle = .rounded
         renameButton.toolTip = "Rename workspace"
+
+        deleteButton = NSButton(title: "Delete", target: nil, action: nil)
+        deleteButton.bezelStyle = .rounded
+        deleteButton.toolTip = "Delete workspace"
 
         toggleSidebarButton = NSButton(title: "Sidebar", target: nil, action: nil)
         toggleSidebarButton.bezelStyle = .rounded
@@ -66,24 +86,31 @@ final class WorkspaceTopBarView: NSView {
         nameLabel.setAccessibilityIdentifier("ContinuumWorkspaceTopBarName")
         countsLabel.setAccessibilityIdentifier("ContinuumWorkspaceTopBarCounts")
         saveStateLabel.setAccessibilityIdentifier("ContinuumWorkspaceTopBarSaveState")
+        managementMessageLabel.setAccessibilityIdentifier("ContinuumWorkspaceTopBarManagementMessage")
         switchWorkspaceButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarSwitch")
+        createButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarCreate")
         renameButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarRename")
+        deleteButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarDelete")
         toggleSidebarButton.setAccessibilityIdentifier("ContinuumWorkspaceTopBarToggleSidebar")
 
         switchWorkspaceButton.target = self
         switchWorkspaceButton.action = #selector(switchWorkspaceSelected(_:))
+        createButton.target = self
+        createButton.action = #selector(createWorkspaceClicked(_:))
         renameButton.target = self
         renameButton.action = #selector(renameWorkspaceClicked(_:))
+        deleteButton.target = self
+        deleteButton.action = #selector(deleteWorkspaceClicked(_:))
         toggleSidebarButton.target = self
         toggleSidebarButton.action = #selector(toggleSidebarClicked(_:))
 
-        let identityStack = NSStackView(views: [nameLabel, countsLabel, saveStateLabel])
+        let identityStack = NSStackView(views: [nameLabel, countsLabel, saveStateLabel, managementMessageLabel])
         identityStack.orientation = .horizontal
         identityStack.alignment = .firstBaseline
         identityStack.spacing = 10
         identityStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let actionsStack = NSStackView(views: [switchWorkspaceButton, renameButton, toggleSidebarButton])
+        let actionsStack = NSStackView(views: [switchWorkspaceButton, createButton, renameButton, deleteButton, toggleSidebarButton])
         actionsStack.orientation = .horizontal
         actionsStack.alignment = .centerY
         actionsStack.spacing = 8
@@ -114,6 +141,7 @@ final class WorkspaceTopBarView: NSView {
         countsLabel.stringValue = Self.countsText(projectCount: model.projectCount, zoneCount: model.zoneCount)
         saveStateLabel.stringValue = model.saveState.displayTitle
         saveStateLabel.textColor = Self.color(for: model.saveState)
+        setManagementMessage(model.managementMessage)
 
         switchWorkspaceButton.removeAllItems()
         for workspace in model.workspaces {
@@ -124,12 +152,22 @@ final class WorkspaceTopBarView: NSView {
             switchWorkspaceButton.selectItem(at: selectedIndex)
         }
         switchWorkspaceButton.isEnabled = !model.workspaces.isEmpty
-        renameButton.isEnabled = true
+        createButton.isEnabled = true
+        renameButton.isEnabled = currentWorkspaceId != nil
+        deleteButton.isEnabled = model.workspaces.count > 1 && currentWorkspaceId != nil
+    }
+
+    func setManagementMessage(_ message: String?) {
+        let text = message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        managementMessageLabel.stringValue = text
+        managementMessageLabel.isHidden = text.isEmpty
     }
 
     var workspaceNameForQA: String { nameLabel.stringValue }
     var countsTextForQA: String { countsLabel.stringValue }
     var saveStateTextForQA: String { saveStateLabel.stringValue }
+    var managementMessageForQA: String { managementMessageLabel.stringValue }
+    var deleteEnabledForQA: Bool { deleteButton.isEnabled }
     var switchWorkspaceNamesForQA: [String] { switchWorkspaceButton.itemArray.map(\.title) }
 
     @discardableResult
@@ -143,9 +181,23 @@ final class WorkspaceTopBarView: NSView {
     }
 
     @discardableResult
+    func clickCreateForQA() -> Bool {
+        guard createButton.isEnabled else { return false }
+        createButton.performClick(nil)
+        return true
+    }
+
+    @discardableResult
     func clickRenameForQA() -> Bool {
         guard renameButton.isEnabled else { return false }
         renameButton.performClick(nil)
+        return true
+    }
+
+    @discardableResult
+    func clickDeleteForQA() -> Bool {
+        guard deleteButton.isEnabled else { return false }
+        deleteButton.performClick(nil)
         return true
     }
 
@@ -163,9 +215,18 @@ final class WorkspaceTopBarView: NSView {
         onSwitchWorkspace?(workspaceId)
     }
 
+    @objc private func createWorkspaceClicked(_ sender: NSButton) {
+        onCreateWorkspace?()
+    }
+
     @objc private func renameWorkspaceClicked(_ sender: NSButton) {
         guard let currentWorkspaceId else { return }
         onRenameWorkspace?(currentWorkspaceId)
+    }
+
+    @objc private func deleteWorkspaceClicked(_ sender: NSButton) {
+        guard let currentWorkspaceId else { return }
+        onDeleteWorkspace?(currentWorkspaceId)
     }
 
     @objc private func toggleSidebarClicked(_ sender: NSButton) {
@@ -173,7 +234,8 @@ final class WorkspaceTopBarView: NSView {
     }
 
     private static func countsText(projectCount: Int, zoneCount: Int) -> String {
-        "\(projectCount) \(projectCount == 1 ? "project" : "projects") · \(zoneCount) \(zoneCount == 1 ? "zone" : "zones")"
+        let base = "\(projectCount) \(projectCount == 1 ? "project" : "projects") · \(zoneCount) \(zoneCount == 1 ? "zone" : "zones")"
+        return zoneCount == 0 ? "\(base) · empty workspace" : base
     }
 
     private static func color(for state: WorkspaceDocumentSaveState) -> NSColor {

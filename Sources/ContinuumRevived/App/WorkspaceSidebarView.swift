@@ -42,6 +42,11 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     private let outlineView: NSOutlineView
     private let column: NSTableColumn
     private let titleLabel: NSTextField
+    private let actionStack: NSStackView
+    private let createButton: NSButton
+    private let renameButton: NSButton
+    private let deleteButton: NSButton
+    private let managementMessageLabel: NSTextField
 
     private var tree = SidebarTree(workspaces: [])
     private var currentWorkspaceId: UUID?
@@ -51,12 +56,40 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     private var tileItemsByKey: [TileItemKey: SidebarItem] = [:]
 
     var onSelection: ((WorkspaceSidebarSelection) -> Void)?
+    var onCreateWorkspace: (() -> Void)?
+    var onRenameWorkspace: ((UUID) -> Void)?
+    var onDeleteWorkspace: ((UUID) -> Void)?
 
     override init(frame frameRect: NSRect) {
         titleLabel = NSTextField(labelWithString: "Workspaces")
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.textColor = .secondaryLabelColor
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        createButton = NSButton(title: "New", target: nil, action: nil)
+        createButton.bezelStyle = .rounded
+        createButton.toolTip = "Create workspace"
+
+        renameButton = NSButton(title: "Rename", target: nil, action: nil)
+        renameButton.bezelStyle = .rounded
+        renameButton.toolTip = "Rename selected workspace"
+
+        deleteButton = NSButton(title: "Delete", target: nil, action: nil)
+        deleteButton.bezelStyle = .rounded
+        deleteButton.toolTip = "Delete selected workspace"
+
+        actionStack = NSStackView(views: [createButton, renameButton, deleteButton])
+        actionStack.orientation = .horizontal
+        actionStack.alignment = .centerY
+        actionStack.spacing = 6
+        actionStack.translatesAutoresizingMaskIntoConstraints = false
+
+        managementMessageLabel = NSTextField(labelWithString: "")
+        managementMessageLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        managementMessageLabel.textColor = .systemOrange
+        managementMessageLabel.lineBreakMode = .byTruncatingTail
+        managementMessageLabel.translatesAutoresizingMaskIntoConstraints = false
+        managementMessageLabel.isHidden = true
 
         scrollView = NSScrollView(frame: .zero)
         scrollView.borderType = .noBorder
@@ -85,9 +118,22 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         wantsLayer = true
         layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.92).cgColor
         setAccessibilityIdentifier("ContinuumWorkspaceSidebarRoot")
+        createButton.setAccessibilityIdentifier("ContinuumWorkspaceSidebarCreate")
+        renameButton.setAccessibilityIdentifier("ContinuumWorkspaceSidebarRename")
+        deleteButton.setAccessibilityIdentifier("ContinuumWorkspaceSidebarDelete")
+        managementMessageLabel.setAccessibilityIdentifier("ContinuumWorkspaceSidebarManagementMessage")
 
         addSubview(titleLabel)
+        addSubview(actionStack)
+        addSubview(managementMessageLabel)
         addSubview(scrollView)
+
+        createButton.target = self
+        createButton.action = #selector(createWorkspaceClicked(_:))
+        renameButton.target = self
+        renameButton.action = #selector(renameWorkspaceClicked(_:))
+        deleteButton.target = self
+        deleteButton.action = #selector(deleteWorkspaceClicked(_:))
 
         outlineView.dataSource = self
         outlineView.delegate = self
@@ -99,9 +145,17 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
             titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 10),
 
+            actionStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            actionStack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10),
+            actionStack.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
+
+            managementMessageLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            managementMessageLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            managementMessageLabel.topAnchor.constraint(equalTo: actionStack.bottomAnchor, constant: 4),
+
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
+            scrollView.topAnchor.constraint(equalTo: managementMessageLabel.bottomAnchor, constant: 8),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
     }
@@ -116,6 +170,7 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         rebuildItems()
         outlineView.reloadData()
         applyDefaultExpansion(selectedZoneId: selectedZoneId, selectedTileId: selectedTileId)
+        updateManagementButtonState()
     }
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
@@ -190,6 +245,8 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     var visibleDisplayNamesForQA: [String] { visibleItems().map(displayTitle(for:)) }
     var visibleStatusTextsForQA: [String] { visibleItems().compactMap { statusPresentation(for: $0)?.text } }
     var visibleStatusGlyphsForQA: [String] { visibleItems().compactMap { statusPresentation(for: $0)?.glyph } }
+    var managementMessageForQA: String { managementMessageLabel.stringValue }
+    var deleteEnabledForQA: Bool { deleteButton.isEnabled }
     var selectedTargetForQA: WorkspaceSidebarSelection? {
         guard outlineView.selectedRow >= 0,
               let item = outlineView.item(atRow: outlineView.selectedRow) as? SidebarItem else { return nil }
@@ -214,6 +271,33 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     @discardableResult
     func selectForQA(workspaceId: UUID, zoneId: UUID? = nil, tileId: UUID? = nil) -> Bool {
         select(workspaceId: workspaceId, zoneId: zoneId, tileId: tileId)
+    }
+
+    func setManagementMessage(_ message: String?) {
+        let text = message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        managementMessageLabel.stringValue = text
+        managementMessageLabel.isHidden = text.isEmpty
+    }
+
+    @discardableResult
+    func clickCreateForQA() -> Bool {
+        guard createButton.isEnabled else { return false }
+        createButton.performClick(nil)
+        return true
+    }
+
+    @discardableResult
+    func clickRenameForQA() -> Bool {
+        guard renameButton.isEnabled else { return false }
+        renameButton.performClick(nil)
+        return true
+    }
+
+    @discardableResult
+    func clickDeleteForQA() -> Bool {
+        guard deleteButton.isEnabled else { return false }
+        deleteButton.performClick(nil)
+        return true
     }
 
     @discardableResult
@@ -248,11 +332,47 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         statusPresentation(for: tileItemsByKey[TileItemKey(workspaceId: workspaceId, zoneId: zoneId, tileId: tileId)])?.glyph
     }
 
+    func outlineViewSelectionDidChange(_ notification: Notification) {
+        updateManagementButtonState()
+    }
+
     @objc private func outlineRowClicked(_ sender: NSOutlineView) {
         let row = sender.clickedRow >= 0 ? sender.clickedRow : sender.selectedRow
         guard row >= 0,
               let item = sender.item(atRow: row) as? SidebarItem else { return }
         performSelection(for: item)
+    }
+
+    @objc private func createWorkspaceClicked(_ sender: NSButton) {
+        onCreateWorkspace?()
+    }
+
+    @objc private func renameWorkspaceClicked(_ sender: NSButton) {
+        guard let workspaceId = workspaceIdForManagementAction() else { return }
+        onRenameWorkspace?(workspaceId)
+    }
+
+    @objc private func deleteWorkspaceClicked(_ sender: NSButton) {
+        guard let workspaceId = workspaceIdForManagementAction() else { return }
+        onDeleteWorkspace?(workspaceId)
+    }
+
+    private func workspaceIdForManagementAction() -> UUID? {
+        if let selection = selectedTargetForQA {
+            switch selection {
+            case let .workspace(workspaceId): return workspaceId
+            case let .zone(workspaceId, _): return workspaceId
+            case let .tile(workspaceId, _, _): return workspaceId
+            }
+        }
+        return currentWorkspaceId
+    }
+
+    private func updateManagementButtonState() {
+        let workspaceId = workspaceIdForManagementAction()
+        createButton.isEnabled = true
+        renameButton.isEnabled = workspaceId != nil
+        deleteButton.isEnabled = workspaceId != nil && tree.workspaces.count > 1
     }
 
     private func rebuildItems() {

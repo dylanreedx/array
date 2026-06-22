@@ -870,6 +870,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-management-polish-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runWorkspaceManagementPolishSelfCheck()
+                print("ContinuumRevivedWorkspaceManagementPolishChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--chrome-integration-guardrails-check") {
             do {
                 let artifact = try runChromeIntegrationGuardrailsSelfCheck()
@@ -2146,6 +2158,14 @@ enum ContinuumApp {
     }
 }
 
+private struct WorkspaceDeleteConfirmationRequest: Equatable {
+    let workspaceId: UUID
+    let workspaceName: String
+    let projectCount: Int
+    let zoneCount: Int
+    let deletionCopy: String
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, CanvasNSViewDelegate, NSSplitViewDelegate {
     private var window: NSWindow?
@@ -2171,7 +2191,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var workspaceSidebarView: WorkspaceSidebarView?
     private var workspaceTopBarView: WorkspaceTopBarView?
     private var workspaceSplitView: NSSplitView?
+    private var workspaceCreatePromptProvider: (() -> String?)?
     private var workspaceRenamePromptProvider: ((String) -> String?)?
+    private var workspaceDeleteConfirmationProvider: ((WorkspaceDeleteConfirmationRequest) -> Bool)?
+    private var workspaceManagementMessage: String?
     private var navSelectedZoneId: UUID?
     private var focusHistory = FocusHistory()
     private var focusModeSession: FocusModeSession?
@@ -2228,6 +2251,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private static let smokeNoteTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000010")!
     private static let smokeFileTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000011")!
     private static let smokeFileTreeTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000012")!
+    private static let workspaceDeleteSemanticsCopy = "Deletes only the workspace entry and workspace layout document. Projects, project folders, and project tile data are not deleted."
     private static let smokeNoteBody = "smoke-note-ok"
     private static let smokeFileBody = "smoke-file-ok"
     private static let smokeFileLongBody: String = {
@@ -4256,9 +4280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let divider = splitView.dividerThickness
         let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: width, height: frame.height))
         sidebar.autoresizingMask = [.height]
-        sidebar.onSelection = { [weak self] selection in
-            self?.handleWorkspaceSidebarSelection(selection)
-        }
+        configureWorkspaceSidebar(sidebar)
 
         let contentPane = NSView(frame: NSRect(x: width + divider, y: 0, width: max(0, frame.width - width - divider), height: frame.height))
         contentPane.autoresizingMask = [.width, .height]
@@ -4291,12 +4313,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return splitView
     }
 
+    private func configureWorkspaceSidebar(_ sidebar: WorkspaceSidebarView) {
+        sidebar.onSelection = { [weak self] selection in
+            self?.handleWorkspaceSidebarSelection(selection)
+        }
+        sidebar.onCreateWorkspace = { [weak self] in
+            self?.createWorkspaceFromChrome()
+        }
+        sidebar.onRenameWorkspace = { [weak self] workspaceId in
+            self?.renameWorkspaceFromTopBar(workspaceId: workspaceId)
+        }
+        sidebar.onDeleteWorkspace = { [weak self] workspaceId in
+            self?.deleteWorkspaceAndRelaunch(workspaceId: workspaceId)
+        }
+    }
+
     private func configureWorkspaceTopBar(_ topBar: WorkspaceTopBarView) {
         topBar.onSwitchWorkspace = { [weak self] workspaceId in
             self?.switchWorkspaceAndRelaunch(workspaceId: workspaceId)
         }
+        topBar.onCreateWorkspace = { [weak self] in
+            self?.createWorkspaceFromChrome()
+        }
         topBar.onRenameWorkspace = { [weak self] workspaceId in
             self?.renameWorkspaceFromTopBar(workspaceId: workspaceId)
+        }
+        topBar.onDeleteWorkspace = { [weak self] workspaceId in
+            self?.deleteWorkspaceAndRelaunch(workspaceId: workspaceId)
         }
         topBar.onToggleSidebar = { [weak self] in
             self?.toggleWorkspaceSidebar()
@@ -4328,7 +4371,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             projectCount: entry?.projectIds.count ?? 0,
             zoneCount: document.zones.count,
             saveState: workspaceDocumentSaveState(workspaceId: currentWorkspaceId, liveDocument: document),
-            workspaces: registry.workspaces
+            workspaces: registry.workspaces,
+            managementMessage: workspaceManagementMessage
         )
     }
 
@@ -4430,9 +4474,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 selectedZoneId: navSelectedZoneId,
                 selectedTileId: canvasView?.canvasState.lastActiveTileId
             )
+            sidebar.setManagementMessage(workspaceManagementMessage)
         } catch {
             fputs("Workspace sidebar reload failed: \(error)\n", stderr)
             sidebar.reload(tree: SidebarTree(workspaces: []), currentWorkspaceId: nil)
+            sidebar.setManagementMessage(workspaceManagementMessage)
         }
     }
 
@@ -5270,6 +5316,201 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return artifact
     }
 
+    static func runWorkspaceManagementPolishSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func document(zoneId: UUID? = nil, name: String = "") -> WorkspaceDocument {
+            let zones: [ZonePlacement]
+            let order: [UUID]
+            if let zoneId {
+                zones = [ZonePlacement(zoneId: zoneId, projectId: nil, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 720, height: 520), color: "blue", collapsed: false, hydrationPolicy: .automatic, name: name, navKey: nil)]
+                order = [zoneId]
+            } else {
+                zones = []
+                order = []
+            }
+            return WorkspaceDocument(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                zones: zones,
+                zoneZOrder: order,
+                lastActiveZoneId: order.first
+            )
+        }
+
+        let fm = FileManager.default
+        let now = Date(timeIntervalSince1970: 1_900_500_000)
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("continuum-workspace-management-polish-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let workspaceA = UUID(uuidString: "00000000-0000-0000-0000-00000000F501")!
+        let workspaceB = UUID(uuidString: "00000000-0000-0000-0000-00000000F502")!
+        let zoneA = UUID(uuidString: "00000000-0000-0000-0000-00000000F511")!
+        let zoneB = UUID(uuidString: "00000000-0000-0000-0000-00000000F512")!
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = workspaceA
+        registry.workspaces = [
+            WorkspaceEntry(id: workspaceA, name: "Alpha Workspace", projectIds: [], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: workspaceB, name: "Beta Workspace", projectIds: [], createdAt: now, updatedAt: now),
+        ]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+        try WorkspaceStore(workspaceId: workspaceA, applicationSupportDirectory: appSupport).save(document(zoneId: zoneA, name: "Alpha Zone"))
+        try WorkspaceStore(workspaceId: workspaceB, applicationSupportDirectory: appSupport).save(document(zoneId: zoneB, name: "Beta Zone"))
+
+        let app = AppDelegate()
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+        let runtime = WorkspaceRuntime(
+            workspaceId: workspaceA,
+            document: document(zoneId: zoneA, name: "Alpha Zone"),
+            registry: ZoneRuntimeRegistry(closeOnZero: true, makeController: { _ in
+                throw CheckError.failed("workspace management polish check should not acquire project controllers")
+            }),
+            focusBroker: app.focusBroker,
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: 640))
+        let topBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: 0, width: 980, height: 44))
+        app.registryStore = registryStore
+        app.workspaceRuntime = runtime
+        app.workspaceSidebarView = sidebar
+        app.workspaceTopBarView = topBar
+        app.configureWorkspaceSidebar(sidebar)
+        app.configureWorkspaceTopBar(topBar)
+        app.reloadWorkspaceSidebar()
+        sidebar.layoutSubtreeIfNeeded()
+        topBar.layoutSubtreeIfNeeded()
+
+        app.workspaceCreatePromptProvider = { "Created From Sidebar" }
+        let createDelivered = sidebar.clickCreateForQA()
+        sidebar.layoutSubtreeIfNeeded()
+        topBar.layoutSubtreeIfNeeded()
+        let createdRegistry = try registryStore.loadOrEmpty()
+        guard let createdWorkspace = createdRegistry.workspaces.first(where: { $0.name == "Created From Sidebar" }) else {
+            throw CheckError.failed("create action did not add workspace to registry")
+        }
+        let createdDocument = try WorkspaceStore(workspaceId: createdWorkspace.id, applicationSupportDirectory: appSupport).load()
+        let createWorked = createDelivered
+            && runtime.workspaceId == createdWorkspace.id
+            && createdDocument.zones.isEmpty
+            && topBar.countsTextForQA.contains("empty workspace")
+            && topBar.workspaceNameForQA == "Created From Sidebar"
+        try expect(createWorked, "sidebar create should create and switch to a visible empty workspace")
+
+        app.workspaceRenamePromptProvider = { currentName in
+            currentName == "Created From Sidebar" ? "Created Renamed" : nil
+        }
+        let renameDelivered = topBar.clickRenameForQA()
+        topBar.layoutSubtreeIfNeeded()
+        let renamedRegistry = try registryStore.loadOrEmpty()
+        let renameWorked = renameDelivered
+            && renamedRegistry.workspaces.contains(where: { $0.id == createdWorkspace.id && $0.name == "Created Renamed" })
+            && topBar.workspaceNameForQA == "Created Renamed"
+        try expect(renameWorked, "top bar rename should validate, persist, and refresh the workspace name")
+
+        app.workspaceRenamePromptProvider = { _ in "   " }
+        let invalidDelivered = topBar.clickRenameForQA()
+        topBar.layoutSubtreeIfNeeded()
+        let invalidRegistry = try registryStore.loadOrEmpty()
+        let invalidRenameRejected = invalidDelivered
+            && invalidRegistry.workspaces.contains(where: { $0.id == createdWorkspace.id && $0.name == "Created Renamed" })
+            && topBar.managementMessageForQA.contains("can't be empty")
+        try expect(invalidRenameRejected, "empty workspace rename should be rejected with a visible validation message")
+
+        var deleteRequests: [WorkspaceDeleteConfirmationRequest] = []
+        app.workspaceDeleteConfirmationProvider = { request in
+            deleteRequests.append(request)
+            return false
+        }
+        let cancelDelivered = topBar.clickDeleteForQA()
+        topBar.layoutSubtreeIfNeeded()
+        let cancelRegistry = try registryStore.loadOrEmpty()
+        let deleteCancelPreservedWorkspace = cancelDelivered
+            && cancelRegistry.workspaces.contains(where: { $0.id == createdWorkspace.id })
+            && runtime.workspaceId == createdWorkspace.id
+            && topBar.managementMessageForQA.contains("preserved")
+        try expect(deleteCancelPreservedWorkspace, "canceling delete confirmation should preserve the workspace")
+
+        app.workspaceDeleteConfirmationProvider = { request in
+            deleteRequests.append(request)
+            return true
+        }
+        let confirmDelivered = topBar.clickDeleteForQA()
+        topBar.layoutSubtreeIfNeeded()
+        let confirmRegistry = try registryStore.loadOrEmpty()
+        let deletedStore = WorkspaceStore(workspaceId: createdWorkspace.id, applicationSupportDirectory: appSupport)
+        let deleteConfirmRemovedWorkspace = confirmDelivered
+            && !confirmRegistry.workspaces.contains(where: { $0.id == createdWorkspace.id })
+            && !fm.fileExists(atPath: deletedStore.layout.workspaceDirectory.path)
+            && runtime.workspaceId != createdWorkspace.id
+            && topBar.managementMessageForQA.contains("not deleted")
+        try expect(deleteConfirmRemovedWorkspace, "confirming delete should remove workspace registry/document while preserving project data semantics")
+
+        let workspaceAfterCreatedDelete = runtime.workspaceId
+        let deleteReplacementDelivered = topBar.clickDeleteForQA()
+        topBar.layoutSubtreeIfNeeded()
+        let oneWorkspaceRegistry = try registryStore.loadOrEmpty()
+        try expect(deleteReplacementDelivered, "second delete should be delivered while two workspaces remain")
+        try expect(oneWorkspaceRegistry.workspaces.count == 1, "second confirmed delete should leave exactly one workspace")
+        try expect(!oneWorkspaceRegistry.workspaces.contains(where: { $0.id == workspaceAfterCreatedDelete }), "second confirmed delete should remove the current replacement workspace")
+
+        let lastWorkspaceId = runtime.workspaceId
+        let lastDeleteDelivered = topBar.clickDeleteForQA()
+        topBar.layoutSubtreeIfNeeded()
+        let lastRegistry = try registryStore.loadOrEmpty()
+        let lastWorkspaceProtected = !lastDeleteDelivered
+            && !topBar.deleteEnabledForQA
+            && lastRegistry.workspaces.count == 1
+            && lastRegistry.workspaces.first?.id == lastWorkspaceId
+            && runtime.workspaceId == lastWorkspaceId
+        try expect(lastWorkspaceProtected, "last workspace delete action should be disabled and preserve the workspace")
+
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let directory = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("workspace-management-polish", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "workspace-management-polish",
+            "path": "WorkspaceSidebarView/WorkspaceTopBarView buttons -> AppDelegate create/rename/delete validation and confirmation -> RegistryStore/WorkspaceStore/WorkspaceRuntime",
+            "createWorked": createWorked,
+            "renameWorked": renameWorked,
+            "invalidRenameRejected": invalidRenameRejected,
+            "deleteCancelPreservedWorkspace": deleteCancelPreservedWorkspace,
+            "deleteConfirmRemovedWorkspace": deleteConfirmRemovedWorkspace,
+            "lastWorkspaceProtected": lastWorkspaceProtected,
+            "createdWorkspaceId": createdWorkspace.id.uuidString,
+            "createdWorkspaceWasEmpty": createdDocument.zones.isEmpty,
+            "deleteConfirmationRequests": deleteRequests.map { request in
+                [
+                    "workspaceId": request.workspaceId.uuidString,
+                    "workspaceName": request.workspaceName,
+                    "projectCount": request.projectCount,
+                    "zoneCount": request.zoneCount,
+                    "deletionCopy": request.deletionCopy,
+                ]
+            },
+            "deleteSemantics": Self.workspaceDeleteSemanticsCopy,
+            "duplicateNamePolicy": "allowed: Registry.createWorkspace and Registry.renameWorkspace already allow duplicate names",
+            "artifactPath": artifact.path,
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
     private func installSettingsChangeObserver() {
         guard settingsChangeObserver == nil else { return }
         settingsChangeObserver = NotificationCenter.default.addObserver(
@@ -5647,7 +5888,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case let .addProjectToCanvas(projectId):
             addProjectZone(projectId: projectId)
         case .newWorkspace:
-            createWorkspaceAndRelaunch(name: "Untitled Workspace")
+            createWorkspaceFromChrome()
         case let .renameWorkspace(workspaceId):
             renameWorkspace(workspaceId: workspaceId, name: "Renamed Workspace")
         case let .deleteWorkspace(workspaceId):
@@ -6007,12 +6248,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private func createWorkspaceAndRelaunch(name: String) {
-        guard let registryStore else { return }
+    private func setWorkspaceManagementMessage(_ message: String?) {
+        workspaceManagementMessage = message
+        workspaceTopBarView?.setManagementMessage(message)
+        workspaceSidebarView?.setManagementMessage(message)
+    }
+
+    private func createWorkspaceFromChrome() {
+        let name = workspaceCreatePromptProvider?() ?? promptForWorkspaceName(
+            title: "New Workspace",
+            defaultValue: "Untitled Workspace",
+            actionTitle: "Create"
+        )
+        guard let name else { return }
+        _ = createWorkspaceAndRelaunch(name: name)
+    }
+
+    @discardableResult
+    private func createWorkspaceAndRelaunch(name: String) -> Bool {
+        guard let registryStore else { return false }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            setWorkspaceManagementMessage("Workspace name can't be empty.")
+            return false
+        }
         do {
             var registry = try registryStore.loadOrEmpty()
-            let workspace = registry.createWorkspace(name: name, now: Date())
-            let appSupport = WorkspaceStore.defaultApplicationSupportDirectory()
+            let workspace = registry.createWorkspace(name: trimmed, now: Date())
+            let appSupport = registryStore.registryFile.deletingLastPathComponent()
             try WorkspaceStore(workspaceId: workspace.id, applicationSupportDirectory: appSupport).save(
                 WorkspaceDocument(
                     viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
@@ -6024,9 +6287,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try registryStore.save(registry)
             // Switch in-process to the new empty workspace (no relaunch).
             try workspaceRuntime?.switchWorkspace(to: workspace.id)
+            setWorkspaceManagementMessage("Created empty workspace “\(workspace.name)”.")
             reloadWorkspaceSidebar()
+            return true
         } catch {
             fputs("Create Workspace failed: \(error)\n", stderr)
+            setWorkspaceManagementMessage("Create workspace failed: \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -6036,55 +6303,120 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let registry = try registryStore.loadOrEmpty()
             guard let currentName = registry.workspaces.first(where: { $0.id == workspaceId })?.name else { return }
             guard let newName = workspaceRenamePromptProvider?(currentName) ?? promptForWorkspaceRename(currentName: currentName) else { return }
-            renameWorkspace(workspaceId: workspaceId, name: newName)
+            _ = renameWorkspace(workspaceId: workspaceId, name: newName)
         } catch {
             fputs("Rename Workspace failed: \(error)\n", stderr)
         }
     }
 
     private func promptForWorkspaceRename(currentName: String) -> String? {
-        let alert = NSAlert()
-        alert.messageText = "Rename Workspace"
-        alert.informativeText = "Enter a new name for this workspace."
-        alert.addButton(withTitle: "Rename")
-        alert.addButton(withTitle: "Cancel")
-        let field = NSTextField(string: currentName)
-        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
-        alert.accessoryView = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        return field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        promptForWorkspaceName(title: "Rename Workspace", defaultValue: currentName, actionTitle: "Rename")
     }
 
-    private func renameWorkspace(workspaceId: UUID, name: String) {
-        guard let registryStore else { return }
-        do {
-            var registry = try registryStore.loadOrEmpty()
-            guard registry.renameWorkspace(id: workspaceId, name: name, now: Date()) else { return }
-            try registryStore.save(registry)
-            reloadWorkspaceSidebar()
-        } catch {
-            fputs("Rename Workspace failed: \(error)\n", stderr)
+    private func promptForWorkspaceName(title: String, defaultValue: String, actionTitle: String) -> String? {
+        var validationMessage: String?
+        while true {
+            let alert = NSAlert()
+            alert.messageText = title
+            alert.informativeText = validationMessage ?? "Enter a workspace name. Duplicate names are allowed."
+            alert.addButton(withTitle: actionTitle)
+            alert.addButton(withTitle: "Cancel")
+            let field = NSTextField(string: defaultValue)
+            field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+            alert.accessoryView = field
+            guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+            let trimmed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+            validationMessage = "Workspace name can't be empty."
+            setWorkspaceManagementMessage(validationMessage)
         }
     }
 
-    private func deleteWorkspaceAndRelaunch(workspaceId: UUID) {
-        guard let registryStore else { return }
+    @discardableResult
+    private func renameWorkspace(workspaceId: UUID, name: String) -> Bool {
+        guard let registryStore else { return false }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            setWorkspaceManagementMessage("Workspace name can't be empty.")
+            return false
+        }
         do {
             var registry = try registryStore.loadOrEmpty()
-            guard registry.deleteWorkspace(id: workspaceId, now: Date()) else { return }
-            let appSupport = WorkspaceStore.defaultApplicationSupportDirectory()
+            guard registry.renameWorkspace(id: workspaceId, name: trimmed, now: Date()) else {
+                setWorkspaceManagementMessage("Workspace could not be renamed.")
+                return false
+            }
+            try registryStore.save(registry)
+            setWorkspaceManagementMessage("Renamed workspace to “\(trimmed)”.")
+            reloadWorkspaceSidebar()
+            return true
+        } catch {
+            fputs("Rename Workspace failed: \(error)\n", stderr)
+            setWorkspaceManagementMessage("Rename workspace failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func confirmDeleteWorkspace(_ request: WorkspaceDeleteConfirmationRequest) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Delete “\(request.workspaceName)” workspace?"
+        alert.informativeText = "\(request.deletionCopy)\n\nThis workspace currently has \(request.projectCount) \(request.projectCount == 1 ? "project" : "projects") and \(request.zoneCount) \(request.zoneCount == 1 ? "zone" : "zones")."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Delete Workspace")
+        return alert.runModal() == .alertSecondButtonReturn
+    }
+
+    @discardableResult
+    private func deleteWorkspaceAndRelaunch(workspaceId: UUID) -> Bool {
+        guard let registryStore else { return false }
+        do {
+            var registry = try registryStore.loadOrEmpty()
+            guard let target = registry.workspaces.first(where: { $0.id == workspaceId }) else {
+                setWorkspaceManagementMessage("Workspace could not be found.")
+                return false
+            }
+            guard registry.workspaces.count > 1 else {
+                setWorkspaceManagementMessage("Cannot delete the last workspace. Create another workspace first.")
+                return false
+            }
+            let appSupport = registryStore.registryFile.deletingLastPathComponent()
             let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
+            let zoneCount = (try? store.tryLoad()?.zones.count) ?? 0
+            let request = WorkspaceDeleteConfirmationRequest(
+                workspaceId: workspaceId,
+                workspaceName: target.name,
+                projectCount: target.projectIds.count,
+                zoneCount: zoneCount,
+                deletionCopy: Self.workspaceDeleteSemanticsCopy
+            )
+            let confirmed = workspaceDeleteConfirmationProvider?(request) ?? confirmDeleteWorkspace(request)
+            guard confirmed else {
+                setWorkspaceManagementMessage("Delete canceled; workspace “\(target.name)” was preserved.")
+                reloadWorkspaceSidebar()
+                return false
+            }
+
+            let deletingCurrent = workspaceRuntime?.workspaceId == workspaceId || registry.lastActiveWorkspaceId == workspaceId
+            workspaceRuntime?.flushAll()
+            guard registry.deleteWorkspace(id: workspaceId, now: Date()) else {
+                setWorkspaceManagementMessage("Workspace could not be deleted.")
+                return false
+            }
+            try registryStore.save(registry)
+            if deletingCurrent, let nextWorkspaceId = registry.lastActiveWorkspaceId {
+                try workspaceRuntime?.switchWorkspace(to: nextWorkspaceId)
+            }
             if FileManager.default.fileExists(atPath: store.layout.workspaceDirectory.path) {
                 try store.deleteDocument()
             }
-            workspaceRuntime?.flushAll()
-            try registryStore.save(registry)
-            if let nextWorkspaceId = registry.lastActiveWorkspaceId {
-                switchWorkspaceAndRelaunch(workspaceId: nextWorkspaceId)
-            }
+            setWorkspaceManagementMessage("Deleted workspace “\(target.name)”. Projects and project tile data were not deleted.")
             reloadWorkspaceSidebar()
+            return true
         } catch {
             fputs("Delete Workspace failed: \(error)\n", stderr)
+            setWorkspaceManagementMessage("Delete workspace failed: \(error.localizedDescription)")
+            return false
         }
     }
 
