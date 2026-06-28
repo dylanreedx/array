@@ -152,6 +152,9 @@ class TileNSView: NSView {
         } else {
             addSubview(view)
         }
+        if let titleBar {
+            addSubview(titleBar, positioned: .above, relativeTo: view)
+        }
         layoutContentView()
     }
 
@@ -178,6 +181,9 @@ class TileNSView: NSView {
             titleBar?.needsDisplay = true
         }
         titleBar?.applyCloseButtonSizing(buttonSize: closeButtonWorldSize, glyphPointSize: closeGlyphWorldPointSize)
+        if let titleBar, titleBar.superview === self {
+            addSubview(titleBar, positioned: .above, relativeTo: contentView)
+        }
     }
 
     private func layoutContentView() {
@@ -235,28 +241,25 @@ class TileNSView: NSView {
     /// bottom/left/right ring. Returning self for ring points routes mouseDown
     /// to TileNSView.mouseDown so the existing resize logic fires.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        // `point` arrives in the SUPERVIEW's coordinate system; convert to this
-        // view's bounds (world units) before any ring math. Using `point` raw only
-        // happens to work when frame.origin == .zero and zoom == 1 (an origin tile,
-        // no pan/zoom) — at any other position/zoom the bottom/left/right/corner
-        // rings never get reclaimed and body content swallows the resize. The top
-        // ring is the lone exception because the title bar forwards mouseDown to us.
-        let local = convert(point, from: superview)
+        // AppKit passes `point` in this receiver's local coordinate system.
+        // A previous implementation treated it as superview/canvas coordinates
+        // and converted it again, which made terminal title bars/rings miss at
+        // non-zero origins and zoom levels. Browser tiles appeared better only
+        // because their own subview stack still left more chrome hittable.
+        let local = point
         if bounds.contains(local), resizeEdge(at: local) != nil {
             return self
         }
-        // Floored move-grab strip. The drawn TitleBarView subview is only
-        // `titleBarHeight` world units tall, so at low zoom its on-screen height
-        // collapses and clicks in the top strip fall through to body content.
-        // Claim the portion of the floored strip that lies BELOW the title bar
-        // subview so those clicks route to mouseDown → .move. The resize ring is
-        // already claimed above (resize wins on the top edge), and the title bar
-        // subview keeps its own [0, titleBarHeight] region (close/stop buttons +
-        // its own move-forwarding), so neither is stolen here.
-        if bounds.contains(local),
-           let titleBar,
-           local.y >= titleBar.frame.maxY,
-           local.y < grabHeightInLocalCoordinates {
+        // Floored move-grab strip. At low zoom the title bar is visually enlarged,
+        // but body content can still be stacked above it in AppKit's subview order.
+        // Claim the entire post-resize grab strip before `super.hitTest` so terminal
+        // content cannot swallow title-bar drags. Route through TitleBarView first
+        // so close/accessory controls still win; otherwise return self for move.
+        if bounds.contains(local), local.y < grabHeightInLocalCoordinates {
+            if let titleBar {
+                let titlePoint = convert(local, to: titleBar)
+                if let hit = titleBar.hitTest(titlePoint) { return hit }
+            }
             return self
         }
         return super.hitTest(point)
@@ -516,17 +519,12 @@ class TileNSView: NSView {
         return titleBar.convert(titleBar.qaCloseButtonFrame, to: self)
     }
 
-    /// QA: does a world-coordinate click route to this tile's move handling
-    /// rather than body content, via the REAL `hitTest` path? Converts the world
-    /// point to the tile's superview (canvas) coordinate space — what AppKit
-    /// passes to `hitTest` — so the bounds/frame zoom transform is exercised, then
-    /// asserts the resolved view is the tile itself (floored strip) or the title
-    /// bar, which forwards mouseDown to the tile → `.move`. Body content would be
-    /// a regression. Drives `--tile-drag-grab-check`.
-    func qaHitRoutesToMove(atWorld worldPoint: CGPoint) -> Bool {
-        guard let superview else { return false }
-        let superPoint = convert(worldPoint, to: superview)
-        let hit = hitTest(superPoint)
+    /// QA: does a local tile-coordinate click route to this tile's move handling
+    /// rather than body content? This validates the production override using
+    /// AppKit's documented `hitTest(_:)` local-coordinate contract. Body content
+    /// would be a regression. Drives `--tile-drag-grab-check`.
+    func qaHitRoutesToMove(atLocal localPoint: CGPoint) -> Bool {
+        let hit = hitTest(localPoint)
         return hit === self || hit === titleBar
     }
 

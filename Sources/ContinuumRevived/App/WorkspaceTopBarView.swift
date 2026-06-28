@@ -59,22 +59,27 @@ final class WorkspaceTopBarView: NSView {
         switchWorkspaceButton = NSPopUpButton(frame: .zero, pullsDown: false)
         switchWorkspaceButton.toolTip = "Switch workspace"
         switchWorkspaceButton.bezelStyle = .rounded
-        switchWorkspaceButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        switchWorkspaceButton.controlSize = .small
+        switchWorkspaceButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        createButton = NSButton(title: "New", target: nil, action: nil)
+        createButton = NSButton(title: "+", target: nil, action: nil)
         createButton.bezelStyle = .rounded
+        createButton.controlSize = .small
         createButton.toolTip = "Create workspace"
 
         renameButton = NSButton(title: "Rename", target: nil, action: nil)
         renameButton.bezelStyle = .rounded
+        renameButton.controlSize = .small
         renameButton.toolTip = "Rename workspace"
 
         deleteButton = NSButton(title: "Delete", target: nil, action: nil)
         deleteButton.bezelStyle = .rounded
+        deleteButton.controlSize = .small
         deleteButton.toolTip = "Delete workspace"
 
-        toggleSidebarButton = NSButton(title: "Sidebar", target: nil, action: nil)
+        toggleSidebarButton = NSButton(title: "☰", target: nil, action: nil)
         toggleSidebarButton.bezelStyle = .rounded
+        toggleSidebarButton.controlSize = .small
         toggleSidebarButton.toolTip = "Toggle workspace sidebar"
 
         super.init(frame: frameRect)
@@ -107,27 +112,30 @@ final class WorkspaceTopBarView: NSView {
         let identityStack = NSStackView(views: [nameLabel, countsLabel, saveStateLabel, managementMessageLabel])
         identityStack.orientation = .horizontal
         identityStack.alignment = .firstBaseline
-        identityStack.spacing = 10
+        identityStack.spacing = 8
         identityStack.translatesAutoresizingMaskIntoConstraints = false
+        identityStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        let actionsStack = NSStackView(views: [switchWorkspaceButton, createButton, renameButton, deleteButton, toggleSidebarButton])
+        let actionsStack = NSStackView(views: [toggleSidebarButton, switchWorkspaceButton, createButton, renameButton, deleteButton])
         actionsStack.orientation = .horizontal
         actionsStack.alignment = .centerY
-        actionsStack.spacing = 8
+        actionsStack.spacing = 6
         actionsStack.translatesAutoresizingMaskIntoConstraints = false
+        actionsStack.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         addSubview(identityStack)
         addSubview(actionsStack)
 
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(greaterThanOrEqualToConstant: 42),
+            heightAnchor.constraint(greaterThanOrEqualToConstant: 36),
 
-            identityStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            identityStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             identityStack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            identityStack.trailingAnchor.constraint(lessThanOrEqualTo: actionsStack.leadingAnchor, constant: -16),
+            identityStack.trailingAnchor.constraint(lessThanOrEqualTo: actionsStack.leadingAnchor, constant: -10),
 
-            actionsStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            actionsStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             actionsStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            switchWorkspaceButton.widthAnchor.constraint(lessThanOrEqualToConstant: 180),
         ])
     }
 

@@ -541,6 +541,46 @@ final class CanvasNSView: NSView {
         return overlay.frame
     }
 
+    func showWorkspaceTransitionLabel(_ text: String, duration: TimeInterval = 1.2) {
+        workspaceTransitionLabelView?.removeFromSuperview()
+        let label = WorkspaceTransitionLabelView(text: text)
+        workspaceTransitionLabelView = label
+        addSubview(label, positioned: .above, relativeTo: nil)
+        layoutWorkspaceTransitionLabel()
+        label.alphaValue = 1
+        guard duration > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self, weak label] in
+            guard let self, let label, self.workspaceTransitionLabelView === label else { return }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.18
+                label.animator().alphaValue = 0
+            } completionHandler: { [weak self, weak label] in
+                Task { @MainActor [weak self, weak label] in
+                    guard let self, let label, self.workspaceTransitionLabelView === label else { return }
+                    label.removeFromSuperview()
+                    self.workspaceTransitionLabelView = nil
+                }
+            }
+        }
+    }
+
+    var qaWorkspaceTransitionLabelText: String? {
+        guard let label = workspaceTransitionLabelView, !label.isHidden, label.alphaValue > 0 else { return nil }
+        return label.text
+    }
+
+    private func layoutWorkspaceTransitionLabel() {
+        guard let label = workspaceTransitionLabelView else { return }
+        let size = label.preferredSize(maxWidth: max(160, bounds.width - 32))
+        label.frame = CGRect(
+            x: max(16, (bounds.width - size.width) / 2),
+            y: 16,
+            width: min(size.width, max(160, bounds.width - 32)),
+            height: size.height
+        )
+        label.needsDisplay = true
+    }
+
     /// Remove a tile from the canvas: drops the NSView, the dictionary entry,
     /// and the model-side tile. Per-runtime cleanup (terminate PTY, kill
     /// WKWebView, flush note save, purge descriptor) is the caller's
@@ -582,6 +622,9 @@ final class CanvasNSView: NSView {
     /// Canvas-owned translucent ghost shown at a dragged tile's snap destination
     /// while drag magnetization is in range. Topmost, click-transparent.
     private var dragGhostOverlay: DragGhostOverlayView?
+
+    /// Brief, click-through label shown after a workspace switch.
+    private var workspaceTransitionLabelView: WorkspaceTransitionLabelView?
 
     /// UserDefaults the focus-border appearance resolves from (`FocusBorderConfig`).
     /// Overridable so `runFocusBorderSelfCheck` can drive enabled/color/gap
@@ -802,7 +845,8 @@ final class CanvasNSView: NSView {
     }
 
     private func zoneWorldBounds() -> CGRect? {
-        let rects = liveZones.map { Self.cgRect(from: CanvasEngine.zoneWorldFrame($0)) }
+        let placements = liveZones + zoneLayers.map(\.placement)
+        let rects = placements.map { Self.cgRect(from: CanvasEngine.zoneWorldFrame($0)) }
             .filter { $0.origin.x.isFinite && $0.origin.y.isFinite && $0.width.isFinite && $0.height.isFinite && $0.width > 0 && $0.height > 0 }
         guard var bounds = rects.first else { return nil }
         for rect in rects.dropFirst() { bounds = bounds.union(rect) }
@@ -3379,7 +3423,7 @@ final class CanvasNSView: NSView {
             // the now-zoom-floored title bar, which forwards mouseDown to the tile
             // → .move. Either proves the move target survives at low zoom; only a
             // fall-through to body would be a regression.
-            stripRoutesToTile[String(zoom)] = tileView.qaHitRoutesToMove(atWorld: CGPoint(x: stripX, y: stripY))
+            stripRoutesToTile[String(zoom)] = tileView.qaHitRoutesToMove(atLocal: CGPoint(x: stripX, y: stripY))
 
             // A point clearly in the body (below the grab strip, above the bottom
             // resize band) is NOT a move.
@@ -3462,12 +3506,12 @@ final class CanvasNSView: NSView {
             ]
             for (name, p) in ringProbes {
                 try expect(ringView.qaResizeEdge(at: p) != nil, "ring probe \(name) must sit on the resize ring (local-coords premise); got nil at \(p)")
-                ringReclaim[name] = ringView.qaHitRoutesToMove(atWorld: p)
+                ringReclaim[name] = ringView.qaHitRoutesToMove(atLocal: p)
             }
             // A deep-body point must still reach the content view (we didn't over-claim).
             let bodyPoint = CGPoint(x: w / 2, y: (ringView.grabHeightInLocalCoordinates + (h - rm)) / 2)
             try expect(ringView.qaResizeEdge(at: bodyPoint) == nil, "body probe must be off the ring; got \(String(describing: ringView.qaResizeEdge(at: bodyPoint)))")
-            ringBodyReclaimed = ringView.qaHitRoutesToMove(atWorld: bodyPoint)
+            ringBodyReclaimed = ringView.qaHitRoutesToMove(atLocal: bodyPoint)
         }
         try expect(ringReclaim.values.allSatisfy { $0 == true }, "a panned/zoomed tile must reclaim the resize ring from body content on every edge/corner: \(ringReclaim)")
         try expect(ringBodyReclaimed == false, "a deep-body click must reach content, not be reclaimed by the tile as a resize/move")
@@ -4921,6 +4965,52 @@ extension CanvasNSViewDelegate {
 /// the outside of the tile, in the gap). Click-transparent: `hitTest` returns
 /// nil so it never blocks tiles or the canvas. Sized in screen space, so the
 /// stroke + dashes stay screen-space constant at any canvas zoom.
+@MainActor
+private final class WorkspaceTransitionLabelView: NSView {
+    let text: String
+
+    override var isFlipped: Bool { true }
+
+    init(text: String) {
+        self.text = text
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.masksToBounds = false
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func preferredSize(maxWidth: CGFloat) -> CGSize {
+        let textSize = (text as NSString).size(withAttributes: Self.textAttributes)
+        return CGSize(width: min(maxWidth, max(160, textSize.width + 36)), height: 32)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let path = NSBezierPath(roundedRect: bounds, xRadius: 14, yRadius: 14)
+        NSColor.black.withAlphaComponent(0.72).setFill()
+        path.fill()
+        NSColor.white.withAlphaComponent(0.16).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+        let size = (text as NSString).size(withAttributes: Self.textAttributes)
+        let rect = CGRect(
+            x: max(12, (bounds.width - size.width) / 2),
+            y: max(0, (bounds.height - size.height) / 2),
+            width: min(size.width, max(0, bounds.width - 24)),
+            height: size.height
+        )
+        (text as NSString).draw(in: rect, withAttributes: Self.textAttributes)
+    }
+
+    private static let textAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+        .foregroundColor: NSColor.white.withAlphaComponent(0.92)
+    ]
+}
+
 @MainActor
 /// A phantom OUTLINE previewing where a dragged tile will snap — an accent border
 /// with a barely-there tint, so the moving tile never reads as "turned blue". It

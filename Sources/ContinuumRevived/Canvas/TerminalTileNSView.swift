@@ -23,7 +23,7 @@ final class TerminalTileNSView: TileNSView {
         fatalError("init(coder:) is not supported")
     }
 
-    override var contentTopInsetWorldHeight: CGFloat { TileNSView.titleBarHeight }
+    override var contentTopInsetWorldHeight: CGFloat { chromeBarHeight }
 
     private func applyThemeBackground(_ color: NSColor?) {
         guard let color else { return }

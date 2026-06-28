@@ -727,6 +727,7 @@ final class GhosttyRuntimeContext {
         }
         configPointer = config
 
+        Self.ensureGhosttyXDGConfigBridge()
         ghostty_config_load_default_files(config)
         ghostty_config_load_recursive_files(config)
         ghostty_config_finalize(config)
@@ -775,6 +776,21 @@ final class GhosttyRuntimeContext {
 
         appPointer = app
         ghostty_app_set_focus(app, true)
+    }
+
+    private static func ensureGhosttyXDGConfigBridge() {
+        let fileManager = FileManager.default
+        let home = fileManager.homeDirectoryForCurrentUser
+        let xdgConfig = home.appendingPathComponent(".config/ghostty", isDirectory: true)
+        let appSupportConfig = home.appendingPathComponent("Library/Application Support/com.mitchellh.ghostty", isDirectory: true)
+        guard !fileManager.fileExists(atPath: xdgConfig.path),
+              fileManager.fileExists(atPath: appSupportConfig.path) else { return }
+        do {
+            try fileManager.createDirectory(at: xdgConfig.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fileManager.createSymbolicLink(at: xdgConfig, withDestinationURL: appSupportConfig)
+        } catch {
+            fputs("Ghostty config bridge failed: \(error)\n", stderr)
+        }
     }
 
     func shutdown() {

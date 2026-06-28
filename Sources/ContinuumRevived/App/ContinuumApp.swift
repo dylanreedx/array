@@ -882,6 +882,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-switch-polish-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runWorkspaceSwitchPolishSelfCheck()
+                print("ContinuumRevivedWorkspaceSwitchPolishChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--chrome-integration-guardrails-check") {
             do {
                 let artifact = try runChromeIntegrationGuardrailsSelfCheck()
@@ -4284,7 +4296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let contentPane = NSView(frame: NSRect(x: width + divider, y: 0, width: max(0, frame.width - width - divider), height: frame.height))
         contentPane.autoresizingMask = [.width, .height]
-        let topBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: max(0, frame.height - 44), width: contentPane.bounds.width, height: 44))
+        let topBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: max(0, frame.height - 38), width: contentPane.bounds.width, height: 38))
         configureWorkspaceTopBar(topBar)
 
         topBar.translatesAutoresizingMaskIntoConstraints = false
@@ -4295,7 +4307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             topBar.leadingAnchor.constraint(equalTo: contentPane.leadingAnchor),
             topBar.trailingAnchor.constraint(equalTo: contentPane.trailingAnchor),
             topBar.topAnchor.constraint(equalTo: contentPane.topAnchor),
-            topBar.heightAnchor.constraint(equalToConstant: 44),
+            topBar.heightAnchor.constraint(equalToConstant: 38),
 
             canvasView.leadingAnchor.constraint(equalTo: contentPane.leadingAnchor),
             canvasView.trailingAnchor.constraint(equalTo: contentPane.trailingAnchor),
@@ -4511,6 +4523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let workspaceRuntime else { return false }
             try workspaceRuntime.switchWorkspace(to: workspaceId)
             navSelectedZoneId = nil
+            showWorkspaceSwitchTransitionLabel(workspaceId: workspaceId)
             reloadWorkspaceSidebar()
             return workspaceRuntime.workspaceId == workspaceId
         } catch {
@@ -4557,10 +4570,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let splitView = workspaceSplitView,
               let sidebar = workspaceSidebarView else { return }
         sidebar.isHidden = !visible
-        splitView.adjustSubviews()
         if visible {
             splitView.setPosition(CGFloat(WorkspaceSidebarConfig.resolveWidth()), ofDividerAt: 0)
+        } else {
+            splitView.setPosition(0, ofDividerAt: 0)
         }
+        splitView.adjustSubviews()
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -4572,11 +4587,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
         guard splitView === workspaceSplitView, dividerIndex == 0 else { return proposedMinimumPosition }
+        if workspaceSidebarView?.isHidden == true { return 0 }
         return CGFloat(WorkspaceSidebarConfig.minWidth)
     }
 
     func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
         guard splitView === workspaceSplitView, dividerIndex == 0 else { return proposedMaximumPosition }
+        if workspaceSidebarView?.isHidden == true { return 0 }
         return CGFloat(WorkspaceSidebarConfig.maxWidth)
     }
 
@@ -5511,6 +5528,218 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return artifact
     }
 
+    static func runWorkspaceSwitchPolishSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String { switch self { case let .failed(message): return message } }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func viewportsNearlyEqual(_ lhs: CanvasViewport, _ rhs: CanvasViewport) -> Bool {
+            max(abs(lhs.x - rhs.x), abs(lhs.y - rhs.y), abs(lhs.zoom - rhs.zoom)) < 0.001
+        }
+        func tile(id: UUID, title: String, x: Double, y: Double) -> Tile {
+            Tile(
+                id: id,
+                kind: .note,
+                title: title,
+                frame: TileFrame(x: x, y: y, width: 240, height: 160),
+                zIndex: 1,
+                runtimeRef: nil,
+                metadata: TileMetadata(noteId: id)
+            )
+        }
+        func makeProject(id: UUID, name: String, root: URL, now: Date) -> Project {
+            Project(
+                id: id,
+                name: name,
+                rootPath: root.path,
+                createdAt: now,
+                updatedAt: now,
+                defaultLaunchProfileId: "shell",
+                editorPreference: .auto,
+                settings: ProjectSettings(
+                    restorePolicy: .restoreDescriptors,
+                    browserStoragePolicy: .perProject,
+                    terminalClosePolicy: .askWhenRunning
+                )
+            )
+        }
+
+        let fm = FileManager.default
+        let now = Date(timeIntervalSince1970: 1_900_600_000)
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("continuum-workspace-switch-polish-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        let projectA1Root = tempRoot.appendingPathComponent("ProjectA1", isDirectory: true)
+        let projectA2Root = tempRoot.appendingPathComponent("ProjectA2", isDirectory: true)
+        let projectBRoot = tempRoot.appendingPathComponent("ProjectB", isDirectory: true)
+        try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        try fm.createDirectory(at: projectA1Root, withIntermediateDirectories: true)
+        try fm.createDirectory(at: projectA2Root, withIntermediateDirectories: true)
+        try fm.createDirectory(at: projectBRoot, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let workspaceA = UUID(uuidString: "00000000-0000-0000-0000-00000000F601")!
+        let workspaceB = UUID(uuidString: "00000000-0000-0000-0000-00000000F602")!
+        let projectA1 = UUID(uuidString: "00000000-0000-0000-0000-00000000F611")!
+        let projectA2 = UUID(uuidString: "00000000-0000-0000-0000-00000000F612")!
+        let projectB = UUID(uuidString: "00000000-0000-0000-0000-00000000F613")!
+        let zoneA1 = UUID(uuidString: "00000000-0000-0000-0000-00000000F621")!
+        let zoneA2 = UUID(uuidString: "00000000-0000-0000-0000-00000000F622")!
+        let zoneB = UUID(uuidString: "00000000-0000-0000-0000-00000000F623")!
+        let tileA1 = UUID(uuidString: "00000000-0000-0000-0000-00000000F631")!
+        let tileA2 = UUID(uuidString: "00000000-0000-0000-0000-00000000F632")!
+        let tileB = UUID(uuidString: "00000000-0000-0000-0000-00000000F633")!
+        let deletedTileB = UUID(uuidString: "00000000-0000-0000-0000-00000000F634")!
+
+        let projectA1Object = makeProject(id: projectA1, name: "Project A1", root: projectA1Root, now: now)
+        let projectA2Object = makeProject(id: projectA2, name: "Project A2", root: projectA2Root, now: now)
+        let projectBObject = makeProject(id: projectB, name: "Project B", root: projectBRoot, now: now)
+        let storeA1 = ProjectStore(projectRoot: projectA1Root)
+        let storeA2 = ProjectStore(projectRoot: projectA2Root)
+        let storeB = ProjectStore(projectRoot: projectBRoot)
+        let tileA1Value = tile(id: tileA1, title: "A1", x: 20, y: 20)
+        let tileA2Value = tile(id: tileA2, title: "A2", x: 40, y: 40)
+        let tileBValue = tile(id: tileB, title: "B", x: 60, y: 60)
+        try storeA1.saveProject(projectA1Object)
+        try storeA1.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileA1Value], groups: [], lastActiveTileId: tileA1))
+        try storeA2.saveProject(projectA2Object)
+        try storeA2.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileA2Value], groups: [], lastActiveTileId: nil))
+        try storeB.saveProject(projectBObject)
+        try storeB.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileBValue], groups: [], lastActiveTileId: tileB))
+
+        let docA = WorkspaceDocument(
+            viewport: CanvasViewport(x: 10, y: 20, zoom: 1),
+            zones: [
+                ZonePlacement(zoneId: zoneA1, projectId: projectA1, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 640, height: 480), color: "blue", collapsed: false, hydrationPolicy: .automatic, name: "Alpha One", navKey: "1"),
+                ZonePlacement(zoneId: zoneA2, projectId: projectA2, origin: ZonePoint(x: 900, y: 0), size: ZoneSize(width: 640, height: 480), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "Alpha Two", navKey: "2"),
+            ],
+            zoneZOrder: [zoneA1, zoneA2],
+            lastActiveZoneId: zoneA1
+        )
+        let docB = WorkspaceDocument(
+            viewport: CanvasViewport(x: 33, y: 44, zoom: 1.1),
+            zones: [
+                ZonePlacement(zoneId: zoneB, projectId: projectB, origin: ZonePoint(x: 200, y: 100), size: ZoneSize(width: 720, height: 520), color: "orange", collapsed: false, hydrationPolicy: .automatic, name: "Beta", navKey: "3"),
+            ],
+            zoneZOrder: [zoneB],
+            lastActiveZoneId: zoneB
+        )
+        let workspaceStoreA = WorkspaceStore(workspaceId: workspaceA, applicationSupportDirectory: appSupport)
+        let workspaceStoreB = WorkspaceStore(workspaceId: workspaceB, applicationSupportDirectory: appSupport)
+        try workspaceStoreA.save(docA)
+        try workspaceStoreB.save(docB)
+
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = workspaceA
+        registry.lastActiveProjectId = projectA1
+        registry.workspaces = [
+            WorkspaceEntry(id: workspaceA, name: "Alpha Workspace", projectIds: [projectA1, projectA2], createdAt: now, updatedAt: now),
+            WorkspaceEntry(id: workspaceB, name: "Beta Workspace", projectIds: [projectB], createdAt: now, updatedAt: now),
+        ]
+        registry.projects = [
+            ProjectEntry(id: projectA1, name: "Project A1", rootPath: projectA1Root.path, workspaceId: workspaceA, lastOpenedAt: now, pinned: false, missing: false),
+            ProjectEntry(id: projectA2, name: "Project A2", rootPath: projectA2Root.path, workspaceId: workspaceA, lastOpenedAt: now, pinned: false, missing: false),
+            ProjectEntry(id: projectB, name: "Project B", rootPath: projectBRoot.path, workspaceId: workspaceB, lastOpenedAt: now, pinned: false, missing: false),
+        ]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+
+        let app = AppDelegate()
+        let browserEngine = BrowserEngineContext()
+        defer { browserEngine.shutdown() }
+        let zoneRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { projectId in
+            if projectId == projectA1 { return ZoneRuntimeController(projectRoot: projectA1Root, projectStore: storeA1, project: projectA1Object) }
+            if projectId == projectA2 { return ZoneRuntimeController(projectRoot: projectA2Root, projectStore: storeA2, project: projectA2Object) }
+            if projectId == projectB { return ZoneRuntimeController(projectRoot: projectBRoot, projectStore: storeB, project: projectBObject) }
+            throw CheckError.failed("unexpected project id \(projectId)")
+        })
+        let runtime = WorkspaceRuntime(
+            workspaceId: workspaceA,
+            document: docA,
+            registry: zoneRegistry,
+            focusBroker: app.focusBroker,
+            registryStore: registryStore,
+            ghostty: nil,
+            browserEngine: browserEngine
+        )
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: docA.viewport, tiles: [], groups: [], lastActiveTileId: nil), activeZone: nil, zoneRenderModels: [], showsZoneChrome: false)
+        canvas.frame = NSRect(x: 0, y: 0, width: 1_200, height: 800)
+        app.registryStore = registryStore
+        app.workspaceRuntime = runtime
+        app.canvasView = canvas
+        try runtime.install(into: canvas, appRegistry: registry)
+        canvas.layoutSubtreeIfNeeded()
+
+        let mutatedAViewport = CanvasViewport(x: 123, y: 234, zoom: 0.75)
+        try expect(app.focusBroker.requestFocus(.tile(tileA2), reason: .userClick), "setup: tileA2 should be focusable before switch")
+        canvas.setViewport(mutatedAViewport)
+
+        try expect(app.switchWorkspaceFromSidebarIfNeeded(workspaceB), "switch to workspace B should succeed")
+        canvas.layoutSubtreeIfNeeded()
+        let persistedAAfterDeparture = try workspaceStoreA.load()
+        let persistedA2Canvas = try storeA2.loadCanvas()
+        let departingViewportSaved = viewportsNearlyEqual(persistedAAfterDeparture.viewport, mutatedAViewport)
+        let departingFocusSaved = persistedAAfterDeparture.lastActiveZoneId == zoneA2 && persistedA2Canvas.lastActiveTileId == tileA2
+        let targetViewportRestored = viewportsNearlyEqual(canvas.viewport, docB.viewport)
+        let lastFocusRestored = app.focusBroker.activeSurface == .tile(tileB) && canvas.canvasState.lastActiveTileId == tileB
+        try expect(departingViewportSaved, "departing workspace viewport should be saved before switch")
+        try expect(departingFocusSaved, "departing workspace last zone/tile focus should be saved before switch")
+        try expect(targetViewportRestored, "target workspace viewport should restore from document")
+        try expect(lastFocusRestored, "target workspace valid last tile focus should restore")
+
+        let mutatedBViewport = CanvasViewport(x: 301, y: 302, zoom: 0.9)
+        canvas.setViewport(mutatedBViewport)
+        try expect(app.switchWorkspaceFromSidebarIfNeeded(workspaceA), "round-trip switch back to workspace A should succeed")
+        canvas.layoutSubtreeIfNeeded()
+        let roundTripViewportRestored = viewportsNearlyEqual(canvas.viewport, mutatedAViewport)
+        let roundTripFocusRestored = app.focusBroker.activeSurface == .tile(tileA2) && canvas.canvasState.lastActiveTileId == tileA2
+        try expect(roundTripViewportRestored, "round trip should restore workspace A's saved viewport")
+        try expect(roundTripFocusRestored, "round trip should restore workspace A's saved focused tile")
+
+        try storeB.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: deletedTileB))
+        let expectedFallbackViewport = CanvasEngine.fit(
+            worldRect: CGRect(x: 200, y: 100, width: 720, height: 520),
+            viewportSize: canvas.bounds.size
+        )
+        try expect(app.switchWorkspaceFromSidebarIfNeeded(workspaceB), "switch to workspace B with deleted focus should succeed")
+        canvas.layoutSubtreeIfNeeded()
+        let deletedFocusFallbackWorked = app.focusBroker.activeSurface == .canvas
+            && canvas.canvasState.lastActiveTileId != deletedTileB
+            && viewportsNearlyEqual(canvas.viewport, expectedFallbackViewport)
+        let transitionLabelShown = app.qaWorkspaceSwitchTransitionLabelText == "Switched to Beta Workspace"
+        try expect(deletedFocusFallbackWorked, "deleted focused tile should fall back to canvas and frame workspace bounds")
+        try expect(transitionLabelShown, "workspace switch should show transition label")
+
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("workspace-switch-polish", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "workspace-switch-polish",
+            "path": "AppDelegate switch path -> WorkspaceRuntime.switchWorkspace(to:) -> CanvasNSView.setViewport/focus/transition label",
+            "departingViewportSaved": departingViewportSaved,
+            "departingFocusSaved": departingFocusSaved,
+            "targetViewportRestored": targetViewportRestored,
+            "lastFocusRestored": lastFocusRestored && roundTripFocusRestored,
+            "roundTripViewportRestored": roundTripViewportRestored,
+            "deletedFocusFallbackWorked": deletedFocusFallbackWorked,
+            "transitionLabelShown": transitionLabelShown,
+            "departingViewport": ["x": persistedAAfterDeparture.viewport.x, "y": persistedAAfterDeparture.viewport.y, "zoom": persistedAAfterDeparture.viewport.zoom],
+            "targetViewport": ["x": docB.viewport.x, "y": docB.viewport.y, "zoom": docB.viewport.zoom],
+            "fallbackViewport": ["x": canvas.viewport.x, "y": canvas.viewport.y, "zoom": canvas.viewport.zoom],
+            "expectedFallbackViewport": ["x": expectedFallbackViewport.x, "y": expectedFallbackViewport.y, "zoom": expectedFallbackViewport.zoom],
+            "transitionLabelText": app.qaWorkspaceSwitchTransitionLabelText ?? "",
+            "artifactPath": artifact.path,
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
     private func installSettingsChangeObserver() {
         guard settingsChangeObserver == nil else { return }
         settingsChangeObserver = NotificationCenter.default.addObserver(
@@ -6420,10 +6649,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    private func workspaceDisplayName(workspaceId: UUID) -> String {
+        guard let registryStore,
+              let registry = try? registryStore.loadOrEmpty(),
+              let entry = registry.workspaces.first(where: { $0.id == workspaceId }) else {
+            return "Workspace"
+        }
+        return entry.name
+    }
+
+    private func showWorkspaceSwitchTransitionLabel(workspaceId: UUID) {
+        canvasView?.showWorkspaceTransitionLabel("Switched to \(workspaceDisplayName(workspaceId: workspaceId))")
+    }
+
+    var qaWorkspaceSwitchTransitionLabelText: String? {
+        canvasView?.qaWorkspaceTransitionLabelText
+    }
+
     private func switchWorkspaceAndRelaunch(workspaceId: UUID) {
         do {
             // Switch in-process — no relaunch needed.
             try workspaceRuntime?.switchWorkspace(to: workspaceId)
+            showWorkspaceSwitchTransitionLabel(workspaceId: workspaceId)
             reloadWorkspaceSidebar()
         } catch {
             fputs("Switch Workspace failed: \(error)\n", stderr)
@@ -6793,17 +7040,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return temp
         }
 
+        if let envRoot = ProcessInfo.processInfo.environment["CONTINUUM_PROJECT_ROOT"], envRoot.hasPrefix("/") {
+            return try requestProjectFolderAccessIfNeeded(URL(fileURLWithPath: envRoot, isDirectory: true))
+        }
+
+        // Do not probe a remembered project inside macOS privacy-protected folders before
+        // the user has granted access. FileManager probes against ~/Documents can trigger
+        // repeated TCC prompts while boot restore is also trying to start terminals/file
+        // trees. Route that path through one explicit NSOpenPanel grant first.
+        if registry.settings.openLastProjectOnLaunch,
+           let projectId = registry.lastActiveProjectId,
+           let entry = registry.projects.first(where: { $0.id == projectId }),
+           entry.rootPath.hasPrefix("/"),
+           requiresExplicitProjectFolderGrant(URL(fileURLWithPath: entry.rootPath, isDirectory: true)) {
+            return try requestProjectFolderAccessIfNeeded(URL(fileURLWithPath: entry.rootPath, isDirectory: true))
+        }
+
         switch ProjectLaunchCoordinator.decide(registry: registry) {
         case let .open(url):
-            return url
+            return try requestProjectFolderAccessIfNeeded(url)
         case let .presentPicker(request):
             let picker = ProjectPickerPanel(request: request)
             guard let selected = picker.runModal() else {
                 NSApp.terminate(nil)
                 throw CocoaError(.userCancelled)
             }
-            return selected
+            return try requestProjectFolderAccessIfNeeded(selected)
         }
+    }
+
+    private static func requiresExplicitProjectFolderGrant(_ url: URL) -> Bool {
+        let path = url.standardizedFileURL.path
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+        let protectedRoots = ["Documents", "Desktop", "Downloads"].map { "\(home)/\($0)" }
+        return protectedRoots.contains { path == $0 || path.hasPrefix($0 + "/") }
+    }
+
+    private static func requestProjectFolderAccessIfNeeded(_ url: URL) throws -> URL {
+        let standardized = url.standardizedFileURL
+        guard requiresExplicitProjectFolderGrant(standardized) else { return standardized }
+        let grantKey = projectFolderGrantAcknowledgementKey(for: standardized)
+        if UserDefaults.standard.bool(forKey: grantKey) {
+            return standardized
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "Grant Continuum access to this project folder"
+        alert.informativeText = "Continuum needs access to restore this project once. Select the project folder in the next dialog; if you cancel, Continuum will quit instead of repeatedly triggering macOS privacy prompts.\n\n\(standardized.path)"
+        alert.addButton(withTitle: "Choose Folder…")
+        alert.addButton(withTitle: "Quit")
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            NSApp.terminate(nil)
+            throw CocoaError(.userCancelled)
+        }
+
+        let panel = NSOpenPanel()
+        panel.message = "Choose the Continuum project folder"
+        panel.prompt = "Grant Access"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.resolvesAliases = true
+        panel.directoryURL = standardized.deletingLastPathComponent()
+        panel.nameFieldStringValue = standardized.lastPathComponent
+
+        guard panel.runModal() == .OK, let selected = panel.url?.standardizedFileURL else {
+            NSApp.terminate(nil)
+            throw CocoaError(.userCancelled)
+        }
+        UserDefaults.standard.set(true, forKey: projectFolderGrantAcknowledgementKey(for: selected))
+        return selected
+    }
+
+    private static func projectFolderGrantAcknowledgementKey(for url: URL) -> String {
+        let path = url.standardizedFileURL.path
+        let encoded = Data(path.utf8).base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "=", with: "")
+        return "continuum.projectFolderGrantAcknowledged.\(encoded)"
     }
 
     private static func resolveAppSupportDir(smokeTest: Bool) -> URL? {

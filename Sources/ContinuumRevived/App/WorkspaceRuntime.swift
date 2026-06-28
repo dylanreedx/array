@@ -419,7 +419,7 @@ final class WorkspaceRuntime {
 
     /// Tear down the current workspace's zone layers + runtimes and install the target
     /// workspace's in-process (no app relaunch). Steps:
-    ///   1. Flush all current controllers.
+    ///   1. Flush all current controllers and persist departing viewport/focus.
     ///   2. Load the target `WorkspaceDocument` from disk.
     ///   3. Diff current vs target project sets: release departing (ref-count → close-at-zero),
     ///      keep shared (same instance, ref-count unchanged), acquire arriving.
@@ -433,18 +433,10 @@ final class WorkspaceRuntime {
     var _relaunchSpy: (() -> Void)?
 
     func switchWorkspace(to targetWorkspaceId: UUID) throws {
-        // 1. Flush current + persist departing workspace's live viewport to disk.
+        // 1. Flush current + persist departing workspace's live viewport/focus to disk.
+        let departingFocus = departingFocusSnapshot(from: canvasView)
         flushAll()
-
-        // Capture the canvas's current in-memory viewport and write it back into
-        // the departing WorkspaceDocument before saving, so a round-trip restores
-        // the user's last pan/zoom position rather than the stale on-disk value.
-        if let liveViewport = canvasView?.viewport {
-            document.viewport = liveViewport
-            let appSupportForSave = registryStore.registryFile.deletingLastPathComponent()
-            let departingStore = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupportForSave)
-            try departingStore.save(document)
-        }
+        try persistDepartingWorkspaceState(focus: departingFocus)
 
         // 2. Load target document.
         let appSupport = registryStore.registryFile.deletingLastPathComponent()
@@ -545,7 +537,7 @@ final class WorkspaceRuntime {
         }
 
         if let canvas = canvasView {
-            restoreFocus(from: canvas)
+            restoreFocus(from: canvas, frameWorkspaceOnFallback: true)
         } else {
             _ = focusBroker.requestFocus(.canvas, reason: .appActivated)
         }
@@ -664,19 +656,76 @@ final class WorkspaceRuntime {
 
     // MARK: - Private
 
-    private func restoreFocus(from canvasView: CanvasNSView) {
+    private struct DepartingFocusSnapshot {
+        var tileId: UUID?
+        var zoneId: UUID?
+    }
+
+    private enum FocusRestoreResult: Equatable {
+        case tile(UUID)
+        case zone(UUID)
+        case canvasFallback(framedWorkspace: Bool)
+    }
+
+    private func departingFocusSnapshot(from canvasView: CanvasNSView?) -> DepartingFocusSnapshot {
+        let focusedTileId: UUID? = {
+            if case let .tile(tileId) = focusBroker.activeSurface { return tileId }
+            return canvasView?.canvasState.lastActiveTileId
+        }()
+        let focusedZoneId = focusedTileId.flatMap { canvasView?.navigationTileSnapshot(for: $0)?.zoneId }
+        return DepartingFocusSnapshot(tileId: focusedTileId, zoneId: focusedZoneId)
+    }
+
+    private func persistDepartingWorkspaceState(focus: DepartingFocusSnapshot) throws {
+        if let liveViewport = canvasView?.viewport {
+            document.viewport = liveViewport
+        }
+        if let zoneId = focus.zoneId,
+           document.zones.contains(where: { $0.zoneId == zoneId }) {
+            document.lastActiveZoneId = zoneId
+        }
+        if let tileId = focus.tileId,
+           let zoneId = focus.zoneId,
+           let projectId = document.zones.first(where: { $0.zoneId == zoneId })?.projectId,
+           let controller = registry.controller(for: projectId),
+           var canvas = try controller.projectStore.tryLoadCanvas(),
+           canvas.tiles.contains(where: { $0.id == tileId }) {
+            canvas.lastActiveTileId = tileId
+            try controller.projectStore.saveCanvas(canvas)
+        }
+        let appSupportForSave = registryStore.registryFile.deletingLastPathComponent()
+        let departingStore = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupportForSave)
+        try departingStore.save(document)
+    }
+
+    @discardableResult
+    private func restoreFocus(from canvasView: CanvasNSView, frameWorkspaceOnFallback: Bool = false) -> FocusRestoreResult {
         // Find the active zone's stored last-active tile id.
         guard let lastActiveZoneId = document.lastActiveZoneId,
-              let zone = document.zones.first(where: { $0.zoneId == lastActiveZoneId }),
-              let projectId = zone.projectId,
-              let controller = registry.controller(for: projectId),
+              let zone = document.zones.first(where: { $0.zoneId == lastActiveZoneId }) else {
+            return focusCanvasFallback(canvasView, frameWorkspace: frameWorkspaceOnFallback)
+        }
+        guard let projectId = zone.projectId else {
+            _ = focusBroker.requestFocus(.canvas, reason: .appActivated)
+            return .zone(lastActiveZoneId)
+        }
+        guard let controller = registry.controller(for: projectId),
               let lastActiveTileId = (try? controller.projectStore.tryLoadCanvas())?.flatMap({ $0.lastActiveTileId }) ?? nil else {
-            _ = focusBroker.requestFocus(.canvas, reason: .appActivated)
-            return
+            return focusCanvasFallback(canvasView, frameWorkspace: frameWorkspaceOnFallback)
         }
-        if !focusBroker.requestFocus(.tile(lastActiveTileId), reason: .appActivated) {
-            _ = focusBroker.requestFocus(.canvas, reason: .appActivated)
+        if focusBroker.requestFocus(.tile(lastActiveTileId), reason: .appActivated) {
+            return .tile(lastActiveTileId)
         }
+        return focusCanvasFallback(canvasView, frameWorkspace: frameWorkspaceOnFallback)
+    }
+
+    private func focusCanvasFallback(_ canvasView: CanvasNSView, frameWorkspace: Bool) -> FocusRestoreResult {
+        _ = focusBroker.requestFocus(.canvas, reason: .appActivated)
+        if frameWorkspace, let viewport = canvasView.fitAllToViewport() {
+            canvasView.setViewport(viewport)
+            return .canvasFallback(framedWorkspace: true)
+        }
+        return .canvasFallback(framedWorkspace: false)
     }
 
     // MARK: - Self-check
