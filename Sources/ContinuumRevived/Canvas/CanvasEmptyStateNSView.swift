@@ -73,13 +73,14 @@ final class CanvasEmptyStateNSView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        for subview in subviews.reversed() {
-            let converted = convert(point, to: subview)
-            if let hit = subview.hitTest(converted), hit is NSButton {
-                return hit
-            }
-        }
-        return nil
+        // Stay click-through everywhere except the action buttons, so the canvas
+        // beneath keeps receiving background clicks. Delegate to `super` for the
+        // actual resolution: it converts `point` (delivered in this view's
+        // superview space) and recurses correctly. The previous hand-rolled
+        // conversion double-subtracted the centered stack's origin, shifting
+        // every button's hit region off-screen — buttons were unclickable.
+        let hit = super.hitTest(point)
+        return hit is NSButton ? hit : nil
     }
 
     private func setupStack() {
@@ -225,6 +226,52 @@ final class CanvasEmptyStateNSView: NSView {
         guard let button = collectSubviews(of: self, as: NSButton.self).first(where: { $0.title == title }) else { return false }
         button.performClick(nil)
         return true
+    }
+
+    /// Real-path check: a click at the visual center of each action button must
+    /// resolve — through `hitTest` (the point arrives in the receiver's SUPERVIEW
+    /// space, as AppKit delivers it) — to that exact button, and firing it must
+    /// run its action. Reproduces the "empty-state buttons are unclickable" bug:
+    /// the inner stack is centered, so the old override double-subtracted its
+    /// origin and shifted every hit region off the buttons.
+    @MainActor
+    static func runHitTestSelfCheck() throws {
+        func fail(_ message: String) -> Error {
+            NSError(domain: "EmptyStateHitTest", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        final class FlippedHost: NSView { override var isFlipped: Bool { true } }
+
+        var fired: Set<String> = []
+        let actions = CanvasEmptyStateActions(
+            spawnClaude: { fired.insert("claude") },
+            spawnShell: { fired.insert("shell") },
+            spawnBrowser: { fired.insert("browser") },
+            openInEditor: { fired.insert("editor") },
+            addProjectToCanvas: { fired.insert("addProject") },
+            recentProjects: [.init(title: "demo", action: { fired.insert("recent") })]
+        )
+        let host = FlippedHost(frame: NSRect(x: 0, y: 0, width: 960, height: 720))
+        let view = CanvasEmptyStateNSView(actions: actions, projectPath: "/tmp/demo")
+        view.frame = host.bounds
+        host.addSubview(view)
+        host.layoutSubtreeIfNeeded()
+        view.layoutSubtreeIfNeeded()
+
+        let buttons = view.collectSubviews(of: view, as: NSButton.self)
+        guard !buttons.isEmpty else { throw fail("no action buttons rendered") }
+        for button in buttons {
+            let centerInSelf = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: view)
+            // hitTest is delivered a point in the receiver's superview space:
+            let pointForHitTest = view.convert(centerInSelf, to: host)
+            let hit = view.hitTest(pointForHitTest)
+            guard let hitButton = hit as? NSButton, hitButton === button else {
+                throw fail("click at center of '\(button.title)' resolved to \(String(describing: hit)) — expected that button (empty-state buttons unclickable)")
+            }
+            hitButton.performClick(nil)
+        }
+        guard fired.contains("shell"), fired.contains("claude"), fired.contains("recent") else {
+            throw fail("resolved buttons did not fire their actions: \(fired.sorted())")
+        }
     }
 
     private func collectSubviews<T: NSView>(of view: NSView, as type: T.Type) -> [T] {

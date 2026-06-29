@@ -690,6 +690,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--empty-state-hittest-check") {
+            do {
+                _ = NSApplication.shared
+                try CanvasEmptyStateNSView.runHitTestSelfCheck()
+                print("ContinuumRevivedEmptyStateHitTestChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--component-gallery-check") {
             do {
                 _ = NSApplication.shared
