@@ -690,6 +690,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--component-gallery-check") {
+            do {
+                _ = NSApplication.shared
+                try ComponentGalleryPanel.runSelfCheck()
+                print("ContinuumRevivedComponentGalleryChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--settings-panel-check") {
             do {
                 _ = NSApplication.shared
@@ -2050,6 +2062,7 @@ enum ContinuumApp {
         let viewMenuItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
         let viewMenu = NSMenu(title: "View")
         viewMenu.addItem(NSMenuItem(title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: ""))
+        viewMenu.addItem(NSMenuItem(title: "Component Gallery", action: #selector(AppDelegate.openComponentGalleryFromMenu(_:)), keyEquivalent: ""))
         viewMenuItem.submenu = viewMenu
         mainMenu.addItem(viewMenuItem)
 
@@ -2087,6 +2100,7 @@ enum ContinuumApp {
 
         guard let viewMenu = mainMenu.item(withTitle: "View")?.submenu else { throw SelfCheckError("missing View menu") }
         try expectMenuItem(viewMenu, title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "")
+        try expectMenuItem(viewMenu, title: "Component Gallery", action: #selector(AppDelegate.openComponentGalleryFromMenu(_:)), keyEquivalent: "")
     }
 
     private static func expectMenuItem(
@@ -2220,6 +2234,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var profilePalette: LaunchProfilePalette?
     private var paletteContextTileId: UUID?
     private var settingsPanel: SettingsPanel?
+    private var componentGalleryPanel: ComponentGalleryPanel?
     private var settingsChangeObserver: NSObjectProtocol?
     private var tmuxDefaults: UserDefaults = .standard
     private var tmuxPathResolver: (UserDefaults) -> String? = { TmuxLocator.resolve(defaults: $0) }
@@ -4264,6 +4279,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             focusBroker.openModal(.settings)
             panel.show(near: window)
         }
+    }
+
+    @objc func openComponentGalleryFromMenu(_ sender: Any?) {
+        let panel = componentGalleryPanel ?? {
+            let panel = ComponentGalleryPanel(ghostty: ghostty)
+            panel.onClose = { [weak self] in self?.componentGalleryPanel = nil }
+            return panel
+        }()
+        componentGalleryPanel = panel
+        panel.show(near: window)
     }
 
     private func makeSettingsPanel() -> SettingsPanel {
