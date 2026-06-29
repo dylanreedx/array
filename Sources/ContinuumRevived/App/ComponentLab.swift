@@ -21,6 +21,11 @@ enum LabContent {
     /// A real chrome view built from a fixture, on a flat dark backdrop.
     /// `preferredSize` fixes the render size (centered); nil pins it to fill.
     case staticCard(preferredSize: NSSize?, make: () -> NSView)
+
+    /// A live, interactive canvas you operate for real (spawn / drag / resize /
+    /// zoom). `configure` seeds the initial tiles; the sandbox always provides a
+    /// spawn toolbar + zoom controls. Fills the host.
+    case canvasSandbox(configure: (LabSandboxContext) -> Void)
 }
 
 /// One catalog entry, grouped under a category in the left nav.
@@ -101,12 +106,199 @@ enum LabFixtures {
     }
 }
 
+// MARK: - Sandbox
+
+/// Owns a live canvas + a spawn toolbar + zoom controls for an interactive
+/// sandbox. Fixture tiles install directly (no runtime); a throwaway temp dir
+/// backs File/FileTree tiles and is deleted on teardown. (Runtime tiles —
+/// terminal/browser — are added in a later phase via `env`.)
+@MainActor
+final class LabSandboxContext: NSObject {
+    let canvas: CanvasNSView
+    let containerView: NSView
+    let env: LabEnvironment
+
+    private let tempDir: URL
+    private let sampleFilePath: String
+    private var teardownBlocks: [() -> Void] = []
+    private var spawnCount = 0
+    private let zoomLabel = NSTextField(labelWithString: "100%")
+
+    init(env: LabEnvironment) {
+        self.env = env
+        tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("continuum-lab/\(UUID().uuidString)", isDirectory: true)
+        sampleFilePath = tempDir.appendingPathComponent("README.md").path
+        canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil
+        ))
+        containerView = NSView()
+        super.init()
+
+        let fm = FileManager.default
+        try? fm.createDirectory(at: tempDir.appendingPathComponent("src"), withIntermediateDirectories: true)
+        try? "# Sandbox\n\nA real File tile rendering a file from disk.\n".write(toFile: sampleFilePath, atomically: true, encoding: .utf8)
+        try? "let answer = 42\n".write(to: tempDir.appendingPathComponent("src/main.swift"), atomically: true, encoding: .utf8)
+
+        canvas.onTileCloseRequested = { [weak canvas] id in canvas?.removeTile(id: id) }
+        buildContainer()
+        registerTeardown { [tempDir] in try? FileManager.default.removeItem(at: tempDir) }
+    }
+
+    func registerTeardown(_ block: @escaping () -> Void) { teardownBlocks.append(block) }
+
+    var qaTempDirExists: Bool { FileManager.default.fileExists(atPath: tempDir.path) }
+
+    func teardownAll() {
+        teardownBlocks.reversed().forEach { $0() }
+        teardownBlocks.removeAll()
+        canvas.removeFromSuperview()
+        containerView.removeFromSuperview()
+    }
+
+    // MARK: Layout
+
+    private func buildContainer() {
+        let toolbar = makeToolbar()
+        toolbar.translatesAutoresizingMaskIntoConstraints = false
+        canvas.translatesAutoresizingMaskIntoConstraints = false
+        containerView.addSubview(toolbar)
+        containerView.addSubview(canvas)
+        NSLayoutConstraint.activate([
+            toolbar.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+            toolbar.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+            toolbar.topAnchor.constraint(equalTo: containerView.topAnchor),
+            toolbar.heightAnchor.constraint(equalToConstant: 38),
+            canvas.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+            canvas.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+            canvas.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
+            canvas.bottomAnchor.constraint(equalTo: containerView.bottomAnchor)
+        ])
+    }
+
+    private func makeToolbar() -> NSView {
+        let bar = NSView()
+        bar.wantsLayer = true
+        bar.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.96).cgColor
+
+        func button(_ title: String, _ action: Selector) -> NSButton {
+            let b = NSButton(title: title, target: self, action: action)
+            b.bezelStyle = .rounded
+            b.controlSize = .small
+            return b
+        }
+        let spawn = NSStackView(views: [
+            button("+ Note", #selector(spawnNoteClicked)),
+            button("+ File", #selector(spawnFileClicked)),
+            button("+ File Tree", #selector(spawnFileTreeClicked)),
+            button("+ Run Artifacts", #selector(spawnRunArtifactsClicked)),
+            button("+ Placeholder", #selector(spawnDescriptorClicked))
+        ])
+        spawn.spacing = 6
+
+        zoomLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        zoomLabel.textColor = .secondaryLabelColor
+        zoomLabel.alignment = .center
+        zoomLabel.setContentHuggingPriority(.required, for: .horizontal)
+        let zoom = NSStackView(views: [
+            button("−", #selector(zoomOutClicked)),
+            zoomLabel,
+            button("+", #selector(zoomInClicked)),
+            button("Reset", #selector(zoomResetClicked))
+        ])
+        zoom.spacing = 4
+
+        let row = NSStackView(views: [spawn, NSView(), zoom])
+        row.orientation = .horizontal
+        row.distribution = .fill
+        row.alignment = .centerY
+        row.edgeInsets = NSEdgeInsets(top: 0, left: 10, bottom: 0, right: 10)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
+            row.centerYAnchor.constraint(equalTo: bar.centerYAnchor)
+        ])
+        return bar
+    }
+
+    // MARK: Spawning (fixture tiles — no runtime)
+
+    private func nextZ() -> Int { (canvas.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1 }
+
+    private func placement(for kind: TileKind) -> TileFrame {
+        let size = CanvasEngine.defaultFrame(for: kind)
+        let offset = Double(spawnCount % 6) * 36
+        spawnCount += 1
+        return TileFrame(x: 60 + offset, y: 60 + offset, width: size.width, height: size.height)
+    }
+
+    func spawnNote() {
+        let noteId = UUID()
+        let tile = Tile(id: UUID(), kind: .note, title: "note \(spawnCount + 1)", frame: placement(for: .note), zIndex: nextZ(), runtimeRef: nil, metadata: TileMetadata(noteId: noteId))
+        canvas.install(tileView: NoteTileNSView(tile: tile, noteId: noteId, initialBody: "# Note\n\nType here…"), for: tile)
+    }
+
+    func spawnFile() {
+        let tile = Tile(id: UUID(), kind: .file, title: "README.md", frame: placement(for: .file), zIndex: nextZ(), runtimeRef: nil, metadata: TileMetadata(filePath: sampleFilePath))
+        canvas.install(tileView: FileTileNSView(tile: tile), for: tile)
+    }
+
+    func spawnFileTree() {
+        let id = UUID()
+        let fileTreeTile = FileTreeTile(tileId: id, rootPath: tempDir.path, expandedPaths: [], selectedPath: nil, searchQuery: "", ignoredNames: [], gitBadges: .off)
+        let tile = Tile(id: id, kind: .fileTree, title: "Files", frame: placement(for: .fileTree), zIndex: nextZ(), runtimeRef: nil, metadata: TileMetadata(filePath: tempDir.path))
+        canvas.install(tileView: FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile), for: tile)
+    }
+
+    func spawnRunArtifacts() {
+        let tile = Tile(id: UUID(), kind: .runArtifacts, title: "Run Artifacts", frame: placement(for: .runArtifacts), zIndex: nextZ(), runtimeRef: nil, metadata: TileMetadata())
+        canvas.install(tileView: RunArtifactsTileNSView(tile: tile), for: tile)
+    }
+
+    func spawnDescriptor() {
+        let tile = Tile(id: UUID(), kind: .terminal, title: "placeholder", frame: placement(for: .terminal), zIndex: nextZ(), runtimeRef: nil, metadata: TileMetadata())
+        canvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+    }
+
+    @objc private func spawnNoteClicked() { spawnNote() }
+    @objc private func spawnFileClicked() { spawnFile() }
+    @objc private func spawnFileTreeClicked() { spawnFileTree() }
+    @objc private func spawnRunArtifactsClicked() { spawnRunArtifacts() }
+    @objc private func spawnDescriptorClicked() { spawnDescriptor() }
+
+    // MARK: Zoom (drives the same path as pinch — keeps cursor rects + metrics live)
+
+    func setZoom(_ z: Double) {
+        let clamped = min(3.0, max(0.25, z))
+        let vp = canvas.viewport
+        canvas.setViewport(CanvasViewport(x: vp.x, y: vp.y, zoom: clamped))
+        zoomLabel.stringValue = "\(Int((clamped * 100).rounded()))%"
+    }
+
+    @objc private func zoomInClicked() { setZoom(canvas.viewport.zoom * 1.25) }
+    @objc private func zoomOutClicked() { setZoom(canvas.viewport.zoom / 1.25) }
+    @objc private func zoomResetClicked() { setZoom(1) }
+}
+
 // MARK: - Catalog
 
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [sidebarCard, topBarCard, emptyStateCard]
+        [tileSandbox, sidebarCard, topBarCard, emptyStateCard]
+    }
+
+    private static var tileSandbox: LabEntry {
+        LabEntry(
+            id: "tiles.sandbox", category: "Tiles", title: "Tile Sandbox",
+            summary: "A live canvas — spawn real tiles from the toolbar, then drag, resize, and zoom them.",
+            content: .canvasSandbox { ctx in
+                ctx.spawnNote()
+                ctx.spawnFileTree()
+            }
+        )
     }
 
     private static var sidebarCard: LabEntry {
@@ -283,6 +475,11 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         switch entry.content {
         case let .staticCard(preferredSize, make):
             Self.place(make(), in: host, preferredSize: preferredSize)
+        case let .canvasSandbox(configure):
+            let sandbox = LabSandboxContext(env: env)
+            configure(sandbox)
+            teardown.append { sandbox.teardownAll() }
+            Self.place(sandbox.containerView, in: host, preferredSize: nil)
         }
     }
 
@@ -412,7 +609,46 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             rendered.append(["entry": entry.id, "width": metrics.width, "height": metrics.height, "distinctColors": metrics.distinctSampledColors])
         }
 
-        let manifest: [String: Any] = ["check": "component-lab", "entryCount": entries.count, "rendered": rendered]
+        // Interactive sandbox: spawn every fixture tile kind, assert they install,
+        // render each tile non-blank, that zoom clamps via setViewport, and that
+        // teardown deletes the throwaway temp dir.
+        let sandbox = LabSandboxContext(env: LabEnvironment(ghostty: nil, browserEngine: nil))
+        sandbox.spawnNote(); sandbox.spawnFile(); sandbox.spawnFileTree(); sandbox.spawnRunArtifacts(); sandbox.spawnDescriptor()
+        guard sandbox.canvas.canvasState.tiles.count == 5 else {
+            throw fail("sandbox installed \(sandbox.canvas.canvasState.tiles.count) tiles, expected 5")
+        }
+        guard sandbox.qaTempDirExists else { throw fail("sandbox temp dir was not created") }
+
+        let sandboxWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700), styleMask: [.borderless], backing: .buffered, defer: false)
+        sandbox.containerView.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        sandboxWindow.contentView = sandbox.containerView
+        sandbox.containerView.layoutSubtreeIfNeeded()
+        sandbox.canvas.layoutSubtreeIfNeeded()
+        let tileViews = sandbox.canvas.subviews.compactMap { $0 as? TileNSView }
+        guard tileViews.count == 5 else { throw fail("sandbox canvas has \(tileViews.count) tile views, expected 5") }
+        for tileView in tileViews {
+            tileView.layoutSubtreeIfNeeded()
+            guard let rep = tileView.bitmapImageRepForCachingDisplay(in: tileView.bounds) else { throw fail("sandbox tile bitmap alloc failed") }
+            tileView.cacheDisplay(in: tileView.bounds, to: rep)
+            let m = VisualSnapshot.metrics(of: rep)
+            guard !m.isBlank else { throw fail("sandbox tile '\(tileView.tile.title)' render is blank (\(m.distinctSampledColors) colors)") }
+        }
+
+        sandbox.setZoom(5.0); let zoomHigh = sandbox.canvas.viewport.zoom
+        sandbox.setZoom(0.01); let zoomLow = sandbox.canvas.viewport.zoom
+        guard abs(zoomHigh - 3.0) < 1e-6, abs(zoomLow - 0.25) < 1e-6 else {
+            throw fail("zoom clamp wrong: high=\(zoomHigh) (want 3.0), low=\(zoomLow) (want 0.25)")
+        }
+
+        sandbox.teardownAll()
+        guard !sandbox.qaTempDirExists else { throw fail("sandbox temp dir survived teardown") }
+
+        let manifest: [String: Any] = [
+            "check": "component-lab",
+            "entryCount": entries.count,
+            "rendered": rendered,
+            "sandbox": ["tilesInstalled": 5, "zoomClampHigh": zoomHigh, "zoomClampLow": zoomLow]
+        ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: directory.appendingPathComponent("manifest.json"))
     }
