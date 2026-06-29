@@ -41,15 +41,21 @@ final class CanvasEmptyStateNSView: NSView {
     }
 
     private let stack = NSStackView()
+    private let card = NSView()
     private let projectPathLabel = NSTextField(labelWithString: "")
     private var recentProjectButtons: [NSButton] = []
+
+    private static let cardInset: CGFloat = 30
 
     init(actions: CanvasEmptyStateActions?, projectPath: String? = nil) {
         self.actions = actions
         self.projectPath = projectPath
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = true
-        wantsLayer = false
+        // Scrim: dim whatever is behind so the launch card reads as the single
+        // focal element instead of bleeding into the canvas / zones underneath.
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
         setAccessibilityIdentifier("ContinuumEmptyState")
         setupStack()
         projectPathLabel.stringValue = projectPath ?? ""
@@ -63,13 +69,16 @@ final class CanvasEmptyStateNSView: NSView {
 
     override func layout() {
         super.layout()
-        let fittingSize = stack.fittingSize
-        stack.frame = NSRect(
-            x: floor((bounds.width - fittingSize.width) / 2),
-            y: floor((bounds.height - fittingSize.height) / 2),
-            width: fittingSize.width,
-            height: fittingSize.height
+        let inset = Self.cardInset
+        let fit = stack.fittingSize
+        let cardSize = NSSize(width: fit.width + inset * 2, height: fit.height + inset * 2)
+        card.frame = NSRect(
+            x: floor((bounds.width - cardSize.width) / 2),
+            y: floor((bounds.height - cardSize.height) / 2),
+            width: cardSize.width,
+            height: cardSize.height
         )
+        stack.frame = NSRect(x: inset, y: inset, width: fit.width, height: fit.height)
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -84,11 +93,18 @@ final class CanvasEmptyStateNSView: NSView {
     }
 
     private func setupStack() {
+        card.wantsLayer = true
+        card.layer?.backgroundColor = NSColor(calibratedWhite: 0.11, alpha: 1).cgColor
+        card.layer?.cornerRadius = 14
+        card.layer?.borderWidth = 1
+        card.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        addSubview(card)
+
         stack.orientation = .vertical
         stack.alignment = .centerX
-        stack.spacing = 24
+        stack.spacing = 18
         stack.translatesAutoresizingMaskIntoConstraints = true
-        addSubview(stack)
+        card.addSubview(stack)
         rebuildStack()
     }
 
@@ -194,16 +210,11 @@ final class CanvasEmptyStateNSView: NSView {
     }
 
     private func makeButton(title: String, action: Selector) -> NSButton {
-        let button = NSButton(title: title, target: self, action: action)
-        button.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-        button.bezelStyle = .rounded
-        button.controlSize = .regular
-        button.setButtonType(.momentaryPushIn)
+        let button = LaunchActionButton(title: title, target: self, action: action)
         button.translatesAutoresizingMaskIntoConstraints = false
-        button.alignment = .left
         NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 260),
-            button.heightAnchor.constraint(equalToConstant: 30)
+            button.widthAnchor.constraint(equalToConstant: 320),
+            button.heightAnchor.constraint(equalToConstant: 34)
         ])
         return button
     }
@@ -217,13 +228,13 @@ final class CanvasEmptyStateNSView: NSView {
     func qaSnapshot() -> QASnapshot {
         QASnapshot(
             accessibilityIdentifier: accessibilityIdentifier(),
-            buttonTitles: collectSubviews(of: self, as: NSButton.self).map(\.title),
+            buttonTitles: collectSubviews(of: self, as: NSButton.self).map { $0.attributedTitle.string },
             text: collectSubviews(of: self, as: NSTextField.self).map(\.stringValue)
         )
     }
 
     func qaPressButton(titled title: String) -> Bool {
-        guard let button = collectSubviews(of: self, as: NSButton.self).first(where: { $0.title == title }) else { return false }
+        guard let button = collectSubviews(of: self, as: NSButton.self).first(where: { $0.attributedTitle.string == title }) else { return false }
         button.performClick(nil)
         return true
     }
@@ -307,6 +318,55 @@ final class CanvasEmptyStateNSView: NSView {
         guard let project = actions?.recentProjects[safe: sender.tag] else { return }
         project.action()
     }
+}
+
+/// A legible, command-palette-style action row: monospace label on a subtle
+/// fill that brightens on hover. Replaces the default dark rounded bezel, which
+/// rendered near-invisible against the dark canvas. The visible string is driven
+/// via `attributedTitle` (so its `.string` stays exactly the action label — QA
+/// and the empty-state self-check match on it), with left padding from the
+/// paragraph indent rather than baked-in spaces.
+private final class LaunchActionButton: NSButton {
+    private static let resting = NSColor.white.withAlphaComponent(0.06)
+    private static let hover = NSColor.white.withAlphaComponent(0.14)
+
+    convenience init(title: String, target: AnyObject?, action: Selector?) {
+        self.init(frame: .zero)
+        self.target = target
+        self.action = action
+        isBordered = false
+        setButtonType(.momentaryChange)
+        wantsLayer = true
+        layer?.cornerRadius = 7
+        layer?.backgroundColor = Self.resting.cgColor
+        focusRingType = .none
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .left
+        paragraph.firstLineHeadIndent = 14
+        paragraph.headIndent = 14
+        attributedTitle = NSAttributedString(string: title, attributes: [
+            .foregroundColor: NSColor.white.withAlphaComponent(0.88),
+            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+            .paragraphStyle: paragraph
+        ])
+    }
+
+    override init(frame frameRect: NSRect) { super.init(frame: frameRect) }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    // Act on the first click even when the window isn't key (the empty state
+    // often appears on an unfocused canvas).
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { layer?.backgroundColor = Self.hover.cgColor }
+    override func mouseExited(with event: NSEvent) { layer?.backgroundColor = Self.resting.cgColor }
 }
 
 private extension Array {
