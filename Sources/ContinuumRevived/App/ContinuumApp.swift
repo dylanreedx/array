@@ -702,11 +702,11 @@ enum ContinuumApp {
             }
         }
 
-        if CommandLine.arguments.contains("--component-gallery-check") {
+        if CommandLine.arguments.contains("--component-lab-check") {
             do {
                 _ = NSApplication.shared
-                try ComponentGalleryPanel.runSelfCheck()
-                print("ContinuumRevivedComponentGalleryChecks passed")
+                try ComponentLabPanel.runSelfCheck()
+                print("ContinuumRevivedComponentLabChecks passed")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -2074,7 +2074,7 @@ enum ContinuumApp {
         let viewMenuItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
         let viewMenu = NSMenu(title: "View")
         viewMenu.addItem(NSMenuItem(title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: ""))
-        viewMenu.addItem(NSMenuItem(title: "Component Gallery", action: #selector(AppDelegate.openComponentGalleryFromMenu(_:)), keyEquivalent: ""))
+        viewMenu.addItem(NSMenuItem(title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: ""))
         viewMenuItem.submenu = viewMenu
         mainMenu.addItem(viewMenuItem)
 
@@ -2112,7 +2112,7 @@ enum ContinuumApp {
 
         guard let viewMenu = mainMenu.item(withTitle: "View")?.submenu else { throw SelfCheckError("missing View menu") }
         try expectMenuItem(viewMenu, title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "")
-        try expectMenuItem(viewMenu, title: "Component Gallery", action: #selector(AppDelegate.openComponentGalleryFromMenu(_:)), keyEquivalent: "")
+        try expectMenuItem(viewMenu, title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: "")
     }
 
     private static func expectMenuItem(
@@ -2246,7 +2246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var profilePalette: LaunchProfilePalette?
     private var paletteContextTileId: UUID?
     private var settingsPanel: SettingsPanel?
-    private var componentGalleryPanel: ComponentGalleryPanel?
+    private var componentLabPanel: ComponentLabPanel?
     private var settingsChangeObserver: NSObjectProtocol?
     private var tmuxDefaults: UserDefaults = .standard
     private var tmuxPathResolver: (UserDefaults) -> String? = { TmuxLocator.resolve(defaults: $0) }
@@ -4293,13 +4293,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    @objc func openComponentGalleryFromMenu(_ sender: Any?) {
-        let panel = componentGalleryPanel ?? {
-            let panel = ComponentGalleryPanel(ghostty: ghostty)
-            panel.onClose = { [weak self] in self?.componentGalleryPanel = nil }
+    @objc func openComponentLabFromMenu(_ sender: Any?) {
+        let panel = componentLabPanel ?? {
+            let panel = ComponentLabPanel(env: LabEnvironment(ghostty: ghostty, browserEngine: browserEngine))
+            panel.onClose = { [weak self] in self?.componentLabPanel = nil }
             return panel
         }()
-        componentGalleryPanel = panel
+        componentLabPanel = panel
         panel.show(near: window)
     }
 
