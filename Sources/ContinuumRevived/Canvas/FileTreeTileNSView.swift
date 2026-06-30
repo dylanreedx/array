@@ -469,8 +469,9 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
     }
 
     private func rowTitle(for item: FileTreeOutlineItem) -> String {
-        let prefix = item.node.isDirectory ? "> " : "  "
-        return prefix + item.node.displayName
+        // The NSOutlineView disclosure triangle already marks expandable
+        // directories; a "> " text prefix duplicated it as a second, dim chevron.
+        item.node.displayName
     }
 
     private func badgeTitle(for node: FileTreeNode) -> String {
