@@ -690,18 +690,6 @@ enum ContinuumApp {
             }
         }
 
-        if CommandLine.arguments.contains("--empty-state-hittest-check") {
-            do {
-                _ = NSApplication.shared
-                try CanvasEmptyStateNSView.runHitTestSelfCheck()
-                print("ContinuumRevivedEmptyStateHitTestChecks passed")
-                Foundation.exit(0)
-            } catch {
-                fputs("FAIL: \(error)\n", stderr)
-                Foundation.exit(1)
-            }
-        }
-
         if CommandLine.arguments.contains("--component-lab-check") {
             do {
                 _ = NSApplication.shared
@@ -2324,7 +2312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
             let ghostty = try GhosttyRuntimeContext()
             let browserEngine = BrowserEngineContext()
-            let seededSmokeTiles = smokeTestEnabled && Self.requestedQAFlow() != .emptyCanvas
+            let seededSmokeTiles = smokeTestEnabled
                 ? try Self.seedSmokeTestTiles(in: projectStore, projectRoot: projectRoot)
                 : []
 
@@ -2347,7 +2335,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 }
             }
             if smokeTestEnabled,
-               Self.requestedQAFlow() != .emptyCanvas,
                !canvasState.tiles.contains(where: { $0.kind == .terminal }) {
                 canvasState.tiles.append(Self.defaultTerminalTile())
             }
@@ -2457,32 +2444,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             workspaceRuntime?.activeController?.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
             installFocusHistoryHook()
-            let recentProjectActions: [CanvasEmptyStateActions.RecentProject] = ProjectPickerModel.makeRows(registry: registry)
-                .filter { $0.isSelectable && $0.id != project.id }
-                .prefix(3)
-                .map { row in
-                    CanvasEmptyStateActions.RecentProject(title: row.name) { [weak self] in
-                        self?.addProjectZone(projectId: row.id)
-                    }
-                }
-            canvasView.configureEmptyStateActions(CanvasEmptyStateActions(
-                spawnClaude: { [weak self] in
-                    self?.spawnTerminalFromProfile("claude", trigger: "empty-state:claude")
-                },
-                spawnShell: { [weak self] in
-                    self?.spawnTerminalFromProfile("shell", trigger: "empty-state:shell")
-                },
-                spawnBrowser: { [weak self] in
-                    self?.spawnBrowserDefault()
-                },
-                openInEditor: { [weak self] in
-                    self?.openProjectInEditor()
-                },
-                addProjectToCanvas: { [weak self] in
-                    self?.openProfilePalette(initialQuery: "add project")
-                },
-                recentProjects: recentProjectActions
-            ), projectPath: project.rootPath)
 
             installHotkeyMonitor()
             installTileFocusMonitor()
@@ -8426,7 +8387,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case browserURLFocus = "browser-url-focus"
         case canvasDragResize = "canvas-drag-resize"
         case canvasZoomPanEdge = "canvas-zoom-pan-edge"
-        case emptyCanvas = "empty-canvas"
         case restartPlaceholderClick = "restart-placeholder-click"
         case terminalStress10 = "terminal-stress-10"
         case paletteLeakCheck = "palette-leak-check"
@@ -8479,8 +8439,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             runCanvasDragResizeFlow(window: window)
         case .canvasZoomPanEdge:
             runCanvasZoomPanEdgeFlow(window: window)
-        case .emptyCanvas:
-            runEmptyCanvasFlow(window: window)
         case .restartPlaceholderClick:
             runRestartPlaceholderClickFlow(window: window)
         case .terminalStress10:
@@ -9518,105 +9476,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             tSec: 1.0,
             success: true
         )
-    }
-
-    private func runEmptyCanvasFlow(window: NSWindow) {
-        let (qaCapture, capture) = makeQACapture(window: window)
-        scheduleInitialCapture(capture)
-        var emptyStateWasInstalled = false
-        var emptyStateWasRemoved = false
-        var emptyStateContentMatched = false
-        var recentProjectAdded = false
-        let qaRecentProjectId = UUID(uuidString: "00000000-0000-0000-0000-000000005601")!
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            guard let registryStore = self.registryStore, let canvasView = self.canvasView else { return }
-            do {
-                var registry = try registryStore.loadOrEmpty()
-                let qaRoot = FileManager.default.temporaryDirectory.appendingPathComponent("continuum-empty-workspace-recent-\(UUID().uuidString)", isDirectory: true)
-                try FileManager.default.createDirectory(at: qaRoot.appendingPathComponent(".continuum-revived", isDirectory: true), withIntermediateDirectories: true)
-                if !registry.projects.contains(where: { $0.id == qaRecentProjectId }) {
-                    registry.projects.append(ProjectEntry(
-                        id: qaRecentProjectId,
-                        name: "QA Recent Project",
-                        rootPath: qaRoot.path,
-                        workspaceId: nil,
-                        lastOpenedAt: Date(),
-                        pinned: false
-                    ))
-                }
-                try registryStore.save(registry)
-                canvasView.configureEmptyStateActions(CanvasEmptyStateActions(
-                    spawnClaude: { [weak self] in self?.spawnTerminalFromProfile("claude", trigger: "empty-state:claude") },
-                    spawnShell: { [weak self] in self?.spawnTerminalFromProfile("shell", trigger: "empty-state:shell") },
-                    spawnBrowser: { [weak self] in self?.spawnBrowserDefault() },
-                    openInEditor: { [weak self] in self?.openProjectInEditor() },
-                    addProjectToCanvas: { [weak self] in self?.openProfilePalette(initialQuery: "add project") },
-                    recentProjects: [CanvasEmptyStateActions.RecentProject(title: "QA Recent Project") { [weak self] in
-                        self?.addProjectZone(projectId: qaRecentProjectId)
-                    }]
-                ), projectPath: self.activeProject?.rootPath)
-            } catch {
-                capture("empty-canvas-recent-seed-failed", 0.25, "\(error)")
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            guard let canvasView = self.canvasView else {
-                capture("empty-canvas-skipped", 0.4, "canvas unavailable")
-                return
-            }
-            let snapshot = canvasView.emptyStateQASnapshot()
-            let text = snapshot?.text.joined(separator: " | ") ?? ""
-            let buttons = snapshot?.buttonTitles ?? []
-            emptyStateWasInstalled = canvasView.canvasState.tiles.isEmpty && canvasView.emptyStateInstalled
-            emptyStateContentMatched = snapshot?.accessibilityIdentifier == "ContinuumEmptyState"
-                && buttons.count >= 4
-                && text.contains("CONTINUUM")
-                && text.contains("⌘K")
-                && text.contains("open the command palette")
-                && text.contains("notes, files, and projects live in ⌘K")
-                && buttons.contains("Add Project to Canvas")
-                && buttons.contains("Recent: QA Recent Project")
-                && buttons.contains("New Claude Terminal   ⌘1")
-                && buttons.contains("New Shell Terminal    ⌘2")
-                && buttons.contains("New Browser           ⌘3")
-                && buttons.contains("Open in Nvim          ⌘4")
-            capture(
-                "empty-canvas-visible",
-                0.4,
-                "tiles \(canvasView.canvasState.tiles.count), empty state \(canvasView.emptyStateInstalled), ax \(snapshot?.accessibilityIdentifier ?? "nil"), buttons \(buttons), contentMatched \(emptyStateContentMatched)"
-            )
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-            let pressed = self.canvasView?.qaPressEmptyStateButton(titled: "Recent: QA Recent Project") == true
-            if let registryStore = self.registryStore {
-                do {
-                    let registry = try registryStore.loadOrEmpty()
-                    if let workspaceId = registry.lastActiveWorkspaceId {
-                        let workspaceStore = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: registryStore.registryFile.deletingLastPathComponent())
-                        let document = try workspaceStore.load()
-                        recentProjectAdded = document.zones.contains(where: { $0.projectId == qaRecentProjectId })
-                    }
-                } catch {
-                    capture("empty-canvas-recent-add-check-failed", 0.6, "\(error)")
-                }
-            }
-            capture("empty-canvas-recent-add", 0.6, "pressed \(pressed), workspace contains project \(recentProjectAdded)")
-            let notes = self.spawnTerminalForQA(profileId: "shell")
-            capture("empty-canvas-spawn-requested", 0.65, notes)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
-            emptyStateWasRemoved = self.canvasView?.canvasState.tiles.isEmpty == false
-                && self.canvasView?.emptyStateInstalled == false
-            capture("empty-canvas-spawned-shell", 0.9, "empty state removed \(emptyStateWasRemoved)")
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            self.recordLaunchTime()
-            capture("empty-canvas-final-state", 1.2, nil)
-            qaCapture?.writeManifest()
-            self.qaPerf?.writeReport()
-            self.smokeTestExitCode = emptyStateWasInstalled && emptyStateContentMatched && recentProjectAdded && emptyStateWasRemoved ? 0 : 2
-            window.performClose(nil)
-        }
     }
 
     static func runBrowserLRUBudgetSelfCheck() throws -> URL {

@@ -29,7 +29,6 @@ let package = Package(
                 "Canvas/BrowserRestartTileNSView.swift",
                 "Canvas/BrowserSnapshotTileNSView.swift",
                 "Canvas/BrowserTileNSView.swift",
-                "Canvas/CanvasEmptyStateNSView.swift",
                 "Canvas/ConductorQueueTileNSView.swift",
                 "Canvas/CanvasNSView.swift",
                 "Canvas/DescriptorTileNSView.swift",

@@ -82,10 +82,6 @@ final class CanvasNSView: NSView {
     /// by the app from the resolved `NavKeymap` when the leader opens (mirrors
     /// `leaderLabelAlphabet`).
     var leaderZoneOrdinalAlphabet: [String] = NavKeymap.default.leaderZoneOrdinalAlphabet
-    private var emptyStateView: CanvasEmptyStateNSView?
-    private var emptyStateActions: CanvasEmptyStateActions?
-    private var emptyStateProjectPath: String?
-    private(set) var emptyStateInstalled = false
 
     private var spaceHeld = false
     private var spaceDragLastWindowPoint: CGPoint = .zero
@@ -218,7 +214,6 @@ final class CanvasNSView: NSView {
         if showsZoneChrome {
             installZoneChromeViews()
         }
-        updateEmptyStateVisibility()
         // Live focus-border config: re-apply when Settings writes a preference.
         NotificationCenter.default.addObserver(
             self,
@@ -419,19 +414,12 @@ final class CanvasNSView: NSView {
         } else {
             canvasState.tiles.append(tile)
         }
-        updateEmptyStateVisibility()
         reorderTileSubviewsByZIndex()
         if previousTile == nil || previousTile?.title != tile.title || previousTile?.kind != tile.kind {
             delegate?.canvasSidebarModelDidChange(self)
         }
     }
 
-    func configureEmptyStateActions(_ actions: CanvasEmptyStateActions, projectPath: String? = nil) {
-        emptyStateActions = actions
-        emptyStateProjectPath = projectPath
-        emptyStateView?.actions = actions
-        emptyStateView?.projectPath = projectPath
-    }
 
     func detachFocusBroker() {
         guard let focusBroker else { return }
@@ -598,7 +586,6 @@ final class CanvasNSView: NSView {
         if borderedTileId == id {
             borderedTileId = nil
         }
-        updateEmptyStateVisibility()
         delegate?.canvasSidebarModelDidChange(self)
         delegate?.canvasDidChange(self)
     }
@@ -1331,14 +1318,6 @@ final class CanvasNSView: NSView {
 
     var viewport: CanvasViewport { canvasState.viewport }
 
-    func emptyStateQASnapshot() -> CanvasEmptyStateNSView.QASnapshot? {
-        emptyStateView?.qaSnapshot()
-    }
-
-    func qaPressEmptyStateButton(titled title: String) -> Bool {
-        emptyStateView?.qaPressButton(titled: title) ?? false
-    }
-
     private func reorderTileSubviewsByZIndex() {
         // ordering: tileId.uuidString → [zoneIndex, tileZIndex, tileArrayIndex]
         // zoneIndex for single-zone tiles: 0 (they're their own zone).
@@ -1392,7 +1371,6 @@ final class CanvasNSView: NSView {
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         layoutAllTiles()
-        layoutEmptyState()
         layoutNavModeOverlay()
     }
 
@@ -1446,32 +1424,6 @@ final class CanvasNSView: NSView {
         }
     }
 
-    private func updateEmptyStateVisibility() {
-        if canvasState.tiles.isEmpty {
-            installEmptyStateIfNeeded()
-        } else {
-            uninstallEmptyStateIfNeeded()
-        }
-    }
-
-    private func installEmptyStateIfNeeded() {
-        guard emptyStateView == nil else { return }
-        let view = CanvasEmptyStateNSView(actions: emptyStateActions, projectPath: emptyStateProjectPath)
-        emptyStateView = view
-        addSubview(view, positioned: .above, relativeTo: nil)
-        emptyStateInstalled = true
-        layoutEmptyState()
-    }
-
-    private func uninstallEmptyStateIfNeeded() {
-        emptyStateView?.removeFromSuperview()
-        emptyStateView = nil
-        emptyStateInstalled = false
-    }
-
-    private func layoutEmptyState() {
-        emptyStateView?.frame = bounds
-    }
 
     private func installNavModeOverlayIfNeeded() {
         guard navModeOverlayView == nil else {

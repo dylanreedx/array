@@ -97,13 +97,6 @@ enum LabFixtures {
         ])
     }
 
-    static func emptyStateActions() -> CanvasEmptyStateActions {
-        CanvasEmptyStateActions(
-            spawnClaude: {}, spawnShell: {}, spawnBrowser: {}, openInEditor: {},
-            addProjectToCanvas: {},
-            recentProjects: [.init(title: "continuum-revived", action: {}), .init(title: "dotfiles", action: {})]
-        )
-    }
 }
 
 // MARK: - Sandbox
@@ -287,7 +280,7 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, emptyStateCard]
+        [tileSandbox, sidebarCard, topBarCard]
     }
 
     private static var tileSandbox: LabEntry {
@@ -325,15 +318,6 @@ enum LabCatalog {
         )
     }
 
-    private static var emptyStateCard: LabEntry {
-        LabEntry(
-            id: "chrome.emptystate", category: "Chrome", title: "Canvas Empty State",
-            summary: "Blank-canvas first run: wordmark, ⌘K hint, spawn actions, recents.",
-            content: .staticCard(preferredSize: nil) {
-                CanvasEmptyStateNSView(actions: LabFixtures.emptyStateActions(), projectPath: "~/code/continuum-revived")
-            }
-        )
-    }
 }
 
 // MARK: - Panel
