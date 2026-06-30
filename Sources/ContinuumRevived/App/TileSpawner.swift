@@ -105,7 +105,7 @@ final class TileSpawner {
         }
     }
 
-    func spawnTerminal(profileId: String, at worldPoint: CGPoint? = nil) -> Outcome {
+    func spawnTerminal(profileId: String, at worldPoint: CGPoint? = nil, allowTmuxPersistence: Bool = true) -> Outcome {
         guard let spec = registry.spec(for: profileId) else {
             return .unknownProfile(id: profileId)
         }
@@ -129,7 +129,7 @@ final class TileSpawner {
             agentDescriptor: agentDescriptor(for: spec, projectRoot: projectRoot, at: now),
             createdAt: now,
             at: worldPoint,
-            allowTmuxPersistence: true
+            allowTmuxPersistence: allowTmuxPersistence
         )
     }
 

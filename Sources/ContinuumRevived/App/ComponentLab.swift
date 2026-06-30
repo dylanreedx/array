@@ -280,7 +280,9 @@ final class LabSandboxContext: NSObject {
     // teardown so closing the lab kills its PTY / webview (no orphan processes).
     func spawnTerminal() {
         guard let spawner else { return }
-        if case let .spawned(runtime) = spawner.spawnTerminal(profileId: "shell") {
+        // No tmux persistence: a throwaway lab terminal must not leave a tmux
+        // session behind after the lab closes.
+        if case let .spawned(runtime) = spawner.spawnTerminal(profileId: "shell", allowTmuxPersistence: false) {
             registerTeardown { runtime.terminate(policy: .force) }
         }
     }
