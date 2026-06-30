@@ -113,6 +113,7 @@ final class LabSandboxContext: NSObject {
 
     private let tempDir: URL
     private let sampleFilePath: String
+    private var spawner: TileSpawner?
     private var teardownBlocks: [() -> Void] = []
     private var spawnCount = 0
     private let zoomLabel = NSTextField(labelWithString: "100%")
@@ -132,6 +133,20 @@ final class LabSandboxContext: NSObject {
         try? fm.createDirectory(at: tempDir.appendingPathComponent("src"), withIntermediateDirectories: true)
         try? "# Sandbox\n\nA real File tile rendering a file from disk.\n".write(toFile: sampleFilePath, atomically: true, encoding: .utf8)
         try? "let answer = 42\n".write(to: tempDir.appendingPathComponent("src/main.swift"), atomically: true, encoding: .utf8)
+
+        // Runtime tiles (terminal/browser) spawn through the real TileSpawner
+        // using the app's shared engines. TileSpawner needs a browserEngine, so
+        // the spawner only exists when one was injected (absent in headless checks).
+        if let browserEngine = env.browserEngine {
+            let store = ProjectStore(projectRoot: tempDir)
+            let project = Project(
+                id: UUID(), name: "Lab Sandbox", rootPath: tempDir.path,
+                createdAt: Date(), updatedAt: Date(),
+                defaultLaunchProfileId: "shell", editorPreference: .auto,
+                settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
+            )
+            spawner = TileSpawner(canvasView: canvas, ghostty: env.ghostty, browserEngine: browserEngine, projectStore: store, project: project)
+        }
 
         canvas.onTileCloseRequested = { [weak canvas] id in canvas?.removeTile(id: id) }
         buildContainer()
@@ -180,12 +195,18 @@ final class LabSandboxContext: NSObject {
             b.controlSize = .small
             return b
         }
+        let terminalButton = button("Terminal", #selector(spawnTerminalClicked))
+        terminalButton.isEnabled = spawner != nil && env.ghostty != nil
+        terminalButton.toolTip = terminalButton.isEnabled ? nil : "No Ghostty runtime available in this build"
+        let browserButton = button("Browser", #selector(spawnBrowserClicked))
+        browserButton.isEnabled = spawner != nil
         let spawn = NSStackView(views: [
-            button("+ Note", #selector(spawnNoteClicked)),
-            button("+ File", #selector(spawnFileClicked)),
-            button("+ File Tree", #selector(spawnFileTreeClicked)),
-            button("+ Run Artifacts", #selector(spawnRunArtifactsClicked)),
-            button("+ Placeholder", #selector(spawnDescriptorClicked))
+            terminalButton,
+            browserButton,
+            button("Note", #selector(spawnNoteClicked)),
+            button("File", #selector(spawnFileClicked)),
+            button("File Tree", #selector(spawnFileTreeClicked)),
+            button("Run", #selector(spawnRunArtifactsClicked))
         ])
         spawn.spacing = 6
 
@@ -255,6 +276,24 @@ final class LabSandboxContext: NSObject {
         canvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
     }
 
+    // Runtime tiles — real terminal/browser via TileSpawner; each registers a
+    // teardown so closing the lab kills its PTY / webview (no orphan processes).
+    func spawnTerminal() {
+        guard let spawner else { return }
+        if case let .spawned(runtime) = spawner.spawnTerminal(profileId: "shell") {
+            registerTeardown { runtime.terminate(policy: .force) }
+        }
+    }
+
+    func spawnBrowser() {
+        guard let spawner else { return }
+        if case let .spawned(runtime) = spawner.spawnBrowser(url: "about:blank") {
+            registerTeardown { runtime.terminate(policy: .force) }
+        }
+    }
+
+    @objc private func spawnTerminalClicked() { spawnTerminal() }
+    @objc private func spawnBrowserClicked() { spawnBrowser() }
     @objc private func spawnNoteClicked() { spawnNote() }
     @objc private func spawnFileClicked() { spawnFile() }
     @objc private func spawnFileTreeClicked() { spawnFileTree() }
