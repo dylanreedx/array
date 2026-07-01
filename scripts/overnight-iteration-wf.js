@@ -26,9 +26,9 @@ const COMMIT_RESULT = { type:'object', additionalProperties:false, required:['co
 }}
 
 const IMPL_PROMPT = [
-  'Implement ONE Continuum ticket end to end. This is a native macOS/Swift app at /Users/dylan/Documents/personal/continuum-revived.',
+  'Implement ONE Continuum ticket end to end. This is a native macOS/Swift app at /Users/dylan/Documents/personal/continuum-overnight (a git worktree on branch overnight/agent-orchestration — work here, not in any other checkout).',
   'READ THE TICKET FIRST and follow it exactly (its approach, seams, breadcrumbs, and "Done when" are authoritative — do not redesign): ' + TICKET + '.',
-  'Also skim /Users/dylan/Documents/personal/continuum-revived/docs/38-locked-decisions.md so you do not reopen a settled decision.',
+  'Also skim /Users/dylan/Documents/personal/continuum-overnight/docs/38-locked-decisions.md so you do not reopen a settled decision.',
   'DO THE WORK: edit files under Sources/ (and tests) per the ticket. Write the ticket\'s Logic/Backend/UX tests where they are automatable. Then PROVE it:',
   '  1. Run `swift build` and fix until it compiles cleanly.',
   '  2. Run `./scripts/run-matrix.sh` and read the result honestly.',
