@@ -28,11 +28,14 @@ emit token, exit.
      (blocked tickets remaining is a normal, honest end state — they go in the morning summary).
 
 3. **Classify effort** for that ticket from its nature: pure/mechanical Core work (enums, op-log,
-   pure derivation, snapshot types) → `low`; integration/topology/reader/observer wiring → `medium`;
-   work touching many seams at once or a broad migration → `high`. (Its Execution-mode section may
-   already recommend one — prefer that if present.)
+   pure derivation, snapshot types) → `low`; integration/reader/observer wiring → `medium`; **any
+   ticket that re-models an existing type and migrates its call sites, or touches many seams at once
+   → `high`** (these are the ones that fail a shallow pass — give them room). Its Execution-mode
+   section may recommend one; prefer the higher of the two.
 
-4. **Run the internal Workflow** for exactly this one ticket:
+4. **Run the internal Workflow** for exactly this one ticket. Pass `args` as a real JSON **object**
+   (never a JSON-encoded string — a stringified value will not thread and the ticket path will come
+   through empty):
    ```
    Workflow({
      scriptPath: "scripts/overnight-iteration-wf.js",
@@ -40,10 +43,14 @@ emit token, exit.
              effort: "<low|medium|high>", branch: "<current branch>" }
    })
    ```
-   It implements with Sonnet at that effort, runs `swift build` + `./scripts/run-matrix.sh`, then
-   dual-reviews the diff (Opus + GPT-5.5 via the Codex CLI) and commits **only** if the build is
-   green, the matrix is green, and both reviewers clear. It does not push and adds no co-authoring
-   footer. Wait for it to finish and read its returned result object.
+   The Workflow runs a **self-repair loop**: implement (Sonnet @ that effort) → `swift build` +
+   `./scripts/run-matrix.sh` → dual-review the diff (**real Opus** + GPT-5.5 via Codex) → if either
+   reviewer rejects, it feeds the concerns back for a fix pass and re-reviews, up to 3 rounds; it
+   commits **only** if build+matrix are green AND both reviewers clear, else it leaves the tree dirty
+   and reports skipped. It never pushes and adds no co-authoring footer. Wait for it to finish and
+   read its returned result object (fields: `committed`, `commitHash`, `rounds`, `reason`,
+   `outstandingConcerns`). If the result is a FATAL "no ticketPath" (args failed to thread), do not
+   retry blindly — print `LOOP: STOP args-threading-failed` so a human fixes the invocation.
 
 5. **Record the outcome** by appending one row to `docs/38-tickets/_PROGRESS.md` (create the file
    with a header row if missing). Row format:
@@ -52,13 +59,16 @@ emit token, exit.
    - `committed: false` → status `skipped`, and put the `reason` + the top reviewer/impl concern in
      the note so a human can pick it up. Leave the working tree as the Workflow left it; do not revert.
 
-6. **Emit the control token** as the FINAL line of your output, nothing after it:
+6. **Emit the control token** as the FINAL line of your output. It MUST be a raw plain-text line —
+   NO backticks, NO code fence, NO markdown, no bold, nothing before it on the line and nothing after
+   it. The harness scans for a line matching `LOOP: (CONTINUE|STOP)...`; wrapping it in backticks or
+   prose breaks detection and halts the whole loop. Exactly one of:
    - Committed this ticket → `LOOP: CONTINUE <ticket file>`
-   - Skipped this ticket (honest failure, but the loop should keep going to the next) →
-     `LOOP: CONTINUE skipped:<ticket file>`
+   - Skipped this ticket (honest failure, loop keeps going to the next) → `LOOP: CONTINUE skipped:<ticket file>`
    - Queue drained → `LOOP: STOP queue-drained`
-   - Something is structurally wrong and continuing is unsafe (e.g. on the wrong branch, repo
-     unexpectedly dirty before you started, Workflow tool unavailable) → `LOOP: STOP <short-reason>`
+   - Structurally unsafe to continue (wrong branch, unexpectedly dirty repo, args-threading failure,
+     Workflow tool unavailable) → `LOOP: STOP <short-reason>`
+   Write it bare, e.g. the literal line:  LOOP: CONTINUE 05-delete-tombstone.md
 
 ## Guardrails (never violate)
 

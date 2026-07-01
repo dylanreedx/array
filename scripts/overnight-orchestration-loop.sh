@@ -248,7 +248,10 @@ for i in $(seq 1 "$MAX_ITER"); do
   run_claude_iteration "$i" "$OUT"
   rc=$?
 
-  token="$(grep -E '^LOOP: ' "$OUT" | tail -1 || true)"
+  # Extract the control token even if the model wrapped it in markdown backticks
+  # or placed it mid-line. `\140` is octal for backtick (a literal backtick here
+  # would open a nested command substitution). Take the last occurrence.
+  token="$(tr -d '\140' < "$OUT" | grep -oE 'LOOP: (CONTINUE|STOP).*' | tail -1 || true)"
   echo "[loop] rc=$rc token='${token:-none}' (log: $OUT)"
   tail -3 "$OUT" | sed 's/^/[iter] /'
   append_event "iteration-end" "rc=$rc token=${token:-none} log=$OUT"

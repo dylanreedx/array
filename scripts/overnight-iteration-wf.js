@@ -1,18 +1,21 @@
 export const meta = {
   name: 'overnight-iteration',
-  description: 'Execute ONE Continuum implementation ticket: implement with Sonnet at the ticket-appropriate effort, prove it with swift build + the matrix, then dual-review the diff (Opus + GPT-5.5 via the Codex CLI) and commit only if the build is green, the matrix is green, and both reviewers clear. No push. No co-authoring footer.',
+  description: 'Execute ONE Continuum ticket with a self-repair loop: implement with Sonnet, prove with swift build + the matrix, dual-review the diff (real Opus + GPT-5.5 via Codex), and if either reviewer rejects, feed the concerns back for a fix pass and re-review — up to 3 rounds — before either committing (only when build+matrix green AND both reviewers clear) or skipping honestly. No push. No co-authoring footer.',
   phases: [
     { title: 'Implement', detail: 'edit Sources/, make swift build + matrix green' },
-    { title: 'Dual review', detail: 'Opus review + Codex gpt-5.5 cross-review of the diff' },
+    { title: 'Dual review', detail: 'real Opus + Codex gpt-5.5 review of the diff' },
     { title: 'Commit', detail: 'commit iff green and both reviewers clear' },
   ],
 }
 
-// args: { ticketPath, ticketName, effort ('low'|'medium'|'high'), branch }
-const A = args || {}
+// Inputs arrive via the Workflow `args`. Be robust to args being passed as a
+// JSON string (a known foot-gun) rather than an object.
+let A = args || {}
+if (typeof A === 'string') { try { A = JSON.parse(A) } catch (e) { A = {} } }
 const TICKET = A.ticketPath
-const NAME = A.ticketName || (TICKET || 'ticket')
-const EFFORT = (A.effort === 'low' || A.effort === 'medium' || A.effort === 'high') ? A.effort : 'low'
+const NAME = A.ticketName || TICKET || 'ticket'
+const EFFORT = ['low','medium','high'].includes(A.effort) ? A.effort : 'medium'
+const MAX_ROUNDS = 3
 
 const IMPL_RESULT = { type:'object', additionalProperties:false, required:['built','matrixGreen','changedFiles','summary'], properties:{
   built:{type:'boolean'}, matrixGreen:{type:'boolean'},
@@ -26,72 +29,102 @@ const COMMIT_RESULT = { type:'object', additionalProperties:false, required:['co
 }}
 
 const IMPL_PROMPT = [
-  'Implement ONE Continuum ticket end to end. This is a native macOS/Swift app at /Users/dylan/Documents/personal/continuum-overnight (a git worktree on branch overnight/agent-orchestration — work here, not in any other checkout).',
-  'READ THE TICKET FIRST and follow it exactly (its approach, seams, breadcrumbs, and "Done when" are authoritative — do not redesign): ' + TICKET + '.',
-  'Also skim /Users/dylan/Documents/personal/continuum-overnight/docs/38-locked-decisions.md so you do not reopen a settled decision.',
-  'DO THE WORK: edit files under Sources/ (and tests) per the ticket. Write the ticket\'s Logic/Backend/UX tests where they are automatable. Then PROVE it:',
-  '  1. Run `swift build` and fix until it compiles cleanly.',
-  '  2. Run `./scripts/run-matrix.sh` and read the result honestly.',
-  'HARD RULES: do NOT `git commit`, do NOT `git push`, do NOT touch git at all — a later stage owns the commit. Do NOT edit files outside what the ticket requires. NO fake-green: if you cannot get a clean build and a green matrix with an honest implementation, stop and report built/matrixGreen=false with the real reason — do not weaken tests or stub the check to pass.',
-  'Return {built, matrixGreen, changedFiles, summary, notes}: built=did `swift build` succeed; matrixGreen=did the matrix pass; summary=what you changed and why (for the reviewers); notes=anything shaky.'
+  'Implement ONE Continuum ticket end to end. Native macOS/Swift app at /Users/dylan/Documents/personal/continuum-overnight (this worktree — work HERE, not any other checkout).',
+  'READ THE TICKET FIRST and follow it exactly — its approach, seams, breadcrumbs, and "Done when" are authoritative; do not redesign or descope: ' + TICKET + '.',
+  'Also skim docs/38-locked-decisions.md so you do not reopen a settled decision.',
+  'DO THE WORK: edit files under Sources/ (and tests) per the ticket. Implement the FULL ticket — if it says migrate call sites, migrate ALL of them (a compatibility shim that leaves old call sites working is a FAILURE of a compile-enforced migration, not a convenience). Write the ticket\'s Logic/Backend/UX tests where automatable; a test that only compares IDs or uses a local fold helper instead of the real production merge/apply path does not count. Then PROVE it: (1) `swift build` until clean; (2) `./scripts/run-matrix.sh` and read the result honestly.',
+  'HARD RULES: do NOT touch git (a later stage commits). Do NOT edit files outside what the ticket requires. NO fake-green: if you cannot reach a clean build + green matrix with an honest, complete implementation, report built/matrixGreen=false with the real reason — never weaken a test or add a shim to pass.',
+  'Return {built, matrixGreen, changedFiles, summary, notes}.'
+].join('\n')
+
+const FIX_PROMPT = (concerns, round) => [
+  'You are fix round ' + round + ' for a Continuum ticket. A previous pass implemented it but reviewers REJECTED it. The implementation is in the working tree (uncommitted). Fix EVERY concern below in place; do not start over, do not revert good work.',
+  'The ticket (authoritative contract): ' + TICKET + '. Re-read it. Also read the current uncommitted diff (`git --no-pager diff`, `git status`) to see what exists.',
+  'CONCERNS TO RESOLVE (from Opus and/or GPT-5.5 — every one must be genuinely addressed, not papered over):',
+  ...(concerns || []).map((c, i) => '  ' + (i + 1) + '. ' + c),
+  'After fixing: `swift build` until clean, then `./scripts/run-matrix.sh`. Do NOT touch git. NO fake-green — if a concern reveals the approach is wrong, fix it properly; if you genuinely cannot resolve one honestly, say so in notes rather than masking it.',
+  'Return {built, matrixGreen, changedFiles, summary, notes} — summary should say how each concern was addressed.'
 ].join('\n')
 
 const OPUS_PROMPT = [
-  'Adversarially review the UNCOMMITTED diff that implements a Continuum ticket. Be strict — this ships unattended.',
-  'The ticket (the contract the diff must satisfy): ' + TICKET + '. Read it, then read the working-tree diff via `git diff` and `git status` (nothing is committed yet).',
-  'Judge: does the diff actually deliver the ticket\'s "Done when"? Correct, idiomatic to the surrounding code, no scope creep, no dead code, no weakened/faked tests, no reopened settled decision, no secret or transcript body crossing a sync boundary (I5). Verify the tests genuinely exercise the behavior (not tautologies).',
-  'Return {clear, concerns[], notes}: clear=true only if you would merge this as-is. List every real problem as a concern.'
+  'Adversarially review the UNCOMMITTED diff implementing a Continuum ticket. Be strict — this ships unattended.',
+  'Ticket (the contract the diff must satisfy): ' + TICKET + '. Read it, then read the working-tree diff (`git --no-pager diff`, `git status`; nothing is committed).',
+  'Judge against the ticket\'s "Done when": does the diff actually and COMPLETELY deliver it? Watch specifically for: incomplete migrations (compat shims / unmigrated call sites that defeat a compile-enforced change), tests that are tautological or bypass the real production path, missing required test tiers, reopened settled decisions, real correctness bugs, scope creep, and any secret/transcript body crossing a sync boundary (I5).',
+  'Return {clear, concerns[], notes}: clear=true only if you would merge as-is. Every real problem is a concern, stated concretely enough to fix.'
 ].join('\n')
 
 const CODEX_PROMPT = [
-  'Get an INDEPENDENT second-model review of the current uncommitted diff by driving the Codex CLI (GPT-5.5), then relay its verdict.',
-  'Run exactly this (read-only, non-interactive) from the repo root and capture stdout:',
-  '  codex exec --json -m gpt-5.5 --sandbox read-only --skip-git-repo-check "Review the current uncommitted git diff (run: git --no-pager diff; git --no-pager diff --staged; git status) against the ticket at ' + TICKET + '. Report as strict JSON {clear:boolean, concerns:string[]} whether the change correctly and completely implements the ticket with no bugs, no scope creep, no weakened or faked tests, and no reopened decision. clear=true only if you would merge as-is."',
-  'If the codex invocation errors, hangs, or cannot authenticate, treat that as NOT clear (clear=false) with a concern explaining the failure — never fabricate a pass.',
-  'Parse Codex\'s JSON verdict from its output and return {clear, concerns[], notes}. Put Codex\'s raw concerns into concerns[]; note in notes if you had to infer the verdict.'
+  'Get an INDEPENDENT second-model review of the current uncommitted diff via the Codex CLI (GPT-5.5), then relay its verdict.',
+  'Run this from the repo root and capture stdout:',
+  '  codex exec --json -m gpt-5.5 --sandbox read-only --skip-git-repo-check "Review the current uncommitted git diff (run: git --no-pager diff; git status) against the ticket at ' + TICKET + '. Check for incomplete migrations, correctness bugs, tautological/bypassing tests, missing required tests, and scope creep. Return strict JSON {clear:boolean, concerns:string[]}; clear=true only if you would merge as-is."',
+  'If codex errors, hangs, or cannot authenticate, treat that as NOT clear with a concern explaining the failure — never fabricate a pass.',
+  'Return {clear, concerns[], notes} parsed from Codex\'s verdict; put its raw concerns in concerns[].'
 ].join('\n')
 
-const COMMIT_PROMPT = (impl, opus, codex) => [
-  'Decide whether to commit the current uncommitted work for a Continuum ticket, and act.',
-  'Inputs — implementation: ' + JSON.stringify(impl) + '; Opus review: ' + JSON.stringify(opus) + '; Codex(gpt-5.5) review: ' + JSON.stringify(codex) + '.',
-  'COMMIT ONLY IF all of these hold: built===true AND matrixGreen===true AND Opus clear===true AND Codex clear===true. Otherwise DO NOT commit.',
-  'If committing: `git add -A` then `git commit` with a plain Conventional-Commits message `type(scope): summary` describing the ticket outcome. ABSOLUTELY NO co-authoring / "Generated with" / AI footer of any kind. Do NOT push. Then return {committed:true, commitHash:<short hash>, reason:"all gates green"}.',
-  'If NOT committing: leave the working tree exactly as-is (do not revert — the harness will inspect). Return {committed:false, reason:"<which gate failed, concretely>"}.'
+const COMMIT_PROMPT = [
+  'All gates for a Continuum ticket are green (build + matrix + both reviewers clear). Commit the current uncommitted work.',
+  '`git add -A` then `git commit` with a plain Conventional-Commits message `type(scope): summary` describing the ticket outcome. ABSOLUTELY NO co-authoring / "Generated with" / AI footer. Do NOT push.',
+  'Return {committed:true, commitHash:<short hash>, reason:"all gates green"}. If for some reason git fails, return {committed:false, reason:<why>}.'
 ].join('\n')
 
-log('iteration for ' + NAME + ' (effort=' + EFFORT + ')')
-
-phase('Implement')
-const impl = await agent(IMPL_PROMPT, { label:'implement:' + NAME, phase:'Implement', model:'sonnet', effort: EFFORT, schema: IMPL_RESULT })
-
-// Only spend review budget if the implementation actually built + passed the matrix.
-let opus = { clear:false, concerns:['implementation did not reach a green build+matrix; review skipped'] }
-let codex = { clear:false, concerns:['implementation did not reach a green build+matrix; review skipped'] }
-if (impl && impl.built && impl.matrixGreen) {
-  phase('Dual review')
-  const reviews = await parallel([
-    () => agent(OPUS_PROMPT, { label:'review-opus:' + NAME, phase:'Dual review', effort:'high', schema: VERDICT }),
-    () => agent(CODEX_PROMPT, { label:'review-codex-gpt5.5:' + NAME, phase:'Dual review', schema: VERDICT }),
-  ])
-  opus = reviews[0] || opus
-  codex = reviews[1] || codex
-} else {
-  log('build/matrix not green — skipping review, will not commit')
+if (!TICKET) {
+  log('FATAL: no ticketPath in args (threading failed) — cannot run')
+  return { ticket: NAME, committed:false, built:false, matrixGreen:false, opusClear:false, codexClear:false, rounds:0, reason:'no ticketPath in args', outstandingConcerns:['Workflow args did not thread a ticketPath'] }
 }
 
-phase('Commit')
-const commit = await agent(COMMIT_PROMPT(impl, opus, codex), { label:'commit:' + NAME, phase:'Commit', schema: COMMIT_RESULT })
+log('iteration for ' + NAME + ' (effort=' + EFFORT + ', up to ' + MAX_ROUNDS + ' repair rounds)')
+
+let committed = false, hash = null, reason = '', rounds = 0
+let opus = { clear:false, concerns:[] }, codex = { clear:false, concerns:[] }
+let concerns = []
+
+for (let round = 1; round <= MAX_ROUNDS && !committed; round++) {
+  rounds = round
+  // Round 1 implements at the ticket's effort; repair rounds escalate to high
+  // (subtle review concerns need more reasoning than the first pass).
+  phase('Implement')
+  const implEffort = round === 1 ? EFFORT : 'high'
+  const implPrompt = round === 1 ? IMPL_PROMPT : FIX_PROMPT(concerns, round)
+  const label = round === 1 ? ('implement:' + NAME) : ('fix' + round + ':' + NAME)
+  const impl = await agent(implPrompt, { label, phase:'Implement', model:'sonnet', effort: implEffort, schema: IMPL_RESULT })
+
+  if (!impl || !impl.built || !impl.matrixGreen) {
+    concerns = ['Build or matrix not green — ' + ((impl && impl.summary) || 'implementer returned no result') + ' | ' + ((impl && impl.notes) || '')]
+    log('round ' + round + ': build/matrix not green, ' + (round < MAX_ROUNDS ? 'retrying' : 'giving up'))
+    continue
+  }
+
+  phase('Dual review')
+  const reviews = await parallel([
+    () => agent(OPUS_PROMPT, { label:'review-opus:' + NAME, phase:'Dual review', model:'opus', effort:'high', schema: VERDICT }),
+    () => agent(CODEX_PROMPT, { label:'review-codex-gpt5.5:' + NAME, phase:'Dual review', schema: VERDICT }),
+  ])
+  opus = reviews[0] || { clear:false, concerns:['Opus review agent returned nothing'] }
+  codex = reviews[1] || { clear:false, concerns:['Codex review agent returned nothing'] }
+
+  if (opus.clear && codex.clear) {
+    phase('Commit')
+    const c = await agent(COMMIT_PROMPT, { label:'commit:' + NAME, phase:'Commit', schema: COMMIT_RESULT })
+    if (c && c.committed) {
+      committed = true; hash = c.commitHash || null; reason = 'all gates green (round ' + round + ')'
+    } else {
+      concerns = ['Commit stage declined: ' + ((c && c.reason) || 'unknown')]
+    }
+  } else {
+    concerns = [
+      ...(opus.clear ? [] : (opus.concerns || []).map(x => 'Opus: ' + x)),
+      ...(codex.clear ? [] : (codex.concerns || []).map(x => 'Codex: ' + x)),
+    ]
+    log('round ' + round + ': reviewers rejected (' + concerns.length + ' concerns), ' + (round < MAX_ROUNDS ? 'fixing' : 'out of rounds'))
+  }
+}
+
+if (!committed && !reason) {
+  reason = 'not cleared after ' + rounds + ' round(s); outstanding: ' + JSON.stringify(concerns).slice(0, 600)
+}
 
 return {
-  ticket: NAME,
-  built: !!(impl && impl.built),
-  matrixGreen: !!(impl && impl.matrixGreen),
-  opusClear: !!(opus && opus.clear),
-  codexClear: !!(codex && codex.clear),
-  committed: !!(commit && commit.committed),
-  commitHash: (commit && commit.commitHash) || null,
-  reason: (commit && commit.reason) || 'unknown',
-  opusConcerns: (opus && opus.concerns) || [],
-  codexConcerns: (codex && codex.concerns) || [],
-  implNotes: (impl && impl.notes) || '',
+  ticket: NAME, committed, commitHash: hash, rounds, reason,
+  opusClear: !!opus.clear, codexClear: !!codex.clear,
+  outstandingConcerns: committed ? [] : concerns,
 }
