@@ -9,6 +9,7 @@ alongside the git log on `overnight/agent-orchestration`.
 | (infra, not a ticket) | done | eb7d4fe | n/a | Harness bug: implementer repo path hardcoded to the wrong checkout. Fixed. |
 | 01-store-protocol-seam.md | done | c71d601 | matrix: green | Clean; both reviewers cleared. |
 | 02-op-enum-logged-op-envelope.md | done | a4cba75 | matrix: green | Hand-resolved; frozen wire format, full matrix passed. |
+| 03-membership-tile-register.md | skipped | - | matrix: green (headless) | Not cleared after 3 review rounds (Opus+Codex both rejected). Top concerns: out-of-scope ProjectStore.swift saveCanvas re-stamp violates the ticket's "Stop if" file fence (and forces one-way v1→v2 canvas migration on first save); setTiles(_:forZone:) replaces the whole Tile record instead of writing only zoneId (can clobber runtimeRef/metadata/frame from a stale caller, and the new T02 test enshrines it); WorkspaceProfileStore.captureProfile/saveProfile persists the nested WorkspaceDocument verbatim, bypassing the v3 re-stamp so old code can silently drop membership; I5 taint check builds its own allow-list projection (tautological, not the production sync projection). Tree left dirty as the workflow left it. |
 
 ## Reset for the Fable-orchestrated retry (2026-07-01)
 
