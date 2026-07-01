@@ -5173,12 +5173,12 @@ do {
 
     // Group 8: SettingsSchema wiring.
     let sections = SettingsSchema.sections()
-    guard let general = sections.first(where: { $0.id == "general" }) else {
-        fputs("FAIL: zoneBoundsConfig group8: no general section in SettingsSchema\n", stderr)
+    guard let zonesSection = sections.first(where: { $0.id == "zones" }) else {
+        fputs("FAIL: zoneBoundsConfig group8: no zones section in SettingsSchema\n", stderr)
         Foundation.exit(1)
     }
     func field(key: String) -> SettingsField? {
-        general.fields.first {
+        zonesSection.fields.first {
             if case let .text(k, _, _) = $0 { return k == key }
             return false
         }
