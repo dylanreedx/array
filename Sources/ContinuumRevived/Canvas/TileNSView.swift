@@ -65,7 +65,25 @@ class TileNSView: NSView {
 
     private var titleBar: TitleBarView?
     private var cornerOverlay: CornerOverlayView?
+    private var affordanceOverlay: AffordanceOverlayView?
     private(set) var contentView: NSView?
+
+    /// Debug-draw mode, default off and set only by the Component Lab: overlays
+    /// the interaction hitboxes (move-grab strip, resize edge bands, corner
+    /// zones, close-button target) plus live screen-px metrics, so the otherwise
+    /// invisible affordances can be seen and tuned. Never enabled in normal use;
+    /// the overlay is hit-transparent so it never intercepts events.
+    var showsInteractionAffordances = false {
+        didSet {
+            guard showsInteractionAffordances != oldValue else { return }
+            if showsInteractionAffordances {
+                installAffordanceOverlay()
+            } else {
+                affordanceOverlay?.removeFromSuperview()
+                affordanceOverlay = nil
+            }
+        }
+    }
     private var dragKind: DragKind = .none
     private var dragLastWindowPoint: CGPoint = .zero
     private var mouseDraggedSinceDown = false
@@ -136,6 +154,44 @@ class TileNSView: NSView {
         self.cornerOverlay = overlay
     }
 
+    private func installAffordanceOverlay() {
+        guard affordanceOverlay == nil else { return }
+        let overlay = AffordanceOverlayView(frame: bounds)
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(overlay)  // topmost — installed after chrome/content/corner
+        NSLayoutConstraint.activate([
+            overlay.leadingAnchor.constraint(equalTo: leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: trailingAnchor),
+            overlay.topAnchor.constraint(equalTo: topAnchor),
+            overlay.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+        affordanceOverlay = overlay
+        updateAffordanceOverlay()
+    }
+
+    private func updateAffordanceOverlay() {
+        affordanceOverlay?.metrics = affordanceMetrics()
+    }
+
+    /// The live interaction geometry, in world units + the derived on-screen px
+    /// (world × zoom). The overlay draws from this and the self-check asserts the
+    /// screen-px floors hold across zoom (the docs/25 dead-corner/grab regression).
+    func affordanceMetrics() -> TileAffordanceMetrics {
+        let zoom = max(0.0001, CGFloat(canvas?.viewport.zoom ?? 1))
+        let m = resizeMarginInLocalCoordinates
+        return TileAffordanceMetrics(
+            zoom: zoom,
+            resizeEdgeWorld: m,
+            cornerWorld: max(Self.cornerHoverSize, 2 * m),
+            grabWorld: grabHeightInLocalCoordinates,
+            closeWorld: closeButtonWorldSize,
+            closeFrame: qaCloseButtonFrame,
+            zIndex: tile.zIndex
+        )
+    }
+
+    var qaAffordanceOverlayInstalled: Bool { affordanceOverlay != nil }
+
     /// Subclasses install their content view via this entry point so the
     /// title bar stays on top and the body is automatically resized.
     func setContentView(_ view: NSView) {
@@ -162,6 +218,7 @@ class TileNSView: NSView {
         super.layout()
         layoutChrome()
         layoutContentView()
+        updateAffordanceOverlay()
     }
 
     /// Drive the title-bar height + close-button size from the current zoom so
@@ -484,6 +541,7 @@ class TileNSView: NSView {
     func invalidateForCanvasLayout() {
         qaCanvasLayoutInvalidationCount += 1
         setNeedsDisplay(bounds)
+        updateAffordanceOverlay()  // zoom-dependent metrics refresh with the camera
     }
 
     /// World edge length for the close button, floored so its on-screen size
@@ -983,4 +1041,87 @@ private final class CornerOverlayView: NSView {
         default: return nil
         }
     }
+}
+
+/// Live interaction geometry for a tile, in world units plus the derived
+/// on-screen pixels (world × zoom). Screen-px values are what the floors in
+/// TileNSView are designed to hold constant/minimum across zoom.
+struct TileAffordanceMetrics: Equatable {
+    var zoom: CGFloat
+    var resizeEdgeWorld: CGFloat
+    var cornerWorld: CGFloat
+    var grabWorld: CGFloat
+    var closeWorld: CGFloat
+    var closeFrame: CGRect
+    var zIndex: Int
+
+    var resizeEdgeScreenPx: CGFloat { resizeEdgeWorld * zoom }
+    var cornerScreenPx: CGFloat { cornerWorld * zoom }
+    var grabScreenPx: CGFloat { grabWorld * zoom }
+    var closeScreenPx: CGFloat { closeWorld * zoom }
+}
+
+/// Hit-transparent debug overlay drawing a tile's interaction zones + a live
+/// screen-px readout. Draws in the tile's world coordinate space (flipped to
+/// match), so the bands are exactly the hit regions `resizeEdge`/`hitTest` use —
+/// no re-derivation that could drift from production geometry.
+@MainActor
+private final class AffordanceOverlayView: NSView {
+    var metrics: TileAffordanceMetrics? { didSet { needsDisplay = true } }
+
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let m = metrics, m.zoom > 0 else { return }
+        let w = bounds.width, h = bounds.height
+        let edge = m.resizeEdgeWorld, c = m.cornerWorld, grab = m.grabWorld
+
+        func fill(_ rect: NSRect, _ color: NSColor) { color.setFill(); rect.fill() }
+
+        // Move-grab strip first; resize bands + corners layer on top (matching
+        // hit precedence: resize wins over move).
+        fill(NSRect(x: 0, y: 0, width: w, height: grab), NSColor.systemBlue.withAlphaComponent(0.16))
+
+        let edgeColor = NSColor.systemOrange.withAlphaComponent(0.22)
+        fill(NSRect(x: 0, y: 0, width: w, height: edge), edgeColor)
+        fill(NSRect(x: 0, y: h - edge, width: w, height: edge), edgeColor)
+        fill(NSRect(x: 0, y: edge, width: edge, height: max(0, h - 2 * edge)), edgeColor)
+        fill(NSRect(x: w - edge, y: edge, width: edge, height: max(0, h - 2 * edge)), edgeColor)
+
+        let cornerColor = NSColor.systemPink.withAlphaComponent(0.28)
+        fill(NSRect(x: 0, y: 0, width: c, height: c), cornerColor)
+        fill(NSRect(x: w - c, y: 0, width: c, height: c), cornerColor)
+        fill(NSRect(x: 0, y: h - c, width: c, height: c), cornerColor)
+        fill(NSRect(x: w - c, y: h - c, width: c, height: c), cornerColor)
+
+        if !m.closeFrame.isEmpty {
+            let path = NSBezierPath(rect: m.closeFrame)
+            path.lineWidth = max(1, 1.5 / m.zoom)
+            NSColor.systemTeal.withAlphaComponent(0.95).setStroke()
+            path.stroke()
+        }
+
+        drawReadout(m, originX: edge + 6 / m.zoom, originY: grab + 6 / m.zoom)
+    }
+
+    private func drawReadout(_ m: TileAffordanceMetrics, originX: CGFloat, originY: CGFloat) {
+        // Screen-constant font (≈11px) so the readout stays legible at any zoom.
+        let font = NSFont.monospacedSystemFont(ofSize: max(6, 11 / m.zoom), weight: .medium)
+        let text = """
+        zoom \(String(format: "%.2f", m.zoom))×
+        edge \(px(m.resizeEdgeScreenPx))  corner \(px(m.cornerScreenPx))
+        grab \(px(m.grabScreenPx))  close \(px(m.closeScreenPx))
+        z-index \(m.zIndex)
+        """ as NSString
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.white]
+        let pad = 5 / m.zoom
+        let size = text.size(withAttributes: attrs)
+        let bg = NSRect(x: originX, y: originY, width: size.width + pad * 2, height: size.height + pad * 2)
+        NSColor.black.withAlphaComponent(0.6).setFill()
+        NSBezierPath(roundedRect: bg, xRadius: 4 / m.zoom, yRadius: 4 / m.zoom).fill()
+        text.draw(at: NSPoint(x: originX + pad, y: originY + pad), withAttributes: attrs)
+    }
+
+    private func px(_ value: CGFloat) -> String { "\(Int(value.rounded()))px" }
 }

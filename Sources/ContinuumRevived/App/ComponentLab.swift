@@ -116,6 +116,7 @@ final class LabSandboxContext: NSObject {
     private var spawner: TileSpawner?
     private var teardownBlocks: [() -> Void] = []
     private var spawnCount = 0
+    private var affordancesOn = false
     private let zoomLabel = NSTextField(labelWithString: "100%")
 
     init(env: LabEnvironment) {
@@ -205,16 +206,20 @@ final class LabSandboxContext: NSObject {
             browserButton,
             button("Note", #selector(spawnNoteClicked)),
             button("File", #selector(spawnFileClicked)),
-            button("File Tree", #selector(spawnFileTreeClicked)),
-            button("Run", #selector(spawnRunArtifactsClicked))
+            button("File Tree", #selector(spawnFileTreeClicked))
         ])
         spawn.spacing = 6
+
+        let affordanceToggle = NSButton(checkboxWithTitle: "Hitboxes", target: self, action: #selector(toggleAffordancesClicked(_:)))
+        affordanceToggle.controlSize = .small
+        affordanceToggle.toolTip = "Overlay each tile's interaction zones + live screen-px metrics"
 
         zoomLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         zoomLabel.textColor = .secondaryLabelColor
         zoomLabel.alignment = .center
         zoomLabel.setContentHuggingPriority(.required, for: .horizontal)
         let zoom = NSStackView(views: [
+            affordanceToggle,
             button("−", #selector(zoomOutClicked)),
             zoomLabel,
             button("+", #selector(zoomInClicked)),
@@ -241,6 +246,25 @@ final class LabSandboxContext: NSObject {
 
     private func nextZ() -> Int { (canvas.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1 }
 
+    /// Install a fixture tile and give it the current affordance-overlay state.
+    private func install(_ view: TileNSView, for tile: Tile) {
+        canvas.install(tileView: view, for: tile)
+        view.showsInteractionAffordances = affordancesOn
+    }
+
+    /// Apply the current toggle to every tile (used after runtime spawns, whose
+    /// views the spawner installs directly, and when the toggle flips).
+    private func applyAffordances() {
+        for tileView in canvas.subviews.compactMap({ $0 as? TileNSView }) {
+            tileView.showsInteractionAffordances = affordancesOn
+        }
+    }
+
+    @objc private func toggleAffordancesClicked(_ sender: NSButton) {
+        affordancesOn = sender.state == .on
+        applyAffordances()
+    }
+
     private func placement(for kind: TileKind) -> TileFrame {
         let size = CanvasEngine.defaultFrame(for: kind)
         let offset = Double(spawnCount % 6) * 36
@@ -251,29 +275,29 @@ final class LabSandboxContext: NSObject {
     func spawnNote() {
         let noteId = UUID()
         let tile = Tile(id: UUID(), kind: .note, title: "note \(spawnCount + 1)", frame: placement(for: .note), zIndex: nextZ(), runtimeRef: nil, metadata: TileMetadata(noteId: noteId))
-        canvas.install(tileView: NoteTileNSView(tile: tile, noteId: noteId, initialBody: "# Note\n\nType here…"), for: tile)
+        install(NoteTileNSView(tile: tile, noteId: noteId, initialBody: "# Note\n\nType here…"), for: tile)
     }
 
     func spawnFile() {
         let tile = Tile(id: UUID(), kind: .file, title: "README.md", frame: placement(for: .file), zIndex: nextZ(), runtimeRef: nil, metadata: TileMetadata(filePath: sampleFilePath))
-        canvas.install(tileView: FileTileNSView(tile: tile), for: tile)
+        install(FileTileNSView(tile: tile), for: tile)
     }
 
     func spawnFileTree() {
         let id = UUID()
         let fileTreeTile = FileTreeTile(tileId: id, rootPath: tempDir.path, expandedPaths: [], selectedPath: nil, searchQuery: "", ignoredNames: [], gitBadges: .off)
         let tile = Tile(id: id, kind: .fileTree, title: "Files", frame: placement(for: .fileTree), zIndex: nextZ(), runtimeRef: nil, metadata: TileMetadata(filePath: tempDir.path))
-        canvas.install(tileView: FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile), for: tile)
+        install(FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile), for: tile)
     }
 
     func spawnRunArtifacts() {
         let tile = Tile(id: UUID(), kind: .runArtifacts, title: "Run Artifacts", frame: placement(for: .runArtifacts), zIndex: nextZ(), runtimeRef: nil, metadata: TileMetadata())
-        canvas.install(tileView: RunArtifactsTileNSView(tile: tile), for: tile)
+        install(RunArtifactsTileNSView(tile: tile), for: tile)
     }
 
     func spawnDescriptor() {
         let tile = Tile(id: UUID(), kind: .terminal, title: "placeholder", frame: placement(for: .terminal), zIndex: nextZ(), runtimeRef: nil, metadata: TileMetadata())
-        canvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+        install(DescriptorTileNSView(tile: tile), for: tile)
     }
 
     // Runtime tiles — real terminal/browser via TileSpawner; each registers a
@@ -285,6 +309,7 @@ final class LabSandboxContext: NSObject {
         if case let .spawned(runtime) = spawner.spawnTerminal(profileId: "shell", allowTmuxPersistence: false) {
             registerTeardown { runtime.terminate(policy: .force) }
         }
+        applyAffordances()
     }
 
     func spawnBrowser() {
@@ -292,6 +317,7 @@ final class LabSandboxContext: NSObject {
         if case let .spawned(runtime) = spawner.spawnBrowser(url: "about:blank") {
             registerTeardown { runtime.terminate(policy: .force) }
         }
+        applyAffordances()
     }
 
     @objc private func spawnTerminalClicked() { spawnTerminal() }
@@ -664,6 +690,30 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard abs(zoomHigh - 3.0) < 1e-6, abs(zoomLow - 0.25) < 1e-6 else {
             throw fail("zoom clamp wrong: high=\(zoomHigh) (want 3.0), low=\(zoomLow) (want 0.25)")
         }
+
+        // Affordance inspector: overlay installs, and the screen-px floors hold
+        // across zoom (regression gate on the docs/25 dead-corner/grab bugs).
+        let probe = tileViews[0]
+        probe.showsInteractionAffordances = true
+        guard probe.qaAffordanceOverlayInstalled else { throw fail("affordance overlay did not install") }
+        for zoom in [0.5, 1.0, 2.0] {
+            sandbox.setZoom(zoom)
+            let a = probe.affordanceMetrics()
+            guard abs(a.resizeEdgeScreenPx - 8) < 0.5 else { throw fail("resize edge \(a.resizeEdgeScreenPx)px @ zoom \(zoom), want 8") }
+            guard a.cornerScreenPx >= 15.5 else { throw fail("corner \(a.cornerScreenPx)px @ zoom \(zoom), want >=16") }
+            guard a.grabScreenPx >= 27.5 else { throw fail("grab \(a.grabScreenPx)px @ zoom \(zoom), want >=28") }
+            guard a.closeScreenPx >= 21.5 else { throw fail("close \(a.closeScreenPx)px @ zoom \(zoom), want >=22") }
+        }
+        sandbox.setZoom(1.0)
+        probe.layoutSubtreeIfNeeded()
+        if let rep = probe.bitmapImageRepForCachingDisplay(in: probe.bounds) {
+            probe.cacheDisplay(in: probe.bounds, to: rep)
+            try rep.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("affordance-overlay.png"))
+            guard !VisualSnapshot.metrics(of: rep).isBlank else { throw fail("affordance overlay render is blank") }
+        }
+
+        probe.showsInteractionAffordances = false
+        guard !probe.qaAffordanceOverlayInstalled else { throw fail("affordance overlay did not uninstall") }
 
         sandbox.teardownAll()
         guard !sandbox.qaTempDirExists else { throw fail("sandbox temp dir survived teardown") }
