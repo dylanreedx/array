@@ -25,4 +25,13 @@ public enum JSONCodec {
         )
         return decoder
     }
+
+    /// Canonical op-log encoding: always sortedKeys, never pretty-printed, so
+    /// byte output is deterministic across replicas and encoder instances.
+    public static func makeOpLogEncoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return encoder
+    }
 }

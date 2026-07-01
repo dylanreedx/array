@@ -10,6 +10,15 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+// Trap-testing hook: when invoked with this env var set, deliberately call
+// the operation under test so a subprocess check can assert the process
+// crashes (non-zero/abnormal exit) rather than trying to catch a Swift
+// `precondition` in-process, which is not catchable.
+if ProcessInfo.processInfo.environment["CRCC_TRAP_TEST"] == "FracIndex.between.equal" {
+    _ = FracIndex.between(.first, .first)
+    Foundation.exit(0) // unreachable if the precondition traps, as expected
+}
+
 func approximatelyEqual(_ a: CGPoint, _ b: CGPoint, tolerance: Double = 0.001) -> Bool {
     abs(a.x - b.x) < tolerance && abs(a.y - b.y) < tolerance
 }
@@ -5747,6 +5756,57 @@ do {
     let screen = CanvasEngine.tileScreenFrame(TileFrame(x: 1000, y: 500, width: 2200, height: 1200), viewport: framed)
     expect(screen.minX >= 95.9 && screen.maxX <= 1104.1, "zone framing contains width with padding")
     expect(screen.minY >= 95.9 && screen.maxY <= 704.1, "zone framing contains height with padding")
+}
+
+// MARK: - Ticket 02: Op enum & LoggedOp envelope
+
+runSpatialOpTests()
+
+// Mechanical CI guard: SpatialOp.swift must contain no wall-clock references.
+// A comment banning `Date`/`clock()` is not enforcement; this grep-level scan is.
+do {
+    let path = "Sources/ContinuumRevivedCore/SpatialOp.swift"
+    guard let source = try? String(contentsOfFile: path, encoding: .utf8) else {
+        fputs("FAIL: wall-clock guard: could not read \(path) from cwd \(FileManager.default.currentDirectoryPath)\n", stderr)
+        Foundation.exit(1)
+    }
+    let bannedTokens = ["Date(", "Date.now", "CFAbsoluteTime", "clock()", "DispatchTime.now()", "ContinuousClock"]
+    for token in bannedTokens {
+        expect(!source.contains(token), "wall-clock guard: SpatialOp.swift must not reference '\(token)'")
+    }
+    print("wall-clock guard: SpatialOp.swift scanned (\(source.count) chars), 0 banned tokens found")
+}
+
+// Mechanical CI guard: ContinuumRevivedCore's target declaration in
+// Package.swift must keep an empty `dependencies:` array — the op-log
+// layer is pure Swift with zero external dependencies.
+do {
+    let path = "Package.swift"
+    guard let source = try? String(contentsOfFile: path, encoding: .utf8) else {
+        fputs("FAIL: dependencies guard: could not read \(path) from cwd \(FileManager.default.currentDirectoryPath)\n", stderr)
+        Foundation.exit(1)
+    }
+    // Match `.target(name: "ContinuumRevivedCore")` specifically — NOT the
+    // `.library(name: "ContinuumRevivedCore", ...)` product declaration,
+    // which also contains the substring `name: "ContinuumRevivedCore"` and
+    // appears earlier in the file. Anchor on the `.target(` prefix so the
+    // guard inspects the actual target declaration that owns
+    // `dependencies:`, with no dependencies: argument at all (the empty
+    // case) — any dependencies: array appearing in that same target
+    // declaration fails the guard.
+    guard let range = source.range(of: ".target(name: \"ContinuumRevivedCore\"") else {
+        fputs("FAIL: dependencies guard: could not find ContinuumRevivedCore target declaration in Package.swift\n", stderr)
+        Foundation.exit(1)
+    }
+    // Look at the declaration up to the next `)` that closes the .target(...) call.
+    let afterName = source[range.upperBound...]
+    guard let closeParen = afterName.firstIndex(of: ")") else {
+        fputs("FAIL: dependencies guard: malformed ContinuumRevivedCore target declaration\n", stderr)
+        Foundation.exit(1)
+    }
+    let declaration = afterName[afterName.startIndex..<closeParen]
+    expect(!declaration.contains("dependencies"), "dependencies guard: ContinuumRevivedCore target must declare no dependencies, found: \(declaration)")
+    print("dependencies guard: ContinuumRevivedCore target has zero dependencies")
 }
 
 print("ContinuumRevivedCoreChecks passed")
