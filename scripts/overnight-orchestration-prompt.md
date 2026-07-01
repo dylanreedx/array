@@ -55,6 +55,7 @@ emit token, exit.
 5. **Record the outcome** by appending one row to `docs/38-tickets/_PROGRESS.md` (create the file
    with a header row if missing). Row format:
    `| <ticket file> | done|skipped | <commit hash or -> | matrix: green|red | <one-line note incl. any reviewer concerns> |`
+   Use `matrix: green (headless)` when it passed with the surface checks skipped — that flags the ticket as still owing a supervised GUI-matrix pass before merge.
    - `committed: true` in the result → status `done`.
    - `committed: false` → status `skipped`, and put the `reason` + the top reviewer/impl concern in
      the note so a human can pick it up. Leave the working tree as the Workflow left it; do not revert.

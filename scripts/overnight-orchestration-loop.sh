@@ -27,7 +27,10 @@ ALLOW_DIRTY="${ALLOW_DIRTY:-0}"
 ALLOW_MAIN="${ALLOW_MAIN:-0}"
 EXPECTED_BRANCH="${EXPECTED_BRANCH:-overnight/agent-orchestration}"
 PUSH_MODE="${PUSH_MODE:-local-only}"
-CLAUDE_MODEL="${CLAUDE_MODEL:-sonnet}"
+# Orchestrator model: Fable 5 drives each iteration (picks the ticket, runs the
+# implement workflow, coordinates reviews, decides commit/skip). The IMPLEMENTER
+# stays Sonnet 5 (set in overnight-iteration-wf.js); reviewers stay Opus + Codex.
+CLAUDE_MODEL="${CLAUDE_MODEL:-fable}"
 CLAUDE_EFFORT="${CLAUDE_EFFORT:-medium}"
 # `claude -p` kills still-running background tasks after this many ms (default
 # 600000 = 10 min). The per-ticket Workflow runs as a background task and a real
@@ -36,6 +39,11 @@ CLAUDE_EFFORT="${CLAUDE_EFFORT:-medium}"
 # no LOOP token. 0 = wait indefinitely; the ITER_TIMEOUT_SECONDS watchdog below
 # is the real outer bound on a hung iteration.
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-0}"
+# The overnight loop runs headless (no terminal surface for Ghostty), so the
+# matrix's surface-rendering checks time out. Skip them in the loop's matrix; a
+# supervised full-matrix pass on a GUI host covers them. Propagates to the
+# implement agent's `./scripts/run-matrix.sh` invocation.
+export CONTINUUM_SKIP_SURFACE_CHECKS="${CONTINUUM_SKIP_SURFACE_CHECKS:-1}"
 ROOT_PI_DIR="${ROOT_PI_DIR:-$HOME/.pi}"
 PROJECT_LOG_DIR="${PROJECT_LOG_DIR:-.pi/overnight-logs}"
 
