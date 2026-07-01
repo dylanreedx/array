@@ -14,6 +14,16 @@ This ticket also enforces the wall-clock ban that the architecture mandates. Tod
 
 ### The op-envelope provenance question, resolved up front
 
+> **RULING (2026-07-01 — supersedes the paragraphs below where they conflict):** Ticket 02
+> (the op enum & LoggedOp envelope) has ALREADY landed **both** `OpId` and
+> `LoggedOp { opId; op: Op }` in `ContinuumRevivedCore` (`SpatialOp.swift`). To avoid a
+> name collision with those shipped types, this ticket must: **(1) reuse ticket 02's existing
+> `OpId` verbatim — do NOT re-declare it;** and **(2) name this ticket's op-agnostic transport
+> envelope `TransportLoggedOp { opId: OpId; payload: Data }`.** Everywhere the text below says
+> `LoggedOp` for the *transport envelope*, read `TransportLoggedOp`. Ticket 02's `LoggedOp`
+> (which carries a typed `Op`) stays untouched; the two coexist cleanly — one carries a typed
+> op, the other an opaque `payload` the transport never inspects.
+
 The sync transport moves ops, so it needs a *type of op* to move. The SYNC-MODEL spike (`docs/2026-06-30-orchestration-spikes/SYNC-MODEL.md:290-319`) defines the full op vocabulary — `OpId`, `Op`, `LoggedOp` — and locates it in a *future* dependency-free `ContinuumRevivedSync` target that does not exist yet. That target is out of scope here: this ticket must not pull in the whole spatial op enum, and it must stay standalone against Core.
 
 So **this ticket creates a minimal `OpId` and `LoggedOp` in `ContinuumRevivedCore`** — the smallest shape the transport needs to be a real seam — with fields that match the spike verbatim so the future `ContinuumRevivedSync` work re-homes (or re-exports) them without a rename:

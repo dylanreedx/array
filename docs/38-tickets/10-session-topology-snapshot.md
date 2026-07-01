@@ -82,8 +82,18 @@ The public surface of the new file:
   type
 - `public static func parse(tmuxOutput: String) throws -> SessionTopologySnapshot` — the
   pure parser
-- `public enum ParseError: Error, Equatable` — `malformedLine(String)`,
-  `emptyInput`, `invalidPid(String)`
+- `public enum ParseError: Error, Equatable` — `malformedLine(String)`, `invalidPid(String)`
+  (the `emptyInput` case is REMOVED — see ruling below)
+
+> **RULING (2026-07-01 — supersedes the empty-input handling everywhere in this ticket):**
+> Empty or whitespace-only input is NOT an error — it is a valid **empty (zero-session)
+> snapshot** (the normal "nothing running" case). `parse("")` and `parse("\n\n")` return a
+> snapshot with zero sessions; they do NOT throw. Concretely: remove the `ParseError.emptyInput`
+> case and the `guard !lines.isEmpty else { throw … }`; when there are zero non-empty lines,
+> return an empty snapshot. `ParseError` now covers only a genuinely malformed *non-empty line*
+> (`malformedLine` = wrong field count, `invalidPid` = non-numeric pid). The two
+> "`parse("")` / `parse("\n\n")` throws `ParseError.emptyInput`" assertions in the tests below
+> are replaced by: assert each returns a **zero-session snapshot**.
 - `public func window(paneId: String) -> WindowEntry?` — convenience lookup used by invariant
   checks; scans all sessions
 
