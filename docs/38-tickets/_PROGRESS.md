@@ -28,7 +28,21 @@ many downstream tickets. Their prior findings, preserved so the morning review h
   tests + visual gate; and a real correctness bug — `.last` (0.75) is a reusable value, so
   `bringToFront`/spawn can hand out a duplicate `zPosition`; legacy migration overshoots `.last`.
 
+- **04 retry (hardened loop, 3 rounds):** Opus cleared; Codex did not. Three concerns: (1)
+  `CanvasEngine.bringToFront`/`WorkspaceDocument.bringZoneToFront` compute the promotion base from
+  all *other* items then overwrite the target — if the target already has a large gap over the
+  rest, promoting it can *lower* its z-position (target 0.99 vs. others maxing at 0.60 becomes
+  0.675); added tests only cover a close promotion chain and miss this case. (2) Legacy `Tile`
+  decode stores a placeholder `zPosition = 0.5` for `_legacyZIndex`, but rank-based redistribution
+  only runs in `CanvasState`'s own decode path — `WorkspaceDocument` decodes embedded
+  `groupZoneTiles` directly and never migrates their legacy ranks, so legacy group-zone tiles
+  collapse to the same 0.5. No test covers that path. (3) Zone hit-testing
+  (`CanvasNSView.tileId(at:)` / `zoneId(at:)`) still uses live-zone array/insertion order instead
+  of sorting by the new `ZonePlacement.zPosition`, so front-to-back zone routing isn't actually
+  driven by the migrated fractional index yet.
+
 The full original notes are in the git history of this file (earlier `chore(overnight)` commits).
 New attempts append their rows to the table above.
 
 | 03-membership-tile-register.md | skipped | - | matrix: green | Hardened loop, 3 rounds, not cleared. Opus cleared; Codex did not: `CanvasState.currentSchemaVersion` bumped to 2, but a v1 project canvas loaded via `ProjectStore` keeps `schemaVersion == 1` and `saveCanvas` writes that value back unchanged — if `zoneId` is set on such a tile and saved, the file carries the new field while still declaring v1, so an old build accepts it and silently drops membership instead of hitting the intended v2 forward-incompat guard. Added v1 test only decodes the old shape, doesn't cover the real load→set zoneId→save→assert-schemaVersion-2 path. Working tree left dirty (uncommitted) for a human/next attempt to pick up. |
+| 04-zorder-fractional-index.md | skipped | - | matrix: green | Hardened loop, 3 rounds, not cleared. Opus cleared; Codex did not — see "04 retry" notes above (bringToFront can lower an already-frontmost item; embedded `groupZoneTiles` legacy migration skipped; zone hit-testing still order-based, not zPosition-based). Working tree left dirty (uncommitted) for a human/next attempt to pick up. |
