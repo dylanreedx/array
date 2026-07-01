@@ -576,11 +576,47 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             Self.place(sandbox.containerView, in: host, preferredSize: nil)
         case let .launcher(buttonTitle, present):
             currentLauncher = present
-            let button = NSButton(title: buttonTitle, target: self, action: #selector(launcherButtonClicked))
-            button.bezelStyle = .rounded
-            button.controlSize = .large
-            Self.place(button, in: host, preferredSize: NSSize(width: 240, height: 40))
+            let pane = Self.makeLauncherPane(title: entry.title, summary: entry.summary, buttonTitle: buttonTitle, target: self, action: #selector(launcherButtonClicked))
+            pane.translatesAutoresizingMaskIntoConstraints = false
+            host.addSubview(pane)
+            NSLayoutConstraint.activate([
+                pane.centerXAnchor.constraint(equalTo: host.centerXAnchor),
+                pane.centerYAnchor.constraint(equalTo: host.centerYAnchor),
+                pane.widthAnchor.constraint(lessThanOrEqualToConstant: 400)
+            ])
         }
+    }
+
+    /// Launcher pane: title + summary + a prominent accent button. Explicit
+    /// light colours + an accent bezel with white title so it stays legible on
+    /// the dark host regardless of the system appearance.
+    static func makeLauncherPane(title: String, summary: String, buttonTitle: String, target: AnyObject?, action: Selector?) -> NSStackView {
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        titleLabel.textColor = NSColor(white: 0.95, alpha: 1)
+        titleLabel.alignment = .center
+
+        let summaryLabel = NSTextField(wrappingLabelWithString: summary)
+        summaryLabel.font = .systemFont(ofSize: 12)
+        summaryLabel.textColor = NSColor(white: 0.6, alpha: 1)
+        summaryLabel.alignment = .center
+        summaryLabel.preferredMaxLayoutWidth = 360
+
+        let button = NSButton(title: buttonTitle, target: target, action: action)
+        button.bezelStyle = .rounded
+        button.controlSize = .large
+        button.bezelColor = .controlAccentColor
+        button.attributedTitle = NSAttributedString(string: buttonTitle, attributes: [
+            .foregroundColor: NSColor.white,
+            .font: NSFont.systemFont(ofSize: 13, weight: .medium)
+        ])
+
+        let stack = NSStackView(views: [titleLabel, summaryLabel, button])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 12
+        stack.setCustomSpacing(18, after: summaryLabel)
+        return stack
     }
 
     @objc private func launcherButtonClicked() {
@@ -777,6 +813,31 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
 
         sandbox.teardownAll()
         guard !sandbox.qaTempDirExists else { throw fail("sandbox temp dir survived teardown") }
+
+        // Launcher pane legibility on the dark host (light-on-dark, accent button).
+        let launcherHost = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 300))
+        launcherHost.wantsLayer = true
+        launcherHost.layer?.backgroundColor = NSColor(white: 0.12, alpha: 1).cgColor
+        let launcherWindow = NSWindow(contentRect: launcherHost.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        launcherWindow.contentView = launcherHost
+        let pane = makeLauncherPane(title: "Command Palette", summary: "The real ⌘K launch palette. Opens empty here — the app fills it with live profiles/projects.", buttonTitle: "Open Command Palette", target: nil, action: nil)
+        pane.translatesAutoresizingMaskIntoConstraints = false
+        launcherHost.addSubview(pane)
+        NSLayoutConstraint.activate([
+            pane.centerXAnchor.constraint(equalTo: launcherHost.centerXAnchor),
+            pane.centerYAnchor.constraint(equalTo: launcherHost.centerYAnchor),
+            pane.widthAnchor.constraint(lessThanOrEqualToConstant: 400)
+        ])
+        launcherHost.layoutSubtreeIfNeeded()
+        if let rep = launcherHost.bitmapImageRepForCachingDisplay(in: launcherHost.bounds) {
+            launcherHost.cacheDisplay(in: launcherHost.bounds, to: rep)
+            try rep.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("launcher-pane.png"))
+            // >3 sampled colours: dark host + light title + grey summary + accent
+            // button + white label — a dark-on-dark regression would collapse this.
+            guard VisualSnapshot.metrics(of: rep).distinctSampledColors > 3 else {
+                throw fail("launcher pane is low-contrast (dark-on-dark?)")
+            }
+        }
 
         let manifest: [String: Any] = [
             "check": "component-lab",
