@@ -75,7 +75,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         if let panel { return panel }
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 440),
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 460),
             styleMask: [.titled, .closable, .utilityWindow],
             backing: .buffered,
             defer: false
@@ -87,7 +87,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         panel.becomesKeyOnlyIfNeeded = false
         panel.delegate = nil
 
-        let root = NSView(frame: panel.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 620, height: 440))
+        let root = NSView(frame: panel.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 700, height: 460))
         root.autoresizingMask = [.width, .height]
         root.setAccessibilityIdentifier(Self.rootAccessibilityIdentifier)
         root.wantsLayer = true
@@ -264,11 +264,15 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     /// rows add an Edit button (→ chord capture) and a Reset button (→ clear the
     /// override). The current chord is rendered from the panel's live keymap.
     private func shortcutEntryRow(for entry: ShortcutCatalogEntry) -> NSView {
+        // Fixed-width name + chord columns so every row's chord lines up in a
+        // vertical column (variable-width names otherwise let the chords drift).
         let nameLabel = label(entry.label, size: 11, weight: .regular, color: .labelColor)
-        nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        nameLabel.lineBreakMode = .byTruncatingTail
+        nameLabel.translatesAutoresizingMaskIntoConstraints = false
+        nameLabel.widthAnchor.constraint(equalToConstant: 190).isActive = true
         let chordLabel = label(entry.chordDisplay, size: 11, weight: .regular, color: .secondaryLabelColor)
         chordLabel.translatesAutoresizingMaskIntoConstraints = false
-        chordLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 64).isActive = true
+        chordLabel.widthAnchor.constraint(equalToConstant: 96).isActive = true
 
         let row = NSStackView()
         row.orientation = .horizontal
@@ -472,15 +476,32 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     func numberOfRows(in tableView: NSTableView) -> Int { sections.count }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let section = sections[row]
         let cell = NSTableCellView()
-        let text = NSTextField(labelWithString: sections[row].title)
+
+        let icon = NSImageView()
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.imageScaling = .scaleProportionallyDown
+        icon.contentTintColor = .secondaryLabelColor
+        if let symbol = section.iconSystemName {
+            icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: section.title)
+        }
+        cell.addSubview(icon)
+        cell.imageView = icon
+
+        let text = NSTextField(labelWithString: section.title)
         text.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         text.textColor = .labelColor
         text.translatesAutoresizingMaskIntoConstraints = false
         cell.addSubview(text)
         cell.textField = text
+
         NSLayoutConstraint.activate([
-            text.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 10),
+            icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 10),
+            icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 16),
+            icon.heightAnchor.constraint(equalToConstant: 16),
+            text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
             text.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
             text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
@@ -679,6 +700,20 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         let metrics = VisualSnapshot.metrics(of: rep)
         guard !metrics.isBlank else {
             throw SettingsPanelSelfCheckError.blankRender(colors: metrics.distinctSampledColors, width: metrics.width, height: metrics.height)
+        }
+
+        // Artifacts: render the reorganized sections so the change is reviewable.
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let artifactDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs/\(timestamp)/settings-panel", isDirectory: true)
+        try? FileManager.default.createDirectory(at: artifactDir, withIntermediateDirectories: true)
+        for id in ["keybindings", "navigation", "general"] {
+            guard let idx = sections.firstIndex(where: { $0.id == id }) else { continue }
+            panel.selectSectionForQA(idx)
+            if let content = panel.contentViewForQA, let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+                content.cacheDisplay(in: content.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: artifactDir.appendingPathComponent("\(id).png"))
+            }
         }
 
         // 5. Clean teardown — no leaked window.

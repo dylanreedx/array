@@ -14,6 +14,7 @@ public enum SettingsSchema {
             SettingsSection(
                 id: "keybindings",
                 title: "Keybindings",
+                iconSystemName: "keyboard",
                 fields: [
                     .shortcuts(label: "Keyboard Shortcuts")
                 ]
@@ -21,16 +22,17 @@ public enum SettingsSchema {
             SettingsSection(
                 id: "navigation",
                 title: "Navigation",
+                iconSystemName: "arrow.up.arrow.down",
                 fields: [
                     .choice(
                         key: NavKeymap.leaderHoldDefaultsKey,
-                        label: "Leader Modifier (hold)",
+                        label: "Hold-to-Navigate Key",
                         options: NavKeymap.leaderHoldModifierOptions,
                         default: NavKeymap.modifierToken(NavKeymap.default.leaderHoldModifier)
                     ),
                     .text(
                         key: NavKeymap.leaderDwellDefaultsKey,
-                        label: "Leader Hold Delay (ms)",
+                        label: "Hold Activation Delay (ms)",
                         default: String(NavKeymap.default.leaderDwellMs)
                     ),
                     .text(
@@ -40,7 +42,7 @@ public enum SettingsSchema {
                     ),
                     .text(
                         key: NavKeymap.leaderZoneOrdinalKeysDefaultsKey,
-                        label: "Zone Jump Ordinal Keys",
+                        label: "Zone Number Keys",
                         default: NavKeymap.default.leaderZoneOrdinalKeys
                     ),
                 ]
@@ -48,6 +50,7 @@ public enum SettingsSchema {
             SettingsSection(
                 id: "general",
                 title: "General",
+                iconSystemName: "gearshape",
                 fields: [
                     .text(
                         key: DefaultBrowserURL.userDefaultsKey,
@@ -143,6 +146,7 @@ public enum SettingsSchema {
             SettingsSection(
                 id: "browser",
                 title: "Browser",
+                iconSystemName: "globe",
                 fields: [
                     .info(
                         label: "Safari Web Inspector is advanced native WebKit inspection from Safari Develop. Continuum Inspector Tile opens inside Continuum with limited Elements, logs-only Console, Styles, and Network-lite panels."
@@ -157,6 +161,7 @@ public enum SettingsSchema {
             SettingsSection(
                 id: "terminal",
                 title: "Terminal",
+                iconSystemName: "terminal",
                 fields: [
                     .toggle(
                         key: TmuxPersistenceConfig.enabledKey,
@@ -188,6 +193,7 @@ public enum SettingsSchema {
             SettingsSection(
                 id: "appearance",
                 title: "Appearance",
+                iconSystemName: "paintbrush",
                 fields: [
                     .toggle(
                         key: FocusBorderConfig.enabledKey,

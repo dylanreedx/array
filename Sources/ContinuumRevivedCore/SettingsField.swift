@@ -100,11 +100,14 @@ public enum SettingsValue: Equatable, Sendable {
 public struct SettingsSection: Equatable, Sendable {
     public let id: String
     public let title: String
+    /// SF Symbol name shown beside the section title in the sidebar, or nil.
+    public let iconSystemName: String?
     public let fields: [SettingsField]
 
-    public init(id: String, title: String, fields: [SettingsField]) {
+    public init(id: String, title: String, iconSystemName: String? = nil, fields: [SettingsField]) {
         self.id = id
         self.title = title
+        self.iconSystemName = iconSystemName
         self.fields = fields
     }
 }
