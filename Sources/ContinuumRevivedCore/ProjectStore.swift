@@ -154,6 +154,28 @@ public struct ProjectStore: Sendable {
         }
     }
 
+    public func browserStateFileExists() -> Bool {
+        FileManager.default.fileExists(atPath: layout.browserFile.path)
+    }
+
+    public func fileTreeStateFileExists() -> Bool {
+        FileManager.default.fileExists(atPath: layout.fileTreeIndexFile.path)
+    }
+
+    public func deleteNoteBody(id: UUID) throws {
+        let url = layout.noteFile(id: id)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+    }
+
+    public func deleteReviewCommentState(reviewId: UUID) throws {
+        let url = layout.reviewFile(id: reviewId)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+    }
+
     public func listSessions() throws -> [TerminalSessionDescriptor] {
         let dir = layout.sessionsDirectory
         guard FileManager.default.fileExists(atPath: dir.path) else { return [] }
@@ -301,3 +323,5 @@ public struct ProjectStore: Sendable {
         }
     }
 }
+
+extension ProjectStore: ProjectStoring {}

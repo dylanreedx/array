@@ -74,3 +74,5 @@ public struct WorkspaceStore: Sendable {
         try FileManager.default.removeItem(at: layout.workspaceDirectory)
     }
 }
+
+extension WorkspaceStore: WorkspaceStoring {}

@@ -3941,6 +3941,131 @@ do {
     expect(!survivingIds.contains(exitedSignal.id), "exitedSignal descriptor was pruned")
 }
 
+// MARK: - StoreProtocols seam (T01)
+
+do {
+    let scratchRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: scratchRoot, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: scratchRoot) }
+
+    let projectStore: any ProjectStoring = ProjectStore(projectRoot: scratchRoot, retainedBackups: 1)
+
+    // 1. Protocol conformance is exercised through the protocol type.
+    let project = Project(
+        name: "seam-project",
+        rootPath: scratchRoot.path,
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        defaultLaunchProfileId: "shell",
+        editorPreference: .auto,
+        settings: ProjectSettings(
+            restorePolicy: .restoreDescriptors,
+            browserStoragePolicy: .perProject,
+            terminalClosePolicy: .askWhenRunning
+        )
+    )
+    try projectStore.saveProject(project)
+    let loadedProject = try projectStore.loadProject()
+    expect(loadedProject == project, "ProjectStoring round-trips saveProject/loadProject")
+
+    let canvas = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil)
+    try projectStore.saveCanvas(canvas)
+    let loadedCanvas = try projectStore.loadCanvas()
+    expect(loadedCanvas == canvas, "ProjectStoring round-trips saveCanvas/loadCanvas")
+
+    let seamDescriptor = TerminalSessionDescriptor(
+        id: UUID(),
+        tileId: UUID(),
+        launchProfileId: "shell",
+        command: "/bin/zsh",
+        args: [],
+        cwd: scratchRoot.path,
+        env: [:],
+        title: "SeamSession",
+        createdAt: Date(timeIntervalSince1970: 1_700_000_500),
+        lastStartedAt: Date(timeIntervalSince1970: 1_700_000_500),
+        lastExit: nil
+    )
+    try projectStore.saveSession(seamDescriptor)
+    let loadedSession = try projectStore.loadSession(id: seamDescriptor.id)
+    expect(loadedSession == seamDescriptor, "ProjectStoring round-trips saveSession/loadSession")
+    let listedSessionIds = try projectStore.listSessions().map(\.id)
+    expect(listedSessionIds == [seamDescriptor.id], "ProjectStoring listSessions returns the saved session via the protocol")
+
+    // 2. The four new named methods work through the protocol type.
+    expect(!projectStore.browserStateFileExists(), "browserStateFileExists is false before any browser save")
+    try projectStore.saveBrowserState(BrowserState(tiles: []))
+    expect(projectStore.browserStateFileExists(), "browserStateFileExists is true after saveBrowserState")
+
+    expect(!projectStore.fileTreeStateFileExists(), "fileTreeStateFileExists is false before any file-tree save")
+    try projectStore.saveFileTreeState(FileTreeState(tiles: []))
+    expect(projectStore.fileTreeStateFileExists(), "fileTreeStateFileExists is true after saveFileTreeState")
+
+    let noteId = UUID()
+    try projectStore.saveNoteBody(id: noteId, text: "seam note body")
+    expect(projectStore.tryLoadNoteBody(id: noteId) == "seam note body", "saveNoteBody is readable before delete")
+    try projectStore.deleteNoteBody(id: noteId)
+    expect(projectStore.tryLoadNoteBody(id: noteId) == nil, "deleteNoteBody removes the note body via the protocol")
+
+    let reviewId = UUID()
+    try projectStore.saveReviewCommentState(ReviewCommentState(reviewId: reviewId, comments: []))
+    let reviewStateBeforeDelete = try projectStore.tryLoadReviewCommentState(reviewId: reviewId)
+    expect(reviewStateBeforeDelete != nil, "saveReviewCommentState is readable before delete")
+    try projectStore.deleteReviewCommentState(reviewId: reviewId)
+    let reviewStateAfterDelete = try projectStore.tryLoadReviewCommentState(reviewId: reviewId)
+    expect(reviewStateAfterDelete == nil, "deleteReviewCommentState removes the review sidecar via the protocol")
+
+    // 3. WorkspaceStoring round-trip.
+    let workspaceStore: any WorkspaceStoring = WorkspaceStore(
+        workspaceId: UUID(),
+        applicationSupportDirectory: scratchRoot.appendingPathComponent("app-support", isDirectory: true)
+    )
+    let document = WorkspaceDocument(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        zones: [],
+        zoneZOrder: [],
+        lastActiveZoneId: nil
+    )
+    try workspaceStore.save(document)
+    let loadedDocument = try workspaceStore.load()
+    expect(loadedDocument == document, "WorkspaceStoring round-trips save/load")
+
+    // 4. pruneExitedSessions accepts the protocol type.
+    let liveDescriptor = TerminalSessionDescriptor(
+        id: UUID(),
+        tileId: UUID(),
+        launchProfileId: "shell",
+        command: "/bin/zsh",
+        args: [],
+        cwd: scratchRoot.path,
+        env: [:],
+        title: "SeamLive",
+        createdAt: Date(timeIntervalSince1970: 1_700_000_600),
+        lastStartedAt: Date(timeIntervalSince1970: 1_700_000_600),
+        lastExit: nil
+    )
+    let exitedDescriptor = TerminalSessionDescriptor(
+        id: UUID(),
+        tileId: UUID(),
+        launchProfileId: "shell",
+        command: "/bin/zsh",
+        args: [],
+        cwd: scratchRoot.path,
+        env: [:],
+        title: "SeamExited",
+        createdAt: Date(timeIntervalSince1970: 1_700_000_700),
+        lastStartedAt: Date(timeIntervalSince1970: 1_700_000_700),
+        lastExit: TerminalLastExit(exitCode: 0, signal: nil, at: Date(timeIntervalSince1970: 1_700_000_800))
+    )
+    try projectStore.saveSession(liveDescriptor)
+    try projectStore.saveSession(exitedDescriptor)
+    pruneExitedSessions(in: projectStore)
+    let seamSurvivingIds = Set(try projectStore.listSessions().map(\.id))
+    expect(seamSurvivingIds.contains(liveDescriptor.id), "pruneExitedSessions via the protocol keeps the live session")
+    expect(!seamSurvivingIds.contains(exitedDescriptor.id), "pruneExitedSessions via the protocol prunes the exited session")
+}
+
 // MARK: - Phase 6 core note/file/file-tree models
 
 do {

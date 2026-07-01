@@ -20,7 +20,7 @@ enum WorkspaceDocumentSaveState: String, Equatable {
 
 @MainActor
 final class WorkspaceDocumentSaveController {
-    private let store: WorkspaceStore
+    private let store: any WorkspaceStoring
     private let defaults: UserDefaults
     private var timer: Timer?
     private var pendingDocument: WorkspaceDocument?
@@ -28,7 +28,7 @@ final class WorkspaceDocumentSaveController {
     private(set) var lastError: Error?
     var onStateChange: ((WorkspaceDocumentSaveState) -> Void)?
 
-    init(store: WorkspaceStore, defaults: UserDefaults = .standard) {
+    init(store: any WorkspaceStoring, defaults: UserDefaults = .standard) {
         self.store = store
         self.defaults = defaults
     }

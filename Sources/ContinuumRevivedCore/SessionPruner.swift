@@ -7,7 +7,7 @@ import Foundation
 /// Best-effort: a failure to list or delete a single session writes a warning
 /// to stderr and continues rather than propagating. This mirrors the
 /// `listSessions` internal skip-on-error behavior.
-public func pruneExitedSessions(in store: ProjectStore) {
+public func pruneExitedSessions(in store: any ProjectStoring) {
     let sessions: [TerminalSessionDescriptor]
     do {
         sessions = try store.listSessions()

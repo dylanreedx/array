@@ -2227,7 +2227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private let smokeTestEnabled = ProcessInfo.processInfo.environment["CONTINUUM_SMOKE_TEST"] == "1"
     private var smokeTestExitCode: Int32?
     private var workspaceRuntime: WorkspaceRuntime?
-    private var projectStore: ProjectStore? { workspaceRuntime?.activeController?.projectStore }
+    private var projectStore: (any ProjectStoring)? { workspaceRuntime?.activeController?.projectStore }
     private var activeProject: Project? { workspaceRuntime?.activeController?.project }
     private var registryStore: RegistryStore?
     private var tileSpawner: TileSpawner?
@@ -3071,8 +3071,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                         noteState.tiles.removeAll { $0.id == noteId || $0.tileId == id }
                         try? projectStore.saveNoteState(noteState)
                     }
-                    let noteFile = projectStore.layout.noteFile(id: noteId)
-                    try? FileManager.default.removeItem(at: noteFile)
+                    try? projectStore.deleteNoteBody(id: noteId)
                 }
             }
         case .file:
@@ -3092,7 +3091,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case .diffReview:
             if let reviewId = tile.metadata.reviewId,
                let projectStore {
-                try? FileManager.default.removeItem(at: projectStore.layout.reviewFile(id: reviewId))
+                try? projectStore.deleteReviewCommentState(reviewId: reviewId)
             }
         case .runArtifacts:
             // Run artifact viewer tiles are read-only; retain the run directory.
@@ -7202,7 +7201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return tile
     }
 
-    private static func seedSmokeTestTiles(in projectStore: ProjectStore, projectRoot: URL) throws -> [Tile] {
+    private static func seedSmokeTestTiles(in projectStore: any ProjectStoring, projectRoot: URL) throws -> [Tile] {
         try projectStore.saveNoteBody(id: smokeNoteId, text: smokeNoteBody)
 
         var noteState = (try? projectStore.tryLoadNoteState()) ?? NoteState(tiles: [])

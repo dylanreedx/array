@@ -27,7 +27,7 @@ final class TileSpawner {
     weak var canvasView: CanvasNSView?
     private let ghostty: GhosttyRuntimeContext?
     private let browserEngine: BrowserEngineContext
-    private let projectStore: ProjectStore
+    private let projectStore: any ProjectStoring
     private let project: Project
     private let registry: LaunchProfileRegistry
     private let detector: ToolDetector
@@ -68,7 +68,7 @@ final class TileSpawner {
         canvasView: CanvasNSView,
         ghostty: GhosttyRuntimeContext?,
         browserEngine: BrowserEngineContext,
-        projectStore: ProjectStore,
+        projectStore: any ProjectStoring,
         project: Project,
         registry: LaunchProfileRegistry = LaunchProfileRegistry(),
         detector: ToolDetector = .live,
@@ -1324,7 +1324,7 @@ final class TileSpawner {
     private func loadBrowserStateIfAvailable() throws -> BrowserState? {
         do {
             return try projectStore.loadBrowserState()
-        } catch AtomicWriterError.noValidBackup where !FileManager.default.fileExists(atPath: projectStore.layout.browserFile.path) {
+        } catch AtomicWriterError.noValidBackup where !projectStore.browserStateFileExists() {
             return nil
         }
     }
@@ -3820,7 +3820,7 @@ final class TileSpawner {
         let descriptorRoot = tile.metadata.filePath.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL.path }
         do {
             guard let state = try projectStore.tryLoadFileTreeState() else {
-                let kind = FileManager.default.fileExists(atPath: projectStore.layout.fileTreeIndexFile.path)
+                let kind = projectStore.fileTreeStateFileExists()
                     ? "corrupt"
                     : "missing"
                 return .recoverableError(

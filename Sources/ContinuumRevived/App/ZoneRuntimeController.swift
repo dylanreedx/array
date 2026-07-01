@@ -5,7 +5,7 @@ import Foundation
 @MainActor
 final class ZoneRuntimeController {
     let projectRoot: URL
-    let projectStore: ProjectStore
+    let projectStore: any ProjectStoring
     private(set) var project: Project
 
     var runtimes: [GhosttyTerminalRuntime] = []
@@ -68,7 +68,7 @@ final class ZoneRuntimeController {
         self.project = try Self.loadOrCreateProject(in: projectStore, projectRoot: projectRoot)
     }
 
-    init(projectRoot: URL, projectStore: ProjectStore, project: Project) {
+    init(projectRoot: URL, projectStore: any ProjectStoring, project: Project) {
         self.projectRoot = projectRoot
         self.projectStore = projectStore
         self.project = project
@@ -605,7 +605,7 @@ final class ZoneRuntimeController {
         return manifestURL
     }
 
-    private static func loadOrCreateProject(in store: ProjectStore, projectRoot: URL) throws -> Project {
+    private static func loadOrCreateProject(in store: any ProjectStoring, projectRoot: URL) throws -> Project {
         if let existing = try store.tryLoadProject() {
             return existing
         }
