@@ -67,80 +67,52 @@ public enum SettingsSchema {
                         ],
                         default: DeleteConfirmPolicy.runtimes.rawValue
                     ),
-                    .toggle(
-                        key: ZoneChromeFeature.userDefaultsKey,
-                        label: "Zone Chrome",
-                        default: true
-                    ),
-                    .text(
-                        key: TileGapResolver.userDefaultsKey,
-                        label: "Tile Gap",
-                        default: String(Int(TileGapResolver.defaultGap))
-                    ),
+                ]
+            ),
+            SettingsSection(
+                id: "zones",
+                title: "Zones",
+                iconSystemName: "square.grid.2x2",
+                fields: [
+                    .toggle(key: ZoneChromeFeature.userDefaultsKey, label: "Zone Chrome", default: true),
+                    .text(key: DefaultGroupZoneName.userDefaultsKey, label: "Default Zone Name", default: DefaultGroupZoneName.fallback),
+                    .text(key: AmbientZoneHome.userDefaultsKey, label: "Ambient Zone Home Directory", default: AmbientZoneHome.fallback),
                     .text(key: ZoneBoundsConfig.paddingKey, label: "Zone Padding", default: String(Int(ZoneBoundsConfig.defaultPadding))),
                     .text(key: ZoneBoundsConfig.emptyMinWidthKey, label: "Zone Empty Min Width", default: String(Int(ZoneBoundsConfig.defaultEmptyMinWidth))),
                     .text(key: ZoneBoundsConfig.emptyMinHeightKey, label: "Zone Empty Min Height", default: String(Int(ZoneBoundsConfig.defaultEmptyMinHeight))),
-                    .toggle(
-                        key: DragMagnetizeConfig.enabledKey,
-                        label: "Drag Snapping",
-                        default: DragMagnetizeConfig.defaultEnabled
-                    ),
-                    .text(
-                        key: ZoneHydrationBudgetConfig.maxLiveZonesKey,
-                        label: "Max Live Zones",
-                        default: String(ZoneHydrationBudgetConfig.defaultMaxLiveZones)
-                    ),
-                    .text(
-                        key: ZoneHydrationReconcileConfig.intervalKey,
-                        label: "Zone Hydration Debounce (ms)",
-                        default: String(ZoneHydrationReconcileConfig.defaultIntervalMs)
-                    ),
-                    .text(
-                        key: BrowserRuntimeBudget.defaultsKey,
-                        label: "Max Live Web Views",
-                        default: String(BrowserRuntimeBudget.defaultMaxLive)
-                    ),
-                    .toggle(
-                        key: ZoneRuntimeBudgetConfig.closeOnZeroKey,
-                        label: "Close Project Runtime When Unused",
-                        default: ZoneRuntimeBudgetConfig.defaultCloseOnZero
-                    ),
-                    .text(
-                        key: DefaultGroupZoneName.userDefaultsKey,
-                        label: "Default Zone Name",
-                        default: DefaultGroupZoneName.fallback
-                    ),
-                    .text(
-                        key: AmbientZoneHome.userDefaultsKey,
-                        label: "Ambient Zone Home Directory",
-                        default: AmbientZoneHome.fallback
-                    ),
-                    .text(
-                        key: AutosaveConfig.debounceMsKey,
-                        label: "Autosave Debounce (ms)",
-                        default: String(AutosaveConfig.defaultDebounceMs)
-                    ),
-                    .toggle(
-                        key: SessionResumeConfig.scrollbackEnabledKey,
-                        label: "Restore Scrollback on Resume",
-                        default: SessionResumeConfig.scrollbackEnabledDefault
-                    ),
-                    .text(
-                        key: SessionResumeConfig.scrollbackMaxLinesKey,
-                        label: "Scrollback Resume Max Lines",
-                        default: String(SessionResumeConfig.scrollbackMaxLinesDefault)
-                    ),
-                    .text(
-                        key: ZoneGestureConfig.minCreateDragScreenPointsKey,
-                        label: "Zone Create Drag Threshold (px)",
-                        default: String(Int(ZoneGestureConfig.defaultMinCreateDragScreenPoints))
-                    ),
-                    // WorkspaceProfileConfig.defaultCaptureModeKey and defaultApplyModeKey
-                    // are intentionally not in SettingsSchema yet. The captureMode/applyMode
-                    // distinction has no behavioral effect: T13 session-state fields live in
-                    // ProjectStore sibling stores (not WorkspaceDocument), so snapshot and
-                    // template produce byte-identical profiles. Settings entries will be added
-                    // when a session-state bridge is designed.
+                    .text(key: ZoneGestureConfig.minCreateDragScreenPointsKey, label: "Zone Create Drag Threshold (px)", default: String(Int(ZoneGestureConfig.defaultMinCreateDragScreenPoints))),
+                ]
+            ),
+            SettingsSection(
+                id: "canvas",
+                title: "Canvas",
+                iconSystemName: "macwindow",
+                fields: [
+                    .text(key: TileGapResolver.userDefaultsKey, label: "Tile Gap", default: String(Int(TileGapResolver.defaultGap))),
+                    .toggle(key: DragMagnetizeConfig.enabledKey, label: "Drag Snapping", default: DragMagnetizeConfig.defaultEnabled),
+                ]
+            ),
+            SettingsSection(
+                id: "sessions",
+                title: "Sessions",
+                iconSystemName: "clock.arrow.circlepath",
+                fields: [
+                    .text(key: AutosaveConfig.debounceMsKey, label: "Autosave Debounce (ms)", default: String(AutosaveConfig.defaultDebounceMs)),
+                    .toggle(key: SessionResumeConfig.scrollbackEnabledKey, label: "Restore Scrollback on Resume", default: SessionResumeConfig.scrollbackEnabledDefault),
+                    .text(key: SessionResumeConfig.scrollbackMaxLinesKey, label: "Scrollback Resume Max Lines", default: String(SessionResumeConfig.scrollbackMaxLinesDefault)),
+                ]
+            ),
+            SettingsSection(
+                id: "limits",
+                title: "Runtime Limits",
+                iconSystemName: "gauge.with.dots.needle.67percent",
+                fields: [
+                    .text(key: ZoneHydrationBudgetConfig.maxLiveZonesKey, label: "Max Live Zones", default: String(ZoneHydrationBudgetConfig.defaultMaxLiveZones)),
+                    .text(key: BrowserRuntimeBudget.defaultsKey, label: "Max Live Web Views", default: String(BrowserRuntimeBudget.defaultMaxLive)),
+                    .text(key: ZoneHydrationReconcileConfig.intervalKey, label: "Zone Hydration Debounce (ms)", default: String(ZoneHydrationReconcileConfig.defaultIntervalMs)),
+                    .toggle(key: ZoneRuntimeBudgetConfig.closeOnZeroKey, label: "Close Project Runtime When Unused", default: ZoneRuntimeBudgetConfig.defaultCloseOnZero),
+                    // WorkspaceProfileConfig capture/apply modes are intentionally absent
+                    // until a session-state bridge is designed (no behavioral effect yet).
                 ]
             ),
             SettingsSection(

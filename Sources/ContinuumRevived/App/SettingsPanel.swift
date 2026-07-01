@@ -673,10 +673,12 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
 
         // 3. A General toggle round-trips: flip the checkbox → bound setValue
         // wrote UserDefaults → currentValue reflects it.
-        let generalIndex = sections.firstIndex { $0.id == "general" } ?? 0
-        panel.selectSectionForQA(generalIndex)
+        let toggleSectionIndex = sections.firstIndex { section in
+            section.fields.contains { if case .toggle = $0 { return true }; return false }
+        } ?? 0
+        panel.selectSectionForQA(toggleSectionIndex)
         guard let toggle = panel.firstToggleControlForQA(),
-              let toggleField = sections[generalIndex].fields.first(where: { if case .toggle = $0 { return true }; return false }),
+              let toggleField = sections[toggleSectionIndex].fields.first(where: { if case .toggle = $0 { return true }; return false }),
               let key = toggleField.key else {
             throw SettingsPanelSelfCheckError.noGeneralToggle
         }
