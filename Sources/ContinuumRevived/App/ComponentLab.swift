@@ -26,6 +26,11 @@ enum LabContent {
     /// zoom). `configure` seeds the initial tiles; the sandbox always provides a
     /// spawn toolbar + zoom controls. Fills the host.
     case canvasSandbox(configure: (LabSandboxContext) -> Void)
+
+    /// A button that presents a real modal/panel (command palette, settings,
+    /// project picker) near the lab window. `present` returns an object to retain
+    /// for the panel's lifetime (nil for synchronous modals).
+    case launcher(buttonTitle: String, present: (NSWindow) -> AnyObject?)
 }
 
 /// One catalog entry, grouped under a category in the left nav.
@@ -347,7 +352,42 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard]
+        [tileSandbox, sidebarCard, topBarCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
+    }
+
+    private static var commandPaletteLauncher: LabEntry {
+        LabEntry(
+            id: "panel.palette", category: "Palettes & Settings", title: "Command Palette",
+            summary: "The real ⌘K launch palette. Opens empty here — the app fills it with live profiles/projects.",
+            content: .launcher(buttonTitle: "Open Command Palette") { host in
+                let palette = LaunchProfilePalette()
+                palette.show(near: host, profiles: [])
+                return palette
+            }
+        )
+    }
+
+    private static var settingsLauncher: LabEntry {
+        LabEntry(
+            id: "panel.settings", category: "Palettes & Settings", title: "Settings",
+            summary: "The real Settings panel, live schema.",
+            content: .launcher(buttonTitle: "Open Settings") { host in
+                let panel = SettingsPanel()
+                panel.show(near: host)
+                return panel
+            }
+        )
+    }
+
+    private static var projectPickerLauncher: LabEntry {
+        LabEntry(
+            id: "panel.projectPicker", category: "Palettes & Settings", title: "Project Picker",
+            summary: "The modal project picker (empty rows). Runs modally, then dismisses.",
+            content: .launcher(buttonTitle: "Open Project Picker") { _ in
+                _ = ProjectPickerPanel(request: ProjectLaunchCoordinator.PickerRequest(reason: .noUsableProject, rows: [], workspaces: [])).runModal()
+                return nil
+            }
+        )
     }
 
     private static var tileSandbox: LabEntry {
@@ -406,6 +446,8 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
     private var entriesByCategory: [String: [LabEntry]] = [:]
     private var selectedEntry: LabEntry?
     private var teardown: [() -> Void] = []
+    private var currentLauncher: ((NSWindow) -> AnyObject?)?
+    private var launchedRetained: [AnyObject] = []
 
     init(env: LabEnvironment) {
         self.env = env
@@ -444,6 +486,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
 
     func close() {
         clearCurrentContent()
+        launchedRetained.removeAll()  // releases any launched settings/palette panels
         panel?.orderOut(nil)
         let restoreTarget = previousKeyWindow
         outline?.dataSource = nil
@@ -531,12 +574,24 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             configure(sandbox)
             teardown.append { sandbox.teardownAll() }
             Self.place(sandbox.containerView, in: host, preferredSize: nil)
+        case let .launcher(buttonTitle, present):
+            currentLauncher = present
+            let button = NSButton(title: buttonTitle, target: self, action: #selector(launcherButtonClicked))
+            button.bezelStyle = .rounded
+            button.controlSize = .large
+            Self.place(button, in: host, preferredSize: NSSize(width: 240, height: 40))
         }
+    }
+
+    @objc private func launcherButtonClicked() {
+        guard let present = currentLauncher, let window = panel else { return }
+        if let retained = present(window) { launchedRetained.append(retained) }
     }
 
     private func clearCurrentContent() {
         teardown.forEach { $0() }
         teardown.removeAll()
+        currentLauncher = nil
         hostView?.subviews.forEach { $0.removeFromSuperview() }
     }
 
@@ -628,6 +683,11 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         let entries = panel.qaEntries()
         panel.close()
         guard !entries.isEmpty else { throw fail("component lab catalog is empty") }
+        // Launcher entries are launch-only (they open real panels needing a run
+        // loop), so just assert they're catalogued.
+        for id in ["panel.palette", "panel.settings", "panel.projectPicker"] {
+            guard entries.contains(where: { $0.id == id }) else { throw fail("missing launcher entry \(id)") }
+        }
 
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
