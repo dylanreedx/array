@@ -10,6 +10,8 @@ alongside the git log on `overnight/agent-orchestration`.
 | 01-store-protocol-seam.md | done | c71d601 | matrix: green | Clean; both reviewers cleared. |
 | 02-op-enum-logged-op-envelope.md | done | a4cba75 | matrix: green | Hand-resolved; frozen wire format, full matrix passed. |
 | 03-membership-tile-register.md | skipped | - | matrix: green (headless) | Not cleared after 3 review rounds (Opus+Codex both rejected). Top concerns: out-of-scope ProjectStore.swift saveCanvas re-stamp violates the ticket's "Stop if" file fence (and forces one-way v1→v2 canvas migration on first save); setTiles(_:forZone:) replaces the whole Tile record instead of writing only zoneId (can clobber runtimeRef/metadata/frame from a stale caller, and the new T02 test enshrines it); WorkspaceProfileStore.captureProfile/saveProfile persists the nested WorkspaceDocument verbatim, bypassing the v3 re-stamp so old code can silently drop membership; I5 taint check builds its own allow-list projection (tautological, not the production sync projection). Tree left dirty as the workflow left it. |
+| 04-zorder-fractional-index.md | skipped | - | matrix: green (headless) | Fast-forwarded past (2026-07-01, Dylan's call): real correctness bugs + the same class of scope tension as 03 — needs human hands, not more loop time. Rejected attempts preserved via `git stash list`. |
+| 05-delete-tombstone.md | skipped | - | matrix: n/a | Fast-forwarded past: another migration re-model, grouped with 03/04 for human review. Prior attempt stashed. |
 
 ## Reset for the Fable-orchestrated retry (2026-07-01)
 
