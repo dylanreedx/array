@@ -30,3 +30,5 @@ many downstream tickets. Their prior findings, preserved so the morning review h
 
 The full original notes are in the git history of this file (earlier `chore(overnight)` commits).
 New attempts append their rows to the table above.
+
+| 03-membership-tile-register.md | skipped | - | matrix: green | Hardened loop, 3 rounds, not cleared. Opus cleared; Codex did not: `CanvasState.currentSchemaVersion` bumped to 2, but a v1 project canvas loaded via `ProjectStore` keeps `schemaVersion == 1` and `saveCanvas` writes that value back unchanged — if `zoneId` is set on such a tile and saved, the file carries the new field while still declaring v1, so an old build accepts it and silently drops membership instead of hitting the intended v2 forward-incompat guard. Added v1 test only decodes the old shape, doesn't cover the real load→set zoneId→save→assert-schemaVersion-2 path. Working tree left dirty (uncommitted) for a human/next attempt to pick up. |
