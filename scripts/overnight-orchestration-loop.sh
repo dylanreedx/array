@@ -29,6 +29,13 @@ EXPECTED_BRANCH="${EXPECTED_BRANCH:-overnight/agent-orchestration}"
 PUSH_MODE="${PUSH_MODE:-local-only}"
 CLAUDE_MODEL="${CLAUDE_MODEL:-sonnet}"
 CLAUDE_EFFORT="${CLAUDE_EFFORT:-medium}"
+# `claude -p` kills still-running background tasks after this many ms (default
+# 600000 = 10 min). The per-ticket Workflow runs as a background task and a real
+# ticket routinely needs longer than 10 min (implement + build + matrix + dual
+# review), so the default silently terminated the Workflow mid-run and produced
+# no LOOP token. 0 = wait indefinitely; the ITER_TIMEOUT_SECONDS watchdog below
+# is the real outer bound on a hung iteration.
+export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-0}"
 ROOT_PI_DIR="${ROOT_PI_DIR:-$HOME/.pi}"
 PROJECT_LOG_DIR="${PROJECT_LOG_DIR:-.pi/overnight-logs}"
 
