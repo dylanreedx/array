@@ -16,10 +16,16 @@ emit token, exit.
    on the current branch. A ticket is DONE only if `_PROGRESS.md` marks it done AND a matching commit
    exists.
 
-2. **Pick the next ticket.** The first ticket in the Overnight-executable set that is not done and
-   whose dependencies (named in its "Depends on" section) are all done. Only `autonomous` tickets —
-   never `supervised` or `needs-substrate`. If there is no such ticket, print `LOOP: STOP queue-drained`
-   and exit immediately.
+2. **Pick the next ticket.** The first ticket in the Overnight-executable set that is (a) not done,
+   (b) **not already marked `skipped`** in `_PROGRESS.md`, and (c) whose dependencies (named in its
+   "Depends on" section) are all `done`. Only `autonomous` tickets — never `supervised` or
+   `needs-substrate`.
+   - **Never re-attempt a ticket already marked `skipped`.** A skip means it failed honest
+     verification once; treat it as *blocked*, not pending. Move past it. A ticket whose dependency
+     is `skipped`/blocked (not `done`) is itself blocked — skip it too, because you cannot build on a
+     missing foundation. This is what prevents the loop from livelocking on one stuck ticket.
+   - If no ticket satisfies (a)+(b)+(c), print `LOOP: STOP queue-drained` and exit immediately
+     (blocked tickets remaining is a normal, honest end state — they go in the morning summary).
 
 3. **Classify effort** for that ticket from its nature: pure/mechanical Core work (enums, op-log,
    pure derivation, snapshot types) → `low`; integration/topology/reader/observer wiring → `medium`;

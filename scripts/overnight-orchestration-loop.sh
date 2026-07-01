@@ -52,6 +52,7 @@ CURRENT_BRANCH="$(git branch --show-current)"
 STOP_REASON="running"
 ITERATIONS=0
 failures=0
+PREV_SKIP_TOKEN=""
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g'
@@ -282,7 +283,19 @@ for i in $(seq 1 "$MAX_ITER"); do
     "LOOP: STOP"*)
       echo "[loop] iteration requested stop: $token"
       stop_run "${token#LOOP: STOP }"; break ;;
+    "LOOP: CONTINUE skipped:"*)
+      # Livelock guard: the same ticket skipped twice in a row means the
+      # queue-selection logic is re-picking a blocked ticket. Halt rather
+      # than burn iterations. (The iteration prompt should not re-pick a
+      # skipped ticket; this is the backstop if it does.)
+      if [ "$token" = "$PREV_SKIP_TOKEN" ]; then
+        echo "[loop] same ticket skipped twice consecutively; halting: $token"
+        stop_run "repeated-skip:${token#LOOP: CONTINUE skipped:}"; break
+      fi
+      PREV_SKIP_TOKEN="$token"
+      append_event "continue" "$token" ;;
     "LOOP: CONTINUE"*)
+      PREV_SKIP_TOKEN=""
       append_event "continue" "$token" ;;
     *)
       echo "[loop] unrecognized LOOP token; halting: $token"
