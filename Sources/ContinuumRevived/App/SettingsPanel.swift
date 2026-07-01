@@ -75,7 +75,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         if let panel { return panel }
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 700, height: 460),
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 470),
             styleMask: [.titled, .closable, .utilityWindow],
             backing: .buffered,
             defer: false
@@ -87,7 +87,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         panel.becomesKeyOnlyIfNeeded = false
         panel.delegate = nil
 
-        let root = NSView(frame: panel.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 700, height: 460))
+        let root = NSView(frame: panel.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 760, height: 470))
         root.autoresizingMask = [.width, .height]
         root.setAccessibilityIdentifier(Self.rootAccessibilityIdentifier)
         root.wantsLayer = true
@@ -239,25 +239,70 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     private func shortcutsRow(for field: SettingsField) -> NSView {
-        let labelView = label(field.label, size: 12, weight: .semibold, color: .secondaryLabelColor)
-        let group = NSStackView()
-        group.orientation = .vertical
-        group.alignment = .leading
-        group.spacing = 8
-        group.addArrangedSubview(labelView)
         shortcutRowsById.removeAll()
         editButtonToEntryId.removeAll()
         resetButtonToEntryId.removeAll()
+        shortcutGroupButtonTitles.removeAll()
 
         let grouped = groupedShortcutEntries()
+        if selectedShortcutGroup == nil || !grouped.contains(where: { $0.title == selectedShortcutGroup }) {
+            selectedShortcutGroup = grouped.first?.title
+        }
+
+        // Left rail — jump between shortcut groups; selecting one filters the pane.
+        let rail = NSStackView()
+        rail.orientation = .vertical
+        rail.alignment = .leading
+        rail.spacing = 2
+        rail.translatesAutoresizingMaskIntoConstraints = false
+        rail.widthAnchor.constraint(equalToConstant: 120).isActive = true
         for group_ in grouped {
-            let groupTitle = label(group_.title, size: 11, weight: .semibold, color: .tertiaryLabelColor)
-            group.addArrangedSubview(groupTitle)
-            for entry in group_.entries {
-                group.addArrangedSubview(shortcutEntryRow(for: entry))
+            let selected = group_.title == selectedShortcutGroup
+            let button = NSButton(title: group_.title, target: self, action: #selector(selectShortcutGroup(_:)))
+            button.isBordered = false
+            button.alignment = .left
+            button.attributedTitle = NSAttributedString(string: group_.title, attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: selected ? .semibold : .regular),
+                .foregroundColor: selected ? NSColor.controlAccentColor : NSColor.secondaryLabelColor
+            ])
+            shortcutGroupButtonTitles[ObjectIdentifier(button)] = group_.title
+            rail.addArrangedSubview(button)
+        }
+
+        // Right content — the selected group's shortcut rows.
+        let content = NSStackView()
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 8
+        if let selected = grouped.first(where: { $0.title == selectedShortcutGroup }) {
+            content.addArrangedSubview(label(selected.title, size: 12, weight: .semibold, color: .labelColor))
+            for entry in selected.entries {
+                content.addArrangedSubview(shortcutEntryRow(for: entry))
             }
         }
-        return group
+
+        let row = NSStackView(views: [rail, content])
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.spacing = 18
+        return row
+    }
+
+    @objc private func selectShortcutGroup(_ sender: NSButton) {
+        guard let title = shortcutGroupButtonTitles[ObjectIdentifier(sender)] else { return }
+        selectedShortcutGroup = title
+        renderSelectedSection()
+    }
+
+    /// QA/edit helper: ensure the group containing `entryId` is the one rendered,
+    /// so its row exists in `shortcutRowsById` before capture/reset/inspection.
+    private func ensureShortcutEntryRendered(_ entryId: String) {
+        if shortcutRowsById[entryId] != nil { return }
+        for group_ in groupedShortcutEntries() where group_.entries.contains(where: { $0.id == entryId }) {
+            selectedShortcutGroup = group_.title
+            renderSelectedSection()
+            return
+        }
     }
 
     /// One catalog-entry row. Non-configurable rows are static text. Configurable
@@ -269,10 +314,10 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         let nameLabel = label(entry.label, size: 11, weight: .regular, color: .labelColor)
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        nameLabel.widthAnchor.constraint(equalToConstant: 190).isActive = true
+        nameLabel.widthAnchor.constraint(equalToConstant: 170).isActive = true
         let chordLabel = label(entry.chordDisplay, size: 11, weight: .regular, color: .secondaryLabelColor)
         chordLabel.translatesAutoresizingMaskIntoConstraints = false
-        chordLabel.widthAnchor.constraint(equalToConstant: 96).isActive = true
+        chordLabel.widthAnchor.constraint(equalToConstant: 88).isActive = true
 
         let row = NSStackView()
         row.orientation = .horizontal
@@ -342,6 +387,8 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     private var shortcutRowsById: [String: ShortcutRowContext] = [:]
     private var editButtonToEntryId: [ObjectIdentifier: String] = [:]
     private var resetButtonToEntryId: [ObjectIdentifier: String] = [:]
+    private var selectedShortcutGroup: String?
+    private var shortcutGroupButtonTitles: [ObjectIdentifier: String] = [:]
 
     @objc private func beginEditingShortcut(_ sender: NSButton) {
         guard let id = editButtonToEntryId[ObjectIdentifier(sender)], let context = shortcutRowsById[id] else { return }
@@ -536,7 +583,8 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     /// The chord text currently rendered for a catalog entry's row, or nil if the
     /// row isn't rendered. Reads the live label (reflects post-edit re-render).
     func renderedChordDisplayForQA(entryId: String) -> String? {
-        shortcutRowsById[entryId]?.chordLabel.stringValue
+        ensureShortcutEntryRendered(entryId)
+        return shortcutRowsById[entryId]?.chordLabel.stringValue
     }
 
     /// Drives the real edit path for an entry: opens capture, then feeds a
@@ -545,6 +593,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     /// `KeybindEditor.Result` so the check can assert applied vs. rejected.
     @discardableResult
     func simulateCaptureForQA(entryId: String, keyCode: UInt16, modifiers: FocusKeyModifiers, character: String?) -> KeybindEditor.Result? {
+        ensureShortcutEntryRendered(entryId)
         guard let context = shortcutRowsById[entryId] else { return nil }
         beginCapture(in: context)
         return finishCapture(context, keyCode: keyCode, modifiers: modifiers, character: character)
@@ -552,6 +601,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
 
     /// Drives the real reset path for an entry's row.
     func resetForQA(entryId: String) {
+        ensureShortcutEntryRendered(entryId)
         guard let context = shortcutRowsById[entryId] else { return }
         if let resolved = KeybindEditor.reset(target: context.target, defaults: defaults) {
             applyResolvedKeymap(resolved)
