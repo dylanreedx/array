@@ -6243,6 +6243,7 @@ runSessionPrunerTests()
 // MARK: - Ticket 23: Private managed-agent session record
 
 runManagedAgentSessionRecordTests()
+runAgentAdapterTests()
 
 // MARK: - Ticket 13: Invariant spine harness (I1-I8)
 //

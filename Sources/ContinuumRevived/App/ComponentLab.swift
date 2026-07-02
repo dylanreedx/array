@@ -352,7 +352,7 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, agentKindCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
+        [tileSandbox, sidebarCard, topBarCard, agentKindCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
     }
 
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
@@ -415,6 +415,88 @@ enum LabCatalog {
         stack.addArrangedSubview(title)
         stack.addArrangedSubview(kind)
         return stack
+    }
+
+    static var agentAdapterProjectionCard: LabEntry {
+        LabEntry(
+            id: "agent.adapter.projection",
+            category: "Chrome",
+            title: "AgentAdapter Event Projection",
+            summary: "Managed adapter event stream projected through deriveStatusSignals.",
+            content: .staticCard(preferredSize: NSSize(width: 520, height: 260)) {
+                makeAgentAdapterProjectionView()
+            }
+        )
+    }
+
+    static func agentAdapterProjectionRows() -> [(String, AgentStatus)] {
+        let threadId = "lab-thread"
+        let events: [AgentRuntimeEvent] = [
+            .sessionStateChanged(.starting),
+            .sessionStateChanged(.running),
+            .turnStarted(threadId: threadId, turnId: "turn-1"),
+            .itemStarted(threadId: threadId, itemId: "item-1", kind: .commandExecution, title: "run build"),
+            .requestOpened(threadId: threadId, requestId: "request-1", kind: .commandExecutionApproval),
+            .requestResolved(threadId: threadId, requestId: "request-1", decision: "approve"),
+            .itemCompleted(threadId: threadId, itemId: "item-1", kind: .commandExecution, status: .completed),
+            .turnCompleted(threadId: threadId, turnId: "turn-1", outcome: .completed, errorMessage: nil),
+            .sessionStateChanged(.ready)
+        ]
+        var accumulated: [AgentRuntimeEvent] = []
+        return events.enumerated().map { index, event in
+            accumulated.append(event)
+            let signals = deriveStatusSignals(from: accumulated, threadId: threadId, engineStatus: .idle)
+            return ("\(index + 1). \(agentRuntimeEventName(event))", deriveAgentStatus(signals: signals))
+        }
+    }
+
+    static func makeAgentAdapterProjectionView() -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+
+        let title = NSTextField(labelWithString: "AgentAdapter Event Projection")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.textColor = .labelColor
+        stack.addArrangedSubview(title)
+
+        for (index, row) in agentAdapterProjectionRows().enumerated() {
+            let field = NSTextField(labelWithString: "\(row.0) -> \(row.1.rawValue)")
+            field.identifier = NSUserInterfaceItemIdentifier("agentAdapterProjection.row.\(index + 1)")
+            field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            field.textColor = color(for: row.1)
+            stack.addArrangedSubview(field)
+        }
+        return stack
+    }
+
+    private static func agentRuntimeEventName(_ event: AgentRuntimeEvent) -> String {
+        switch event {
+        case .sessionStateChanged(let state): return "sessionStateChanged(\(state.rawValue))"
+        case .turnStarted: return "turnStarted"
+        case .turnCompleted(_, _, let outcome, _): return "turnCompleted(\(outcome.rawValue))"
+        case .itemStarted(_, _, let kind, _): return "itemStarted(\(kind.rawValue))"
+        case .itemCompleted(_, _, let kind, let status): return "itemCompleted(\(kind.rawValue), \(status.rawValue))"
+        case .contentDelta: return "contentDelta"
+        case .requestOpened: return "requestOpened"
+        case .requestResolved: return "requestResolved"
+        case .userInputRequested: return "userInputRequested"
+        case .userInputResolved: return "userInputResolved"
+        case .tokenUsageUpdated: return "tokenUsageUpdated"
+        case .runtimeError: return "runtimeError"
+        }
+    }
+
+    private static func color(for status: AgentStatus) -> NSColor {
+        switch status {
+        case .needsAttention: return .systemOrange
+        case .working: return .systemBlue
+        case .done: return .systemGreen
+        case .stale: return .systemGray
+        case .idle: return .systemTeal
+        case .configuring: return .systemPurple
+        }
     }
 
     static var managedSessionRecordCard: LabEntry {
@@ -839,6 +921,37 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard kindLabel.stringValue == "Kind -> claude" else {
             throw fail("agent.kind label rendered '\(kindLabel.stringValue)', expected 'Kind -> claude'")
         }
+        guard let adapterEntry = entries.first(where: { $0.id == "agent.adapter.projection" }),
+              case let .staticCard(_, makeAdapterView) = adapterEntry.content else {
+            throw fail("missing agent.adapter.projection card")
+        }
+        let adapterView = makeAdapterView()
+        func adapterText(_ row: Int) throws -> String {
+            guard let field = adapterView.descendant(withIdentifier: "agentAdapterProjection.row.\(row)") as? NSTextField else {
+                throw fail("agent adapter projection card missing row \(row)")
+            }
+            return field.stringValue
+        }
+        let adapterRow1 = try adapterText(1)
+        let adapterRow2 = try adapterText(2)
+        let adapterRow5 = try adapterText(5)
+        let adapterRow6 = try adapterText(6)
+        let adapterRow9 = try adapterText(9)
+        guard adapterRow1.hasSuffix("-> configuring") else {
+            throw fail("agent adapter row 1 rendered '\(adapterRow1)'")
+        }
+        guard adapterRow2.hasSuffix("-> working") else {
+            throw fail("agent adapter row 2 rendered '\(adapterRow2)'")
+        }
+        guard adapterRow5.hasSuffix("-> needsAttention") else {
+            throw fail("agent adapter row 5 rendered '\(adapterRow5)'")
+        }
+        guard adapterRow6.hasSuffix("-> working") else {
+            throw fail("agent adapter row 6 rendered '\(adapterRow6)'")
+        }
+        guard adapterRow9.hasSuffix("-> done") else {
+            throw fail("agent adapter row 9 rendered '\(adapterRow9)'")
+        }
         guard let managedEntry = entries.first(where: { $0.id == "managed.session.record" }),
               case let .staticCard(_, makeManagedView) = managedEntry.content else {
             throw fail("missing managed.session.record card")
@@ -1010,6 +1123,13 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             "rendered": rendered,
             "sandbox": ["tilesInstalled": 5, "zoomClampHigh": zoomHigh, "zoomClampLow": zoomLow],
             "agentKind": ["label": kindLabel.stringValue],
+            "agentAdapterProjection": [
+                "row1": adapterRow1,
+                "row2": adapterRow2,
+                "row5": adapterRow5,
+                "row6": adapterRow6,
+                "row9": adapterRow9
+            ],
             "managedSessionRecord": [
                 "agentKind": managedAgentKind,
                 "status": managedStatus,
