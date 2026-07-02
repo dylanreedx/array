@@ -2238,13 +2238,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var settingsChangeObserver: NSObjectProtocol?
     private var tmuxDefaults: UserDefaults = .standard
     private var tmuxPathResolver: (UserDefaults) -> String? = { TmuxLocator.resolve(defaults: $0) }
-    private var tmuxProcessRunner: (String, [String]) throws -> Void = { command, arguments in
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: command)
-        process.arguments = arguments
-        try process.run()
-        process.waitUntilExit()
-    }
+    // Ticket: docs/38-tickets/12-injectable-substrates.md — the daemon-dependent
+    // kill-session seam goes through the injectable `TmuxControl` protocol
+    // (real: ProcessTmuxControl, tests: InMemoryTmuxControl) rather than a raw
+    // Process invocation, so later session/topology code can prove this
+    // teardown path against the same fake the rest of the substrate uses.
+    private var tmuxControlFactory: (String) -> any TmuxControl = { ProcessTmuxControl(tmuxPath: $0) }
     private var suppressTerminateOnWindowCloseForQA = false
     private let focusBroker = FocusBroker()
     private var navKeymap: NavKeymap = .default {
@@ -3109,12 +3108,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
               let tmuxPath = tmuxPathResolver(tmuxDefaults) else {
             return
         }
-        let command = TmuxSession.killSessionCommand(tileId: tileId, tmuxPath: tmuxPath)
-        do {
-            try tmuxProcessRunner(command.command, command.arguments)
-        } catch {
+        let sessionName = TmuxSession.sessionName(tileId: tileId)
+        let control = tmuxControlFactory(tmuxPath)
+        if let error = Self.runTmuxControlOperationSync({ try await control.killSession(name: sessionName) }) {
             fputs("tmux kill-session failed for tile=\(tileId.uuidString): \(error)\n", stderr)
         }
+    }
+
+    /// `TmuxControl` is async throughout (it may shell out to a real `tmux`
+    /// process); this call site is synchronous (a UI deletion callback), so it
+    /// blocks on the same subprocess completion the previous raw-`Process`
+    /// call already blocked on — no observable behavior change, just routed
+    /// through the injectable seam.
+    private static func runTmuxControlOperationSync(_ operation: @escaping @Sendable () async throws -> Void) -> Error? {
+        final class ErrorBox: @unchecked Sendable { var error: Error? }
+        let box = ErrorBox()
+        let semaphore = DispatchSemaphore(value: 0)
+        Task.detached {
+            do {
+                try await operation()
+            } catch {
+                box.error = error
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return box.error
     }
 
     private func restartTile(tileId: UUID) {
@@ -10981,9 +11000,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
             if !condition() { throw CheckError.failed(message) }
         }
-        final class CommandCapture {
-            var commands: [[String: Any]] = []
-        }
         func makeProjectStore(root: URL, name: String) throws -> (ProjectStore, Project) {
             let now = Date(timeIntervalSince1970: 1_700_000_000)
             let project = Project(
@@ -11005,7 +11021,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
             return (store, project)
         }
-        func makeDelegate(root: URL, defaults: UserDefaults, fakeTmuxPath: String, capture: CommandCapture) throws -> (AppDelegate, CanvasNSView, BrowserEngineContext) {
+        func makeDelegate(root: URL, defaults: UserDefaults, fakeTmuxPath: String, tmuxControl: InMemoryTmuxControl) throws -> (AppDelegate, CanvasNSView, BrowserEngineContext) {
             let (store, project) = try makeProjectStore(root: root, name: "terminal-tmux-delete-lifecycle-check")
             let canvas = CanvasNSView(canvasState: try store.loadCanvas())
             canvas.frame = CGRect(x: 0, y: 0, width: 1200, height: 800)
@@ -11027,9 +11043,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             )
             delegate.tmuxDefaults = defaults
             delegate.tmuxPathResolver = { _ in fakeTmuxPath }
-            delegate.tmuxProcessRunner = { command, arguments in
-                capture.commands.append(["command": command, "arguments": arguments])
-            }
+            delegate.tmuxControlFactory = { _ in tmuxControl }
             delegate.suppressTerminateOnWindowCloseForQA = true
             canvas.onTileCloseRequested = { [weak delegate] tileId in
                 delegate?.deleteTile(id: tileId)
@@ -11059,10 +11073,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             defaults.removePersistentDomain(forName: defaultsSuiteName)
         }
 
-        let deleteCapture = CommandCapture()
+        let deleteTmuxControl = InMemoryTmuxControl()
         let deleteRoot = tempRoot.appendingPathComponent("delete", isDirectory: true)
         try fileManager.createDirectory(at: deleteRoot, withIntermediateDirectories: true)
-        let (deleteDelegate, deleteCanvas, deleteBrowserEngine) = try makeDelegate(root: deleteRoot, defaults: defaults, fakeTmuxPath: fakeTmuxPath, capture: deleteCapture)
+        let (deleteDelegate, deleteCanvas, deleteBrowserEngine) = try makeDelegate(root: deleteRoot, defaults: defaults, fakeTmuxPath: fakeTmuxPath, tmuxControl: deleteTmuxControl)
         defer { deleteBrowserEngine.shutdown() }
         _ = deleteDelegate
         let terminalTileId = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
@@ -11078,16 +11092,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let terminalView = TileNSView(tile: terminalTile)
         deleteCanvas.install(tileView: terminalView, for: terminalTile)
         terminalView.onClose?()
-        let expectedKill = TmuxSession.killSessionCommand(tileId: terminalTileId, tmuxPath: fakeTmuxPath)
-        try expect(deleteCapture.commands.count == 1, "terminal tile user close should issue exactly one tmux kill-session command, got \(deleteCapture.commands)")
-        try expect(deleteCapture.commands.first?["command"] as? String == expectedKill.command, "unexpected tmux kill command: \(deleteCapture.commands)")
-        try expect(deleteCapture.commands.first?["arguments"] as? [String] == expectedKill.arguments, "unexpected tmux kill arguments: \(deleteCapture.commands)")
+        let expectedSessionName = TmuxSession.sessionName(tileId: terminalTileId)
+        try expect(deleteTmuxControl.log.count == 1, "terminal tile user close should issue exactly one tmux kill-session command, got \(deleteTmuxControl.log)")
+        try expect(deleteTmuxControl.log.first == .killSession(name: expectedSessionName), "unexpected tmux kill call: \(deleteTmuxControl.log)")
         try expect(!deleteCanvas.canvasState.tiles.contains(where: { $0.id == terminalTileId }), "terminal tile close should remove tile through delete path")
 
-        let teardownCapture = CommandCapture()
+        let teardownTmuxControl = InMemoryTmuxControl()
         let teardownRoot = tempRoot.appendingPathComponent("teardown", isDirectory: true)
         try fileManager.createDirectory(at: teardownRoot, withIntermediateDirectories: true)
-        let (teardownDelegate, teardownCanvas, teardownBrowserEngine) = try makeDelegate(root: teardownRoot, defaults: defaults, fakeTmuxPath: fakeTmuxPath, capture: teardownCapture)
+        let (teardownDelegate, teardownCanvas, teardownBrowserEngine) = try makeDelegate(root: teardownRoot, defaults: defaults, fakeTmuxPath: fakeTmuxPath, tmuxControl: teardownTmuxControl)
         defer { teardownBrowserEngine.shutdown() }
         let teardownTileId = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
         let teardownTile = Tile(
@@ -11101,16 +11114,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         )
         teardownCanvas.install(tileView: TileNSView(tile: teardownTile), for: teardownTile)
         teardownDelegate.windowWillClose(Notification(name: NSWindow.willCloseNotification))
-        try expect(teardownCapture.commands.isEmpty, "app teardown/window close must detach only and not issue kill-session; got \(teardownCapture.commands)")
+        try expect(teardownTmuxControl.log.isEmpty, "app teardown/window close must detach only and not issue kill-session; got \(teardownTmuxControl.log)")
 
-        let disabledCapture = CommandCapture()
+        let disabledTmuxControl = InMemoryTmuxControl()
         let disabledRoot = tempRoot.appendingPathComponent("disabled", isDirectory: true)
         try fileManager.createDirectory(at: disabledRoot, withIntermediateDirectories: true)
         let disabledDefaultsSuiteName = "continuum.test.terminalTmuxDeleteLifecycle.disabled.\(UUID().uuidString)"
         let disabledDefaults = UserDefaults(suiteName: disabledDefaultsSuiteName)!
         disabledDefaults.removePersistentDomain(forName: disabledDefaultsSuiteName)
         disabledDefaults.set(false, forKey: TmuxPersistenceConfig.enabledKey)
-        let (disabledDelegate, disabledCanvas, disabledBrowserEngine) = try makeDelegate(root: disabledRoot, defaults: disabledDefaults, fakeTmuxPath: fakeTmuxPath, capture: disabledCapture)
+        let (disabledDelegate, disabledCanvas, disabledBrowserEngine) = try makeDelegate(root: disabledRoot, defaults: disabledDefaults, fakeTmuxPath: fakeTmuxPath, tmuxControl: disabledTmuxControl)
         defer {
             disabledDefaults.removePersistentDomain(forName: disabledDefaultsSuiteName)
             disabledBrowserEngine.shutdown()
@@ -11128,12 +11141,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let disabledView = TileNSView(tile: disabledTile)
         disabledCanvas.install(tileView: disabledView, for: disabledTile)
         disabledView.onClose?()
-        try expect(disabledCapture.commands.isEmpty, "tmux-disabled terminal close must not issue tmux kill-session; got \(disabledCapture.commands)")
+        try expect(disabledTmuxControl.log.isEmpty, "tmux-disabled terminal close must not issue tmux kill-session; got \(disabledTmuxControl.log)")
 
-        let absentCapture = CommandCapture()
+        let absentTmuxControl = InMemoryTmuxControl()
         let absentRoot = tempRoot.appendingPathComponent("absent", isDirectory: true)
         try fileManager.createDirectory(at: absentRoot, withIntermediateDirectories: true)
-        let (absentDelegate, absentCanvas, absentBrowserEngine) = try makeDelegate(root: absentRoot, defaults: defaults, fakeTmuxPath: fakeTmuxPath, capture: absentCapture)
+        let (absentDelegate, absentCanvas, absentBrowserEngine) = try makeDelegate(root: absentRoot, defaults: defaults, fakeTmuxPath: fakeTmuxPath, tmuxControl: absentTmuxControl)
         defer { absentBrowserEngine.shutdown() }
         absentDelegate.tmuxPathResolver = { _ in nil }
         let absentTile = Tile(
@@ -11148,12 +11161,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let absentView = TileNSView(tile: absentTile)
         absentCanvas.install(tileView: absentView, for: absentTile)
         absentView.onClose?()
-        try expect(absentCapture.commands.isEmpty, "tmux-absent terminal close must not issue tmux kill-session; got \(absentCapture.commands)")
+        try expect(absentTmuxControl.log.isEmpty, "tmux-absent terminal close must not issue tmux kill-session; got \(absentTmuxControl.log)")
 
-        let nonTerminalCapture = CommandCapture()
+        let nonTerminalTmuxControl = InMemoryTmuxControl()
         let nonTerminalRoot = tempRoot.appendingPathComponent("non-terminal", isDirectory: true)
         try fileManager.createDirectory(at: nonTerminalRoot, withIntermediateDirectories: true)
-        let (nonTerminalDelegate, nonTerminalCanvas, nonTerminalBrowserEngine) = try makeDelegate(root: nonTerminalRoot, defaults: defaults, fakeTmuxPath: fakeTmuxPath, capture: nonTerminalCapture)
+        let (nonTerminalDelegate, nonTerminalCanvas, nonTerminalBrowserEngine) = try makeDelegate(root: nonTerminalRoot, defaults: defaults, fakeTmuxPath: fakeTmuxPath, tmuxControl: nonTerminalTmuxControl)
         defer { nonTerminalBrowserEngine.shutdown() }
         _ = nonTerminalDelegate
         let noteTile = Tile(
@@ -11168,7 +11181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let noteView = TileNSView(tile: noteTile)
         nonTerminalCanvas.install(tileView: noteView, for: noteTile)
         noteView.onClose?()
-        try expect(nonTerminalCapture.commands.isEmpty, "non-terminal tile close must not issue tmux kill-session; got \(nonTerminalCapture.commands)")
+        try expect(nonTerminalTmuxControl.log.isEmpty, "non-terminal tile close must not issue tmux kill-session; got \(nonTerminalTmuxControl.log)")
 
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
@@ -11180,12 +11193,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "check": "terminal-tmux-delete-lifecycle",
             "fakeTmuxPath": fakeTmuxPath,
             "deletedTerminalTileId": terminalTileId.uuidString,
-            "deleteCommands": deleteCapture.commands,
+            "deleteTmuxCalls": deleteTmuxControl.log.map(String.init(describing:)),
             "teardownTerminalTileId": teardownTileId.uuidString,
-            "teardownCommands": teardownCapture.commands,
-            "disabledCommands": disabledCapture.commands,
-            "absentCommands": absentCapture.commands,
-            "nonTerminalCommands": nonTerminalCapture.commands,
+            "teardownTmuxCalls": teardownTmuxControl.log.map(String.init(describing:)),
+            "disabledTmuxCalls": disabledTmuxControl.log.map(String.init(describing:)),
+            "absentTmuxCalls": absentTmuxControl.log.map(String.init(describing:)),
+            "nonTerminalTmuxCalls": nonTerminalTmuxControl.log.map(String.init(describing:)),
         ]
         let artifact = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

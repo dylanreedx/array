@@ -5821,4 +5821,9 @@ runSessionTopologySnapshotTests()
 
 runSidebarActivityTreeSnapshotTests()
 
+// MARK: - Ticket 12: Injectable substrates (TmuxControl, Clock, Host, SyncTransport)
+
+runSubstrateTests()
+runTmuxRealPathCheck()
+
 print("ContinuumRevivedCoreChecks passed")
