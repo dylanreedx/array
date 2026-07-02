@@ -75,3 +75,4 @@ New attempts append their rows to the table above.
 | 23-private-managed-session-record.md | done | 9fdabf8 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
 | 35-agent-state-reader-protocol.md | done | 73e8b25 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
 | 36-pi-reader.md | done | 8d5c8e0 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
+| 37-claude-reader.md | done | 64ec368 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
