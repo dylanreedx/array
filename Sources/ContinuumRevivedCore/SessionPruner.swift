@@ -24,3 +24,88 @@ public func pruneExitedSessions(in store: any ProjectStoring) {
         }
     }
 }
+
+public actor SessionPruner {
+    public struct Configuration: Sendable, Equatable {
+        public var inactivityThreshold: TimeInterval
+        public var sweepInterval: TimeInterval
+
+        public init(
+            inactivityThreshold: TimeInterval = IdleReaperConfig.defaultInactivityThreshold,
+            sweepInterval: TimeInterval = IdleReaperConfig.defaultSweepInterval
+        ) {
+            self.inactivityThreshold = inactivityThreshold
+            self.sweepInterval = sweepInterval
+        }
+    }
+
+    public struct SessionBinding: Sendable, Equatable {
+        public let sessionName: String
+        public let tileIds: [UUID]
+        public var lastSeenAt: Date
+
+        public init(sessionName: String, tileIds: [UUID], lastSeenAt: Date) {
+            self.sessionName = sessionName
+            self.tileIds = tileIds
+            self.lastSeenAt = lastSeenAt
+        }
+    }
+
+    private let tmuxControl: any TmuxControl
+    private let clock: any Clock
+    public let configuration: Configuration
+    private let bindingSource: @Sendable () async -> [SessionBinding]
+    private let activitySnapshotSource: @Sendable () async -> ActivityLogSnapshot?
+    private var sweepTask: Task<Void, Never>?
+
+    public init(
+        tmuxControl: any TmuxControl,
+        clock: any Clock,
+        configuration: Configuration = .init(),
+        bindingSource: @Sendable @escaping () async -> [SessionBinding],
+        activitySnapshotSource: @Sendable @escaping () async -> ActivityLogSnapshot?
+    ) {
+        self.tmuxControl = tmuxControl
+        self.clock = clock
+        self.configuration = configuration
+        self.bindingSource = bindingSource
+        self.activitySnapshotSource = activitySnapshotSource
+    }
+
+    public func start() {
+        guard sweepTask == nil else { return }
+        sweepTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                await self.sweep()
+                let interval = await self.configuration.sweepInterval
+                let nanoseconds = UInt64(max(0, interval) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: nanoseconds)
+            }
+        }
+    }
+
+    public func stop() {
+        sweepTask?.cancel()
+        sweepTask = nil
+    }
+
+    public func sweep() async {
+        let now = clock.now()
+        let bindings = await bindingSource()
+
+        for binding in bindings {
+            guard now.timeIntervalSince(binding.lastSeenAt) >= configuration.inactivityThreshold else {
+                continue
+            }
+
+            let snapshot = await activitySnapshotSource()
+            let hasActiveTurn = binding.tileIds.contains { tileId in
+                snapshot?.byTile[tileId]?.status == .working
+            }
+            guard !hasActiveTurn else { continue }
+
+            try? await tmuxControl.detachSession(name: binding.sessionName)
+        }
+    }
+}

@@ -22,6 +22,7 @@ final class ZoneRuntimeController {
     private var browserSaveTimer: Timer?
     private var noteSaveTimer: Timer?
     private var fileTreeSaveTimer: Timer?
+    private var sessionPruner: SessionPruner?
     private var isCanvasDirty = false
     private var isBrowserDirty = false
     private var isNoteDirty = false
@@ -95,6 +96,7 @@ final class ZoneRuntimeController {
         guard !isClosed else { return }
         isClosed = true
 
+        stopReaper()
         flushPendingSaves()
         detachUI()
 
@@ -137,6 +139,49 @@ final class ZoneRuntimeController {
             }
             return fallbacks
         }
+    }
+
+    func startReaper(
+        tmuxControl: any TmuxControl,
+        activitySnapshotSource: @escaping @Sendable () async -> ActivityLogSnapshot?,
+        clock: any Clock = SystemClock(),
+        defaults: UserDefaults = .standard
+    ) {
+        stopReaper()
+
+        let config = SessionPruner.Configuration(
+            inactivityThreshold: IdleReaperConfig.resolveInactivityThreshold(defaults: defaults),
+            sweepInterval: IdleReaperConfig.resolveSweepInterval(defaults: defaults)
+        )
+
+        let pruner = SessionPruner(
+            tmuxControl: tmuxControl,
+            clock: clock,
+            configuration: config,
+            bindingSource: { [weak self] in
+                guard let self else { return [] }
+                return await MainActor.run {
+                    let tileIds = self.canvasView?.canvasState.tiles.map(\.id) ?? self.runtimes.map(\.tileId)
+                    guard !tileIds.isEmpty else { return [] }
+                    return [
+                        SessionPruner.SessionBinding(
+                            sessionName: self.projectSessionName(),
+                            tileIds: tileIds,
+                            lastSeenAt: self.project.createdAt
+                        )
+                    ]
+                }
+            },
+            activitySnapshotSource: activitySnapshotSource
+        )
+        sessionPruner = pruner
+        Task { await pruner.start() }
+    }
+
+    func stopReaper() {
+        guard let pruner = sessionPruner else { return }
+        sessionPruner = nil
+        Task { await pruner.stop() }
     }
 
     func detachUI() {

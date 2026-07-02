@@ -100,6 +100,16 @@ public enum SettingsSchema {
                     .text(key: AutosaveConfig.debounceMsKey, label: "Autosave Debounce (ms)", default: String(AutosaveConfig.defaultDebounceMs)),
                     .toggle(key: SessionResumeConfig.scrollbackEnabledKey, label: "Restore Scrollback on Resume", default: SessionResumeConfig.scrollbackEnabledDefault),
                     .text(key: SessionResumeConfig.scrollbackMaxLinesKey, label: "Scrollback Resume Max Lines", default: String(SessionResumeConfig.scrollbackMaxLinesDefault)),
+                    .text(
+                        key: IdleReaperConfig.inactivityThresholdKey,
+                        label: "Idle Reaper Threshold (seconds)",
+                        default: String(Int(IdleReaperConfig.defaultInactivityThreshold))
+                    ),
+                    .text(
+                        key: IdleReaperConfig.sweepIntervalKey,
+                        label: "Idle Reaper Sweep Interval (seconds)",
+                        default: String(Int(IdleReaperConfig.defaultSweepInterval))
+                    ),
                 ]
             ),
             SettingsSection(

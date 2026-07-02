@@ -5874,6 +5874,10 @@ runSidebarActivityTreeSnapshotTests()
 runSubstrateTests()
 runTmuxRealPathCheck()
 
+// MARK: - Ticket 21: Idle reaper detach
+
+runSessionPrunerTests()
+
 // MARK: - Ticket 13: Invariant spine harness (I1-I8)
 //
 // A tiny helper both full and stub blocks call, so EVERY block writes-then-reads-back.
