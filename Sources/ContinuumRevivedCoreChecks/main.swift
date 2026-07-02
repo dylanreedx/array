@@ -333,6 +333,13 @@ do {
     expect(kill.command == tmuxPath, "tmux kill command should use resolved tmux path")
     expect(kill.arguments == ["kill-session", "-t", name], "tmux kill command argv should target stable session name")
 
+    let viewName = TmuxSession.viewSessionName(tileId: tileId)
+    expect(viewName == "continuum-view-\(tileId.uuidString)", "tmux view session name should be continuum-view-prefixed tile UUID")
+    expect(viewName != name, "tmux view session name must not collide with legacy per-tile session name")
+    let viewKill = TmuxSession.killViewSessionCommand(tileId: tileId, tmuxPath: tmuxPath)
+    expect(viewKill.command == tmuxPath, "tmux view-session kill command should use resolved tmux path")
+    expect(viewKill.arguments == ["kill-session", "-t", viewName], "tmux view-session kill argv should target stable view session name")
+
     let killWindow = TmuxSession.killWindowCommand(target: "%7", tmuxPath: tmuxPath)
     expect(killWindow.command == tmuxPath, "tmux kill-window command should use resolved tmux path")
     expect(killWindow.arguments == ["kill-window", "-t", "%7"], "tmux kill-window argv should target the captured pane id")

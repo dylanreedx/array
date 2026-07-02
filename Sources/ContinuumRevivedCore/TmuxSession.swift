@@ -9,6 +9,10 @@ public enum TmuxSession {
         "continuum-\(tileId.uuidString)"
     }
 
+    public static func viewSessionName(tileId: UUID) -> String {
+        "continuum-view-\(tileId.uuidString)"
+    }
+
     public static func wrap(
         profile: LaunchProfile,
         tileId: UUID,
@@ -53,6 +57,10 @@ public enum TmuxSession {
 
     public static func killSessionCommand(tileId: UUID, tmuxPath: String) -> (command: String, arguments: [String]) {
         (command: tmuxPath, arguments: ["kill-session", "-t", sessionName(tileId: tileId)])
+    }
+
+    public static func killViewSessionCommand(tileId: UUID, tmuxPath: String) -> (command: String, arguments: [String]) {
+        (command: tmuxPath, arguments: ["kill-session", "-t", viewSessionName(tileId: tileId)])
     }
 
     public static func killWindowCommand(target: String, tmuxPath: String) -> (command: String, arguments: [String]) {

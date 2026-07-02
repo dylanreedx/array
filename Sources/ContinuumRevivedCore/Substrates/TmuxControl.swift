@@ -43,6 +43,7 @@ public struct TmuxSessionInfo: Equatable, Sendable {
 public enum InMemoryTmuxControlError: Error, Equatable {
     case sessionNotFound(String)
     case paneNotFound(String)
+    case forcedFailure(String)
 }
 
 public enum TmuxControlError: Error, Equatable {
@@ -60,6 +61,7 @@ public enum TmuxControlError: Error, Equatable {
 public final class InMemoryTmuxControl: TmuxControl, @unchecked Sendable {
     public var livePanes: [String: PaneStub] = [:]      // %pane_id -> stub
     public var sessions: [String: [String]] = [:]        // session name -> [%pane_id]
+    public var killSessionFailures: Set<String> = []
 
     public private(set) var log: [TmuxCall] = []
 
@@ -136,6 +138,9 @@ public final class InMemoryTmuxControl: TmuxControl, @unchecked Sendable {
 
     public func killSession(name: String) async throws {
         log.append(.killSession(name: name))
+        if killSessionFailures.contains(name) {
+            throw InMemoryTmuxControlError.forcedFailure(name)
+        }
         guard let panes = sessions.removeValue(forKey: name) else { return }
         for paneId in panes {
             guard var stub = livePanes[paneId] else { continue }

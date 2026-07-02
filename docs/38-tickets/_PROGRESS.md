@@ -80,3 +80,4 @@ New attempts append their rows to the table above.
 | 24-lazy-resume-on-focus.md | done | d166d2e | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
 | 59-scope-optionset-model.md | done | 71ecc95 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
 | 67-agent-adapter-protocol.md | done | 2979905 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
+| 28-view-session-cleanup.md | done | d9570a4 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |

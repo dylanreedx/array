@@ -3171,6 +3171,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if let error = Self.runTmuxControlOperationSync({ try await control.killWindow(target: target) }) {
                 fputs("tmux kill-window failed for tile=\(tileId.uuidString) target=\(target): \(error)\n", stderr)
             }
+            let viewSessionName = TmuxSession.viewSessionName(tileId: tileId)
+            if let error = Self.runTmuxControlOperationSync({ try await control.killSession(name: viewSessionName) }) {
+                fputs("tmux kill-session (view) failed for tile=\(tileId.uuidString): \(error)\n", stderr)
+            }
             return
         }
 
@@ -11195,13 +11199,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let terminalView = TileNSView(tile: terminalTile)
         deleteCanvas.install(tileView: terminalView, for: terminalTile)
         terminalView.onClose?()
-        try expect(deleteTmuxControl.log.count == 1, "terminal tile user close should issue exactly one tmux kill-window command, got \(deleteTmuxControl.log)")
-        try expect(deleteTmuxControl.log.first == .killWindow(target: terminalWindowTarget), "terminal tile close must target captured tmux pane id, got \(deleteTmuxControl.log)")
+        let expectedViewSessionName = TmuxSession.viewSessionName(tileId: terminalTileId)
+        try expect(deleteTmuxControl.log.count == 2, "terminal tile user close should issue exactly two tmux commands (window teardown then view cleanup), got \(deleteTmuxControl.log)")
+        try expect(deleteTmuxControl.log[0] == .killWindow(target: terminalWindowTarget), "terminal tile close must first target captured tmux pane id, got \(deleteTmuxControl.log)")
+        try expect(deleteTmuxControl.log[1] == .killSession(name: expectedViewSessionName), "terminal tile close must then kill the grouped view session, got \(deleteTmuxControl.log)")
         try expect(!deleteTmuxControl.log.contains { call in
             if case let .killSession(name) = call { return name.hasPrefix("continuum-proj-") }
             return false
         }, "terminal close path must not kill a project session directly: \(deleteTmuxControl.log)")
         try expect(!deleteCanvas.canvasState.tiles.contains(where: { $0.id == terminalTileId }), "terminal tile close should remove tile through delete path")
+
+        let throwingViewTmuxControl = InMemoryTmuxControl()
+        let throwingViewRoot = tempRoot.appendingPathComponent("throwing-view", isDirectory: true)
+        try fileManager.createDirectory(at: throwingViewRoot, withIntermediateDirectories: true)
+        let (throwingViewDelegate, throwingViewCanvas, throwingViewBrowserEngine, throwingViewStore) = try makeDelegate(root: throwingViewRoot, defaults: defaults, fakeTmuxPath: fakeTmuxPath, tmuxControl: throwingViewTmuxControl)
+        defer { throwingViewBrowserEngine.shutdown() }
+        _ = throwingViewDelegate
+        let throwingViewTileId = UUID(uuidString: "99999999-9999-9999-9999-999999999999")!
+        let throwingViewWindowTarget = "%99"
+        throwingViewTmuxControl.killSessionFailures.insert(TmuxSession.viewSessionName(tileId: throwingViewTileId))
+        let throwingViewTile = Tile(
+            id: throwingViewTileId,
+            kind: .terminal,
+            title: "Throwing View",
+            frame: TileFrame(x: 70, y: 70, width: 480, height: 300),
+            zIndex: 1,
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "shell", projectRelativeCwd: ".")
+        )
+        try throwingViewStore.saveSession(TerminalSessionDescriptor(
+            id: UUID(uuidString: "99999999-9999-4999-8999-999999999999")!,
+            tileId: throwingViewTileId,
+            launchProfileId: "shell",
+            command: "/bin/zsh",
+            args: [],
+            cwd: throwingViewRoot.path,
+            env: [:],
+            title: "Throwing View",
+            createdAt: Date(timeIntervalSince1970: 1_717_000_002),
+            lastStartedAt: Date(timeIntervalSince1970: 1_717_000_002),
+            lastExit: nil,
+            tmuxWindowTarget: throwingViewWindowTarget
+        ))
+        let throwingView = TileNSView(tile: throwingViewTile)
+        throwingViewCanvas.install(tileView: throwingView, for: throwingViewTile)
+        throwingView.onClose?()
+        try expect(
+            throwingViewTmuxControl.log == [
+                .killWindow(target: throwingViewWindowTarget),
+                .killSession(name: TmuxSession.viewSessionName(tileId: throwingViewTileId))
+            ],
+            "throwing view-session cleanup should still attempt window teardown first, got \(throwingViewTmuxControl.log)"
+        )
+        try expect(!throwingViewCanvas.canvasState.tiles.contains(where: { $0.id == throwingViewTileId }), "view-session kill failure should not prevent tile removal")
+        let throwingViewSavedCanvas = try throwingViewStore.loadCanvas()
+        try expect(!throwingViewSavedCanvas.tiles.contains(where: { $0.id == throwingViewTileId }), "view-session kill failure should not prevent canvas save")
 
         let legacyTmuxControl = InMemoryTmuxControl()
         let legacyRoot = tempRoot.appendingPathComponent("legacy", isDirectory: true)
@@ -11398,6 +11450,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "deletedTerminalTileId": terminalTileId.uuidString,
             "deleteTmuxCalls": deleteTmuxControl.log.map(String.init(describing:)),
             "deleteTmuxWindowTarget": terminalWindowTarget,
+            "throwingViewTerminalTileId": throwingViewTileId.uuidString,
+            "throwingViewTmuxCalls": throwingViewTmuxControl.log.map(String.init(describing:)),
             "legacyTerminalTileId": legacyTileId.uuidString,
             "legacyTmuxCalls": legacyTmuxControl.log.map(String.init(describing:)),
             "teardownTerminalTileId": teardownTileId.uuidString,
