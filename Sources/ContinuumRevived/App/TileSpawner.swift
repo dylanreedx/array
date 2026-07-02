@@ -34,6 +34,7 @@ final class TileSpawner {
     private let ghostty: GhosttyRuntimeContext?
     private let browserEngine: BrowserEngineContext
     private let projectStore: any ProjectStoring
+    private let managedSessionStore: ManagedAgentSessionStore
     private let project: Project
     private let registry: LaunchProfileRegistry
     private let detector: ToolDetector
@@ -83,12 +84,14 @@ final class TileSpawner {
         defaults: UserDefaults = .standard,
         tmuxPathResolver: @escaping (UserDefaults) -> String? = { TmuxLocator.resolve(defaults: $0) },
         tmuxControlFactory: @escaping @Sendable (String) -> any TmuxControl = { ProcessTmuxControl(tmuxPath: $0) },
-        browserProfiles: [BrowserProfile] = [BrowserProfile.builtInDefault()]
+        browserProfiles: [BrowserProfile] = [BrowserProfile.builtInDefault()],
+        managedSessionStore: ManagedAgentSessionStore? = nil
     ) {
         self.canvasView = canvasView
         self.ghostty = ghostty
         self.browserEngine = browserEngine
         self.projectStore = projectStore
+        self.managedSessionStore = managedSessionStore ?? ManagedAgentSessionStore(projectRoot: URL(fileURLWithPath: project.rootPath, isDirectory: true))
         self.project = project
         self.registry = registry
         self.detector = detector
@@ -225,6 +228,7 @@ final class TileSpawner {
         )
         do {
             try projectStore.saveSession(descriptor)
+            writeInitialManagedSessionRecord(for: descriptor, at: now)
             try projectStore.saveCanvas(canvasView.canvasState)
         } catch {
             if let target = wrappedProfile.windowTarget {
@@ -235,6 +239,20 @@ final class TileSpawner {
             return .failure(error)
         }
         return .spawned(runtime)
+    }
+
+    private func writeInitialManagedSessionRecord(for descriptor: TerminalSessionDescriptor, at now: Date) {
+        guard let windowTarget = descriptor.tmuxWindowTarget,
+              let runtimePayload = try? ManagedAgentSessionRecord.makeRuntimePayload(windowTarget: windowTarget, cwd: descriptor.cwd)
+        else { return }
+        let record = ManagedAgentSessionRecord(
+            tileId: descriptor.tileId,
+            agentKind: descriptor.agentDescriptor?.agentKind ?? .shell,
+            status: .running,
+            lastSeenAt: now,
+            runtimePayload: runtimePayload
+        )
+        try? managedSessionStore.upsert(record)
     }
 
     private func terminalProjectRoot() -> String {

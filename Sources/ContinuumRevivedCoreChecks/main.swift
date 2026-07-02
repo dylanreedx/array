@@ -6031,6 +6031,10 @@ runTmuxRealPathCheck()
 
 runSessionPrunerTests()
 
+// MARK: - Ticket 23: Private managed-agent session record
+
+runManagedAgentSessionRecordTests()
+
 // MARK: - Ticket 13: Invariant spine harness (I1-I8)
 //
 // A tiny helper both full and stub blocks call, so EVERY block writes-then-reads-back.

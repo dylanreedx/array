@@ -352,7 +352,7 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, agentKindCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
+        [tileSandbox, sidebarCard, topBarCard, agentKindCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
     }
 
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
@@ -414,6 +414,48 @@ enum LabCatalog {
 
         stack.addArrangedSubview(title)
         stack.addArrangedSubview(kind)
+        return stack
+    }
+
+    static var managedSessionRecordCard: LabEntry {
+        LabEntry(
+            id: "managed.session.record",
+            category: "Chrome",
+            title: "Managed Session Record",
+            summary: "Private host-local record fields for a managed terminal binding.",
+            content: .staticCard(preferredSize: NSSize(width: 420, height: 132)) {
+                makeManagedSessionRecordView(record: managedSessionRecordFixture)
+            }
+        )
+    }
+
+    static var managedSessionRecordFixture: ManagedAgentSessionRecord {
+        let payload = try! ManagedAgentSessionRecord.makeRuntimePayload(windowTarget: "%42", cwd: "/tmp/continuum")
+        return ManagedAgentSessionRecord(
+            tileId: UUID(uuidString: "23000000-0000-4000-8000-000000000042")!,
+            agentKind: .shell,
+            status: .running,
+            lastSeenAt: LabFixtures.epoch,
+            runtimePayload: payload
+        )
+    }
+
+    static func makeManagedSessionRecordView(record: ManagedAgentSessionRecord) -> NSView {
+        func row(_ identifier: String, _ label: String, _ value: String) -> NSTextField {
+            let field = NSTextField(labelWithString: "\(label)  → \(value)")
+            field.identifier = NSUserInterfaceItemIdentifier(identifier)
+            field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            field.textColor = .labelColor
+            return field
+        }
+        let stack = NSStackView(views: [
+            row("managedSession.agentKind", "agentKind", record.agentKind.rawValue),
+            row("managedSession.status", "status", record.status.rawValue),
+            row("managedSession.tmuxWindowTarget", "tmuxWindowTarget", record.tmuxWindowTarget() ?? "")
+        ])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
         return stack
     }
 
@@ -797,6 +839,29 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard kindLabel.stringValue == "Kind -> claude" else {
             throw fail("agent.kind label rendered '\(kindLabel.stringValue)', expected 'Kind -> claude'")
         }
+        guard let managedEntry = entries.first(where: { $0.id == "managed.session.record" }),
+              case let .staticCard(_, makeManagedView) = managedEntry.content else {
+            throw fail("missing managed.session.record card")
+        }
+        let managedView = makeManagedView()
+        func managedText(_ identifier: String) throws -> String {
+            guard let field = managedView.descendant(withIdentifier: identifier) as? NSTextField else {
+                throw fail("managed session card missing label \(identifier)")
+            }
+            return field.stringValue
+        }
+        let managedAgentKind = try managedText("managedSession.agentKind")
+        let managedStatus = try managedText("managedSession.status")
+        let managedWindowTarget = try managedText("managedSession.tmuxWindowTarget")
+        guard managedAgentKind == "agentKind  → shell" else {
+            throw fail("managed session agentKind label rendered '\(managedAgentKind)'")
+        }
+        guard managedStatus == "status  → running" else {
+            throw fail("managed session status label rendered '\(managedStatus)'")
+        }
+        guard managedWindowTarget == "tmuxWindowTarget  → %42" else {
+            throw fail("managed session window target label rendered '\(managedWindowTarget)'")
+        }
 
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -945,6 +1010,11 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             "rendered": rendered,
             "sandbox": ["tilesInstalled": 5, "zoomClampHigh": zoomHigh, "zoomClampLow": zoomLow],
             "agentKind": ["label": kindLabel.stringValue],
+            "managedSessionRecord": [
+                "agentKind": managedAgentKind,
+                "status": managedStatus,
+                "tmuxWindowTarget": managedWindowTarget
+            ],
             "sessionNaming": [
                 "projectSessionName": projectLabel,
                 "ambientSessionName": ambientLabel,

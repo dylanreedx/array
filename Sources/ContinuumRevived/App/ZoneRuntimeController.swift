@@ -6,6 +6,7 @@ import Foundation
 final class ZoneRuntimeController {
     let projectRoot: URL
     let projectStore: any ProjectStoring
+    let managedSessionStore: ManagedAgentSessionStore
     private(set) var project: Project
 
     var runtimes: [GhosttyTerminalRuntime] = []
@@ -64,6 +65,7 @@ final class ZoneRuntimeController {
 
         let projectStore = ProjectStore(projectRoot: projectRoot)
         self.projectStore = projectStore
+        self.managedSessionStore = ManagedAgentSessionStore(projectRoot: projectRoot)
 
         pruneExitedSessions(in: projectStore)
         self.project = try Self.loadOrCreateProject(in: projectStore, projectRoot: projectRoot)
@@ -72,6 +74,7 @@ final class ZoneRuntimeController {
     init(projectRoot: URL, projectStore: any ProjectStoring, project: Project) {
         self.projectRoot = projectRoot
         self.projectStore = projectStore
+        self.managedSessionStore = ManagedAgentSessionStore(projectRoot: projectRoot)
         self.project = project
         self.projectLock = nil
     }
@@ -106,6 +109,11 @@ final class ZoneRuntimeController {
             if var descriptor = try? projectStore.loadSession(id: runtime.id) {
                 descriptor.lastExit = TerminalLastExit(exitCode: nil, signal: nil, at: now)
                 try? projectStore.saveSession(descriptor)
+            }
+            if var record = try? managedSessionStore.load(tileId: runtime.tileId) {
+                record.status = .stopped
+                record.lastSeenAt = now
+                try? managedSessionStore.upsert(record)
             }
         }
 

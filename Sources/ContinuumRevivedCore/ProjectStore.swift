@@ -28,6 +28,10 @@ public struct ProjectStoreLayout: Sendable {
         stateRoot.appendingPathComponent("sessions", isDirectory: true)
     }
 
+    public var managedSessionsDirectory: URL {
+        stateRoot.appendingPathComponent("managed-sessions", isDirectory: true)
+    }
+
     public var browserDirectory: URL {
         stateRoot.appendingPathComponent("browser", isDirectory: true)
     }
@@ -70,6 +74,10 @@ public struct ProjectStoreLayout: Sendable {
 
     public func sessionFile(id: UUID) -> URL {
         sessionsDirectory.appendingPathComponent("\(id.uuidString).json", isDirectory: false)
+    }
+
+    public func managedSessionFile(tileId: UUID) -> URL {
+        managedSessionsDirectory.appendingPathComponent("\(tileId.uuidString).json", isDirectory: false)
     }
 }
 

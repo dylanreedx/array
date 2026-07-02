@@ -258,7 +258,8 @@ final class WorkspaceRuntime {
                 ghostty: ghostty,
                 browserEngine: browserEngine,
                 projectStore: activeStore,
-                project: active.project
+                project: active.project,
+                managedSessionStore: active.managedSessionStore
             )
             active.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
         }
@@ -531,7 +532,8 @@ final class WorkspaceRuntime {
                 ghostty: ghostty,
                 browserEngine: browserEngine,
                 projectStore: activeStore,
-                project: active.project
+                project: active.project,
+                managedSessionStore: active.managedSessionStore
             )
             active.attachUI(canvasView: canvas, tileSpawner: spawner, focusBroker: focusBroker)
         }
