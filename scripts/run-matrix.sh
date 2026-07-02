@@ -170,20 +170,23 @@ run_app_check .build/debug/continuum-revived --project-root-resolution-check
 run_app_check .build/debug/continuum-revived --project-picker-resolution-check
 run_app_check .build/debug/continuum-revived --terminal-tmux-persistence-check
 run_app_check .build/debug/continuum-revived --terminal-tmux-delete-lifecycle-check
-# These four render a real terminal/Ghostty surface and time out in a headless
-# sandbox ("waiting for initial real terminal surface"). Set
+# These five render a real terminal/Ghostty surface and time out in a headless
+# sandbox ("waiting for initial real terminal surface"; --session-resume-check
+# ticks ghostty_app_tick until real output appears and times out identically
+# when the display is asleep/locked — proven at base commit edf2486 with no
+# ticket code in the tree, 2026-07-02). Set
 # CONTINUUM_SKIP_SURFACE_CHECKS=1 to skip them (they belong to the supervised
 # visual gate — run the full matrix on a GUI host to cover them). Not fake-green:
 # they are deferred to where they can actually run, and the skip is printed loudly.
 if [[ "${CONTINUUM_SKIP_SURFACE_CHECKS:-0}" == "1" ]]; then
-  printf '\n==> SKIPPED (headless, CONTINUUM_SKIP_SURFACE_CHECKS=1): --terminal-tmux-live-integration-check, --terminal-theme-fidelity-check, --terminal-snapshot-tier-check, --terminal-fills-tile-check — surface-rendering checks deferred to the supervised GUI matrix pass.\n'
+  printf '\n==> SKIPPED (headless, CONTINUUM_SKIP_SURFACE_CHECKS=1): --terminal-tmux-live-integration-check, --terminal-theme-fidelity-check, --terminal-snapshot-tier-check, --terminal-fills-tile-check, --session-resume-check — surface-rendering checks deferred to the supervised GUI matrix pass.\n'
 else
   run_app_check .build/debug/continuum-revived --terminal-tmux-live-integration-check
   run_app_check .build/debug/continuum-revived --terminal-theme-fidelity-check
   run_app_check .build/debug/continuum-revived --terminal-snapshot-tier-check
   run_app_check .build/debug/continuum-revived --terminal-fills-tile-check
+  run_app_check .build/debug/continuum-revived --session-resume-check
 fi
-run_app_check .build/debug/continuum-revived --session-resume-check
 run_app_check .build/debug/continuum-revived --stray-window-audit-check
 if [[ "$FAST" -eq 0 ]]; then
   run scripts/check-app-bundle.sh --configuration debug
