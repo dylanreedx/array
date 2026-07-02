@@ -393,6 +393,81 @@ do {
     expect(engine.tick(at: t0.addingTimeInterval(8)) == .idle, "unknown title should not prolong working-to-idle hysteresis")
 }
 
+// MARK: - deriveAgentStatus priority ladder
+
+do {
+    func check(_ signals: StatusSignals, _ expected: AgentStatus, _ label: String) {
+        let actual = deriveAgentStatus(signals: signals)
+        expect(actual == expected, "deriveAgentStatus: \(label): expected \(expected), got \(actual)")
+    }
+
+    check(StatusSignals(agentKind: .managed, hasPendingApproval: true, isRunning: true),
+          .needsAttention, "approval beats running")
+    check(StatusSignals(agentKind: .managed, hasPendingUserInput: true, isRunning: true),
+          .needsAttention, "user input beats running")
+    check(StatusSignals(agentKind: .claude,
+                        hookBreadcrumbPresent: true,
+                        hookBreadcrumbAge: StatusSignals.hookFreshnessWindow - 1,
+                        isRunning: true),
+          .needsAttention, "fresh Claude hook breadcrumb beats running")
+    check(StatusSignals(agentKind: .claude,
+                        hookBreadcrumbPresent: true,
+                        hookBreadcrumbAge: StatusSignals.hookFreshnessWindow,
+                        isRunning: true),
+          .working, "stale hook breadcrumb falls through to running")
+    check(StatusSignals(agentKind: .claude, isRunning: true),
+          .working, "Claude without hook breadcrumb does not fabricate attention")
+    check(StatusSignals(agentKind: .pi,
+                        hookBreadcrumbPresent: true,
+                        hookBreadcrumbAge: StatusSignals.hookFreshnessWindow - 1,
+                        isRunning: true),
+          .working, "non-Claude hook breadcrumb is ignored")
+    check(StatusSignals(agentKind: .unknown, isError: true, isRunning: true),
+          .idle, "error maps to idle and beats running")
+    check(StatusSignals(agentKind: .shell, isStarting: true),
+          .configuring, "starting maps to configuring")
+    check(StatusSignals(agentKind: .shell, isRunning: true),
+          .working, "running maps to working")
+    check(StatusSignals(agentKind: .managed, isCompleted: true),
+          .done, "completed maps to done")
+    check(StatusSignals(agentKind: .codex, engineStatus: .stale),
+          .stale, "engine stale passes through")
+    check(StatusSignals(agentKind: .unknown),
+          .idle, "unknown with no evidence stays idle")
+    check(StatusSignals(agentKind: .unknown, isRunning: true),
+          .working, "unknown running process evidence maps to working")
+}
+
+do {
+    let tempURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-claude-status-\(UUID().uuidString).jsonl")
+    defer { try? FileManager.default.removeItem(at: tempURL) }
+
+    let jsonl = """
+    {"type":"session_started","session_id":"fixture"}
+    {"type":"assistant","status":"in_progress","message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}
+
+    """
+    try jsonl.write(to: tempURL, atomically: true, encoding: .utf8)
+
+    let file = try String(contentsOf: tempURL, encoding: .utf8)
+    let hasInProgressAssistant = try file
+        .split(separator: "\n")
+        .map(String.init)
+        .contains { line in
+            let data = Data(line.utf8)
+            guard
+                let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                object["type"] as? String == "assistant"
+            else { return false }
+            return object["status"] as? String == "in_progress"
+        }
+
+    let signals = StatusSignals(agentKind: .claude, isRunning: hasInProgressAssistant)
+    expect(deriveAgentStatus(signals: signals) == .working,
+           "claude working JSONL fixture should derive working after a real file read")
+}
+
 // MARK: - Linear ticket queue model
 
 do {

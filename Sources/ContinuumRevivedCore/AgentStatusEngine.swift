@@ -110,3 +110,83 @@ public struct AgentStatusEngine: Equatable, Sendable {
         return nil
     }
 }
+
+public struct StatusSignals: Equatable, Sendable {
+    public var agentKind: AgentKind
+    public var hasPendingApproval: Bool
+    public var hasPendingUserInput: Bool
+    public var hookBreadcrumbPresent: Bool
+    public var hookBreadcrumbAge: TimeInterval?
+    public var isError: Bool
+    public var isStarting: Bool
+    public var isRunning: Bool
+    public var isCompleted: Bool
+    public var engineStatus: AgentStatus
+
+    public init(
+        agentKind: AgentKind,
+        hasPendingApproval: Bool = false,
+        hasPendingUserInput: Bool = false,
+        hookBreadcrumbPresent: Bool = false,
+        hookBreadcrumbAge: TimeInterval? = nil,
+        isError: Bool = false,
+        isStarting: Bool = false,
+        isRunning: Bool = false,
+        isCompleted: Bool = false,
+        engineStatus: AgentStatus = .idle
+    ) {
+        self.agentKind = agentKind
+        self.hasPendingApproval = hasPendingApproval
+        self.hasPendingUserInput = hasPendingUserInput
+        self.hookBreadcrumbPresent = hookBreadcrumbPresent
+        self.hookBreadcrumbAge = hookBreadcrumbAge
+        self.isError = isError
+        self.isStarting = isStarting
+        self.isRunning = isRunning
+        self.isCompleted = isCompleted
+        self.engineStatus = engineStatus
+    }
+}
+
+extension StatusSignals {
+    public static let hookFreshnessWindow: TimeInterval = AgentStatusEngine.Configuration().staleTimeout
+}
+
+public func deriveAgentStatus(signals: StatusSignals) -> AgentStatus {
+    if signals.hasPendingApproval {
+        return .needsAttention
+    }
+
+    if signals.hasPendingUserInput {
+        return .needsAttention
+    }
+
+    if signals.agentKind == .claude,
+       signals.hookBreadcrumbPresent,
+       let age = signals.hookBreadcrumbAge,
+       age < StatusSignals.hookFreshnessWindow {
+        return .needsAttention
+    }
+
+    if signals.isError {
+        return .idle
+    }
+
+    if signals.isStarting {
+        return .configuring
+    }
+
+    if signals.isRunning {
+        return .working
+    }
+
+    if signals.isCompleted {
+        return .done
+    }
+
+    if signals.engineStatus == .stale {
+        return .stale
+    }
+
+    return .idle
+}
