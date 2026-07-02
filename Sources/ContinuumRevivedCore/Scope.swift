@@ -16,4 +16,8 @@ public struct Scope: OptionSet, Codable, Hashable, Sendable {
     public static let observer: Scope = [.orchestrationRead]
     public static let `operator`: Scope = [.orchestrationRead, .orchestrationOperate, .terminalOperate]
     public static let admin: Scope = [.operator, .accessRead, .accessWrite]
+
+    public func isSubset(of ceiling: Scope) -> Bool {
+        ceiling.intersection(self) == self
+    }
 }

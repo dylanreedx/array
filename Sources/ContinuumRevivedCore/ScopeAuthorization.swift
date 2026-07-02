@@ -26,16 +26,39 @@ public let requiredScope: [ControlMessage: Scope] = [
     .revokeDevice: .accessWrite,
 ]
 
-public enum AuthError: Error, Equatable, Sendable {
+public enum AuthError: Error, Equatable, Sendable, CustomStringConvertible {
+    case unknown
+    case expired
+    case alreadyUsed
+    case revoked
+    case scopeNotGranted
+    case invalidToken
     case missingScope(Scope)
     case unscopedMessage(ControlMessage)
+
+    public var description: String {
+        switch self {
+        case .unknown: return "unknown"
+        case .expired: return "expired"
+        case .alreadyUsed: return "alreadyUsed"
+        case .revoked: return "revoked"
+        case .scopeNotGranted: return "scopeNotGranted"
+        case .invalidToken: return "invalidToken"
+        case .missingScope(let scope): return "missingScope(\(scope.rawValue))"
+        case .unscopedMessage(let message): return "unscopedMessage(\(message.rawValue))"
+        }
+    }
 }
 
 public func authorize(_ message: ControlMessage, grantedScopes: Scope) throws {
     guard let required = requiredScope[message] else {
-        throw AuthError.unscopedMessage(message)
+        fatalError("No scope entry for \(message) - add one before shipping this message type.")
     }
     guard grantedScopes.contains(required) else {
         throw AuthError.missingScope(required)
     }
+}
+
+public func authorize(_ message: ControlMessage, session: AuthSession) throws {
+    try authorize(message, grantedScopes: session.scopes)
 }

@@ -6252,6 +6252,10 @@ runSessionPrunerTests()
 runManagedAgentSessionRecordTests()
 runAgentAdapterTests()
 
+// MARK: - Ticket 54: Bootstrap auth every path
+
+try runAuthChecks()
+
 // MARK: - Ticket 13: Invariant spine harness (I1-I8)
 //
 // A tiny helper both full and stub blocks call, so EVERY block writes-then-reads-back.
