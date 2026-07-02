@@ -527,6 +527,62 @@ do {
     try writeAndVerify(manifest)
 }
 
+// MARK: - Ticket 59: Scope OptionSet
+
+do {
+    expect(Scope.observer.isSubset(of: .operator), "Scope.observer must be a strict observe-only subset of operator")
+    expect(!Scope.operator.isSubset(of: .observer), "Scope.operator must carry capabilities absent from observer")
+    expect(Scope.admin.isSuperset(of: .operator), "Scope.admin must include every operator capability")
+    expect(Scope.admin.contains(.accessRead), "Scope.admin must include accessRead")
+    expect(Scope.admin.contains(.accessWrite), "Scope.admin must include accessWrite")
+
+    expect(Scope.observer.contains(.orchestrationRead), "Scope.observer must include orchestrationRead")
+    expect(!Scope.observer.contains(.orchestrationOperate), "Scope.observer cannot operate orchestration")
+    expect(!Scope.observer.contains(.terminalOperate), "Scope.observer cannot operate terminals")
+    expect(!Scope.observer.contains(.accessRead), "Scope.observer cannot read device lists")
+    expect(!Scope.observer.contains(.accessWrite), "Scope.observer cannot manage devices")
+
+    let encodedScope = try JSONEncoder().encode(Scope.admin)
+    let decodedScope = try JSONDecoder().decode(Scope.self, from: encodedScope)
+    expect(decodedScope == .admin, "Scope must round-trip through JSON by rawValue")
+
+    expect(requiredScope.count == ControlMessage.allCases.count, "every ControlMessage must have a declared required scope")
+    for message in ControlMessage.allCases {
+        expect(requiredScope[message] != nil, "ControlMessage \(message.rawValue) must not be unscoped")
+    }
+
+    try authorize(.subscribeActivity, grantedScopes: .observer)
+    try authorize(.subscribeSpatial, grantedScopes: .observer)
+    try authorize(.respondToApproval, grantedScopes: .observer)
+
+    let observerDenied: [(ControlMessage, Scope)] = [
+        (.moveTile, .orchestrationOperate),
+        (.resizeTile, .orchestrationOperate),
+        (.spawnTerminal, .orchestrationOperate),
+        (.sendKeys, .terminalOperate),
+        (.listDevices, .accessRead),
+        (.pairDevice, .accessWrite),
+        (.revokeDevice, .accessWrite),
+    ]
+    for (message, missing) in observerDenied {
+        do {
+            try authorize(message, grantedScopes: .observer)
+            expect(false, "observer must not authorize \(message.rawValue)")
+        } catch AuthError.missingScope(let scope) {
+            expect(scope == missing, "observer denial for \(message.rawValue) must report missing \(missing.rawValue), got \(scope.rawValue)")
+        } catch {
+            expect(false, "observer denial for \(message.rawValue) must throw missingScope, got \(error)")
+        }
+    }
+
+    for message in ControlMessage.allCases {
+        try authorize(message, grantedScopes: .admin)
+    }
+
+    let customReadOnly = Scope(rawValue: Scope.orchestrationRead.rawValue)
+    expect(customReadOnly == .observer, "rawValue construction must preserve observer scope identity")
+}
+
 do {
     let resolver = ShellLaunchResolver(environment: ["SHELL": "/bin/zsh"])
     let profile = try resolver.resolveShell(cwd: "/tmp/continuum")
