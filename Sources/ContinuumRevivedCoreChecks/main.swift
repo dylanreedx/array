@@ -5813,4 +5813,8 @@ do {
 
 runActivityStoreTests()
 
+// MARK: - Ticket 10: Session topology snapshot
+
+runSessionTopologySnapshotTests()
+
 print("ContinuumRevivedCoreChecks passed")
