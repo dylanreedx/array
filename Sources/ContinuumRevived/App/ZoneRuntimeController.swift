@@ -33,6 +33,17 @@ final class ZoneRuntimeController {
     private var isClosed = false
     private(set) var hydrationTier: HydrationTier = .live
 
+    // Ticket 24 (double-resume race): two focus events on the same tile close
+    // together (e.g. `.appActivated` on relaunch immediately followed by a
+    // `.userClick` restoring prior focus) can both read the same stale
+    // `ManagedAgentSessionRecord` before either has written back a fresh
+    // window target, each calling `tmux.newWindow` and leaking a duplicate
+    // tmux window. This set is checked-and-inserted synchronously (no `await`
+    // between the check and the insert), so it is safe under MainActor's
+    // cooperative scheduling even though the recovery itself suspends: at most
+    // one in-flight recovery per tile is ever allowed to reach `recoverRecord`.
+    private var inFlightRecoveries: Set<UUID> = []
+
     enum HydrationLifecycleError: Error, CustomStringConvertible {
         case controllerClosed
         case uiUnavailable
@@ -310,6 +321,13 @@ final class ZoneRuntimeController {
         tmux: any TmuxControl
     ) async {
         guard Self.shouldAttemptLazyRecovery(for: reason) else { return }
+        // Coalesce: if a recovery for this tile is already in flight, skip —
+        // the in-flight call owns the one-window guarantee. Check-and-insert
+        // is synchronous (no `await` in between), so it is race-free even
+        // though two focus events can enqueue concurrent calls to this method.
+        guard !inFlightRecoveries.contains(tileId) else { return }
+        inFlightRecoveries.insert(tileId)
+        defer { inFlightRecoveries.remove(tileId) }
         do {
             _ = try await routableSession(
                 forTile: tileId,
@@ -1115,6 +1133,31 @@ final class ZoneRuntimeController {
         }
         try expect(postedErrors.values.contains { $0.0 == noCursorTile && $0.1.contains("no resume state") }, "focus recovery should surface noResumeState for the tile")
 
+        // Ticket 24 (double-resume race): two focus events landing close together on the
+        // SAME tile (e.g. `.appActivated` on relaunch immediately followed by a `.userClick`
+        // restoring prior focus) must not both reach `recoverRecord` — that would create two
+        // real tmux windows for one tile. Fire two overlapping recovery calls concurrently for
+        // a tile with a dead target + a resume cursor (recoverable) and assert exactly one
+        // `tmux.newWindow` call results.
+        let concurrentTile = UUID(uuidString: "00000000-0000-0000-0000-0000000024A7")!
+        try writeRecord(controller, tileId: concurrentTile, target: deadTarget, cwd: "/tmp/concurrent", cursor: cursor, lastSeenAt: oldDate)
+        func newWindowCallCount() -> Int {
+            tmux.log.filter { if case .newWindow = $0 { return true } else { return false } }.count
+        }
+        let newWindowCountBeforeConcurrent = newWindowCallCount()
+        _ = try awaitMain {
+            async let firstRecovery: Void = controller.recoverManagedSessionOnFocus(tileId: concurrentTile, reason: .userClick, tmux: tmux)
+            async let secondRecovery: Void = controller.recoverManagedSessionOnFocus(tileId: concurrentTile, reason: .userClick, tmux: tmux)
+            _ = await (firstRecovery, secondRecovery)
+            return true
+        }
+        let concurrentNewWindowDelta = newWindowCallCount() - newWindowCountBeforeConcurrent
+        try expect(concurrentNewWindowDelta == 1, "two overlapping recover calls for one tile must create exactly one tmux window")
+        let concurrentRecord = try controller.managedSessionStore.load(tileId: concurrentTile)
+        let concurrentRecordTarget = concurrentRecord?.tmuxWindowTarget()
+        try expect(concurrentRecordTarget != nil && concurrentRecordTarget != deadTarget, "concurrent recovery persists a fresh window target")
+        try expect(controller.inFlightRecoveries.isEmpty, "in-flight recovery guard clears once both concurrent calls complete")
+
         let manifest: [String: Any] = [
             "check": "zone-lazy-resume",
             "projectSessionName": sessionName,
@@ -1124,6 +1167,9 @@ final class ZoneRuntimeController {
             "adoptedLastSeenAdvanced": (liveRecord?.lastSeenAt ?? oldDate) > oldDate,
             "focusVerdicts": Dictionary(uniqueKeysWithValues: focusVerdicts.map { ($0.key.rawValue, $0.value) }),
             "postedErrors": postedErrors.values.map { ["tileId": $0.0.uuidString, "error": $0.1] },
+            "concurrentNewWindowDelta": concurrentNewWindowDelta,
+            "concurrentRecordTarget": concurrentRecordTarget ?? "",
+            "inFlightRecoveriesAfterConcurrent": controller.inFlightRecoveries.count,
             "tmuxLog": tmux.log.map(String.init(describing:)),
             "tempRoot": tempRoot.path
         ]

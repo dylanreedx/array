@@ -221,6 +221,15 @@ final class CanvasNSView: NSView {
             name: .continuumSettingsChanged,
             object: nil
         )
+        // Ticket 24: a lazy-resume failure (ZoneRuntimeController.recoverManagedSessionOnFocus)
+        // has no other subscriber anywhere in the UI — without this, recovery failures are
+        // silent. Surface them as the stale indicator + a non-empty error label on the tile.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleManagedSessionRecoveryError(_:)),
+            name: .continuumManagedSessionRecoveryError,
+            object: nil
+        )
     }
 
     required init?(coder: NSCoder) {
@@ -717,6 +726,17 @@ final class CanvasNSView: NSView {
     /// border in Settings reflects immediately (docs/29 §1 live update).
     @objc func focusBorderConfigDidChange() {
         applyFocusBorder()
+    }
+
+    /// Renders a lazy-resume failure on its tile: the gray hollow `.stale`
+    /// indicator plus a non-empty error label (surfaced as the tile's tooltip),
+    /// rather than leaving the failure invisible.
+    @objc private func handleManagedSessionRecoveryError(_ notification: Notification) {
+        guard let tileId = notification.userInfo?["tileId"] as? UUID,
+              let error = notification.userInfo?["error"],
+              let view = tileViews[tileId] else { return }
+        view.agentStatus = .stale
+        view.agentStatusErrorMessage = String(describing: error)
     }
 
     /// Reposition the overlay around `tileId`'s current screen frame if it is

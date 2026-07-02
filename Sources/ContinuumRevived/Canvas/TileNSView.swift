@@ -12,6 +12,7 @@ class TileNSView: NSView {
         var title: String
         var agentStatus: AgentStatus?
         var agentStatusLabel: String?
+        var agentStatusErrorMessage: String?
     }
 
     static let titleBarHeight: CGFloat = 24
@@ -44,6 +45,13 @@ class TileNSView: NSView {
 
     var agentStatus: AgentStatus? {
         didSet { titleBar?.agentStatus = agentStatus }
+    }
+
+    /// Non-empty description of why the tile is in a failed/stale state (e.g. a
+    /// lazy-resume recovery error). Surfaced as the tile's tooltip and carried
+    /// in `ChromeSnapshot` so a caller can assert it is non-empty.
+    var agentStatusErrorMessage: String? {
+        didSet { titleBar?.agentStatusErrorMessage = agentStatusErrorMessage }
     }
 
     var chromeSnapshot: ChromeSnapshot? { titleBar?.snapshot }
@@ -644,6 +652,7 @@ class TileNSView: NSView {
 private final class TitleBarView: NSView {
     var tile: Tile { didSet { needsDisplay = true } }
     var agentStatus: AgentStatus? { didSet { needsDisplay = true } }
+    var agentStatusErrorMessage: String? { didSet { toolTip = agentStatusErrorMessage } }
     var onCloseRequested: (() -> Void)?
     var onStopRunRequested: (() -> Void)?
     var additionalMenuItemsProvider: (() -> [NSMenuItem])?
@@ -653,7 +662,8 @@ private final class TitleBarView: NSView {
         TileNSView.ChromeSnapshot(
             title: "\(tile.kind.rawValue.capitalized) · \(tile.title)",
             agentStatus: agentStatus,
-            agentStatusLabel: agentStatus.map(Self.label(for:))
+            agentStatusLabel: agentStatus.map(Self.label(for:)),
+            agentStatusErrorMessage: agentStatusErrorMessage
         )
     }
 
