@@ -43,7 +43,7 @@ log to add explicit rulings, prompt amendments, and recovery actions.
 | C-20260701-002 | `04-zorder-fractional-index.md` | open | `SCOPE-FENCE`, `MIGRATION-DATALOSS`, `REVIEW-REJECTED` | `_PROGRESS.md`, dry-run agents | Split into FracIndex hardening, tile migration, workspace migration, render/hit-test migration. | Dylan/Fable | - |
 | C-20260701-003 | `05-delete-tombstone.md` | open | `DIRTY-UNTRACKED`, `DEP-BLOCKED`, `REVIEW-REJECTED` | `_PROGRESS.md`, stash list, dry-run agents | Retryable after file-hygiene guard; forbid drift into ticket 06 materialize/compactor. | Fable | - |
 | C-20260701-004 | `08-sync-observation-type-split.md` | resolved | `DIRTY-UNTRACKED`, `PROVIDER-QUOTA`, `HARNESS-FAIL` | current dirty tree, run `20260701T195840` | Classify current uncommitted attempt before any new ticket; provider regex missed “session limit”. | Dylan/Fable | 368cf7e |
-| C-20260701-005 | `10-session-topology-snapshot.md` | open | `CONTRACT-CONFLICT` | `_HANDOFF.md`, dry-run agents | Prompt/ticket amendment: empty or whitespace tmux output is a valid zero-session snapshot; no `emptyInput` case. | Fable | - |
+| C-20260701-005 | `10-session-topology-snapshot.md` | resolved | `CONTRACT-CONFLICT` | `_HANDOFF.md`, dry-run agents | Prompt/ticket amendment: empty or whitespace tmux output is a valid zero-session snapshot; no `emptyInput` case. | Fable | c8e6a56 |
 | C-20260701-006 | `06-oplog-apply-compaction.md` | open | `DEP-BLOCKED` | dry-run agents | Do not attempt until 03/04/05 semantics are landed or explicitly decomposed. | Fable | - |
 | C-20260701-007 | `07-convergence-fuzz-red-green.md` | open | `DEP-BLOCKED`, `DETERMINISM-GAP` | dry-run agents | Do not attempt until 06 lands; seed-derived fixed UUIDs required. | Fable | - |
 | C-20260701-008 | `09-taint-scan-i5.md` | open | `DEP-BLOCKED`, `CONTRACT-CONFLICT` | dry-run agents | Wait for 08; clarify legitimate geometry integer handling vs pid-shaped taint. | Fable | - |
@@ -147,6 +147,10 @@ log to add explicit rulings, prompt amendments, and recovery actions.
   all parse as a valid snapshot with zero sessions/windows.
 - **Prompt amendment required:** Fable must state this override directly in the implementor packet.
 - **Recovery:** Update ticket text or add an amendment packet before retry.
+- **Resolution (2026-07-01, run `20260701T225402` iter 2):** Ticket text carries the ruling banner
+  (added in `feded6b`) and the packet states the override; the retry landed in `c8e6a56` (round 2,
+  Fable + Codex both clear) with empty/whitespace inputs returning zero-session snapshots and no
+  `emptyInput` case.
 
 ## C-20260701-006 — `06-oplog-apply-compaction.md`
 
