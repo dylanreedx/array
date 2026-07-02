@@ -28,6 +28,10 @@ public enum TmuxSession {
         (command: tmuxPath, arguments: ["kill-session", "-t", sessionName(tileId: tileId)])
     }
 
+    public static func killWindowCommand(target: String, tmuxPath: String) -> (command: String, arguments: [String]) {
+        (command: tmuxPath, arguments: ["kill-window", "-t", target])
+    }
+
     public static func attachWindowProfile(paneTarget: String, cwd: String, tmuxPath: String) -> LaunchProfile {
         LaunchProfile(
             command: tmuxPath,

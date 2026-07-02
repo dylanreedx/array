@@ -323,6 +323,11 @@ do {
     expect(kill.command == tmuxPath, "tmux kill command should use resolved tmux path")
     expect(kill.arguments == ["kill-session", "-t", name], "tmux kill command argv should target stable session name")
 
+    let killWindow = TmuxSession.killWindowCommand(target: "%7", tmuxPath: tmuxPath)
+    expect(killWindow.command == tmuxPath, "tmux kill-window command should use resolved tmux path")
+    expect(killWindow.arguments == ["kill-window", "-t", "%7"], "tmux kill-window argv should target the captured pane id")
+    expect(killWindow.arguments != kill.arguments, "kill-window and kill-session argv must not be interchangeable")
+
     let projectSessionName = TmuxSession.projectSessionName(projectId: UUID(uuidString: "A0000000-0000-4000-8000-000000000036")!)
     expect(projectSessionName == "continuum-proj-A0000000-0000-4000-8000-000000000036", "project tmux session name should be continuum-proj-prefixed project UUID")
     let newWindowArgs = TmuxSession.newWindowArguments(

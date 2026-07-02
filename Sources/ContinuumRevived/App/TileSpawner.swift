@@ -3889,6 +3889,79 @@ final class TileSpawner {
             "postKillHasSessionStatus": realPostKill.status
         ]
 
+        let closeLifecycleProjectId = UUID()
+        let closeLifecycleSessionName = TmuxSession.projectSessionName(projectId: closeLifecycleProjectId)
+        let closeLifecycleRoot = fileManager.temporaryDirectory.appendingPathComponent("continuum-tmux-close-\(closeLifecycleProjectId.uuidString)", isDirectory: true)
+        let closeLifecycleCwd = (closeLifecycleRoot.path as NSString).resolvingSymlinksInPath
+        try fileManager.createDirectory(at: closeLifecycleRoot, withIntermediateDirectories: true)
+        let closeLifecycleKillSession = TmuxSession.killProjectSessionCommand(projectId: closeLifecycleProjectId, tmuxPath: tmuxPath)
+        var shouldCleanupCloseLifecycleSession = true
+        defer {
+            if shouldCleanupCloseLifecycleSession {
+                _ = try? run(closeLifecycleKillSession.command, closeLifecycleKillSession.arguments, allowFailure: true)
+            }
+            try? fileManager.removeItem(at: closeLifecycleRoot)
+        }
+        func captureCloseLifecycleSnapshot() throws -> SessionTopologySnapshot {
+            let output = try run(tmuxPath, ["list-windows", "-a", "-F", SessionTopologySnapshot.tmuxFormatString], allowFailure: true)
+            guard output.status == 0 || output.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw CheckError.failed("tmux list-windows failed while capturing close lifecycle snapshot: stdout=\(output.stdout) stderr=\(output.stderr)")
+            }
+            return try SessionTopologySnapshot.parse(tmuxOutput: output.stdout)
+        }
+        func closeLifecycleWindowCount() throws -> Int {
+            try captureCloseLifecycleSnapshot().session(named: closeLifecycleSessionName)?.windows.count ?? 0
+        }
+
+        let closePane1 = try run(tmuxPath, [
+            "new-session", "-d", "-s", closeLifecycleSessionName, "-c", closeLifecycleCwd, "-P", "-F", "#{pane_id}"
+        ]).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        let closePane2 = try run(tmuxPath, TmuxSession.newWindowArguments(projectSessionName: closeLifecycleSessionName, cwd: closeLifecycleCwd, innerCommand: nil)).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        let closePane3 = try run(tmuxPath, TmuxSession.newWindowArguments(projectSessionName: closeLifecycleSessionName, cwd: closeLifecycleCwd, innerCommand: nil)).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        try expect([closePane1, closePane2, closePane3].allSatisfy(TmuxSession.isValidPaneId), "project close lifecycle panes must be captured as pane ids: \([closePane1, closePane2, closePane3])")
+        let closeSnapshotBefore = try captureCloseLifecycleSnapshot()
+        let closeWindowsBefore = closeSnapshotBefore.session(named: closeLifecycleSessionName)?.windows.count ?? 0
+        try expect(closeWindowsBefore == 3, "project close lifecycle should start with three tmux windows, got \(closeWindowsBefore)")
+
+        let closeKillMiddle = TmuxSession.killWindowCommand(target: closePane2, tmuxPath: tmuxPath)
+        let closeKillMiddleResult = try run(closeKillMiddle.command, closeKillMiddle.arguments)
+        let closeSnapshotAfterOne = try captureCloseLifecycleSnapshot()
+        let closeWindowsAfterOne = closeSnapshotAfterOne.session(named: closeLifecycleSessionName)?.windows.count ?? 0
+        try expect(closeWindowsAfterOne == 2, "killing one captured pane should leave two project windows, got \(closeWindowsAfterOne)")
+        try expect(closeSnapshotAfterOne.window(paneId: closePane2) == nil, "killed pane should disappear from topology snapshot")
+        try expect(closeSnapshotAfterOne.window(paneId: closePane1) != nil && closeSnapshotAfterOne.window(paneId: closePane3) != nil, "other project panes should remain after one window close")
+
+        let closeKillFirst = TmuxSession.killWindowCommand(target: closePane1, tmuxPath: tmuxPath)
+        let closeKillThird = TmuxSession.killWindowCommand(target: closePane3, tmuxPath: tmuxPath)
+        _ = try run(closeKillFirst.command, closeKillFirst.arguments)
+        let closeWindowsAfterTwo = try closeLifecycleWindowCount()
+        try expect(closeWindowsAfterTwo == 1, "killing two of three captured panes should leave one project window, got \(closeWindowsAfterTwo)")
+        let closeKillThirdResult = try run(closeKillThird.command, closeKillThird.arguments)
+        shouldCleanupCloseLifecycleSession = false
+        let closeSnapshotAfterAll = try captureCloseLifecycleSnapshot()
+        let closeWindowsAfterAll = closeSnapshotAfterAll.session(named: closeLifecycleSessionName)?.windows.count ?? 0
+        let closePostKillHasSession = try run(tmuxPath, ["has-session", "-t", closeLifecycleSessionName], allowFailure: true)
+        try expect(closeWindowsAfterAll == 0, "killing the last project window should remove the session from topology, got \(closeWindowsAfterAll)")
+        try expect(closePostKillHasSession.status != 0, "killing the last project window should let tmux reap the project session")
+        let closeLifecycleManifest: [String: Any] = [
+            "status": "passed",
+            "projectId": closeLifecycleProjectId.uuidString,
+            "sessionName": closeLifecycleSessionName,
+            "paneTargets": [closePane1, closePane2, closePane3],
+            "windowsBefore": closeWindowsBefore,
+            "windowsAfterOneClose": closeWindowsAfterOne,
+            "windowsAfterTwoCloses": closeWindowsAfterTwo,
+            "windowsAfterAllClosed": closeWindowsAfterAll,
+            "killOneCommand": [closeKillMiddle.command] + closeKillMiddle.arguments,
+            "killOneExitStatus": closeKillMiddleResult.status,
+            "killLastCommand": [closeKillThird.command] + closeKillThird.arguments,
+            "killLastExitStatus": closeKillThirdResult.status,
+            "postLastCloseHasSessionStatus": closePostKillHasSession.status,
+            "snapshotBefore": try String(data: JSONEncoder().encode(closeSnapshotBefore), encoding: .utf8) ?? "",
+            "snapshotAfterOneClose": try String(data: JSONEncoder().encode(closeSnapshotAfterOne), encoding: .utf8) ?? "",
+            "snapshotAfterAllClosed": try String(data: JSONEncoder().encode(closeSnapshotAfterAll), encoding: .utf8) ?? ""
+        ]
+
         let manifestPath = try artifact([
             "check": "terminal-tmux-live-integration",
             "status": "passed",
@@ -3912,7 +3985,8 @@ final class TileSpawner {
             "killCommand": [kill.command] + kill.arguments,
             "killExitStatus": killResult.status,
             "postKillHasSessionStatus": postKill.status,
-            "realAppRestart": realAppManifest
+            "realAppRestart": realAppManifest,
+            "projectCloseWindowLifecycle": closeLifecycleManifest
         ])
         return ("ContinuumRevivedTerminalTmuxLiveIntegrationChecks passed: \(manifestPath.path)", manifestPath)
     }
