@@ -1,6 +1,47 @@
 import Foundation
 
-public enum SidebarAgentStatusKind: String, Equatable, Sendable {
+// TODO: remove once AgentSnapshot.Evidence from the agent-state-reader-protocol
+// ticket (35) is available in ContinuumRevivedCore. This is a minimal forward
+// declaration carrying only the members this ticket exercises — do not add
+// `kind`, `title`, `mode`, `asOf`, or `detail` (that is ticket 35's scope).
+public struct AgentSnapshot: Codable, Equatable, Sendable {
+    // I5 scope note (fix-round-3): `source` is a free-form string identifying which
+    // reader/file produced this evidence (e.g. "claude:sessions/<name>.json"), and it
+    // is serialized verbatim by `ActivityTreeSnapshot`'s `Codable` conformance. This
+    // type does not runtime-validate that `source`/`lastEventType` are free of
+    // forbidden substrings (pid, paneId, windowTarget, content, body, prompt) —
+    // producing an I5-clean `source` string is the READER's contract (the
+    // agent-state-reader-protocol ticket, 35), not something this envelope type can
+    // enforce after the fact without knowing what a legitimate reader tag looks like.
+    // What this ticket owns is the taint-scan proof that a real, populated snapshot
+    // built through the real construction paths (`SidebarTreeBuilder.build`,
+    // `ActivityTreeSnapshot.make`) is clean, AND that the scan mechanism itself is
+    // capable of catching a violation if one were introduced — see the "I5 taint scan
+    // proves it can actually catch a violation" check in
+    // SidebarActivityTreeSnapshotTests.swift, added in fix-round-3 because the
+    // original scan only ever ran against pre-sanitized fixtures.
+    public struct Evidence: Codable, Equatable, Sendable {
+        public var source: String
+        public var lastEventType: String?
+        public var mtimeAgeSeconds: Double
+
+        public init(source: String, lastEventType: String?, mtimeAgeSeconds: Double) {
+            self.source = source
+            self.lastEventType = lastEventType
+            self.mtimeAgeSeconds = mtimeAgeSeconds
+        }
+    }
+
+    public var status: AgentStatus
+    public var evidence: Evidence?
+
+    public init(status: AgentStatus, evidence: Evidence?) {
+        self.status = status
+        self.evidence = evidence
+    }
+}
+
+public enum SidebarAgentStatusKind: String, Codable, Equatable, Sendable {
     case working
     case needsAttention
     case done
@@ -18,7 +59,7 @@ public enum SidebarAgentStatusKind: String, Equatable, Sendable {
     }
 }
 
-public struct SidebarAgentStatusRollup: Equatable, Sendable {
+public struct SidebarAgentStatusRollup: Codable, Equatable, Sendable {
     public var working: Int
     public var needsAttention: Int
     public var done: Int
@@ -75,21 +116,23 @@ public struct SidebarAgentStatusRollup: Equatable, Sendable {
     }
 }
 
-public struct SidebarTileRow: Equatable, Sendable {
+public struct SidebarTileRow: Codable, Equatable, Sendable {
     public let tileId: UUID
     public let title: String
     public let kind: TileKind
     public let agentStatus: AgentStatus?
+    public var evidence: AgentSnapshot.Evidence?
 
-    public init(tileId: UUID, title: String, kind: TileKind, agentStatus: AgentStatus? = nil) {
+    public init(tileId: UUID, title: String, kind: TileKind, agentStatus: AgentStatus? = nil, evidence: AgentSnapshot.Evidence? = nil) {
         self.tileId = tileId
         self.title = title
         self.kind = kind
         self.agentStatus = agentStatus
+        self.evidence = evidence
     }
 }
 
-public struct SidebarZoneRow: Equatable, Sendable {
+public struct SidebarZoneRow: Codable, Equatable, Sendable {
     public let zoneId: UUID
     public let name: String
     public let color: String
@@ -111,7 +154,7 @@ public struct SidebarZoneRow: Equatable, Sendable {
     }
 }
 
-public struct SidebarWorkspaceRow: Equatable, Sendable {
+public struct SidebarWorkspaceRow: Codable, Equatable, Sendable {
     public let workspaceId: UUID
     public let name: String
     public var zones: [SidebarZoneRow]
@@ -123,11 +166,87 @@ public struct SidebarWorkspaceRow: Equatable, Sendable {
     }
 }
 
-public struct SidebarTree: Equatable, Sendable {
+public struct SidebarTree: Codable, Equatable, Sendable {
     public var workspaces: [SidebarWorkspaceRow]
 
     public init(workspaces: [SidebarWorkspaceRow]) {
         self.workspaces = workspaces
+    }
+}
+
+// NAME NOTE: ticket 08 (Sources/ContinuumRevivedCore/AgentActivityEvent.swift) had
+// already shipped a public `ActivityTreeSnapshot` — the ActivityStore's materialized
+// read model (snapshotSequence/snapshotReplicaId/byTile) — before this ticket landed.
+// Two public types cannot share one name in the same module, so that pre-existing
+// type was renamed to `ActivityLogSnapshot` (see the comment above its declaration
+// in AgentActivityEvent.swift) to free up `ActivityTreeSnapshot` for this ticket's
+// SidebarTree-wrapping envelope, exactly as ticket 11 names it. This is the one
+// change fix-round-2 made outside SidebarTree.swift; the ticket's file fence assumed
+// no prior claim on the name existed, which was not the case.
+//
+// No public initializer is declared here: the only construction paths are `make(...)`
+// below and `init(from:)` (JSON decoding), both of which derive `rollup` from the tree
+// rather than accepting it as an arbitrary argument. This keeps the invariant that
+// `rollup` can never disagree with the tree's tile statuses.
+//
+// fix-round-3: the synthesized `Codable` this struct originally relied on gave decoding
+// a THIRD construction path — `init(from:)` synthesized from `Decodable` decodes whatever
+// `rollup` bytes are present in the JSON verbatim, so a hand-edited or foreign
+// `ActivityTreeSnapshot` document could decode with a `rollup` that disagrees with its own
+// `tree`. `init(from:)` is now written by hand: it still requires a well-formed `rollup`
+// key to be present (so malformed/missing-field JSON still fails to decode), but it
+// discards the decoded value and recomputes `rollup` from the decoded `tree` via the same
+// `deriveRollup(from:)` helper `make(...)` uses. This closes the gap non-tautologically —
+// see the negative-fixture decode test in SidebarActivityTreeSnapshotTests.swift, which
+// decodes JSON carrying a deliberately wrong `rollup` and asserts the decoded value is the
+// correctly-derived one, not the tampered bytes.
+public struct ActivityTreeSnapshot: Codable, Equatable, Sendable {
+    public let tree: SidebarTree
+    public let capturedAt: Date          // file-mtime clock, not Date.now()
+    public let replicaId: String         // stable device id; empty string in tests
+    public let rollup: SidebarAgentStatusRollup   // derived at construction, not stored raw
+
+    public static func make(
+        tree: SidebarTree,
+        capturedAt: Date,
+        replicaId: String
+    ) -> ActivityTreeSnapshot {
+        ActivityTreeSnapshot(tree: tree, capturedAt: capturedAt, replicaId: replicaId, rollup: deriveRollup(from: tree))
+    }
+
+    // Shared by `make(...)` and `init(from:)` so both construction paths — normal
+    // construction and JSON decoding — produce a rollup that can never disagree with
+    // the tree.
+    private static func deriveRollup(from tree: SidebarTree) -> SidebarAgentStatusRollup {
+        let allStatuses = tree.workspaces
+            .flatMap(\.zones)
+            .flatMap(\.tiles)
+            .compactMap(\.agentStatus)
+        return SidebarAgentStatusRollup.make(statuses: allStatuses)
+    }
+
+    private init(tree: SidebarTree, capturedAt: Date, replicaId: String, rollup: SidebarAgentStatusRollup) {
+        self.tree = tree
+        self.capturedAt = capturedAt
+        self.replicaId = replicaId
+        self.rollup = rollup
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case tree, capturedAt, replicaId, rollup
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let tree = try container.decode(SidebarTree.self, forKey: .tree)
+        self.tree = tree
+        self.capturedAt = try container.decode(Date.self, forKey: .capturedAt)
+        self.replicaId = try container.decode(String.self, forKey: .replicaId)
+        // Require a well-formed `rollup` key (so truncated/malformed JSON still fails
+        // to decode) but ignore its value and recompute from `tree` instead — see the
+        // comment above the struct for why.
+        _ = try container.decode(SidebarAgentStatusRollup.self, forKey: .rollup)
+        self.rollup = Self.deriveRollup(from: tree)
     }
 }
 
@@ -179,6 +298,35 @@ public enum SidebarTreeBuilder {
             return SidebarWorkspaceRow(workspaceId: entry.id, name: entry.name, zones: zones)
         }
         return SidebarTree(workspaces: workspaceRows)
+    }
+
+    public static func build(
+        registry: Registry,
+        documents: [UUID: WorkspaceDocument],
+        projectCanvases: [UUID: CanvasState] = [:],
+        agentSnapshots: [UUID: AgentSnapshot]
+    ) -> SidebarTree {
+        // Derive the agentStatusesByTileId map from snapshots so the existing
+        // build path handles all the zone/tile assembly logic unchanged.
+        let statusMap = agentSnapshots.mapValues(\.status)
+        // Re-use the existing builder to produce the tree structure.
+        var tree = build(
+            registry: registry,
+            documents: documents,
+            projectCanvases: projectCanvases,
+            agentStatusesByTileId: statusMap
+        )
+        // Thread evidence into each tile row. Walk every tile by id and attach.
+        for wi in tree.workspaces.indices {
+            for zi in tree.workspaces[wi].zones.indices {
+                for ti in tree.workspaces[wi].zones[zi].tiles.indices {
+                    let tileId = tree.workspaces[wi].zones[zi].tiles[ti].tileId
+                    tree.workspaces[wi].zones[zi].tiles[ti].evidence =
+                        agentSnapshots[tileId]?.evidence
+                }
+            }
+        }
+        return tree
     }
 
     private static func tiles(for placement: ZonePlacement, document: WorkspaceDocument, projectCanvases: [UUID: CanvasState]) -> [Tile] {

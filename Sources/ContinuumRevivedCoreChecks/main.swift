@@ -5817,4 +5817,8 @@ runActivityStoreTests()
 
 runSessionTopologySnapshotTests()
 
+// MARK: - Ticket 11: Activity tree snapshot
+
+runSidebarActivityTreeSnapshotTests()
+
 print("ContinuumRevivedCoreChecks passed")

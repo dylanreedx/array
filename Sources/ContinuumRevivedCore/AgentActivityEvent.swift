@@ -116,7 +116,12 @@ public struct AgentActivityEvent: Codable, Equatable, Sendable {
 
 // The materialized read model — a cache, never the source of truth.
 // Rebuilt from the event log via apply(); snapshot equality is the I4 analogue for activity.
-public struct ActivityTreeSnapshot: Codable, Equatable, Sendable {
+// Renamed from `ActivityTreeSnapshot` (its name when ticket 08 shipped) to
+// `ActivityLogSnapshot` by ticket 11 (docs/38-tickets/11-activity-tree-snapshot.md),
+// which reserves the name `ActivityTreeSnapshot` for its own SidebarTree-wrapping
+// envelope. Both types cannot share the name `ActivityTreeSnapshot` in the same
+// module — this fold-derived, per-tile activity cache is the one that yields.
+public struct ActivityLogSnapshot: Codable, Equatable, Sendable {
     public var snapshotSequence: UInt64     // sequence of the last event folded in
     public var snapshotReplicaId: UUID      // replicaId of that event
     public var byTile: [UUID: TileActivity] // keyed by Tile.id
@@ -127,7 +132,7 @@ public struct ActivityTreeSnapshot: Codable, Equatable, Sendable {
         self.byTile = byTile
     }
 
-    public static let empty = ActivityTreeSnapshot(
+    public static let empty = ActivityLogSnapshot(
         snapshotSequence: 0,
         snapshotReplicaId: UUID(uuidString: "00000000-0000-0000-0000-000000000000")!,
         byTile: [:]
@@ -155,7 +160,7 @@ public struct TileActivity: Codable, Equatable, Sendable {
 // order — the same key flush(to:)/loadActivityEvents sort by ("Watch out for": cross-
 // device ordering uses (sequence, replicaId) as the total-order key). Folding the same
 // set of events in ANY arrival order — live tail-apply as they occur locally, versus a
-// sorted disk replay — must converge to the identical ActivityTreeSnapshot. A fold that
+// sorted disk replay — must converge to the identical ActivityLogSnapshot. A fold that
 // simply overwrote with "whichever event was just handed to it" would NOT have this
 // property: seed a store with a foreign event at a high sequence (via `existing:`),
 // then live-append a local event that gets a low local sequence (this host's own
@@ -165,7 +170,7 @@ public struct TileActivity: Codable, Equatable, Sendable {
 // exactly what this fold must not allow. So every derived field — snapshotSequence /
 // snapshotReplicaId, and each tile's status / lastSummary / updatedAt — is read off a
 // MAX over canonical order, never off "whichever event arrived most recently".
-public func apply(_ tree: ActivityTreeSnapshot, _ event: AgentActivityEvent) -> ActivityTreeSnapshot {
+public func apply(_ tree: ActivityLogSnapshot, _ event: AgentActivityEvent) -> ActivityLogSnapshot {
     var next = tree
 
     if (event.sequence, event.replicaId.uuidString) > (next.snapshotSequence, next.snapshotReplicaId.uuidString) {
@@ -202,7 +207,7 @@ public func apply(_ tree: ActivityTreeSnapshot, _ event: AgentActivityEvent) -> 
 // Stream item: exactly the two cases a subscriber can receive.
 // snapshot always arrives first; events tail from there.
 public enum ActivityStreamItem: Sendable {
-    case snapshot(ActivityTreeSnapshot)
+    case snapshot(ActivityLogSnapshot)
     case event(AgentActivityEvent)
 }
 

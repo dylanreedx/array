@@ -26,7 +26,7 @@ public protocol ActivityStoreProtocol: Actor {
     func append(_ draft: AgentActivityEventDraft) async
     func subscribe() -> AsyncStream<ActivityStreamItem>
     func replay(fromSequenceExclusive sequence: UInt64, replicaId: UUID) -> [AgentActivityEvent]
-    func currentSnapshot() async -> ActivityTreeSnapshot
+    func currentSnapshot() async -> ActivityLogSnapshot
     func flush(to url: URL) throws
 }
 
@@ -34,7 +34,7 @@ public actor ActivityStore: ActivityStoreProtocol {
     // The in-memory log — the authoritative live copy. Flushed as ONE JSON document
     // (ActivityLogFile) via AtomicWriter.write on flush(to:). Disk is the recovery source.
     private var log: [AgentActivityEvent] = []
-    private var snapshot: ActivityTreeSnapshot = .empty
+    private var snapshot: ActivityLogSnapshot = .empty
     private var observers: [UUID: AsyncStream<ActivityStreamItem>.Continuation] = [:]
     private let replicaId: UUID  // injected at init; identifies this host in the global order
     private var nextSequence: UInt64 = 1
@@ -97,7 +97,7 @@ public actor ActivityStore: ActivityStoreProtocol {
             .sorted { $0.sequence < $1.sequence }
     }
 
-    public func currentSnapshot() async -> ActivityTreeSnapshot { snapshot }
+    public func currentSnapshot() async -> ActivityLogSnapshot { snapshot }
 
     // Persist the WHOLE log as one JSON document via AtomicWriter (backup + fsync +
     // round-trip validation come free). NOT append/NDJSON — AtomicWriter has no such API.

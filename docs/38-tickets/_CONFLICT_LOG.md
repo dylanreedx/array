@@ -47,6 +47,7 @@ log to add explicit rulings, prompt amendments, and recovery actions.
 | C-20260701-006 | `06-oplog-apply-compaction.md` | open | `DEP-BLOCKED` | dry-run agents | Do not attempt until 03/04/05 semantics are landed or explicitly decomposed. | Fable | - |
 | C-20260701-007 | `07-convergence-fuzz-red-green.md` | open | `DEP-BLOCKED`, `DETERMINISM-GAP` | dry-run agents | Do not attempt until 06 lands; seed-derived fixed UUIDs required. | Fable | - |
 | C-20260701-008 | `09-taint-scan-i5.md` | open | `DEP-BLOCKED`, `CONTRACT-CONFLICT` | dry-run agents | Wait for 08; clarify legitimate geometry integer handling vs pid-shaped taint. | Fable | - |
+| C-20260701-009 | `11-activity-tree-snapshot.md` | resolved | `CONTRACT-CONFLICT`, `REVIEW-REJECTED` | fix-round-2/3 diffs, GPT-5.5/Codex review | Rename ticket 08's fold-derived `ActivityTreeSnapshot` (byTile read model) to `ActivityLogSnapshot`; reserve `ActivityTreeSnapshot` for ticket 11's SidebarTree-wrapping envelope, matching ticket 13's assumption. Downstream tickets 21/57/58/61/74 still name the byTile type `ActivityTreeSnapshot` in prose/code samples and must be read as `ActivityLogSnapshot` (or amended) when picked up. | Fable | (uncommitted, fix-round-3) |
 
 ---
 
@@ -173,3 +174,44 @@ log to add explicit rulings, prompt amendments, and recovery actions.
 - **Conflict:** Depends on 08 and all shipped `Op` cases. Pid-shaped integer scan may flag legitimate
   geometry/z-order integers unless the ticket/prompt clarifies key-path handling or safe fixtures.
 - **Recovery:** Wait for 08; clarify scanner behavior before unattended implementation.
+
+## C-20260701-009 — `11-activity-tree-snapshot.md`
+
+- **Class:** `CONTRACT-CONFLICT`, `REVIEW-REJECTED`
+- **Evidence:** fix-round-2 diff (`Sources/ContinuumRevivedCore/AgentActivityEvent.swift`,
+  `Sources/ContinuumRevivedCore/SidebarTree.swift`); GPT-5.5/Codex fix-round-2 and fix-round-3 review
+  notes.
+- **Conflict:** Ticket 08 (`08-sync-observation-type-split.md`, landed in `368cf7e`) already ships a
+  public `ActivityTreeSnapshot` in `AgentActivityEvent.swift` — the `ActivityStore`'s fold-derived,
+  per-tile read model (`snapshotSequence`/`snapshotReplicaId`/`byTile`). Ticket 11 independently names
+  its own new SidebarTree-wrapping envelope `ActivityTreeSnapshot` too. Two public types cannot share
+  one name in one module. This collision predates ticket 11's implementation: ticket 13
+  (`13-invariant-spine-harness.md:60`) already writes "`ActivityTreeSnapshot` is owned by the … 'Activity
+  tree snapshot type' ticket [11]" as an established fact, which only makes sense if ticket 08's type
+  was always going to need a different name. Tickets 21, 57, 58, 61, and 74, by contrast, all use
+  `ActivityTreeSnapshot` in prose and code samples to mean ticket 08's `byTile` fold-derived type (e.g.
+  `21-idle-reaper-detach.md:148`'s `public struct ActivityTreeSnapshot { … byTile … }`,
+  `57-cloudkit-transport-impl.md:87`'s `pushActivitySnapshot(_ snapshot: ActivityTreeSnapshot, …)`) — so
+  the doc corpus itself is internally inconsistent about which type owns the name.
+- **Content to preserve:** Ticket 08's `AgentActivityEvent`/`ActivityStore`/pure `apply(_:_:)`/
+  `TileActivity`/`ActivityStreamItem` semantics (all field shapes, behavior, and tests unchanged — only
+  the type name changes). Ticket 11's `ActivityTreeSnapshot` exactly as it names it (no adaptation
+  needed on ticket 11's side).
+- **Winning directive / required ruling:** `ActivityTreeSnapshot` belongs to ticket 11 (the
+  SidebarTree-wrapping envelope), matching ticket 13's pre-existing assumption. Ticket 08's type is
+  renamed to `ActivityLogSnapshot` (fold-derived, byTile-keyed activity log read model — distinct from
+  the tree-shaped snapshot). `ActivityStoreProtocol.currentSnapshot()`, `ActivityStore.snapshot`, and
+  `ActivityStreamItem.snapshot(_:)` all update to the new name; no other call sites in `Sources/`
+  reference the old name (verified by `grep -rn ActivityTreeSnapshot Sources/` after the rename — only
+  ticket 11's files remain). This is a rename-only change: no field, behavior, or test assertion in
+  ticket 08's type changes.
+- **Prompt amendment required:** Tickets 21, 57, 58, 61, and 74 must be read with `ActivityTreeSnapshot`
+  translated to `ActivityLogSnapshot` wherever their text/code samples mean the `byTile` fold-derived
+  type (not ticket 11's tree envelope). Amend those ticket files (or attach an implementor-packet
+  override, as done for ticket 10 / C-20260701-005) before any of them is picked up for implementation,
+  so an unattended pass does not redeclare a colliding `ActivityTreeSnapshot` or wire the wrong type
+  into a signature like `pushActivitySnapshot(_:)`.
+- **Recovery:** No further action needed to land ticket 11 itself — the rename is complete and verified
+  with no other in-repo Swift consumers of the old name. Before starting 21, 57, 58, 61, or 74, re-read
+  this entry and translate `ActivityTreeSnapshot` references in those ticket files to
+  `ActivityLogSnapshot` where they mean the byTile read model.

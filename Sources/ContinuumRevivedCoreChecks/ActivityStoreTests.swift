@@ -3,7 +3,7 @@ import Foundation
 
 // Ticket: docs/38-tickets/08-sync-observation-type-split.md
 //
-// Logic + backend checks for AgentActivityEvent / ActivityTreeSnapshot / ActivityStore.
+// Logic + backend checks for AgentActivityEvent / ActivityLogSnapshot / ActivityStore.
 // This project has no XCTest target — `run-matrix.sh` never runs `swift test` — so these
 // checks live in the ContinuumRevivedCoreChecks executable, printing PASS/FAIL via `expect`
 // (defined in main.swift) and exiting non-zero on failure, matching every other ticket's
@@ -35,7 +35,7 @@ func runActivityStoreTests() {
 }
 
 private func runActivityStoreTestsAsync() async {
-    // --- LOGIC: pure fold sets every ActivityTreeSnapshot field to concrete, checkable values ---
+    // --- LOGIC: pure fold sets every ActivityLogSnapshot field to concrete, checkable values ---
     // (Not "forward == fromCheckpoint" splitting the same three apply calls two ways — that
     // holds trivially for any deterministic binary function and cannot catch a wrong fold.
     // Assert the actual field values a correct fold must produce instead.)
@@ -53,7 +53,7 @@ private func runActivityStoreTestsAsync() async {
         let e3 = makeEvent(seq: 4, replicaId: rid, tileId: tid, status: .done,
                             kind: "exit.clean", summary: "done", at: t3)
 
-        let snapshot = [e0, e1, e2, e3].reduce(ActivityTreeSnapshot.empty, apply)
+        let snapshot = [e0, e1, e2, e3].reduce(ActivityLogSnapshot.empty, apply)
 
         expect(snapshot.snapshotSequence == 4, "apply fold: snapshotSequence tracks the last folded event")
         expect(snapshot.snapshotReplicaId == rid, "apply fold: snapshotReplicaId tracks the last folded event")
@@ -137,7 +137,7 @@ private func runActivityStoreTestsAsync() async {
         let tid = UUID(), rid = UUID()
         let events = (1...250).map { i in makeEvent(seq: UInt64(i), replicaId: rid, tileId: tid,
                                                      status: .working, kind: "tool.bash") }
-        let snap = events.reduce(ActivityTreeSnapshot.empty, apply)
+        let snap = events.reduce(ActivityLogSnapshot.empty, apply)
         expect(snap.byTile[tid]?.recent.count == 200, "ring buffer caps recent events at 200")
         // Verify it kept the LAST 200, not the first
         expect(snap.byTile[tid]?.recent.first?.sequence == 51, "ring buffer keeps the last 200 events, not the first")
