@@ -70,9 +70,12 @@ func runClaudeAgentStateReaderTests() {
         checkDerive("assistant-tool-use-open", [event("assistant", stop: "tool_use")], age: 10, expected: .working)
         checkDerive("tool-result-loop-open", [
             event("assistant", stop: "tool_use"),
-            event("user", toolUseResult: true),
-            event("assistant", stop: "tool_use")
+            event("user", toolUseResult: true)
         ], age: 10, expected: .working)
+        checkDerive("tool-result-loop-stale", [
+            event("assistant", stop: "tool_use"),
+            event("user", toolUseResult: true)
+        ], age: 1_000, expected: .idle)
         checkDerive("assistant-end-turn-fresh", [event("assistant", stop: "end_turn")], age: 60, expected: .idle)
         checkDerive("assistant-end-turn-past-idle-window", [event("assistant", stop: "end_turn")], age: 200, expected: .idle)
         checkDerive("assistant-tool-use-stale", [event("assistant", stop: "tool_use")], age: 1_000, expected: .idle)

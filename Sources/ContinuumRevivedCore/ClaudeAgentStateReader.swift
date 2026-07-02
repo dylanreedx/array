@@ -120,6 +120,10 @@ public struct ClaudeAgentStateReader: AgentStateReader {
             return ageSeconds <= config.freshWorkingWindow ? .working : .idle
         }
 
+        if last.type == "user", last.hasToolUseResult {
+            return ageSeconds <= config.freshWorkingWindow ? .working : .idle
+        }
+
         if last.type == "assistant", last.stopReason == "end_turn" {
             return .idle
         }
