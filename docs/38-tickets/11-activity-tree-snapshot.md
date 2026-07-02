@@ -38,6 +38,19 @@ New symbols added in the same file:
 - `ActivityTreeSnapshot` — a `Codable, Equatable, Sendable` struct wrapping `SidebarTree` with `capturedAt: Date`, `replicaId: String`, and `rollup: SidebarAgentStatusRollup`
 - `ActivityTreeSnapshot.make(tree:capturedAt:replicaId:)` — static factory that derives `rollup` from the tree and constructs the envelope
 
+> **RULING (2026-07-01, overnight orchestrator).** The agent-state-reader-protocol ticket (35)
+> has not landed and `AgentSnapshot` does not exist in `ContinuumRevivedCore` at all, so the
+> `extension AgentSnapshot` form below cannot compile. Forward-declare the **whole minimal type**
+> instead: a `public struct AgentSnapshot: Codable, Equatable, Sendable` in `SidebarTree.swift`
+> carrying exactly the members this ticket exercises — `status: AgentStatus`, `evidence: Evidence?`,
+> and the nested `Evidence` struct (`source`, `lastEventType: String?`, `mtimeAgeSeconds: Double`) —
+> with the TODO comment keying removal/reconciliation to ticket 35. Do **not** add `kind`, `title`,
+> `mode`, `asOf`, or `detail` (they are ticket 35's scope, and `AgentKind` is ticket 31's); adapt the
+> test/dogfood constructions in this ticket to the minimal shape (drop those arguments). Verification
+> follows the repo-wide convention (commit 417b77c): no XCTest — the checks go in the
+> `ContinuumRevivedCoreChecks` executable wired into `scripts/run-matrix.sh`, superseding the
+> `Tests/…/ActivityTreeSnapshotTests.swift` / `swift test` wording in this ticket.
+
 If `AgentSnapshot.Evidence` is not yet available from the agent-state-reader-protocol ticket, declare it inline in `SidebarTree.swift` as a forward declaration:
 
 ```swift
