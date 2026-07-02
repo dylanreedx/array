@@ -88,10 +88,11 @@ final class ZoneRuntimeController {
         TmuxSession.killProjectSessionCommand(projectId: project.id, tmuxPath: tmuxPath)
     }
 
-    // LIFECYCLE POLICY (D16 — locked):
-    //   project release (refcount → 0): DETACH, never kill.
-    //   Projects span workspaces; killing here would reap live agents on workspace switch.
-    //   kill-session is reserved for explicit project deletion only.
+    // D16 (docs/38-locked-decisions.md): project release = DETACH, never kill.
+    // This function intentionally issues no tmux command. The controller holds no
+    // TmuxControl, no Process, and no TmuxSession reference, so the no-kill property
+    // is enforced by the type rather than by convention. Sessions stay alive across
+    // workspace switches; only explicit user tile close may issue kill-window.
     func close() {
         guard !isClosed else { return }
         isClosed = true

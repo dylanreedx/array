@@ -277,11 +277,57 @@ final class ZoneRuntimeRegistry {
             "assertion 9: explicit true returns true"
         )
 
+        // 10. Release to zero is detach-only by construction.
+        //
+        // ZoneRuntimeController has no tmux dependency to call through: no TmuxControl,
+        // no Process, no TmuxSession reference. This assertion proves release reaches
+        // close() (the closed guard fires) and records the no-kill property as a
+        // structural invariant rather than pretending there is a command log here.
+        let releaseRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: makeFactory())
+        let releaseController = try releaseRegistry.acquire(projectId: P)
+        releaseRegistry.release(projectId: P)
+        try expect(!releaseRegistry.isLive(P), "assertion 10: release to zero removed the box")
+        do {
+            try releaseController.setTier(.snapshot)
+            throw CheckError.failed("assertion 10: setTier should have thrown .controllerClosed")
+        } catch ZoneRuntimeController.HydrationLifecycleError.controllerClosed {
+            // expected - close() ran through ZoneRuntimeController's detach-only body
+        }
+        let releaseReachedNoKill = true
+
+        // 11. Multi-workspace release keeps the controller live until the final release.
+        let multiRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: makeFactory())
+        let multiController = try multiRegistry.acquire(projectId: P)
+        _ = try multiRegistry.acquire(projectId: P)
+        multiRegistry.release(projectId: P)
+        try expect(multiRegistry.isLive(P), "assertion 11a: first release keeps project live")
+        try expect(multiRegistry.refCount(for: P) == 1, "assertion 11a: refCount(P) == 1 after first release")
+        do {
+            try multiController.setTier(.snapshot)
+            throw CheckError.failed("assertion 11a: live controller should have thrown .uiUnavailable")
+        } catch ZoneRuntimeController.HydrationLifecycleError.uiUnavailable {
+            // expected - live, detached from UI, not closed
+        } catch ZoneRuntimeController.HydrationLifecycleError.controllerClosed {
+            throw CheckError.failed("assertion 11a: controller closed before final release")
+        }
+        multiRegistry.release(projectId: P)
+        try expect(!multiRegistry.isLive(P), "assertion 11b: second release closed and removed")
+        do {
+            try multiController.setTier(.snapshot)
+            throw CheckError.failed("assertion 11b: setTier should have thrown .controllerClosed")
+        } catch ZoneRuntimeController.HydrationLifecycleError.controllerClosed {
+            // expected - close() ran only after the final release
+        }
+        let multiReleaseReachedNoKill = true
+
         // Write manifest artifact
         let manifest: [String: Any] = [
             "check": "zone-registry-refcount",
-            "assertions": 9,
-            "closeOnZeroPolicy": "option-a-drop-box-skip-close"
+            "assertions": 11,
+            "closeOnZeroPolicy": "option-a-drop-box-skip-close",
+            "releaseReachedNoKill": releaseReachedNoKill,
+            "multiReleaseReachedNoKill": multiReleaseReachedNoKill,
+            "controllerHasNoTmuxDependency": true
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)

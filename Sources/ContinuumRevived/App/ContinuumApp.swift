@@ -3048,6 +3048,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         switch tile.kind {
         case .terminal:
+            // Deliberate user tile deletion is the only path that may issue a tmux kill.
+            // Project release flows through ZoneRuntimeRegistry.release -> close(), which
+            // has no tmux surface and must remain detach-only.
             killTmuxWindowForDeletedTerminalTile(tileId: id)
             if let runtime = runtimes.first(where: { $0.tileId == id }) {
                 if let projectStore, var descriptor = try? projectStore.loadSession(id: runtime.id) {
@@ -3116,6 +3119,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func killTmuxWindowForDeletedTerminalTile(tileId: UUID) {
+        // LIFECYCLE INVARIANT: this is the only site that may issue a tmux kill
+        // for terminal-tile removal. It is reached from deleteTile(_:) on a
+        // .terminal tile, a deliberate user action. Project release must never call
+        // this function; adding a tmux path to ZoneRuntimeRegistry.release or
+        // ZoneRuntimeController.close violates D16.
         guard TmuxPersistenceConfig.enabled(defaults: tmuxDefaults),
               let tmuxPath = tmuxPathResolver(tmuxDefaults) else {
             return
@@ -11201,6 +11209,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         teardownDelegate.windowWillClose(Notification(name: NSWindow.willCloseNotification))
         try expect(teardownTmuxControl.log.isEmpty, "app teardown/window close must detach only and not issue kill-session; got \(teardownTmuxControl.log)")
 
+        let releaseTmuxControl = InMemoryTmuxControl()
+        let releaseRoot = tempRoot.appendingPathComponent("release", isDirectory: true)
+        try fileManager.createDirectory(at: releaseRoot, withIntermediateDirectories: true)
+        let (releaseDelegate, _, releaseBrowserEngine, _) = try makeDelegate(root: releaseRoot, defaults: defaults, fakeTmuxPath: fakeTmuxPath, tmuxControl: releaseTmuxControl)
+        defer { releaseBrowserEngine.shutdown() }
+        guard let releaseRuntime = releaseDelegate.workspaceRuntime,
+              let releaseProjectId = releaseRuntime.activeController?.project.id else {
+            throw CheckError.failed("release scenario should have an active project")
+        }
+        try expect(releaseRuntime.controller(for: releaseProjectId) != nil, "release scenario should start with a live controller")
+        releaseRuntime.closeAll()
+        try expect(releaseTmuxControl.log.isEmpty, "project release must detach only and issue no tmux kill command; got \(releaseTmuxControl.log)")
+        try expect(releaseRuntime.controller(for: releaseProjectId) == nil, "project release should drop the registry controller")
+
+        let sentinelTmuxControl = InMemoryTmuxControl()
+        try expect(Self.runTmuxControlOperationSync({
+            _ = try await sentinelTmuxControl.newSession(name: "continuum-proj-sentinel", cwd: tempRoot.path, innerCommand: nil)
+            try await sentinelTmuxControl.killSession(name: "continuum-proj-sentinel")
+        }) == nil, "sentinel tmux control operation should run")
+        let sentinelKillDetected = sentinelTmuxControl.log.contains(.killSession(name: "continuum-proj-sentinel"))
+        try expect(sentinelKillDetected, "sentinel should prove InMemoryTmuxControl records killSession")
+
         let disabledTmuxControl = InMemoryTmuxControl()
         let disabledRoot = tempRoot.appendingPathComponent("disabled", isDirectory: true)
         try fileManager.createDirectory(at: disabledRoot, withIntermediateDirectories: true)
@@ -11284,6 +11314,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "legacyTmuxCalls": legacyTmuxControl.log.map(String.init(describing:)),
             "teardownTerminalTileId": teardownTileId.uuidString,
             "teardownTmuxCalls": teardownTmuxControl.log.map(String.init(describing:)),
+            "releaseTmuxCalls": releaseTmuxControl.log.map(String.init(describing:)),
+            "releaseProjectId": releaseProjectId.uuidString,
+            "sentinelTmuxCalls": sentinelTmuxControl.log.map(String.init(describing:)),
+            "sentinelKillDetected": sentinelKillDetected,
             "disabledTmuxCalls": disabledTmuxControl.log.map(String.init(describing:)),
             "absentTmuxCalls": absentTmuxControl.log.map(String.init(describing:)),
             "nonTerminalTmuxCalls": nonTerminalTmuxControl.log.map(String.init(describing:)),

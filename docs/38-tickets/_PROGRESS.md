@@ -70,3 +70,4 @@ New attempts append their rows to the table above.
 | 34-kind-classifier-tmux.md | done | 0ceb220 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
 | 16-capture-tmux-window-target.md | done | b9757fd | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
 | 19-close-tile-kill-window.md | done | c0a7902 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
+| 20-project-release-detach.md | done | 58e84f7 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
