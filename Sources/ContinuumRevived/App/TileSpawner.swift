@@ -5,6 +5,11 @@ import Foundation
 import GhosttyKit
 import WebKit
 
+private final class TmuxSyncBox: @unchecked Sendable {
+    var value: Any?
+    var error: Error?
+}
+
 @MainActor
 final class TileSpawner {
     enum Outcome {
@@ -33,6 +38,7 @@ final class TileSpawner {
     private let detector: ToolDetector
     private let defaults: UserDefaults
     private let tmuxPathResolver: (UserDefaults) -> String?
+    private let tmuxControlFactory: @Sendable (String) -> any TmuxControl
     private var browserProfiles: [BrowserProfile]
 
     /// Dynamic source used by browser tile profile menus after registry edits.
@@ -74,6 +80,7 @@ final class TileSpawner {
         detector: ToolDetector = .live,
         defaults: UserDefaults = .standard,
         tmuxPathResolver: @escaping (UserDefaults) -> String? = { TmuxLocator.resolve(defaults: $0) },
+        tmuxControlFactory: @escaping @Sendable (String) -> any TmuxControl = { ProcessTmuxControl(tmuxPath: $0) },
         browserProfiles: [BrowserProfile] = [BrowserProfile.builtInDefault()]
     ) {
         self.canvasView = canvasView
@@ -85,6 +92,7 @@ final class TileSpawner {
         self.detector = detector
         self.defaults = defaults
         self.tmuxPathResolver = tmuxPathResolver
+        self.tmuxControlFactory = tmuxControlFactory
         self.browserProfiles = browserProfiles
         canvasView.onFileURLDrop = { [weak self] path, worldPoint in
             _ = self?.spawnFile(path: path, at: worldPoint)
@@ -173,9 +181,16 @@ final class TileSpawner {
             runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: launchProfileId, projectRelativeCwd: ".")
         )
-        let launchProfile = allowTmuxPersistence
-            ? tmuxWrappedProfileIfAvailable(profile, tileId: tile.id)
-            : profile
+        let activeProjectId = (terminalProjectContextProvider?())?.id
+        let wrappedProfile: (profile: LaunchProfile, windowTarget: String?)
+        do {
+            wrappedProfile = allowTmuxPersistence
+                ? try tmuxWrappedProfileIfAvailable(profile, tileId: tile.id, projectId: activeProjectId)
+                : (profile, nil)
+        } catch {
+            return .failure(error)
+        }
+        let launchProfile = wrappedProfile.profile
         let runtime = GhosttyTerminalRuntime(
             id: UUID(),
             tileId: tile.id,
@@ -203,12 +218,18 @@ final class TileSpawner {
             createdAt: now,
             lastStartedAt: now,
             lastExit: nil,
-            agentDescriptor: agentDescriptor
+            agentDescriptor: agentDescriptor,
+            tmuxWindowTarget: wrappedProfile.windowTarget
         )
         do {
             try projectStore.saveSession(descriptor)
             try projectStore.saveCanvas(canvasView.canvasState)
         } catch {
+            if let target = wrappedProfile.windowTarget {
+                try? Self.runTmuxControlOperationSync { [tmuxControlFactory] in
+                    try await tmuxControlFactory(launchProfile.command).killWindow(target: target)
+                }
+            }
             return .failure(error)
         }
         return .spawned(runtime)
@@ -218,12 +239,46 @@ final class TileSpawner {
         terminalProjectContextProvider?().map(\.rootPath) ?? project.rootPath
     }
 
-    private func tmuxWrappedProfileIfAvailable(_ profile: LaunchProfile, tileId: UUID) -> LaunchProfile {
+    private func tmuxWrappedProfileIfAvailable(_ profile: LaunchProfile, tileId: UUID, projectId: UUID?) throws -> (profile: LaunchProfile, windowTarget: String?) {
         guard TmuxPersistenceConfig.enabled(defaults: defaults),
               let tmuxPath = tmuxPathResolver(defaults) else {
-            return profile
+            return (profile, nil)
         }
-        return TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath)
+        guard let projectId else {
+            return (TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath), nil)
+        }
+        let control = tmuxControlFactory(tmuxPath)
+        let sessionName = TmuxSession.projectSessionName(projectId: projectId)
+        let innerCommand = Self.innerCommand(for: profile)
+        let paneTarget = try Self.runTmuxControlOperationSync {
+            if try await control.sessionExists(name: sessionName) {
+                return try await control.newWindow(inSession: sessionName, cwd: profile.cwd, innerCommand: innerCommand)
+            } else {
+                return try await control.newSession(name: sessionName, cwd: profile.cwd, innerCommand: innerCommand)
+            }
+        }
+        return (TmuxSession.attachWindowProfile(paneTarget: paneTarget, cwd: profile.cwd, tmuxPath: tmuxPath), paneTarget)
+    }
+
+    private static func innerCommand(for profile: LaunchProfile) -> [String]? {
+        guard !(profile.title == "Shell" && profile.arguments.isEmpty) else { return nil }
+        return [profile.command] + profile.arguments
+    }
+
+    private static func runTmuxControlOperationSync<T>(_ operation: @escaping @Sendable () async throws -> T) throws -> T {
+        let box = TmuxSyncBox()
+        let semaphore = DispatchSemaphore(value: 0)
+        Task.detached {
+            do {
+                box.value = try await operation()
+            } catch {
+                box.error = error
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        if let error = box.error { throw error }
+        return box.value as! T
     }
 
     private func agentDescriptor(for spec: LaunchProfileSpec, projectRoot: String, at now: Date) -> AgentDescriptor? {
@@ -309,7 +364,13 @@ final class TileSpawner {
             cwd: restoredCwd,
             title: profile.title
         )
-        let launchProfile = tmuxWrappedProfileIfAvailable(profileWithCwd, tileId: existing.id)
+        let wrappedProfile: (profile: LaunchProfile, windowTarget: String?)
+        do {
+            wrappedProfile = try tmuxWrappedProfileIfAvailable(profileWithCwd, tileId: existing.id, projectId: (terminalProjectContextProvider?())?.id)
+        } catch {
+            return .failure(error)
+        }
+        let launchProfile = wrappedProfile.profile
 
         let runtime = GhosttyTerminalRuntime(
             id: UUID(),
@@ -342,7 +403,8 @@ final class TileSpawner {
             lastStartedAt: now,
             lastExit: nil,
             agentDescriptor: agentDescriptor,
-            scrollback: persistedDescriptor?.scrollback
+            scrollback: persistedDescriptor?.scrollback,
+            tmuxWindowTarget: wrappedProfile.windowTarget ?? persistedDescriptor?.tmuxWindowTarget
         )
         do {
             try projectStore.saveSession(descriptor)
@@ -3160,6 +3222,42 @@ final class TileSpawner {
             defaults.set(path, forKey: TmuxPersistenceConfig.pathKey)
             return defaults
         }
+        final class ThrowingSessionStore: ProjectStoring, @unchecked Sendable {
+            enum StoreError: Error { case saveSessionFailed }
+            private let base: ProjectStore
+            init(base: ProjectStore) { self.base = base }
+            func saveProject(_ project: Project) throws { try base.saveProject(project) }
+            func loadProject() throws -> Project { try base.loadProject() }
+            func tryLoadProject() throws -> Project? { try base.tryLoadProject() }
+            func saveCanvas(_ canvas: CanvasState) throws { try base.saveCanvas(canvas) }
+            func loadCanvas() throws -> CanvasState { try base.loadCanvas() }
+            func loadCanvasWithSanitizationResult() throws -> CanvasEngine.CanvasSanitizationResult { try base.loadCanvasWithSanitizationResult() }
+            func tryLoadCanvas() throws -> CanvasState? { try base.tryLoadCanvas() }
+            func tryLoadCanvasWithSanitizationResult() throws -> CanvasEngine.CanvasSanitizationResult? { try base.tryLoadCanvasWithSanitizationResult() }
+            func saveSession(_ descriptor: TerminalSessionDescriptor) throws { throw StoreError.saveSessionFailed }
+            func loadSession(id: UUID) throws -> TerminalSessionDescriptor { try base.loadSession(id: id) }
+            func deleteSession(id: UUID) throws { try base.deleteSession(id: id) }
+            func listSessions() throws -> [TerminalSessionDescriptor] { try base.listSessions() }
+            func saveBrowserState(_ state: BrowserState) throws { try base.saveBrowserState(state) }
+            func loadBrowserState() throws -> BrowserState { try base.loadBrowserState() }
+            func tryLoadBrowserState() throws -> BrowserState? { try base.tryLoadBrowserState() }
+            func browserStateFileExists() -> Bool { base.browserStateFileExists() }
+            func saveFileTreeState(_ state: FileTreeState) throws { try base.saveFileTreeState(state) }
+            func loadFileTreeState() throws -> FileTreeState { try base.loadFileTreeState() }
+            func tryLoadFileTreeState() throws -> FileTreeState? { try base.tryLoadFileTreeState() }
+            func fileTreeStateFileExists() -> Bool { base.fileTreeStateFileExists() }
+            func saveNoteState(_ state: NoteState) throws { try base.saveNoteState(state) }
+            func loadNoteState() throws -> NoteState { try base.loadNoteState() }
+            func tryLoadNoteState() throws -> NoteState? { try base.tryLoadNoteState() }
+            func saveNoteBody(id: UUID, text: String) throws { try base.saveNoteBody(id: id, text: text) }
+            func loadNoteBody(id: UUID) throws -> String { try base.loadNoteBody(id: id) }
+            func tryLoadNoteBody(id: UUID) -> String? { base.tryLoadNoteBody(id: id) }
+            func deleteNoteBody(id: UUID) throws { try base.deleteNoteBody(id: id) }
+            func saveReviewCommentState(_ state: ReviewCommentState) throws { try base.saveReviewCommentState(state) }
+            func loadReviewCommentState(reviewId: UUID) throws -> ReviewCommentState { try base.loadReviewCommentState(reviewId: reviewId) }
+            func tryLoadReviewCommentState(reviewId: UUID) throws -> ReviewCommentState? { try base.tryLoadReviewCommentState(reviewId: reviewId) }
+            func deleteReviewCommentState(reviewId: UUID) throws { try base.deleteReviewCommentState(reviewId: reviewId) }
+        }
         func makeProject(root: URL, name: String) -> Project {
             Project(
                 id: UUID(),
@@ -3172,7 +3270,13 @@ final class TileSpawner {
                 settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
             )
         }
-        func makeSpawner(root: URL, defaults: UserDefaults, resolver: @escaping (UserDefaults) -> String?) throws -> (TileSpawner, ProjectStore, CanvasNSView, BrowserEngineContext, GhosttyRuntimeContext) {
+        func makeSpawner(
+            root: URL,
+            defaults: UserDefaults,
+            resolver: @escaping (UserDefaults) -> String?,
+            tmuxControlFactory: @escaping @Sendable (String) -> any TmuxControl = { _ in InMemoryTmuxControl() },
+            storeOverride: (any ProjectStoring)? = nil
+        ) throws -> (TileSpawner, ProjectStore, CanvasNSView, BrowserEngineContext, GhosttyRuntimeContext) {
             let project = makeProject(root: root, name: root.lastPathComponent)
             let store = ProjectStore(projectRoot: root)
             try store.saveProject(project)
@@ -3185,17 +3289,18 @@ final class TileSpawner {
                 canvasView: canvas,
                 ghostty: ghostty,
                 browserEngine: browserEngine,
-                projectStore: store,
+                projectStore: storeOverride ?? store,
                 project: project,
                 defaults: defaults,
-                tmuxPathResolver: resolver
+                tmuxPathResolver: resolver,
+                tmuxControlFactory: tmuxControlFactory
             )
             return (spawner, store, canvas, browserEngine, ghostty)
         }
         func spawnAndDescriptor(spawner: TileSpawner, store: ProjectStore, canvas: CanvasNSView) throws -> (Tile, TerminalSessionDescriptor) {
             switch spawner.spawnTerminal(profileId: "shell") {
-            case .spawned:
-                guard let tile = canvas.canvasState.tiles.first(where: { $0.kind == .terminal }) else {
+            case let .spawned(runtime):
+                guard let tile = canvas.canvasState.tiles.first(where: { $0.id == runtime.tileId }) else {
                     throw CheckError.failed("spawnTerminal did not create a terminal tile")
                 }
                 return (tile, try store.loadSession(id: try runtimeId(for: tile)))
@@ -3235,10 +3340,12 @@ final class TileSpawner {
         try [enabledRoot, offRoot, absentRoot].forEach { try fileManager.createDirectory(at: $0, withIntermediateDirectories: true) }
 
         let enabledDefaults = makeDefaults(enabled: true, path: fakeTmux.path)
+        let enabledTmux = InMemoryTmuxControl()
         let (enabledSpawner, enabledStore, enabledCanvas, enabledBrowser, enabledGhostty) = try makeSpawner(
             root: enabledRoot,
             defaults: enabledDefaults,
-            resolver: { TmuxLocator.resolve(defaults: $0) }
+            resolver: { TmuxLocator.resolve(defaults: $0) },
+            tmuxControlFactory: { _ in enabledTmux }
         )
         defer { enabledGhostty.shutdown(); enabledBrowser.shutdown() }
         let (spawnedTile, spawnedDescriptor) = try spawnAndDescriptor(spawner: enabledSpawner, store: enabledStore, canvas: enabledCanvas)
@@ -3247,9 +3354,103 @@ final class TileSpawner {
         let expectedArgs = ["new-session", "-A", "-s", expectedSessionName, "-c", enabledRoot.path]
         try expect(spawnedDescriptor.command == fakeTmux.path, "enabled spawn should use fake tmux command, got \(spawnedDescriptor.command)")
         try expect(spawnedDescriptor.args == expectedArgs, "enabled spawn should tmux-wrap with stable session/cwd, got \(spawnedDescriptor.args)")
+        try expect(spawnedDescriptor.tmuxWindowTarget == nil, "ambient spawn should not persist a project window target")
+        try expect(!enabledTmux.log.contains { if case .newWindow = $0 { return true }; return false }, "ambient spawn should not create project windows via TmuxControl")
         try expect(restartedDescriptor.command == fakeTmux.path, "enabled restart should use fake tmux command, got \(restartedDescriptor.command)")
         try expect(restartedDescriptor.args == expectedArgs, "enabled restart should keep same tmux session args, got \(restartedDescriptor.args)")
         try expect(spawnedDescriptor.args.firstIndex(of: expectedSessionName) == restartedDescriptor.args.firstIndex(of: expectedSessionName), "spawn and restart should carry the same session name")
+
+        let projectRoot = tempRoot.appendingPathComponent("project-window", isDirectory: true)
+        try fileManager.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        let projectTmux = InMemoryTmuxControl()
+        let projectDefaults = makeDefaults(enabled: true, path: fakeTmux.path)
+        let (projectSpawner, projectStore, projectCanvas, projectBrowser, projectGhostty) = try makeSpawner(
+            root: projectRoot,
+            defaults: projectDefaults,
+            resolver: { _ in fakeTmux.path },
+            tmuxControlFactory: { _ in projectTmux }
+        )
+        defer { projectGhostty.shutdown(); projectBrowser.shutdown() }
+        let projectId = UUID()
+        let projectEntry = ProjectEntry(id: projectId, name: "Project Window", rootPath: projectRoot.path, workspaceId: nil, lastOpenedAt: Date(), pinned: false, missing: false)
+        projectSpawner.terminalProjectContextProvider = { projectEntry }
+        var projectDescriptors: [TerminalSessionDescriptor] = []
+        for _ in 0..<3 {
+            let (_, descriptor) = try spawnAndDescriptor(spawner: projectSpawner, store: projectStore, canvas: projectCanvas)
+            projectDescriptors.append(descriptor)
+        }
+        let projectSessionName = TmuxSession.projectSessionName(projectId: projectId)
+        let projectTargets = projectDescriptors.compactMap(\.tmuxWindowTarget)
+        try expect(projectTmux.log.filter { if case .newSession = $0 { return true }; return false }.count == 1, "project spawns should create exactly one tmux session, log=\(projectTmux.log)")
+        try expect(projectTmux.log.filter { if case .newWindow = $0 { return true }; return false }.count == 2, "project spawns should create exactly two tmux windows, log=\(projectTmux.log)")
+        try expect(projectTargets.count == 3 && Set(projectTargets).count == 3, "project descriptors should persist three distinct pane targets, got \(projectTargets)")
+        try expect(projectTmux.sessions[projectSessionName] == projectTargets, "fake project session should contain exactly persisted targets")
+        for descriptor in projectDescriptors {
+            try expect(descriptor.command == fakeTmux.path, "project descriptor should launch tmux attach, got \(descriptor.command)")
+            try expect(descriptor.args == ["attach-session", "-t", descriptor.tmuxWindowTarget ?? ""], "project descriptor should plain-attach to captured pane, got \(descriptor.args)")
+        }
+
+        let descriptor = TerminalSessionDescriptor(
+            id: UUID(),
+            tileId: UUID(),
+            launchProfileId: "shell",
+            command: "/bin/zsh",
+            args: [],
+            cwd: "/tmp",
+            env: [:],
+            title: "Shell",
+            createdAt: Date(timeIntervalSince1970: 1),
+            lastStartedAt: Date(timeIntervalSince1970: 1),
+            lastExit: nil,
+            tmuxWindowTarget: "%7"
+        )
+        let encoded = try JSONEncoder().encode(descriptor)
+        let decoded = try JSONDecoder().decode(TerminalSessionDescriptor.self, from: encoded)
+        try expect(TerminalSessionDescriptor.currentSchemaVersion == 3, "TerminalSessionDescriptor schema should be v3")
+        try expect(decoded.tmuxWindowTarget == "%7", "tmuxWindowTarget should round-trip through schema v3")
+        let v2JSON = """
+        {"schemaVersion":2,"id":"00000000-0000-0000-0000-000000000001","tileId":"00000000-0000-0000-0000-000000000002","launchProfileId":"shell","command":"/bin/zsh","args":[],"cwd":"/tmp","env":{},"title":"Shell","createdAt":1,"lastStartedAt":1,"lastExit":null}
+        """.data(using: .utf8)!
+        let v2Decoded = try JSONDecoder().decode(TerminalSessionDescriptor.self, from: v2JSON)
+        try expect(v2Decoded.tmuxWindowTarget == nil, "schema v2 descriptors should decode with nil tmuxWindowTarget")
+
+        let failureRoot = tempRoot.appendingPathComponent("project-window-save-failure", isDirectory: true)
+        try fileManager.createDirectory(at: failureRoot, withIntermediateDirectories: true)
+        let failureBaseStore = ProjectStore(projectRoot: failureRoot)
+        let failureProject = makeProject(root: failureRoot, name: "project-window-save-failure")
+        try failureBaseStore.saveProject(failureProject)
+        try failureBaseStore.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        let failureTmux = InMemoryTmuxControl()
+        let throwingStore = ThrowingSessionStore(base: failureBaseStore)
+        let failureCanvas = CanvasNSView(canvasState: try failureBaseStore.loadCanvas())
+        let failureBrowser = BrowserEngineContext()
+        let failureGhostty = try GhosttyRuntimeContext()
+        defer { failureGhostty.shutdown(); failureBrowser.shutdown() }
+        let failureSpawner = TileSpawner(
+            canvasView: failureCanvas,
+            ghostty: failureGhostty,
+            browserEngine: failureBrowser,
+            projectStore: throwingStore,
+            project: failureProject,
+            defaults: projectDefaults,
+            tmuxPathResolver: { _ in fakeTmux.path },
+            tmuxControlFactory: { _ in failureTmux }
+        )
+        let failureProjectId = UUID()
+        failureSpawner.terminalProjectContextProvider = {
+            ProjectEntry(id: failureProjectId, name: "Failing Project", rootPath: failureRoot.path, workspaceId: nil, lastOpenedAt: Date(), pinned: false, missing: false)
+        }
+        switch failureSpawner.spawnTerminal(profileId: "shell") {
+        case .failure:
+            break
+        default:
+            throw CheckError.failed("project spawn should fail when descriptor save fails")
+        }
+        let createdPane = failureTmux.log.compactMap { call -> String? in
+            if case let .killWindow(target) = call { return target }
+            return nil
+        }.first
+        try expect(createdPane != nil, "save failure after project window creation should kill the captured pane, log=\(failureTmux.log)")
 
         let offDefaults = makeDefaults(enabled: false, path: fakeTmux.path)
         let (offSpawner, offStore, offCanvas, offBrowser, offGhostty) = try makeSpawner(
@@ -3285,6 +3486,11 @@ final class TileSpawner {
                 "spawnArgs": spawnedDescriptor.args,
                 "restartCommand": restartedDescriptor.command,
                 "restartArgs": restartedDescriptor.args
+            ],
+            "projectWindow": [
+                "sessionName": projectSessionName,
+                "targets": projectTargets,
+                "log": projectTmux.log.map(String.init(describing:))
             ],
             "toggleOff": ["command": offDescriptor.command, "args": offDescriptor.args, "cwd": offDescriptor.cwd],
             "tmuxAbsent": ["command": absentDescriptor.command, "args": absentDescriptor.args, "cwd": absentDescriptor.cwd]

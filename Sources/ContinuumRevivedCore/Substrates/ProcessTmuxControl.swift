@@ -71,6 +71,10 @@ public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {
         _ = try? run(["detach-client", "-s", name])
     }
 
+    public func sessionExists(name: String) async throws -> Bool {
+        runIgnoringFailure(["has-session", "-t", name]).exitCode == 0
+    }
+
     public func isAlive(paneTarget: String) async throws -> Bool {
         // `display-message -t <pane_id>` is unreliable for this: with no client
         // attached (the common headless case), tmux can exit 0 with empty
@@ -111,7 +115,7 @@ public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {
             let windowCount = windowsResult.exitCode == 0
                 ? windowsResult.stdout.split(separator: "\n", omittingEmptySubsequences: true).count
                 : 0
-            let panesResult = runIgnoringFailure(["list-panes", "-t", name, "-F", "#{pane_id}"])
+            let panesResult = runIgnoringFailure(["list-panes", "-s", "-t", name, "-F", "#{pane_id}"])
             let panes = panesResult.exitCode == 0
                 ? panesResult.stdout.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
                 : []

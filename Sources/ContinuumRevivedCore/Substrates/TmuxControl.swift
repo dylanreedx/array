@@ -17,6 +17,7 @@ public protocol TmuxControl: Sendable {
     func detachSession(name: String) async throws
 
     // Query
+    func sessionExists(name: String) async throws -> Bool
     func isAlive(paneTarget: String) async throws -> Bool
     func paneCurrentPath(paneTarget: String) async throws -> String
     func listSessions() async throws -> [TmuxSessionInfo]
@@ -63,6 +64,7 @@ public final class InMemoryTmuxControl: TmuxControl, @unchecked Sendable {
         case killWindow(target: String)
         case killSession(name: String)
         case detachSession(name: String)
+        case sessionExists(name: String)
         case isAlive(target: String)
         case paneCurrentPath(target: String)
         case listSessions
@@ -138,6 +140,11 @@ public final class InMemoryTmuxControl: TmuxControl, @unchecked Sendable {
 
     public func detachSession(name: String) async throws {
         log.append(.detachSession(name: name))
+    }
+
+    public func sessionExists(name: String) async throws -> Bool {
+        log.append(.sessionExists(name: name))
+        return sessions[name] != nil
     }
 
     public func isAlive(paneTarget: String) async throws -> Bool {

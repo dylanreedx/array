@@ -65,3 +65,4 @@ New attempts append their rows to the table above.
 | 31-agentkind-closed-enum.md | done | 6ce1110 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
 | 21-idle-reaper-detach.md | done | 9b8a241 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
 | 32-derive-agent-status-fn.md | done | eb88e0f | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
+| 15-new-tile-new-window.md | done | d57e4c4 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |

@@ -28,6 +28,15 @@ public enum TmuxSession {
         (command: tmuxPath, arguments: ["kill-session", "-t", sessionName(tileId: tileId)])
     }
 
+    public static func attachWindowProfile(paneTarget: String, cwd: String, tmuxPath: String) -> LaunchProfile {
+        LaunchProfile(
+            command: tmuxPath,
+            arguments: ["attach-session", "-t", paneTarget],
+            cwd: cwd,
+            title: "Terminal"
+        )
+    }
+
     /// Project-scoped session name (phase 1+). `ZoneRuntimeController` is the
     /// only authoritative caller — see `ZoneRuntimeController.projectSessionName()`.
     public static func projectSessionName(projectId: UUID) -> String {

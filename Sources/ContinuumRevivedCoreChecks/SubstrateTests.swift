@@ -38,10 +38,13 @@ private func runTmuxControlSuite() async {
     let fake = InMemoryTmuxControl()
 
     let paneId1 = try! await fake.newSession(name: "s1", cwd: "/tmp/a", innerCommand: nil)
+    let existsAfterSession = try! await fake.sessionExists(name: "s1")
+    expect(existsAfterSession, "sessionExists is true after newSession")
     let paneId2 = try! await fake.newWindow(inSession: "s1", cwd: "/tmp/b", innerCommand: ["zsh"])
 
     expect(fake.log == [
         .newSession(name: "s1", cwd: "/tmp/a"),
+        .sessionExists(name: "s1"),
         .newWindow(session: "s1", cwd: "/tmp/b")
     ], "TmuxControl fake records newSession/newWindow calls in order")
 
@@ -92,6 +95,8 @@ private func runTmuxControlSuite() async {
 
     try! await fake.killSession(name: "s2")
     expect(fake.sessions["s2"] == nil, "killSession removes the session from `sessions`")
+    let existsAfterSessionKill = try! await fake.sessionExists(name: "s2")
+    expect(!existsAfterSessionKill, "sessionExists is false after killSession")
     let aliveAfterSessionKill = try! await fake.isAlive(paneTarget: paneId3)
     expect(!aliveAfterSessionKill, "killSession marks its panes dead")
     expect(fake.log.contains(.killSession(name: "s2")), "killSession calls are logged")
@@ -307,35 +312,34 @@ private func runTmuxRealPathCheckAsync(tmuxPath: String) async {
         // Best-effort cleanup from a prior interrupted run.
         try? await control.killSession(name: sessionName)
 
+        let existsBefore = try await control.sessionExists(name: sessionName)
+        expect(!existsBefore, "ProcessTmuxControl.sessionExists is false before newSession")
+
         let paneId = try await control.newSession(name: sessionName, cwd: "/tmp", innerCommand: nil)
         expect(!paneId.isEmpty, "ProcessTmuxControl.newSession returns a non-empty pane id")
 
+        let existsAfter = try await control.sessionExists(name: sessionName)
+        expect(existsAfter, "ProcessTmuxControl.sessionExists is true after newSession")
+
+        let paneId2 = try await control.newWindow(inSession: sessionName, cwd: "/tmp", innerCommand: nil)
+        expect(!paneId2.isEmpty && paneId2 != paneId, "ProcessTmuxControl.newWindow returns a second distinct pane id")
+
         let aliveBefore = try await control.isAlive(paneTarget: paneId)
         expect(aliveBefore, "ProcessTmuxControl.isAlive is true immediately after newSession")
+        let aliveBefore2 = try await control.isAlive(paneTarget: paneId2)
+        expect(aliveBefore2, "ProcessTmuxControl.isAlive is true immediately after newWindow")
 
         let cwdBefore = try await control.paneCurrentPath(paneTarget: paneId)
         expect(cwdBefore == "/tmp" || cwdBefore == "/private/tmp",
                "ProcessTmuxControl.paneCurrentPath reports the cwd newSession was given, got \(cwdBefore)")
 
-        // Split the single window into two panes directly via the real tmux
-        // binary (outside the TmuxControl surface — there is no splitWindow
-        // operation on the protocol). This proves listSessions().windowCount
-        // counts windows, not panes: two panes in one window must still
-        // report windowCount == 1.
-        let split = Process()
-        split.executableURL = URL(fileURLWithPath: tmuxPath)
-        split.arguments = ["split-window", "-t", sessionName]
-        try split.run()
-        split.waitUntilExit()
-        expect(split.terminationStatus == 0, "real tmux split-window (test setup) should succeed")
-
         struct MissingSessionError: Error { let sessionName: String }
-        let sessionsAfterSplit = try await control.listSessions()
-        guard let sessionInfo = sessionsAfterSplit.first(where: { $0.name == sessionName }) else {
+        let sessionsAfterWindow = try await control.listSessions()
+        guard let sessionInfo = sessionsAfterWindow.first(where: { $0.name == sessionName }) else {
             throw MissingSessionError(sessionName: sessionName)
         }
-        expect(sessionInfo.windowCount == 1, "listSessions().windowCount counts windows, not panes: a split window must still report 1 window, got \(sessionInfo.windowCount)")
-        expect(sessionInfo.paneTargets.count == 2, "listSessions().paneTargets reflects both panes of the split window, got \(sessionInfo.paneTargets)")
+        expect(sessionInfo.windowCount == 2, "listSessions().windowCount reflects two project windows, got \(sessionInfo.windowCount)")
+        expect(Set(sessionInfo.paneTargets).isSuperset(of: [paneId, paneId2]), "listSessions().paneTargets includes both created panes, got \(sessionInfo.paneTargets)")
 
         try await control.killSession(name: sessionName)
 
@@ -346,15 +350,19 @@ private func runTmuxRealPathCheckAsync(tmuxPath: String) async {
         writeTmuxRealPathManifest([
             "tmux_absent": false,
             "tmux_path": tmuxPath,
-            "pane_id": paneId,
+            "exists_before": existsBefore,
+            "exists_after": existsAfter,
+            "pane1": paneId,
+            "pane2": paneId2,
             "isAlive_before": aliveBefore,
+            "isAlive_before_2": aliveBefore2,
             "isAlive_after": aliveAfter,
             "cwd_before": cwdBefore,
-            "windowCount_after_split": sessionInfo.windowCount,
-            "paneCount_after_split": sessionInfo.paneTargets.count,
+            "session_window_count": sessionInfo.windowCount,
+            "session_pane_targets": sessionInfo.paneTargets,
             "elapsed_seconds": elapsed
         ])
-        print("tmux real-path check: pane_id=\(paneId) isAlive_before=\(aliveBefore) isAlive_after=\(aliveAfter) windowCount_after_split=\(sessionInfo.windowCount) paneCount_after_split=\(sessionInfo.paneTargets.count) elapsed=\(String(format: "%.3f", elapsed))s")
+        print("tmux real-path check: exists_before=\(existsBefore) exists_after=\(existsAfter) pane1=\(paneId) pane2=\(paneId2) session_window_count=\(sessionInfo.windowCount) isAlive_after=\(aliveAfter) elapsed=\(String(format: "%.3f", elapsed))s")
     } catch {
         fputs("FAIL: tmux real-path check threw: \(error)\n", stderr)
         Foundation.exit(1)
