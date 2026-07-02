@@ -5809,4 +5809,8 @@ do {
     print("dependencies guard: ContinuumRevivedCore target has zero dependencies")
 }
 
+// MARK: - Ticket 08: Sync/observation type split (ActivityStore)
+
+runActivityStoreTests()
+
 print("ContinuumRevivedCoreChecks passed")
