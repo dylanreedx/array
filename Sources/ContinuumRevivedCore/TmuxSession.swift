@@ -37,6 +37,18 @@ public enum TmuxSession {
         )
     }
 
+    public static func newWindowArguments(projectSessionName: String, cwd: String, innerCommand: [String]?) -> [String] {
+        var arguments = ["new-window", "-d", "-t", projectSessionName, "-c", cwd, "-P", "-F", "#{pane_id}"]
+        if let innerCommand, !innerCommand.isEmpty {
+            arguments.append(contentsOf: innerCommand)
+        }
+        return arguments
+    }
+
+    public static func isValidPaneId(_ value: String) -> Bool {
+        value.hasPrefix("%") && !value.dropFirst().isEmpty && value.dropFirst().allSatisfy(\.isNumber)
+    }
+
     /// Project-scoped session name (phase 1+). `ZoneRuntimeController` is the
     /// only authoritative caller — see `ZoneRuntimeController.projectSessionName()`.
     public static func projectSessionName(projectId: UUID) -> String {

@@ -22,6 +22,7 @@ final class TileSpawner {
 
     enum SpawnError: Error {
         case canvasUnavailable
+        case invalidPaneId(String)
     }
 
     struct AnnotatedProfile {
@@ -257,6 +258,9 @@ final class TileSpawner {
                 return try await control.newSession(name: sessionName, cwd: profile.cwd, innerCommand: innerCommand)
             }
         }
+        guard TmuxSession.isValidPaneId(paneTarget) else {
+            throw SpawnError.invalidPaneId(paneTarget)
+        }
         return (TmuxSession.attachWindowProfile(paneTarget: paneTarget, cwd: profile.cwd, tmuxPath: tmuxPath), paneTarget)
     }
 
@@ -465,7 +469,8 @@ final class TileSpawner {
             lastStartedAt: now,
             lastExit: existing.lastExit,
             agentDescriptor: existing.agentDescriptor,
-            scrollback: boundedScrollback
+            scrollback: boundedScrollback,
+            tmuxWindowTarget: existing.tmuxWindowTarget
         )
         try projectStore.saveSession(descriptor)
     }
@@ -3389,6 +3394,24 @@ final class TileSpawner {
             try expect(descriptor.command == fakeTmux.path, "project descriptor should launch tmux attach, got \(descriptor.command)")
             try expect(descriptor.args == ["attach-session", "-t", descriptor.tmuxWindowTarget ?? ""], "project descriptor should plain-attach to captured pane, got \(descriptor.args)")
         }
+        let flushDescriptorBefore = projectDescriptors[0]
+        let flushRuntime = GhosttyTerminalRuntime(
+            id: flushDescriptorBefore.id,
+            tileId: flushDescriptorBefore.tileId,
+            title: flushDescriptorBefore.title,
+            launchProfile: LaunchProfile(
+                command: flushDescriptorBefore.command,
+                arguments: flushDescriptorBefore.args,
+                cwd: "\(projectRoot.path)/flushed-cwd",
+                title: flushDescriptorBefore.title
+            ),
+            ghostty: projectGhostty,
+            displayDefaults: projectDefaults
+        )
+        try projectSpawner.flushTerminalSessionSnapshot(tileId: flushDescriptorBefore.tileId, runtime: flushRuntime)
+        let flushDescriptorAfter = try projectStore.loadSession(id: flushDescriptorBefore.id)
+        try expect(flushDescriptorAfter.tmuxWindowTarget == flushDescriptorBefore.tmuxWindowTarget, "terminal snapshot flush should preserve tmuxWindowTarget")
+        try expect(flushDescriptorAfter.cwd.hasSuffix("/flushed-cwd"), "terminal snapshot flush should still update live cwd")
 
         let descriptor = TerminalSessionDescriptor(
             id: UUID(),
@@ -3490,6 +3513,8 @@ final class TileSpawner {
             "projectWindow": [
                 "sessionName": projectSessionName,
                 "targets": projectTargets,
+                "flushPreservedTarget": flushDescriptorAfter.tmuxWindowTarget ?? "",
+                "flushCwd": flushDescriptorAfter.cwd,
                 "log": projectTmux.log.map(String.init(describing:))
             ],
             "toggleOff": ["command": offDescriptor.command, "args": offDescriptor.args, "cwd": offDescriptor.cwd],

@@ -47,10 +47,7 @@ public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {
     }
 
     public func newWindow(inSession: String, cwd: String, innerCommand: [String]?) async throws -> String {
-        var arguments = ["new-window", "-P", "-F", "#{pane_id}", "-t", inSession, "-c", cwd]
-        if let innerCommand, !innerCommand.isEmpty {
-            arguments.append(contentsOf: innerCommand)
-        }
+        let arguments = TmuxSession.newWindowArguments(projectSessionName: inSession, cwd: cwd, innerCommand: innerCommand)
         let result = try run(arguments)
         return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }

@@ -323,6 +323,30 @@ do {
     expect(kill.command == tmuxPath, "tmux kill command should use resolved tmux path")
     expect(kill.arguments == ["kill-session", "-t", name], "tmux kill command argv should target stable session name")
 
+    let projectSessionName = TmuxSession.projectSessionName(projectId: UUID(uuidString: "A0000000-0000-4000-8000-000000000036")!)
+    expect(projectSessionName == "continuum-proj-A0000000-0000-4000-8000-000000000036", "project tmux session name should be continuum-proj-prefixed project UUID")
+    let newWindowArgs = TmuxSession.newWindowArguments(
+        projectSessionName: projectSessionName,
+        cwd: "/tmp/Continuum Project",
+        innerCommand: ["/usr/bin/env", "bash", "-lc", "echo ready"]
+    )
+    expect(newWindowArgs == [
+        "new-window", "-d", "-t", projectSessionName, "-c", "/tmp/Continuum Project", "-P", "-F", "#{pane_id}",
+        "/usr/bin/env", "bash", "-lc", "echo ready"
+    ], "project new-window argv should pre-create detached and print pane id")
+    expect(
+        TmuxSession.newWindowArguments(projectSessionName: projectSessionName, cwd: "/tmp/plain", innerCommand: nil) == [
+            "new-window", "-d", "-t", projectSessionName, "-c", "/tmp/plain", "-P", "-F", "#{pane_id}"
+        ],
+        "project new-window argv should omit empty inner command"
+    )
+    let paneCases: [(String, Bool)] = [
+        ("%1", true), ("%42", true), ("%", false), ("", false), ("7", false), ("%7x", false), (" @7", false), ("% 7", false)
+    ]
+    for (value, expected) in paneCases {
+        expect(TmuxSession.isValidPaneId(value) == expected, "pane id validation for \(value.debugDescription) should be \(expected)")
+    }
+
     let suiteName = "continuum.tmux-p1-check.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suiteName)!
     defaults.removePersistentDomain(forName: suiteName)
@@ -1304,6 +1328,42 @@ do {
     let data = try JSONCodec.makeEncoder().encode(descriptor)
     let decoded = try JSONCodec.makeDecoder().decode(TerminalSessionDescriptor.self, from: data)
     expect(decoded == descriptor, "TerminalSessionDescriptor round trip")
+    let targetDescriptor = TerminalSessionDescriptor(
+        id: descriptor.id,
+        tileId: descriptor.tileId,
+        launchProfileId: descriptor.launchProfileId,
+        command: descriptor.command,
+        args: descriptor.args,
+        cwd: descriptor.cwd,
+        env: descriptor.env,
+        title: descriptor.title,
+        createdAt: descriptor.createdAt,
+        lastStartedAt: descriptor.lastStartedAt,
+        lastExit: nil,
+        scrollback: "line one",
+        tmuxWindowTarget: "%9"
+    )
+    expect(TerminalSessionDescriptor.currentSchemaVersion == 3, "TerminalSessionDescriptor current schema is v3 for tmuxWindowTarget")
+    let targetDecoded = try JSONCodec.makeDecoder().decode(TerminalSessionDescriptor.self, from: JSONCodec.makeEncoder().encode(targetDescriptor))
+    expect(targetDecoded == targetDescriptor, "TerminalSessionDescriptor v3 preserves tmuxWindowTarget and scrollback")
+    let v2SessionJSON = """
+    {
+      "schemaVersion": 2,
+      "id": "55555555-5555-5555-5555-555555555555",
+      "tileId": "66666666-6666-6666-6666-666666666666",
+      "launchProfileId": "shell",
+      "command": "/bin/zsh",
+      "args": [],
+      "cwd": "/tmp/x",
+      "env": {},
+      "title": "Shell",
+      "createdAt": "2023-11-14T22:13:20Z",
+      "lastStartedAt": "2023-11-14T22:21:40Z",
+      "scrollback": "legacy"
+    }
+    """.data(using: .utf8)!
+    let v2SessionDecoded = try JSONCodec.makeDecoder().decode(TerminalSessionDescriptor.self, from: v2SessionJSON)
+    expect(v2SessionDecoded.tmuxWindowTarget == nil, "TerminalSessionDescriptor v2 decode leaves absent tmuxWindowTarget nil")
     let withExit = TerminalSessionDescriptor(
         id: descriptor.id,
         tileId: descriptor.tileId,
