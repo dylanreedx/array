@@ -259,7 +259,12 @@ final class TileSpawner {
         terminalProjectContextProvider?().map(\.rootPath) ?? project.rootPath
     }
 
-    private func tmuxWrappedProfileIfAvailable(_ profile: LaunchProfile, tileId: UUID, target: TerminalSessionTarget?) throws -> (profile: LaunchProfile, windowTarget: String?) {
+    private func tmuxWrappedProfileIfAvailable(
+        _ profile: LaunchProfile,
+        tileId: UUID,
+        target: TerminalSessionTarget?,
+        existingWindowTarget: String? = nil
+    ) throws -> (profile: LaunchProfile, windowTarget: String?) {
         guard TmuxPersistenceConfig.enabled(defaults: defaults),
               let tmuxPath = tmuxPathResolver(defaults) else {
             return (profile, nil)
@@ -273,6 +278,12 @@ final class TileSpawner {
             return (TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath, reach: reach, defaults: defaults), nil)
         }
         let control = tmuxControlFactory(tmuxPath)
+        // Ticket 15: a restart/restore must not blindly create a new window when
+        // the persisted descriptor's pane is still alive — that orphans the old
+        // tmux window every relaunch. Re-bind to it instead.
+        if let existingWindowTarget, try Self.runTmuxControlOperationSync({ try await control.isAlive(paneTarget: existingWindowTarget) }) {
+            return (TmuxSession.attachWindowProfile(paneTarget: existingWindowTarget, cwd: profile.cwd, tmuxPath: tmuxPath), existingWindowTarget)
+        }
         let sessionName: String
         switch target {
         case let .project(projectId):
@@ -400,7 +411,12 @@ final class TileSpawner {
         )
         let wrappedProfile: (profile: LaunchProfile, windowTarget: String?)
         do {
-            wrappedProfile = try tmuxWrappedProfileIfAvailable(profileWithCwd, tileId: existing.id, target: terminalSessionTargetProvider?())
+            wrappedProfile = try tmuxWrappedProfileIfAvailable(
+                profileWithCwd,
+                tileId: existing.id,
+                target: terminalSessionTargetProvider?(),
+                existingWindowTarget: persistedDescriptor?.tmuxWindowTarget
+            )
         } catch {
             return .failure(error)
         }
@@ -3476,6 +3492,54 @@ final class TileSpawner {
             try expect(descriptor.command == fakeTmux.path, "project descriptor should launch tmux attach, got \(descriptor.command)")
             try expect(descriptor.args == ["attach-session", "-t", descriptor.tmuxWindowTarget ?? ""], "project descriptor should plain-attach to captured pane, got \(descriptor.args)")
         }
+
+        // Ticket 15 ("new-tile -> new-window"): restarting a project-zone tile
+        // whose persisted tmuxWindowTarget is still alive (the boot-time restore
+        // path — installInitialTerminalTile -> restartTerminalTile) must re-bind
+        // to that window rather than blindly creating a new one, or every launch
+        // orphans the previous tmux window. Uses a dedicated fourth tile (rather
+        // than reusing projectDescriptors[0]) so the restarted real terminal
+        // runtime this exercises can't race the flush check below, which reuses
+        // projectDescriptors[0]'s tileId for its own synthetic runtime.
+        let (restartCheckTile, restartCheckDescriptor) = try spawnAndDescriptor(spawner: projectSpawner, store: projectStore, canvas: projectCanvas)
+        let restartTileId = restartCheckTile.id
+        let liveTargetBeforeRestart = restartCheckDescriptor.tmuxWindowTarget
+        let newWindowCountBeforeLiveRestart = projectTmux.log.filter { if case .newWindow = $0 { return true }; return false }.count
+        let restartedLiveDescriptor = try restartAndDescriptor(tileId: restartTileId, spawner: projectSpawner, store: projectStore, canvas: projectCanvas)
+        let newWindowCountAfterLiveRestart = projectTmux.log.filter { if case .newWindow = $0 { return true }; return false }.count
+        try expect(
+            projectTmux.log.contains(.isAlive(target: liveTargetBeforeRestart ?? "")),
+            "restart should check the persisted pane's liveness via TmuxControl.isAlive before deciding, log=\(projectTmux.log)"
+        )
+        try expect(
+            newWindowCountAfterLiveRestart == newWindowCountBeforeLiveRestart,
+            "restart with a live persisted tmux window must not create a new window (ticket 15), log=\(projectTmux.log)"
+        )
+        try expect(
+            restartedLiveDescriptor.tmuxWindowTarget == liveTargetBeforeRestart,
+            "restart with a live persisted tmux window must reuse the same pane target, got \(restartedLiveDescriptor.tmuxWindowTarget ?? "nil") want \(liveTargetBeforeRestart ?? "nil")"
+        )
+        try expect(
+            restartedLiveDescriptor.args == ["attach-session", "-t", liveTargetBeforeRestart ?? ""],
+            "restart with a live target should plain-attach to the existing pane, got \(restartedLiveDescriptor.args)"
+        )
+
+        // Now kill that window out from under the descriptor (simulating a pane
+        // that died between launches) and restart again: a dead target must
+        // still fall back to creating a fresh window, exactly like today.
+        try Self.runTmuxControlOperationSync { try await projectTmux.killWindow(target: liveTargetBeforeRestart ?? "") }
+        let newWindowCountBeforeDeadRestart = projectTmux.log.filter { if case .newWindow = $0 { return true }; return false }.count
+        let restartedDeadDescriptor = try restartAndDescriptor(tileId: restartTileId, spawner: projectSpawner, store: projectStore, canvas: projectCanvas)
+        let newWindowCountAfterDeadRestart = projectTmux.log.filter { if case .newWindow = $0 { return true }; return false }.count
+        try expect(
+            newWindowCountAfterDeadRestart == newWindowCountBeforeDeadRestart + 1,
+            "restart with a dead persisted tmux window should create exactly one new window, log=\(projectTmux.log)"
+        )
+        try expect(
+            restartedDeadDescriptor.tmuxWindowTarget != nil && restartedDeadDescriptor.tmuxWindowTarget != liveTargetBeforeRestart,
+            "restart with a dead target should persist a fresh pane target, got \(restartedDeadDescriptor.tmuxWindowTarget ?? "nil")"
+        )
+
         let flushDescriptorBefore = projectDescriptors[0]
         let flushRuntime = GhosttyTerminalRuntime(
             id: flushDescriptorBefore.id,
