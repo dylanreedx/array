@@ -50,6 +50,7 @@ final class TileSpawner {
     /// process-wide active project root, allowing worktree project entries to
     /// spawn agents into their own checkout.
     var terminalProjectContextProvider: (() -> ProjectEntry?)?
+    var terminalSessionTargetProvider: (() -> TerminalSessionTarget?)?
     var browserProfileSwitchHandler: ((UUID, UUID) -> Void)?
     var browserProfileCreateHandler: ((UUID) -> Void)?
     var browserProfileRenameHandler: ((UUID, UUID) -> Void)?
@@ -182,11 +183,11 @@ final class TileSpawner {
             runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: launchProfileId, projectRelativeCwd: ".")
         )
-        let activeProjectId = (terminalProjectContextProvider?())?.id
+        let sessionTarget = terminalSessionTargetProvider?()
         let wrappedProfile: (profile: LaunchProfile, windowTarget: String?)
         do {
             wrappedProfile = allowTmuxPersistence
-                ? try tmuxWrappedProfileIfAvailable(profile, tileId: tile.id, projectId: activeProjectId)
+                ? try tmuxWrappedProfileIfAvailable(profile, tileId: tile.id, target: sessionTarget)
                 : (profile, nil)
         } catch {
             return .failure(error)
@@ -240,16 +241,26 @@ final class TileSpawner {
         terminalProjectContextProvider?().map(\.rootPath) ?? project.rootPath
     }
 
-    private func tmuxWrappedProfileIfAvailable(_ profile: LaunchProfile, tileId: UUID, projectId: UUID?) throws -> (profile: LaunchProfile, windowTarget: String?) {
+    private func tmuxWrappedProfileIfAvailable(_ profile: LaunchProfile, tileId: UUID, target: TerminalSessionTarget?) throws -> (profile: LaunchProfile, windowTarget: String?) {
         guard TmuxPersistenceConfig.enabled(defaults: defaults),
               let tmuxPath = tmuxPathResolver(defaults) else {
             return (profile, nil)
         }
-        guard let projectId else {
+        guard let target else {
+            return (TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath), nil)
+        }
+        if case .ambient = target,
+           !TmuxPersistenceConfig.ambientPerWorkspaceEnabled(defaults: defaults) {
             return (TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath), nil)
         }
         let control = tmuxControlFactory(tmuxPath)
-        let sessionName = TmuxSession.projectSessionName(projectId: projectId)
+        let sessionName: String
+        switch target {
+        case let .project(projectId):
+            sessionName = TmuxSession.projectSessionName(projectId: projectId)
+        case let .ambient(workspaceId):
+            sessionName = TmuxSession.ambientSessionName(workspaceId: workspaceId)
+        }
         let innerCommand = Self.innerCommand(for: profile)
         let paneTarget = try Self.runTmuxControlOperationSync {
             if try await control.sessionExists(name: sessionName) {
@@ -370,7 +381,7 @@ final class TileSpawner {
         )
         let wrappedProfile: (profile: LaunchProfile, windowTarget: String?)
         do {
-            wrappedProfile = try tmuxWrappedProfileIfAvailable(profileWithCwd, tileId: existing.id, projectId: (terminalProjectContextProvider?())?.id)
+            wrappedProfile = try tmuxWrappedProfileIfAvailable(profileWithCwd, tileId: existing.id, target: terminalSessionTargetProvider?())
         } catch {
             return .failure(error)
         }
@@ -3342,7 +3353,9 @@ final class TileSpawner {
         let enabledRoot = tempRoot.appendingPathComponent("enabled", isDirectory: true)
         let offRoot = tempRoot.appendingPathComponent("off", isDirectory: true)
         let absentRoot = tempRoot.appendingPathComponent("absent", isDirectory: true)
-        try [enabledRoot, offRoot, absentRoot].forEach { try fileManager.createDirectory(at: $0, withIntermediateDirectories: true) }
+        let ambientRoot = tempRoot.appendingPathComponent("ambient-workspace", isDirectory: true)
+        let ambientOffRoot = tempRoot.appendingPathComponent("ambient-off", isDirectory: true)
+        try [enabledRoot, offRoot, absentRoot, ambientRoot, ambientOffRoot].forEach { try fileManager.createDirectory(at: $0, withIntermediateDirectories: true) }
 
         let enabledDefaults = makeDefaults(enabled: true, path: fakeTmux.path)
         let enabledTmux = InMemoryTmuxControl()
@@ -3365,6 +3378,55 @@ final class TileSpawner {
         try expect(restartedDescriptor.args == expectedArgs, "enabled restart should keep same tmux session args, got \(restartedDescriptor.args)")
         try expect(spawnedDescriptor.args.firstIndex(of: expectedSessionName) == restartedDescriptor.args.firstIndex(of: expectedSessionName), "spawn and restart should carry the same session name")
 
+        let ambientDefaults = makeDefaults(enabled: true, path: fakeTmux.path)
+        ambientDefaults.set(true, forKey: TmuxPersistenceConfig.ambientPerWorkspaceKey)
+        let ambientTmux = InMemoryTmuxControl()
+        let (ambientSpawner, ambientStore, ambientCanvas, ambientBrowser, ambientGhostty) = try makeSpawner(
+            root: ambientRoot,
+            defaults: ambientDefaults,
+            resolver: { _ in fakeTmux.path },
+            tmuxControlFactory: { _ in ambientTmux }
+        )
+        defer { ambientGhostty.shutdown(); ambientBrowser.shutdown() }
+        let ambientWorkspaceId = UUID(uuidString: "A2222222-2222-4222-8222-222222222222")!
+        ambientSpawner.terminalSessionTargetProvider = { .ambient(workspaceId: ambientWorkspaceId) }
+        var ambientDescriptors: [TerminalSessionDescriptor] = []
+        for _ in 0..<2 {
+            let (_, descriptor) = try spawnAndDescriptor(spawner: ambientSpawner, store: ambientStore, canvas: ambientCanvas)
+            ambientDescriptors.append(descriptor)
+        }
+        let ambientSessionName = TmuxSession.ambientSessionName(workspaceId: ambientWorkspaceId)
+        let ambientTargets = ambientDescriptors.compactMap(\.tmuxWindowTarget)
+        try expect(ambientTmux.log.filter { if case .newSession = $0 { return true }; return false }.count == 1, "ambient spawns should create exactly one workspace tmux session, log=\(ambientTmux.log)")
+        try expect(ambientTmux.log.filter { if case .newWindow = $0 { return true }; return false }.count == 1, "ambient spawns should create exactly one second workspace window, log=\(ambientTmux.log)")
+        try expect(!ambientTmux.log.contains { if case .killWindow = $0 { return true }; return false }, "successful ambient spawn should not compensate-kill a window, log=\(ambientTmux.log)")
+        try expect(ambientTargets.count == 2 && Set(ambientTargets).count == 2, "ambient descriptors should persist two distinct pane targets, got \(ambientTargets)")
+        try expect(ambientTmux.sessions[ambientSessionName] == ambientTargets, "fake ambient session should contain exactly persisted targets")
+        for descriptor in ambientDescriptors {
+            try expect(descriptor.command == fakeTmux.path, "ambient descriptor should launch tmux attach, got \(descriptor.command)")
+            try expect(descriptor.args == ["attach-session", "-t", descriptor.tmuxWindowTarget ?? ""], "ambient descriptor should plain-attach to captured pane, got \(descriptor.args)")
+            try expect(!descriptor.args.contains("new-session") && !descriptor.args.contains("new-window") && !descriptor.args.contains("-A"), "ambient descriptor argv must not create or attach-if-exists, got \(descriptor.args)")
+        }
+
+        let ambientOffDefaults = makeDefaults(enabled: true, path: fakeTmux.path)
+        ambientOffDefaults.set(false, forKey: TmuxPersistenceConfig.ambientPerWorkspaceKey)
+        let ambientOffTmux = InMemoryTmuxControl()
+        let (ambientOffSpawner, ambientOffStore, ambientOffCanvas, ambientOffBrowser, ambientOffGhostty) = try makeSpawner(
+            root: ambientOffRoot,
+            defaults: ambientOffDefaults,
+            resolver: { _ in fakeTmux.path },
+            tmuxControlFactory: { _ in ambientOffTmux }
+        )
+        defer { ambientOffGhostty.shutdown(); ambientOffBrowser.shutdown() }
+        let ambientOffWorkspaceId = UUID(uuidString: "A3333333-3333-4333-8333-333333333333")!
+        ambientOffSpawner.terminalSessionTargetProvider = { .ambient(workspaceId: ambientOffWorkspaceId) }
+        let (ambientOffTile, ambientOffDescriptor) = try spawnAndDescriptor(spawner: ambientOffSpawner, store: ambientOffStore, canvas: ambientOffCanvas)
+        let expectedAmbientOffSessionName = TmuxSession.sessionName(tileId: ambientOffTile.id)
+        try expect(ambientOffDescriptor.tmuxWindowTarget == nil, "ambient fallback-off should not persist a workspace window target")
+        try expect(ambientOffTmux.log.isEmpty, "ambient fallback-off should not call TmuxControl, log=\(ambientOffTmux.log)")
+        try expect(ambientOffDescriptor.command == fakeTmux.path, "ambient fallback-off should still use tmux per-tile wrapper")
+        try expect(ambientOffDescriptor.args.prefix(5) == ["new-session", "-A", "-s", expectedAmbientOffSessionName, "-c"], "ambient fallback-off should use per-tile new-session -A wrapper, got \(ambientOffDescriptor.args)")
+
         let projectRoot = tempRoot.appendingPathComponent("project-window", isDirectory: true)
         try fileManager.createDirectory(at: projectRoot, withIntermediateDirectories: true)
         let projectTmux = InMemoryTmuxControl()
@@ -3379,6 +3441,7 @@ final class TileSpawner {
         let projectId = UUID()
         let projectEntry = ProjectEntry(id: projectId, name: "Project Window", rootPath: projectRoot.path, workspaceId: nil, lastOpenedAt: Date(), pinned: false, missing: false)
         projectSpawner.terminalProjectContextProvider = { projectEntry }
+        projectSpawner.terminalSessionTargetProvider = { .project(projectId: projectId) }
         var projectDescriptors: [TerminalSessionDescriptor] = []
         for _ in 0..<3 {
             let (_, descriptor) = try spawnAndDescriptor(spawner: projectSpawner, store: projectStore, canvas: projectCanvas)
@@ -3463,6 +3526,7 @@ final class TileSpawner {
         failureSpawner.terminalProjectContextProvider = {
             ProjectEntry(id: failureProjectId, name: "Failing Project", rootPath: failureRoot.path, workspaceId: nil, lastOpenedAt: Date(), pinned: false, missing: false)
         }
+        failureSpawner.terminalSessionTargetProvider = { .project(projectId: failureProjectId) }
         switch failureSpawner.spawnTerminal(profileId: "shell") {
         case .failure:
             break
@@ -3516,6 +3580,19 @@ final class TileSpawner {
                 "flushPreservedTarget": flushDescriptorAfter.tmuxWindowTarget ?? "",
                 "flushCwd": flushDescriptorAfter.cwd,
                 "log": projectTmux.log.map(String.init(describing:))
+            ],
+            "ambientWorkspace": [
+                "sessionName": ambientSessionName,
+                "targets": ambientTargets,
+                "descriptors": ambientDescriptors.map { ["args": $0.args, "target": $0.tmuxWindowTarget ?? ""] },
+                "log": ambientTmux.log.map(String.init(describing:))
+            ],
+            "ambientFallbackOff": [
+                "workspaceId": ambientOffWorkspaceId.uuidString,
+                "tileSessionName": expectedAmbientOffSessionName,
+                "target": ambientOffDescriptor.tmuxWindowTarget as Any,
+                "args": ambientOffDescriptor.args,
+                "log": ambientOffTmux.log.map(String.init(describing:))
             ],
             "toggleOff": ["command": offDescriptor.command, "args": offDescriptor.args, "cwd": offDescriptor.cwd],
             "tmuxAbsent": ["command": absentDescriptor.command, "args": absentDescriptor.args, "cwd": absentDescriptor.cwd]

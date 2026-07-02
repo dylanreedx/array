@@ -155,6 +155,11 @@ public enum SettingsSchema {
                         label: "tmux Path",
                         default: TmuxPersistenceConfig.defaultPath
                     ),
+                    .toggle(
+                        key: TmuxPersistenceConfig.ambientPerWorkspaceKey,
+                        label: "Share Ambient Terminal Session per Workspace",
+                        default: TmuxPersistenceConfig.ambientPerWorkspaceDefault
+                    ),
                     .text(
                         key: TerminalDisplayConfig.fontSizeKey,
                         label: "Shell Font Size (0 = Ghostty default)",

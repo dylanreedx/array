@@ -76,6 +76,11 @@ public enum TmuxSession {
     }
 }
 
+public enum TerminalSessionTarget: Sendable, Equatable {
+    case project(projectId: UUID)
+    case ambient(workspaceId: UUID)
+}
+
 public enum TmuxLocator {
     private static let fallbackPaths = [
         "/opt/homebrew/bin/tmux",
@@ -125,6 +130,9 @@ public enum TmuxPersistenceConfig {
     public static let pathKey = "continuum.terminal.tmux.path"
     public static let defaultPath = ""
 
+    public static let ambientPerWorkspaceKey = "continuum.terminal.tmux.ambientPerWorkspace"
+    public static let ambientPerWorkspaceDefault = false
+
     public static func enabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: enabledKey) != nil
             ? defaults.bool(forKey: enabledKey)
@@ -135,5 +143,11 @@ public enum TmuxPersistenceConfig {
         defaults.object(forKey: pathKey) != nil
             ? defaults.string(forKey: pathKey) ?? defaultPath
             : defaultPath
+    }
+
+    public static func ambientPerWorkspaceEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: ambientPerWorkspaceKey) != nil
+            ? defaults.bool(forKey: ambientPerWorkspaceKey)
+            : ambientPerWorkspaceDefault
     }
 }

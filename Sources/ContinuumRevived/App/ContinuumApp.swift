@@ -1902,6 +1902,20 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--terminal-tmux-ambient-workspace-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let spawnArtifact = try TileSpawner.runTerminalTmuxPersistenceSelfCheck()
+                let deleteArtifact = try AppDelegate.runTerminalTmuxDeleteLifecycleSelfCheck()
+                print("ContinuumRevivedTerminalAmbientWorkspaceChecks passed: spawn=\(spawnArtifact.path) delete=\(deleteArtifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--terminal-tmux-live-integration-check") {
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
@@ -2433,6 +2447,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             spawner.terminalProjectContextProvider = { [weak self] in
                 self?.activeZoneProjectEntry()
+            }
+            spawner.terminalSessionTargetProvider = { [weak self] in
+                guard let self else { return nil }
+                if let projectId = activeZoneProjectEntry()?.id {
+                    return .project(projectId: projectId)
+                }
+                if let workspaceId = workspaceRuntime?.workspaceId {
+                    return .ambient(workspaceId: workspaceId)
+                }
+                return nil
             }
             spawner.browserProfileSwitchHandler = { [weak self] tileId, profileId in
                 self?.switchBrowserTileProfile(tileId: tileId, profileId: profileId)
@@ -6682,6 +6706,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
             let deletingCurrent = workspaceRuntime?.workspaceId == workspaceId || registry.lastActiveWorkspaceId == workspaceId
             workspaceRuntime?.flushAll()
+            killAmbientTmuxSessionForDeletedWorkspace(workspaceId: workspaceId)
             guard registry.deleteWorkspace(id: workspaceId, now: Date()) else {
                 setWorkspaceManagementMessage("Workspace could not be deleted.")
                 return false
@@ -6700,6 +6725,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             fputs("Delete Workspace failed: \(error)\n", stderr)
             setWorkspaceManagementMessage("Delete workspace failed: \(error.localizedDescription)")
             return false
+        }
+    }
+
+    private func killAmbientTmuxSessionForDeletedWorkspace(workspaceId: UUID) {
+        guard TmuxPersistenceConfig.enabled(defaults: tmuxDefaults),
+              let tmuxPath = tmuxPathResolver(tmuxDefaults) else {
+            return
+        }
+        let sessionName = TmuxSession.ambientSessionName(workspaceId: workspaceId)
+        let control = tmuxControlFactory(tmuxPath)
+        if let error = Self.runTmuxControlOperationSync({ try await control.killSession(name: sessionName) }) {
+            fputs("tmux kill-session failed for workspace=\(workspaceId.uuidString) session=\(sessionName): \(error)\n", stderr)
         }
     }
 
@@ -11082,6 +11119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             delegate.tmuxDefaults = defaults
             delegate.tmuxPathResolver = { _ in fakeTmuxPath }
             delegate.tmuxControlFactory = { _ in tmuxControl }
+            delegate.registryStore = RegistryStore(applicationSupportDirectory: root)
             delegate.suppressTerminateOnWindowCloseForQA = true
             canvas.onTileCloseRequested = { [weak delegate] tileId in
                 delegate?.deleteTile(id: tileId)
@@ -11230,6 +11268,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }) == nil, "sentinel tmux control operation should run")
         let sentinelKillDetected = sentinelTmuxControl.log.contains(.killSession(name: "continuum-proj-sentinel"))
         try expect(sentinelKillDetected, "sentinel should prove InMemoryTmuxControl records killSession")
+
+        let workspaceDeleteTmuxControl = InMemoryTmuxControl()
+        let workspaceDeleteRoot = tempRoot.appendingPathComponent("workspace-delete", isDirectory: true)
+        try fileManager.createDirectory(at: workspaceDeleteRoot, withIntermediateDirectories: true)
+        let (workspaceDeleteDelegate, _, workspaceDeleteBrowserEngine, _) = try makeDelegate(
+            root: workspaceDeleteRoot,
+            defaults: defaults,
+            fakeTmuxPath: fakeTmuxPath,
+            tmuxControl: workspaceDeleteTmuxControl
+        )
+        defer { workspaceDeleteBrowserEngine.shutdown() }
+        let currentWorkspaceId = UUID(uuidString: "77777777-7777-4777-8777-777777777777")!
+        let deletedWorkspaceId = UUID(uuidString: "88888888-8888-4888-8888-888888888888")!
+        let now = Date(timeIntervalSince1970: 1_717_000_100)
+        let workspaceDeleteRegistry = Registry(
+            lastActiveWorkspaceId: currentWorkspaceId,
+            lastActiveProjectId: nil,
+            workspaces: [
+                WorkspaceEntry(id: currentWorkspaceId, name: "Current", projectIds: [], createdAt: now, updatedAt: now),
+                WorkspaceEntry(id: deletedWorkspaceId, name: "Delete Me", projectIds: [], createdAt: now, updatedAt: now)
+            ],
+            projects: [],
+            settings: RegistrySettings(preferredEditor: .auto, zoomModifier: .command, openLastProjectOnLaunch: true)
+        )
+        try workspaceDeleteDelegate.registryStore?.save(workspaceDeleteRegistry)
+        workspaceDeleteDelegate.workspaceDeleteConfirmationProvider = { request in
+            request.workspaceId == deletedWorkspaceId
+        }
+        try expect(workspaceDeleteDelegate.deleteWorkspaceAndRelaunch(workspaceId: deletedWorkspaceId), "workspace delete should succeed in the two-workspace fixture")
+        let expectedAmbientWorkspaceSession = TmuxSession.ambientSessionName(workspaceId: deletedWorkspaceId)
+        try expect(
+            workspaceDeleteTmuxControl.log.contains(.killSession(name: expectedAmbientWorkspaceSession)),
+            "workspace delete should kill the ambient workspace tmux session before deleting registry entry, got \(workspaceDeleteTmuxControl.log)"
+        )
+        try expect(!workspaceDeleteTmuxControl.log.contains { call in
+            if case let .killSession(name) = call { return name.hasPrefix("continuum-proj-") || name.hasPrefix("continuum-") && !name.hasPrefix("continuum-ws-") }
+            return false
+        }, "workspace delete must target only continuum-ws session, got \(workspaceDeleteTmuxControl.log)")
 
         let disabledTmuxControl = InMemoryTmuxControl()
         let disabledRoot = tempRoot.appendingPathComponent("disabled", isDirectory: true)

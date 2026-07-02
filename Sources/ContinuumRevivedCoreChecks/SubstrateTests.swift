@@ -373,7 +373,8 @@ func runTmuxRealPathCheck() {
 
 private func runTmuxRealPathCheckAsync(tmuxPath: String) async {
     let control = ProcessTmuxControl(tmuxPath: tmuxPath)
-    let sessionName = "continuum-substrate-check"
+    let ambientWorkspaceId = UUID(uuidString: "A4444444-4444-4444-8444-444444444444")!
+    let sessionName = TmuxSession.ambientSessionName(workspaceId: ambientWorkspaceId)
     let start = Date()
 
     do {
@@ -412,33 +413,50 @@ private func runTmuxRealPathCheckAsync(tmuxPath: String) async {
         guard let sessionInfo = sessionsAfterWindow.first(where: { $0.name == sessionName }) else {
             throw MissingSessionError(sessionName: sessionName)
         }
-        expect(sessionInfo.windowCount == 2, "listSessions().windowCount reflects two project windows, got \(sessionInfo.windowCount)")
+        expect(sessionInfo.windowCount == 2, "listSessions().windowCount reflects two ambient workspace windows, got \(sessionInfo.windowCount)")
         expect(Set(sessionInfo.paneTargets).isSuperset(of: [paneId, paneId2]), "listSessions().paneTargets includes both created panes, got \(sessionInfo.paneTargets)")
 
-        try await control.killSession(name: sessionName)
+        try await control.killWindow(target: paneId2)
+        let sessionsAfterOneWindowKill = try await control.listSessions()
+        guard let sessionAfterOneKill = sessionsAfterOneWindowKill.first(where: { $0.name == sessionName }) else {
+            throw MissingSessionError(sessionName: sessionName)
+        }
+        expect(sessionAfterOneKill.windowCount == 1, "killing one ambient workspace window should leave the workspace session alive with one window, got \(sessionAfterOneKill.windowCount)")
+        expect(sessionAfterOneKill.paneTargets == [paneId], "remaining ambient workspace pane should be the first pane, got \(sessionAfterOneKill.paneTargets)")
+        let pane2AliveAfterKill = try await control.isAlive(paneTarget: paneId2)
+        expect(!pane2AliveAfterKill, "killed ambient workspace pane should no longer be alive")
 
+        try await control.killWindow(target: paneId)
         let aliveAfter = try await control.isAlive(paneTarget: paneId)
-        expect(!aliveAfter, "ProcessTmuxControl.isAlive is false after killSession")
+        expect(!aliveAfter, "ProcessTmuxControl.isAlive is false after killing the final ambient workspace window")
+        let existsAfterFinalWindowKill = try await control.sessionExists(name: sessionName)
+        expect(!existsAfterFinalWindowKill, "killing the final ambient workspace window should let tmux reap the session")
 
         let elapsed = Date().timeIntervalSince(start)
         writeTmuxRealPathManifest([
             "tmux_absent": false,
             "tmux_path": tmuxPath,
+            "ambient_workspace_id": ambientWorkspaceId.uuidString,
+            "ambient_session_name": sessionName,
             "exists_before": existsBefore,
             "exists_after": existsAfter,
             "pane1": paneId,
             "pane2": paneId2,
             "isAlive_before": aliveBefore,
             "isAlive_before_2": aliveBefore2,
+            "isAlive_pane2_after_one_kill": pane2AliveAfterKill,
             "isAlive_after": aliveAfter,
+            "exists_after_final_window_kill": existsAfterFinalWindowKill,
             "cwd_before": cwdBefore,
             "pane_current_command": paneCurrentCommand,
             "classified_kind": classifiedKind.rawValue,
             "session_window_count": sessionInfo.windowCount,
+            "session_window_count_after_one_kill": sessionAfterOneKill.windowCount,
             "session_pane_targets": sessionInfo.paneTargets,
+            "session_pane_targets_after_one_kill": sessionAfterOneKill.paneTargets,
             "elapsed_seconds": elapsed
         ])
-        print("tmux real-path check: exists_before=\(existsBefore) exists_after=\(existsAfter) pane1=\(paneId) pane2=\(paneId2) pane_current_command=\(paneCurrentCommand) classified_kind=\(classifiedKind.rawValue) session_window_count=\(sessionInfo.windowCount) isAlive_after=\(aliveAfter) elapsed=\(String(format: "%.3f", elapsed))s")
+        print("tmux real-path check: ambient_session=\(sessionName) exists_before=\(existsBefore) exists_after=\(existsAfter) pane1=\(paneId) pane2=\(paneId2) pane_current_command=\(paneCurrentCommand) classified_kind=\(classifiedKind.rawValue) session_window_count=\(sessionInfo.windowCount) after_one_kill=\(sessionAfterOneKill.windowCount) exists_after_final_window_kill=\(existsAfterFinalWindowKill) elapsed=\(String(format: "%.3f", elapsed))s")
     } catch {
         fputs("FAIL: tmux real-path check threw: \(error)\n", stderr)
         Foundation.exit(1)

@@ -172,6 +172,7 @@ run_app_check .build/debug/continuum-revived --project-root-resolution-check
 run_app_check .build/debug/continuum-revived --project-picker-resolution-check
 run_app_check .build/debug/continuum-revived --terminal-tmux-persistence-check
 run_app_check .build/debug/continuum-revived --terminal-tmux-delete-lifecycle-check
+run_app_check .build/debug/continuum-revived --terminal-tmux-ambient-workspace-check
 # These five render a real terminal/Ghostty surface and time out in a headless
 # sandbox ("waiting for initial real terminal surface"; --session-resume-check
 # ticks ghostty_app_tick until real output appears and times out identically

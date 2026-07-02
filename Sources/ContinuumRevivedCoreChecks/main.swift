@@ -357,11 +357,24 @@ do {
     defaults.removePersistentDomain(forName: suiteName)
     expect(TmuxPersistenceConfig.enabled(defaults: defaults), "tmux persistence should default enabled")
     expect(TmuxPersistenceConfig.path(defaults: defaults) == "", "tmux persistence path should default empty")
+    expect(!TmuxPersistenceConfig.ambientPerWorkspaceEnabled(defaults: defaults), "ambient per-workspace tmux should default disabled")
     defaults.set(false, forKey: TmuxPersistenceConfig.enabledKey)
     defaults.set("/custom/tmux", forKey: TmuxPersistenceConfig.pathKey)
+    defaults.set(true, forKey: TmuxPersistenceConfig.ambientPerWorkspaceKey)
     expect(!TmuxPersistenceConfig.enabled(defaults: defaults), "tmux persistence enabled should read persisted false")
     expect(TmuxPersistenceConfig.path(defaults: defaults) == "/custom/tmux", "tmux persistence path should read persisted path")
+    expect(TmuxPersistenceConfig.ambientPerWorkspaceEnabled(defaults: defaults), "ambient per-workspace tmux should read persisted true")
     expect(TmuxLocator.resolve(defaults: defaults) == "/custom/tmux", "tmux locator should prefer explicit configured path")
+
+    let targetId = UUID(uuidString: "A0000000-0000-4000-8000-000000000037")!
+    let ambientTarget = TerminalSessionTarget.ambient(workspaceId: targetId)
+    let projectTarget = TerminalSessionTarget.project(projectId: targetId)
+    expect(ambientTarget != projectTarget, "TerminalSessionTarget ambient and project cases must be distinct for the same UUID")
+    var sawAmbient = false
+    if case .ambient(let workspaceId) = ambientTarget {
+        sawAmbient = workspaceId == targetId
+    }
+    expect(sawAmbient, "TerminalSessionTarget ambient case should switch with its workspace id")
 }
 
 do {
