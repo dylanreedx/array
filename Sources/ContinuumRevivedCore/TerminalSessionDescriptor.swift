@@ -75,9 +75,9 @@ public struct TerminalSessionDescriptor: Codable, Equatable, Sendable {
         scrollback = try container.decodeIfPresent(String.self, forKey: .scrollback)
     }
 
-    public func restoredForBoot() -> TerminalSessionDescriptor {
+    public func restoredForBoot(now: Date = Date()) -> TerminalSessionDescriptor {
         var restored = self
-        restored.agentDescriptor = agentDescriptor?.restoredForBoot()
+        restored.agentDescriptor = agentDescriptor?.restoredForBoot(now: now)
         return restored
     }
 }

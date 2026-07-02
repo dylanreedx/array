@@ -5826,4 +5826,572 @@ runSidebarActivityTreeSnapshotTests()
 runSubstrateTests()
 runTmuxRealPathCheck()
 
+// MARK: - Ticket 13: Invariant spine harness (I1-I8)
+//
+// A tiny helper both full and stub blocks call, so EVERY block writes-then-reads-back.
+// This is why there is never an unused `manifest` variable anywhere in this ticket:
+// the manifest is always consumed by writing it and reading it back.
+// NOTE: deliberately no `defer { removeItem }` here (unlike the ticket's own breadcrumb).
+// The overnight loop reads manifest files on disk to know which invariants have
+// graduated from stub to full (see "Watch out for" in the ticket), and the ticket's own
+// dogfood step says "opening one of those JSON files in any editor shows measured
+// values" — both are impossible if the run deletes the directory before printing its
+// path. Manifests are left on disk under NSTemporaryDirectory() for inspection; each run
+// gets its own UUID-suffixed directory so concurrent/successive runs never collide.
+func writeAndVerify(_ manifest: InvariantManifest) throws {
+    let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("continuum-\(manifest.invariantId)-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+    try InvariantManifestWriter.write(manifest, to: tmpDir)
+    let file = tmpDir.appendingPathComponent("invariant-\(manifest.invariantId)-\(manifest.runId).json")
+    let readBack = try JSONDecoder().decode(InvariantManifest.self, from: Data(contentsOf: file))
+    expect(readBack == manifest, "\(manifest.invariantId): manifest round-trips through the real filesystem")
+    print("\(manifest.invariantId): manifest at \(file.path)")
+}
+
+// MARK: - InvariantManifest Codable conditional-encode check
+//
+// Ticket contract ("How we test it"): an InvariantManifest with outcome "fail" and a
+// non-nil failureReason must encode with the failureReason key PRESENT; one with
+// outcome "pass" and failureReason nil must encode with the key ABSENT. Every I1-I8
+// block below sets failureReason: nil, so without this block the fail path and the
+// Codable conditional-encode behavior are never exercised.
+do {
+    let encoder = JSONEncoder()
+    let fixedNow = Date(timeIntervalSince1970: 1_800_000_000)
+
+    let failManifest = InvariantManifest(
+        invariantId: "manifest-codable-fail-path",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: fixedNow),
+        measurements: ["probe": .bool(true)],
+        outcome: InvariantOutcome.fail.rawValue,
+        failureReason: "synthetic failure to exercise the Codable conditional-encode path"
+    )
+    let failEncoded = try encoder.encode(failManifest)
+    let failJSON = try JSONSerialization.jsonObject(with: failEncoded) as? [String: Any] ?? [:]
+    expect(failJSON.keys.contains("failureReason"),
+           "InvariantManifest: outcome=fail with non-nil failureReason must encode the failureReason key")
+
+    let passManifest = InvariantManifest(
+        invariantId: "manifest-codable-pass-path",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: fixedNow),
+        measurements: ["probe": .bool(true)],
+        outcome: InvariantOutcome.pass.rawValue,
+        failureReason: nil
+    )
+    let passEncoded = try encoder.encode(passManifest)
+    let passJSON = try JSONSerialization.jsonObject(with: passEncoded) as? [String: Any] ?? [:]
+    expect(!passJSON.keys.contains("failureReason"),
+           "InvariantManifest: outcome=pass with nil failureReason must NOT encode the failureReason key")
+
+    // Round-trip the non-nil-failureReason (fail) manifest through the real filesystem to
+    // prove the write/read/equality path handles a fail-outcome manifest correctly. This
+    // is a synthetic manifest that exists only to exercise the Codable conditional-encode
+    // logic — it is not one of the I1-I8 invariant blocks below. `writeAndVerify` is
+    // deliberately leave-on-disk (see its own comment) so the overnight loop can scan
+    // I1-I8 manifests; reusing it here would leave a synthetic "outcome": "fail" manifest
+    // sitting on disk after every PASSING matrix run, indistinguishable to an overnight
+    // reader from a genuine invariant failure. So this block does its own write-read-back
+    // and cleans up its temp directory immediately afterward.
+    let synthTmpDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("continuum-synthetic-\(failManifest.invariantId)-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: synthTmpDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: synthTmpDir) }
+    try InvariantManifestWriter.write(failManifest, to: synthTmpDir)
+    let synthFile = synthTmpDir.appendingPathComponent("invariant-\(failManifest.invariantId)-\(failManifest.runId).json")
+    let synthReadBack = try JSONDecoder().decode(InvariantManifest.self, from: Data(contentsOf: synthFile))
+    expect(synthReadBack == failManifest, "InvariantManifest: fail-outcome manifest round-trips through the real filesystem")
+}
+
+// MARK: - Invariant I6: Status soundness
+
+do {
+    // Full assertion: AgentStatusEngine is the existing pure derivation.
+    // Every signal combination maps to a measured status; unknown never fabricates.
+    //
+    // MEASURED-VALUE RULE: the timing thresholds in the manifest are READ from the same
+    // Configuration value we inject into the engine — they are never typed as literals.
+    // The engine's `configuration` property is private, so we hold our own Configuration
+    // and inject it; the manifest then reports exactly what the engine ran with.
+    let config = AgentStatusEngine.Configuration()   // default: hysteresis 5s, stale 300s
+    let fakeNow = Date(timeIntervalSince1970: 1_800_000_000)
+    var engine = AgentStatusEngine(initialStatus: .configuring, now: fakeNow, configuration: config)
+
+    // No signals → status stays as initialised, never fabricates a deep status
+    let afterTick = engine.tick(at: fakeNow.addingTimeInterval(10))
+    expect(afterTick == .configuring, "I6: no-signal tick must not fabricate a new status")
+
+    // Stale timeout: at/after config.staleTimeout with no signals, becomes .stale
+    let afterStale = engine.tick(at: fakeNow.addingTimeInterval(config.staleTimeout + 1))
+    expect(afterStale == .stale, "I6: past staleTimeout with no signals must yield .stale, never a fabricated status")
+
+    // needsAttention from title wins over working from output
+    var attentionEngine = AgentStatusEngine(initialStatus: .idle, now: fakeNow, configuration: config)
+    _ = attentionEngine.ingest(.outputActivity, at: fakeNow.addingTimeInterval(1))
+    let afterAttention = attentionEngine.ingest(.terminalTitle("Agent needs attention"), at: fakeNow.addingTimeInterval(2))
+    expect(afterAttention == .needsAttention, "I6: needsAttention from title beats outputActivity")
+
+    // explicit signal takes precedence over inferred signal
+    var explicitEngine = AgentStatusEngine(initialStatus: .idle, now: fakeNow, configuration: config)
+    _ = explicitEngine.ingest(.outputActivity, at: fakeNow.addingTimeInterval(1))          // infers .working
+    let afterExplicit = explicitEngine.ingest(.explicit(.done), at: fakeNow.addingTimeInterval(2))
+    expect(afterExplicit == .done, "I6: explicit signal overrides inferred signal")
+
+    // The count below is the FALSIFIABLE contract: these are exactly the four cases the
+    // block asserts, one measured entry each. Adding a fifth case is a deliberate change
+    // that MUST bump this literal in the same commit (see "Watch out for"). There is no
+    // "at minimum" here — four is the number, and the enumerated cases above are four.
+    // Every one of the four cases records its actual derived status (not just a
+    // hardcoded boolean) so the manifest is falsifiable: if the engine ever regressed to
+    // fabricate a different status, these string fields would show the wrong value even
+    // though `attention_beats_working` / `explicit_beats_inferred` compare against the
+    // SAME measured value the expect() above already checked, not a separate literal.
+    let measurements: [String: JSONValue] = [
+        "checked_signal_combinations": .int(4),
+        "stale_timeout_seconds": .double(config.staleTimeout),        // sourced from live Configuration
+        "hysteresis_seconds": .double(config.workingHysteresis),      // sourced from live Configuration
+        "no_signal_status": .string(afterTick.rawValue),               // measured: must equal .configuring
+        "stale_status": .string(afterStale.rawValue),                  // measured: must equal .stale
+        "attention_status": .string(afterAttention.rawValue),          // measured: must equal .needsAttention
+        "attention_beats_working": .bool(afterAttention == .needsAttention),
+        "explicit_status": .string(afterExplicit.rawValue),            // measured: must equal .done
+        "explicit_beats_inferred": .bool(afterExplicit == .done)
+    ]
+    let manifest = InvariantManifest(
+        invariantId: "I6-status-soundness",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: fakeNow),
+        measurements: measurements,
+        outcome: InvariantOutcome.pass.rawValue,
+        failureReason: nil
+    )
+    try writeAndVerify(manifest)
+}
+
+// MARK: - Invariant I7: Snapshot round-trip
+
+do {
+    // TerminalSessionDescriptor, CanvasState, WorkspaceDocument are all Codable.
+    // Round-trip each through JSONEncoder/JSONDecoder and assert FULL-VALUE equality.
+    //
+    // ROUND-TRIP CONTRACT (stated explicitly because these two fields are the ones most
+    // likely to silently break equality across a schema bump):
+    //   - schemaVersion MUST survive the round trip. The custom Decoder decodes it as a
+    //     REQUIRED key (container.decode, non-optional), so any encode that drops it makes
+    //     the decode throw — the assertion below would fail loudly, not silently.
+    //   - scrollback MUST survive the round trip. It is decoded with decodeIfPresent, so a
+    //     nil round-trips to nil and a set value round-trips to the same value; the
+    //     equality assertion is what guarantees a set scrollback is preserved.
+    // We construct the descriptor WITH an explicit schemaVersion and a non-nil scrollback
+    // so both load-bearing fields are actually exercised by the equality check.
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+
+    let tileId = UUID(uuidString: "B0000000-0000-4000-8000-000000000701")!
+    let descriptor = TerminalSessionDescriptor(
+        schemaVersion: TerminalSessionDescriptor.currentSchemaVersion,   // explicit, not the default
+        id: UUID(uuidString: "B0000000-0000-4000-8000-000000000702")!,
+        tileId: tileId,
+        launchProfileId: "default",
+        command: "/bin/zsh",
+        args: [],
+        cwd: "/tmp/i7-fixture",
+        env: ["TERM": "xterm-256color"],
+        title: "I7 fixture",
+        createdAt: Date(timeIntervalSince1970: 1_800_000_000),
+        lastStartedAt: Date(timeIntervalSince1970: 1_800_000_001),
+        lastExit: nil,
+        agentDescriptor: AgentDescriptor(
+            agentKind: "claude",
+            worktreePath: nil,
+            status: .working,
+            statusUpdatedAt: Date(timeIntervalSince1970: 1_800_000_002),
+            runId: nil
+        ),
+        scrollback: "line-1\nline-2"    // non-nil so the round-trip actually exercises it
+    )
+    let encoded = try encoder.encode(descriptor)
+    let decoded = try decoder.decode(TerminalSessionDescriptor.self, from: encoded)
+    expect(decoded == descriptor, "I7: TerminalSessionDescriptor round-trip must be equal (incl. schemaVersion + scrollback)")
+
+    // The field count is WHATEVER IS MEASURED from the encoded JSON — never a hardcoded
+    // number. It varies with which optional fields are non-nil (e.g. lastExit == nil is
+    // omitted by TerminalLastExit's encodeIfPresent path), so a fixed literal would be a
+    // guess and non-falsifiable. We record the measured count and the sorted field names,
+    // so a future field addition shows up as a diff in the manifest, not as a broken
+    // literal in this ticket.
+    let fieldNames = (try JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        .map { Array($0.keys).sorted() } ?? []
+
+    // CanvasState round-trip: a tile + a group + a lastActiveTileId, all non-nil so the
+    // whole shape is exercised.
+    let canvasTile = Tile(
+        id: UUID(uuidString: "B0000000-0000-4000-8000-000000000703")!,
+        kind: .terminal,
+        title: "I7 canvas fixture",
+        frame: TileFrame(x: 0, y: 0, width: 800, height: 600),
+        zIndex: 1,
+        runtimeRef: RuntimeRef(kind: .terminalSession, id: tileId),
+        metadata: TileMetadata(launchProfileId: "default")
+    )
+    let canvasState = CanvasState(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        tiles: [canvasTile],
+        groups: [TileGroup(
+            id: UUID(uuidString: "B0000000-0000-4000-8000-000000000704")!,
+            title: "I7 group",
+            tileIds: [canvasTile.id],
+            color: "mint",
+            collapsed: false
+        )],
+        lastActiveTileId: canvasTile.id
+    )
+    let canvasEncoded = try encoder.encode(canvasState)
+    let canvasDecoded = try decoder.decode(CanvasState.self, from: canvasEncoded)
+    expect(canvasDecoded == canvasState, "I7: CanvasState round-trip must be equal")
+
+    // WorkspaceDocument round-trip: a zone with the v2 groupZoneTiles field populated so
+    // that field (added after schemaVersion 1) is actually exercised, not left at [].
+    let zoneId = UUID(uuidString: "B0000000-0000-4000-8000-000000000705")!
+    let workspaceDocument = WorkspaceDocument(
+        viewport: CanvasViewport(x: 10, y: 20, zoom: 1.5),
+        zones: [ZonePlacement(
+            zoneId: zoneId,
+            projectId: nil,
+            origin: ZonePoint(x: 0, y: 0),
+            size: ZoneSize(width: 1280, height: 720),
+            color: "mint",
+            collapsed: false,
+            hydrationPolicy: .automatic,
+            name: "I7 zone",
+            navKey: nil
+        )],
+        zoneZOrder: [zoneId],
+        lastActiveZoneId: zoneId,
+        groupZoneTiles: [GroupZoneTiles(zoneId: zoneId, tiles: [canvasTile])]
+    )
+    let workspaceEncoded = try encoder.encode(workspaceDocument)
+    let workspaceDecoded = try decoder.decode(WorkspaceDocument.self, from: workspaceEncoded)
+    expect(workspaceDecoded == workspaceDocument, "I7: WorkspaceDocument round-trip must be equal")
+
+    let manifest = InvariantManifest(
+        invariantId: "I7-snapshot-round-trip",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_800_000_000)),
+        measurements: [
+            "types_checked": .int(3),   // descriptor, CanvasState, WorkspaceDocument
+            "descriptor_field_count": .int(fieldNames.count),   // MEASURED, not a fixed 14/15
+            "descriptor_fields": .array(fieldNames.map { .string($0) }),
+            "schema_version_preserved": .bool(decoded.schemaVersion == descriptor.schemaVersion),
+            "scrollback_preserved": .bool(decoded.scrollback == descriptor.scrollback),
+            "canvas_state_round_trip": .bool(canvasDecoded == canvasState),
+            "workspace_document_round_trip": .bool(workspaceDecoded == workspaceDocument)
+        ],
+        outcome: InvariantOutcome.pass.rawValue,
+        failureReason: nil
+    )
+    try writeAndVerify(manifest)
+}
+
+// MARK: - Invariant I1: Binding bijection (STUB — real assertion lands with the "Capture tmuxWindowTarget at spawn" ticket)
+
+do {
+    // STUB: replace with real assertion when "Capture tmuxWindowTarget at spawn" lands.
+    // When real: construct an InMemoryTmuxControl fake (from the "Injectable substrates"
+    // ticket), spawn two tiles, read back the SessionTopologySnapshot (from the "Session
+    // topology snapshot type" ticket), assert each tile maps to exactly one distinct
+    // window target and no orphan window exists.
+    //
+    // Measured values that will appear in the real manifest:
+    //   tile_count: Int, window_target_count: Int, orphan_window_count: Int,
+    //   tile_ids: [String], window_targets: [String]
+    //
+    // For now this block asserts one real property of a type that EXISTS TODAY, so it is
+    // non-vacuous. It references SessionTopologySnapshot / InMemoryTmuxControl ONLY in the
+    // comments above — it defines no local stand-in types.
+    let statusData = try JSONEncoder().encode(AgentStatus.working)
+    let statusRound = try JSONDecoder().decode(AgentStatus.self, from: statusData)
+    expect(statusRound == .working, "I1 stub: AgentStatus.working codable round-trip")
+
+    let manifest = InvariantManifest(
+        invariantId: "I1-binding-bijection",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_800_000_000)),
+        measurements: [
+            "stub": .bool(true),
+            "depends_on": .string("Capture tmuxWindowTarget at spawn"),
+            // Measured from the non-vacuous assertion just run above (not stub metadata):
+            // the actual round-tripped raw value, so a codec regression shows up here too.
+            "status_round_trip_value": .string(statusRound.rawValue)
+        ],
+        outcome: InvariantOutcome.stub.rawValue,
+        failureReason: nil
+    )
+    // Stubs write-and-read-back exactly like full blocks. No unused variable, no warning.
+    try writeAndVerify(manifest)
+}
+
+// MARK: - Invariant I2: No-mirror (STUB — real assertion lands with the "Grouped view session per tile" ticket)
+
+do {
+    // STUB: replace with real assertion when "Grouped view session per tile" lands.
+    // When real: assert that a tile's grouped/mirrored view session never duplicates the
+    // primary window's tmux target — one canonical window per tile, any group view is a
+    // read-only attach, never a second live pane.
+    //
+    // Measured values that will appear in the real manifest:
+    //   tile_count: Int, primary_window_count: Int, mirrored_window_count: Int (must be 0)
+    //
+    // For now this block asserts one real property of TileGroup, the type this future
+    // mechanism will lean on for "which tiles are grouped together" — non-vacuous, no
+    // local stand-in type.
+    let group = TileGroup(
+        id: UUID(uuidString: "B0000000-0000-4000-8000-000000000801")!,
+        title: "I2 stub group",
+        tileIds: [UUID(uuidString: "B0000000-0000-4000-8000-000000000802")!],
+        color: "mint",
+        collapsed: false
+    )
+    let groupData = try JSONEncoder().encode(group)
+    let groupRound = try JSONDecoder().decode(TileGroup.self, from: groupData)
+    expect(groupRound == group, "I2 stub: TileGroup codable round-trip")
+
+    let manifest = InvariantManifest(
+        invariantId: "I2-no-mirror",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_800_000_000)),
+        measurements: [
+            "stub": .bool(true),
+            "depends_on": .string("Grouped view session per tile"),
+            // Measured from the non-vacuous assertion just run above (not stub metadata):
+            // the actual round-tripped tile membership and color of the fixture group.
+            "fixture_tile_id_count": .int(groupRound.tileIds.count),
+            "fixture_group_color": .string(groupRound.color)
+        ],
+        outcome: InvariantOutcome.stub.rawValue,
+        failureReason: nil
+    )
+    try writeAndVerify(manifest)
+}
+
+// MARK: - Invariant I3: No-session-leak (STUB — real assertion lands with the "Project session naming & lifecycle ownership" ticket)
+
+do {
+    // STUB: replace with real assertion when "Project session naming & lifecycle
+    // ownership" lands. When real: reconcile a SessionTopologySnapshot (from the
+    // "Session topology snapshot type" ticket) against the persisted project set and
+    // assert no tmux session survives its owning project's release/detach.
+    //
+    // Measured values that will appear in the real manifest:
+    //   project_count: Int, session_count: Int, leaked_session_count: Int (must be 0)
+    //
+    // For now this block asserts one real property of SessionTopologySnapshot, the
+    // reconciliation-oracle type that already exists today — non-vacuous, no local
+    // stand-in type.
+    let snapshot = SessionTopologySnapshot(sessions: [
+        SessionTopologySnapshot.SessionEntry(sessionName: "i3-stub-session", windows: [
+            SessionTopologySnapshot.WindowEntry(
+                windowId: "@1",
+                paneId: "%1",
+                paneCurrentPath: "/tmp/i3-fixture",
+                paneCurrentCommand: "zsh",
+                panePid: 4242
+            )
+        ])
+    ])
+    let snapshotData = try JSONEncoder().encode(snapshot)
+    let snapshotRound = try JSONDecoder().decode(SessionTopologySnapshot.self, from: snapshotData)
+    expect(snapshotRound == snapshot, "I3 stub: SessionTopologySnapshot codable round-trip")
+    expect(snapshot.sessions.count == 1, "I3 stub: fixture snapshot has exactly one session")
+
+    let manifest = InvariantManifest(
+        invariantId: "I3-no-session-leak",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_800_000_000)),
+        measurements: [
+            "stub": .bool(true),
+            "depends_on": .string("Project session naming & lifecycle ownership"),
+            "fixture_session_count": .int(snapshot.sessions.count)
+        ],
+        outcome: InvariantOutcome.stub.rawValue,
+        failureReason: nil
+    )
+    try writeAndVerify(manifest)
+}
+
+// MARK: - Invariant I4: Convergence fuzz (STUB — real assertion lands with the "Convergence fuzz: write the I4 RED→GREEN tripwire" ticket)
+// TRIPWIRE: this fuzz must go RED→GREEN before any SyncTransport implementation is committed.
+
+do {
+    // STUB: replace with real assertion when "Convergence fuzz: write the I4 RED→GREEN
+    // tripwire" lands (needs MaterializedState / materialize(...) from the "Op-log apply
+    // & compaction" ticket). When real: shuffle the same set of ops across N simulated
+    // replicas and assert byte-identical encoded materialized state regardless of
+    // delivery order.
+    //
+    // Measured values that will appear in the real manifest:
+    //   replica_count: Int, op_count: Int, shuffle_count: Int, convergence_hash: String
+    //
+    // For now this block asserts real properties of OpId and LoggedOp — both already
+    // exist today (the "Op enum & LoggedOp envelope" ticket) — non-vacuous, no local
+    // stand-in type.
+    let replicaA = UUID(uuidString: "B0000000-0000-4000-8000-0000000008A1")!
+    let replicaB = UUID(uuidString: "B0000000-0000-4000-8000-0000000008B1")!
+    let earlier = OpId(lamport: 1, replica: replicaA)
+    let later = OpId(lamport: 2, replica: replicaB)
+    expect(earlier < later, "I4 stub: OpId total order is lamport-first, wall-clock-free")
+
+    let loggedOp = LoggedOp(
+        opId: earlier,
+        op: .createTile(
+            id: UUID(uuidString: "B0000000-0000-4000-8000-0000000008C1")!,
+            kind: .terminal,
+            title: "I4 fixture",
+            frame: TileFrame(x: 0, y: 0, width: 400, height: 300),
+            zIndex: 0
+        )
+    )
+    let loggedOpData = try JSONEncoder().encode(loggedOp)
+    let loggedOpRound = try JSONDecoder().decode(LoggedOp.self, from: loggedOpData)
+    expect(loggedOpRound == loggedOp, "I4 stub: LoggedOp codable round-trip")
+
+    let manifest = InvariantManifest(
+        invariantId: "I4-convergence-fuzz",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_800_000_000)),
+        measurements: [
+            "stub": .bool(true),
+            "depends_on": .string("Op-log apply & compaction"),
+            "op_id_total_order_holds": .bool(earlier < later)
+        ],
+        outcome: InvariantOutcome.stub.rawValue,
+        failureReason: nil
+    )
+    try writeAndVerify(manifest)
+}
+
+// MARK: - Invariant I5: Sync-boundary purity / taint scan (STUB — real assertion lands with the "Taint scan for sync-boundary purity (I5)" ticket)
+
+do {
+    // STUB: replace with real assertion when "Taint scan for sync-boundary purity (I5)"
+    // lands (needs taintCheck(_:) / TaintViolation from that ticket). When real: walk
+    // every SpatialOp and AgentActivityEvent instance and assert none carries a pid, pane
+    // target, runtime handle, or transcript body — the two provably-disjoint payload
+    // families from the "Sync/observation type split" ticket.
+    //
+    // Measured values that will appear in the real manifest:
+    //   spatial_op_field_count: Int, activity_event_field_count: Int, violation_count: Int (must be 0)
+    //
+    // For now this block asserts a real property of AgentActivityEvent, one of the two
+    // payload families this scan will walk — already exists today — non-vacuous, no
+    // local stand-in type ("SyncBoundaryPayload" does not exist and is not defined here).
+    let draft = AgentActivityEventDraft(
+        tileId: UUID(uuidString: "B0000000-0000-4000-8000-000000000901")!,
+        runId: nil,
+        tone: .info,
+        kind: "turn.started",
+        status: .working,
+        summary: "I5 fixture",
+        occurredAt: Date(timeIntervalSince1970: 1_800_000_000)
+    )
+    let event = AgentActivityEvent(stamping: draft, sequence: 1, replicaId: UUID(uuidString: "B0000000-0000-4000-8000-000000000902")!)
+    let eventData = try JSONEncoder().encode(event)
+    let eventRound = try JSONDecoder().decode(AgentActivityEvent.self, from: eventData)
+    expect(eventRound == event, "I5 stub: AgentActivityEvent codable round-trip")
+
+    let manifest = InvariantManifest(
+        invariantId: "I5-sync-boundary-purity",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_800_000_000)),
+        measurements: [
+            "stub": .bool(true),
+            "depends_on": .string("Taint scan for sync-boundary purity (I5)"),
+            // Measured from the non-vacuous assertion just run above (not stub metadata):
+            // the actual round-tripped field values of the AgentActivityEvent fixture.
+            "fixture_event_kind": .string(eventRound.kind),
+            "fixture_event_status": .string(eventRound.status.rawValue),
+            "fixture_event_sequence": .int(Int(eventRound.sequence))
+        ],
+        outcome: InvariantOutcome.stub.rawValue,
+        failureReason: nil
+    )
+    try writeAndVerify(manifest)
+}
+
+// MARK: - Invariant I8: Restart survival (STUB — real assertion lands with the "Capture tmuxWindowTarget at spawn" ticket + real-tmux reattach path)
+
+do {
+    // STUB: replace with real assertion when "Capture tmuxWindowTarget at spawn" lands and
+    // is exercised against a real tmux reattach. When real: persist a
+    // SessionTopologySnapshot before a simulated restart, reattach, and assert every
+    // surviving tile's window target is unchanged (or the dead-target fallback fires).
+    //
+    // Measured values that will appear in the real manifest:
+    //   tile_count: Int, survived_count: Int, fallback_count: Int
+    //
+    // For now this block asserts a real property of TerminalSessionDescriptor's existing
+    // restart path, restoredForBoot(now:) — it must flip agentDescriptor.status to .stale
+    // and set statusUpdatedAt to the injected `now`, while preserving EVERY other field —
+    // non-vacuous, no local stand-in type.
+    //
+    // WALL-CLOCK BAN: restoredForBoot(now:) takes an explicit `now` (no bare `Date()`
+    // inside this check block) so `afterRestart` is fully deterministic.
+    //
+    // FULL-FIELD PRESERVATION: rather than spot-checking a couple of fields, we build
+    // `expected` as a copy of `beforeRestart` with ONLY agentDescriptor.status/
+    // statusUpdatedAt mutated, then assert `afterRestart == expected` via
+    // TerminalSessionDescriptor's Equatable conformance. That proves every other field
+    // (command, cwd, title, args, env, agentKind, worktreePath, runId, etc.) survives
+    // restart — mutating any of them would fail this single equality check.
+    let fixedRestartNow = Date(timeIntervalSince1970: 1_800_000_099)
+    let beforeRestart = TerminalSessionDescriptor(
+        id: UUID(uuidString: "B0000000-0000-4000-8000-000000000A01")!,
+        tileId: UUID(uuidString: "B0000000-0000-4000-8000-000000000A02")!,
+        launchProfileId: "default",
+        command: "/bin/zsh",
+        args: ["-l", "-c", "echo i8"],
+        cwd: "/tmp/i8-fixture",
+        env: ["TERM": "xterm-256color"],
+        title: "I8 fixture",
+        createdAt: Date(timeIntervalSince1970: 1_800_000_000),
+        lastStartedAt: Date(timeIntervalSince1970: 1_800_000_001),
+        lastExit: nil,
+        agentDescriptor: AgentDescriptor(
+            agentKind: "claude",
+            worktreePath: "/tmp/i8-worktree",
+            status: .working,
+            statusUpdatedAt: Date(timeIntervalSince1970: 1_800_000_002),
+            runId: "i8-run-id"
+        ),
+        scrollback: "line-1\nline-2"
+    )
+    let afterRestart = beforeRestart.restoredForBoot(now: fixedRestartNow)
+    var expectedAfterRestart = beforeRestart
+    expectedAfterRestart.agentDescriptor?.status = .stale
+    expectedAfterRestart.agentDescriptor?.statusUpdatedAt = fixedRestartNow
+    expect(afterRestart.agentDescriptor?.status == .stale, "I8 stub: restoredForBoot flips status to .stale")
+    expect(afterRestart.agentDescriptor?.statusUpdatedAt == fixedRestartNow,
+           "I8 stub: restoredForBoot stamps statusUpdatedAt with the injected now, never wall-clock Date()")
+    expect(afterRestart == expectedAfterRestart,
+           "I8 stub: restoredForBoot preserves EVERY field other than agentDescriptor.status/statusUpdatedAt")
+
+    let manifest = InvariantManifest(
+        invariantId: "I8-restart-survival",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_800_000_000)),
+        measurements: [
+            "stub": .bool(true),
+            "depends_on": .string("Capture tmuxWindowTarget at spawn"),
+            "status_after_restart": .string(afterRestart.agentDescriptor?.status.rawValue ?? "unknown")
+        ],
+        outcome: InvariantOutcome.stub.rawValue,
+        failureReason: nil
+    )
+    try writeAndVerify(manifest)
+}
+
 print("ContinuumRevivedCoreChecks passed")
