@@ -5,6 +5,19 @@ passed only the loop's **objective build+matrix gate** — never the Fable+GPT-5
 Fable-path tickets got. Audited by 8 parallel Sonnet subagents (read-only), each checking its commits
 against the ticket "Done when" contract. **None pushed.**
 
+> **Update (2026-07-02) — TIER 1 RESOLVED.** All three merge-blocking functional bugs are fixed,
+> verified together (combined `swift build` + headless matrix green), and committed:
+> - Ticket 15 → `84b7de1` — restart re-binds to the live tmux window (window leak fixed); `*Checks`
+>   assert live-restart creates 0 new windows, dead-restart exactly 1.
+> - Ticket 24 → `63f8700` — per-tile in-flight guard removes the double-resume race (proven: 2 concurrent
+>   recoveries → 1 window), and recovery errors now surface in the UI (`.stale` pill + error label).
+> - Ticket 37 → `15ba9ce` — reader reports `.working` on a trailing tool-result (RED→GREEN proven).
+>
+> **Still open (pending Dylan):** all of TIER 2 (54 auth persistence/GRDB decision, 21 wire reaper,
+> 22 cwd inheritance, 23 finish `tmuxWindowTarget` migration, 28 needs ticket 27 first), TIER 3
+> verification gaps (16/20/48/67), TIER 4 sign-offs (19/32/33), the `_PROGRESS.md` dangling-hash fix,
+> and the supervised GUI full-matrix pass. Loop remains held (STOP present).
+
 ## Verdict tally
 - **CLEAR (5):** 31 (closed AgentKind enum), 34 (kind classifier), 35 (reader protocol), 36 (pi reader), 59 (scope OptionSet).
 - **CONCERNS (15):** 15, 16, 19, 20, 21, 22, 23, 24, 28, 32, 33, 37, 48, 54, 67.
