@@ -53,3 +53,7 @@ were **stashed** (recoverable via `git stash list`) for human review.
   (`StoreProtocols.swift:5 ProjectStoring`).
 
 New attempts append their rows to the table above.
+
+| ticket | status | commit | matrix | note |
+| --- | --- | --- | --- | --- |
+| 08-sync-observation-type-split.md | done | 368cf7e | matrix: green (headless) | Continued the session-limit-interrupted attempt per C-20260701-004 ruling (classified continue-after-reset; pre-workflow safety stash kept). Cleared round 2, both reviewers (Fable + Codex GPT-5.5). Checks live in ContinuumRevivedCoreChecks (no XCTest). Still owes the supervised GUI-matrix pass before merge. |

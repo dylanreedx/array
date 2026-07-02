@@ -42,7 +42,7 @@ log to add explicit rulings, prompt amendments, and recovery actions.
 | C-20260701-001 | `03-membership-tile-register.md` | open | `SCOPE-FENCE`, `MIGRATION-DATALOSS`, `REVIEW-REJECTED` | `_PROGRESS.md`, dry-run agents | Loosen/split schema re-stamp scope; run 03A–03D micro-sequence before marking 03 retryable. | Dylan/Fable | - |
 | C-20260701-002 | `04-zorder-fractional-index.md` | open | `SCOPE-FENCE`, `MIGRATION-DATALOSS`, `REVIEW-REJECTED` | `_PROGRESS.md`, dry-run agents | Split into FracIndex hardening, tile migration, workspace migration, render/hit-test migration. | Dylan/Fable | - |
 | C-20260701-003 | `05-delete-tombstone.md` | open | `DIRTY-UNTRACKED`, `DEP-BLOCKED`, `REVIEW-REJECTED` | `_PROGRESS.md`, stash list, dry-run agents | Retryable after file-hygiene guard; forbid drift into ticket 06 materialize/compactor. | Fable | - |
-| C-20260701-004 | `08-sync-observation-type-split.md` | open | `DIRTY-UNTRACKED`, `PROVIDER-QUOTA`, `HARNESS-FAIL` | current dirty tree, run `20260701T195840` | Classify current uncommitted attempt before any new ticket; provider regex missed “session limit”. | Dylan/Fable | - |
+| C-20260701-004 | `08-sync-observation-type-split.md` | resolved | `DIRTY-UNTRACKED`, `PROVIDER-QUOTA`, `HARNESS-FAIL` | current dirty tree, run `20260701T195840` | Classify current uncommitted attempt before any new ticket; provider regex missed “session limit”. | Dylan/Fable | 368cf7e |
 | C-20260701-005 | `10-session-topology-snapshot.md` | open | `CONTRACT-CONFLICT` | `_HANDOFF.md`, dry-run agents | Prompt/ticket amendment: empty or whitespace tmux output is a valid zero-session snapshot; no `emptyInput` case. | Fable | - |
 | C-20260701-006 | `06-oplog-apply-compaction.md` | open | `DEP-BLOCKED` | dry-run agents | Do not attempt until 03/04/05 semantics are landed or explicitly decomposed. | Fable | - |
 | C-20260701-007 | `07-convergence-fuzz-red-green.md` | open | `DEP-BLOCKED`, `DETERMINISM-GAP` | dry-run agents | Do not attempt until 06 lands; seed-derived fixed UUIDs required. | Fable | - |
@@ -127,6 +127,12 @@ log to add explicit rulings, prompt amendments, and recovery actions.
   `*Checks` executable wired into `run-matrix.sh`.
 - **Recovery:** Before a new loop run: `git status --short`; decide fate of the four dirty files;
   update quota regex for `session limit` in the next Ralph loop.
+- **Resolution (2026-07-01, run `20260701T225402` iter 1):** Dirty attempt classified
+  **continue-after-reset** — the four files were a post-ruling retry (checks already in
+  `ContinuumRevivedCoreChecks`, no XCTest) interrupted mid-flight by the session limit. A safety
+  stash of the interrupted state was taken, the workflow continued from it, and ticket 08 landed
+  in `368cf7e` (round 2, Fable + Codex both clear). The quota regex already matches
+  `session limit` (`overnight-orchestration-loop.sh:424`), so that recovery item was done.
 
 ## C-20260701-005 — `10-session-topology-snapshot.md`
 
