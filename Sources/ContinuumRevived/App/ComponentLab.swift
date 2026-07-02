@@ -352,7 +352,39 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
+        [tileSandbox, sidebarCard, topBarCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
+    }
+
+    /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
+    static let sessionNamingFixtureId = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+
+    static var sessionNamingCard: LabEntry {
+        LabEntry(
+            id: "session.naming", category: "Chrome", title: "Session Naming",
+            summary: "The pure TmuxSession naming functions (ticket 14), printed for a fixed UUID.",
+            content: .staticCard(preferredSize: NSSize(width: 560, height: 120)) {
+                makeSessionNamingView(fixtureId: sessionNamingFixtureId)
+            }
+        )
+    }
+
+    static func makeSessionNamingView(fixtureId: UUID) -> NSView {
+        func row(_ identifier: String, _ text: String) -> NSTextField {
+            let field = NSTextField(labelWithString: text)
+            field.identifier = NSUserInterfaceItemIdentifier(identifier)
+            field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            field.textColor = .labelColor
+            return field
+        }
+        let stack = NSStackView(views: [
+            row("sessionNaming.projectSessionName", "projectSessionName  → \(TmuxSession.projectSessionName(projectId: fixtureId))"),
+            row("sessionNaming.ambientSessionName", "ambientSessionName  → \(TmuxSession.ambientSessionName(workspaceId: fixtureId))"),
+            row("sessionNaming.sessionName", "sessionName(tileId) → \(TmuxSession.sessionName(tileId: fixtureId))")
+        ])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        return stack
     }
 
     private static var commandPaletteLauncher: LabEntry {
@@ -839,11 +871,43 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             }
         }
 
+        // Session naming panel (ticket 14): assert the three labels read exactly
+        // the expected strings for the fixed UUID — the -proj-/-ws- prefixes are
+        // the load-bearing dogfood proof, not the render-blank check above.
+        let sessionNamingView = LabCatalog.makeSessionNamingView(fixtureId: LabCatalog.sessionNamingFixtureId)
+        func labelText(_ identifier: String) throws -> String {
+            guard let field = sessionNamingView.subviews.compactMap({ $0 as? NSTextField })
+                .first(where: { $0.identifier?.rawValue == identifier }) else {
+                throw fail("session naming panel missing label \(identifier)")
+            }
+            return field.stringValue
+        }
+        let expectedProjectLabel = "projectSessionName  → continuum-proj-00000000-0000-0000-0000-000000000001"
+        let expectedAmbientLabel = "ambientSessionName  → continuum-ws-00000000-0000-0000-0000-000000000001"
+        let expectedSessionLabel = "sessionName(tileId) → continuum-00000000-0000-0000-0000-000000000001"
+        let projectLabel = try labelText("sessionNaming.projectSessionName")
+        let ambientLabel = try labelText("sessionNaming.ambientSessionName")
+        let sessionLabel = try labelText("sessionNaming.sessionName")
+        guard projectLabel == expectedProjectLabel else {
+            throw fail("session naming panel projectSessionName label: expected '\(expectedProjectLabel)' got '\(projectLabel)'")
+        }
+        guard ambientLabel == expectedAmbientLabel else {
+            throw fail("session naming panel ambientSessionName label: expected '\(expectedAmbientLabel)' got '\(ambientLabel)'")
+        }
+        guard sessionLabel == expectedSessionLabel else {
+            throw fail("session naming panel sessionName label: expected '\(expectedSessionLabel)' got '\(sessionLabel)'")
+        }
+
         let manifest: [String: Any] = [
             "check": "component-lab",
             "entryCount": entries.count,
             "rendered": rendered,
-            "sandbox": ["tilesInstalled": 5, "zoomClampHigh": zoomHigh, "zoomClampLow": zoomLow]
+            "sandbox": ["tilesInstalled": 5, "zoomClampHigh": zoomHigh, "zoomClampLow": zoomLow],
+            "sessionNaming": [
+                "projectSessionName": projectLabel,
+                "ambientSessionName": ambientLabel,
+                "sessionName": sessionLabel
+            ]
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: directory.appendingPathComponent("manifest.json"))

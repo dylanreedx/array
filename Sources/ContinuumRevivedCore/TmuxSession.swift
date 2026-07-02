@@ -28,6 +28,24 @@ public enum TmuxSession {
         (command: tmuxPath, arguments: ["kill-session", "-t", sessionName(tileId: tileId)])
     }
 
+    /// Project-scoped session name (phase 1+). `ZoneRuntimeController` is the
+    /// only authoritative caller — see `ZoneRuntimeController.projectSessionName()`.
+    public static func projectSessionName(projectId: UUID) -> String {
+        "continuum-proj-\(projectId.uuidString)"
+    }
+
+    /// Ambient/workspace-scoped session name (phase 1 fallback promotion).
+    public static func ambientSessionName(workspaceId: UUID) -> String {
+        "continuum-ws-\(workspaceId.uuidString)"
+    }
+
+    /// Project-scoped kill-session argv — mirrors `killSessionCommand(tileId:tmuxPath:)`.
+    /// Reserved for explicit project deletion only; never call on a mere release
+    /// (see `ZoneRuntimeController.close()` LIFECYCLE POLICY, D16).
+    public static func killProjectSessionCommand(projectId: UUID, tmuxPath: String) -> (command: String, arguments: [String]) {
+        (command: tmuxPath, arguments: ["kill-session", "-t", projectSessionName(projectId: projectId)])
+    }
+
     private static func shouldPassInnerCommand(_ profile: LaunchProfile) -> Bool {
         !(profile.title == "Shell" && profile.arguments.isEmpty)
     }

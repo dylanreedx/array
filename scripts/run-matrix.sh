@@ -82,6 +82,7 @@ run swift run ContinuumRevivedPerfChecks
 run_app_check .build/debug/continuum-revived --palette-duplicate-root-check
 run_app_check .build/debug/continuum-revived --palette-first-responder-restore-check
 run_app_check .build/debug/continuum-revived --settings-panel-check
+run_app_check .build/debug/continuum-revived --component-lab-check
 run_app_check .build/debug/continuum-revived --keybind-edit-check
 run_app_check .build/debug/continuum-revived --browser-url-focus-check
 run_app_check .build/debug/continuum-revived --browser-ui-delegate-check
@@ -147,6 +148,7 @@ run_app_check .build/debug/continuum-revived --note-file-tile-spawn-check
 run_app_check .build/debug/continuum-revived --run-artifacts-tile-check
 run_app_check .build/debug/continuum-revived --zone-hydration-lifecycle-check
 run_app_check .build/debug/continuum-revived --zone-save-isolation-check
+run_app_check .build/debug/continuum-revived --zone-project-session-naming-check
 run_app_check .build/debug/continuum-revived --zone-registry-refcount-check
 run_app_check .build/debug/continuum-revived --workspace-runtime-install-check
 run_app_check .build/debug/continuum-revived --workspace-switch-check

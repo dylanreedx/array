@@ -75,6 +75,22 @@ final class ZoneRuntimeController {
         self.projectLock = nil
     }
 
+    /// The single authoritative call site for this controller's project session name.
+    /// No other code should construct a `continuum-proj-` name by hand.
+    func projectSessionName() -> String {
+        TmuxSession.projectSessionName(projectId: project.id)
+    }
+
+    /// Project-scoped kill argv — callers must never issue this on a mere release,
+    /// only on deliberate project deletion (see D16).
+    func killProjectSessionCommand(tmuxPath: String) -> (command: String, arguments: [String]) {
+        TmuxSession.killProjectSessionCommand(projectId: project.id, tmuxPath: tmuxPath)
+    }
+
+    // LIFECYCLE POLICY (D16 — locked):
+    //   project release (refcount → 0): DETACH, never kill.
+    //   Projects span workspaces; killing here would reap live agents on workspace switch.
+    //   kill-session is reserved for explicit project deletion only.
     func close() {
         guard !isClosed else { return }
         isClosed = true
@@ -598,6 +614,97 @@ final class ZoneRuntimeController {
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("zone-save-isolation", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: manifestURL, options: .atomic)
+        return manifestURL
+    }
+
+    static func runProjectSessionNamingSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func makeController(projectRoot: URL, projectId: UUID) throws -> ZoneRuntimeController {
+            let now = Date()
+            let project = Project(
+                id: projectId,
+                name: "project-session-naming-check",
+                rootPath: projectRoot.path,
+                createdAt: now,
+                updatedAt: now,
+                defaultLaunchProfileId: "shell",
+                editorPreference: .auto,
+                settings: ProjectSettings(
+                    restorePolicy: .restoreDescriptors,
+                    browserStoragePolicy: .perProject,
+                    terminalClosePolicy: .askWhenRunning
+                )
+            )
+            let store = ProjectStore(projectRoot: projectRoot)
+            try store.saveProject(project)
+            return ZoneRuntimeController(projectRoot: projectRoot, projectStore: store, project: project)
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-zone-project-session-naming-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let projectIdA = UUID(uuidString: "00000000-0000-0000-0000-0000000014A1")!
+        let projectIdB = UUID(uuidString: "00000000-0000-0000-0000-0000000014B2")!
+        let rootA = tempRoot.appendingPathComponent("ProjectA", isDirectory: true)
+        let rootB = tempRoot.appendingPathComponent("ProjectB", isDirectory: true)
+        try fileManager.createDirectory(at: rootA, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: rootB, withIntermediateDirectories: true)
+
+        let controllerA = try makeController(projectRoot: rootA, projectId: projectIdA)
+        let controllerB = try makeController(projectRoot: rootB, projectId: projectIdB)
+
+        // Independently-constructed literal expected values — deliberately NOT derived by
+        // calling TmuxSession.projectSessionName/killProjectSessionCommand, so this check can
+        // catch a bug in either those functions or the controller's delegation to them, not
+        // merely prove the two agree with each other.
+        let expectedNameA = "continuum-proj-\(projectIdA.uuidString)"
+        let expectedNameB = "continuum-proj-\(projectIdB.uuidString)"
+        let controllerNameA = controllerA.projectSessionName()
+        let controllerNameB = controllerB.projectSessionName()
+
+        try expect(controllerNameA == expectedNameA, "controller.projectSessionName() (A): expected \(expectedNameA) got \(controllerNameA)")
+        try expect(controllerNameB == expectedNameB, "controller.projectSessionName() (B): expected \(expectedNameB) got \(controllerNameB)")
+        try expect(controllerNameA != controllerNameB, "controllers over two distinct project ids must not produce the same session name")
+
+        let tmuxPath = "/usr/bin/tmux"
+        let expectedKillCommandA = tmuxPath
+        let expectedKillArgumentsA = ["kill-session", "-t", "continuum-proj-\(projectIdA.uuidString)"]
+        let controllerKillArgsA = controllerA.killProjectSessionCommand(tmuxPath: tmuxPath)
+        try expect(controllerKillArgsA.command == expectedKillCommandA, "controller.killProjectSessionCommand command mismatch: expected \(expectedKillCommandA) got \(controllerKillArgsA.command)")
+        try expect(controllerKillArgsA.arguments == expectedKillArgumentsA, "controller.killProjectSessionCommand arguments mismatch: expected \(expectedKillArgumentsA) got \(controllerKillArgsA.arguments)")
+
+        let manifest: [String: Any] = [
+            "check": "zone-project-session-naming",
+            "projectIdA": projectIdA.uuidString,
+            "projectIdB": projectIdB.uuidString,
+            "controllerNameA": controllerNameA,
+            "controllerNameB": controllerNameB,
+            "expectedNameA": expectedNameA,
+            "expectedNameB": expectedNameB,
+            "controllerKillArgsA": controllerKillArgsA.arguments,
+            "expectedKillArgsA": expectedKillArgumentsA,
+            "tempRoot": tempRoot.path
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("zone-project-session-naming", isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let manifestURL = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

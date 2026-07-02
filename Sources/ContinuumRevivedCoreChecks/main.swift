@@ -6394,4 +6394,85 @@ do {
     try writeAndVerify(manifest)
 }
 
+// MARK: - Ticket 14: project/ambient session naming
+//
+// Ticket contract ("How we test it" / "Done when"): all five naming/kill-argv Logic
+// checks must produce a measured-value manifest recording the actual string next to
+// the expected string, never a bare `{passed: true}`. This reuses the same
+// InvariantManifest + writeAndVerify pattern ticket 13 established (main.swift:5841)
+// rather than inventing a second manifest format.
+
+do {
+    let fixtureIds: [UUID] = [
+        UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+        UUID(uuidString: "A0000000-0000-4000-8000-000000000901")!,
+        UUID(uuidString: "A0000000-0000-4000-8000-000000000902")!
+    ]
+
+    // Check 1: projectSessionName(projectId:) exact string for three fixed UUIDs.
+    var projectNameMeasurements: [String: JSONValue] = [:]
+    for (index, id) in fixtureIds.enumerated() {
+        let actual = TmuxSession.projectSessionName(projectId: id)
+        let expected = "continuum-proj-\(id.uuidString)"
+        expect(actual == expected, "projectSessionName(\(id)): expected \(expected) got \(actual)")
+        projectNameMeasurements["projectSessionName_\(index)_actual"] = .string(actual)
+        projectNameMeasurements["projectSessionName_\(index)_expected"] = .string(expected)
+    }
+
+    // Check 2: two distinct project ids never collide.
+    let nameA = TmuxSession.projectSessionName(projectId: fixtureIds[0])
+    let nameB = TmuxSession.projectSessionName(projectId: fixtureIds[1])
+    expect(nameA != nameB, "projectSessionName: distinct project ids must not collide (got \(nameA) == \(nameB))")
+
+    // Check 3: ambientSessionName(workspaceId:) exact string, and distinct from the
+    // project name for the SAME uuid value (the prefix difference is load-bearing).
+    let sharedId = fixtureIds[0]
+    let projectName = TmuxSession.projectSessionName(projectId: sharedId)
+    let ambientName = TmuxSession.ambientSessionName(workspaceId: sharedId)
+    let expectedAmbient = "continuum-ws-\(sharedId.uuidString)"
+    expect(ambientName == expectedAmbient, "ambientSessionName: expected \(expectedAmbient) got \(ambientName)")
+    expect(ambientName != projectName, "ambientSessionName and projectSessionName must differ for the same UUID (both were \(ambientName))")
+
+    // Check 4: killProjectSessionCommand(projectId:tmuxPath:).arguments exact array.
+    let tmuxPath = "/usr/bin/tmux"
+    let killArgs = TmuxSession.killProjectSessionCommand(projectId: sharedId, tmuxPath: tmuxPath)
+    let expectedKillArgs = ["kill-session", "-t", "continuum-proj-\(sharedId.uuidString)"]
+    expect(killArgs.command == tmuxPath, "killProjectSessionCommand: expected command \(tmuxPath) got \(killArgs.command)")
+    expect(killArgs.arguments == expectedKillArgs, "killProjectSessionCommand: expected \(expectedKillArgs) got \(killArgs.arguments)")
+
+    // Check 5: sessionName(tileId:) unbroken by this ticket's additions.
+    let tileId = fixtureIds[0]
+    let tileName = TmuxSession.sessionName(tileId: tileId)
+    let expectedTileName = "continuum-\(tileId.uuidString)"
+    expect(tileName == expectedTileName, "sessionName(tileId:): expected \(expectedTileName) got \(tileName) (per-tile path must remain unbroken)")
+
+    // Every actual-vs-expected string pair asserted above, recorded verbatim (not
+    // re-derived) so the manifest is falsifiable against the same values the expect()
+    // calls just checked.
+    var measurements: [String: JSONValue] = projectNameMeasurements
+    measurements["projectSessionName_collision_nameA"] = .string(nameA)
+    measurements["projectSessionName_collision_nameB"] = .string(nameB)
+    measurements["projectSessionName_collision_distinct"] = .bool(nameA != nameB)
+    measurements["ambientSessionName_actual"] = .string(ambientName)
+    measurements["ambientSessionName_expected"] = .string(expectedAmbient)
+    measurements["ambientSessionName_distinctFromProject_project"] = .string(projectName)
+    measurements["ambientSessionName_distinctFromProject_ambient"] = .string(ambientName)
+    measurements["killProjectSessionCommand_command_actual"] = .string(killArgs.command)
+    measurements["killProjectSessionCommand_command_expected"] = .string(tmuxPath)
+    measurements["killProjectSessionCommand_arguments_actual"] = .array(killArgs.arguments.map { .string($0) })
+    measurements["killProjectSessionCommand_arguments_expected"] = .array(expectedKillArgs.map { .string($0) })
+    measurements["sessionName_tileId_actual"] = .string(tileName)
+    measurements["sessionName_tileId_expected"] = .string(expectedTileName)
+
+    let manifest = InvariantManifest(
+        invariantId: "ticket14-session-naming",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: Date()),
+        measurements: measurements,
+        outcome: InvariantOutcome.pass.rawValue,
+        failureReason: nil
+    )
+    try writeAndVerify(manifest)
+}
+
 print("ContinuumRevivedCoreChecks passed")
