@@ -53,6 +53,34 @@ final class ZoneRuntimeController {
         }
     }
 
+    enum SessionError: Error, CustomStringConvertible {
+        case noBinding
+        case noResumeState
+        case windowRebindFailed(underlying: Error)
+
+        var description: String {
+            switch self {
+            case .noBinding:
+                return "no managed session binding"
+            case .noResumeState:
+                return "no resume state for managed session"
+            case let .windowRebindFailed(underlying):
+                return "window rebind failed: \(underlying)"
+            }
+        }
+    }
+
+    struct LiveSession: Equatable {
+        let tileId: UUID
+        let windowTarget: String
+        let resumeCursor: Data?
+    }
+
+    enum RoutableSessionOutcome: Equatable {
+        case live(LiveSession)
+        case inactive
+    }
+
     init(root projectRoot: URL, acquireLock: Bool = true) throws {
         self.projectRoot = projectRoot
         if acquireLock {
@@ -131,6 +159,11 @@ final class ZoneRuntimeController {
         focusBroker.onAcceptedTileFocus = { [weak self] tileId in
             self?.canvasView?.markActive(tileId: tileId)
         }
+        let existingReasonHook = focusBroker.onAcceptedTileFocusWithReason
+        focusBroker.onAcceptedTileFocusWithReason = { [weak self] tileId, reason in
+            existingReasonHook?(tileId, reason)
+            self?.recoverManagedSessionOnFocus(tileId: tileId, reason: reason)
+        }
         // Scope leaving all tiles (canvas/modal) clears the marching-ants
         // border; the tile→tile transition is covered by markActive above.
         focusBroker.onAcceptedCanvasScope = { [weak self] in
@@ -196,11 +229,125 @@ final class ZoneRuntimeController {
     func detachUI() {
         canvasView?.detachFocusBroker()
         focusBroker?.onAcceptedTileFocus = nil
+        focusBroker?.onAcceptedTileFocusWithReason = nil
         focusBroker?.onAcceptedCanvasScope = nil
         focusBroker?.activationFallbackSurfaces = nil
         focusBroker = nil
         canvasView = nil
         tileSpawner = nil
+    }
+
+    func routableSession(
+        forTile tileId: UUID,
+        allowRecovery: Bool,
+        tmux: any TmuxControl
+    ) async throws -> RoutableSessionOutcome {
+        guard let record = try managedSessionStore.load(tileId: tileId) else {
+            throw SessionError.noBinding
+        }
+
+        if let target = record.tmuxWindowTarget(),
+           try await tmux.isAlive(paneTarget: target) {
+            var updated = record
+            updated.lastSeenAt = Date()
+            try managedSessionStore.upsert(updated)
+            return .live(LiveSession(tileId: tileId, windowTarget: target, resumeCursor: record.resumeCursor))
+        }
+
+        guard allowRecovery else {
+            return .inactive
+        }
+
+        guard record.resumeCursor != nil else {
+            throw SessionError.noResumeState
+        }
+
+        return .live(try await recoverRecord(record, tmux: tmux))
+    }
+
+    private func recoverRecord(
+        _ record: ManagedAgentSessionRecord,
+        tmux: any TmuxControl
+    ) async throws -> LiveSession {
+        let cwd = runtimePayloadFields(from: record.runtimePayload)?.cwd ?? projectRoot.path
+        let newTarget: String
+        do {
+            newTarget = try await tmux.newWindow(inSession: projectSessionName(), cwd: cwd, innerCommand: nil)
+        } catch {
+            throw SessionError.windowRebindFailed(underlying: error)
+        }
+        guard TmuxSession.isValidPaneId(newTarget) else {
+            throw SessionError.windowRebindFailed(underlying: SessionError.noResumeState)
+        }
+
+        var updated = record
+        updated.runtimePayload = try ManagedAgentSessionRecord.makeRuntimePayload(windowTarget: newTarget, cwd: cwd)
+        updated.lastSeenAt = Date()
+        try managedSessionStore.upsert(updated)
+        return LiveSession(tileId: record.tileId, windowTarget: newTarget, resumeCursor: record.resumeCursor)
+    }
+
+    private func recoverManagedSessionOnFocus(tileId: UUID, reason: FocusRequest) {
+        guard Self.shouldAttemptLazyRecovery(for: reason) else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard (try? self.managedSessionStore.load(tileId: tileId)) != nil else { return }
+            guard let tmuxPath = TmuxLocator.resolve() else {
+                self.postSessionError(.windowRebindFailed(underlying: TmuxControlError.paneNotFound(target: "tmux-not-found")), forTile: tileId)
+                return
+            }
+            await self.recoverManagedSessionOnFocus(
+                tileId: tileId,
+                reason: reason,
+                tmux: ProcessTmuxControl(tmuxPath: tmuxPath)
+            )
+        }
+    }
+
+    private func recoverManagedSessionOnFocus(
+        tileId: UUID,
+        reason: FocusRequest,
+        tmux: any TmuxControl
+    ) async {
+        guard Self.shouldAttemptLazyRecovery(for: reason) else { return }
+        do {
+            _ = try await routableSession(
+                forTile: tileId,
+                allowRecovery: true,
+                tmux: tmux
+            )
+        } catch SessionError.noBinding {
+            return
+        } catch let error as SessionError {
+            postSessionError(error, forTile: tileId)
+        } catch {
+            postSessionError(.windowRebindFailed(underlying: error), forTile: tileId)
+        }
+    }
+
+    private static func shouldAttemptLazyRecovery(for reason: FocusRequest) -> Bool {
+        switch reason {
+        case .userClick, .appActivated:
+            return true
+        case .modalOpened, .modalDismissed, .tileSpawned, .tileClosed, .runtimeExited, .recovery:
+            return false
+        }
+    }
+
+    private func postSessionError(_ error: SessionError, forTile tileId: UUID) {
+        NotificationCenter.default.post(
+            name: .continuumManagedSessionRecoveryError,
+            object: self,
+            userInfo: [
+                "tileId": tileId,
+                "error": error
+            ]
+        )
+    }
+
+    private func runtimePayloadFields(from data: Data?) -> ManagedAgentSessionRecord.RuntimePayloadFields? {
+        guard let data else { return nil }
+        return try? JSONCodec.makeDecoder().decode(ManagedAgentSessionRecord.RuntimePayloadFields.self, from: data)
     }
 
     func setTier(
@@ -766,6 +913,232 @@ final class ZoneRuntimeController {
         return manifestURL
     }
 
+    static func runLazyResumeSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func awaitMain<T>(_ operation: @escaping @MainActor () async throws -> T) throws -> T {
+            let box = ZoneRuntimeControllerAsyncCheckBox()
+            Task { @MainActor in
+                do {
+                    box.result = .success(try await operation())
+                } catch {
+                    box.result = .failure(error)
+                }
+            }
+            let deadline = Date().addingTimeInterval(5)
+            while box.result == nil && Date() < deadline {
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            }
+            guard let result = box.result else {
+                throw CheckError.failed("timed out waiting for lazy resume operation")
+            }
+            guard let value = try result.get() as? T else {
+                throw CheckError.failed("lazy resume operation returned unexpected value type")
+            }
+            return value
+        }
+        func makeController(root: URL, projectId: UUID) throws -> ZoneRuntimeController {
+            let now = Date(timeIntervalSince1970: 1_800_024_000)
+            let project = Project(
+                id: projectId,
+                name: "lazy-resume-check",
+                rootPath: root.path,
+                createdAt: now,
+                updatedAt: now,
+                defaultLaunchProfileId: "shell",
+                editorPreference: .auto,
+                settings: ProjectSettings(
+                    restorePolicy: .restoreDescriptors,
+                    browserStoragePolicy: .perProject,
+                    terminalClosePolicy: .askWhenRunning
+                )
+            )
+            let store = ProjectStore(projectRoot: root)
+            try store.saveProject(project)
+            return ZoneRuntimeController(projectRoot: root, projectStore: store, project: project)
+        }
+        func writeRecord(
+            _ controller: ZoneRuntimeController,
+            tileId: UUID,
+            target: String?,
+            cwd: String?,
+            cursor: Data?,
+            lastSeenAt: Date
+        ) throws {
+            let payload: Data?
+            if let target {
+                payload = try ManagedAgentSessionRecord.makeRuntimePayload(windowTarget: target, cwd: cwd)
+            } else {
+                payload = nil
+            }
+            let record = ManagedAgentSessionRecord(
+                tileId: tileId,
+                agentKind: .claude,
+                status: .running,
+                lastSeenAt: lastSeenAt,
+                resumeCursor: cursor,
+                runtimePayload: payload
+            )
+            try controller.managedSessionStore.upsert(record)
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-zone-lazy-resume-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let projectId = UUID(uuidString: "00000000-0000-0000-0000-0000000024A0")!
+        let controller = try makeController(root: tempRoot, projectId: projectId)
+        let sessionName = controller.projectSessionName()
+        let tmux = InMemoryTmuxControl()
+        _ = try awaitMain { try await tmux.newSession(name: sessionName, cwd: "/tmp/lazy", innerCommand: nil) }
+        let liveTarget = try awaitMain { try await tmux.newWindow(inSession: sessionName, cwd: "/tmp/lazy", innerCommand: nil) }
+        let deadTarget = try awaitMain { try await tmux.newWindow(inSession: sessionName, cwd: "/tmp/dead", innerCommand: nil) }
+        try awaitMain { try await tmux.killWindow(target: deadTarget) }
+
+        let liveTile = UUID(uuidString: "00000000-0000-0000-0000-0000000024A1")!
+        let inactiveTile = UUID(uuidString: "00000000-0000-0000-0000-0000000024A2")!
+        let noCursorTile = UUID(uuidString: "00000000-0000-0000-0000-0000000024A3")!
+        let resumeTile = UUID(uuidString: "00000000-0000-0000-0000-0000000024A4")!
+        let nilPayloadTile = UUID(uuidString: "00000000-0000-0000-0000-0000000024A5")!
+        let absentTile = UUID(uuidString: "00000000-0000-0000-0000-0000000024A6")!
+        let oldDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let cursor = Data("cursor-24".utf8)
+
+        try writeRecord(controller, tileId: liveTile, target: liveTarget, cwd: "/tmp/lazy", cursor: cursor, lastSeenAt: oldDate)
+        try writeRecord(controller, tileId: inactiveTile, target: deadTarget, cwd: "/tmp/dead", cursor: cursor, lastSeenAt: oldDate)
+        try writeRecord(controller, tileId: noCursorTile, target: deadTarget, cwd: "/tmp/dead", cursor: nil, lastSeenAt: oldDate)
+        try writeRecord(controller, tileId: resumeTile, target: deadTarget, cwd: "/tmp/resume", cursor: cursor, lastSeenAt: oldDate)
+        try writeRecord(controller, tileId: nilPayloadTile, target: nil, cwd: nil, cursor: nil, lastSeenAt: oldDate)
+
+        let liveOutcome = try awaitMain {
+            try await controller.routableSession(forTile: liveTile, allowRecovery: true, tmux: tmux)
+        }
+        try expect(liveOutcome == .live(LiveSession(tileId: liveTile, windowTarget: liveTarget, resumeCursor: cursor)), "live target should be adopted without creating a new window")
+        let liveRecord = try controller.managedSessionStore.load(tileId: liveTile)
+        try expect((liveRecord?.lastSeenAt ?? oldDate) > oldDate, "adopt-existing bumps lastSeenAt")
+
+        let inactiveOutcome = try awaitMain {
+            try await controller.routableSession(forTile: inactiveTile, allowRecovery: false, tmux: tmux)
+        }
+        try expect(inactiveOutcome == .inactive, "dead target with allowRecovery=false should return inactive")
+
+        do {
+            _ = try awaitMain {
+                try await controller.routableSession(forTile: noCursorTile, allowRecovery: true, tmux: tmux)
+            }
+            throw CheckError.failed("dead target with no cursor should throw noResumeState")
+        } catch SessionError.noResumeState {
+        }
+
+        do {
+            _ = try awaitMain {
+                try await controller.routableSession(forTile: absentTile, allowRecovery: true, tmux: tmux)
+            }
+            throw CheckError.failed("absent record should throw noBinding")
+        } catch SessionError.noBinding {
+        }
+
+        do {
+            _ = try awaitMain {
+                try await controller.routableSession(forTile: nilPayloadTile, allowRecovery: true, tmux: tmux)
+            }
+            throw CheckError.failed("nil runtime payload with no cursor should throw noResumeState")
+        } catch SessionError.noResumeState {
+        }
+
+        let resumeOutcome = try awaitMain {
+            try await controller.routableSession(forTile: resumeTile, allowRecovery: true, tmux: tmux)
+        }
+        guard case let .live(resumed) = resumeOutcome else {
+            throw CheckError.failed("dead target with cursor should resume to a live session")
+        }
+        try expect(resumed.tileId == resumeTile, "resume returns the original tile id")
+        try expect(resumed.resumeCursor == cursor, "resume preserves opaque cursor")
+        try expect(resumed.windowTarget != deadTarget && TmuxSession.isValidPaneId(resumed.windowTarget), "resume stores a fresh valid pane target")
+        let resumedRecord = try controller.managedSessionStore.load(tileId: resumeTile)
+        try expect(resumedRecord?.tmuxWindowTarget() == resumed.windowTarget, "resume persists the fresh window target")
+        let resumedFields = try JSONCodec.makeDecoder().decode(
+            ManagedAgentSessionRecord.RuntimePayloadFields.self,
+            from: resumedRecord?.runtimePayload ?? Data()
+        )
+        try expect(resumedFields.cwd == "/tmp/resume", "resume preserves cwd from runtime payload")
+
+        let focusVerdicts: [FocusRequest: Bool] = [
+            .userClick: true,
+            .appActivated: true,
+            .tileSpawned: false,
+            .tileClosed: false,
+            .runtimeExited: false,
+            .modalOpened: false,
+            .modalDismissed: false,
+            .recovery: false
+        ]
+        for (reason, expected) in focusVerdicts {
+            try expect(ZoneRuntimeController.shouldAttemptLazyRecovery(for: reason) == expected, "focus reason \(reason.rawValue) lazy-resume verdict mismatch")
+        }
+        let postedErrors = ZoneRuntimeControllerNotificationCheckBox()
+        let observer = NotificationCenter.default.addObserver(
+            forName: .continuumManagedSessionRecoveryError,
+            object: controller,
+            queue: nil
+        ) { notification in
+            guard let tileId = notification.userInfo?["tileId"] as? UUID,
+                  let error = notification.userInfo?["error"]
+            else { return }
+            postedErrors.values.append((tileId, String(describing: error)))
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        try awaitMain {
+            await controller.recoverManagedSessionOnFocus(tileId: absentTile, reason: .userClick, tmux: tmux)
+        }
+        try expect(postedErrors.values.isEmpty, "focus recovery should keep noBinding silent")
+
+        let logCountBeforeSkippedReason = tmux.log.count
+        try awaitMain {
+            await controller.recoverManagedSessionOnFocus(tileId: noCursorTile, reason: .tileClosed, tmux: tmux)
+        }
+        try expect(tmux.log.count == logCountBeforeSkippedReason, "non-user focus reasons should not query tmux")
+        try expect(postedErrors.values.isEmpty, "skipped focus reasons should not surface errors")
+
+        try awaitMain {
+            await controller.recoverManagedSessionOnFocus(tileId: noCursorTile, reason: .userClick, tmux: tmux)
+        }
+        try expect(postedErrors.values.contains { $0.0 == noCursorTile && $0.1.contains("no resume state") }, "focus recovery should surface noResumeState for the tile")
+
+        let manifest: [String: Any] = [
+            "check": "zone-lazy-resume",
+            "projectSessionName": sessionName,
+            "liveTarget": liveTarget,
+            "deadTarget": deadTarget,
+            "resumedTarget": resumed.windowTarget,
+            "adoptedLastSeenAdvanced": (liveRecord?.lastSeenAt ?? oldDate) > oldDate,
+            "focusVerdicts": Dictionary(uniqueKeysWithValues: focusVerdicts.map { ($0.key.rawValue, $0.value) }),
+            "postedErrors": postedErrors.values.map { ["tileId": $0.0.uuidString, "error": $0.1] },
+            "tmuxLog": tmux.log.map(String.init(describing:)),
+            "tempRoot": tempRoot.path
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("zone-lazy-resume", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: manifestURL, options: .atomic)
+        return manifestURL
+    }
+
     private static func loadOrCreateProject(in store: any ProjectStoring, projectRoot: URL) throws -> Project {
         if let existing = try store.tryLoadProject() {
             return existing
@@ -787,4 +1160,16 @@ final class ZoneRuntimeController {
         try store.saveProject(project)
         return project
     }
+}
+
+private final class ZoneRuntimeControllerAsyncCheckBox {
+    var result: Result<Any, Error>?
+}
+
+private final class ZoneRuntimeControllerNotificationCheckBox: @unchecked Sendable {
+    var values: [(UUID, String)] = []
+}
+
+extension Notification.Name {
+    static let continuumManagedSessionRecoveryError = Notification.Name("continuum.managedSession.recoveryError")
 }
