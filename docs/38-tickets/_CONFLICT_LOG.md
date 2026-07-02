@@ -47,6 +47,7 @@ log to add explicit rulings, prompt amendments, and recovery actions.
 | C-20260701-006 | `06-oplog-apply-compaction.md` | open | `DEP-BLOCKED` | dry-run agents | Do not attempt until 03/04/05 semantics are landed or explicitly decomposed. | Fable | - |
 | C-20260701-007 | `07-convergence-fuzz-red-green.md` | open | `DEP-BLOCKED`, `DETERMINISM-GAP` | dry-run agents | Do not attempt until 06 lands; seed-derived fixed UUIDs required. | Fable | - |
 | C-20260701-008 | `09-taint-scan-i5.md` | open | `DEP-BLOCKED`, `CONTRACT-CONFLICT` | dry-run agents | Wait for 08; clarify legitimate geometry integer handling vs pid-shaped taint. | Fable | - |
+| C-20260702-010 | `14-project-session-naming.md` | amended | `CONTRACT-CONFLICT`, `REVIEW-REJECTED` | run `20260701T225402` wf_d58b30f6, Fable+Codex round-3 reviews | Ticket's "No change to ContinuumApp.swift" fence vs its flag-wired backend-check requirement; ruling: check-only flag wiring (`--zone-project-session-naming-check` + matrix line) is required, fence guards spawn/kill/descriptor paths only. Ruling banner added to ticket. | Fable | - |
 | C-20260701-009 | `11-activity-tree-snapshot.md` | resolved | `CONTRACT-CONFLICT`, `REVIEW-REJECTED` | fix-round-2/3 diffs, GPT-5.5/Codex review | Rename ticket 08's fold-derived `ActivityTreeSnapshot` (byTile read model) to `ActivityLogSnapshot`; reserve `ActivityTreeSnapshot` for ticket 11's SidebarTree-wrapping envelope, matching ticket 13's assumption. Downstream tickets 21/57/58/61/74 still name the byTile type `ActivityTreeSnapshot` in prose/code samples and must be read as `ActivityLogSnapshot` (or amended) when picked up. | Fable | (uncommitted, fix-round-3) |
 
 ---
@@ -215,3 +216,24 @@ log to add explicit rulings, prompt amendments, and recovery actions.
   with no other in-repo Swift consumers of the old name. Before starting 21, 57, 58, 61, or 74, re-read
   this entry and translate `ActivityTreeSnapshot` references in those ticket files to
   `ActivityLogSnapshot` where they mean the byTile read model.
+
+## C-20260702-010 — `14-project-session-naming.md`
+
+- **Class:** `CONTRACT-CONFLICT`, `REVIEW-REJECTED`
+- **Evidence:** run `20260701T225402` workflow `wf_d58b30f6-1da` (2026-07-02): 3 rounds, matrix green
+  (headless), both reviewers rejected on one converged concern — `runProjectSessionNamingSelfCheck()`
+  (`ZoneRuntimeController.swift:624`) shipped with zero callers: no `--zone-project-session-naming-check`
+  flag in `ContinuumApp.swift`, no `run_app_check` line in `scripts/run-matrix.sh`.
+- **Conflict:** The ticket's "Done when" requires the controller backend check to pass via the existing
+  self-check-suite pattern (`runHydrationLifecycleSelfCheck` / `runSaveIsolationSelfCheck`), which is
+  flag-wired through `ContinuumApp.swift` + `run-matrix.sh` — but the ticket also fences
+  "No change to `TileSpawner.swift`, `ContinuumApp.swift`, or any descriptor type." An implementer
+  honoring the fence ships an unrunnable check; both reviewers correctly reject dead-weight checks.
+- **Winning directive / required ruling:** The fence guards spawn/attach/kill behavior and descriptor
+  types, not check-only wiring. Adding the `--zone-project-session-naming-check` flag handler in
+  `ContinuumApp.swift` (mirroring the two siblings) and the matching `run_app_check` line in
+  `scripts/run-matrix.sh` is REQUIRED. No other `ContinuumApp.swift` change is permitted.
+- **Prompt amendment required:** Ruling banner added to the top of the ticket file (this commit) —
+  same mechanism as C-20260701-005 / `feded6b`.
+- **Recovery:** Re-drive the workflow from the dirty round-3 tree (attempt is otherwise
+  reviewer-shaped: naming functions, controller methods, Core checks, Component Lab panel all present).

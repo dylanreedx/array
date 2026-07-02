@@ -1,5 +1,17 @@
 # Project session naming & lifecycle ownership
 
+> **RULING (C-20260702-010, 2026-07-02, Fable orchestrator) — resolves an internal contradiction.**
+> The "Done when" item requiring the controller backend check to pass via the existing
+> self-check-suite pattern conflicts with the "No change to `ContinuumApp.swift`" fence: every
+> sibling self-check (`runHydrationLifecycleSelfCheck`, `runSaveIsolationSelfCheck`) is gated by a
+> `CommandLine` flag handler in `ContinuumApp.swift` plus a `run_app_check` line in
+> `scripts/run-matrix.sh`, and an unwired check gates nothing. The fence is to be read as guarding
+> the spawn/attach/kill paths and descriptor types only. **Check-only wiring is REQUIRED, not
+> forbidden:** add an `--zone-project-session-naming-check` flag handler in `ContinuumApp.swift`
+> mirroring the two siblings, and a matching `run_app_check .build/debug/continuum-revived
+> --zone-project-session-naming-check` line in `scripts/run-matrix.sh` next to the other zone
+> self-checks. No other `ContinuumApp.swift` change is permitted by this ruling.
+
 ## What this delivers
 
 After this ticket lands, every new tmux session created for a project zone carries the
