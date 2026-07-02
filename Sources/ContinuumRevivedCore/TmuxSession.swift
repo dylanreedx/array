@@ -9,19 +9,46 @@ public enum TmuxSession {
         "continuum-\(tileId.uuidString)"
     }
 
-    public static func wrap(profile: LaunchProfile, tileId: UUID, tmuxPath: String) -> LaunchProfile {
+    public static func wrap(
+        profile: LaunchProfile,
+        tileId: UUID,
+        tmuxPath: String,
+        reach: RemoteReach = .localhost,
+        defaults: UserDefaults = .standard
+    ) -> LaunchProfile {
         let name = sessionName(tileId: tileId)
         var arguments = ["new-session", "-A", "-s", name, "-c", profile.cwd]
         if shouldPassInnerCommand(profile) {
             arguments.append(profile.command)
             arguments.append(contentsOf: profile.arguments)
         }
-        return LaunchProfile(
-            command: tmuxPath,
-            arguments: arguments,
-            cwd: profile.cwd,
-            title: profile.title
-        )
+        switch reach {
+        case .localhost:
+            return LaunchProfile(
+                command: tmuxPath,
+                arguments: arguments,
+                cwd: profile.cwd,
+                title: profile.title
+            )
+        case let .sshForward(target), let .tailscale(target):
+            let command = tmuxPath.isEmpty ? "tmux" : tmuxPath
+            let remoteInvocation = ([command] + arguments)
+                .map(shellEscape(_:))
+                .joined(separator: " ")
+            var sshArgs = sshBaseArgs(target: target, defaults: defaults)
+            let host = [target.username, target.hostname]
+                .compactMap { $0 }
+                .joined(separator: "@")
+            sshArgs.append(contentsOf: ["-t", host, remoteInvocation])
+            return LaunchProfile(
+                command: "/usr/bin/ssh",
+                arguments: sshArgs,
+                cwd: profile.cwd,
+                title: profile.title
+            )
+        case .tunnel:
+            fatalError("tunnel reach path not yet wired")
+        }
     }
 
     public static func killSessionCommand(tileId: UUID, tmuxPath: String) -> (command: String, arguments: [String]) {
@@ -69,6 +96,23 @@ public enum TmuxSession {
     /// (see `ZoneRuntimeController.close()` LIFECYCLE POLICY, D16).
     public static func killProjectSessionCommand(projectId: UUID, tmuxPath: String) -> (command: String, arguments: [String]) {
         (command: tmuxPath, arguments: ["kill-session", "-t", projectSessionName(projectId: projectId)])
+    }
+
+    private static func sshBaseArgs(target: SSHTarget, defaults: UserDefaults) -> [String] {
+        var args = [
+            "-o", "ConnectTimeout=\(RemoteReachConfig.connectTimeout(defaults: defaults))",
+            "-o", "ServerAliveInterval=\(RemoteReachConfig.serverAliveInterval(defaults: defaults))",
+            "-o", "ServerAliveCountMax=\(RemoteReachConfig.serverAliveCountMax(defaults: defaults))",
+            "-o", "BatchMode=no"
+        ]
+        if let port = target.port {
+            args.append(contentsOf: ["-p", String(port)])
+        }
+        return args
+    }
+
+    private static func shellEscape(_ token: String) -> String {
+        "'" + token.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     private static func shouldPassInnerCommand(_ profile: LaunchProfile) -> Bool {

@@ -19,6 +19,16 @@ if ProcessInfo.processInfo.environment["CRCC_TRAP_TEST"] == "FracIndex.between.e
     Foundation.exit(0) // unreachable if the precondition traps, as expected
 }
 
+if ProcessInfo.processInfo.environment["CRCC_TRAP_TEST"] == "RemoteReach.tunnel.wrap" {
+    _ = TmuxSession.wrap(
+        profile: LaunchProfile(command: "/bin/zsh", arguments: [], cwd: "/tmp", title: "Shell"),
+        tileId: UUID(uuidString: "A0000000-0000-4000-8000-000000004801")!,
+        tmuxPath: "/usr/bin/tmux",
+        reach: .tunnel(relayHost: "relay.example")
+    )
+    Foundation.exit(0) // unreachable if the fatalError traps, as expected
+}
+
 func approximatelyEqual(_ a: CGPoint, _ b: CGPoint, tolerance: Double = 0.001) -> Bool {
     abs(a.x - b.x) < tolerance && abs(a.y - b.y) < tolerance
 }
@@ -375,6 +385,146 @@ do {
         sawAmbient = workspaceId == targetId
     }
     expect(sawAmbient, "TerminalSessionTarget ambient case should switch with its workspace id")
+}
+
+// MARK: - Ticket 48: Host / RemoteReach model
+
+do {
+    let tileId = UUID(uuidString: "A0000000-0000-4000-8000-000000004802")!
+    let envId = UUID(uuidString: "A0000000-0000-4000-8000-000000004803")!
+    let profile = LaunchProfile(
+        command: "/usr/bin/env",
+        arguments: ["bash", "-lc", "printf '%s\\n' \"it works\""],
+        cwd: "/tmp/Continuum Remote",
+        title: "Remote Script"
+    )
+    let target = SSHTarget(alias: "prod", hostname: "prod.example", username: "dylan", port: 2222)
+    let remoteEnvironment = RemoteEnvironment(
+        id: envId,
+        label: "Prod",
+        reach: .sshForward(target),
+        lastConnectedAt: Date(timeIntervalSince1970: 1_800_000_048)
+    )
+
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let decodedEnvironment = try decoder.decode(RemoteEnvironment.self, from: encoder.encode(remoteEnvironment))
+    expect(decodedEnvironment == remoteEnvironment, "RemoteEnvironment must Codable round-trip sshForward reach")
+
+    let tunnel = RemoteReach.tunnel(relayHost: "relay.example")
+    let decodedTunnel = try decoder.decode(RemoteReach.self, from: encoder.encode(tunnel))
+    expect(decodedTunnel == tunnel, "RemoteReach.tunnel must be modeled and Codable even though spawning it traps")
+
+    let suiteName = "RemoteReachChecks-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    expect(RemoteReachConfig.serverAliveInterval(defaults: defaults) == RemoteReachConfig.defaultServerAliveInterval,
+           "RemoteReachConfig default ServerAliveInterval is used when unset")
+    expect(RemoteReachConfig.serverAliveCountMax(defaults: defaults) == RemoteReachConfig.defaultServerAliveCountMax,
+           "RemoteReachConfig default ServerAliveCountMax is used when unset")
+    expect(RemoteReachConfig.connectTimeout(defaults: defaults) == RemoteReachConfig.defaultConnectTimeout,
+           "RemoteReachConfig default ConnectTimeout is used when unset")
+    defaults.set(20, forKey: RemoteReachConfig.serverAliveIntervalKey)
+    defaults.set(7, forKey: RemoteReachConfig.serverAliveCountMaxKey)
+    defaults.set(4, forKey: RemoteReachConfig.connectTimeoutKey)
+
+    let localWrapped = TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: "/opt/bin/tmux", reach: .localhost, defaults: defaults)
+    let sessionName = TmuxSession.sessionName(tileId: tileId)
+    expect(localWrapped.command == "/opt/bin/tmux", "RemoteReach localhost keeps existing tmux command")
+    expect(localWrapped.arguments == [
+        "new-session", "-A", "-s", sessionName, "-c", profile.cwd,
+        "/usr/bin/env", "bash", "-lc", "printf '%s\\n' \"it works\""
+    ], "RemoteReach localhost keeps existing tmux argv shape")
+
+    let sshWrapped = TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: "/opt/bin/tmux", reach: .sshForward(target), defaults: defaults)
+    expect(sshWrapped.command == "/usr/bin/ssh", "sshForward wraps ghostty command with local ssh client")
+    expect(Array(sshWrapped.arguments.prefix(10)) == [
+        "-o", "ConnectTimeout=4",
+        "-o", "ServerAliveInterval=20",
+        "-o", "ServerAliveCountMax=7",
+        "-o", "BatchMode=no",
+        "-p", "2222"
+    ], "sshForward includes configured hardened ssh args and port")
+    expect(sshWrapped.arguments.dropFirst(10).first == "-t", "sshForward uses an interactive remote command")
+    expect(sshWrapped.arguments.dropFirst(11).first == "dylan@prod.example", "sshForward host includes username and hostname")
+    let remoteInvocation = sshWrapped.arguments.last ?? ""
+    expect(remoteInvocation.contains("'/opt/bin/tmux' 'new-session' '-A' '-s' '\(sessionName)' '-c' '/tmp/Continuum Remote'"),
+           "sshForward shell-quotes the tmux argv including cwd with spaces")
+    expect(remoteInvocation.contains("'printf '\\''%s\\n'\\'' \"it works\"'"),
+           "sshForward shell-quotes embedded single quotes in inner command tokens")
+
+    let tailscaleWrapped = TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: "/opt/bin/tmux", reach: .tailscale(target), defaults: defaults)
+    expect(tailscaleWrapped == sshWrapped, "tailscale reach uses the same ssh argv as sshForward")
+
+    let v1JSON = """
+    {
+      "schemaVersion": 1,
+      "id": "A0000000-0000-4000-8000-000000004804",
+      "name": "v1 project",
+      "rootPath": "/tmp/v1",
+      "createdAt": "2026-01-01T00:00:00Z",
+      "updatedAt": "2026-01-01T00:00:01Z",
+      "defaultLaunchProfileId": "shell",
+      "editorPreference": "auto",
+      "settings": {
+        "restorePolicy": "restoreDescriptors",
+        "browserStoragePolicy": "perProject",
+        "terminalClosePolicy": "askWhenRunning",
+        "defaultBrowserProfileId": "\(BrowserProfile.defaultProfileId.uuidString)"
+      }
+    }
+    """.data(using: .utf8)!
+    let decodedV1Project = try decoder.decode(Project.self, from: v1JSON)
+    expect(decodedV1Project.schemaVersion == 1, "Project v1 decode preserves stored schema version")
+    expect(decodedV1Project.remoteEnvironment == nil, "Project v1 decode defaults remoteEnvironment to nil")
+
+    let v2Project = Project(
+        name: "remote project",
+        rootPath: "/tmp/remote",
+        createdAt: Date(timeIntervalSince1970: 1_800_000_000),
+        updatedAt: Date(timeIntervalSince1970: 1_800_000_001),
+        defaultLaunchProfileId: "shell",
+        editorPreference: .auto,
+        settings: ProjectSettings(
+            restorePolicy: .restoreDescriptors,
+            browserStoragePolicy: .perProject,
+            terminalClosePolicy: .askWhenRunning
+        ),
+        remoteEnvironment: remoteEnvironment
+    )
+    let decodedV2Project = try decoder.decode(Project.self, from: encoder.encode(v2Project))
+    expect(decodedV2Project == v2Project, "Project v2 remoteEnvironment round-trips")
+    expect(Project.currentSchemaVersion == 2, "Project schema version is bumped for remoteEnvironment")
+
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    process.environment = ProcessInfo.processInfo.environment.merging(["CRCC_TRAP_TEST": "RemoteReach.tunnel.wrap"]) { _, new in new }
+    try process.run()
+    process.waitUntilExit()
+    expect(process.terminationStatus != 0, "RemoteReach tunnel wrap must trap instead of silently falling back")
+
+    let manifest = InvariantManifest(
+        invariantId: "ticket48-remote-reach-model",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_800_000_048)),
+        measurements: [
+            "ssh_command": .string(sshWrapped.command),
+            "ssh_arg_count": .int(sshWrapped.arguments.count),
+            "localhost_command": .string(localWrapped.command),
+            "project_schema_version": .int(Project.currentSchemaVersion),
+            "config_keys": .array([
+                .string(RemoteReachConfig.serverAliveIntervalKey),
+                .string(RemoteReachConfig.serverAliveCountMaxKey),
+                .string(RemoteReachConfig.connectTimeoutKey)
+            ]),
+            "tunnel_trap_status": .int(Int(process.terminationStatus))
+        ],
+        outcome: InvariantOutcome.pass.rawValue,
+        failureReason: nil
+    )
+    try writeAndVerify(manifest)
 }
 
 do {
@@ -959,7 +1109,7 @@ do {
     expect(decoded == project, "Project round trip")
     expect(decoded.schemaVersion == Project.currentSchemaVersion, "Project schema version preserved")
     let json = String(data: data, encoding: .utf8) ?? ""
-    expect(json.contains("\"schemaVersion\":1"), "Project encodes schemaVersion as 1")
+    expect(json.contains("\"schemaVersion\":\(Project.currentSchemaVersion)"), "Project encodes current schemaVersion")
     expect(json.contains("\"rootPath\":\"/tmp/continuum-revived\""), "Project encodes rootPath verbatim")
 }
 

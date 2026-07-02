@@ -1,7 +1,7 @@
 import Foundation
 
 public struct Project: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
     public let schemaVersion: Int
     public let id: UUID
@@ -12,6 +12,7 @@ public struct Project: Codable, Equatable, Sendable {
     public let defaultLaunchProfileId: String
     public let editorPreference: EditorPreference
     public let settings: ProjectSettings
+    public let remoteEnvironment: RemoteEnvironment?
 
     public init(
         schemaVersion: Int = Project.currentSchemaVersion,
@@ -22,7 +23,8 @@ public struct Project: Codable, Equatable, Sendable {
         updatedAt: Date,
         defaultLaunchProfileId: String,
         editorPreference: EditorPreference,
-        settings: ProjectSettings
+        settings: ProjectSettings,
+        remoteEnvironment: RemoteEnvironment? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.id = id
@@ -33,6 +35,25 @@ public struct Project: Codable, Equatable, Sendable {
         self.defaultLaunchProfileId = defaultLaunchProfileId
         self.editorPreference = editorPreference
         self.settings = settings
+        self.remoteEnvironment = remoteEnvironment
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, id, name, rootPath, createdAt, updatedAt, defaultLaunchProfileId, editorPreference, settings, remoteEnvironment
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        rootPath = try container.decode(String.self, forKey: .rootPath)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        defaultLaunchProfileId = try container.decode(String.self, forKey: .defaultLaunchProfileId)
+        editorPreference = try container.decode(EditorPreference.self, forKey: .editorPreference)
+        settings = try container.decode(ProjectSettings.self, forKey: .settings)
+        remoteEnvironment = try container.decodeIfPresent(RemoteEnvironment.self, forKey: .remoteEnvironment)
     }
 }
 

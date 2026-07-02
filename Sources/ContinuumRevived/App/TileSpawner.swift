@@ -264,12 +264,13 @@ final class TileSpawner {
               let tmuxPath = tmuxPathResolver(defaults) else {
             return (profile, nil)
         }
+        let reach = project.remoteEnvironment?.reach ?? .localhost
         guard let target else {
-            return (TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath), nil)
+            return (TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath, reach: reach, defaults: defaults), nil)
         }
         if case .ambient = target,
            !TmuxPersistenceConfig.ambientPerWorkspaceEnabled(defaults: defaults) {
-            return (TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath), nil)
+            return (TmuxSession.wrap(profile: profile, tileId: tileId, tmuxPath: tmuxPath, reach: reach, defaults: defaults), nil)
         }
         let control = tmuxControlFactory(tmuxPath)
         let sessionName: String
