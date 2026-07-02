@@ -32,8 +32,7 @@ cold. Companion docs: [`_OVERNIGHT-RUNBOOK.md`](_OVERNIGHT-RUNBOOK.md) (resume m
 ## Model config (Dylan's chosen mapping)
 - **Fable 5 orchestrates** each iteration (`CLAUDE_MODEL=fable` in loop.sh → `claude -p --model fable`).
 - **Sonnet 5 implements** (`model:'sonnet'` in wf.js implement/fix stages).
-- **Reviewers: real Opus + GPT-5.5 via Codex CLI** (`model:'opus'` + `codex exec -m gpt-5.5`), both
-  must clear to commit.
+- **Reviewers for the new runner:** **Fable 5** is the Claude-side reviewer/adjudicator; **GPT-5.5 via Codex CLI** is the independent cross-reviewer. Both review lanes must clear to commit.
 
 ## Status right now (20:31 EDT)
 - **Done (committed):** `01-store-protocol-seam` (`c71d601`), `02-op-enum-logged-op-envelope` (`a4cba75`).
@@ -119,3 +118,215 @@ on a GUI-capable machine: `cd <worktree> && git stash any-dirt && ./scripts/run-
    pending-retry so the loop (or Dylan) can complete them.
 5. Before merging to `main`: full supervised matrix on the whole branch; review the 11 stashes for
    salvage; decide whether to merge the whole branch or cherry-pick.
+
+---
+
+## Update — dry-run packetization + ZERO-Workflow preparation (2026-07-01 ~20:50 EDT)
+
+This section supersedes the older “loop is self-healing across usage limits” assumption above for the
+current run. The active Fable iteration hit a provider/session limit and the harness stopped, not slept:
+
+- Run: `~/.pi/overnight-runs/continuum-overnight/run-20260701T195840`
+- Status: `stopped`, reason `harness-malformed-output`
+- Log tail: `You've hit your session limit · resets 10:10pm (America/Toronto)`
+- Why: the quota regex looked for `usage limit` but this provider emitted `session limit`, so the loop
+  did not classify it as provider quota.
+- `STOP` is present in the worktree intentionally. Remove it only when deliberately starting a new loop.
+
+Current tree state must be handled before any new implementation attempt:
+
+```text
+A Sources/ContinuumRevivedCore/ActivityStore.swift
+A Sources/ContinuumRevivedCore/AgentActivityEvent.swift
+A Sources/ContinuumRevivedCoreChecks/ActivityStoreTests.swift
+M Sources/ContinuumRevivedCoreChecks/main.swift
+```
+
+Treat this as a `dirty-attempt` for ticket 08. Do not start a fresh ticket until Fable/Dylan chooses one
+of: continue the attempt after reset, stash it as a rejected attempt, or discard it explicitly.
+
+### Dry-run subagents dispatched
+
+Read-only agents inspected the first ten tickets and the current orchestration harness. Artifacts:
+
+- `explorer-20260702T004047Z-4090dd` — tickets 01–05 implementor packets and 03/04/05 conflict split
+  plan. Final: `.pi/agent-runs/explorer-20260702T004047Z-4090dd/final.md`
+- `explorer-20260702T004047Z-c55974` — tickets 06–10 path maps, acceptance gates, dependency blockers,
+  and ambiguities. Final: `.pi/agent-runs/explorer-20260702T004047Z-c55974/final.md`
+- `code-reviewer-20260702T004047Z-7f156b` — deterministic QA packet + conflict taxonomy. Final:
+  `.pi/agent-runs/code-reviewer-20260702T004047Z-7f156b/final.md`
+- `code-reviewer-20260702T004047Z-286ce7` — ZERO-Workflow handoff format and recovery statuses. Final:
+  `.pi/agent-runs/code-reviewer-20260702T004047Z-286ce7/final.md`
+
+### New companion docs created
+
+- [`_CONFLICT_LOG.md`](_CONFLICT_LOG.md) — reason-code taxonomy and initial entries for 03, 04, 05,
+  current dirty 08, stale 10 ruling, and dependency-blocked 06/07/09.
+- [`_IMPLEMENTOR_PACKETS_01-10.md`](_IMPLEMENTOR_PACKETS_01-10.md) — digestible per-ticket packets for
+  the first ten tickets. These **supplement** the original tickets; they do not remove or weaken any
+  original directive.
+
+### Key conclusion from the dry run
+
+Use richer states than `done/skipped/pending`:
+
+```text
+done
+done-headless
+dirty-attempt
+conflicted-needs-amendment
+blocked-dep
+verification-conflict
+stale-doc-conflict
+terminal-skip
+provider-quota
+harness-fail
+```
+
+For the first ten tickets:
+
+- 01/02 are genuinely done, with supervised GUI matrix debt.
+- 03/04 are `conflicted-needs-amendment`: correct fixes require scope/schema migration decisions and
+  should be split before unattended retry.
+- 05 is mostly retryable, but needs file-hygiene and scope guards; do not drift into ticket 06.
+- 06/07 are `blocked-dep` until 03/04/05 semantics land.
+- 08 is `dirty-attempt` right now.
+- 09 is `blocked-dep` on 08 and needs a geometry-integer taint clarification.
+- 10 is retryable only with the explicit ruling: empty/whitespace tmux output is a zero-session snapshot;
+  no `ParseError.emptyInput`.
+
+### ZERO-Workflow direction
+
+Dylan's current preference: the next overnight runner should be Ralph-style shell orchestration with
+visible subprocesses and logs, **not** Claude `Workflow(...)` inside a session. Fable 5 should act as the
+outer adjudicator/selector/classifier and Claude-side reviewer; Sonnet 5 should remain the default Claude implementer when available; GPT-5.5 can be used as a low/medium implementation fallback because the packets are now explicit, and should remain the independent cross-reviewer. The new review lane is Fable + GPT-5.5 only. Every
+stage should append durable JSONL events and a QA packet.
+
+Do not resume `scripts/overnight-iteration-wf.js` for the redesigned loop unless Dylan explicitly opts
+back into the legacy Workflow-based harness.
+
+Minimum next implementation work before a full overnight run:
+
+1. Classify or preserve the current dirty ticket-08 attempt.
+2. Patch provider-limit detection to include `session limit` if continuing the legacy harness.
+3. Build a no-Workflow Ralph iteration script with explicit stages:
+   select → implement → build → matrix → Fable review → GPT-5.5 review → Fable adjudicate/repair →
+   commit or conflict-log.
+4. Teach the selector to read `_CONFLICT_LOG.md` and `_IMPLEMENTOR_PACKETS_01-10.md`.
+5. Split/amend 03/04/05 before retrying them unattended.
+
+### Local visual plan for morning review
+
+A local-files Agent-Native Plan was created for the full morning scope. It is repo-owned/local-only
+(no hosted Plan DB write) and validated with `plan local verify`.
+
+- Plan folder: `docs/38-tickets/visual-plan-morning-scope/`
+- Source: `docs/38-tickets/visual-plan-morning-scope/plan.mdx`
+- URL file: `docs/38-tickets/visual-plan-morning-scope/.plan-url`
+- Local bridge PID file: `docs/38-tickets/visual-plan-morning-scope/.plan-serve.pid`
+- Serve log: `docs/38-tickets/visual-plan-morning-scope/.plan-serve.log`
+
+Open the URL from `.plan-url` in Chrome/Chromium/Edge while the local bridge is running. If the bridge
+is not running, restart it from the worktree:
+
+```bash
+npx @agent-native/core@latest plan local serve \
+  --dir docs/38-tickets/visual-plan-morning-scope \
+  --port 47832 \
+  --url-file docs/38-tickets/visual-plan-morning-scope/.plan-url
+```
+
+
+### Overnight throughput target and model schedule
+
+Dylan's target is aggressive: by morning, all **autonomous and unblocked** tickets should be either
+committed or honestly classified, unless provider/session usage limits stop the run. Do not count
+`supervised`, `needs-substrate`, or dependency-blocked tickets as implementable unattended work; those
+should be packeted/deferred with clear reason codes instead of fake-greened.
+
+Preferred lane schedule:
+
+1. **Reset → ~12:30am:** Fable selects/reviews/adjudicates; Sonnet implements high-risk or Claude-native
+   tickets; GPT-5.5 can implement low-risk packets if Claude quota is tight.
+2. **~12:30am → ~4:30am:** GPT-5.5 fallback implementation lane for low/medium well-packeted tickets;
+   Fable checks in periodically for selection/classification when quota allows.
+3. **~4:30am → ~8:15am:** Fable wrap-up/audit/morning report; avoid starting risky migrations late.
+4. **8:15am → 8:45am:** Dylan review window: inspect done count, conflicts, dirty state, and supervised
+   GUI matrix debt.
+
+Throughput expectation: 08/10/05 are the immediate targets; 03/04 must be split; 06/07/09 remain blocked
+until their dependencies land. The success metric is not “all 74 literally implemented,” because the
+set includes supervised and needs-substrate tickets; it is “all unattended-safe work landed or classified.”
+
+### Immediate runner patch (Fable review + quota regex)
+
+The legacy harness has been patched enough to resume ticket 08 if Dylan chooses the fast path tonight:
+
+- `scripts/overnight-iteration-wf.js`: Claude-side review lane now uses **Fable** instead of Opus.
+- `scripts/overnight-orchestration-prompt.md`: reviewer wording now says **Fable + GPT-5.5**.
+- `scripts/overnight-orchestration-loop.sh`: provider regex now catches `session limit` as quota/provider failure.
+
+Caveat: this is still the **legacy Workflow-based harness**. It is not the final ZERO-Workflow Ralph
+runner. Use it only if the priority is to pick up ticket 08 quickly tonight.
+
+To resume the dirty 08 attempt with the patched legacy harness, use the fast path only after confirming
+this is intentional:
+
+```bash
+cd /Users/dylan/Documents/personal/continuum-overnight
+rm -f STOP
+ALLOW_DIRTY=1 caffeinate -is ./scripts/overnight-orchestration-loop.sh
+```
+
+Why `ALLOW_DIRTY=1`: ticket 08 has an interrupted uncommitted attempt in the tree, and the goal is to
+continue/classify that attempt rather than start from a clean checkout.
+
+### Packetizing the remaining tickets
+
+Read-only explorer agents have been dispatched to packetize tickets 11–74 in six chunks. When they
+finish, synthesize their finals into additional implementor packet docs (for example
+`_IMPLEMENTOR_PACKETS_11-20.md`, etc.) and update `_CONFLICT_LOG.md` with any newly discovered blockers.
+
+### Packetization complete for all tickets
+
+The remaining packetization agents completed and their final outputs were consolidated into:
+
+- `_IMPLEMENTOR_PACKETS_11-74.md`
+
+Together with `_IMPLEMENTOR_PACKETS_01-10.md`, every ticket now has a supplemental implementor packet or packetization notes. These are not replacements for the original tickets; they are routing/acceptance summaries for unattended agents.
+
+Important blockers discovered in 11–74 packetization:
+
+- 11 depends on reader/evidence types; medium autonomous if dependency/ruling is clear.
+- 12 is high-risk foundational substrate work; must follow the `TransportLoggedOp` ruling.
+- 15/16 overlap on `tmuxWindowTarget`; avoid duplicate schema/capture ownership.
+- 17/25/26 have supervised or real-terminal gates; logic can run, full done needs dogfood/substrate.
+- 31–43 are a coherent additive reader/status pipeline and likely a productive unattended stretch after 08/10/12.
+- 44–47 are supervised UI surface tickets; backend/check portions can land, visual completion needs human pass.
+- 48/54 are autonomous remote/auth foundations; 49–53 need SSH/remote substrate or supervised proof.
+- 55/56/58/59 are autonomous sync/auth vocabulary candidates; 57/61–64 need CloudKit/iOS/APNS substrate; 60/65 have supervised gates.
+- 66/67/70/74 are autonomous managed-tier candidates with canonical-type risks; 68/69 need sidecar/ACP substrate; 71–73 are supervised UI tickets.
+- Before 67–73, create/confirm a managed-tier canonical types decision: `AgentRuntimeEvent`, `ApprovalDecision`, request id type, and local-only/body-carrying payload rules.
+
+### Correction — GPT-5.5 is an implementation fallback, not read-only only
+
+If Claude/Fable hits a session limit, do **not** interpret the downtime as read-only-only. The intended
+fallback is:
+
+1. Let the Claude/Fable loop sleep until its parsed reset time.
+2. If the working tree is clean, or the current dirty attempt has been stashed/classified, use
+   **Codex/GPT-5.5 to implement low/medium, well-packeted autonomous tickets**.
+3. Continue to use GPT-5.5 for independent review/audit as well.
+4. Do not let GPT-5.5 mix diffs into an unresolved dirty Fable attempt; classify/stash first.
+5. When Fable resets, Fable resumes selection/review/adjudication and audits GPT-5.5-produced commits.
+
+The phrase “read-only audits and prep” was too conservative; GPT-5.5 should be a real implementation
+fallback where the packet quality and risk level make that safe.
+
+### PR permission update
+
+Dylan grants conditional permission for the final overnight orchestrator to push and open a GitHub PR if the branch reaches a coherent review state: all autonomous/unblocked tickets are landed or honestly classified, matrix/build status is documented, the tree is clean, and the morning report is complete.
+
+Remote: `https://github.com/dylanreedx/continuum`
+
+Rules: do not merge; do not push dirty/mixed failed-attempt diffs; do not claim supervised/needs-substrate tickets are done without evidence; PR body must include done commits, conflicts/reason codes, matrix/headless debt, mobile/TestFlight readiness, architecture walkthrough, and reviewer guide.

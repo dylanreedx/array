@@ -1,0 +1,365 @@
+---
+title: "Morning Scope — Continuum Overnight Orchestration"
+brief: "What Dylan should wake up to: ticket status, blockers, conflict log, and the next Ralph-style no-Workflow loop plan."
+kind: "plan"
+localOnly: true
+---
+
+# Morning Scope — Continuum Overnight Orchestration
+
+This is the morning review surface for the Continuum agent-orchestration overnight worktree. It summarizes the real state, the first-ten-ticket dry run, the conflicts that should not be retried blindly, and the plan for a Fable-led Ralph loop with no hidden Claude `Workflow(...)` stage.
+
+<Callout id="headline" tone="warning">
+
+**Morning headline:** only tickets 01 and 02 are truly landed. The legacy loop stopped during a ticket-08 attempt because the provider emitted `session limit`; the harness did not classify that string as quota. The worktree is intentionally stopped with a dirty ticket-08 attempt that must be classified before any new implementation run.
+
+</Callout>
+
+## Current repo/run state
+
+<Table
+  id="current-state-table"
+  columns={["Area", "State", "What it means"]}
+  rows={[
+    ["Worktree", "`/Users/dylan/Documents/personal/continuum-overnight`", "All overnight work is on `overnight/agent-orchestration`"],
+    ["Primary checkout", "`/Users/dylan/Documents/personal/continuum-revived`", "Should stay clean on `feature/component-lab`"],
+    ["Legacy loop", "stopped", "Run `run-20260701T195840`; reason recorded as `harness-malformed-output`"],
+    ["Actual stop cause", "provider/session limit", "Log tail: `You've hit your session limit · resets 10:10pm (America/Toronto)`"],
+    ["STOP file", "present intentionally", "Remove only when deliberately launching a new loop"],
+    ["Done tickets", "2 / 74", "01 store seam and 02 op envelope"],
+    ["Dirty attempt", "ticket 08", "Do not start another ticket until this is continued, stashed, or discarded"],
+    ["New planning docs", "uncommitted", "`_CONFLICT_LOG.md`, `_IMPLEMENTOR_PACKETS_01-10.md`, `_HANDOFF.md` update"]
+  ]}
+/>
+
+### What changed for planning
+
+<FileTree
+  id="planning-artifacts-tree"
+  title="Planning and handoff artifacts"
+  entries={[
+    {
+      path: "docs/38-tickets/_HANDOFF.md",
+      change: "modified",
+      note: "Now records session-limit stop, dirty ticket-08 state, dry-run agent artifacts, and ZERO-Workflow direction."
+    },
+    {
+      path: "docs/38-tickets/_CONFLICT_LOG.md",
+      change: "added",
+      note: "Reason-code taxonomy plus initial conflicts for 03/04/05/08/10 and blocked 06/07/09."
+    },
+    {
+      path: "docs/38-tickets/_IMPLEMENTOR_PACKETS_01-10.md",
+      change: "added",
+      note: "Digestible implementor packets for the first ten tickets; supplements original tickets without weakening them."
+    },
+    {
+      path: "Sources/ContinuumRevivedCore/ActivityStore.swift",
+      change: "added",
+      note: "Dirty ticket-08 attempt from interrupted Fable iteration."
+    },
+    {
+      path: "Sources/ContinuumRevivedCore/AgentActivityEvent.swift",
+      change: "added",
+      note: "Dirty ticket-08 attempt from interrupted Fable iteration."
+    },
+    {
+      path: "Sources/ContinuumRevivedCoreChecks/ActivityStoreTests.swift",
+      change: "added",
+      note: "Dirty ticket-08 check file; must be classified before further work."
+    },
+    {
+      path: "Sources/ContinuumRevivedCoreChecks/main.swift",
+      change: "modified",
+      note: "Dirty ticket-08 wiring into executable checks."
+    }
+  ]}
+/>
+
+## The morning decision map
+
+<Diagram id="morning-decision-map" caption="The morning flow: classify the interrupted attempt, then choose between legacy patching and the no-Workflow Ralph loop.">
+
+```html
+<div class="diagram-panel" data-rough>
+  <div class="diagram-card">
+    <div class="diagram-pill">Now</div>
+    <div class="diagram-node">Dirty ticket 08</div>
+    <div class="diagram-muted">ActivityStore / AgentActivityEvent attempt is uncommitted</div>
+  </div>
+  <div class="diagram-card">
+    <div class="diagram-pill">First gate</div>
+    <div class="diagram-node">Classify attempt</div>
+    <div class="diagram-muted">continue after reset · stash · discard by explicit ruling</div>
+  </div>
+  <div class="diagram-card">
+    <div class="diagram-pill">Second gate</div>
+    <div class="diagram-node">Pick runner</div>
+    <div class="diagram-muted">patch legacy loop or build Ralph-style no-Workflow loop</div>
+  </div>
+  <div class="diagram-card">
+    <div class="diagram-pill">Morning-safe queue</div>
+    <div class="diagram-node">10, 05, then additive tickets</div>
+    <div class="diagram-muted">03/04 must be split first; 06/07/09 remain blocked</div>
+  </div>
+</div>
+```
+
+```css
+.diagram-panel { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; align-items: stretch; }
+.diagram-card { border: 1px solid var(--wf-border); border-radius: 14px; padding: 12px; background: var(--wf-surface); }
+.diagram-node { font-weight: 700; margin: 8px 0; }
+.diagram-muted { color: var(--wf-muted); font-size: 13px; line-height: 1.35; }
+.diagram-pill { display: inline-block; padding: 3px 8px; border: 1px solid var(--wf-border); border-radius: 999px; background: var(--wf-accent-soft); }
+```
+
+</Diagram>
+
+## Ticket status: first ten — implementation breakdown
+
+<Table
+  id="ticket-status-01-10"
+  columns={["Ticket", "Implementation details", "Current blocker/gate", "Tonight route"]}
+  rows={[
+    ["01 store protocol seam", "Adds `ProjectStoring` / `WorkspaceStoring`; moves app seams from concrete stores to protocol existentials; preserves concrete `ProjectStore` / `WorkspaceStore`; adds four intent methods instead of exposing paths/layout.", "Done at `c71d601`; still owes supervised full matrix because loop ran headless.", "No rework. Include in final supervised GUI matrix before merge."],
+    ["02 op enum / LoggedOp envelope", "Defines `OpId`, closed hand-coded `Op`, `LoggedOp`, `FracIndex`, and canonical op-log JSON. Establishes frozen spatial wire format with no runtime handles.", "Done at `a4cba75`; still owes supervised full matrix because loop ran headless.", "No rework. Keep as foundation for 05/06/07/09."],
+    ["03 membership tile register", "Moves membership onto `Tile.zoneId`; migrates `WorkspaceDocument.groupZoneTiles` to flat `ambientTiles`; updates schema versions; `setTiles(_:forZone:)` must preserve non-membership fields; production projection must read the new register.", "Conflicted: correct schema re-stamp/save behavior needs explicit scope; prior attempts risked data loss and stale-tile clobber.", "Do not run monolithic. Split into 03A schema re-stamp, 03B model migration, 03C mutation semantics, 03D production projection/I5."],
+    ["04 z-order fractional index", "Replaces `Tile.zIndex` with `Tile.zPosition: FracIndex`; adds `ZonePlacement.zPosition`; migrates legacy `zoneZOrder`; changes render/hit-test/bring-to-front ordering; adds z-position op cases.", "Conflicted: broad migration, legacy ordering, and call-site explosion; compatibility shims hide incomplete work.", "Do not run monolithic. Split into 04A FracIndex hardening, 04B tile migration, 04C zone migration, 04D engine/render/hit-test."],
+    ["05 delete tombstone", "Adds delete op cases, `TombstoneSet`, `TombstoneRecord`, and `CompactionLedger`; proves delete-wins with local folds; deliberately does not implement production materialize/compaction.", "Retryable with guards: prior issue was untracked `Tombstone.swift`; must not drift into ticket 06.", "Good GPT-5.5/Sonnet low-medium candidate after tree is clean; require file-hygiene preflight and fresh checkout build."],
+    ["06 op-log apply + compaction", "Creates real materializer/compactor over spatial ops: LWW fields, membership register, z-order sorting, tombstone delete-wins, canonical snapshots, low-watermark compaction.", "Blocked by 03/04/05 semantics; stubbing missing models would create false confidence.", "Hold until split 03/04 and guarded 05 land. If still blocked near morning, record `blocked-dep` with evidence."],
+    ["07 convergence fuzz", "Adds deterministic multi-replica fuzz: shuffled op delivery, sync settle, byte-identical canonical state, compaction snapshot+tail verification, manifest counts.", "Blocked by 06; also needs fixed seed-derived UUIDs, not random `UUID()`.", "Hold until 06. Good later GPT-5.5 review target because it is mostly deterministic harness logic."],
+    ["08 sync/observation split", "Adds `AgentActivityEvent`, `ActivityTreeSnapshot`, pure `apply(_:_:)`, `ActivityStore` actor, snapshot-then-tail subscription, replay cursor, and `AtomicWriter` flush/load.", "Dirty interrupted attempt in working tree; cannot start new ticket until continued, stashed, or discarded.", "First action after reset: classify/continue this attempt. Ensure checks are executable `*Checks`, not XCTest-only."],
+    ["09 I5 taint scan", "Adds scanner for sync/activity payloads to catch pid, pane target, runtime handle, transcript body, and host-local path leaks; scans every `Op` case and 24 activity-event combinations.", "Blocked by 08 and possibly op case changes from 03/04/05; integer taint policy for legitimate geometry values needs prompt clarification.", "Hold until 08 lands. Add explicit geometry-integer rule before unattended implementation."],
+    ["10 session topology snapshot", "Pure tmux-output parser into `SessionTopologySnapshot`; six tab-separated fields; stable ordering; pane lookup; JSON round-trip; no process calls.", "Retryable with amendment: stale prose mentions `emptyInput`, but winning ruling is empty/whitespace output = zero-session snapshot.", "High-confidence GPT-5.5/Sonnet low candidate once prompt states the ruling explicitly." ]
+  ]}
+/>
+
+<Callout id="first-ten-throughput-note" tone="decision">
+
+For tonight, treat 08 and 10 as the first throughput targets, 05 as the next guarded target, and 03/04 as decomposition work rather than direct implementation. 06/07/09 should only unlock after their dependencies are real.
+
+</Callout>
+
+## Why 03/04/05 should not be retried blindly
+
+<Columns id="migration-conflict-columns">
+<Column id="migration-conflict-03" label="03 membership">
+
+<Callout id="callout-03" tone="risk">
+
+The core failure is schema safety. A loaded old canvas can acquire `zoneId` but still save under the old schema version unless the save/re-stamp path is explicitly handled. Prior attempts also clobbered whole `Tile` records from stale callers.
+
+</Callout>
+
+<Checklist
+  id="checklist-03-split"
+  items={[
+    { id: "03a", label: "03A schema re-stamp contract", note: "Old-shape decode followed by save writes the new schema version." },
+    { id: "03b", label: "03B zoneId + ambientTiles migration", note: "Pure model/Codable migration." },
+    { id: "03c", label: "03C membership mutation semantics", note: "Only `zoneId` mutates; frame/runtimeRef/metadata/kind survive stale callers." },
+    { id: "03d", label: "03D production projection", note: "Rendering/projection wiring and I5 check use production path." }
+  ]}
+/>
+
+</Column>
+<Column id="migration-conflict-04" label="04 z-order">
+
+<Callout id="callout-04" tone="risk">
+
+The risk is an incomplete migration hidden by compatibility shims. `Tile.zIndex` must be replaced with `zPosition`, legacy rank order must survive, and render/hit-test order must follow the new model.
+
+</Callout>
+
+<Checklist
+  id="checklist-04-split"
+  items={[
+    { id: "04a", label: "04A FracIndex hardening", note: "Hashable/Codable/Comparable/Sendable and invariant checks." },
+    { id: "04b", label: "04B tile zPosition migration", note: "Remove zIndex shim so compiler finds all call sites." },
+    { id: "04c", label: "04C workspace zone zPosition", note: "Decode legacy `zoneZOrder` into distributed positions." },
+    { id: "04d", label: "04D engine/render/hit-test", note: "Bring-to-front and topmost hit-testing use zPosition order." }
+  ]}
+/>
+
+</Column>
+</Columns>
+
+<Callout id="callout-05" tone="info">
+
+Ticket 05 is less design-conflicted than 03/04. It mainly needs a file-hygiene guard because a prior attempt left `Tombstone.swift` untracked while package/tests referenced it. The prompt must also forbid drifting into ticket 06's production materializer or compactor.
+
+</Callout>
+
+## Target overnight architecture: Fable-led Ralph loop
+
+The next runner should make every stage visible in shell logs and JSONL. Fable should select, classify, review, and adjudicate. Sonnet remains the default Claude implementer when available; GPT-5.5 can take low/medium implementation fallback lanes because the first-ten packets are now explicit. GPT-5.5 also remains the independent cross-reviewer. The new review lane is Fable + GPT-5.5 only.
+
+<Diagram id="ralph-loop-architecture" caption="No hidden Workflow: explicit shell stages with durable artifacts.">
+
+```html
+<div class="diagram-panel ralph" data-rough>
+  <div class="diagram-node">select<br><span>Fable reads queue + conflict log</span></div>
+  <div class="diagram-node">implement<br><span>Sonnet one ticket only</span></div>
+  <div class="diagram-node">build<br><span>swift build</span></div>
+  <div class="diagram-node">matrix<br><span>*Checks + run-matrix</span></div>
+  <div class="diagram-node">review<br><span>Fable + GPT-5.5</span></div>
+  <div class="diagram-node">adjudicate<br><span>Fable chooses repair vs commit</span></div>
+  <div class="diagram-node">commit or conflict<br><span>local commit or _CONFLICT_LOG</span></div>
+</div>
+```
+
+```css
+.diagram-panel.ralph { display: grid; grid-template-columns: repeat(7, minmax(120px, 1fr)); gap: 10px; }
+.ralph .diagram-node { border: 1px solid var(--wf-border); border-radius: 12px; padding: 10px; background: var(--wf-surface); text-align: center; font-weight: 700; }
+.ralph .diagram-node span { display: block; margin-top: 6px; color: var(--wf-muted); font-weight: 400; font-size: 12px; line-height: 1.3; }
+```
+
+</Diagram>
+
+## Tonight execution windows and throughput forecast
+
+<Callout id="forecast-truth" tone="warning">
+
+The aggressive target is **all autonomous, unblocked tickets done or honestly classified by morning**. All 74 tickets cannot be literally implemented unattended tonight because the ticket set includes supervised UI gates, needs-substrate tickets, and dependency-blocked work. A successful morning is: committed autonomous work where gates are honest, plus explicit conflict/dependency entries for anything not safe to run.
+
+</Callout>
+
+<Table
+  id="tonight-window-table"
+  columns={["Window", "Primary lane", "Fallback lane", "Expected output"]}
+  rows={[
+    ["Now → usage reset", "Preserve state; do not burn more hidden Workflow attempts", "Use GPT-5.5 only for read-only packet/check review", "Plan docs finalized; dirty 08 classified; STOP remains until deliberate launch"],
+    ["Reset → ~12:30am", "Fable selector/reviewer/adjudicator + Sonnet implement for 08, 10, 05", "GPT-5.5 low implementation for 10 or file-hygiene parts if Claude quota is tight", "Land 08 if salvageable; land 10; possibly land guarded 05"],
+    ["~12:30am → ~4:30am", "GPT-5.5 implementation lane on low/medium, well-packeted tickets", "Fable periodically adjudicates conflict-log and retry choices when quota allows", "Drain additive/pure autonomous tickets; classify blockers instead of retry-burning"],
+    ["~4:30am → ~8:15am", "Fable wrap-up / audit / morning report", "GPT-5.5 cross-checks conflict log and progress rows", "No risky new migrations late; produce clear morning status, commits, logs, and next actions"],
+    ["8:15am → 8:45am review", "Human review", "Supervised GUI matrix if time", "Dylan sees done count, blockers, dirty state, and merge risk" ]
+  ]}
+/>
+
+<Table
+  id="throughput-scenarios"
+  columns={["Scenario", "Assumption", "Likely morning result"]}
+  rows={[
+    ["Conservative", "Claude usage remains tight; GPT-5.5 handles only small low-risk packets", "08 classified, 10 done, 05 possibly done, conflict log accurate"],
+    ["Expected hybrid", "Fable returns after reset; GPT-5.5 can implement low/medium additive tickets overnight", "Most unblocked autonomous tickets after 08/10/12 progress; 03/04/06/07/09 honestly blocked until deps"],
+    ["Aggressive", "No further provider limits; no hidden build breaks; no substrate gates reached", "Autonomous queue mostly drained or classified; supervised/needs-substrate tickets remain deferred with packets"],
+    ["Impossible claim", "All 74 literally implemented unattended", "Not a valid target: 17 supervised + 11 needs-substrate + 3 unclassified require human/device/cloud checks"]
+  ]}
+/>
+
+### Stage event contract
+
+<Code
+  id="stage-jsonl-code"
+  filename="events.jsonl"
+  language="json"
+  caption="Each stage should append machine-readable evidence instead of collapsing failures into `skipped`."
+  code={'{"stage":"select","ticket":"08-sync-observation-type-split.md","status":"started"}\n{"stage":"implement","status":"done","changedFiles":["Sources/ContinuumRevivedCore/ActivityStore.swift"]}\n{"stage":"build","status":"pass","log":"run-.../logs/build.log"}\n{"stage":"matrix","status":"pass-headless","deferredSurfaceChecks":["terminal-surface"],"log":"run-.../logs/matrix.log"}\n{"stage":"review","reviewer":"fable","status":"pass","concerns":[]}\n{"stage":"review","reviewer":"gpt-5.5","status":"reject","reasonCode":"VFY-NONGATING","concerns":["Check is not wired into run-matrix.sh"]}\n{"stage":"final","status":"blocked","reasonCode":"VFY-NONGATING","dirty":true}\n'}
+/>
+
+## QA packet required from every implementor attempt
+
+<Checklist
+  id="qa-packet-checklist"
+  items={[
+    { id: "qa-ticket", label: "Ticket and attempt id", note: "Include ticket path, run dir, iteration log, and git head." },
+    { id: "qa-changed-files", label: "Changed files and new file visibility", note: "List `git diff --name-only`; confirm new files are tracked or intent-to-add." },
+    { id: "qa-build", label: "Build result", note: "`swift build` pass/fail with log path." },
+    { id: "qa-matrix", label: "Matrix result", note: "`./scripts/run-matrix.sh`; mark headless if surface checks are skipped." },
+    { id: "qa-checks", label: "Targeted *Checks evidence", note: "Quote measured manifest lines; no XCTest-only proof." },
+    { id: "qa-acceptance", label: "Acceptance mapping", note: "Each Done-when item maps to evidence line/check name." },
+    { id: "qa-unresolved", label: "Unresolved concerns", note: "Blockers, reviewer concerns, human rulings, dirty/stash artifact." }
+  ]}
+/>
+
+## Morning-ready actions
+
+<Checklist
+  id="morning-actions"
+  items={[
+    { id: "action-08", label: "Classify dirty ticket-08 attempt", note: "Continue after reset, stash, or discard. Do not mix with another ticket." },
+    { id: "action-provider", label: "Patch provider-limit detection", note: "Include `session limit` in quota/provider regex if legacy harness is used again." },
+    { id: "action-ralph", label: "Create no-Workflow Ralph iteration script", note: "Explicit select/implement/build/matrix/review/adjudicate/commit stages." },
+    { id: "action-conflict", label: "Teach selector to read `_CONFLICT_LOG.md`", note: "Never treat `skipped` as a sufficient terminal state." },
+    { id: "action-split", label: "Author split/amend packets for 03/04/05", note: "Preserve original directives; add scope rulings instead of guessing." },
+    { id: "action-safe", label: "Run retryable tickets only after gates", note: "10 is safe with the empty/whitespace ruling; 05 is safe with file hygiene." }
+  ]}
+/>
+
+## Full 74-ticket program map
+
+<Table
+  id="phase-map-table"
+  columns={["Phase", "Tickets", "Morning status"]}
+  rows={[
+    ["0 Foundations", "01–13", "01/02 done; 03/04 conflicted; 05 guarded; 06/07/09 blocked; 08 dirty; 10/12 retryable by ruling"],
+    ["1 Session topology", "14–26", "Not reached; 14 has prior coverage gap to fix before retry"],
+    ["2 De-mirror", "27–30", "Not reached; depends on topology/membership correctness"],
+    ["3 Agent awareness/readers", "31–43", "Likely next productive additive stretch once 08/10/12 land"],
+    ["4 Activity surface", "44–47", "Supervised/UI review later"],
+    ["5 Remote execution", "48–54", "Later; several tickets marked gaps"],
+    ["6 Sync + multi-device", "55–65", "Later; needs transport/fuzz confidence"],
+    ["7 Managed agents + bus", "66–74", "Later; depends on reader/activity foundations"]
+  ]}
+/>
+
+## Source artifacts for this plan
+
+<Table
+  id="agent-artifacts-table"
+  columns={["Artifact", "Use"]}
+  rows={[
+    ["`.pi/agent-runs/explorer-20260702T004047Z-4090dd/final.md`", "Tickets 01–05 packets and 03/04/05 split/conflict plan"],
+    ["`.pi/agent-runs/explorer-20260702T004047Z-c55974/final.md`", "Tickets 06–10 path maps, acceptance gates, blockers, ambiguities"],
+    ["`.pi/agent-runs/code-reviewer-20260702T004047Z-7f156b/final.md`", "QA packet and conflict taxonomy"],
+    ["`.pi/agent-runs/code-reviewer-20260702T004047Z-286ce7/final.md`", "ZERO-Workflow handoff format and status taxonomy"],
+    ["`docs/38-tickets/_HANDOFF.md`", "Durable resume state"],
+    ["`docs/38-tickets/_CONFLICT_LOG.md`", "Durable blocker ledger"],
+    ["`docs/38-tickets/_IMPLEMENTOR_PACKETS_01-10.md`", "First-ten implementor packets"]
+  ]}
+/>
+
+### Open Questions
+
+<QuestionForm
+  id="open-questions"
+  questions={[
+    {
+      id: "q-dirty-08",
+      title: "What should happen to the current dirty ticket-08 attempt?",
+      mode: "single",
+      options: [
+        { id: "continue", label: "Continue it after usage reset", detail: "Best if the partial implementation is close and reviewers can finish it.", recommended: true },
+        { id: "stash", label: "Stash it as an interrupted attempt", detail: "Preserves work while clearing the tree for loop redesign." },
+        { id: "discard", label: "Discard it", detail: "Only if we decide the attempt is not worth salvaging." }
+      ],
+      required: true
+    },
+    {
+      id: "q-loop-choice",
+      title: "Which runner should be used for the next overnight window?",
+      mode: "single",
+      options: [
+        { id: "ralph", label: "Build the no-Workflow Ralph loop first", detail: "Matches the desired observable loop; slower setup, cleaner overnight.", recommended: true },
+        { id: "legacy-patched", label: "Patch and resume the legacy Workflow harness", detail: "Faster to continue, but keeps hidden Workflow layering." }
+      ],
+      required: true
+    },
+    {
+      id: "q-scope-fence",
+      title: "How should 03/04 scope fences be handled?",
+      mode: "single",
+      options: [
+        { id: "split", label: "Split into explicit micro-tickets", detail: "Preserves original directive while making schema/call-site migrations reviewable.", recommended: true },
+        { id: "loosen", label: "Loosen the existing ticket fences", detail: "Fewer docs, but higher chance of broad unattended edits." }
+      ],
+      required: true
+    },
+    {
+      id: "q-notes",
+      title: "Additional morning constraints for Fable?",
+      mode: "freeform",
+      placeholder: "Example: max iterations, which tickets to avoid, model budget, commit policy..."
+    }
+  ]}
+  submitLabel="Record morning decisions"
+/>
