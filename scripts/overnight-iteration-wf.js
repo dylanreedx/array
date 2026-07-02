@@ -1,9 +1,9 @@
 export const meta = {
   name: 'overnight-iteration',
-  description: 'Execute ONE Continuum ticket with a self-repair loop: implement with Sonnet, prove with swift build + the matrix, dual-review the diff (real Opus + GPT-5.5 via Codex), and if either reviewer rejects, feed the concerns back for a fix pass and re-review — up to 3 rounds — before either committing (only when build+matrix green AND both reviewers clear) or skipping honestly. No push. No co-authoring footer.',
+  description: 'Execute ONE Continuum ticket with a self-repair loop: implement with Sonnet, prove with swift build + the matrix, dual-review the diff (real Fable + GPT-5.5 via Codex), and if either reviewer rejects, feed the concerns back for a fix pass and re-review — up to 3 rounds — before either committing (only when build+matrix green AND both reviewers clear) or skipping honestly. No push. No co-authoring footer.',
   phases: [
     { title: 'Implement', detail: 'edit Sources/, make swift build + matrix green' },
-    { title: 'Dual review', detail: 'real Opus + Codex gpt-5.5 review of the diff' },
+    { title: 'Dual review', detail: 'real Fable + Codex gpt-5.5 review of the diff' },
     { title: 'Commit', detail: 'commit iff green and both reviewers clear' },
   ],
 }
@@ -41,13 +41,13 @@ const IMPL_PROMPT = [
 const FIX_PROMPT = (concerns, round) => [
   'You are fix round ' + round + ' for a Continuum ticket. A previous pass implemented it but reviewers REJECTED it. The implementation is in the working tree (uncommitted). Fix EVERY concern below in place; do not start over, do not revert good work.',
   'The ticket (authoritative contract): ' + TICKET + '. Re-read it. Also read the current uncommitted diff (`git --no-pager diff`, `git status`) to see what exists.',
-  'CONCERNS TO RESOLVE (from Opus and/or GPT-5.5 — every one must be genuinely addressed, not papered over):',
+  'CONCERNS TO RESOLVE (from Fable and/or GPT-5.5 — every one must be genuinely addressed, not papered over):',
   ...(concerns || []).map((c, i) => '  ' + (i + 1) + '. ' + c),
   'After fixing: `swift build` until clean, then `./scripts/run-matrix.sh`. Do NOT commit; `git add -N` any brand-new file so it shows in the diff, but otherwise do not touch git. NO fake-green — if a concern reveals the approach is wrong, fix it properly; if you genuinely cannot resolve one honestly, say so in notes rather than masking it.',
   'Return {built, matrixGreen, changedFiles, summary, notes} — summary should say how each concern was addressed.'
 ].join('\n')
 
-const OPUS_PROMPT = [
+const FABLE_PROMPT = [
   'Adversarially review the UNCOMMITTED diff implementing a Continuum ticket. Be strict — this ships unattended.',
   'Ticket (the contract the diff must satisfy): ' + TICKET + '. Read it, then read the working-tree diff (`git --no-pager diff`, `git status`; nothing is committed).',
   'Judge against the ticket\'s "Done when": does the diff actually and COMPLETELY deliver it? Watch specifically for: incomplete migrations (compat shims / unmigrated call sites that defeat a compile-enforced change), tests that are tautological or bypass the real production path, missing required test tiers, reopened settled decisions, real correctness bugs, scope creep, and any secret/transcript body crossing a sync boundary (I5). REJECT verification that does not actually gate: this repo has NO XCTest and the matrix does not run `swift test`, so any XCTestCase / `import XCTest` / new `Tests/` target is dead weight that never runs — checks MUST be in a `*Checks` executable target wired into `scripts/run-matrix.sh`. Also reject any diff that edits `scripts/run-matrix.sh` to weaken/skip a check (a fake-green attempt).',
@@ -70,13 +70,13 @@ const COMMIT_PROMPT = [
 
 if (!TICKET) {
   log('FATAL: no ticketPath in args (threading failed) — cannot run')
-  return { ticket: NAME, committed:false, built:false, matrixGreen:false, opusClear:false, codexClear:false, rounds:0, reason:'no ticketPath in args', outstandingConcerns:['Workflow args did not thread a ticketPath'] }
+  return { ticket: NAME, committed:false, built:false, matrixGreen:false, fableClear:false, codexClear:false, rounds:0, reason:'no ticketPath in args', outstandingConcerns:['Workflow args did not thread a ticketPath'] }
 }
 
 log('iteration for ' + NAME + ' (effort=' + EFFORT + ', up to ' + MAX_ROUNDS + ' repair rounds)')
 
 let committed = false, hash = null, reason = '', rounds = 0
-let opus = { clear:false, concerns:[] }, codex = { clear:false, concerns:[] }
+let fable = { clear:false, concerns:[] }, codex = { clear:false, concerns:[] }
 let concerns = []
 
 for (let round = 1; round <= MAX_ROUNDS && !committed; round++) {
@@ -97,13 +97,13 @@ for (let round = 1; round <= MAX_ROUNDS && !committed; round++) {
 
   phase('Dual review')
   const reviews = await parallel([
-    () => agent(OPUS_PROMPT, { label:'review-opus:' + NAME, phase:'Dual review', model:'opus', effort:'high', schema: VERDICT }),
+    () => agent(FABLE_PROMPT, { label:'review-fable:' + NAME, phase:'Dual review', model:'fable', effort:'high', schema: VERDICT }),
     () => agent(CODEX_PROMPT, { label:'review-codex-gpt5.5:' + NAME, phase:'Dual review', schema: VERDICT }),
   ])
-  opus = reviews[0] || { clear:false, concerns:['Opus review agent returned nothing'] }
+  fable = reviews[0] || { clear:false, concerns:['Fable review agent returned nothing'] }
   codex = reviews[1] || { clear:false, concerns:['Codex review agent returned nothing'] }
 
-  if (opus.clear && codex.clear) {
+  if (fable.clear && codex.clear) {
     phase('Commit')
     const c = await agent(COMMIT_PROMPT, { label:'commit:' + NAME, phase:'Commit', schema: COMMIT_RESULT })
     if (c && c.committed) {
@@ -113,7 +113,7 @@ for (let round = 1; round <= MAX_ROUNDS && !committed; round++) {
     }
   } else {
     concerns = [
-      ...(opus.clear ? [] : (opus.concerns || []).map(x => 'Opus: ' + x)),
+      ...(fable.clear ? [] : (fable.concerns || []).map(x => 'Fable: ' + x)),
       ...(codex.clear ? [] : (codex.concerns || []).map(x => 'Codex: ' + x)),
     ]
     log('round ' + round + ': reviewers rejected (' + concerns.length + ' concerns), ' + (round < MAX_ROUNDS ? 'fixing' : 'out of rounds'))
@@ -126,6 +126,6 @@ if (!committed && !reason) {
 
 return {
   ticket: NAME, committed, commitHash: hash, rounds, reason,
-  opusClear: !!opus.clear, codexClear: !!codex.clear,
+  fableClear: !!fable.clear, codexClear: !!codex.clear,
   outstandingConcerns: committed ? [] : concerns,
 }

@@ -12,9 +12,11 @@ emit token, exit.
 
 1. **Load state.** Read `docs/38-tickets/_OVERNIGHT-RUNBOOK.md` (the contract), the queue in
    `docs/38-tickets/README.md` (its "Overnight-executable set" lists the `autonomous` tickets in
-   dependency order), and `docs/38-tickets/_PROGRESS.md` if it exists. Cross-check `git log --oneline`
-   on the current branch. A ticket is DONE only if `_PROGRESS.md` marks it done AND a matching commit
-   exists.
+   dependency order), `docs/38-tickets/_PROGRESS.md`, `docs/38-tickets/_CONFLICT_LOG.md`, and the
+   relevant implementor packet doc (`_IMPLEMENTOR_PACKETS_01-10.md` or `_IMPLEMENTOR_PACKETS_11-74.md`).
+   Cross-check `git log --oneline` on the current branch. A ticket is DONE only if `_PROGRESS.md` marks
+   it done AND a matching commit exists. A conflict-log `open` entry is a hard routing input: do not
+   blindly retry a conflicted ticket as a monolith.
 
 2. **Pick the next ticket.** The first ticket in the Overnight-executable set that is (a) not done,
    (b) **not already marked `skipped`** in `_PROGRESS.md`, and (c) whose dependencies (named in its
@@ -44,7 +46,7 @@ emit token, exit.
    })
    ```
    The Workflow runs a **self-repair loop**: implement (Sonnet @ that effort) → `swift build` +
-   `./scripts/run-matrix.sh` → dual-review the diff (**real Opus** + GPT-5.5 via Codex) → if either
+   `./scripts/run-matrix.sh` → dual-review the diff (**Fable** + GPT-5.5 via Codex) → if either
    reviewer rejects, it feeds the concerns back for a fix pass and re-reviews, up to 3 rounds; it
    commits **only** if build+matrix are green AND both reviewers clear, else it leaves the tree dirty
    and reports skipped. It never pushes and adds no co-authoring footer. Wait for it to finish and
