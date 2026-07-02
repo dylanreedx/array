@@ -6021,6 +6021,7 @@ runSessionTopologySnapshotTests()
 // MARK: - Ticket 11: Activity tree snapshot
 
 runSidebarActivityTreeSnapshotTests()
+runAgentStateReaderTests()
 
 // MARK: - Ticket 12: Injectable substrates (TmuxControl, Clock, Host, SyncTransport)
 

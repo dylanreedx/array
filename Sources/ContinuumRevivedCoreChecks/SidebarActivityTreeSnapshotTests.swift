@@ -172,7 +172,12 @@ func runSidebarActivityTreeSnapshotTests() {
         )
 
         let snapshot = AgentSnapshot(
+            kind: .claude,
             status: .working,
+            title: "Claude",
+            mode: "normal",
+            asOf: fixedDate,
+            detail: nil,
             evidence: evidence(claudeEvidenceSource, "assistant", 12.4)
         )
         let tree = SidebarTreeBuilder.build(

@@ -1,46 +1,5 @@
 import Foundation
 
-// TODO: remove once AgentSnapshot.Evidence from the agent-state-reader-protocol
-// ticket (35) is available in ContinuumRevivedCore. This is a minimal forward
-// declaration carrying only the members this ticket exercises — do not add
-// `kind`, `title`, `mode`, `asOf`, or `detail` (that is ticket 35's scope).
-public struct AgentSnapshot: Codable, Equatable, Sendable {
-    // I5 scope note (fix-round-3): `source` is a free-form string identifying which
-    // reader/file produced this evidence (e.g. "claude:sessions/<name>.json"), and it
-    // is serialized verbatim by `ActivityTreeSnapshot`'s `Codable` conformance. This
-    // type does not runtime-validate that `source`/`lastEventType` are free of
-    // forbidden substrings (pid, paneId, windowTarget, content, body, prompt) —
-    // producing an I5-clean `source` string is the READER's contract (the
-    // agent-state-reader-protocol ticket, 35), not something this envelope type can
-    // enforce after the fact without knowing what a legitimate reader tag looks like.
-    // What this ticket owns is the taint-scan proof that a real, populated snapshot
-    // built through the real construction paths (`SidebarTreeBuilder.build`,
-    // `ActivityTreeSnapshot.make`) is clean, AND that the scan mechanism itself is
-    // capable of catching a violation if one were introduced — see the "I5 taint scan
-    // proves it can actually catch a violation" check in
-    // SidebarActivityTreeSnapshotTests.swift, added in fix-round-3 because the
-    // original scan only ever ran against pre-sanitized fixtures.
-    public struct Evidence: Codable, Equatable, Sendable {
-        public var source: String
-        public var lastEventType: String?
-        public var mtimeAgeSeconds: Double
-
-        public init(source: String, lastEventType: String?, mtimeAgeSeconds: Double) {
-            self.source = source
-            self.lastEventType = lastEventType
-            self.mtimeAgeSeconds = mtimeAgeSeconds
-        }
-    }
-
-    public var status: AgentStatus
-    public var evidence: Evidence?
-
-    public init(status: AgentStatus, evidence: Evidence?) {
-        self.status = status
-        self.evidence = evidence
-    }
-}
-
 public enum SidebarAgentStatusKind: String, Codable, Equatable, Sendable {
     case working
     case needsAttention

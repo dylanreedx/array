@@ -73,3 +73,4 @@ New attempts append their rows to the table above.
 | 20-project-release-detach.md | done | 58e84f7 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
 | 22-per-workspace-ambient-session.md | done | cc4e319 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
 | 23-private-managed-session-record.md | done | 9fdabf8 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
+| 35-agent-state-reader-protocol.md | done | 73e8b25 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |

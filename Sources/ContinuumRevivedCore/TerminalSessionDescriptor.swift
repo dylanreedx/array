@@ -87,7 +87,7 @@ public struct TerminalSessionDescriptor: Codable, Equatable, Sendable {
     }
 }
 
-public enum AgentKind: String, Codable, Equatable, Sendable {
+public enum AgentKind: String, Codable, Equatable, Sendable, CaseIterable {
     case shell
     case claude
     case codex
@@ -106,7 +106,7 @@ public enum AgentKind: String, Codable, Equatable, Sendable {
     }
 }
 
-public enum AgentStatus: String, Codable, Equatable, Sendable {
+public enum AgentStatus: String, Codable, Equatable, Sendable, CaseIterable {
     case configuring
     case working
     case idle
