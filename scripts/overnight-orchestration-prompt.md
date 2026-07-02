@@ -46,7 +46,7 @@ emit token, exit.
    })
    ```
    The Workflow runs a **self-repair loop**: implement (Sonnet @ that effort) → `swift build` +
-   `./scripts/run-matrix.sh` → dual-review the diff (**Fable** + GPT-5.5 via Codex) → if either
+   `./scripts/run-matrix.sh` → dual-review the diff (**Opus** by default, via `CLAUDE_REVIEW_MODEL`, + GPT-5.5 via Codex) → if either
    reviewer rejects, it feeds the concerns back for a fix pass and re-reviews, up to 3 rounds; it
    commits **only** if build+matrix are green AND both reviewers clear, else it leaves the tree dirty
    and reports skipped. It never pushes and adds no co-authoring footer. Wait for it to finish and

@@ -330,3 +330,20 @@ Dylan grants conditional permission for the final overnight orchestrator to push
 Remote: `https://github.com/dylanreedx/continuum`
 
 Rules: do not merge; do not push dirty/mixed failed-attempt diffs; do not claim supervised/needs-substrate tickets are done without evidence; PR body must include done commits, conflicts/reason codes, matrix/headless debt, mobile/TestFlight readiness, architecture walkthrough, and reviewer guide.
+
+### 2026-07-02 model routing update — Fable unavailable, Opus primary
+
+Dylan reports Fable is no longer available. The loop has been adapted so Claude orchestration/review defaults to **Opus**, while implementation remains delegated to **Sonnet 5** and fallback implementation/review remains **Codex/GPT-5.5**.
+
+Changed files:
+
+- `scripts/overnight-orchestration-loop.sh`
+  - `CLAUDE_MODEL` default changed from `fable` to `opus`.
+  - `CLAUDE_REVIEW_MODEL` exported, default `opus`.
+- `scripts/overnight-iteration-wf.js`
+  - Claude review agent now uses `CLAUDE_REVIEW_MODEL` instead of hard-coded `fable`.
+  - Sonnet implementer and Codex/GPT-5.5 reviewer remain unchanged.
+- `scripts/overnight-orchestration-prompt.md`
+  - reviewer wording updated to Opus-by-default via `CLAUDE_REVIEW_MODEL` + GPT-5.5.
+
+Continuation command should remove `STOP` only when Dylan wants the background loop to run again.

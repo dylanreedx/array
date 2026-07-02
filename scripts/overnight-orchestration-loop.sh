@@ -2,7 +2,7 @@
 # overnight-orchestration-loop.sh — Ralph-style driver for the agent-orchestration
 # program. Forked from overnight-loop.sh; same observability + resilience, but each
 # iteration is a fresh headless Claude Code (`claude -p`, Sonnet 5) that runs the
-# internal per-ticket Workflow (implement -> swift build + matrix -> Fable + Codex
+# internal per-ticket Workflow (implement -> swift build + matrix -> Claude review + Codex
 # gpt-5.5 dual review -> commit). State lives in git + docs/38-tickets/_PROGRESS.md.
 #
 # Usage from repo root, on the overnight branch, tree clean:
@@ -31,11 +31,13 @@ ALLOW_DIRTY="${ALLOW_DIRTY:-0}"
 ALLOW_MAIN="${ALLOW_MAIN:-0}"
 EXPECTED_BRANCH="${EXPECTED_BRANCH:-overnight/agent-orchestration}"
 PUSH_MODE="${PUSH_MODE:-local-only}"
-# Orchestrator model: Fable 5 drives each iteration (picks the ticket, runs the
-# implement workflow, coordinates reviews, decides commit/skip). The IMPLEMENTER
-# stays Sonnet 5 (set in overnight-iteration-wf.js); reviewers stay Fable + Codex.
-CLAUDE_MODEL="${CLAUDE_MODEL:-fable}"
+# Orchestrator model: default to Opus when Fable is unavailable. It picks the
+# ticket, runs the implement workflow, coordinates reviews, decides commit/skip.
+# The IMPLEMENTER stays Sonnet 5 (set in overnight-iteration-wf.js); reviewers are
+# Claude review model (default Opus) + Codex/GPT-5.5.
+CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"
 CLAUDE_EFFORT="${CLAUDE_EFFORT:-medium}"
+export CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-opus}"
 # `claude -p` kills still-running background tasks after this many ms (default
 # 600000 = 10 min). The per-ticket Workflow runs as a background task and a real
 # ticket routinely needs longer than 10 min (implement + build + matrix + dual
@@ -50,12 +52,12 @@ export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="${CLAUDE_CODE_PRINT_BG_WAIT_CEILING
 export CONTINUUM_SKIP_SURFACE_CHECKS="${CONTINUUM_SKIP_SURFACE_CHECKS:-1}"
 ROOT_PI_DIR="${ROOT_PI_DIR:-$HOME/.pi}"
 PROJECT_LOG_DIR="${PROJECT_LOG_DIR:-.pi/overnight-logs}"
-# GPT-5.5/Codex implementation fallback. When Fable is rate-limited, don't just idle:
+# GPT-5.5/Codex implementation fallback. When Claude review/orchestrator model is rate-limited, don't just idle:
 # implement eligible low/medium autonomous tickets via Codex during the reset window.
 # Codex implements + builds + runs matrix + commits (one ticket per commit, clean history,
 # no AI footer); the loop then INDEPENDENTLY re-verifies build+matrix and reverts the commit
-# if the objective gate does not hold. Only ever runs on a clean tree. Fable audits these
-# commits when it resumes (they are marked "gpt-5.5 fallback; pending Fable audit" in _PROGRESS.md).
+# if the objective gate does not hold. Only ever runs on a clean tree. Claude reviewer audits these
+# commits when it resumes (they are marked "gpt-5.5 fallback; pending Claude audit" in _PROGRESS.md).
 CODEX_FALLBACK="${CODEX_FALLBACK:-1}"
 CODEX_MODEL="${CODEX_MODEL:-gpt-5.5}"
 # The implementor packets are detailed enough that GPT-5.5 can run at low reasoning effort.
@@ -239,7 +241,7 @@ $(cat "$PROMPT_FILE")"
   return "$rc"
 }
 
-# Implement ONE eligible low/medium autonomous ticket via GPT-5.5/Codex while Fable is
+# Implement ONE eligible low/medium autonomous ticket via GPT-5.5/Codex while Claude is
 # rate-limited. Codex selects, implements, builds, runs the matrix, and commits. This
 # function then re-verifies the result objectively (bash-side build + matrix) and REVERTS
 # the commit if it does not hold up — Codex cannot fake-green past this gate. Returns:
@@ -251,7 +253,7 @@ run_codex_fallback() {
   local pre_head
   pre_head="$(git rev-parse HEAD)"
 
-  # Never mix a Codex attempt into a dirty tree (e.g. an unresolved Fable attempt).
+  # Never mix a Codex attempt into a dirty tree (e.g. an unresolved Claude attempt).
   if [ -n "$(git status --porcelain)" ]; then
     append_event "codex-fallback-skip" "tree dirty; not starting codex implementer"
     return 2
@@ -263,7 +265,7 @@ run_codex_fallback() {
   # literal; -d '' reads to NUL (never present) and returns non-zero at EOF, hence `|| true`.
   read -r -d '' prompt <<'CODEXEOF' || true
 You are the GPT-5.5 implementation fallback for the Continuum agent-orchestration overnight loop,
-running while the Fable/Claude model is rate-limited. Implement exactly ONE ticket end-to-end and commit it.
+running while the Claude model is rate-limited. Implement exactly ONE ticket end-to-end and commit it.
 Repository: the current working directory (a git worktree on branch overnight/agent-orchestration).
 Local commits ONLY — NEVER push.
 
@@ -293,7 +295,7 @@ STEP 4 — COMMIT, only if `swift build` is clean AND the matrix passed. One tic
 plain Conventional-Commits message `type(scope): summary` — NO body footer, NO Co-Authored-By, NO AI
 attribution of any kind. `git add -A` (include new files). Then append a row to
 docs/38-tickets/_PROGRESS.md marking the ticket done with the short commit hash and the note
-"gpt-5.5 fallback; pending Fable audit", and `git commit --amend --no-edit` to fold that row into the
+"gpt-5.5 fallback; pending Claude audit", and `git commit --amend --no-edit` to fold that row into the
 same commit. Finally print `CODEX_TICKET: <ticket-filename>` then `CODEX_RESULT: committed`.
 If you CANNOT make it honestly green: do NOT commit; run `git reset --hard HEAD` and `git clean -fd`
 to leave a pristine tree; print `CODEX_TICKET: <ticket-filename>` then `CODEX_RESULT: skipped:<reason>`.
@@ -429,24 +431,24 @@ for i in $(seq 1 "$MAX_ITER"); do
       stop_run "provider-failure-window"; break
     fi
     quota_sleep="$(quota_sleep_seconds_from_log "$OUT")"
-    echo "[loop] quota/provider failure #$failures/$MAX_SOFT_FAIL — Fable window down ~${quota_sleep}s"
+    echo "[loop] quota/provider failure #$failures/$MAX_SOFT_FAIL — Claude window down ~${quota_sleep}s"
     append_event "quota-sleep" "failure $failures/$MAX_SOFT_FAIL for ${quota_sleep}s"
     quota_deadline=$(( $(date +%s) + quota_sleep ))
 
     # Don't idle through the reset window: implement eligible tickets via GPT-5.5/Codex.
     # Each attempt is one committed-and-verified (or reverted) ticket. A productive attempt
-    # resets the soft-failure counter so a long-but-productive Fable outage never trips the halt.
+    # resets the soft-failure counter so a long-but-productive Claude outage never trips the halt.
     if [ "$CODEX_FALLBACK" = "1" ] && command -v codex >/dev/null 2>&1; then
       while : ; do
         [ -f "$STOP_FILE" ] && break
         remaining=$(( quota_deadline - $(date +%s) ))
         [ "$remaining" -lt "$CODEX_MIN_BUDGET_SECONDS" ] && break
         if [ -n "$(git status --porcelain)" ]; then
-          append_event "codex-fallback-skip" "tree dirty; deferring to Fable on reset"
+          append_event "codex-fallback-skip" "tree dirty; deferring to Claude on reset"
           break
         fi
         CODEX_OUT="$LOG_DIR/codex-$STAMP-$(date +%H%M%S).log"
-        echo "[loop] Fable down — GPT-5.5 fallback implementer (window ~${remaining}s)"
+        echo "[loop] Claude down — GPT-5.5 fallback implementer (window ~${remaining}s)"
         run_codex_fallback "$CODEX_OUT"; cfr=$?
         [ "$cfr" -eq 0 ] && failures=0
         write_status "running" "codex-fallback"; write_report
@@ -459,7 +461,7 @@ for i in $(seq 1 "$MAX_ITER"); do
 
     remaining=$(( quota_deadline - $(date +%s) ))
     if [ "$remaining" -gt 0 ]; then
-      echo "[loop] sleeping ${remaining}s until Fable reset"
+      echo "[loop] sleeping ${remaining}s until Claude reset"
       if ! sleep_interruptible "$remaining"; then
         echo "[loop] STOP file present during quota sleep; halting."
         stop_run "stop-file"; break
