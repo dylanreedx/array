@@ -1164,7 +1164,55 @@ do {
 
 // MARK: - TerminalSessionDescriptor round trip
 
+func runAgentKindChecks() throws {
+    let cases: [AgentKind] = [.shell, .claude, .codex, .pi, .managed, .unknown]
+    let encoder = JSONCodec.makeEncoder()
+    let decoder = JSONCodec.makeDecoder()
+    let baseDate = Date(timeIntervalSince1970: 1_700_001_000)
+
+    for kind in cases {
+        let descriptor = AgentDescriptor(
+            agentKind: kind,
+            worktreePath: "/tmp/\(kind.rawValue)",
+            status: .working,
+            statusUpdatedAt: baseDate,
+            runId: "run-\(kind.rawValue)"
+        )
+        let data = try encoder.encode(descriptor)
+        let decoded = try decoder.decode(AgentDescriptor.self, from: data)
+        expect(decoded.agentKind == kind, "AgentKind \(kind.rawValue) JSON round trip")
+    }
+
+    let legacyAgentJSON = """
+    {
+      "agentKind": "qa-reviewer",
+      "worktreePath": "/tmp/x",
+      "status": "working",
+      "statusUpdatedAt": "2023-11-14T22:30:00Z"
+    }
+    """.data(using: .utf8)!
+    let legacyAgentDescriptor = try decoder.decode(AgentDescriptor.self, from: legacyAgentJSON)
+    expect(legacyAgentDescriptor.agentKind == .unknown, "unknown raw agentKind decodes to .unknown")
+
+    let registry = LaunchProfileRegistry()
+    expect(registry.spec(for: "claude")?.agentKind == .claude, "claude spec carries .claude agent kind")
+    expect(registry.spec(for: "codex")?.agentKind == .codex, "codex spec carries .codex agent kind")
+    expect(registry.spec(for: "shell")?.agentKind == nil, "shell spec is not an agent")
+    expect(registry.spec(for: "nvim")?.agentKind == nil, "nvim spec is not an agent")
+
+    let harnessDescriptor = AgentDescriptor.configuring(
+        agentKind: .pi,
+        worktreePath: "/tmp/project",
+        now: baseDate,
+        runId: "code-reviewer-20260702T000000Z"
+    )
+    expect(harnessDescriptor.agentKind == .pi, "harness-role descriptors map to AgentKind.pi")
+    expect(harnessDescriptor.status == .configuring, "harness-role descriptors start configuring")
+}
+
 do {
+    try runAgentKindChecks()
+
     let descriptor = TerminalSessionDescriptor(
         id: UUID(uuidString: "55555555-5555-5555-5555-555555555555")!,
         tileId: UUID(uuidString: "66666666-6666-6666-6666-666666666666")!,
@@ -1200,7 +1248,7 @@ do {
 
     let agentUpdatedAt = Date(timeIntervalSince1970: 1_700_001_000)
     let agentDescriptor = AgentDescriptor(
-        agentKind: "claude",
+        agentKind: .claude,
         worktreePath: "/tmp/x",
         status: .working,
         statusUpdatedAt: agentUpdatedAt,
@@ -1249,7 +1297,7 @@ do {
     expect(restoredDescriptor.status == .stale, "agent descriptor stale restoration status")
     expect(restoredDescriptor.statusUpdatedAt == restoreClock, "agent descriptor stale restoration timestamp")
     expect(restoredDescriptor.runId == "claude-20260613T000000Z-abc123", "agent descriptor stale restoration preserves run binding")
-    let worktreeSpawnDescriptor = AgentDescriptor.configuring(agentKind: "claude", worktreePath: "/tmp/worktree-checkout", now: agentUpdatedAt)
+    let worktreeSpawnDescriptor = AgentDescriptor.configuring(agentKind: .claude, worktreePath: "/tmp/worktree-checkout", now: agentUpdatedAt)
     expect(worktreeSpawnDescriptor.worktreePath == "/tmp/worktree-checkout", "agent descriptor configuring seam preserves worktree path")
     expect(worktreeSpawnDescriptor.status == .configuring, "agent descriptor configuring seam starts configuring")
 
@@ -1363,7 +1411,7 @@ time.sleep(30)
     expect(kill(treeHandle.pid!, 0) == -1 && errno == ESRCH, "HarnessRunControl kills the run process-group leader")
     expect(kill(childPid, 0) == -1 && errno == ESRCH, "HarnessRunControl kills the sleeping child process in the group")
 
-    let descriptor = AgentDescriptor.configuring(agentKind: "qa-reviewer", worktreePath: "/repo", now: Date(timeIntervalSince1970: 1_765_584_000), runId: runId)
+    let descriptor = AgentDescriptor.configuring(agentKind: .unknown, worktreePath: "/repo", now: Date(timeIntervalSince1970: 1_765_584_000), runId: runId)
     expect(descriptor.runId == runId, "AgentDescriptor configuring seam binds harness run id")
 }
 
@@ -2009,7 +2057,7 @@ do {
         lastStartedAt: Date(timeIntervalSince1970: 1_700_000_500),
         lastExit: nil,
         agentDescriptor: AgentDescriptor(
-            agentKind: "claude",
+            agentKind: .claude,
             worktreePath: scratch.path,
             status: .working,
             statusUpdatedAt: Date(timeIntervalSince1970: 1_700_000_600)
@@ -3677,10 +3725,10 @@ do {
     expect(registry.spec(for: "shell")?.agentKind == nil, "shell spec is not an agent")
     expect(registry.spec(for: "claude")?.displayName == "New Claude Agent", "claude spec has agent palette label")
     expect(registry.spec(for: "claude")?.title == "Agent · Claude", "claude spec has agent tile title")
-    expect(registry.spec(for: "claude")?.agentKind == "claude", "claude spec carries agent kind")
+    expect(registry.spec(for: "claude")?.agentKind == .claude, "claude spec carries agent kind")
     expect(registry.spec(for: "codex")?.displayName == "New Codex Agent", "codex spec has agent palette label")
     expect(registry.spec(for: "codex")?.title == "Agent · Codex", "codex spec has agent tile title")
-    expect(registry.spec(for: "codex")?.agentKind == "codex", "codex spec carries agent kind")
+    expect(registry.spec(for: "codex")?.agentKind == .codex, "codex spec carries agent kind")
     expect(registry.spec(for: "nvim")?.agentKind == nil, "nvim spec is not an agent")
     expect(registry.spec(for: "nope") == nil, "Unknown id returns nil")
 }
@@ -6006,7 +6054,7 @@ do {
         lastStartedAt: Date(timeIntervalSince1970: 1_800_000_001),
         lastExit: nil,
         agentDescriptor: AgentDescriptor(
-            agentKind: "claude",
+            agentKind: .claude,
             worktreePath: nil,
             status: .working,
             statusUpdatedAt: Date(timeIntervalSince1970: 1_800_000_002),
@@ -6361,7 +6409,7 @@ do {
         lastStartedAt: Date(timeIntervalSince1970: 1_800_000_001),
         lastExit: nil,
         agentDescriptor: AgentDescriptor(
-            agentKind: "claude",
+            agentKind: .claude,
             worktreePath: "/tmp/i8-worktree",
             status: .working,
             statusUpdatedAt: Date(timeIntervalSince1970: 1_800_000_002),

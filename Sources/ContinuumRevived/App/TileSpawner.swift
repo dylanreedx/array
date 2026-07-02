@@ -141,7 +141,7 @@ final class TileSpawner {
         return spawnTerminal(
             profile: profile,
             launchProfileId: "harness:\(role.id)",
-            agentDescriptor: AgentDescriptor.configuring(agentKind: role.id, worktreePath: projectRoot, now: now, runId: runId),
+            agentDescriptor: AgentDescriptor.configuring(agentKind: .pi, worktreePath: projectRoot, now: now, runId: runId),
             createdAt: now,
             at: worldPoint,
             allowTmuxPersistence: false

@@ -82,6 +82,25 @@ public struct TerminalSessionDescriptor: Codable, Equatable, Sendable {
     }
 }
 
+public enum AgentKind: String, Codable, Equatable, Sendable {
+    case shell
+    case claude
+    case codex
+    case pi
+    case managed
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = AgentKind(rawValue: raw) ?? .unknown
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
 public enum AgentStatus: String, Codable, Equatable, Sendable {
     case configuring
     case working
@@ -92,13 +111,13 @@ public enum AgentStatus: String, Codable, Equatable, Sendable {
 }
 
 public struct AgentDescriptor: Codable, Equatable, Sendable {
-    public var agentKind: String
+    public var agentKind: AgentKind
     public var worktreePath: String?
     public var status: AgentStatus
     public var statusUpdatedAt: Date
     public var runId: String?
 
-    public init(agentKind: String, worktreePath: String?, status: AgentStatus, statusUpdatedAt: Date, runId: String? = nil) {
+    public init(agentKind: AgentKind, worktreePath: String?, status: AgentStatus, statusUpdatedAt: Date, runId: String? = nil) {
         self.agentKind = agentKind
         self.worktreePath = worktreePath
         self.status = status
@@ -106,7 +125,7 @@ public struct AgentDescriptor: Codable, Equatable, Sendable {
         self.runId = runId
     }
 
-    public static func configuring(agentKind: String, worktreePath: String?, now: Date, runId: String? = nil) -> AgentDescriptor {
+    public static func configuring(agentKind: AgentKind, worktreePath: String?, now: Date, runId: String? = nil) -> AgentDescriptor {
         AgentDescriptor(agentKind: agentKind, worktreePath: worktreePath, status: .configuring, statusUpdatedAt: now, runId: runId)
     }
 

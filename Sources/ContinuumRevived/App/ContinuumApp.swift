@@ -5040,7 +5040,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 createdAt: now,
                 lastStartedAt: now,
                 lastExit: nil,
-                agentDescriptor: AgentDescriptor(agentKind: "qa", worktreePath: root.path, status: status, statusUpdatedAt: now)
+                agentDescriptor: AgentDescriptor(agentKind: .unknown, worktreePath: root.path, status: status, statusUpdatedAt: now)
             ))
         }
 
@@ -7590,9 +7590,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             Tile(id: workingTileId, kind: .terminal, title: "Agent · Claude", frame: TileFrame(x: 0, y: 0, width: 200, height: 120), zIndex: 1, runtimeRef: nil, metadata: TileMetadata()),
             Tile(id: needsTileId, kind: .terminal, title: "Agent · Codex", frame: TileFrame(x: 220, y: 0, width: 200, height: 120), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
         ], groups: [], lastActiveTileId: workingTileId))
-        try store.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: workingTileId, launchProfileId: "claude", command: "/bin/zsh", args: [], cwd: projectRoot.path, env: [:], title: "Agent · Claude", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: "claude", worktreePath: projectRoot.path, status: .working, statusUpdatedAt: now)))
-        try store.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: needsTileId, launchProfileId: "codex", command: "/bin/zsh", args: [], cwd: projectRoot.path, env: [:], title: "Agent · Codex", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: "codex", worktreePath: projectRoot.path, status: .needsAttention, statusUpdatedAt: now)))
-        try store.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: orphanTileId, launchProfileId: "old", command: "/bin/zsh", args: [], cwd: projectRoot.path, env: [:], title: "Old Agent", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: "claude", worktreePath: projectRoot.path, status: .done, statusUpdatedAt: now)))
+        try store.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: workingTileId, launchProfileId: "claude", command: "/bin/zsh", args: [], cwd: projectRoot.path, env: [:], title: "Agent · Claude", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: .claude, worktreePath: projectRoot.path, status: .working, statusUpdatedAt: now)))
+        try store.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: needsTileId, launchProfileId: "codex", command: "/bin/zsh", args: [], cwd: projectRoot.path, env: [:], title: "Agent · Codex", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: .codex, worktreePath: projectRoot.path, status: .needsAttention, statusUpdatedAt: now)))
+        try store.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: orphanTileId, launchProfileId: "old", command: "/bin/zsh", args: [], cwd: projectRoot.path, env: [:], title: "Old Agent", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: .claude, worktreePath: projectRoot.path, status: .done, statusUpdatedAt: now)))
 
         let productionCanvas = CanvasNSView(canvasState: try store.loadCanvas(), activeZone: zone, zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: zone, displayName: "Agent Project")])
         productionCanvas.install(tileView: TileNSView(tile: productionCanvas.canvasState.tiles[0]), for: productionCanvas.canvasState.tiles[0])
@@ -12805,9 +12805,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if tile.id == agentTileB { view.agentStatus = .needsAttention }
             overlayCanvas.install(tileView: view, for: tile)
         }
-        try tempStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: agentTileA, launchProfileId: "claude", command: "/bin/zsh", args: [], cwd: tempProjectRoot.path, env: [:], title: "Agent A", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: "claude", worktreePath: tempProjectRoot.path, status: .working, statusUpdatedAt: now)))
-        try tempStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: agentTileB, launchProfileId: "codex", command: "/bin/zsh", args: [], cwd: tempProjectRoot.path, env: [:], title: "Agent B", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: "codex", worktreePath: tempProjectRoot.path, status: .needsAttention, statusUpdatedAt: now)))
-        try tempStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: orphanAgentTile, launchProfileId: "old", command: "/bin/zsh", args: [], cwd: tempProjectRoot.path, env: [:], title: "Orphan", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: "claude", worktreePath: tempProjectRoot.path, status: .needsAttention, statusUpdatedAt: now)))
+        try tempStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: agentTileA, launchProfileId: "claude", command: "/bin/zsh", args: [], cwd: tempProjectRoot.path, env: [:], title: "Agent A", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: .claude, worktreePath: tempProjectRoot.path, status: .working, statusUpdatedAt: now)))
+        try tempStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: agentTileB, launchProfileId: "codex", command: "/bin/zsh", args: [], cwd: tempProjectRoot.path, env: [:], title: "Agent B", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: .codex, worktreePath: tempProjectRoot.path, status: .needsAttention, statusUpdatedAt: now)))
+        try tempStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: orphanAgentTile, launchProfileId: "old", command: "/bin/zsh", args: [], cwd: tempProjectRoot.path, env: [:], title: "Orphan", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: .claude, worktreePath: tempProjectRoot.path, status: .needsAttention, statusUpdatedAt: now)))
         overlayCanvas.markActive(tileId: selectedTileId)
         navApp.openNavMode()
         navApp.handleNavModeKey(keyEvent("a", keyCode: 0))
@@ -13470,9 +13470,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         let now = Date(timeIntervalSince1970: 1_234)
-        let idle = AgentDescriptor(agentKind: "claude", worktreePath: "/tmp/project", status: .idle, statusUpdatedAt: now)
-        let needsAttention = AgentDescriptor(agentKind: "codex", worktreePath: "/tmp/project", status: .needsAttention, statusUpdatedAt: now)
-        let working = AgentDescriptor(agentKind: "claude", worktreePath: "/tmp/project", status: .working, statusUpdatedAt: now)
+        let idle = AgentDescriptor(agentKind: .claude, worktreePath: "/tmp/project", status: .idle, statusUpdatedAt: now)
+        let needsAttention = AgentDescriptor(agentKind: .codex, worktreePath: "/tmp/project", status: .needsAttention, statusUpdatedAt: now)
+        let working = AgentDescriptor(agentKind: .claude, worktreePath: "/tmp/project", status: .working, statusUpdatedAt: now)
 
         let reviewId = UUID(uuidString: "BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF")!
         let flyback = ReviewFlybackPromptComposer.compose(
