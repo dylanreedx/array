@@ -1,5 +1,11 @@
 # Approvals to needsAttention (managed tier)
 
+> **Ruling C-20260702-012 (auth — read before implementing):** `respondToApproval` must NOT rely on the
+> `.observer` scope floor. An `.observer`-scoped session (e.g. an iOS phone) must not be able to approve or
+> deny an approval it does not own. This ticket must gate `respondToApproval` on the session **owning the
+> target approval** (or holding an operator+ scope) before clearing the pending entry. See the 54/59 audit
+> finding in `_CODEX_AUDIT.md`.
+
 ## What this delivers
 
 A pending approval from a managed agent becomes the authoritative, highest-priority source of `AgentStatus.needsAttention` for that tile — checked before any reader-derived or engine-derived signal. Concretely: when a managed agent raises a permission request, a `UUID`-keyed `AgentApprovalRequest` lands in an in-memory pending store owned by the per-project runtime controller; the pure status-derivation function sees `hasPendingApproval = true` and returns `.needsAttention` unconditionally, above any `working` or `idle` signal. When the human (on Mac or iOS) responds, the symmetric `respondToApproval` call clears the pending entry and the derivation function naturally recomputes to `working` or `idle` on the next cycle.

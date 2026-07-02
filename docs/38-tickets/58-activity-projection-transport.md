@@ -1,5 +1,10 @@
 # Activity projection over the sync transport
 
+> **Ruling C-20260701-009 (read before implementing):** where this ticket says `ActivityTreeSnapshot`
+> meaning the **byTile fold read-model** (ticket 08's summary-per-tile snapshot), that type was renamed
+> to **`ActivityLogSnapshot`**. The name `ActivityTreeSnapshot` now belongs to ticket 11's SidebarTree
+> envelope. Use `ActivityLogSnapshot` for the fold read-model.
+
 ## What this delivers
 
 After this ticket lands, the `ActivityStore` — which already knows how to produce a

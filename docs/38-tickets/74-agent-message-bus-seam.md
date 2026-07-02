@@ -1,5 +1,10 @@
 # Agent message-bus seam
 
+> **Ruling C-20260701-009 (read before implementing):** where this ticket says `ActivityTreeSnapshot`
+> meaning the **byTile fold read-model** (ticket 08's summary-per-tile snapshot), that type was renamed
+> to **`ActivityLogSnapshot`**. The name `ActivityTreeSnapshot` now belongs to ticket 11's SidebarTree
+> envelope. Use `ActivityLogSnapshot` for the fold read-model.
+
 ## What this delivers
 
 By the time this ticket lands, Continuum has a named, typed, compilable stub for the app-level agent message bus described in Decision F of the architecture. No messages actually travel yet — no agent reads from this bus, no orchestration logic subscribes to it — but the vocabulary is locked into the codebase, the post/subscribe contract is expressed as a Swift protocol, and every future ticket that needs to route structured agent-to-agent messages has a concrete seam to build on rather than a blank page.

@@ -82,3 +82,4 @@ New attempts append their rows to the table above.
 | 67-agent-adapter-protocol.md | done | 2979905 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
 | 28-view-session-cleanup.md | done | d9570a4 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
 | 54-bootstrap-auth-every-path.md | done | e9ef18a | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
+| 30-shared-view-exemption.md | skipped | - | matrix: n/a | Blocked: depends on grouped-view-session spawn (ticket 27), which never landed and is NOT in the autonomous queue. Skip until 27 is built by hand (C-20260702-013). |
