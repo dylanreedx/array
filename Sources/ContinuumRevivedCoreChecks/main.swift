@@ -6097,6 +6097,244 @@ do {
     try writeAndVerify(manifest)
 }
 
+// MARK: - Invariant I6: Status soundness (pure derivation golden table)
+
+do {
+    struct GoldenRow {
+        let name: String
+        let signals: StatusSignals
+        let expected: AgentStatus
+        let group: Character
+        let isAttentionBeatsRunningRow: Bool
+        let isFabricationGuardRow: Bool
+    }
+
+    let freshHookAge: TimeInterval = 5
+    let staleHookAge = StatusSignals.hookFreshnessWindow
+
+    let goldenTable: [GoldenRow] = [
+        // --- Group A: honest floor / no fabrication ---
+        GoldenRow(
+            name: "no_signals_falls_to_idle",
+            signals: StatusSignals(agentKind: .shell),
+            expected: .idle,
+            group: "A",
+            isAttentionBeatsRunningRow: false,
+            isFabricationGuardRow: true
+        ),
+        GoldenRow(
+            name: "unknown_kind_no_runstate_falls_to_idle",
+            signals: StatusSignals(agentKind: .unknown),
+            expected: .idle,
+            group: "A",
+            isAttentionBeatsRunningRow: false,
+            isFabricationGuardRow: true
+        ),
+        GoldenRow(
+            name: "error_maps_to_idle_not_fabricated_terminal",
+            signals: StatusSignals(agentKind: .claude, isError: true),
+            expected: .idle,
+            group: "A",
+            isAttentionBeatsRunningRow: false,
+            isFabricationGuardRow: true
+        ),
+        GoldenRow(
+            name: "engine_stale_no_positive_signals_is_stale",
+            signals: StatusSignals(agentKind: .claude, engineStatus: .stale),
+            expected: .stale,
+            group: "A",
+            isAttentionBeatsRunningRow: false,
+            isFabricationGuardRow: true
+        ),
+
+        // --- Group B: running, configuring, and idle ---
+        GoldenRow(
+            name: "shell_running_maps_to_working",
+            signals: StatusSignals(agentKind: .shell, isRunning: true),
+            expected: .working,
+            group: "B",
+            isAttentionBeatsRunningRow: false,
+            isFabricationGuardRow: false
+        ),
+        GoldenRow(
+            name: "claude_running_maps_to_working",
+            signals: StatusSignals(agentKind: .claude, isRunning: true),
+            expected: .working,
+            group: "B",
+            isAttentionBeatsRunningRow: false,
+            isFabricationGuardRow: false
+        ),
+        GoldenRow(
+            name: "codex_running_maps_to_working",
+            signals: StatusSignals(agentKind: .codex, isRunning: true),
+            expected: .working,
+            group: "B",
+            isAttentionBeatsRunningRow: false,
+            isFabricationGuardRow: false
+        ),
+        GoldenRow(
+            name: "pi_running_maps_to_working",
+            signals: StatusSignals(agentKind: .pi, isRunning: true),
+            expected: .working,
+            group: "B",
+            isAttentionBeatsRunningRow: false,
+            isFabricationGuardRow: false
+        ),
+        GoldenRow(
+            name: "managed_running_maps_to_working",
+            signals: StatusSignals(agentKind: .managed, isRunning: true),
+            expected: .working,
+            group: "B",
+            isAttentionBeatsRunningRow: false,
+            isFabricationGuardRow: false
+        ),
+        GoldenRow(
+            name: "starting_maps_to_configuring",
+            signals: StatusSignals(agentKind: .shell, isStarting: true),
+            expected: .configuring,
+            group: "B",
+            isAttentionBeatsRunningRow: false,
+            isFabricationGuardRow: false
+        ),
+        GoldenRow(
+            name: "unknown_running_process_maps_to_working",
+            signals: StatusSignals(agentKind: .unknown, isRunning: true),
+            expected: .working,
+            group: "B",
+            isAttentionBeatsRunningRow: false,
+            isFabricationGuardRow: false
+        ),
+
+        // --- Group C: attention precedence ---
+        GoldenRow(
+            name: "managed_pending_approval_beats_running",
+            signals: StatusSignals(agentKind: .managed, hasPendingApproval: true, isRunning: true),
+            expected: .needsAttention,
+            group: "C",
+            isAttentionBeatsRunningRow: true,
+            isFabricationGuardRow: false
+        ),
+        GoldenRow(
+            name: "managed_pending_user_input_beats_running",
+            signals: StatusSignals(agentKind: .managed, hasPendingUserInput: true, isRunning: true),
+            expected: .needsAttention,
+            group: "C",
+            isAttentionBeatsRunningRow: true,
+            isFabricationGuardRow: false
+        ),
+        GoldenRow(
+            name: "claude_fresh_hook_breadcrumb_beats_running",
+            signals: StatusSignals(
+                agentKind: .claude,
+                hookBreadcrumbPresent: true,
+                hookBreadcrumbAge: freshHookAge,
+                isRunning: true
+            ),
+            expected: .needsAttention,
+            group: "C",
+            isAttentionBeatsRunningRow: true,
+            isFabricationGuardRow: false
+        ),
+        GoldenRow(
+            name: "codex_running_without_attention_stays_working",
+            signals: StatusSignals(agentKind: .codex, isRunning: true),
+            expected: .working,
+            group: "C",
+            isAttentionBeatsRunningRow: false,
+            isFabricationGuardRow: false
+        ),
+
+        // --- Group D: done and stale ---
+        GoldenRow(
+            name: "completed_maps_to_done",
+            signals: StatusSignals(agentKind: .managed, isCompleted: true),
+            expected: .done,
+            group: "D",
+            isAttentionBeatsRunningRow: false,
+            isFabricationGuardRow: false
+        ),
+        GoldenRow(
+            name: "stale_engine_without_positive_signal_maps_to_stale",
+            signals: StatusSignals(agentKind: .codex, engineStatus: .stale),
+            expected: .stale,
+            group: "D",
+            isAttentionBeatsRunningRow: false,
+            isFabricationGuardRow: false
+        ),
+        GoldenRow(
+            name: "running_signal_beats_stale_engine",
+            signals: StatusSignals(agentKind: .pi, isRunning: true, engineStatus: .stale),
+            expected: .working,
+            group: "D",
+            isAttentionBeatsRunningRow: false,
+            isFabricationGuardRow: false
+        ),
+        GoldenRow(
+            name: "stale_claude_hook_falls_through_to_running",
+            signals: StatusSignals(
+                agentKind: .claude,
+                hookBreadcrumbPresent: true,
+                hookBreadcrumbAge: staleHookAge,
+                isRunning: true
+            ),
+            expected: .working,
+            group: "D",
+            isAttentionBeatsRunningRow: false,
+            isFabricationGuardRow: false
+        )
+    ]
+
+    expect(goldenTable.count == 19, "I6 pure derivation golden table must contain 19 rows")
+
+    var groupCounts: [Character: Int] = ["A": 0, "B": 0, "C": 0, "D": 0]
+    var attentionBeatsRunningAllPass = true
+    var fabricationRowsAllPass = true
+    for row in goldenTable {
+        let actual = deriveAgentStatus(signals: row.signals)
+        expect(actual == row.expected, "I6 pure derivation golden row \(row.name): expected \(row.expected), got \(actual)")
+        groupCounts[row.group, default: 0] += 1
+
+        if row.isAttentionBeatsRunningRow {
+            let passed = actual == .needsAttention
+            attentionBeatsRunningAllPass = attentionBeatsRunningAllPass && passed
+            expect(passed, "I6 pure derivation attention precedence row \(row.name) must resolve to needsAttention")
+        }
+
+        if row.isFabricationGuardRow {
+            let passed = actual == .idle || actual == .stale
+            fabricationRowsAllPass = fabricationRowsAllPass && passed
+            expect(passed, "I6 pure derivation fabrication guard row \(row.name) must resolve only to idle or stale")
+        }
+    }
+
+    expect(groupCounts["A"] == 4, "I6 pure derivation golden table group A must have 4 rows")
+    expect(groupCounts["B"] == 7, "I6 pure derivation golden table group B must have 7 rows")
+    expect(groupCounts["C"] == 4, "I6 pure derivation golden table group C must have 4 rows")
+    expect(groupCounts["D"] == 4, "I6 pure derivation golden table group D must have 4 rows")
+    expect(attentionBeatsRunningAllPass, "I6 pure derivation golden table must prove attention beats running")
+    expect(fabricationRowsAllPass, "I6 pure derivation golden table must prove no-fabrication rows")
+
+    let epoch = Date(timeIntervalSince1970: 1_800_000_000)
+    let manifest = InvariantManifest(
+        invariantId: "I6-status-soundness-pure-derivation",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: epoch),
+        measurements: [
+            "rows_checked": .int(goldenTable.count),
+            "group_A_honest_floor": .int(groupCounts["A"] ?? 0),
+            "group_B_running_idle": .int(groupCounts["B"] ?? 0),
+            "group_C_attention_precedence": .int(groupCounts["C"] ?? 0),
+            "group_D_done_stale": .int(groupCounts["D"] ?? 0),
+            "attention_beats_running_all_pass": .bool(attentionBeatsRunningAllPass),
+            "fabrication_rows_all_pass": .bool(fabricationRowsAllPass),
+            "via": .string("pure_derivation_golden_table")
+        ],
+        outcome: InvariantOutcome.pass.rawValue,
+        failureReason: nil
+    )
+    try writeAndVerify(manifest)
+}
+
 // MARK: - Invariant I7: Snapshot round-trip
 
 do {
