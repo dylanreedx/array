@@ -20,6 +20,7 @@ public protocol TmuxControl: Sendable {
     func sessionExists(name: String) async throws -> Bool
     func isAlive(paneTarget: String) async throws -> Bool
     func paneCurrentPath(paneTarget: String) async throws -> String
+    func paneCurrentCommand(paneTarget: String) async throws -> String
     func listSessions() async throws -> [TmuxSessionInfo]
 }
 
@@ -42,6 +43,10 @@ public struct TmuxSessionInfo: Equatable, Sendable {
 public enum InMemoryTmuxControlError: Error, Equatable {
     case sessionNotFound(String)
     case paneNotFound(String)
+}
+
+public enum TmuxControlError: Error, Equatable {
+    case paneNotFound(target: String)
 }
 
 /// In-memory fake for `TmuxControl`. No subprocess is spawned; every call is
@@ -67,6 +72,7 @@ public final class InMemoryTmuxControl: TmuxControl, @unchecked Sendable {
         case sessionExists(name: String)
         case isAlive(target: String)
         case paneCurrentPath(target: String)
+        case paneCurrentCommand(target: String)
         case listSessions
     }
 
@@ -158,6 +164,14 @@ public final class InMemoryTmuxControl: TmuxControl, @unchecked Sendable {
             throw InMemoryTmuxControlError.paneNotFound(paneTarget)
         }
         return stub.cwd
+    }
+
+    public func paneCurrentCommand(paneTarget: String) async throws -> String {
+        log.append(.paneCurrentCommand(target: paneTarget))
+        guard let stub = livePanes[paneTarget], stub.isAlive else {
+            throw TmuxControlError.paneNotFound(target: paneTarget)
+        }
+        return stub.currentCommand
     }
 
     public func listSessions() async throws -> [TmuxSessionInfo] {

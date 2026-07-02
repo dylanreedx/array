@@ -352,7 +352,7 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
+        [tileSandbox, sidebarCard, topBarCard, agentKindCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
     }
 
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
@@ -384,6 +384,36 @@ enum LabCatalog {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
+        return stack
+    }
+
+    static var agentKindCard: LabEntry {
+        LabEntry(
+            id: "agent.kind", category: "Chrome", title: "Agent Kind",
+            summary: "Descriptor kind row used by the agent-status inspector.",
+            content: .staticCard(preferredSize: NSSize(width: 280, height: 96)) {
+                makeAgentKindView(descriptor: AgentDescriptor(agentKind: .claude, worktreePath: "/tmp/project", status: .working, statusUpdatedAt: LabFixtures.epoch))
+            }
+        )
+    }
+
+    static func makeAgentKindView(descriptor: AgentDescriptor) -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+
+        let title = NSTextField(labelWithString: "Agent Status")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.textColor = .labelColor
+
+        let kind = NSTextField(labelWithString: "Kind -> \(descriptor.agentKind.rawValue)")
+        kind.identifier = NSUserInterfaceItemIdentifier("agentKind.value")
+        kind.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        kind.textColor = .labelColor
+
+        stack.addArrangedSubview(title)
+        stack.addArrangedSubview(kind)
         return stack
     }
 
@@ -756,6 +786,17 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         for id in ["panel.palette", "panel.settings", "panel.projectPicker"] {
             guard entries.contains(where: { $0.id == id }) else { throw fail("missing launcher entry \(id)") }
         }
+        guard let agentKindEntry = entries.first(where: { $0.id == "agent.kind" }),
+              case let .staticCard(_, makeAgentKindView) = agentKindEntry.content else {
+            throw fail("missing agent.kind descriptor card")
+        }
+        let agentKindView = makeAgentKindView()
+        guard let kindLabel = agentKindView.descendant(withIdentifier: "agentKind.value") as? NSTextField else {
+            throw fail("agent.kind card missing agentKind.value label")
+        }
+        guard kindLabel.stringValue == "Kind -> claude" else {
+            throw fail("agent.kind label rendered '\(kindLabel.stringValue)', expected 'Kind -> claude'")
+        }
 
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -903,6 +944,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             "entryCount": entries.count,
             "rendered": rendered,
             "sandbox": ["tilesInstalled": 5, "zoomClampHigh": zoomHigh, "zoomClampLow": zoomLow],
+            "agentKind": ["label": kindLabel.stringValue],
             "sessionNaming": [
                 "projectSessionName": projectLabel,
                 "ambientSessionName": ambientLabel,
@@ -911,5 +953,17 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: directory.appendingPathComponent("manifest.json"))
+    }
+}
+
+private extension NSView {
+    func descendant(withIdentifier rawValue: String) -> NSView? {
+        if identifier?.rawValue == rawValue { return self }
+        for subview in subviews {
+            if let match = subview.descendant(withIdentifier: rawValue) {
+                return match
+            }
+        }
+        return nil
     }
 }

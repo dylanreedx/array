@@ -100,6 +100,14 @@ public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {
         throw TmuxProcessError(arguments: ["paneCurrentPath", paneTarget], exitCode: -1, stderr: "pane not found: \(paneTarget)")
     }
 
+    public func paneCurrentCommand(paneTarget: String) async throws -> String {
+        guard try await isAlive(paneTarget: paneTarget) else {
+            throw TmuxControlError.paneNotFound(target: paneTarget)
+        }
+        let result = try run(["display-message", "-p", "-t", paneTarget, "#{pane_current_command}"])
+        return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     public func listSessions() async throws -> [TmuxSessionInfo] {
         let sessionsResult = runIgnoringFailure(["list-sessions", "-F", "#{session_name}"])
         guard sessionsResult.exitCode == 0 else { return [] }  // no server running

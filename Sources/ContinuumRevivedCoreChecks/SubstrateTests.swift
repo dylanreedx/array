@@ -30,6 +30,7 @@ func runSubstrateTests() {
 private func runAsyncSubstrateSuites() async {
     await runTmuxControlSuite()
     await runFakeSyncTransportSuite()
+    await runKindClassifierSuites()
 }
 
 // MARK: - TmuxControl suite
@@ -114,6 +115,73 @@ private func runTmuxControlSuite() async {
     }
 
     print("TmuxControl suite: newSession/newWindow/killWindow/killSession/isAlive/listSessions all match expected fake semantics")
+}
+
+private func runKindClassifierSuites() async {
+    let mappingCases: [(String, AgentKind)] = [
+        ("claude", .claude),
+        ("pi", .pi),
+        ("codex", .codex),
+        ("node", .unknown),
+        ("zsh", .shell),
+        ("bash", .shell),
+        ("fish", .shell),
+        ("sh", .shell),
+        ("login", .unknown),
+        ("vim", .unknown),
+        ("python3", .unknown),
+        ("", .unknown)
+    ]
+
+    for (processName, expected) in mappingCases {
+        expect(
+            AgentKind.from(processName: processName) == expected,
+            "AgentKind.from(processName:) maps '\(processName)' to \(expected.rawValue)"
+        )
+    }
+
+    expect(AgentKind.from(processName: "Claude") == .claude, "AgentKind.from normalizes title case")
+    expect(AgentKind.from(processName: "CLAUDE") == .claude, "AgentKind.from normalizes uppercase")
+    expect(AgentKind.from(processName: "  claude  ") == .claude, "AgentKind.from trims surrounding spaces")
+
+    for _ in 0..<100 {
+        expect(AgentKind.from(processName: "claude") == .claude, "AgentKind.from is deterministic across repeated calls")
+    }
+
+    let fake = InMemoryTmuxControl()
+    fake.livePanes["%1"] = InMemoryTmuxControl.PaneStub(cwd: "/tmp/proj", currentCommand: "claude", isAlive: true)
+    fake.livePanes["%2"] = InMemoryTmuxControl.PaneStub(cwd: "/tmp/proj", currentCommand: "zsh", isAlive: true)
+    fake.livePanes["%3"] = InMemoryTmuxControl.PaneStub(cwd: "/tmp/proj", currentCommand: "pi", isAlive: false)
+
+    let classifier = KindClassifier()
+    let kind1 = try! await classifier.classify(windowTarget: "%1", using: fake)
+    let kind2 = try! await classifier.classify(windowTarget: "%2", using: fake)
+    expect(kind1 == .claude, "KindClassifier classifies fake pane command claude")
+    expect(kind2 == .shell, "KindClassifier classifies fake pane command zsh as shell")
+    expect(
+        fake.log.contains(.paneCurrentCommand(target: "%1")) && fake.log.contains(.paneCurrentCommand(target: "%2")),
+        "KindClassifier uses the TmuxControl paneCurrentCommand seam"
+    )
+
+    do {
+        _ = try await classifier.classify(windowTarget: "%3", using: fake)
+        expect(false, "KindClassifier must throw for dead panes")
+    } catch let error as TmuxControlError {
+        expect(error == .paneNotFound(target: "%3"), "KindClassifier propagates exact dead-pane target, got \(error)")
+    } catch {
+        expect(false, "KindClassifier dead-pane error type was \(error)")
+    }
+
+    do {
+        _ = try await classifier.classify(windowTarget: "%99", using: fake)
+        expect(false, "KindClassifier must throw for never-seeded panes")
+    } catch let error as TmuxControlError {
+        expect(error == .paneNotFound(target: "%99"), "KindClassifier propagates exact missing-pane target, got \(error)")
+    } catch {
+        expect(false, "KindClassifier missing-pane error type was \(error)")
+    }
+
+    print("KindClassifier suite: mapping table, normalization, fake query seam, and paneNotFound propagation passed")
 }
 
 // MARK: - FakeClock suite
@@ -333,6 +401,12 @@ private func runTmuxRealPathCheckAsync(tmuxPath: String) async {
         expect(cwdBefore == "/tmp" || cwdBefore == "/private/tmp",
                "ProcessTmuxControl.paneCurrentPath reports the cwd newSession was given, got \(cwdBefore)")
 
+        let paneCurrentCommand = try await control.paneCurrentCommand(paneTarget: paneId)
+        expect(paneCurrentCommand == "zsh" || paneCurrentCommand.hasSuffix("/zsh"),
+               "ProcessTmuxControl.paneCurrentCommand reports the shell command, got \(paneCurrentCommand)")
+        let classifiedKind = try await KindClassifier().classify(windowTarget: paneId, using: control)
+        expect(classifiedKind == .shell, "KindClassifier classifies real tmux shell pane as shell, got \(classifiedKind.rawValue)")
+
         struct MissingSessionError: Error { let sessionName: String }
         let sessionsAfterWindow = try await control.listSessions()
         guard let sessionInfo = sessionsAfterWindow.first(where: { $0.name == sessionName }) else {
@@ -358,11 +432,13 @@ private func runTmuxRealPathCheckAsync(tmuxPath: String) async {
             "isAlive_before_2": aliveBefore2,
             "isAlive_after": aliveAfter,
             "cwd_before": cwdBefore,
+            "pane_current_command": paneCurrentCommand,
+            "classified_kind": classifiedKind.rawValue,
             "session_window_count": sessionInfo.windowCount,
             "session_pane_targets": sessionInfo.paneTargets,
             "elapsed_seconds": elapsed
         ])
-        print("tmux real-path check: exists_before=\(existsBefore) exists_after=\(existsAfter) pane1=\(paneId) pane2=\(paneId2) session_window_count=\(sessionInfo.windowCount) isAlive_after=\(aliveAfter) elapsed=\(String(format: "%.3f", elapsed))s")
+        print("tmux real-path check: exists_before=\(existsBefore) exists_after=\(existsAfter) pane1=\(paneId) pane2=\(paneId2) pane_current_command=\(paneCurrentCommand) classified_kind=\(classifiedKind.rawValue) session_window_count=\(sessionInfo.windowCount) isAlive_after=\(aliveAfter) elapsed=\(String(format: "%.3f", elapsed))s")
     } catch {
         fputs("FAIL: tmux real-path check threw: \(error)\n", stderr)
         Foundation.exit(1)

@@ -67,3 +67,4 @@ New attempts append their rows to the table above.
 | 32-derive-agent-status-fn.md | done | eb88e0f | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
 | 15-new-tile-new-window.md | done | d57e4c4 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
 | 33-status-derivation-golden.md | done | ed44632 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
+| 34-kind-classifier-tmux.md | done | 0ceb220 | matrix: green (headless) | gpt-5.5 fallback; pending Fable audit |
