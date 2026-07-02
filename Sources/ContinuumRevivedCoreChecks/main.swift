@@ -6619,7 +6619,7 @@ do {
 
     let epoch = Date(timeIntervalSince1970: 1_800_000_000)
     let manifest = InvariantManifest(
-        invariantId: "I6-status-soundness-pure-derivation",
+        invariantId: "I6-status-soundness",
         runId: UUID().uuidString,
         measuredAt: ISO8601DateFormatter().string(from: epoch),
         measurements: [
