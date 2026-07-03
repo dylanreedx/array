@@ -122,7 +122,7 @@ public struct WorkspaceProfileStore: Sendable {
             capturedDocument = document
         case .template:
             // ARCHITECTURE-NOTE: WorkspaceDocument contains only layout fields
-            // (viewport, zones, zoneZOrder, lastActiveZoneId, groupZoneTiles). T13
+            // (viewport, zones, zoneZOrder, lastActiveZoneId, ambientTiles). T13
             // session-state lives in ProjectStore sibling stores, not here. There is
             // nothing to strip from the document, so template is currently
             // layout-identical to snapshot. When a session-state bridge is added to

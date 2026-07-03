@@ -163,11 +163,9 @@ func runSidebarActivityTreeSnapshotTests() {
             zones: [zonePlacement],
             zoneZOrder: [zoneId],
             lastActiveZoneId: nil,
-            groupZoneTiles: [
-                GroupZoneTiles(zoneId: zoneId, tiles: [
-                    tile(claudeTileId, "Claude", 1),
-                    tile(terminalTileId, "Terminal", 2),
-                ]),
+            ambientTiles: [
+                tile(claudeTileId, "Claude", 1).with(zoneId: zoneId),
+                tile(terminalTileId, "Terminal", 2).with(zoneId: zoneId),
             ]
         )
 

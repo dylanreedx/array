@@ -192,7 +192,13 @@ final class WorkspaceRuntime {
         var newlyAcquired: [UUID] = []
 
         for zone in document.zones {
-            guard let projectId = zone.projectId else { continue }
+            guard let projectId = zone.projectId else {
+                // Ambient (group) zone: no project, no controller. Its tiles live on
+                // the workspace document itself and membership is each tile's
+                // `zoneId` register (ticket 03) — render straight from it.
+                layers.append(Self.makeAmbientZoneLayer(zone: zone, document: document))
+                continue
+            }
             // Only acquire controllers for live-tier zones.
             guard plan.tier(for: zone.zoneId) == .live else { continue }
 
@@ -368,6 +374,25 @@ final class WorkspaceRuntime {
         return placement.zoneId
     }
 
+    /// Build the canvas layer for an ambient (projectId == nil) zone from the
+    /// workspace document's `ambientTiles` register — the production read path
+    /// of the ticket-03 membership re-model.
+    private static func makeAmbientZoneLayer(
+        zone: ZonePlacement,
+        document: WorkspaceDocument
+    ) -> CanvasNSView.ZoneLayer {
+        let memberTiles = document.tiles(forZone: zone.zoneId)
+        var tileViews: [UUID: TileNSView] = [:]
+        for tile in memberTiles {
+            tileViews[tile.id] = DescriptorTileNSView(tile: tile)
+        }
+        let displayName = zone.name.isEmpty ? "Group" : zone.name
+        let renderModel = CanvasNSView.ZoneRenderModel(placement: zone, displayName: displayName)
+        let layer = CanvasNSView.ZoneLayer(placement: zone, renderModel: renderModel, tiles: memberTiles)
+        layer.tileViews = tileViews
+        return layer
+    }
+
     private func _addGroupZone() throws -> UUID {
         let home = AmbientZoneHome.current
         // Create an ambient (rootless) controller — acquireLock: false so no project lock is grabbed.
@@ -394,15 +419,12 @@ final class WorkspaceRuntime {
         document.zoneZOrder.append(zoneId)
         document.lastActiveZoneId = zoneId
 
-        // Persist empty tile list for this group zone (T02 workspace-store storage).
-        // setTiles with empty array is a no-op per the implementation, but the zone is
-        // addressable via tiles(forZone:) returning [].
-        // We explicitly record the zoneId as having been allocated (empty is fine at create).
+        // A new group zone starts with no members: no ambient tile's zoneId
+        // register points at it yet, so tiles(forZone:) is [] until a real
+        // membership write (setTileZone / setTiles) lands.
 
-        // Build and install layer.
-        let renderModel = CanvasNSView.ZoneRenderModel(placement: placement, displayName: placement.name)
-        let layer = CanvasNSView.ZoneLayer(placement: placement, renderModel: renderModel, tiles: [])
-        layer.tileViews = [:]
+        // Build and install layer from the register read path.
+        let layer = Self.makeAmbientZoneLayer(zone: placement, document: document)
         installedLayers.append(layer)
         canvasView?.upsertZoneLayer(layer)
 
@@ -485,7 +507,12 @@ final class WorkspaceRuntime {
         // Build layers from newly acquired + shared controllers.
         var layers: [CanvasNSView.ZoneLayer] = []
         for zone in targetDocument.zones {
-            guard let projectId = zone.projectId else { continue }
+            guard let projectId = zone.projectId else {
+                // Ambient zone: rendered from the workspace document's ambientTiles
+                // register, same as install (ticket 03).
+                layers.append(Self.makeAmbientZoneLayer(zone: zone, document: targetDocument))
+                continue
+            }
             guard plan.tier(for: zone.zoneId) == .live else { continue }
             guard let controller = registry.controller(for: projectId) else { continue }
 

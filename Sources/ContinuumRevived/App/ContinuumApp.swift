@@ -4760,10 +4760,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ],
             zoneZOrder: [zoneOne, zoneTwo],
             lastActiveZoneId: zoneOne,
-            groupZoneTiles: [
-                GroupZoneTiles(zoneId: zoneOne, tiles: currentTiles),
-                GroupZoneTiles(zoneId: zoneTwo, tiles: secondZoneTiles),
-            ]
+            ambientTiles: currentTiles.map { $0.with(zoneId: zoneOne) }
+                + secondZoneTiles.map { $0.with(zoneId: zoneTwo) }
         )
         let otherDocument = WorkspaceDocument(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
@@ -4772,7 +4770,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ],
             zoneZOrder: [otherZone],
             lastActiveZoneId: otherZone,
-            groupZoneTiles: [GroupZoneTiles(zoneId: otherZone, tiles: otherTiles)]
+            ambientTiles: otherTiles.map { $0.with(zoneId: otherZone) }
         )
         try WorkspaceStore(workspaceId: currentWorkspace, applicationSupportDirectory: appSupport).save(currentDocument)
         try WorkspaceStore(workspaceId: otherWorkspace, applicationSupportDirectory: appSupport).save(otherDocument)
@@ -4935,10 +4933,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ],
             zoneZOrder: [zoneA, zoneB],
             lastActiveZoneId: zoneA,
-            groupZoneTiles: [
-                GroupZoneTiles(zoneId: zoneA, tiles: [tileAValue]),
-                GroupZoneTiles(zoneId: zoneB, tiles: [tileBValue]),
-            ]
+            ambientTiles: [tileAValue.with(zoneId: zoneA), tileBValue.with(zoneId: zoneB)]
         )
         let docB = WorkspaceDocument(
             viewport: CanvasViewport(x: 10, y: 20, zoom: 1),
@@ -4947,7 +4942,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ],
             zoneZOrder: [zoneC],
             lastActiveZoneId: zoneC,
-            groupZoneTiles: [GroupZoneTiles(zoneId: zoneC, tiles: [tileCValue, missingTileValue])]
+            ambientTiles: [tileCValue.with(zoneId: zoneC), missingTileValue.with(zoneId: zoneC)]
         )
         try WorkspaceStore(workspaceId: workspaceA, applicationSupportDirectory: appSupport).save(docA)
         try WorkspaceStore(workspaceId: workspaceB, applicationSupportDirectory: appSupport).save(docB)
@@ -5179,7 +5174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             zones: [projectZone, groupZone],
             zoneZOrder: [projectZoneId, groupZoneId],
             lastActiveZoneId: projectZoneId,
-            groupZoneTiles: [GroupZoneTiles(zoneId: groupZoneId, tiles: [groupTile])]
+            ambientTiles: [groupTile.with(zoneId: groupZoneId)]
         )
         try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport).save(document)
 
@@ -15493,7 +15488,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         defer { try? fm.removeItem(at: appSupport) }
 
         // Source document. WorkspaceDocument is layout-only (viewport, zones, zoneZOrder,
-        // lastActiveZoneId, groupZoneTiles). T13 session-state fields (scrollback on
+        // lastActiveZoneId, ambientTiles). T13 session-state fields (scrollback on
         // TerminalSessionDescriptor, interactionState on BrowserTile) live in ProjectStore
         // sibling stores keyed by tile id, NOT on WorkspaceDocument. There is no session
         // field to embed here; the template/snapshot distinction is layout-identical.

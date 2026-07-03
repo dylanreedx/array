@@ -110,7 +110,31 @@ final class CanvasNSView: NSView {
     /// from `zoneRenderModels`; `liveZones` holds the authoritative placement.
     private var zoneDisplayByZoneId: [UUID: ZoneRenderModel] = [:]
     /// tileId → zoneId. A tile absent from this map is a bare (unzoned) tile.
+    /// Derived cache over the authoritative `Tile.zoneId` LWW register (ticket 03):
+    /// every mutation goes through `setTileZone(_:zoneId:)`, which stamps the
+    /// register in `canvasState` so membership persists with the canvas.
     private var tileZoneMembership: [UUID: UUID] = [:]
+
+    /// Production membership write: the single sink every canvas membership
+    /// change flows through. Writes ONLY the tile's `zoneId` register (plus the
+    /// derived cache) — never any sibling field. This is the same field
+    /// `Op.setTileZone` folds into, so the op-log apply (ticket 06) and the UI
+    /// share one write path.
+    func setTileZone(_ tileId: UUID, zoneId: UUID?) {
+        if let zoneId {
+            tileZoneMembership[tileId] = zoneId
+        } else {
+            tileZoneMembership.removeValue(forKey: tileId)
+        }
+        if let i = canvasState.tiles.firstIndex(where: { $0.id == tileId }) {
+            canvasState.tiles[i].zoneId = zoneId
+        }
+    }
+
+    /// QA reader: the persisted register value for a tile (nil = ambient).
+    func qaTileZoneRegister(of tileId: UUID) -> UUID? {
+        canvasState.tiles.first(where: { $0.id == tileId })?.zoneId
+    }
 
     /// QA reader: the live zone ids in seeded order.
     var qaLiveZoneIds: [UUID] { liveZones.map { $0.zoneId } }
@@ -238,14 +262,24 @@ final class CanvasNSView: NSView {
 
     private func seedTileZoneMembershipFromGeometry() {
         tileZoneMembership.removeAll()
+        let liveZoneIds = Set(liveZones.map(\.zoneId))
         for tile in canvasState.tiles {
+            // The persisted `Tile.zoneId` register wins: a tile that carries a
+            // live zone's id re-joins it directly, no geometry probe.
+            if let registered = tile.zoneId, liveZoneIds.contains(registered) {
+                tileZoneMembership[tile.id] = registered
+                continue
+            }
+            // Legacy tiles (pre-v2 canvas: register nil) fall back to the
+            // historical geometry seed; the derived membership is stamped into
+            // the register so it becomes durable on the next canvas save.
             let cx = tile.frame.x + tile.frame.width / 2
             let cy = tile.frame.y + tile.frame.height / 2
             guard let zone = liveZones.reversed().first(where: { placement in
                 let f = CanvasEngine.zoneWorldFrame(placement)
                 return cx >= f.x && cx <= f.x + f.width && cy >= f.y && cy <= f.y + f.height
             }) else { continue }
-            tileZoneMembership[tile.id] = zone.zoneId
+            setTileZone(tile.id, zoneId: zone.zoneId)
         }
     }
 
@@ -322,7 +356,7 @@ final class CanvasNSView: NSView {
         var changed = false
         if let containing {
             if containing.zoneId != current {
-                tileZoneMembership[tileId] = containing.zoneId   // adopt / re-home
+                setTileZone(tileId, zoneId: containing.zoneId)   // adopt / re-home
                 growZoneToFitMembers(containing.zoneId)
                 changed = true
             }
@@ -331,7 +365,7 @@ final class CanvasNSView: NSView {
             let f = CanvasEngine.zoneWorldFrame(zone)
             let outsideBy = max(f.x - cx, cx - (f.x + f.width), f.y - cy, cy - (f.y + f.height))
             if outsideBy >= ZoneBreakoutConfig.distance(defaults: breakoutDefaults) {
-                tileZoneMembership.removeValue(forKey: tileId)   // break out → bare
+                setTileZone(tileId, zoneId: nil)   // break out → bare
                 changed = true
             }
         }
@@ -352,11 +386,11 @@ final class CanvasNSView: NSView {
         let memberIds = canvasState.tiles.filter { tileZoneMembership[$0.id] == zoneId }.map { $0.id }
         if !keepTiles && isGroupZone {
             for id in memberIds {
-                tileZoneMembership.removeValue(forKey: id)
+                setTileZone(id, zoneId: nil)
                 removeTile(id: id)
             }
         } else {
-            for id in memberIds { tileZoneMembership.removeValue(forKey: id) }  // spill to bare canvas
+            for id in memberIds { setTileZone(id, zoneId: nil) }  // spill to bare canvas
         }
         liveZones.remove(at: idx)
         zoneDisplayByZoneId.removeValue(forKey: zoneId)
@@ -419,9 +453,23 @@ final class CanvasNSView: NSView {
         focusBroker?.register(tileView)
         layoutTile(tile)
         if let idx = canvasState.tiles.firstIndex(where: { $0.id == tile.id }) {
-            canvasState.tiles[idx] = tile
+            // Replacing a tile record (restart placeholder → live terminal, etc.)
+            // must not clobber the membership register: callers construct their
+            // Tile copies without membership knowledge, so the stored zoneId is
+            // authoritative unless the caller's copy explicitly carries one.
+            var updated = tile
+            updated.zoneId = tile.zoneId ?? canvasState.tiles[idx].zoneId
+            canvasState.tiles[idx] = updated
+            if let zone = updated.zoneId {
+                tileZoneMembership[tile.id] = zone
+            } else {
+                tileZoneMembership.removeValue(forKey: tile.id)
+            }
         } else {
             canvasState.tiles.append(tile)
+            if let zone = tile.zoneId {
+                tileZoneMembership[tile.id] = zone
+            }
         }
         reorderTileSubviewsByZIndex()
         if previousTile == nil || previousTile?.title != tile.title || previousTile?.kind != tile.kind {
@@ -1699,9 +1747,9 @@ final class CanvasNSView: NSView {
                     let f = canvasState.tiles[i].frame
                     let cx = f.x + f.width / 2, cy = f.y + f.height / 2
                     guard cx >= ox && cx <= ox + ow && cy >= oy && cy <= oy + oh else { continue }
-                    // Membership is a pure overlay tag — the tile keeps its world
-                    // frame (no conversion), so the project canvas stays valid.
-                    tileZoneMembership[canvasState.tiles[i].id] = newZoneId
+                    // Membership is a register write on the tile — the tile keeps
+                    // its world frame (no conversion), so the project canvas stays valid.
+                    setTileZone(canvasState.tiles[i].id, zoneId: newZoneId)
                 }
                 if showsZoneChrome, zoneChromeViews[newZoneId] == nil {
                     let view = ZoneChromeNSView(model: zoneDisplayByZoneId[newZoneId]!)
@@ -2454,6 +2502,10 @@ final class CanvasNSView: NSView {
 
         try expect(canvas.qaZoneMembership(of: memberId) == zoneId, "precondition: member belongs to the zone")
         try expect(canvas.qaZoneMembership(of: bareId) == nil, "precondition: bare tile has no membership")
+        // Ticket 03: the geometry seed writes through the production register —
+        // the persisted Tile.zoneId must agree with the derived map.
+        try expect(canvas.qaTileZoneRegister(of: memberId) == zoneId, "register: seed stamps Tile.zoneId for the member")
+        try expect(canvas.qaTileZoneRegister(of: bareId) == nil, "register: bare tile's Tile.zoneId stays nil")
 
         // Leg 1a: nudge the member just past the right edge (center → 470, outsideBy 20 < 60) → STAYS.
         try dragTile(memberView, by: 310, 0, window: window)
@@ -2462,6 +2514,7 @@ final class CanvasNSView: NSView {
         // Leg 1b: pull it far past the edge (outsideBy ≫ 60) → BREAKS OUT to bare.
         try dragTile(memberView, by: 260, 0, window: window)
         try expect(canvas.qaZoneMembership(of: memberId) == nil, "far drag past the edge must break the member out to bare")
+        try expect(canvas.qaTileZoneRegister(of: memberId) == nil, "register: break-out clears Tile.zoneId through setTileZone")
         // Still a real, clickable tile (frame.x = 100+310+260 = 670, center 730,145).
         try expect(canvas.canvasState.tiles.contains { $0.id == memberId }, "broken-out tile must still exist")
         try expect(canvas.tileId(at: CGPoint(x: 730, y: 145)) == memberId, "broken-out tile must still be clickable")
@@ -2469,6 +2522,7 @@ final class CanvasNSView: NSView {
         // Leg 2: drag the bare tile into the zone (world delta (-400,-300) → center 260,145 inside) → ADOPTED.
         try dragTile(bareView, by: -400, 300, window: window)
         try expect(canvas.qaZoneMembership(of: bareId) == zoneId, "bare tile dropped inside the zone must be adopted (got \(String(describing: canvas.qaZoneMembership(of: bareId))))")
+        try expect(canvas.qaTileZoneRegister(of: bareId) == zoneId, "register: adoption writes Tile.zoneId through setTileZone")
 
         let fm = FileManager.default
         let tempRoot = URL(fileURLWithPath: fm.currentDirectoryPath)

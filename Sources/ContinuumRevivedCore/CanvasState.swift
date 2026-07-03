@@ -1,7 +1,8 @@
 import Foundation
 
-public struct CanvasState: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 1
+public struct CanvasState: Equatable, Sendable {
+    /// v1: original shape. v2: `Tile.zoneId` LWW membership register (ticket 03).
+    public static let currentSchemaVersion = 2
 
     public let schemaVersion: Int
     public var viewport: CanvasViewport
@@ -24,6 +25,41 @@ public struct CanvasState: Codable, Equatable, Sendable {
     }
 }
 
+extension CanvasState: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, viewport, tiles, groups, lastActiveTileId
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        // Migrate-forward-on-load: any supported older version decodes into the
+        // CURRENT in-memory shape (new fields defaulted by Tile's decoder), so it
+        // is stamped current here. Future versions keep their stamp so the schema
+        // guard (`ProjectStore.checkSchema`) fires instead of silently downgrading.
+        schemaVersion = decodedVersion <= CanvasState.currentSchemaVersion
+            ? CanvasState.currentSchemaVersion
+            : decodedVersion
+        viewport = try container.decode(CanvasViewport.self, forKey: .viewport)
+        tiles = try container.decode([Tile].self, forKey: .tiles)
+        groups = try container.decode([TileGroup].self, forKey: .groups)
+        lastActiveTileId = try container.decodeIfPresent(UUID.self, forKey: .lastActiveTileId)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        // Re-stamp on save: the encoder always writes the shape it knows, which is
+        // by definition the current schema — never an older stamp a decoded value
+        // might still carry. (`max` keeps a future stamp intact so an accidental
+        // save of an unmigratable document stays loud on the next load.)
+        try container.encode(Swift.max(schemaVersion, CanvasState.currentSchemaVersion), forKey: .schemaVersion)
+        try container.encode(viewport, forKey: .viewport)
+        try container.encode(tiles, forKey: .tiles)
+        try container.encode(groups, forKey: .groups)
+        try container.encodeIfPresent(lastActiveTileId, forKey: .lastActiveTileId)
+    }
+}
+
 public struct CanvasViewport: Codable, Equatable, Sendable {
     public var x: Double
     public var y: Double
@@ -36,12 +72,17 @@ public struct CanvasViewport: Codable, Equatable, Sendable {
     }
 }
 
-public struct Tile: Codable, Equatable, Sendable {
+public struct Tile: Equatable, Sendable {
     public let id: UUID
     public var kind: TileKind
     public var title: String
     public var frame: TileFrame
     public var zIndex: Int
+    /// Group-zone membership as a last-writer-wins register ON the tile:
+    /// nil = ambient (no zone); non-nil = the one zone that owns this tile.
+    /// "A tile belongs to at most one zone" is a consequence of the type,
+    /// not a post-merge repair. This is the field `Op.setTileZone` folds into.
+    public var zoneId: UUID?
     public var runtimeRef: RuntimeRef?
     public var metadata: TileMetadata
 
@@ -51,6 +92,7 @@ public struct Tile: Codable, Equatable, Sendable {
         title: String,
         frame: TileFrame,
         zIndex: Int,
+        zoneId: UUID? = nil,
         runtimeRef: RuntimeRef?,
         metadata: TileMetadata
     ) {
@@ -59,8 +101,46 @@ public struct Tile: Codable, Equatable, Sendable {
         self.title = title
         self.frame = frame
         self.zIndex = zIndex
+        self.zoneId = zoneId
         self.runtimeRef = runtimeRef
         self.metadata = metadata
+    }
+
+    public func with(zoneId: UUID?) -> Tile {
+        var copy = self
+        copy.zoneId = zoneId
+        return copy
+    }
+}
+
+extension Tile: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, title, frame, zIndex, zoneId, runtimeRef, metadata
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        kind = try container.decode(TileKind.self, forKey: .kind)
+        title = try container.decode(String.self, forKey: .title)
+        frame = try container.decode(TileFrame.self, forKey: .frame)
+        zIndex = try container.decode(Int.self, forKey: .zIndex)
+        // Pre-v2 canvases have no zoneId key: every tile decodes as ambient.
+        zoneId = try container.decodeIfPresent(UUID.self, forKey: .zoneId)
+        runtimeRef = try container.decodeIfPresent(RuntimeRef.self, forKey: .runtimeRef)
+        metadata = try container.decode(TileMetadata.self, forKey: .metadata)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(title, forKey: .title)
+        try container.encode(frame, forKey: .frame)
+        try container.encode(zIndex, forKey: .zIndex)
+        try container.encodeIfPresent(zoneId, forKey: .zoneId)
+        try container.encodeIfPresent(runtimeRef, forKey: .runtimeRef)
+        try container.encode(metadata, forKey: .metadata)
     }
 }
 

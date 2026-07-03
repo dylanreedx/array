@@ -1,24 +1,20 @@
 import Foundation
 
-public struct GroupZoneTiles: Codable, Equatable, Sendable {
-    public let zoneId: UUID
-    public var tiles: [Tile]
-
-    public init(zoneId: UUID, tiles: [Tile]) {
-        self.zoneId = zoneId
-        self.tiles = tiles
-    }
-}
-
 public struct WorkspaceDocument: Equatable, Sendable {
-    public static let currentSchemaVersion = 2
+    /// v2: grouped `groupZoneTiles` bag. v3: flat `ambientTiles` list with
+    /// membership on each tile's `zoneId` LWW register (ticket 03).
+    public static let currentSchemaVersion = 3
 
     public let schemaVersion: Int
     public var viewport: CanvasViewport
     public var zones: [ZonePlacement]
     public var zoneZOrder: [UUID]
     public var lastActiveZoneId: UUID?
-    public var groupZoneTiles: [GroupZoneTiles]
+    /// The tiles that live in this workspace's group zones (and formerly-zoned
+    /// ambient tiles with `zoneId == nil`). This is the authoritative store for
+    /// ambient tiles — they have no project `CanvasState`. Membership is derived
+    /// from each tile's `zoneId` register, never from a per-zone list.
+    public var ambientTiles: [Tile]
 
     public init(
         schemaVersion: Int = WorkspaceDocument.currentSchemaVersion,
@@ -26,27 +22,47 @@ public struct WorkspaceDocument: Equatable, Sendable {
         zones: [ZonePlacement],
         zoneZOrder: [UUID],
         lastActiveZoneId: UUID?,
-        groupZoneTiles: [GroupZoneTiles] = []
+        ambientTiles: [Tile] = []
     ) {
         self.schemaVersion = schemaVersion
         self.viewport = viewport
         self.zones = zones
         self.zoneZOrder = zoneZOrder
         self.lastActiveZoneId = lastActiveZoneId
-        self.groupZoneTiles = groupZoneTiles
+        self.ambientTiles = ambientTiles
     }
 
     public func tiles(forZone zoneId: UUID) -> [Tile] {
-        groupZoneTiles.first(where: { $0.zoneId == zoneId })?.tiles ?? []
+        ambientTiles.filter { $0.zoneId == zoneId }
     }
 
+    /// Field-scoped membership write: places `tiles` into the zone and clears
+    /// tiles previously in the zone that are absent from the new list. For a
+    /// tile already present in `ambientTiles` this mutates ONLY its `zoneId`
+    /// register — a stale caller's copy of the tile must never clobber the
+    /// stored frame/title/runtimeRef/metadata.
     public mutating func setTiles(_ tiles: [Tile], forZone zoneId: UUID) {
-        if let i = groupZoneTiles.firstIndex(where: { $0.zoneId == zoneId }) {
-            if tiles.isEmpty { groupZoneTiles.remove(at: i) }
-            else { groupZoneTiles[i].tiles = tiles }
-        } else if !tiles.isEmpty {
-            groupZoneTiles.append(GroupZoneTiles(zoneId: zoneId, tiles: tiles))
+        let newIds = Set(tiles.map(\.id))
+        for i in ambientTiles.indices
+        where ambientTiles[i].zoneId == zoneId && !newIds.contains(ambientTiles[i].id) {
+            ambientTiles[i].zoneId = nil
         }
+        for tile in tiles {
+            if let i = ambientTiles.firstIndex(where: { $0.id == tile.id }) {
+                ambientTiles[i].zoneId = zoneId
+            } else {
+                ambientTiles.append(tile.with(zoneId: zoneId))
+            }
+        }
+    }
+
+    /// The LWW register write for one ambient tile — the production sink for
+    /// `Op.setTileZone` targeting a tile stored on this document. Mutates ONLY
+    /// the `zoneId` field of the addressed tile; every sibling field is
+    /// untouched. No-op if the tile is not in `ambientTiles`.
+    public mutating func setTileZone(_ tileId: UUID, zoneId: UUID?) {
+        guard let i = ambientTiles.firstIndex(where: { $0.id == tileId }) else { return }
+        ambientTiles[i].zoneId = zoneId
     }
 
     public func validateSchema(at url: URL) throws {
@@ -120,27 +136,59 @@ public struct WorkspaceDocument: Equatable, Sendable {
 
 extension WorkspaceDocument: Codable {
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, viewport, zones, zoneZOrder, lastActiveZoneId, groupZoneTiles
+        // `groupZoneTiles` is decode-only: the pre-v3 on-disk shape. Never re-emitted.
+        case schemaVersion, viewport, zones, zoneZOrder, lastActiveZoneId, ambientTiles, groupZoneTiles
+    }
+
+    /// Decode-only parse of the pre-v3 grouped shape. Not public API; exists
+    /// solely so the migration can flatten old documents into `ambientTiles`.
+    private struct LegacyGroupZoneTiles: Decodable {
+        let zoneId: UUID
+        var tiles: [Tile]
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        let decodedVersion = try container.decode(Int.self, forKey: .schemaVersion)
         viewport = try container.decode(CanvasViewport.self, forKey: .viewport)
         zones = try container.decode([ZonePlacement].self, forKey: .zones)
         zoneZOrder = try container.decode([UUID].self, forKey: .zoneZOrder)
         lastActiveZoneId = try container.decodeIfPresent(UUID.self, forKey: .lastActiveZoneId)
-        groupZoneTiles = try container.decodeIfPresent([GroupZoneTiles].self, forKey: .groupZoneTiles) ?? []
+
+        var tiles = try container.decodeIfPresent([Tile].self, forKey: .ambientTiles) ?? []
+        if decodedVersion < 3 {
+            // Flatten the pre-v3 grouped shape: the legacy list already holds the
+            // full Tile values, so migration stamps each tile's zoneId register
+            // directly and re-homes it — no cross-store lookup exists or is needed.
+            let legacy = try container.decodeIfPresent([LegacyGroupZoneTiles].self, forKey: .groupZoneTiles) ?? []
+            for group in legacy {
+                for tile in group.tiles where !tiles.contains(where: { $0.id == tile.id }) {
+                    tiles.append(tile.with(zoneId: group.zoneId))
+                }
+            }
+        }
+        ambientTiles = tiles
+
+        // Migrate-forward-on-load: supported older versions decode into the current
+        // in-memory shape and are stamped current. Future versions keep their stamp
+        // so `validateSchema` fires instead of silently downgrading.
+        schemaVersion = decodedVersion <= WorkspaceDocument.currentSchemaVersion
+            ? WorkspaceDocument.currentSchemaVersion
+            : decodedVersion
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(schemaVersion, forKey: .schemaVersion)
+        // Re-stamp on save (see CanvasState.encode(to:) for the rationale). This
+        // also covers every embedding — e.g. the WorkspaceDocument nested inside a
+        // WorkspaceProfile — so no save path can write new fields under an old stamp.
+        try container.encode(Swift.max(schemaVersion, WorkspaceDocument.currentSchemaVersion), forKey: .schemaVersion)
         try container.encode(viewport, forKey: .viewport)
         try container.encode(zones, forKey: .zones)
         try container.encode(zoneZOrder, forKey: .zoneZOrder)
         try container.encodeIfPresent(lastActiveZoneId, forKey: .lastActiveZoneId)
-        try container.encode(groupZoneTiles, forKey: .groupZoneTiles)
+        // Only the flat register-carrying list; the legacy grouped key is never re-emitted.
+        try container.encode(ambientTiles, forKey: .ambientTiles)
     }
 }
 

@@ -1257,7 +1257,10 @@ do {
     expect(decoded == workspace, "WorkspaceDocument round trip")
     expect(decoded.schemaVersion == WorkspaceDocument.currentSchemaVersion, "WorkspaceDocument schema version preserved")
     let json = String(data: data, encoding: .utf8) ?? ""
-    expect(json.contains("\"schemaVersion\":2"), "WorkspaceDocument encodes schemaVersion as 2")
+    expect(
+        json.contains("\"schemaVersion\":\(WorkspaceDocument.currentSchemaVersion)"),
+        "WorkspaceDocument encodes schemaVersion as \(WorkspaceDocument.currentSchemaVersion)"
+    )
     expect(json.contains("\"hydrationPolicy\":\"automatic\""), "WorkspaceDocument encodes automatic hydration policy")
     expect(json.contains("\"hydrationPolicy\":\"pinnedLive\""), "WorkspaceDocument encodes pinned-live hydration policy")
 }
@@ -1349,7 +1352,9 @@ do {
     }
     """
     let decoded = try JSONCodec.makeDecoder().decode(WorkspaceDocument.self, from: Data(fixture.utf8))
-    expect(decoded.schemaVersion == 1, "WorkspaceDocument fixture schema version")
+    // Older supported versions are migrated forward in memory and stamped current
+    // on load (ticket 03 re-stamp doctrine); the raw v1 fixture must still decode.
+    expect(decoded.schemaVersion == WorkspaceDocument.currentSchemaVersion, "WorkspaceDocument fixture schema version migrated to current")
     expect(decoded.viewport == CanvasViewport(x: 12.5, y: -4.25, zoom: 1.25), "WorkspaceDocument fixture viewport")
     expect(decoded.zones.count == 1, "WorkspaceDocument fixture zone count")
     let zone = decoded.zones[0]
@@ -2056,19 +2061,22 @@ do {
     try store.save(document)
     let loaded = try store.load()
 
-    // 1. Full round-trip equality (proves groupZoneTiles is in Equatable + Codable)
-    expect(loaded == document, "T02 assertion 1: store round-trip equality includes groupZoneTiles")
+    // 1. Full round-trip equality (proves ambientTiles + zoneId are in Equatable + Codable)
+    expect(loaded == document, "T02 assertion 1: store round-trip equality includes ambientTiles")
 
-    // 2. Group tiles survive disk round-trip; zone-local frames intact
+    // 2. Group tiles survive disk round-trip; zone-local frames intact; zoneId register stamped
     let reloadedTiles = loaded.tiles(forZone: gz)
-    expect(reloadedTiles == [t1, t2], "T02 assertion 2: group-zone tiles equal after round-trip")
+    expect(
+        reloadedTiles == [t1.with(zoneId: gz), t2.with(zoneId: gz)],
+        "T02 assertion 2: group-zone tiles equal after round-trip (zoneId == gz)"
+    )
     expect(reloadedTiles.first?.frame.x == 40, "T02 assertion 2b: zone-local frame.x preserved (== 40)")
 
     // 3. Project zone has no workspace-stored tiles
     expect(loaded.tiles(forZone: pz) == [], "T02 assertion 3a: project zone has no workspace tiles")
     expect(
-        !loaded.groupZoneTiles.contains(where: { $0.zoneId == pz }),
-        "T02 assertion 3b: project zone has no groupZoneTiles entry"
+        !loaded.ambientTiles.contains(where: { $0.zoneId == pz }),
+        "T02 assertion 3b: no ambient tile carries the project zone's id in its register"
     )
 
     // 4. Isolation: workspace canvas.json has group tile ids; no ProjectStore canvas.json written
@@ -2091,8 +2099,8 @@ do {
     }
     expect(!foundProjectCanvas, "T02 assertion 4c: no ProjectStore canvas.json written under scratch")
 
-    // 5. Backward compat: v2 doc WITHOUT groupZoneTiles key decodes to []
-    // Hand-written literal (no groupZoneTiles key) — proves an older on-disk shape loads
+    // 5. Backward compat: v2 doc WITHOUT groupZoneTiles key decodes to empty ambientTiles
+    // Hand-written literal (no groupZoneTiles / ambientTiles key) — proves an older on-disk shape loads
     let literalJSON = """
     {
       "schemaVersion": 2,
@@ -2114,31 +2122,41 @@ do {
     // Use the full AtomicWriter path: write to store.layout.canvasFile, then store.load()
     try Data(literalJSON.utf8).write(to: store.layout.canvasFile)
     let decodedOld = try store.load()
-    expect(decodedOld.groupZoneTiles == [], "T02 assertion 5a: old v2 doc (no groupZoneTiles key) decodes to []")
+    expect(decodedOld.ambientTiles == [], "T02 assertion 5a: old v2 doc (no groupZoneTiles key) decodes to empty ambientTiles")
     expect(decodedOld.tiles(forZone: pz) == [], "T02 assertion 5b: old v2 doc: project zone has no tiles")
+    expect(
+        decodedOld.schemaVersion == WorkspaceDocument.currentSchemaVersion,
+        "T02 assertion 5c: old v2 doc is migrated forward in memory (schemaVersion == current)"
+    )
 
     // Restore the document for remaining assertions
     try store.save(document)
 
-    // 6. setTiles empty removes the entry
+    // 6. setTiles empty clears every register but keeps the tiles in ambientTiles
     var docForEmpty = document
     docForEmpty.setTiles([], forZone: gz)
-    expect(docForEmpty.tiles(forZone: gz) == [], "T02 assertion 6a: setTiles([]) removes the entry")
+    expect(docForEmpty.tiles(forZone: gz) == [], "T02 assertion 6a: setTiles([]) clears the zone's membership")
     expect(
-        !docForEmpty.groupZoneTiles.contains(where: { $0.zoneId == gz }),
-        "T02 assertion 6b: setTiles([]) removes the zone row entirely"
+        docForEmpty.ambientTiles.map(\.id).sorted(by: { $0.uuidString < $1.uuidString })
+            == [t1id, t2id].sorted(by: { $0.uuidString < $1.uuidString })
+            && docForEmpty.ambientTiles.allSatisfy { $0.zoneId == nil },
+        "T02 assertion 6b: cleared tiles remain in ambientTiles with zoneId == nil"
     )
 
-    // 7. setTiles upsert replaces, doesn't duplicate
+    // 7. setTiles narrows membership via the register, doesn't duplicate
     var docForUpsert = document  // already has gz → [t1, t2]
     docForUpsert.setTiles([t1], forZone: gz)
     expect(
-        docForUpsert.groupZoneTiles.filter { $0.zoneId == gz }.count == 1,
-        "T02 assertion 7a: setTiles upsert produces exactly one zone row"
+        docForUpsert.ambientTiles.filter { $0.zoneId == gz }.count == 1,
+        "T02 assertion 7a: exactly one tile carries the zone in its register after narrowing"
     )
     expect(
-        docForUpsert.tiles(forZone: gz) == [t1],
-        "T02 assertion 7b: setTiles upsert replaces tiles, not appends"
+        docForUpsert.tiles(forZone: gz) == [t1.with(zoneId: gz)],
+        "T02 assertion 7b: setTiles narrows membership to [t1]"
+    )
+    expect(
+        docForUpsert.ambientTiles.first(where: { $0.id == t2id })?.zoneId == nil,
+        "T02 assertion 7c: t2 dropped to ambient (zoneId == nil), not removed"
     )
 
     // 8. Multiple group zones coexist
@@ -2152,13 +2170,289 @@ do {
     try storeMulti.save(docMulti)
     let loadedMulti = try storeMulti.load()
     expect(
-        loadedMulti.tiles(forZone: gz) == [t1, t2],
+        loadedMulti.tiles(forZone: gz) == [t1.with(zoneId: gz), t2.with(zoneId: gz)],
         "T02 assertion 8a: multiple group zones coexist — gz still has [t1, t2]"
     )
     expect(
-        loadedMulti.tiles(forZone: gz2) == [t3],
+        loadedMulti.tiles(forZone: gz2) == [t3.with(zoneId: gz2)],
         "T02 assertion 8b: multiple group zones coexist — gz2 has [t3]"
     )
+}
+
+// MARK: - Membership as a tile-level LWW register (T03)
+
+do {
+    let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-membership-register-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: scratch) }
+
+    let zoneX = UUID(uuidString: "0000AAAA-0000-4000-8000-0000000000AA")!
+    let zoneY = UUID(uuidString: "0000BBBB-0000-4000-8000-0000000000BB")!
+    let tA = UUID(uuidString: "0000E001-0000-4000-8000-000000000001")!
+    let tB = UUID(uuidString: "0000E002-0000-4000-8000-000000000002")!
+    let tC = UUID(uuidString: "0000E003-0000-4000-8000-000000000003")!
+    let runtimeRefId = UUID(uuidString: "0000F001-0000-4000-8000-00000000000F")!
+
+    func makeTile(_ id: UUID, title: String, x: Double) -> Tile {
+        Tile(
+            id: id,
+            kind: .terminal,
+            title: title,
+            frame: TileFrame(x: x, y: 0, width: 400, height: 300),
+            zIndex: 0,
+            runtimeRef: RuntimeRef(kind: .terminalSession, id: runtimeRefId),
+            metadata: TileMetadata(launchProfileId: "default", projectRelativeCwd: "sub/dir")
+        )
+    }
+    func makeDoc(_ tiles: [Tile]) -> WorkspaceDocument {
+        WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [
+                ZonePlacement(zoneId: zoneX, projectId: nil, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 800, height: 600), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "X", navKey: nil),
+                ZonePlacement(zoneId: zoneY, projectId: nil, origin: ZonePoint(x: 900, y: 0), size: ZoneSize(width: 800, height: 600), color: "blue", collapsed: false, hydrationPolicy: .automatic, name: "Y", navKey: nil),
+            ],
+            zoneZOrder: [zoneX, zoneY],
+            lastActiveZoneId: zoneX,
+            ambientTiles: tiles
+        )
+    }
+
+    // ── Register semantics: at most one zone per tile, automatically ──
+    var doc = makeDoc([makeTile(tA, title: "A", x: 0), makeTile(tB, title: "B", x: 500), makeTile(tC, title: "C", x: 1000)])
+    doc.setTileZone(tA, zoneId: zoneX)
+    expect(doc.ambientTiles.first { $0.id == tA }?.zoneId == zoneX, "T03 register: A joins X")
+    doc.setTileZone(tA, zoneId: zoneY)
+    expect(doc.ambientTiles.first { $0.id == tA }?.zoneId == zoneY, "T03 register: last write wins — A moves to Y")
+    doc.setTileZone(tA, zoneId: nil)
+    expect(doc.ambientTiles.first { $0.id == tA }?.zoneId == nil, "T03 register: A returns to ambient")
+    expect(
+        doc.ambientTiles.first { $0.id == tB }?.zoneId == nil && doc.ambientTiles.first { $0.id == tC }?.zoneId == nil,
+        "T03 register: B and C untouched throughout"
+    )
+
+    // ── Field preservation: membership writes may touch ONLY zoneId ──
+    let original = doc.ambientTiles.first { $0.id == tA }!
+    var stale = makeTile(tA, title: "STALE-TITLE", x: 9999)
+    stale.runtimeRef = nil
+    stale.metadata = TileMetadata()
+    doc.setTiles([stale], forZone: zoneX)
+    let afterStaleWrite = doc.ambientTiles.first { $0.id == tA }!
+    expect(afterStaleWrite.zoneId == zoneX, "T03 clobber-guard: membership updated")
+    expect(afterStaleWrite.frame == original.frame, "T03 clobber-guard: frame preserved under stale caller")
+    expect(afterStaleWrite.title == original.title, "T03 clobber-guard: title preserved under stale caller")
+    expect(afterStaleWrite.runtimeRef == original.runtimeRef, "T03 clobber-guard: runtimeRef preserved under stale caller")
+    expect(afterStaleWrite.metadata == original.metadata, "T03 clobber-guard: metadata preserved under stale caller")
+
+    // ── Derived-view consistency ──
+    doc.setTiles([doc.ambientTiles.first { $0.id == tA }!, doc.ambientTiles.first { $0.id == tB }!], forZone: zoneX)
+    expect(
+        Set(doc.tiles(forZone: zoneX).map(\.id)) == [tA, tB],
+        "T03 derived view: tiles(forZone: X) == {A, B}"
+    )
+    doc.setTiles([], forZone: zoneX)
+    expect(doc.tiles(forZone: zoneX).isEmpty, "T03 derived view: clear empties the zone")
+    expect(
+        Set(doc.ambientTiles.map(\.id)).isSuperset(of: [tA, tB]) && doc.ambientTiles.allSatisfy { $0.zoneId != zoneX },
+        "T03 derived view: cleared tiles stay in ambientTiles, no register points at X"
+    )
+
+    // ── LWW convergence through the PRODUCTION merge path ──
+    // No spatial materialize exists yet (ticket 06); the production merge path today is
+    // OpId's total order (SpatialOp.swift) + the production register write
+    // `WorkspaceDocument.setTileZone`. Two replicas receive the same setTileZone ops in
+    // opposite arrival orders, fold by sorting on OpId and applying through the
+    // production writer, and must converge byte-identically.
+    let replicaA = UUID(uuidString: "0000AB01-0000-4000-8000-00000000AB01")!
+    let replicaB = UUID(uuidString: "0000AB02-0000-4000-8000-00000000AB02")!
+    let ops: [LoggedOp] = [
+        LoggedOp(opId: OpId(lamport: 5, replica: replicaA), op: .setTileZone(tileId: tA, zoneId: zoneX)),
+        LoggedOp(opId: OpId(lamport: 9, replica: replicaB), op: .setTileZone(tileId: tA, zoneId: zoneY)),
+        LoggedOp(opId: OpId(lamport: 9, replica: replicaA), op: .setTileZone(tileId: tA, zoneId: nil)),
+        LoggedOp(opId: OpId(lamport: 7, replica: replicaB), op: .setTileZone(tileId: tB, zoneId: zoneX)),
+    ]
+    func fold(_ arrivalOrder: [LoggedOp]) throws -> Data {
+        var replicaDoc = makeDoc([makeTile(tA, title: "A", x: 0), makeTile(tB, title: "B", x: 500), makeTile(tC, title: "C", x: 1000)])
+        for logged in arrivalOrder.sorted(by: { $0.opId < $1.opId }) {
+            guard case let .setTileZone(tileId, zoneId) = logged.op else { continue }
+            replicaDoc.setTileZone(tileId, zoneId: zoneId)   // production register write
+        }
+        return try JSONCodec.makeOpLogEncoder().encode(replicaDoc)
+    }
+    let bytesForward = try fold(ops)
+    let bytesReversed = try fold(ops.reversed())
+    expect(bytesForward == bytesReversed, "T03 LWW convergence: opposite arrival orders → byte-identical documents")
+    let converged = try JSONCodec.makeDecoder().decode(WorkspaceDocument.self, from: bytesForward)
+    expect(
+        converged.ambientTiles.first { $0.id == tA }?.zoneId == zoneY,
+        "T03 LWW convergence: A resolves to the highest-OpId write (lamport 9, replica B > replica A tie-break)"
+    )
+    expect(converged.ambientTiles.first { $0.id == tB }?.zoneId == zoneX, "T03 LWW convergence: B in X")
+    let bytesReplayed = try fold(ops + ops)   // duplicate delivery
+    expect(bytesReplayed == bytesForward, "T03 LWW convergence: duplicate delivery is idempotent")
+
+    // ── Old-format migration: non-empty pre-v3 groupZoneTiles flattens into ambientTiles ──
+    let t1Json = """
+    {"id": "\(tA.uuidString)", "kind": "terminal", "title": "legacy-1",
+     "frame": {"x": 10, "y": 20, "width": 300, "height": 200}, "zIndex": 4,
+     "runtimeRef": {"kind": "terminalSession", "id": "\(runtimeRefId.uuidString)"},
+     "metadata": {"launchProfileId": "default"}}
+    """
+    let t2Json = """
+    {"id": "\(tB.uuidString)", "kind": "note", "title": "legacy-2",
+     "frame": {"x": 400, "y": 20, "width": 300, "height": 200}, "zIndex": 5,
+     "metadata": {}}
+    """
+    let legacyDocJson = """
+    {
+      "schemaVersion": 2,
+      "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+      "zones": [{
+        "zoneId": "\(zoneX.uuidString)", "origin": {"x": 0, "y": 0},
+        "size": {"width": 1280, "height": 720}, "color": "mint",
+        "collapsed": false, "hydrationPolicy": "automatic", "name": "X"
+      }],
+      "zoneZOrder": ["\(zoneX.uuidString)"],
+      "groupZoneTiles": [{"zoneId": "\(zoneX.uuidString)", "tiles": [\(t1Json), \(t2Json)]}]
+    }
+    """
+    let migrated = try JSONCodec.makeDecoder().decode(WorkspaceDocument.self, from: Data(legacyDocJson.utf8))
+    expect(migrated.schemaVersion == WorkspaceDocument.currentSchemaVersion, "T03 migration: v2 doc stamped current in memory")
+    expect(
+        Set(migrated.ambientTiles.map(\.id)) == [tA, tB] && migrated.ambientTiles.allSatisfy { $0.zoneId == zoneX },
+        "T03 migration: both legacy tiles re-homed into ambientTiles with zoneId == X"
+    )
+    expect(Set(migrated.tiles(forZone: zoneX).map(\.id)) == [tA, tB], "T03 migration: tiles(forZone: X) sees both")
+    expect(
+        migrated.ambientTiles.first { $0.id == tA }?.runtimeRef?.id == runtimeRefId
+            && migrated.ambientTiles.first { $0.id == tA }?.frame.x == 10
+            && migrated.ambientTiles.first { $0.id == tA }?.zIndex == 4,
+        "T03 migration: lossless — runtimeRef/frame/zIndex survive the flatten"
+    )
+    let reEncoded = try String(decoding: JSONCodec.makeEncoder().encode(migrated), as: UTF8.self)
+    expect(!reEncoded.contains("groupZoneTiles"), "T03 migration: re-save never emits the legacy groupZoneTiles key")
+    expect(
+        reEncoded.contains("\"schemaVersion\":\(WorkspaceDocument.currentSchemaVersion)"),
+        "T03 migration: re-save is stamped to the current workspace schema"
+    )
+    let reDecoded = try JSONCodec.makeDecoder().decode(WorkspaceDocument.self, from: Data(reEncoded.utf8))
+    expect(reDecoded == migrated, "T03 migration: migrate → save → load is idempotent")
+
+    // ── v1 canvas backward-compat: no zoneId key → all tiles ambient ──
+    let v1CanvasJson = """
+    {
+      "schemaVersion": 1,
+      "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+      "tiles": [\(t1Json)],
+      "groups": []
+    }
+    """
+    let v1Canvas = try JSONCodec.makeCanvasDecoder().decode(CanvasState.self, from: Data(v1CanvasJson.utf8))
+    expect(v1Canvas.tiles.allSatisfy { $0.zoneId == nil }, "T03 canvas compat: v1 tiles decode with zoneId == nil")
+    expect(v1Canvas.schemaVersion == CanvasState.currentSchemaVersion, "T03 canvas compat: v1 canvas stamped current in memory")
+
+    // ── Future-schema guard still fires (no silent decodeIfPresent swallow) ──
+    let futureDocJson = legacyDocJson.replacingOccurrences(of: "\"schemaVersion\": 2", with: "\"schemaVersion\": 99")
+    let futureDoc = try JSONCodec.makeDecoder().decode(WorkspaceDocument.self, from: Data(futureDocJson.utf8))
+    var futureGuardFired = false
+    do { try futureDoc.validateSchema(at: URL(fileURLWithPath: "/dev/null")) }
+    catch { futureGuardFired = true }
+    expect(futureGuardFired, "T03 guard: a future-schema document is rejected, not silently accepted")
+
+    // ── Real-path old-file upgrade through WorkspaceStore + AtomicWriter ──
+    let wsId = UUID(uuidString: "AAAAAAAA-0000-4000-8000-000000000003")!
+    let store = WorkspaceStore(workspaceId: wsId, applicationSupportDirectory: scratch, retainedBackups: 2)
+    try FileManager.default.createDirectory(at: store.layout.workspaceDirectory, withIntermediateDirectories: true)
+    try Data(legacyDocJson.utf8).write(to: store.layout.canvasFile)
+    let upgraded = try store.load()
+    expect(
+        Set(upgraded.tiles(forZone: zoneX).map(\.id)) == [tA, tB],
+        "T03 real-path upgrade: legacy groupZoneTiles payload loads through WorkspaceStore into the register"
+    )
+    try store.save(upgraded)
+    let rawAfterSave = try String(contentsOf: store.layout.canvasFile, encoding: .utf8)
+    expect(!rawAfterSave.contains("groupZoneTiles"), "T03 real-path upgrade: saved file carries no legacy key")
+    expect(
+        rawAfterSave.contains("\"schemaVersion\" : \(WorkspaceDocument.currentSchemaVersion)"),
+        "T03 real-path upgrade: saved file is stamped v\(WorkspaceDocument.currentSchemaVersion) so an old build's guard fires instead of silently dropping membership"
+    )
+    let reUpgraded = try store.load()
+    expect(reUpgraded == upgraded, "T03 real-path upgrade: second load of the migrated file is identical (idempotent)")
+
+    // ── Schema re-stamp contract on the ProjectStore canvas path (prior 03 failure) ──
+    // A v1 canvas loaded via ProjectStore must NOT keep schemaVersion 1 on save:
+    // saving after mutation writes the CURRENT stamp, so an old build hits its
+    // version guard instead of silently dropping the zoneId field.
+    let projectRoot = scratch.appendingPathComponent("restamp-project", isDirectory: true)
+    let projectStore = ProjectStore(projectRoot: projectRoot)
+    try FileManager.default.createDirectory(at: projectStore.layout.stateRoot, withIntermediateDirectories: true)
+    try Data(v1CanvasJson.utf8).write(to: projectStore.layout.canvasFile)
+    var loadedCanvas = try projectStore.loadCanvas()
+    loadedCanvas.tiles[0].zoneId = zoneX     // the new field a v1 build knows nothing about
+    try projectStore.saveCanvas(loadedCanvas)
+    let rawCanvas = try String(contentsOf: projectStore.layout.canvasFile, encoding: .utf8)
+    expect(
+        rawCanvas.contains("\"schemaVersion\" : \(CanvasState.currentSchemaVersion)"),
+        "T03 re-stamp: saveCanvas writes the current canvas schema (\(CanvasState.currentSchemaVersion)), never the decoded v1 stamp"
+    )
+    expect(rawCanvas.contains("\"zoneId\""), "T03 re-stamp: the new field rides under the new stamp")
+
+    // ── WorkspaceProfile nested-document re-stamp (prior 03 failure) ──
+    let profileStore = WorkspaceProfileStore(applicationSupportDirectory: scratch)
+    let profile = profileStore.captureProfile(
+        name: "restamp-profile",
+        from: migrated,
+        mode: .snapshot,
+        id: UUID(uuidString: "0000ABCD-0000-4000-8000-00000000ABCD")!,
+        now: Date(timeIntervalSince1970: 1_800_000_000)
+    )
+    try profileStore.saveProfile(profile)
+    let rawProfile = try String(contentsOf: profileStore.profileFile(id: profile.id), encoding: .utf8)
+    expect(!rawProfile.contains("groupZoneTiles"), "T03 profile re-stamp: nested document carries no legacy key")
+    expect(rawProfile.contains("ambientTiles"), "T03 profile re-stamp: nested document persists ambientTiles")
+    expect(
+        rawProfile.contains("\"schemaVersion\" : \(WorkspaceDocument.currentSchemaVersion)"),
+        "T03 profile re-stamp: nested document is stamped current, not the pre-migration version"
+    )
+    let profileBack = try profileStore.loadProfile(id: profile.id)
+    expect(profileBack.document == migrated, "T03 profile re-stamp: nested document round-trips losslessly")
+
+    // ── I5 taint: the production sync payload for membership is the Op itself ──
+    // The op carries only tile UUID + zone UUID; encode the real wire shape with the
+    // canonical op-log encoder and scan the actual bytes.
+    let taintedTile = makeTile(tA, title: "tainted", x: 0)   // carries a real runtimeRef
+    let fullTileJson = try String(decoding: JSONCodec.makeEncoder().encode(taintedTile), as: UTF8.self)
+    expect(fullTileJson.contains("runtimeRef"), "T03 I5 sanity: the persistence encoding of Tile DOES carry runtimeRef (scan is non-vacuous)")
+    let wireOp = LoggedOp(
+        opId: OpId(lamport: 42, replica: replicaA),
+        op: .setTileZone(tileId: taintedTile.id, zoneId: zoneX)
+    )
+    let wireBytes = try JSONCodec.makeOpLogEncoder().encode(wireOp)
+    let wireJson = String(decoding: wireBytes, as: UTF8.self)
+    expect(!wireJson.contains("runtimeRef"), "T03 I5: setTileZone wire payload carries no runtimeRef key")
+    expect(!wireJson.contains(runtimeRefId.uuidString), "T03 I5: setTileZone wire payload carries no runtime handle value")
+    expect(!wireJson.contains("metadata"), "T03 I5: setTileZone wire payload carries no tile metadata")
+    expect(!wireJson.contains("/Users/"), "T03 I5: setTileZone wire payload carries no host-local path")
+
+    let manifest = InvariantManifest(
+        invariantId: "ticket03-membership-register",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_800_000_000)),
+        measurements: [
+            "ambientTilesWithZoneId": .int(migrated.ambientTiles.filter { $0.zoneId != nil }.count),
+            "ambientTilesWithoutZoneId": .int(migrated.ambientTiles.filter { $0.zoneId == nil }.count),
+            "workspaceSchemaVersion": .string("2->\(WorkspaceDocument.currentSchemaVersion)"),
+            "canvasSchemaVersion": .string("1->\(CanvasState.currentSchemaVersion)"),
+            "migrationRan": .bool(true),
+            "lwwConvergedByteCount": .int(bytesForward.count),
+            "taintScannedBytes": .int(wireBytes.count),
+            "taintTokensFound": .int(0),
+            "via": .string("production_setTileZone_register")
+        ],
+        outcome: InvariantOutcome.pass.rawValue,
+        failureReason: nil
+    )
+    try writeAndVerify(manifest)
 }
 
 // MARK: - DefaultWorkspaceMigration
@@ -5825,14 +6119,10 @@ do {
         zones: [zonePlacementA1, zonePlacementA2],
         zoneZOrder: [zoneA2Id, zoneA1Id],
         lastActiveZoneId: nil,
-        groupZoneTiles: [
-            GroupZoneTiles(zoneId: zoneA2Id, tiles: [
-                sidebarTile("00000000-0000-0000-0000-0000000000E1", "Scratch Agent", .terminal, 1),
-                sidebarTile("00000000-0000-0000-0000-0000000000E2", "Scratch Note", .note, 2),
-            ]),
-            GroupZoneTiles(zoneId: zoneA1Id, tiles: [
-                sidebarTile("00000000-0000-0000-0000-0000000000E3", "Project Browser", .browser, 3),
-            ]),
+        ambientTiles: [
+            sidebarTile("00000000-0000-0000-0000-0000000000E1", "Scratch Agent", .terminal, 1).with(zoneId: zoneA2Id),
+            sidebarTile("00000000-0000-0000-0000-0000000000E2", "Scratch Note", .note, 2).with(zoneId: zoneA2Id),
+            sidebarTile("00000000-0000-0000-0000-0000000000E3", "Project Browser", .browser, 3).with(zoneId: zoneA1Id),
         ]
     )
 
@@ -6722,8 +7012,8 @@ do {
     let canvasDecoded = try decoder.decode(CanvasState.self, from: canvasEncoded)
     expect(canvasDecoded == canvasState, "I7: CanvasState round-trip must be equal")
 
-    // WorkspaceDocument round-trip: a zone with the v2 groupZoneTiles field populated so
-    // that field (added after schemaVersion 1) is actually exercised, not left at [].
+    // WorkspaceDocument round-trip: a zone with the v3 ambientTiles field populated so
+    // that field (and the zoneId register it carries) is actually exercised, not left at [].
     let zoneId = UUID(uuidString: "B0000000-0000-4000-8000-000000000705")!
     let workspaceDocument = WorkspaceDocument(
         viewport: CanvasViewport(x: 10, y: 20, zoom: 1.5),
@@ -6740,7 +7030,7 @@ do {
         )],
         zoneZOrder: [zoneId],
         lastActiveZoneId: zoneId,
-        groupZoneTiles: [GroupZoneTiles(zoneId: zoneId, tiles: [canvasTile])]
+        ambientTiles: [canvasTile.with(zoneId: zoneId)]
     )
     let workspaceEncoded = try encoder.encode(workspaceDocument)
     let workspaceDecoded = try decoder.decode(WorkspaceDocument.self, from: workspaceEncoded)
