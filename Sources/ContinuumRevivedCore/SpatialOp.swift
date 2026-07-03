@@ -111,7 +111,12 @@ public struct FracIndex: Comparable, Codable, Hashable, Sendable {
 /// docs/38-tickets/02-op-enum-logged-op-envelope.md "Wire format".
 public enum Op: Sendable, Equatable {
     // --- Tile lifecycle ---
-    case createTile(id: UUID, kind: TileKind, title: String, frame: TileFrame, zIndex: Int)
+    // Wire amendment (ticket 04, pre-transport): `createTile`'s z payload and
+    // `setTileZIndex`'s payload changed from the legacy Int rank to FracIndex.
+    // Amended while ZERO producers/consumers/persisted op logs exist (the
+    // op-log store is ticket 06), so no data can be lost; an old-shape payload
+    // fails decode loudly (keyNotFound), never silently misreads.
+    case createTile(id: UUID, kind: TileKind, title: String, frame: TileFrame, zPosition: FracIndex)
     case deleteTile(id: UUID)
 
     // --- Zone lifecycle ---
@@ -120,7 +125,7 @@ public enum Op: Sendable, Equatable {
 
     // --- Per-field LWW registers on Tile ---
     case setTileFrame(id: UUID, frame: TileFrame)
-    case setTileZIndex(id: UUID, zIndex: Int)
+    case setTileZIndex(id: UUID, z: FracIndex)
     case setTileTitle(id: UUID, title: String)
     case setTileKind(id: UUID, kind: TileKind)
     case setTileCollapsed(id: UUID, collapsed: Bool)
@@ -185,7 +190,7 @@ extension Op: Codable {
     // Same rationale as CodingKeys above: every payload-key rawValue is an
     // explicit frozen string literal, not an implicit case-name default.
     private enum CreateTileKeys: String, CodingKey {
-        case id = "id", kind = "kind", title = "title", frame = "frame", zIndex = "zIndex"
+        case id = "id", kind = "kind", title = "title", frame = "frame", zPosition = "zPosition"
     }
     private enum DeleteTileKeys: String, CodingKey { case id = "id" }
     private enum CreateZoneKeys: String, CodingKey {
@@ -193,7 +198,7 @@ extension Op: Codable {
     }
     private enum DeleteZoneKeys: String, CodingKey { case id = "id" }
     private enum SetTileFrameKeys: String, CodingKey { case id = "id", frame = "frame" }
-    private enum SetTileZIndexKeys: String, CodingKey { case id = "id", zIndex = "zIndex" }
+    private enum SetTileZIndexKeys: String, CodingKey { case id = "id", z = "z" }
     private enum SetTileTitleKeys: String, CodingKey { case id = "id", title = "title" }
     private enum SetTileKindKeys: String, CodingKey { case id = "id", kind = "kind" }
     private enum SetTileCollapsedKeys: String, CodingKey { case id = "id", collapsed = "collapsed" }
@@ -239,7 +244,7 @@ extension Op: Codable {
                 kind: try p.decode(TileKind.self, forKey: .kind),
                 title: try p.decode(String.self, forKey: .title),
                 frame: try p.decode(TileFrame.self, forKey: .frame),
-                zIndex: try p.decode(Int.self, forKey: .zIndex)
+                zPosition: try p.decode(FracIndex.self, forKey: .zPosition)
             )
         case .deleteTile:
             let p = try c.nestedContainer(keyedBy: DeleteTileKeys.self, forKey: .deleteTile)
@@ -262,7 +267,7 @@ extension Op: Codable {
             self = .setTileFrame(id: try p.decode(UUID.self, forKey: .id), frame: try p.decode(TileFrame.self, forKey: .frame))
         case .setTileZIndex:
             let p = try c.nestedContainer(keyedBy: SetTileZIndexKeys.self, forKey: .setTileZIndex)
-            self = .setTileZIndex(id: try p.decode(UUID.self, forKey: .id), zIndex: try p.decode(Int.self, forKey: .zIndex))
+            self = .setTileZIndex(id: try p.decode(UUID.self, forKey: .id), z: try p.decode(FracIndex.self, forKey: .z))
         case .setTileTitle:
             let p = try c.nestedContainer(keyedBy: SetTileTitleKeys.self, forKey: .setTileTitle)
             self = .setTileTitle(id: try p.decode(UUID.self, forKey: .id), title: try p.decode(String.self, forKey: .title))
@@ -308,13 +313,13 @@ extension Op: Codable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case let .createTile(id, kind, title, frame, zIndex):
+        case let .createTile(id, kind, title, frame, zPosition):
             var p = c.nestedContainer(keyedBy: CreateTileKeys.self, forKey: .createTile)
             try p.encode(id, forKey: .id)
             try p.encode(kind, forKey: .kind)
             try p.encode(title, forKey: .title)
             try p.encode(frame, forKey: .frame)
-            try p.encode(zIndex, forKey: .zIndex)
+            try p.encode(zPosition, forKey: .zPosition)
         case let .deleteTile(id):
             var p = c.nestedContainer(keyedBy: DeleteTileKeys.self, forKey: .deleteTile)
             try p.encode(id, forKey: .id)
@@ -333,10 +338,10 @@ extension Op: Codable {
             var p = c.nestedContainer(keyedBy: SetTileFrameKeys.self, forKey: .setTileFrame)
             try p.encode(id, forKey: .id)
             try p.encode(frame, forKey: .frame)
-        case let .setTileZIndex(id, zIndex):
+        case let .setTileZIndex(id, z):
             var p = c.nestedContainer(keyedBy: SetTileZIndexKeys.self, forKey: .setTileZIndex)
             try p.encode(id, forKey: .id)
-            try p.encode(zIndex, forKey: .zIndex)
+            try p.encode(z, forKey: .z)
         case let .setTileTitle(id, title):
             var p = c.nestedContainer(keyedBy: SetTileTitleKeys.self, forKey: .setTileTitle)
             try p.encode(id, forKey: .id)

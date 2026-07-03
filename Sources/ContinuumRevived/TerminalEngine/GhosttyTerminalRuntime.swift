@@ -446,7 +446,7 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
             kind: .terminal,
             title: "ZOOM_PAN_STABILITY_PROBE",
             frame: TileFrame(x: 0, y: 0, width: 800, height: 520),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata()
         )
@@ -608,7 +608,7 @@ final class GhosttyTerminalRuntime: TerminalRuntime, AgentTileTextEndpoint {
             kind: .terminal,
             title: "FILLS_TILE_PROBE",
             frame: TileFrame(x: 0, y: 0, width: worldWidth, height: worldHeight),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata()
         )

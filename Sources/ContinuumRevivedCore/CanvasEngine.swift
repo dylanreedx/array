@@ -220,7 +220,10 @@ public enum CanvasEngine {
 
     public static func hitTest(worldPoint: CGPoint, tiles: [Tile]) -> Tile? {
         tiles
-            .sorted { $0.zIndex > $1.zIndex }
+            .sorted { lhs, rhs in
+                if lhs.zPosition != rhs.zPosition { return lhs.zPosition > rhs.zPosition }
+                return lhs.id.uuidString > rhs.id.uuidString   // deterministic tie-break
+            }
             .first { tile in
                 contains(worldPoint, in: tile.frame)
             }
@@ -232,7 +235,10 @@ public enum CanvasEngine {
         tilesByZone: [UUID: [Tile]]
     ) -> ZoneHit? {
         zones
-            .sorted { $0.zIndex > $1.zIndex }
+            .sorted { lhs, rhs in
+                if lhs.zPosition != rhs.zPosition { return lhs.zPosition > rhs.zPosition }
+                return lhs.id.uuidString > rhs.id.uuidString   // deterministic tie-break
+            }
             .lazy
             .compactMap { zone -> ZoneHit? in
                 guard contains(worldPoint, in: zone.frame) else { return nil }
@@ -437,12 +443,12 @@ public enum CanvasEngine {
     public struct NavigationZone: Equatable, Sendable {
         public let id: UUID
         public var frame: TileFrame
-        public var zIndex: Int
+        public var zPosition: FracIndex
 
-        public init(id: UUID, frame: TileFrame, zIndex: Int = 0) {
+        public init(id: UUID, frame: TileFrame, zPosition: FracIndex = .first) {
             self.id = id
             self.frame = frame
-            self.zIndex = zIndex
+            self.zPosition = zPosition
         }
     }
 
@@ -455,7 +461,7 @@ public enum CanvasEngine {
         return nearestRect(
             from: origin.id,
             direction: direction,
-            items: tiles.map { NavigationItem(id: $0.id, rect: rect(for: $0.frame), zIndex: $0.zIndex) }
+            items: tiles.map { NavigationItem(id: $0.id, rect: rect(for: $0.frame), zPosition: $0.zPosition) }
         )
     }
 
@@ -467,14 +473,14 @@ public enum CanvasEngine {
         nearestRect(
             from: zoneId,
             direction: direction,
-            items: zones.map { NavigationItem(id: $0.id, rect: rect(for: $0.frame), zIndex: $0.zIndex) }
+            items: zones.map { NavigationItem(id: $0.id, rect: rect(for: $0.frame), zPosition: $0.zPosition) }
         )
     }
 
     private struct NavigationItem {
         let id: UUID
         let rect: CGRect
-        let zIndex: Int
+        let zPosition: FracIndex
     }
 
     private static func nearestRect(
@@ -519,7 +525,7 @@ public enum CanvasEngine {
                 if lhsScore != rhsScore { return lhsScore < rhsScore }
                 if lhs.primary != rhs.primary { return lhs.primary < rhs.primary }
                 if lhs.orthogonal != rhs.orthogonal { return lhs.orthogonal < rhs.orthogonal }
-                if lhs.item.zIndex != rhs.item.zIndex { return lhs.item.zIndex > rhs.item.zIndex }
+                if lhs.item.zPosition != rhs.item.zPosition { return lhs.item.zPosition > rhs.item.zPosition }
                 return lhs.item.id.uuidString < rhs.item.id.uuidString
             }?.item.id
     }
@@ -597,30 +603,31 @@ public enum CanvasEngine {
 
     // MARK: - Z-order
 
-    /// Promote `tileId` above every other tile by setting its zIndex to
-    /// `max + 1`. Other tiles are unchanged. Use `renormalizeZOrder` to keep
-    /// the integer space compact.
+    /// The fractional position a NEW tile should spawn at so it lands above
+    /// every existing tile: `after(currentMax)`, or `.first` on an empty
+    /// canvas. Replaces the old `max(zIndex) + 1` allocation pattern; no
+    /// renormalization pass exists or is needed.
+    public static func zPositionAbove(_ tiles: [Tile]) -> FracIndex {
+        guard let maxZ = tiles.map(\.zPosition).max() else { return .first }
+        return FracIndex.after(maxZ)
+    }
+
+    /// Promote `tileId` above every other tile via the fractional index:
+    /// `after(currentMax)`. Other tiles are unchanged. If the tile is ALREADY
+    /// strictly frontmost, the array is returned untouched — bring-to-front
+    /// must never move the front item (the old `max + 1` rewrite churned it,
+    /// and at precision exhaustion a rewrite could even LOWER it).
     public static func bringToFront(tileId: UUID, in tiles: [Tile]) -> [Tile] {
-        let maxZ = tiles.map(\.zIndex).max() ?? 0
+        guard let target = tiles.first(where: { $0.id == tileId }) else { return tiles }
+        let othersMax = tiles.filter { $0.id != tileId }.map(\.zPosition).max()
+        guard let othersMax else { return tiles }                 // only tile — already front
+        if target.zPosition > othersMax { return tiles }          // already strictly frontmost
+        let promotedPosition = FracIndex.after(othersMax)
         return tiles.map { tile in
             guard tile.id == tileId else { return tile }
             var promoted = tile
-            promoted.zIndex = maxZ + 1
+            promoted.zPosition = promotedPosition
             return promoted
-        }
-    }
-
-    /// Compress the z-index space to `0 ... n-1` while preserving order.
-    public static func renormalizeZOrder(_ tiles: [Tile]) -> [Tile] {
-        let sorted = tiles.sorted { $0.zIndex < $1.zIndex }
-        var rank: [UUID: Int] = [:]
-        for (i, tile) in sorted.enumerated() {
-            rank[tile.id] = i
-        }
-        return tiles.map { tile in
-            var compressed = tile
-            compressed.zIndex = rank[tile.id] ?? tile.zIndex
-            return compressed
         }
     }
 

@@ -826,7 +826,7 @@ final class CanvasNSView: NSView {
         let previousActiveTileId = canvasState.lastActiveTileId
         guard let target = canvasState.tiles.first(where: { $0.id == tileId }) else { return }
         let alreadyFrontmost = canvasState.tiles.allSatisfy { tile in
-            tile.id == tileId || target.zIndex > tile.zIndex
+            tile.id == tileId || target.zPosition > tile.zPosition
         }
 
         canvasState.lastActiveTileId = tileId
@@ -1158,13 +1158,17 @@ final class CanvasNSView: NSView {
             let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: canvasState.viewport)
             var navigationZones: [CanvasEngine.NavigationZone] = []
             var tilesByZone: [UUID: [Tile]] = [:]
+            // Rank the installed layer order into (0,1) so the engine's
+            // (zPosition, id) zone sort reproduces it exactly.
+            let orderedZonePositions = FracIndex.distribute(count: zoneLayerOrder.count)
             for (index, zoneId) in zoneLayerOrder.enumerated() {
                 guard let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) else { continue }
                 guard !layer.placement.collapsed else { continue }
                 navigationZones.append(CanvasEngine.NavigationZone(
                     id: zoneId,
                     frame: CanvasEngine.zoneWorldFrame(layer.placement),
-                    zIndex: index  // later in order = higher zIndex = wins
+                    // later in order = higher position = wins
+                    zPosition: orderedZonePositions[index]
                 ))
                 tilesByZone[zoneId] = layer.tiles
             }
@@ -1172,7 +1176,7 @@ final class CanvasNSView: NSView {
         }
         // Unified live path (zone-unify P1): hit-test every tile at its world
         // frame — members offset by their membership zone, bare tiles as-is.
-        // Tiles in a collapsed zone are skipped. zIndex ordering is global.
+        // Tiles in a collapsed zone are skipped. zPosition ordering is global.
         return CanvasEngine.hitTest(screenPoint: screenPoint, viewport: canvasState.viewport, tiles: worldFrameTiles())?.id
     }
 
@@ -1387,18 +1391,20 @@ final class CanvasNSView: NSView {
     var viewport: CanvasViewport { canvasState.viewport }
 
     private func reorderTileSubviewsByZIndex() {
-        // ordering: tileId.uuidString → [zoneIndex, tileZIndex, tileArrayIndex]
+        // ordering: tileId.uuidString → [zoneIndex, tileZPosition]
         // zoneIndex for single-zone tiles: 0 (they're their own zone).
         // For ZoneLayer tiles: position in zoneLayerOrder + 1 so they sort after
         // single-zone tiles when both are present (choice B coexistence).
+        // Ties resolve by tile id (the deterministic (zPosition, id) sort key),
+        // never by array position.
         let ordering = NSMutableDictionary()
-        for (index, tile) in canvasState.tiles.enumerated() {
-            ordering[tile.id.uuidString] = [0, tile.zIndex, index]
+        for tile in canvasState.tiles {
+            ordering[tile.id.uuidString] = [0.0, tile.zPosition.value]
         }
         for layer in zoneLayers {
-            let zoneIdx = (zoneLayerOrder.firstIndex(of: layer.placement.zoneId) ?? 0) + 1
-            for (tileIdx, tile) in layer.tiles.enumerated() {
-                ordering[tile.id.uuidString] = [zoneIdx, tile.zIndex, tileIdx]
+            let zoneIdx = Double((zoneLayerOrder.firstIndex(of: layer.placement.zoneId) ?? 0) + 1)
+            for tile in layer.tiles {
+                ordering[tile.id.uuidString] = [zoneIdx, tile.zPosition.value]
             }
         }
         sortSubviews({ lhs, rhs, context in
@@ -1406,16 +1412,18 @@ final class CanvasNSView: NSView {
                 let ordering = context.map({ Unmanaged<NSMutableDictionary>.fromOpaque($0).takeUnretainedValue() }),
                 let lhs = lhs as? TileNSView,
                 let rhs = rhs as? TileNSView,
-                let lhsInfo = ordering[lhs.tile.id.uuidString] as? [Int],
-                let rhsInfo = ordering[rhs.tile.id.uuidString] as? [Int]
+                let lhsInfo = ordering[lhs.tile.id.uuidString] as? [Double],
+                let rhsInfo = ordering[rhs.tile.id.uuidString] as? [Double]
             else {
                 return .orderedSame
             }
-            // Compare (zoneIndex, tileZIndex, tileArrayIndex) lexicographically.
-            for i in 0..<3 {
+            // Compare (zoneIndex, zPosition, id) lexicographically.
+            for i in 0..<2 {
                 let l = lhsInfo[i], r = rhsInfo[i]
                 if l != r { return l < r ? .orderedAscending : .orderedDescending }
             }
+            let lid = lhs.tile.id.uuidString, rid = rhs.tile.id.uuidString
+            if lid != rid { return lid < rid ? .orderedAscending : .orderedDescending }
             return .orderedSame
         }, context: Unmanaged.passUnretained(ordering).toOpaque())
         // The sort only orders tile subviews; the chrome comparator returns
@@ -2004,9 +2012,9 @@ final class CanvasNSView: NSView {
         let lowId = UUID(uuidString: "00000000-0000-0000-0000-000000000101")!
         let overlap = TileFrame(x: 100, y: 100, width: 300, height: 220)
         let seededTiles = [
-            Tile(id: midId, kind: .note, title: "MID_FIRST", frame: overlap, zIndex: 5, runtimeRef: nil, metadata: TileMetadata()),
-            Tile(id: topId, kind: .note, title: "TOP_MIDDLE", frame: overlap, zIndex: 99, runtimeRef: nil, metadata: TileMetadata()),
-            Tile(id: lowId, kind: .note, title: "LOW_LAST", frame: overlap, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+            Tile(id: midId, kind: .note, title: "MID_FIRST", frame: overlap, zPosition: .fromLegacyRank(5), runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: topId, kind: .note, title: "TOP_MIDDLE", frame: overlap, zPosition: .fromLegacyRank(99), runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: lowId, kind: .note, title: "LOW_LAST", frame: overlap, zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         ]
         let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: viewport, tiles: seededTiles, groups: [], lastActiveTileId: nil))
@@ -2032,7 +2040,7 @@ final class CanvasNSView: NSView {
         let manifest: [String: Any] = [
             "check": "zindex-relaunch-hit-test",
             "arrayOrder": seededTiles.map { $0.id.uuidString },
-            "zIndices": Dictionary(uniqueKeysWithValues: seededTiles.map { ($0.id.uuidString, $0.zIndex) }),
+            "zPositions": Dictionary(uniqueKeysWithValues: seededTiles.map { ($0.id.uuidString, $0.zPosition.value) }),
             "visualSubviewOrder": visualOrder.map { $0.uuidString },
             "hitPoint": ["x": hitPoint.x, "y": hitPoint.y],
             "expectedTopId": topId.uuidString,
@@ -2097,9 +2105,9 @@ final class CanvasNSView: NSView {
         )
         let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
         let preZoneTiles = [
-            Tile(id: firstId, kind: .note, title: "legacy-low", frame: TileFrame(x: 40, y: 50, width: 220, height: 140), zIndex: 1, runtimeRef: nil, metadata: TileMetadata()),
-            Tile(id: topId, kind: .note, title: "legacy-top", frame: TileFrame(x: 100, y: 90, width: 220, height: 140), zIndex: 9, runtimeRef: nil, metadata: TileMetadata()),
-            Tile(id: outsideId, kind: .file, title: "legacy-outside", frame: TileFrame(x: 420, y: 80, width: 160, height: 120), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+            Tile(id: firstId, kind: .note, title: "legacy-low", frame: TileFrame(x: 40, y: 50, width: 220, height: 140), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: topId, kind: .note, title: "legacy-top", frame: TileFrame(x: 100, y: 90, width: 220, height: 140), zPosition: .fromLegacyRank(9), runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: outsideId, kind: .file, title: "legacy-outside", frame: TileFrame(x: 420, y: 80, width: 160, height: 120), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
         ]
         let preZoneCanvas = CanvasState(viewport: viewport, tiles: preZoneTiles, groups: [], lastActiveTileId: topId)
         let projectStore = ProjectStore(projectRoot: projectRoot)
@@ -2146,7 +2154,7 @@ final class CanvasNSView: NSView {
         let legacyHit = CanvasEngine.hitTest(screenPoint: hitPoint, viewport: viewport, tiles: preZoneTiles)?.id
         let zoneHit = CanvasEngine.hitTest(
             worldPoint: CanvasEngine.screenToWorld(hitPoint, viewport: viewport),
-            zones: [CanvasEngine.NavigationZone(id: zone.zoneId, frame: CanvasEngine.zoneWorldFrame(zone), zIndex: 0)],
+            zones: [CanvasEngine.NavigationZone(id: zone.zoneId, frame: CanvasEngine.zoneWorldFrame(zone), zPosition: .fromLegacyRank(0))],
             tilesByZone: [zone.zoneId: preZoneTiles]
         )?.tile.id
         let canvasHit = canvas.tileId(at: hitPoint)
@@ -2216,8 +2224,8 @@ final class CanvasNSView: NSView {
             origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 800, height: 600),
             color: "teal", collapsed: false, hydrationPolicy: .automatic, name: "Proj", navKey: nil
         )
-        let tileA = Tile(id: aId, kind: .note, title: "a", frame: TileFrame(x: 100, y: 100, width: 200, height: 140), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let tileB = Tile(id: bId, kind: .note, title: "b", frame: TileFrame(x: 360, y: 120, width: 200, height: 140), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let tileA = Tile(id: aId, kind: .note, title: "a", frame: TileFrame(x: 100, y: 100, width: 200, height: 140), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: bId, kind: .note, title: "b", frame: TileFrame(x: 360, y: 120, width: 200, height: 140), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
         let canvas = CanvasNSView(
             canvasState: CanvasState(viewport: viewport, tiles: [tileA, tileB], groups: [], lastActiveTileId: nil),
             activeZone: zone
@@ -2288,8 +2296,8 @@ final class CanvasNSView: NSView {
                                  origin: ZonePoint(x: 50, y: 50), size: ZoneSize(width: 400, height: 300),
                                  color: "teal", collapsed: false, hydrationPolicy: .automatic, name: "Z", navKey: nil)
         // Member tiles store WORLD frames; zone-move translates them explicitly.
-        let tileA = Tile(id: aId, kind: .note, title: "a", frame: TileFrame(x: 70, y: 90, width: 100, height: 80), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let tileB = Tile(id: bId, kind: .note, title: "b", frame: TileFrame(x: 250, y: 90, width: 100, height: 80), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let tileA = Tile(id: aId, kind: .note, title: "a", frame: TileFrame(x: 70, y: 90, width: 100, height: 80), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: bId, kind: .note, title: "b", frame: TileFrame(x: 250, y: 90, width: 100, height: 80), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
         let canvas = CanvasNSView(
             canvasState: CanvasState(viewport: vp, tiles: [tileA, tileB], groups: [], lastActiveTileId: nil),
             activeZone: zone,
@@ -2302,7 +2310,7 @@ final class CanvasNSView: NSView {
         window.orderFrontRegardless()
         for t in [tileA, tileB] { canvas.install(tileView: DescriptorTileNSView(tile: t), for: t) }
         // Bare tile installed post-init → never assigned membership → world frame.
-        let bare = Tile(id: bareId, kind: .note, title: "bare", frame: TileFrame(x: 700, y: 400, width: 100, height: 80), zIndex: 3, runtimeRef: nil, metadata: TileMetadata())
+        let bare = Tile(id: bareId, kind: .note, title: "bare", frame: TileFrame(x: 700, y: 400, width: 100, height: 80), zPosition: .fromLegacyRank(3), runtimeRef: nil, metadata: TileMetadata())
         canvas.install(tileView: DescriptorTileNSView(tile: bare), for: bare)
         canvas.layoutSubtreeIfNeeded()
 
@@ -2380,9 +2388,9 @@ final class CanvasNSView: NSView {
         let in2Id = UUID(uuidString: "00000000-0000-0000-0000-0000000000C2")!
         let outId = UUID(uuidString: "00000000-0000-0000-0000-0000000000C3")!
         // Bare tiles (no activeZone → no seeded membership).
-        let in1 = Tile(id: in1Id, kind: .note, title: "in1", frame: TileFrame(x: 150, y: 150, width: 80, height: 60), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let in2 = Tile(id: in2Id, kind: .note, title: "in2", frame: TileFrame(x: 250, y: 160, width: 80, height: 60), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
-        let out = Tile(id: outId, kind: .note, title: "out", frame: TileFrame(x: 600, y: 400, width: 80, height: 60), zIndex: 3, runtimeRef: nil, metadata: TileMetadata())
+        let in1 = Tile(id: in1Id, kind: .note, title: "in1", frame: TileFrame(x: 150, y: 150, width: 80, height: 60), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let in2 = Tile(id: in2Id, kind: .note, title: "in2", frame: TileFrame(x: 250, y: 160, width: 80, height: 60), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
+        let out = Tile(id: outId, kind: .note, title: "out", frame: TileFrame(x: 600, y: 400, width: 80, height: 60), zPosition: .fromLegacyRank(3), runtimeRef: nil, metadata: TileMetadata())
         let canvas = CanvasNSView(
             canvasState: CanvasState(viewport: vp, tiles: [in1, in2, out], groups: [], lastActiveTileId: nil),
             showsZoneChrome: true
@@ -2473,7 +2481,7 @@ final class CanvasNSView: NSView {
         let zone = ZonePlacement(zoneId: zoneId, projectId: UUID(uuidString: "00000000-0000-0000-0000-0000000000D1")!,
                                  origin: ZonePoint(x: 50, y: 50), size: ZoneSize(width: 400, height: 300),
                                  color: "teal", collapsed: false, hydrationPolicy: .automatic, name: "Z", navKey: nil)
-        let member = Tile(id: memberId, kind: .note, title: "m", frame: TileFrame(x: 100, y: 100, width: 120, height: 90), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let member = Tile(id: memberId, kind: .note, title: "m", frame: TileFrame(x: 100, y: 100, width: 120, height: 90), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         let canvas = CanvasNSView(
             canvasState: CanvasState(viewport: vp, tiles: [member], groups: [], lastActiveTileId: nil),
             activeZone: zone,
@@ -2495,7 +2503,7 @@ final class CanvasNSView: NSView {
         window.orderFrontRegardless()
         let memberView = DescriptorTileNSView(tile: member)
         canvas.install(tileView: memberView, for: member)
-        let bare = Tile(id: bareId, kind: .note, title: "b", frame: TileFrame(x: 600, y: 400, width: 120, height: 90), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let bare = Tile(id: bareId, kind: .note, title: "b", frame: TileFrame(x: 600, y: 400, width: 120, height: 90), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
         let bareView = DescriptorTileNSView(tile: bare)
         canvas.install(tileView: bareView, for: bare)
         canvas.layoutSubtreeIfNeeded()
@@ -2556,7 +2564,7 @@ final class CanvasNSView: NSView {
             let zone = ZonePlacement(zoneId: zoneId, projectId: projectId,
                                      origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 400, height: 300),
                                      color: "teal", collapsed: false, hydrationPolicy: .automatic, name: "Z", navKey: nil)
-            let member = Tile(id: memberId, kind: .note, title: "m", frame: TileFrame(x: 100, y: 100, width: 120, height: 90), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+            let member = Tile(id: memberId, kind: .note, title: "m", frame: TileFrame(x: 100, y: 100, width: 120, height: 90), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
             let canvas = CanvasNSView(
                 canvasState: CanvasState(viewport: vp, tiles: [member], groups: [], lastActiveTileId: nil),
                 activeZone: zone,
@@ -2637,8 +2645,8 @@ final class CanvasNSView: NSView {
         let zone = ZonePlacement(zoneId: zoneId, projectId: UUID(), origin: ZonePoint(x: 0, y: 0),
                                  size: ZoneSize(width: 600, height: 400), color: "teal",
                                  collapsed: false, hydrationPolicy: .automatic, name: "Z", navKey: nil)
-        let tA = Tile(id: aId, kind: .note, title: "a", frame: TileFrame(x: 80, y: 80, width: 140, height: 100), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let tB = Tile(id: bId, kind: .note, title: "b", frame: TileFrame(x: 300, y: 120, width: 140, height: 100), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let tA = Tile(id: aId, kind: .note, title: "a", frame: TileFrame(x: 80, y: 80, width: 140, height: 100), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let tB = Tile(id: bId, kind: .note, title: "b", frame: TileFrame(x: 300, y: 120, width: 140, height: 100), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
         let cvA = CanvasNSView(canvasState: CanvasState(viewport: vp, tiles: [tA, tB], groups: [], lastActiveTileId: nil),
                                activeZone: zone, zoneRenderModels: [ZoneRenderModel(placement: zone, displayName: "Z")], showsZoneChrome: true)
         cvA.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
@@ -2649,8 +2657,8 @@ final class CanvasNSView: NSView {
         try expect(cvA.qaZoneChromeIsBehindMembers(zoneId), "boot-seeded zone chrome must paint behind its member tiles")
 
         // Case B: gesture-created zone over two existing bare tiles (the regression path).
-        let in1 = Tile(id: UUID(), kind: .note, title: "i1", frame: TileFrame(x: 150, y: 150, width: 100, height: 80), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let in2 = Tile(id: UUID(), kind: .note, title: "i2", frame: TileFrame(x: 280, y: 170, width: 100, height: 80), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let in1 = Tile(id: UUID(), kind: .note, title: "i1", frame: TileFrame(x: 150, y: 150, width: 100, height: 80), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let in2 = Tile(id: UUID(), kind: .note, title: "i2", frame: TileFrame(x: 280, y: 170, width: 100, height: 80), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
         let cvB = CanvasNSView(canvasState: CanvasState(viewport: vp, tiles: [in1, in2], groups: [], lastActiveTileId: nil), showsZoneChrome: true)
         cvB.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
         let wB = NSWindow(contentRect: cvB.frame, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -2708,7 +2716,7 @@ final class CanvasNSView: NSView {
         let zone = ZonePlacement(zoneId: zoneId, projectId: UUID(uuidString: "00000000-0000-0000-0000-0000000000F1")!,
                                  origin: ZonePoint(x: 100, y: 100), size: ZoneSize(width: 400, height: 300),
                                  color: "teal", collapsed: false, hydrationPolicy: .automatic, name: "Z", navKey: nil)
-        let member = Tile(id: memberId, kind: .note, title: "m", frame: TileFrame(x: 150, y: 150, width: 120, height: 90), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let member = Tile(id: memberId, kind: .note, title: "m", frame: TileFrame(x: 150, y: 150, width: 120, height: 90), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         let canvas = CanvasNSView(
             canvasState: CanvasState(viewport: vp, tiles: [member], groups: [], lastActiveTileId: nil),
             activeZone: zone, zoneRenderModels: [ZoneRenderModel(placement: zone, displayName: "Z")], showsZoneChrome: true)
@@ -2775,7 +2783,7 @@ final class CanvasNSView: NSView {
         let alpha = ZonePlacement(zoneId: alphaZoneId, projectId: alphaProjectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 640, height: 420), color: "blue", collapsed: false, hydrationPolicy: .automatic)
         let beta = ZonePlacement(zoneId: betaZoneId, projectId: betaProjectId, origin: ZonePoint(x: 760, y: 0), size: ZoneSize(width: 640, height: 420), color: "mint", collapsed: false, hydrationPolicy: .automatic)
         let gamma = ZonePlacement(zoneId: gammaZoneId, projectId: gammaProjectId, origin: ZonePoint(x: 1520, y: 0), size: ZoneSize(width: 640, height: 90), color: "purple", collapsed: true, hydrationPolicy: .automatic)
-        let tile = Tile(id: tileId, kind: .note, title: "alpha", frame: TileFrame(x: 40, y: 52, width: 180, height: 120), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tile = Tile(id: tileId, kind: .note, title: "alpha", frame: TileFrame(x: 40, y: 52, width: 180, height: 120), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         let canvas = CanvasNSView(
             canvasState: CanvasState(viewport: viewport, tiles: [tile], groups: [], lastActiveTileId: nil),
             activeZone: alpha,
@@ -2888,9 +2896,9 @@ final class CanvasNSView: NSView {
         let placementB = ZonePlacement(zoneId: layerBZoneId, projectId: layerBProjectId, origin: ZonePoint(x: 760, y: 0), size: ZoneSize(width: 640, height: 420), color: "mint", collapsed: false, hydrationPolicy: .automatic)
         let placementG = ZonePlacement(zoneId: layerGZoneId, projectId: nil, origin: ZonePoint(x: 0, y: 500), size: ZoneSize(width: 640, height: 300), color: "purple", collapsed: false, hydrationPolicy: .automatic)
 
-        let tA = Tile(id: tAId, kind: .note, title: "tA", frame: TileFrame(x: 40, y: 52, width: 180, height: 120), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let tB = Tile(id: tBId, kind: .note, title: "tB", frame: TileFrame(x: 30, y: 40, width: 200, height: 140), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let tG = Tile(id: tGId, kind: .note, title: "tG", frame: TileFrame(x: 20, y: 30, width: 160, height: 100), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tA = Tile(id: tAId, kind: .note, title: "tA", frame: TileFrame(x: 40, y: 52, width: 180, height: 120), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let tB = Tile(id: tBId, kind: .note, title: "tB", frame: TileFrame(x: 30, y: 40, width: 200, height: 140), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let tG = Tile(id: tGId, kind: .note, title: "tG", frame: TileFrame(x: 20, y: 30, width: 160, height: 100), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
 
         let layerA = ZoneLayer(placement: placementA, renderModel: ZoneRenderModel(placement: placementA, displayName: "LayerA"), tiles: [tA])
         layerA.tileViews[tAId] = DescriptorTileNSView(tile: tA)
@@ -2952,7 +2960,7 @@ final class CanvasNSView: NSView {
         let layerOverProjectId = UUID(uuidString: "00000000-0000-0000-0000-000000004805")!
         let tOverId           = UUID(uuidString: "00000000-0000-0000-0000-000000004825")!
         let placementOver = ZonePlacement(zoneId: layerOverZoneId, projectId: layerOverProjectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 200, height: 200), color: "orange", collapsed: false, hydrationPolicy: .automatic)
-        let tOver = Tile(id: tOverId, kind: .note, title: "tOver", frame: TileFrame(x: 10, y: 10, width: 150, height: 150), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tOver = Tile(id: tOverId, kind: .note, title: "tOver", frame: TileFrame(x: 10, y: 10, width: 150, height: 150), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         let layerOver = ZoneLayer(placement: placementOver, renderModel: ZoneRenderModel(placement: placementOver, displayName: "LayerOver"), tiles: [tOver])
         layerOver.tileViews[tOverId] = DescriptorTileNSView(tile: tOver)
         layerCanvas.upsertZoneLayer(layerOver)
@@ -3076,8 +3084,8 @@ final class CanvasNSView: NSView {
         //  while being minimum-safe. adaptive h = 170+48+34=252 instead of spec's 232.)
         let t1Frame = TileFrame(x: 40, y: 52, width: 180, height: 170)
         let t2Frame = TileFrame(x: 260, y: 52, width: 180, height: 170)
-        let tile1 = Tile(id: t1Id, kind: .note, title: "ZAB_T1", frame: t1Frame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let tile2 = Tile(id: t2Id, kind: .note, title: "ZAB_T2", frame: t2Frame, zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let tile1 = Tile(id: t1Id, kind: .note, title: "ZAB_T1", frame: t1Frame, zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let tile2 = Tile(id: t2Id, kind: .note, title: "ZAB_T2", frame: t2Frame, zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
 
         let canvas = CanvasNSView(
             canvasState: CanvasState(viewport: viewport, tiles: [tile1, tile2], groups: [], lastActiveTileId: nil),
@@ -3192,9 +3200,9 @@ final class CanvasNSView: NSView {
         let needsTileId = UUID(uuidString: "00000000-0000-0000-0000-000000008322")!
         let plainTileId = UUID(uuidString: "00000000-0000-0000-0000-000000008323")!
         let zone = ZonePlacement(zoneId: zoneId, projectId: projectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 760, height: 480), color: "blue", collapsed: false, hydrationPolicy: .automatic)
-        let working = Tile(id: workingTileId, kind: .terminal, title: "Agent · Claude", frame: TileFrame(x: 32, y: 52, width: 220, height: 140), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let needs = Tile(id: needsTileId, kind: .terminal, title: "Agent · Codex", frame: TileFrame(x: 280, y: 52, width: 220, height: 140), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
-        let plain = Tile(id: plainTileId, kind: .terminal, title: "Shell", frame: TileFrame(x: 528, y: 52, width: 180, height: 140), zIndex: 3, runtimeRef: nil, metadata: TileMetadata())
+        let working = Tile(id: workingTileId, kind: .terminal, title: "Agent · Claude", frame: TileFrame(x: 32, y: 52, width: 220, height: 140), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let needs = Tile(id: needsTileId, kind: .terminal, title: "Agent · Codex", frame: TileFrame(x: 280, y: 52, width: 220, height: 140), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
+        let plain = Tile(id: plainTileId, kind: .terminal, title: "Shell", frame: TileFrame(x: 528, y: 52, width: 180, height: 140), zPosition: .fromLegacyRank(3), runtimeRef: nil, metadata: TileMetadata())
         let canvas = CanvasNSView(
             canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [working, needs, plain], groups: [], lastActiveTileId: nil),
             activeZone: zone,
@@ -3279,7 +3287,7 @@ final class CanvasNSView: NSView {
             kind: .terminal,
             title: "WORLD_BOUNDS_PROBE",
             frame: TileFrame(x: 40, y: 30, width: 400, height: 240),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata()
         )
@@ -3398,7 +3406,7 @@ final class CanvasNSView: NSView {
             kind: .terminal,
             title: "DRAG_GRAB_PROBE",
             frame: TileFrame(x: 40, y: 30, width: 400, height: 1000),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata()
         )
@@ -3506,7 +3514,7 @@ final class CanvasNSView: NSView {
                 kind: .note,
                 title: "RING_PROBE",
                 frame: TileFrame(x: 260, y: 180, width: 320, height: 240),
-                zIndex: 1,
+                zPosition: .fromLegacyRank(1),
                 runtimeRef: nil,
                 metadata: TileMetadata()
             )
@@ -3592,7 +3600,7 @@ final class CanvasNSView: NSView {
             kind: .terminal,
             title: "CHROME_SCALE_PROBE",
             frame: TileFrame(x: 40, y: 30, width: 400, height: 1000),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata()
         )
@@ -3712,7 +3720,7 @@ final class CanvasNSView: NSView {
             kind: .note,
             title: "HUD_PROBE",
             frame: TileFrame(x: 100, y: 100, width: 400, height: 300),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata()
         )
@@ -3871,8 +3879,8 @@ final class CanvasNSView: NSView {
         let upperId = UUID(uuidString: "00000000-0000-0000-0000-000000000402")!
         let lowerFrame = TileFrame(x: 80, y: 80, width: 320, height: 220)
         let upperFrame = TileFrame(x: 140, y: 80, width: 320, height: 220)
-        let lower = Tile(id: lowerId, kind: .note, title: "LOWER_PROBE", frame: lowerFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let upper = Tile(id: upperId, kind: .note, title: "UPPER_STEALS_ON_REATTACH", frame: upperFrame, zIndex: 10, runtimeRef: nil, metadata: TileMetadata())
+        let lower = Tile(id: lowerId, kind: .note, title: "LOWER_PROBE", frame: lowerFrame, zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let upper = Tile(id: upperId, kind: .note, title: "UPPER_STEALS_ON_REATTACH", frame: upperFrame, zPosition: .fromLegacyRank(10), runtimeRef: nil, metadata: TileMetadata())
         let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: viewport, tiles: [lower, upper], groups: [], lastActiveTileId: nil))
         canvas.frame = NSRect(x: 0, y: 0, width: 640, height: 480)
@@ -3905,20 +3913,20 @@ final class CanvasNSView: NSView {
         try expect(window.firstResponder === lowerView.probe, "precondition: lower probe should be first responder before bring-to-front")
 
         let beforeResponderOwner = owner(of: window.firstResponder)
-        let beforeZ = Dictionary(uniqueKeysWithValues: canvas.canvasState.tiles.map { ($0.id.uuidString, $0.zIndex) })
+        let beforeZ = Dictionary(uniqueKeysWithValues: canvas.canvasState.tiles.map { ($0.id.uuidString, $0.zPosition.value) })
 
         // Operation under test: production bring-to-front only. Do not call any
         // runtime/probe focus repair after this point; that would mask BUG-004.
         canvas.bringToFront(tileId: lowerId)
 
         let afterVisualOrder = canvas.subviews.compactMap { ($0 as? TileNSView)?.tile.id }
-        let afterZ = Dictionary(uniqueKeysWithValues: canvas.canvasState.tiles.map { ($0.id.uuidString, $0.zIndex) })
+        let afterZ = Dictionary(uniqueKeysWithValues: canvas.canvasState.tiles.map { ($0.id.uuidString, $0.zPosition.value) })
         let afterResponderOwner = owner(of: window.firstResponder)
         let semanticHitAfter = canvas.tileId(at: overlappedHitPoint)
         let sentinel = "b"
         try dispatchKey(sentinel, in: window)
 
-        try expect(canvas.canvasState.tiles.first(where: { $0.id == lowerId })?.zIndex == (canvas.canvasState.tiles.map(\.zIndex).max() ?? -1), "lower tile should have max zIndex after bring-to-front")
+        try expect(canvas.canvasState.tiles.first(where: { $0.id == lowerId })?.zPosition == canvas.canvasState.tiles.map(\.zPosition).max(), "lower tile should have max zPosition after bring-to-front")
         try expect(afterVisualOrder.last == lowerId, "lower tile should be top AppKit subview after bring-to-front")
         try expect(semanticHitAfter == lowerId, "lower tile should be semantic hit-test top after bring-to-front")
         try expect(window.firstResponder === lowerView.probe, "first responder should remain lower semantic responder; got \(String(describing: window.firstResponder))")
@@ -3993,8 +4001,8 @@ final class CanvasNSView: NSView {
 
         let tileAId = UUID(uuidString: "00000000-0000-0000-0000-0000000007A1")!
         let tileBId = UUID(uuidString: "00000000-0000-0000-0000-0000000007B2")!
-        let tileA = Tile(id: tileAId, kind: .note, title: "SCOPE_A", frame: TileFrame(x: 60, y: 60, width: 280, height: 200), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let tileB = Tile(id: tileBId, kind: .note, title: "SCOPE_B", frame: TileFrame(x: 420, y: 60, width: 280, height: 200), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let tileA = Tile(id: tileAId, kind: .note, title: "SCOPE_A", frame: TileFrame(x: 60, y: 60, width: 280, height: 200), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: tileBId, kind: .note, title: "SCOPE_B", frame: TileFrame(x: 420, y: 60, width: 280, height: 200), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
         let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: viewport, tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
         let focusBroker = FocusBroker()
@@ -4099,8 +4107,8 @@ final class CanvasNSView: NSView {
 
         let tileAId = UUID(uuidString: "00000000-0000-0000-0000-0000000005A1")!
         let tileBId = UUID(uuidString: "00000000-0000-0000-0000-0000000005B2")!
-        let tileA = Tile(id: tileAId, kind: .note, title: "BORDER_A", frame: TileFrame(x: 60, y: 60, width: 280, height: 200), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let tileB = Tile(id: tileBId, kind: .note, title: "BORDER_B", frame: TileFrame(x: 420, y: 60, width: 280, height: 200), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let tileA = Tile(id: tileAId, kind: .note, title: "BORDER_A", frame: TileFrame(x: 60, y: 60, width: 280, height: 200), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: tileBId, kind: .note, title: "BORDER_B", frame: TileFrame(x: 420, y: 60, width: 280, height: 200), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
         let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: viewport, tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
         let focusBroker = FocusBroker()
@@ -4747,8 +4755,8 @@ final class CanvasNSView: NSView {
         // Zone-local tile frames.
         let t1ZoneLocal = TileFrame(x: 20, y: 40, width: 160, height: 120)
         let t2ZoneLocal = TileFrame(x: 200, y: 40, width: 160, height: 120)
-        let t1 = Tile(id: t1Id, kind: .note, title: "MV_T1", frame: t1ZoneLocal, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let t2 = Tile(id: t2Id, kind: .note, title: "MV_T2", frame: t2ZoneLocal, zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let t1 = Tile(id: t1Id, kind: .note, title: "MV_T1", frame: t1ZoneLocal, zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let t2 = Tile(id: t2Id, kind: .note, title: "MV_T2", frame: t2ZoneLocal, zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
 
         let gz = ZonePlacement(
             zoneId: gzId, projectId: nil,

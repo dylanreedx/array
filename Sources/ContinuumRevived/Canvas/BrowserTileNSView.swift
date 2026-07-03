@@ -695,7 +695,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
             kind: .browser,
             title: "Browser",
             frame: TileFrame(x: 0, y: 0, width: 640, height: 420),
-            zIndex: 0,
+            zPosition: .fromLegacyRank(0),
             runtimeRef: nil,
             metadata: TileMetadata(url: runtime.url)
         )

@@ -155,8 +155,8 @@ func runSidebarActivityTreeSnapshotTests() {
         )
         let claudeTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000B02")!
         let terminalTileId = UUID(uuidString: "00000000-0000-0000-0000-000000000B03")!
-        func tile(_ id: UUID, _ title: String, _ zIndex: Int) -> Tile {
-            Tile(id: id, kind: .terminal, title: title, frame: TileFrame(x: Double(zIndex) * 10, y: 0, width: 120, height: 80), zIndex: zIndex, runtimeRef: nil, metadata: TileMetadata())
+        func tile(_ id: UUID, _ title: String, _ rank: Int) -> Tile {
+            Tile(id: id, kind: .terminal, title: title, frame: TileFrame(x: Double(rank) * 10, y: 0, width: 120, height: 80), zPosition: .fromLegacyRank(rank), runtimeRef: nil, metadata: TileMetadata())
         }
         let document = WorkspaceDocument(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),

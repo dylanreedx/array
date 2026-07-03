@@ -82,7 +82,7 @@ private func runManagedAgentSessionStoreContract() throws {
             kind: .terminal,
             title: "Terminal",
             frame: TileFrame(x: 1, y: 2, width: 3, height: 4),
-            zIndex: 1
+            zPosition: .fromLegacyRank(1)
         )
     ))
     let activityJSON = try JSONCodec.makeEncoder().encode(AgentActivityEvent(

@@ -2,7 +2,8 @@ import Foundation
 
 public struct CanvasState: Equatable, Sendable {
     /// v1: original shape. v2: `Tile.zoneId` LWW membership register (ticket 03).
-    public static let currentSchemaVersion = 2
+    /// v3: `Tile.zPosition` fractional z-index replaces `Tile.zIndex` (ticket 04).
+    public static let currentSchemaVersion = 3
 
     public let schemaVersion: Int
     public var viewport: CanvasViewport
@@ -77,7 +78,12 @@ public struct Tile: Equatable, Sendable {
     public var kind: TileKind
     public var title: String
     public var frame: TileFrame
-    public var zIndex: Int
+    /// Stacking order as a fractional-index LWW register (ticket 04): a
+    /// reorder is a field set on the tile, not a mutation of a shared slot
+    /// structure, so concurrent reorders converge. Render/hit-test order is
+    /// the (zPosition, id) sort — never array order. This is the field
+    /// `Op.setTileZIndex` folds into.
+    public var zPosition: FracIndex
     /// Group-zone membership as a last-writer-wins register ON the tile:
     /// nil = ambient (no zone); non-nil = the one zone that owns this tile.
     /// "A tile belongs to at most one zone" is a consequence of the type,
@@ -91,7 +97,7 @@ public struct Tile: Equatable, Sendable {
         kind: TileKind,
         title: String,
         frame: TileFrame,
-        zIndex: Int,
+        zPosition: FracIndex,
         zoneId: UUID? = nil,
         runtimeRef: RuntimeRef?,
         metadata: TileMetadata
@@ -100,7 +106,7 @@ public struct Tile: Equatable, Sendable {
         self.kind = kind
         self.title = title
         self.frame = frame
-        self.zIndex = zIndex
+        self.zPosition = zPosition
         self.zoneId = zoneId
         self.runtimeRef = runtimeRef
         self.metadata = metadata
@@ -115,7 +121,8 @@ public struct Tile: Equatable, Sendable {
 
 extension Tile: Codable {
     private enum CodingKeys: String, CodingKey {
-        case id, kind, title, frame, zIndex, zoneId, runtimeRef, metadata
+        // `zIndex` is decode-only: the pre-v3 integer rank. Never re-emitted.
+        case id, kind, title, frame, zPosition, zIndex, zoneId, runtimeRef, metadata
     }
 
     public init(from decoder: Decoder) throws {
@@ -124,7 +131,16 @@ extension Tile: Codable {
         kind = try container.decode(TileKind.self, forKey: .kind)
         title = try container.decode(String.self, forKey: .title)
         frame = try container.decode(TileFrame.self, forKey: .frame)
-        zIndex = try container.decode(Int.self, forKey: .zIndex)
+        if let position = try container.decodeIfPresent(FracIndex.self, forKey: .zPosition) {
+            zPosition = position
+        } else {
+            // Pre-v3 tile: migrate the legacy integer rank through the
+            // order-preserving map. Self-contained per tile, so every
+            // embedding (project canvas, workspace ambientTiles) migrates
+            // identically with no container-level second pass.
+            let legacy = try container.decode(Int.self, forKey: .zIndex)
+            zPosition = FracIndex.fromLegacyRank(legacy)
+        }
         // Pre-v2 canvases have no zoneId key: every tile decodes as ambient.
         zoneId = try container.decodeIfPresent(UUID.self, forKey: .zoneId)
         runtimeRef = try container.decodeIfPresent(RuntimeRef.self, forKey: .runtimeRef)
@@ -137,7 +153,7 @@ extension Tile: Codable {
         try container.encode(kind, forKey: .kind)
         try container.encode(title, forKey: .title)
         try container.encode(frame, forKey: .frame)
-        try container.encode(zIndex, forKey: .zIndex)
+        try container.encode(zPosition, forKey: .zPosition)
         try container.encodeIfPresent(zoneId, forKey: .zoneId)
         try container.encodeIfPresent(runtimeRef, forKey: .runtimeRef)
         try container.encode(metadata, forKey: .metadata)

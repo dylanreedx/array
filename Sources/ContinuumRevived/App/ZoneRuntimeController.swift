@@ -564,7 +564,7 @@ final class ZoneRuntimeController {
                 kind: .browser,
                 title: "Lifecycle browser",
                 frame: TileFrame(x: 20, y: 20, width: 640, height: 420),
-                zIndex: 1,
+                zPosition: .fromLegacyRank(1),
                 runtimeRef: nil,
                 metadata: TileMetadata(url: "data:text/html;charset=utf-8,<html><head><title>lifecycle</title></head><body>ok</body></html>")
             )],
@@ -679,7 +679,7 @@ final class ZoneRuntimeController {
                     kind: .note,
                     title: name,
                     frame: TileFrame(x: 20, y: 20, width: 300, height: 180),
-                    zIndex: 1,
+                    zPosition: .fromLegacyRank(1),
                     runtimeRef: nil,
                     metadata: TileMetadata(noteId: tileId)
                 )],

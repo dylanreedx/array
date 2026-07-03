@@ -13,13 +13,13 @@ private func allOpCases() -> [Op] {
     let origin = ZonePoint(x: 5, y: 6)
     let size = ZoneSize(width: 100, height: 200)
     return [
-        .createTile(id: id1, kind: .terminal, title: "shell", frame: frame, zIndex: 3),
+        .createTile(id: id1, kind: .terminal, title: "shell", frame: frame, zPosition: .fromLegacyRank(3)),
         .deleteTile(id: id1),
         .createZone(id: id1, projectId: id2, origin: origin, size: size, name: "zone", color: "#ff0000"),
         .createZone(id: id1, projectId: nil, origin: origin, size: size, name: "ambient", color: "#00ff00"),
         .deleteZone(id: id1),
         .setTileFrame(id: id1, frame: frame),
-        .setTileZIndex(id: id1, zIndex: 7),
+        .setTileZIndex(id: id1, z: FracIndex(value: 0.875)),
         .setTileTitle(id: id1, title: "renamed"),
         .setTileKind(id: id1, kind: .note),
         .setTileCollapsed(id: id1, collapsed: true),
@@ -87,13 +87,38 @@ func runSpatialOpTests() {
     let fixedId = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
     let fixedZone = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!
 
+    // Wire amendment (ticket 04, pre-transport): createTile carries zPosition
+    // (FracIndex) instead of the legacy Int zIndex; setTileZIndex carries z
+    // (FracIndex). Amended while zero producers/consumers/persisted op logs
+    // exist — see the Op enum doc comment.
     let createTileFixture = """
-    {"createTile":{"frame":{"height":400,"width":300,"x":10,"y":20},"id":"11111111-1111-4111-8111-111111111111","kind":"terminal","title":"shell","zIndex":3}}
+    {"createTile":{"frame":{"height":400,"width":300,"x":10,"y":20},"id":"11111111-1111-4111-8111-111111111111","kind":"terminal","title":"shell","zPosition":0.75}}
     """
     let decodedCreateTile = try! JSONCodec.makeDecoder().decode(Op.self, from: Data(createTileFixture.utf8))
     expect(
-        decodedCreateTile == .createTile(id: fixedId, kind: .terminal, title: "shell", frame: TileFrame(x: 10, y: 20, width: 300, height: 400), zIndex: 3),
+        decodedCreateTile == .createTile(id: fixedId, kind: .terminal, title: "shell", frame: TileFrame(x: 10, y: 20, width: 300, height: 400), zPosition: FracIndex(value: 0.75)),
         "createTile fixture decode mismatch"
+    )
+
+    // A pre-amendment payload (Int "zIndex") must fail LOUDLY (keyNotFound),
+    // never silently misread.
+    let legacyCreateTileFixture = """
+    {"createTile":{"frame":{"height":400,"width":300,"x":10,"y":20},"id":"11111111-1111-4111-8111-111111111111","kind":"terminal","title":"shell","zIndex":3}}
+    """
+    do {
+        _ = try JSONCodec.makeDecoder().decode(Op.self, from: Data(legacyCreateTileFixture.utf8))
+        expect(false, "decoding the pre-amendment createTile payload (Int zIndex) must throw, not succeed")
+    } catch {
+        // expected: loud failure, no silent misread
+    }
+
+    let setTileZIndexFixture = """
+    {"setTileZIndex":{"id":"11111111-1111-4111-8111-111111111111","z":0.875}}
+    """
+    let decodedSetTileZIndex = try! JSONCodec.makeDecoder().decode(Op.self, from: Data(setTileZIndexFixture.utf8))
+    expect(
+        decodedSetTileZIndex == .setTileZIndex(id: fixedId, z: FracIndex(value: 0.875)),
+        "setTileZIndex fixture decode mismatch"
     )
 
     let setTileFrameFixture = """

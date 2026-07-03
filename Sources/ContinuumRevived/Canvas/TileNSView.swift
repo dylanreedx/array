@@ -194,7 +194,7 @@ class TileNSView: NSView {
             grabWorld: grabHeightInLocalCoordinates,
             closeWorld: closeButtonWorldSize,
             closeFrame: qaCloseButtonFrame,
-            zIndex: tile.zIndex
+            zPosition: tile.zPosition
         )
     }
 
@@ -1063,7 +1063,7 @@ struct TileAffordanceMetrics: Equatable {
     var grabWorld: CGFloat
     var closeWorld: CGFloat
     var closeFrame: CGRect
-    var zIndex: Int
+    var zPosition: FracIndex
 
     var resizeEdgeScreenPx: CGFloat { resizeEdgeWorld * zoom }
     var cornerScreenPx: CGFloat { cornerWorld * zoom }
@@ -1122,7 +1122,7 @@ private final class AffordanceOverlayView: NSView {
         zoom \(String(format: "%.2f", m.zoom))×
         edge \(px(m.resizeEdgeScreenPx))  corner \(px(m.cornerScreenPx))
         grab \(px(m.grabScreenPx))  close \(px(m.closeScreenPx))
-        z-index \(m.zIndex)
+        z-position \(String(format: "%.6f", m.zPosition.value))
         """ as NSString
         let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.white]
         let pad = 5 / m.zoom

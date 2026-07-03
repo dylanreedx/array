@@ -58,7 +58,7 @@ enum LabFixtures {
             kind: kind,
             title: title,
             frame: TileFrame(x: 0, y: 0, width: 480, height: 320),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: "shell", projectRelativeCwd: ".")
         )
@@ -249,7 +249,7 @@ final class LabSandboxContext: NSObject {
 
     // MARK: Spawning (fixture tiles — no runtime)
 
-    private func nextZ() -> Int { (canvas.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1 }
+    private func nextZ() -> FracIndex { CanvasEngine.zPositionAbove(canvas.canvasState.tiles) }
 
     /// Install a fixture tile and give it the current affordance-overlay state.
     private func install(_ view: TileNSView, for tile: Tile) {
@@ -279,29 +279,29 @@ final class LabSandboxContext: NSObject {
 
     func spawnNote() {
         let noteId = UUID()
-        let tile = Tile(id: UUID(), kind: .note, title: "note \(spawnCount + 1)", frame: placement(for: .note), zIndex: nextZ(), runtimeRef: nil, metadata: TileMetadata(noteId: noteId))
+        let tile = Tile(id: UUID(), kind: .note, title: "note \(spawnCount + 1)", frame: placement(for: .note), zPosition: nextZ(), runtimeRef: nil, metadata: TileMetadata(noteId: noteId))
         install(NoteTileNSView(tile: tile, noteId: noteId, initialBody: "# Note\n\nType here…"), for: tile)
     }
 
     func spawnFile() {
-        let tile = Tile(id: UUID(), kind: .file, title: "README.md", frame: placement(for: .file), zIndex: nextZ(), runtimeRef: nil, metadata: TileMetadata(filePath: sampleFilePath))
+        let tile = Tile(id: UUID(), kind: .file, title: "README.md", frame: placement(for: .file), zPosition: nextZ(), runtimeRef: nil, metadata: TileMetadata(filePath: sampleFilePath))
         install(FileTileNSView(tile: tile), for: tile)
     }
 
     func spawnFileTree() {
         let id = UUID()
         let fileTreeTile = FileTreeTile(tileId: id, rootPath: tempDir.path, expandedPaths: [], selectedPath: nil, searchQuery: "", ignoredNames: [], gitBadges: .off)
-        let tile = Tile(id: id, kind: .fileTree, title: "Files", frame: placement(for: .fileTree), zIndex: nextZ(), runtimeRef: nil, metadata: TileMetadata(filePath: tempDir.path))
+        let tile = Tile(id: id, kind: .fileTree, title: "Files", frame: placement(for: .fileTree), zPosition: nextZ(), runtimeRef: nil, metadata: TileMetadata(filePath: tempDir.path))
         install(FileTreeTileNSView(tile: tile, fileTreeTile: fileTreeTile), for: tile)
     }
 
     func spawnRunArtifacts() {
-        let tile = Tile(id: UUID(), kind: .runArtifacts, title: "Run Artifacts", frame: placement(for: .runArtifacts), zIndex: nextZ(), runtimeRef: nil, metadata: TileMetadata())
+        let tile = Tile(id: UUID(), kind: .runArtifacts, title: "Run Artifacts", frame: placement(for: .runArtifacts), zPosition: nextZ(), runtimeRef: nil, metadata: TileMetadata())
         install(RunArtifactsTileNSView(tile: tile), for: tile)
     }
 
     func spawnDescriptor() {
-        let tile = Tile(id: UUID(), kind: .terminal, title: "placeholder", frame: placement(for: .terminal), zIndex: nextZ(), runtimeRef: nil, metadata: TileMetadata())
+        let tile = Tile(id: UUID(), kind: .terminal, title: "placeholder", frame: placement(for: .terminal), zPosition: nextZ(), runtimeRef: nil, metadata: TileMetadata())
         install(DescriptorTileNSView(tile: tile), for: tile)
     }
 

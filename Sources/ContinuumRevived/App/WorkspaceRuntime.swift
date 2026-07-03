@@ -819,7 +819,7 @@ final class WorkspaceRuntime {
                     kind: .note,
                     title: name,
                     frame: TileFrame(x: 20, y: 20, width: 300, height: 180),
-                    zIndex: 1,
+                    zPosition: .fromLegacyRank(1),
                     runtimeRef: nil,
                     metadata: TileMetadata(noteId: tileId)
                 )],

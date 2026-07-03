@@ -1190,7 +1190,7 @@ do {
                 kind: .terminal,
                 title: "Claude Code",
                 frame: TileFrame(x: 80, y: 80, width: 900, height: 620),
-                zIndex: 10,
+                zPosition: .fromLegacyRank(10),
                 runtimeRef: RuntimeRef(kind: .terminalSession, id: sessionId),
                 metadata: TileMetadata(
                     launchProfileId: "claude",
@@ -2015,7 +2015,7 @@ do {
             kind: .terminal,
             title: "T-\(id.uuidString.prefix(8))",
             frame: TileFrame(x: x, y: y, width: w, height: h),
-            zIndex: 0,
+            zPosition: .fromLegacyRank(0),
             runtimeRef: nil,
             metadata: TileMetadata()
         )
@@ -2200,7 +2200,7 @@ do {
             kind: .terminal,
             title: title,
             frame: TileFrame(x: x, y: 0, width: 400, height: 300),
-            zIndex: 0,
+            zPosition: .fromLegacyRank(0),
             runtimeRef: RuntimeRef(kind: .terminalSession, id: runtimeRefId),
             metadata: TileMetadata(launchProfileId: "default", projectRelativeCwd: "sub/dir")
         )
@@ -2326,8 +2326,8 @@ do {
     expect(
         migrated.ambientTiles.first { $0.id == tA }?.runtimeRef?.id == runtimeRefId
             && migrated.ambientTiles.first { $0.id == tA }?.frame.x == 10
-            && migrated.ambientTiles.first { $0.id == tA }?.zIndex == 4,
-        "T03 migration: lossless — runtimeRef/frame/zIndex survive the flatten"
+            && migrated.ambientTiles.first { $0.id == tA }?.zPosition == .fromLegacyRank(4),
+        "T03 migration: lossless — runtimeRef/frame/z rank survive the flatten"
     )
     let reEncoded = try String(decoding: JSONCodec.makeEncoder().encode(migrated), as: UTF8.self)
     expect(!reEncoded.contains("groupZoneTiles"), "T03 migration: re-save never emits the legacy groupZoneTiles key")
@@ -2448,6 +2448,122 @@ do {
             "taintScannedBytes": .int(wireBytes.count),
             "taintTokensFound": .int(0),
             "via": .string("production_setTileZone_register")
+        ],
+        outcome: InvariantOutcome.pass.rawValue,
+        failureReason: nil
+    )
+    try writeAndVerify(manifest)
+}
+
+// MARK: - Z-order as a fractional index — tile migration (T04B)
+
+do {
+    let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-zorder-fracindex-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: scratch) }
+
+    // Fixture tiles with legacy integer ranks [3, 1, 99, 2] (ticket 04's
+    // canonical migration vector), ids chosen so id order differs from rank order.
+    let ids = [
+        UUID(uuidString: "0000D101-0000-4000-8000-000000000001")!,
+        UUID(uuidString: "0000D102-0000-4000-8000-000000000002")!,
+        UUID(uuidString: "0000D103-0000-4000-8000-000000000003")!,
+        UUID(uuidString: "0000D104-0000-4000-8000-000000000004")!,
+    ]
+    let legacyRanks = [3, 1, 99, 2]
+    let tilesJson = zip(ids, legacyRanks).map { id, z in
+        """
+        {"id": "\(id.uuidString)", "kind": "terminal", "title": "z\(z)",
+         "frame": {"x": 0, "y": 0, "width": 300, "height": 200}, "zIndex": \(z),
+         "metadata": {}}
+        """
+    }.joined(separator: ",")
+    let legacyCanvasJson = """
+    {"schemaVersion": 1, "viewport": {"x": 0, "y": 0, "zoom": 1.0}, "tiles": [\(tilesJson)], "groups": []}
+    """
+
+    // ── In-memory migration: rank order preserved, all positions in (0, 1) ──
+    let migrated = try JSONCodec.makeCanvasDecoder().decode(CanvasState.self, from: Data(legacyCanvasJson.utf8))
+    expect(migrated.schemaVersion == CanvasState.currentSchemaVersion, "T04B: legacy canvas stamped current in memory")
+    let byId = Dictionary(uniqueKeysWithValues: migrated.tiles.map { ($0.id, $0.zPosition) })
+    let rankSorted = zip(ids, legacyRanks).sorted { $0.1 < $1.1 }.map { byId[$0.0]! }
+    for (a, b) in zip(rankSorted, rankSorted.dropFirst()) {
+        expect(a < b, "T04B: migrated zPositions strictly increase in legacy rank order")
+    }
+    expect(migrated.tiles.allSatisfy { $0.zPosition.value > 0 && $0.zPosition.value < 1 }, "T04B: migrated positions inside (0, 1)")
+
+    // ── Bit-identical round-trip of FracIndex positions ──
+    let reEncoded = try JSONCodec.makeEncoder().encode(migrated)
+    let reDecoded = try JSONCodec.makeDecoder().decode(CanvasState.self, from: reEncoded)
+    for (a, b) in zip(migrated.tiles, reDecoded.tiles) {
+        expect(a.zPosition.value.bitPattern == b.zPosition.value.bitPattern, "T04B: zPosition round-trips bit-identically for \(a.id)")
+    }
+    expect(reDecoded == migrated, "T04B: migrate -> save -> load is idempotent")
+
+    // ── Real-path legacy file migration through ProjectStore + AtomicWriter ──
+    let projectRoot = scratch.appendingPathComponent("zorder-project", isDirectory: true)
+    let projectStore = ProjectStore(projectRoot: projectRoot)
+    try FileManager.default.createDirectory(at: projectStore.layout.stateRoot, withIntermediateDirectories: true)
+    try Data(legacyCanvasJson.utf8).write(to: projectStore.layout.canvasFile)
+    let loaded = try projectStore.loadCanvas()
+    expect(loaded.tiles.count == 4, "T04B real-path: all 4 legacy tiles load")
+    try projectStore.saveCanvas(loaded)
+    let rawCanvas = try String(contentsOf: projectStore.layout.canvasFile, encoding: .utf8)
+    expect(rawCanvas.contains("\"zPosition\""), "T04B real-path: saved file carries zPosition")
+    expect(!rawCanvas.contains("\"zIndex\""), "T04B real-path: saved file carries NO legacy zIndex key")
+    expect(
+        rawCanvas.contains("\"schemaVersion\" : \(CanvasState.currentSchemaVersion)"),
+        "T04B real-path: saved file stamped v\(CanvasState.currentSchemaVersion) so an old build's guard fires"
+    )
+    let reloaded = try projectStore.loadCanvas()
+    let reloadedById = Dictionary(uniqueKeysWithValues: reloaded.tiles.map { ($0.id, $0.zPosition) })
+    let reloadedRankSorted = zip(ids, legacyRanks).sorted { $0.1 < $1.1 }.map { reloadedById[$0.0]! }
+    for (a, b) in zip(reloadedRankSorted, reloadedRankSorted.dropFirst()) {
+        expect(a < b, "T04B real-path: rank order survives the on-disk upgrade")
+    }
+
+    // ── Convergence sub-case (I4): concurrent setTileZIndex ops, opposite
+    // arrival orders, fold in OpId order writing the tile's zPosition register —
+    // byte-identical canvases. ──
+    let replicaA = UUID(uuidString: "0000AB03-0000-4000-8000-00000000AB03")!
+    let replicaB = UUID(uuidString: "0000AB04-0000-4000-8000-00000000AB04")!
+    let target = ids[0]
+    let zOps: [LoggedOp] = [
+        LoggedOp(opId: OpId(lamport: 3, replica: replicaA), op: .setTileZIndex(id: target, z: FracIndex(value: 0.6))),
+        LoggedOp(opId: OpId(lamport: 8, replica: replicaB), op: .setTileZIndex(id: target, z: FracIndex(value: 0.9))),
+        LoggedOp(opId: OpId(lamport: 8, replica: replicaA), op: .setTileZIndex(id: target, z: FracIndex(value: 0.1))),
+    ]
+    func foldZ(_ arrivalOrder: [LoggedOp]) throws -> Data {
+        var state = migrated
+        for logged in arrivalOrder.sorted(by: { $0.opId < $1.opId }) {
+            guard case let .setTileZIndex(id, z) = logged.op else { continue }
+            if let i = state.tiles.firstIndex(where: { $0.id == id }) {
+                state.tiles[i].zPosition = z    // the register Op.setTileZIndex folds into
+            }
+        }
+        return try JSONCodec.makeOpLogEncoder().encode(state)
+    }
+    let zForward = try foldZ(zOps)
+    let zReversed = try foldZ(zOps.reversed())
+    expect(zForward == zReversed, "T04B convergence: opposite arrival orders -> byte-identical canvas")
+    let zConverged = try JSONCodec.makeDecoder().decode(CanvasState.self, from: zForward)
+    expect(
+        zConverged.tiles.first { $0.id == target }?.zPosition == FracIndex(value: 0.9),
+        "T04B convergence: highest OpId wins (lamport 8, replica B beats replica A tie)"
+    )
+
+    let manifest = InvariantManifest(
+        invariantId: "ticket04-zorder-fracindex",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_800_000_000)),
+        measurements: [
+            "legacyRanksMigrated": .int(legacyRanks.count),
+            "canvasSchemaVersion": .string("1->\(CanvasState.currentSchemaVersion)"),
+            "positionsInOpenInterval": .bool(migrated.tiles.allSatisfy { $0.zPosition.value > 0 && $0.zPosition.value < 1 }),
+            "savedFileHasZIndexKey": .bool(rawCanvas.contains("\"zIndex\"")),
+            "convergedByteCount": .int(zForward.count),
+            "via": .string("tile_zposition_migration")
         ],
         outcome: InvariantOutcome.pass.rawValue,
         failureReason: nil
@@ -3403,7 +3519,7 @@ do {
         collapsed: false,
         hydrationPolicy: .automatic
     )
-    let tile = Tile(id: UUID(), kind: .note, title: "note", frame: TileFrame(x: 20, y: 30, width: 200, height: 120), zIndex: 0, runtimeRef: nil, metadata: TileMetadata())
+    let tile = Tile(id: UUID(), kind: .note, title: "note", frame: TileFrame(x: 20, y: 30, width: 200, height: 120), zPosition: .fromLegacyRank(0), runtimeRef: nil, metadata: TileMetadata())
     expect(CanvasEngine.worldFrame(tile: tile, in: zone) == TileFrame(x: 520, y: -70, width: 200, height: 120), "worldFrame(tile:in:) applies placement origin")
     expect(CanvasEngine.zoneWorldFrame(zone) == TileFrame(x: 500, y: -100, width: 640, height: 480), "zoneWorldFrame uses placement origin and size")
     expect(CanvasEngine.zoneLocalPoint(world: CGPoint(x: 525, y: -65), zone: zone) == CGPoint(x: 25, y: 35), "zoneLocalPoint(world:zone:) subtracts placement origin")
@@ -3446,7 +3562,7 @@ do {
         kind: .terminal,
         title: "lower",
         frame: TileFrame(x: 0, y: 0, width: 200, height: 200),
-        zIndex: 1,
+        zPosition: .fromLegacyRank(1),
         runtimeRef: nil,
         metadata: TileMetadata()
     )
@@ -3455,7 +3571,7 @@ do {
         kind: .terminal,
         title: "upper",
         frame: TileFrame(x: 100, y: 100, width: 200, height: 200),
-        zIndex: 2,
+        zPosition: .fromLegacyRank(2),
         runtimeRef: nil,
         metadata: TileMetadata()
     )
@@ -3469,11 +3585,11 @@ do {
 // MARK: - CanvasEngine: zone-aware hit testing
 
 do {
-    let zoneA = CanvasEngine.NavigationZone(id: UUID(uuidString: "00000000-0000-0000-0000-000000000401")!, frame: TileFrame(x: 0, y: 0, width: 400, height: 300), zIndex: 0)
-    let zoneB = CanvasEngine.NavigationZone(id: UUID(uuidString: "00000000-0000-0000-0000-000000000402")!, frame: TileFrame(x: 300, y: 0, width: 400, height: 300), zIndex: 1)
-    let tileA = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000403")!, kind: .terminal, title: "a", frame: TileFrame(x: 50, y: 50, width: 100, height: 100), zIndex: 0, runtimeRef: nil, metadata: TileMetadata())
-    let tileBLower = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000404")!, kind: .terminal, title: "b-low", frame: TileFrame(x: 50, y: 50, width: 120, height: 120), zIndex: 0, runtimeRef: nil, metadata: TileMetadata())
-    let tileBUpper = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000405")!, kind: .terminal, title: "b-high", frame: TileFrame(x: 80, y: 80, width: 120, height: 120), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+    let zoneA = CanvasEngine.NavigationZone(id: UUID(uuidString: "00000000-0000-0000-0000-000000000401")!, frame: TileFrame(x: 0, y: 0, width: 400, height: 300), zPosition: .fromLegacyRank(0))
+    let zoneB = CanvasEngine.NavigationZone(id: UUID(uuidString: "00000000-0000-0000-0000-000000000402")!, frame: TileFrame(x: 300, y: 0, width: 400, height: 300), zPosition: .fromLegacyRank(1))
+    let tileA = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000403")!, kind: .terminal, title: "a", frame: TileFrame(x: 50, y: 50, width: 100, height: 100), zPosition: .fromLegacyRank(0), runtimeRef: nil, metadata: TileMetadata())
+    let tileBLower = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000404")!, kind: .terminal, title: "b-low", frame: TileFrame(x: 50, y: 50, width: 120, height: 120), zPosition: .fromLegacyRank(0), runtimeRef: nil, metadata: TileMetadata())
+    let tileBUpper = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000405")!, kind: .terminal, title: "b-high", frame: TileFrame(x: 80, y: 80, width: 120, height: 120), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
 
     let translatedHit = CanvasEngine.hitTest(worldPoint: CGPoint(x: 360, y: 60), zones: [zoneA, zoneB], tilesByZone: [zoneA.id: [tileA], zoneB.id: [tileBLower, tileBUpper]])
     expect(translatedHit?.zoneId == zoneB.id && translatedHit?.tile.id == tileBLower.id, "Zone hit test subtracts translated zone origin before tile hit")
@@ -3493,7 +3609,7 @@ do {
             kind: .terminal,
             title: suffix,
             frame: TileFrame(x: x, y: y, width: 100, height: 100),
-            zIndex: z,
+            zPosition: .fromLegacyRank(z),
             runtimeRef: nil,
             metadata: TileMetadata()
         )
@@ -3515,16 +3631,16 @@ do {
 }
 
 do {
-    let origin = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000101")!, kind: .terminal, title: "origin", frame: TileFrame(x: 0, y: 0, width: 100, height: 100), zIndex: 0, runtimeRef: nil, metadata: TileMetadata())
-    let highZ = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000102")!, kind: .terminal, title: "high", frame: TileFrame(x: 200, y: 0, width: 100, height: 100), zIndex: 10, runtimeRef: nil, metadata: TileMetadata())
-    let lowZ = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000103")!, kind: .terminal, title: "low", frame: TileFrame(x: 200, y: 0, width: 100, height: 100), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+    let origin = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000101")!, kind: .terminal, title: "origin", frame: TileFrame(x: 0, y: 0, width: 100, height: 100), zPosition: .fromLegacyRank(0), runtimeRef: nil, metadata: TileMetadata())
+    let highZ = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000102")!, kind: .terminal, title: "high", frame: TileFrame(x: 200, y: 0, width: 100, height: 100), zPosition: .fromLegacyRank(10), runtimeRef: nil, metadata: TileMetadata())
+    let lowZ = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000103")!, kind: .terminal, title: "low", frame: TileFrame(x: 200, y: 0, width: 100, height: 100), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
     expect(CanvasEngine.nearestTile(from: origin.id, direction: .right, tiles: [lowZ, origin, highZ]) == highZ.id, "nearestTile breaks equal geometry ties by higher zIndex")
 }
 
 do {
-    let origin = CanvasEngine.NavigationZone(id: UUID(uuidString: "00000000-0000-0000-0000-000000000201")!, frame: TileFrame(x: 0, y: 0, width: 400, height: 300), zIndex: 0)
-    let right = CanvasEngine.NavigationZone(id: UUID(uuidString: "00000000-0000-0000-0000-000000000202")!, frame: TileFrame(x: 600, y: 0, width: 400, height: 300), zIndex: 0)
-    let down = CanvasEngine.NavigationZone(id: UUID(uuidString: "00000000-0000-0000-0000-000000000203")!, frame: TileFrame(x: 0, y: 500, width: 400, height: 300), zIndex: 0)
+    let origin = CanvasEngine.NavigationZone(id: UUID(uuidString: "00000000-0000-0000-0000-000000000201")!, frame: TileFrame(x: 0, y: 0, width: 400, height: 300), zPosition: .fromLegacyRank(0))
+    let right = CanvasEngine.NavigationZone(id: UUID(uuidString: "00000000-0000-0000-0000-000000000202")!, frame: TileFrame(x: 600, y: 0, width: 400, height: 300), zPosition: .fromLegacyRank(0))
+    let down = CanvasEngine.NavigationZone(id: UUID(uuidString: "00000000-0000-0000-0000-000000000203")!, frame: TileFrame(x: 0, y: 500, width: 400, height: 300), zPosition: .fromLegacyRank(0))
     let zones = [down, right, origin]
     expect(CanvasEngine.nearestZone(from: origin.id, direction: .right, zones: zones) == right.id, "nearestZone returns right-hand zone")
     expect(CanvasEngine.nearestZone(from: origin.id, direction: .down, zones: zones) == down.id, "nearestZone returns lower zone")
@@ -3540,7 +3656,7 @@ do {
         kind: .terminal,
         title: "t",
         frame: TileFrame(x: 100, y: 100, width: 300, height: 200),
-        zIndex: 1,
+        zPosition: .fromLegacyRank(1),
         runtimeRef: nil,
         metadata: TileMetadata()
     )
@@ -3560,7 +3676,7 @@ do {
         kind: .terminal,
         title: "t",
         frame: TileFrame(x: 100, y: 100, width: 400, height: 300),
-        zIndex: 1,
+        zPosition: .fromLegacyRank(1),
         runtimeRef: nil,
         metadata: TileMetadata()
     )
@@ -3580,34 +3696,42 @@ do {
     expect(topLeft.frame.width == 380 && topLeft.frame.height == 270, "Top-left drag shrinks size, got \(topLeft.frame)")
 }
 
-// MARK: - CanvasEngine: bring-to-front + z-order renormalization
+// MARK: - CanvasEngine: bring-to-front (fractional index, ticket 04)
 
 do {
-    let a = Tile(id: UUID(), kind: .terminal, title: "a", frame: TileFrame(x: 0, y: 0, width: 100, height: 100), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-    let b = Tile(id: UUID(), kind: .terminal, title: "b", frame: TileFrame(x: 0, y: 0, width: 100, height: 100), zIndex: 5, runtimeRef: nil, metadata: TileMetadata())
-    let c = Tile(id: UUID(), kind: .terminal, title: "c", frame: TileFrame(x: 0, y: 0, width: 100, height: 100), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+    let a = Tile(id: UUID(), kind: .terminal, title: "a", frame: TileFrame(x: 0, y: 0, width: 100, height: 100), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+    let b = Tile(id: UUID(), kind: .terminal, title: "b", frame: TileFrame(x: 0, y: 0, width: 100, height: 100), zPosition: .fromLegacyRank(5), runtimeRef: nil, metadata: TileMetadata())
+    let c = Tile(id: UUID(), kind: .terminal, title: "c", frame: TileFrame(x: 0, y: 0, width: 100, height: 100), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
 
     let promoted = CanvasEngine.bringToFront(tileId: a.id, in: [a, b, c])
     let promotedA = promoted.first { $0.id == a.id }!
     let promotedB = promoted.first { $0.id == b.id }!
-    expect(promotedA.zIndex > promotedB.zIndex, "bringToFront makes target highest, got \(promoted.map(\.zIndex))")
+    expect(promotedA.zPosition > promotedB.zPosition, "bringToFront makes target highest, got \(promoted.map(\.zPosition.value))")
+    expect(promotedA.zPosition.value < 1, "bringToFront stays inside the open interval")
+    expect(
+        promoted.first { $0.id == b.id }! == b && promoted.first { $0.id == c.id }! == c,
+        "bringToFront leaves every other tile untouched"
+    )
 
-    // Renormalize compresses to 0..n-1 keeping order.
-    let inflated = [a, b, c].map { Tile(id: $0.id, kind: $0.kind, title: $0.title, frame: $0.frame, zIndex: $0.zIndex * 1000, runtimeRef: nil, metadata: $0.metadata) }
-    let normalized = CanvasEngine.renormalizeZOrder(inflated)
-    let zs = normalized.map(\.zIndex).sorted()
-    expect(zs == [0, 1, 2], "Renormalize produces 0..n-1, got \(zs)")
-    // Order preserved
-    let originalOrder = inflated.sorted { $0.zIndex < $1.zIndex }.map(\.id)
-    let normalizedOrder = normalized.sorted { $0.zIndex < $1.zIndex }.map(\.id)
-    expect(originalOrder == normalizedOrder, "Renormalize preserves relative order")
+    // Already-frontmost: bring-to-front must NOT move the front item (and in
+    // particular must never LOWER it) — the array comes back identical.
+    let again = CanvasEngine.bringToFront(tileId: a.id, in: promoted)
+    expect(again == promoted, "bringToFront on the already-frontmost tile is a no-op")
+
+    // No renormalization pass exists: fractional positions never overflow.
+    // (CanvasEngine.renormalizeZOrder is deleted; this comment pins the intent.)
+
+    // Spawn allocation: zPositionAbove lands strictly above every existing tile.
+    let spawnZ = CanvasEngine.zPositionAbove(promoted)
+    expect(promoted.allSatisfy { $0.zPosition < spawnZ }, "zPositionAbove is strictly above all existing tiles")
+    expect(CanvasEngine.zPositionAbove([]) == .first, "zPositionAbove on an empty canvas is .first")
 }
 
 // MARK: - CanvasEngine: group bounds + fit-to-bounds
 
 do {
-    let t1 = Tile(id: UUID(), kind: .terminal, title: "1", frame: TileFrame(x: 100, y: 100, width: 200, height: 200), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-    let t2 = Tile(id: UUID(), kind: .terminal, title: "2", frame: TileFrame(x: 400, y: 50, width: 100, height: 300), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+    let t1 = Tile(id: UUID(), kind: .terminal, title: "1", frame: TileFrame(x: 100, y: 100, width: 200, height: 200), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+    let t2 = Tile(id: UUID(), kind: .terminal, title: "2", frame: TileFrame(x: 400, y: 50, width: 100, height: 300), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
     let group = TileGroup(id: UUID(), title: "g", tileIds: [t1.id, t2.id], color: "blue", collapsed: false)
 
     let bounds = CanvasEngine.groupBounds(group, in: [t1, t2])
@@ -4506,7 +4630,7 @@ do {
         kind: .terminal,
         title: "Shell",
         frame: TileFrame(x: 0, y: 0, width: 600, height: 400),
-        zIndex: 1,
+        zPosition: .fromLegacyRank(1),
         runtimeRef: RuntimeRef(kind: .terminalSession, id: UUID(uuidString: "BBBBBBBB-1111-1111-1111-111111111111")!),
         metadata: TileMetadata(launchProfileId: "shell", projectRelativeCwd: ".")
     )
@@ -4515,7 +4639,7 @@ do {
         kind: .terminal,
         title: "Claude",
         frame: TileFrame(x: 700, y: 0, width: 600, height: 400),
-        zIndex: 2,
+        zPosition: .fromLegacyRank(2),
         runtimeRef: RuntimeRef(kind: .terminalSession, id: UUID(uuidString: "BBBBBBBB-2222-2222-2222-222222222222")!),
         metadata: TileMetadata(launchProfileId: "claude", projectRelativeCwd: ".")
     )
@@ -4841,9 +4965,9 @@ do {
     let canvas = CanvasState(
         viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
         tiles: [
-            Tile(id: noteTileId, kind: .note, title: "Note", frame: TileFrame(x: 0, y: 0, width: 400, height: 300), zIndex: 1, runtimeRef: RuntimeRef(kind: .note, id: noteId), metadata: TileMetadata(noteId: noteId)),
-            Tile(id: UUID(uuidString: "CCCCCCCC-3333-3333-3333-333333333333")!, kind: .file, title: "ProjectStore.swift", frame: TileFrame(x: 420, y: 0, width: 400, height: 300), zIndex: 2, runtimeRef: RuntimeRef(kind: .file, id: UUID()), metadata: TileMetadata(filePath: "Sources/ContinuumRevivedCore/ProjectStore.swift")),
-            Tile(id: fileTreeTileId, kind: .fileTree, title: "Files", frame: TileFrame(x: 840, y: 0, width: 360, height: 520), zIndex: 3, runtimeRef: nil, metadata: TileMetadata())
+            Tile(id: noteTileId, kind: .note, title: "Note", frame: TileFrame(x: 0, y: 0, width: 400, height: 300), zPosition: .fromLegacyRank(1), runtimeRef: RuntimeRef(kind: .note, id: noteId), metadata: TileMetadata(noteId: noteId)),
+            Tile(id: UUID(uuidString: "CCCCCCCC-3333-3333-3333-333333333333")!, kind: .file, title: "ProjectStore.swift", frame: TileFrame(x: 420, y: 0, width: 400, height: 300), zPosition: .fromLegacyRank(2), runtimeRef: RuntimeRef(kind: .file, id: UUID()), metadata: TileMetadata(filePath: "Sources/ContinuumRevivedCore/ProjectStore.swift")),
+            Tile(id: fileTreeTileId, kind: .fileTree, title: "Files", frame: TileFrame(x: 840, y: 0, width: 360, height: 520), zPosition: .fromLegacyRank(3), runtimeRef: nil, metadata: TileMetadata())
         ],
         groups: [],
         lastActiveTileId: fileTreeTileId
@@ -5092,7 +5216,7 @@ do {
                 kind: .terminal,
                 title: "Bad frame",
                 frame: TileFrame(x: Double.nan, y: -Double.infinity, width: -1, height: 0),
-                zIndex: 0,
+                zPosition: .fromLegacyRank(0),
                 runtimeRef: RuntimeRef(kind: .terminalSession, id: UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!),
                 metadata: TileMetadata(launchProfileId: "shell", projectRelativeCwd: ".")
             )
@@ -5124,7 +5248,7 @@ do {
                 kind: .note,
                 title: "Visible after recenter",
                 frame: TileFrame(x: 80, y: 90, width: 300, height: 220),
-                zIndex: 0,
+                zPosition: .fromLegacyRank(0),
                 runtimeRef: nil,
                 metadata: TileMetadata(noteId: UUID(uuidString: "dddddddd-dddd-dddd-dddd-dddddddddddd")!)
             )
@@ -5164,7 +5288,7 @@ do {
                 kind: .note,
                 title: "Legitimate empty pan",
                 frame: TileFrame(x: 80, y: 90, width: 300, height: 220),
-                zIndex: 0,
+                zPosition: .fromLegacyRank(0),
                 runtimeRef: nil,
                 metadata: TileMetadata(noteId: UUID(uuidString: "12121212-1212-1212-1212-121212121212")!)
             )
@@ -5188,7 +5312,7 @@ do {
                 kind: .browser,
                 title: "Clamp zoom only",
                 frame: TileFrame(x: 30, y: 40, width: 1000, height: 700),
-                zIndex: 3,
+                zPosition: .fromLegacyRank(3),
                 runtimeRef: RuntimeRef(kind: .browserTile, id: UUID(uuidString: "ffffffff-ffff-ffff-ffff-ffffffffffff")!),
                 metadata: TileMetadata(url: "https://example.com")
             )
@@ -5217,7 +5341,7 @@ do {
                     width: Double.greatestFiniteMagnitude,
                     height: Double.greatestFiniteMagnitude
                 ),
-                zIndex: 0,
+                zPosition: .fromLegacyRank(0),
                 runtimeRef: nil,
                 metadata: TileMetadata()
             )
@@ -6103,13 +6227,13 @@ do {
         name: "Scratch",
         navKey: nil
     )
-    func sidebarTile(_ uuid: String, _ title: String, _ kind: TileKind, _ zIndex: Int) -> Tile {
+    func sidebarTile(_ uuid: String, _ title: String, _ kind: TileKind, _ rank: Int) -> Tile {
         Tile(
             id: UUID(uuidString: uuid)!,
             kind: kind,
             title: title,
-            frame: TileFrame(x: Double(zIndex) * 10, y: 0, width: 120, height: 80),
-            zIndex: zIndex,
+            frame: TileFrame(x: Double(rank) * 10, y: 0, width: 120, height: 80),
+            zPosition: .fromLegacyRank(rank),
             runtimeRef: nil,
             metadata: TileMetadata()
         )
@@ -6992,7 +7116,7 @@ do {
         kind: .terminal,
         title: "I7 canvas fixture",
         frame: TileFrame(x: 0, y: 0, width: 800, height: 600),
-        zIndex: 1,
+        zPosition: .fromLegacyRank(1),
         runtimeRef: RuntimeRef(kind: .terminalSession, id: tileId),
         metadata: TileMetadata(launchProfileId: "default")
     )
@@ -7210,7 +7334,7 @@ do {
             kind: .terminal,
             title: "I4 fixture",
             frame: TileFrame(x: 0, y: 0, width: 400, height: 300),
-            zIndex: 0
+            zPosition: .fromLegacyRank(0)
         )
     )
     let loggedOpData = try JSONEncoder().encode(loggedOp)

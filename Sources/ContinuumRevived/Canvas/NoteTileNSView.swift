@@ -155,7 +155,7 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
             kind: .note,
             title: "NOTE_CLICK_FOCUS",
             frame: TileFrame(x: 80, y: 80, width: 360, height: 240),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata(noteId: noteId)
         )

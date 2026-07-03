@@ -572,7 +572,7 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
             kind: .fileTree,
             title: "Files",
             frame: TileFrame(x: 0, y: 0, width: 420, height: 360),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata(filePath: root.path)
         )
@@ -635,7 +635,7 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
             kind: .fileTree,
             title: "Files",
             frame: TileFrame(x: 0, y: 0, width: 420, height: 360),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata(filePath: root.path)
         )
@@ -702,7 +702,7 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
             kind: .fileTree,
             title: "Files",
             frame: TileFrame(x: 0, y: 0, width: 420, height: 360),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata()
         )

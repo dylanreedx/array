@@ -2700,8 +2700,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let b = UUID(uuidString: "A0000000-0000-4000-8000-000000000802")!
         let z1 = UUID(uuidString: "A0000000-0000-4000-8000-000000000811")!
         let z2 = UUID(uuidString: "A0000000-0000-4000-8000-000000000812")!
-        let tileA = Tile(id: a, kind: .note, title: "A", frame: TileFrame(x: 80, y: 120, width: 320, height: 220), zIndex: 0, runtimeRef: nil, metadata: TileMetadata())
-        let tileB = Tile(id: b, kind: .note, title: "B", frame: TileFrame(x: 2_520, y: 140, width: 320, height: 220), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tileA = Tile(id: a, kind: .note, title: "A", frame: TileFrame(x: 80, y: 120, width: 320, height: 220), zPosition: .fromLegacyRank(0), runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: b, kind: .note, title: "B", frame: TileFrame(x: 2_520, y: 140, width: 320, height: 220), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         let zoneA = ZonePlacement(zoneId: z1, projectId: nil, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 700, height: 520), color: "blue", collapsed: false, hydrationPolicy: .automatic, name: "Z1", navKey: "a")
         let zoneB = ZonePlacement(zoneId: z2, projectId: nil, origin: ZonePoint(x: 2_320, y: 0), size: ZoneSize(width: 700, height: 520), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "Z2", navKey: "b")
         let canvas = CanvasNSView(
@@ -2981,10 +2981,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let fallbackTiles = canvasView.canvasState.tiles
             .filter { $0.id != deletedTileId }
             .sorted { lhs, rhs in
-                if lhs.zIndex == rhs.zIndex {
+                if lhs.zPosition == rhs.zPosition {
                     return lhs.id.uuidString < rhs.id.uuidString
                 }
-                return lhs.zIndex > rhs.zIndex
+                return lhs.zPosition > rhs.zPosition
             }
             .map { FocusSurfaceID.tile($0.id) }
         _ = focusBroker.recoverFocus(candidates: fallbackTiles, reason: .tileClosed)
@@ -3872,7 +3872,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let currentTerminalTiles = canvasView.canvasState.tiles
             .filter { $0.kind == .terminal }
             .sorted { lhs, rhs in
-                if lhs.zIndex != rhs.zIndex { return lhs.zIndex < rhs.zIndex }
+                if lhs.zPosition != rhs.zPosition { return lhs.zPosition < rhs.zPosition }
                 return lhs.id.uuidString < rhs.id.uuidString
             }
         let currentTerminalTileIds = Set(currentTerminalTiles.map(\.id))
@@ -4709,13 +4709,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
             if !condition() { throw CheckError.failed(message) }
         }
-        func tile(id: UUID, title: String, kind: TileKind, zIndex: Int) -> Tile {
+        func tile(id: UUID, title: String, kind: TileKind, rank: Int) -> Tile {
             Tile(
                 id: id,
                 kind: kind,
                 title: title,
-                frame: TileFrame(x: Double(zIndex) * 40, y: 0, width: 320, height: 220),
-                zIndex: zIndex,
+                frame: TileFrame(x: Double(rank) * 40, y: 0, width: 320, height: 220),
+                zPosition: .fromLegacyRank(rank),
                 runtimeRef: nil,
                 metadata: TileMetadata()
             )
@@ -4733,14 +4733,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let zoneTwo = UUID(uuidString: "00000000-0000-0000-0000-00000000B002")!
         let otherZone = UUID(uuidString: "00000000-0000-0000-0000-00000000B003")!
         let currentTiles = [
-            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000C001")!, title: "Shell Agent", kind: .terminal, zIndex: 1),
-            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000C002")!, title: "Docs Browser", kind: .browser, zIndex: 2),
+            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000C001")!, title: "Shell Agent", kind: .terminal, rank: 1),
+            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000C002")!, title: "Docs Browser", kind: .browser, rank: 2),
         ]
         let secondZoneTiles = [
-            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000C003")!, title: "Scratch Note", kind: .note, zIndex: 3),
+            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000C003")!, title: "Scratch Note", kind: .note, rank: 3),
         ]
         let otherTiles = [
-            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000C004")!, title: "Collapsed Workspace Tile", kind: .terminal, zIndex: 4),
+            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000C004")!, title: "Collapsed Workspace Tile", kind: .terminal, rank: 4),
         ]
 
         var registry = Registry.empty()
@@ -4849,13 +4849,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
             if !condition() { throw CheckError.failed(message) }
         }
-        func tile(id: UUID, title: String, x: Double = 40, y: Double = 40, zIndex: Int = 1) -> Tile {
+        func tile(id: UUID, title: String, x: Double = 40, y: Double = 40, rank: Int = 1) -> Tile {
             Tile(
                 id: id,
                 kind: .note,
                 title: title,
                 frame: TileFrame(x: x, y: y, width: 260, height: 180),
-                zIndex: zIndex,
+                zPosition: .fromLegacyRank(rank),
                 runtimeRef: nil,
                 metadata: TileMetadata(noteId: id)
             )
@@ -4907,10 +4907,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             )
         }
 
-        let tileAValue = tile(id: tileA, title: "Current Tile", x: 40, y: 40, zIndex: 1)
-        let tileBValue = tile(id: tileB, title: "Zone Tile", x: 60, y: 60, zIndex: 1)
-        let tileCValue = tile(id: tileC, title: "Cross Workspace Tile", x: 50, y: 50, zIndex: 1)
-        let missingTileValue = tile(id: missingTile, title: "Stale Missing Tile", x: 80, y: 80, zIndex: 2)
+        let tileAValue = tile(id: tileA, title: "Current Tile", x: 40, y: 40, rank: 1)
+        let tileBValue = tile(id: tileB, title: "Zone Tile", x: 60, y: 60, rank: 1)
+        let tileCValue = tile(id: tileC, title: "Cross Workspace Tile", x: 50, y: 50, rank: 1)
+        let missingTileValue = tile(id: missingTile, title: "Stale Missing Tile", x: 80, y: 80, rank: 2)
 
         let projectAObject = makeProject(id: projectA, name: "Project A", root: projectARoot)
         let projectBObject = makeProject(id: projectB, name: "Project B", root: projectBRoot)
@@ -5077,13 +5077,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
             if !condition() { throw CheckError.failed(message) }
         }
-        func tile(id: UUID, title: String, x: Double, y: Double, kind: TileKind = .terminal, zIndex: Int = 1) -> Tile {
+        func tile(id: UUID, title: String, x: Double, y: Double, kind: TileKind = .terminal, rank: Int = 1) -> Tile {
             Tile(
                 id: id,
                 kind: kind,
                 title: title,
                 frame: TileFrame(x: x, y: y, width: 180, height: 120),
-                zIndex: zIndex,
+                zPosition: .fromLegacyRank(rank),
                 runtimeRef: nil,
                 metadata: kind == .note ? TileMetadata(noteId: id) : TileMetadata()
             )
@@ -5125,12 +5125,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let createdTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000E315")!
         let groupTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000E316")!
 
-        let workingTile = tile(id: workingTileId, title: "Working Agent", x: 40, y: 40, zIndex: 1)
-        let needsTile = tile(id: needsTileId, title: "Needs Agent", x: 260, y: 40, zIndex: 2)
-        let doneTile = tile(id: doneTileId, title: "Done Agent", x: 40, y: 220, zIndex: 3)
-        let staleTile = tile(id: staleTileId, title: "Stale Agent", x: 260, y: 220, zIndex: 4)
-        let createdTile = tile(id: createdTileId, title: "Created Live Tile", x: 500, y: 40, kind: .note, zIndex: 5)
-        let groupTile = tile(id: groupTileId, title: "Group Note", x: 940, y: 40, kind: .note, zIndex: 6)
+        let workingTile = tile(id: workingTileId, title: "Working Agent", x: 40, y: 40, rank: 1)
+        let needsTile = tile(id: needsTileId, title: "Needs Agent", x: 260, y: 40, rank: 2)
+        let doneTile = tile(id: doneTileId, title: "Done Agent", x: 40, y: 220, rank: 3)
+        let staleTile = tile(id: staleTileId, title: "Stale Agent", x: 260, y: 220, rank: 4)
+        let createdTile = tile(id: createdTileId, title: "Created Live Tile", x: 500, y: 40, kind: .note, rank: 5)
+        let groupTile = tile(id: groupTileId, title: "Group Note", x: 940, y: 40, kind: .note, rank: 6)
 
         let project = Project(
             id: projectId,
@@ -5634,7 +5634,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 kind: .note,
                 title: title,
                 frame: TileFrame(x: x, y: y, width: 240, height: 160),
-                zIndex: 1,
+                zPosition: .fromLegacyRank(1),
                 runtimeRef: nil,
                 metadata: TileMetadata(noteId: id)
             )
@@ -7273,7 +7273,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             kind: .terminal,
             title: "Shell",
             frame: TileFrame(x: 40, y: 40, width: 660, height: 480),
-            zIndex: 2,
+            zPosition: .fromLegacyRank(2),
             runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: "shell", projectRelativeCwd: ".")
         )
@@ -7286,7 +7286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             kind: .ticketQueue,
             title: "\(config.teamKey) Ticket Queue",
             frame: TileFrame(x: 80, y: 80, width: 520, height: 480),
-            zIndex: (canvasState.tiles.map(\.zIndex).max() ?? 0) + 1,
+            zPosition: CanvasEngine.zPositionAbove(canvasState.tiles),
             runtimeRef: nil,
             metadata: TileMetadata(linearTeamKey: config.teamKey, linearTeamId: config.teamId, linearQuery: config.query)
         ))
@@ -7298,7 +7298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             kind: .diffReview,
             title: "Diff Review",
             frame: TileFrame(x: 120, y: 120, width: 720, height: 520),
-            zIndex: (canvasState.tiles.map(\.zIndex).max() ?? 0) + 1,
+            zPosition: CanvasEngine.zPositionAbove(canvasState.tiles),
             runtimeRef: nil,
             metadata: TileMetadata(reviewId: reviewId, diffSource: "workingTreeVsHEAD")
         )
@@ -7377,7 +7377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 kind: .note,
                 title: "Smoke note",
                 frame: TileFrame(x: 720, y: 300, width: Double(noteSize.width), height: Double(noteSize.height)),
-                zIndex: 3,
+                zPosition: .fromLegacyRank(3),
                 runtimeRef: nil,
                 metadata: TileMetadata(noteId: smokeNoteId)
             ),
@@ -7386,7 +7386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 kind: .file,
                 title: "smoke-file.txt",
                 frame: TileFrame(x: 360, y: 40, width: Double(fileSize.width), height: Double(fileSize.height)),
-                zIndex: 4,
+                zPosition: .fromLegacyRank(4),
                 runtimeRef: nil,
                 metadata: TileMetadata(filePath: smokeFileURL.path)
             ),
@@ -7395,7 +7395,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 kind: .fileTree,
                 title: "Smoke files",
                 frame: TileFrame(x: 380, y: 560, width: Double(fileTreeSize.width), height: Double(fileTreeSize.height)),
-                zIndex: 5,
+                zPosition: .fromLegacyRank(5),
                 runtimeRef: nil,
                 metadata: TileMetadata()
             )
@@ -7497,8 +7497,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try projectStore.saveCanvas(CanvasState(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
             tiles: [
-                Tile(id: projectTileId, kind: .note, title: "project-tile", frame: TileFrame(x: 100, y: 100, width: 200, height: 120), zIndex: 1, runtimeRef: nil, metadata: TileMetadata(noteId: projectTileId)),
-                Tile(id: groupTileId, kind: .note, title: "group-tile", frame: TileFrame(x: 2250, y: 120, width: 200, height: 120), zIndex: 2, runtimeRef: nil, metadata: TileMetadata(noteId: groupTileId))
+                Tile(id: projectTileId, kind: .note, title: "project-tile", frame: TileFrame(x: 100, y: 100, width: 200, height: 120), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(noteId: projectTileId)),
+                Tile(id: groupTileId, kind: .note, title: "group-tile", frame: TileFrame(x: 2250, y: 120, width: 200, height: 120), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata(noteId: groupTileId))
             ],
             groups: [],
             lastActiveTileId: groupTileId
@@ -7661,8 +7661,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let needsTileId = UUID(uuidString: "00000000-0000-0000-0000-000000008345")!
         let orphanTileId = UUID(uuidString: "00000000-0000-0000-0000-000000008346")!
         try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [
-            Tile(id: workingTileId, kind: .terminal, title: "Agent · Claude", frame: TileFrame(x: 0, y: 0, width: 200, height: 120), zIndex: 1, runtimeRef: nil, metadata: TileMetadata()),
-            Tile(id: needsTileId, kind: .terminal, title: "Agent · Codex", frame: TileFrame(x: 220, y: 0, width: 200, height: 120), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+            Tile(id: workingTileId, kind: .terminal, title: "Agent · Claude", frame: TileFrame(x: 0, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: needsTileId, kind: .terminal, title: "Agent · Codex", frame: TileFrame(x: 220, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
         ], groups: [], lastActiveTileId: workingTileId))
         try store.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: workingTileId, launchProfileId: "claude", command: "/bin/zsh", args: [], cwd: projectRoot.path, env: [:], title: "Agent · Claude", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: .claude, worktreePath: projectRoot.path, status: .working, statusUpdatedAt: now)))
         try store.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: needsTileId, launchProfileId: "codex", command: "/bin/zsh", args: [], cwd: projectRoot.path, env: [:], title: "Agent · Codex", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: .codex, worktreePath: projectRoot.path, status: .needsAttention, statusUpdatedAt: now)))
@@ -7937,7 +7937,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             kind: .note,
             title: "group-zone-sentinel",
             frame: TileFrame(x: 10, y: 10, width: 300, height: 200),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata(noteId: sentinelTileId)
         )
@@ -8274,7 +8274,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         func makeCanvas(tileId: UUID, lastActive: Bool) -> CanvasState {
             CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-                        tiles: [Tile(id: tileId, kind: .note, title: "tile", frame: TileFrame(x: 10, y: 10, width: 200, height: 120), zIndex: 1, runtimeRef: nil, metadata: TileMetadata(noteId: tileId))],
+                        tiles: [Tile(id: tileId, kind: .note, title: "tile", frame: TileFrame(x: 10, y: 10, width: 200, height: 120), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(noteId: tileId))],
                         groups: [],
                         lastActiveTileId: lastActive ? tileId : nil)
         }
@@ -9624,7 +9624,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 kind: .browser,
                 title: "Budget browser \(index)",
                 frame: TileFrame(x: Double(index) * 40, y: Double(index) * 40, width: 640, height: 420),
-                zIndex: index,
+                zPosition: .fromLegacyRank(index),
                 runtimeRef: nil,
                 metadata: TileMetadata(url: "data:text/html;charset=utf-8,<title>budget-\(index)</title>")
             )
@@ -9711,7 +9711,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let tiles = tileIds.enumerated().map { idx, tid in
                 Tile(id: tid, kind: .browser, title: "\(name)-\(idx)",
                      frame: TileFrame(x: Double(idx) * 40, y: 0, width: 640, height: 420),
-                     zIndex: idx, runtimeRef: nil,
+                     zPosition: .fromLegacyRank(idx), runtimeRef: nil,
                      metadata: TileMetadata(url: "data:text/html;charset=utf-8,<title>\(name)-\(idx)</title>"))
             }
             try s.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: tiles, groups: [], lastActiveTileId: nil))
@@ -9823,7 +9823,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Hydrate a fresh a3 in zone A, register it (b1/b2 NOT re-registered), protected = {b2}.
         let mzA3 = UUID(uuidString: "a3a3a3a3-a3a3-a3a3-a3a3-a3a3a3a3a3a3")!
         let mzA3Tile = Tile(id: mzA3, kind: .browser, title: "zone-A-a3",
-                            frame: TileFrame(x: 120, y: 0, width: 640, height: 420), zIndex: 10,
+                            frame: TileFrame(x: 120, y: 0, width: 640, height: 420), zPosition: .fromLegacyRank(10),
                             runtimeRef: nil, metadata: TileMetadata(url: "data:text/html;charset=utf-8,<title>zone-A-a3</title>"))
         // install() appends to canvasState.tiles so restartBrowserTile can find it.
         mzCanvasA.install(tileView: DescriptorTileNSView(tile: mzA3Tile), for: mzA3Tile)
@@ -9899,7 +9899,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 tiles: [Tile(
                     id: tileId, kind: .browser, title: "\(name) browser",
                     frame: TileFrame(x: 10, y: 10, width: 300, height: 200),
-                    zIndex: 1, runtimeRef: nil,
+                    zPosition: .fromLegacyRank(1), runtimeRef: nil,
                     metadata: TileMetadata(url: "data:text/html;charset=utf-8,<title>\(name)</title>")
                 )],
                 groups: [], lastActiveTileId: nil
@@ -10815,7 +10815,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     kind: .note,
                     title: "Legitimate offscreen pan",
                     frame: TileFrame(x: 120, y: 140, width: 320, height: 220),
-                    zIndex: 1,
+                    zPosition: .fromLegacyRank(1),
                     runtimeRef: nil,
                     metadata: TileMetadata(noteId: UUID(uuidString: "abcdefab-cdef-cdef-cdef-abcdefabcdef")!)
                 )
@@ -11173,7 +11173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             kind: .terminal,
             title: "Shell",
             frame: TileFrame(x: 10, y: 10, width: 480, height: 300),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: "shell", projectRelativeCwd: ".")
         )
@@ -11218,7 +11218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             kind: .terminal,
             title: "Throwing View",
             frame: TileFrame(x: 70, y: 70, width: 480, height: 300),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: "shell", projectRelativeCwd: ".")
         )
@@ -11262,7 +11262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             kind: .terminal,
             title: "Legacy Shell",
             frame: TileFrame(x: 60, y: 60, width: 480, height: 300),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: "shell", projectRelativeCwd: ".")
         )
@@ -11298,7 +11298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             kind: .terminal,
             title: "Shell",
             frame: TileFrame(x: 20, y: 20, width: 480, height: 300),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: "shell", projectRelativeCwd: ".")
         )
@@ -11384,7 +11384,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             kind: .terminal,
             title: "Shell",
             frame: TileFrame(x: 40, y: 40, width: 300, height: 200),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: "shell", projectRelativeCwd: ".")
         )
@@ -11404,7 +11404,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             kind: .terminal,
             title: "Shell",
             frame: TileFrame(x: 50, y: 50, width: 300, height: 200),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: "shell", projectRelativeCwd: ".")
         )
@@ -11424,7 +11424,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             kind: .note,
             title: "Note",
             frame: TileFrame(x: 30, y: 30, width: 300, height: 200),
-            zIndex: 1,
+            zPosition: .fromLegacyRank(1),
             runtimeRef: nil,
             metadata: TileMetadata(noteId: UUID())
         )
@@ -11653,7 +11653,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         let tileId = UUID(uuidString: "00000000-0000-0000-0000-00000000DEAD")!
-        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [Tile(id: tileId, kind: .note, title: "L", frame: TileFrame(x: 40, y: 40, width: 200, height: 150), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())], groups: [], lastActiveTileId: tileId))
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [Tile(id: tileId, kind: .note, title: "L", frame: TileFrame(x: 40, y: 40, width: 200, height: 150), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())], groups: [], lastActiveTileId: tileId))
         canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = canvas
@@ -11755,8 +11755,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let aId = UUID(uuidString: "00000000-0000-0000-0000-0000000000A1")!
         let bId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B2")!
-        let tileA = Tile(id: aId, kind: .note, title: "A", frame: TileFrame(x: 40, y: 40, width: 200, height: 170), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let tileB = Tile(id: bId, kind: .note, title: "B", frame: TileFrame(x: 400, y: 300, width: 240, height: 180), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let tileA = Tile(id: aId, kind: .note, title: "A", frame: TileFrame(x: 40, y: 40, width: 200, height: 170), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: bId, kind: .note, title: "B", frame: TileFrame(x: 400, y: 300, width: 240, height: 180), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 0.3), tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
         canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -11829,7 +11829,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // 7) A FOCUSED tile that is only partially in view stays jumpable — the
         //    jump centers it. Exclusion requires full visibility, not just focus.
         let cId = UUID(uuidString: "00000000-0000-0000-0000-0000000000C3")!
-        let tileC = Tile(id: cId, kind: .note, title: "C", frame: TileFrame(x: 0, y: 0, width: 240, height: 180), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tileC = Tile(id: cId, kind: .note, title: "C", frame: TileFrame(x: 0, y: 0, width: 240, height: 180), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         let canvas2 = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 100, y: 0, zoom: 1), tiles: [tileC], groups: [], lastActiveTileId: nil))
         canvas2.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
         let window2 = NSWindow(contentRect: canvas2.frame, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -11857,7 +11857,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         //    readability just to make the whole tile fit in a small window. Keep
         //    the shell readable and reveal the useful top/left area with padding.
         let terminalId = UUID(uuidString: "00000000-0000-0000-0000-0000000000D4")!
-        let terminalTile = Tile(id: terminalId, kind: .terminal, title: "Terminal", frame: TileFrame(x: 1000, y: 800, width: 900, height: 584), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let terminalTile = Tile(id: terminalId, kind: .terminal, title: "Terminal", frame: TileFrame(x: 1000, y: 800, width: 900, height: 584), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         let terminalStart = CanvasViewport(x: 0, y: 0, zoom: 0.3)
         let terminalCanvas = CanvasNSView(canvasState: CanvasState(viewport: terminalStart, tiles: [terminalTile], groups: [], lastActiveTileId: nil))
         terminalCanvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
@@ -11890,7 +11890,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let layerZoneId = UUID(uuidString: "00000000-0000-0000-0000-0000000000E5")!
         let layerTileId = UUID(uuidString: "00000000-0000-0000-0000-0000000000E6")!
         let layerPlacement = ZonePlacement(zoneId: layerZoneId, projectId: nil, origin: ZonePoint(x: 2000, y: 2000), size: ZoneSize(width: 500, height: 360), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "Layer")
-        let layerTile = Tile(id: layerTileId, kind: .note, title: "Layer Tile", frame: TileFrame(x: 40, y: 50, width: 220, height: 160), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let layerTile = Tile(id: layerTileId, kind: .note, title: "Layer Tile", frame: TileFrame(x: 40, y: 50, width: 220, height: 160), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         let layerStart = CanvasViewport(x: 2000, y: 2000, zoom: 1)
         let layerCanvas = CanvasNSView(
             canvasState: CanvasState(viewport: layerStart, tiles: [], groups: [], lastActiveTileId: nil),
@@ -11989,12 +11989,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let viewportBounds = CGRect(x: 0, y: 0, width: 1200, height: 800)
         let tiles: [Tile] = [
-            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000601")!, kind: .note, title: "left", frame: TileFrame(x: -120, y: 100, width: 240, height: 180), zIndex: 1, runtimeRef: nil, metadata: TileMetadata()),
-            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000602")!, kind: .note, title: "right", frame: TileFrame(x: 1080, y: 100, width: 240, height: 180), zIndex: 2, runtimeRef: nil, metadata: TileMetadata()),
-            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000603")!, kind: .note, title: "top", frame: TileFrame(x: 300, y: -90, width: 240, height: 180), zIndex: 3, runtimeRef: nil, metadata: TileMetadata()),
-            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000604")!, kind: .note, title: "bottom", frame: TileFrame(x: 300, y: 720, width: 240, height: 180), zIndex: 4, runtimeRef: nil, metadata: TileMetadata()),
-            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000605")!, kind: .note, title: "corner sliver", frame: TileFrame(x: 1192, y: 792, width: 100, height: 100), zIndex: 5, runtimeRef: nil, metadata: TileMetadata()),
-            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000606")!, kind: .note, title: "offscreen", frame: TileFrame(x: 1400, y: 1400, width: 120, height: 120), zIndex: 6, runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000601")!, kind: .note, title: "left", frame: TileFrame(x: -120, y: 100, width: 240, height: 180), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000602")!, kind: .note, title: "right", frame: TileFrame(x: 1080, y: 100, width: 240, height: 180), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000603")!, kind: .note, title: "top", frame: TileFrame(x: 300, y: -90, width: 240, height: 180), zPosition: .fromLegacyRank(3), runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000604")!, kind: .note, title: "bottom", frame: TileFrame(x: 300, y: 720, width: 240, height: 180), zPosition: .fromLegacyRank(4), runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000605")!, kind: .note, title: "corner sliver", frame: TileFrame(x: 1192, y: 792, width: 100, height: 100), zPosition: .fromLegacyRank(5), runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: UUID(uuidString: "00000000-0000-0000-0000-000000000606")!, kind: .note, title: "offscreen", frame: TileFrame(x: 1400, y: 1400, width: 120, height: 120), zPosition: .fromLegacyRank(6), runtimeRef: nil, metadata: TileMetadata()),
         ]
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: tiles, groups: [], lastActiveTileId: nil))
         canvas.frame = viewportBounds
@@ -12167,7 +12167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         //    zone with navKey "a"; the zone must win (viewport == zone-fit, not tile-center).
         //    We use a fresh canvas with one zone navKey="a" and one visible tile.
         let tileId5 = UUID(uuidString: "00000000-0000-0000-0000-000000001851")!
-        let tileFor5 = Tile(id: tileId5, kind: .note, title: "tile5", frame: TileFrame(x: 50, y: 50, width: 200, height: 150), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tileFor5 = Tile(id: tileId5, kind: .note, title: "tile5", frame: TileFrame(x: 50, y: 50, width: 200, height: 150), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         let placementD = ZonePlacement(zoneId: UUID(uuidString: "00000000-0000-0000-0000-00000000181D")!, projectId: pId, origin: ZonePoint(x: 2000, y: 0), size: ZoneSize(width: 300, height: 200), color: "orange", collapsed: false, hydrationPolicy: .automatic, navKey: "a")
         let expectedD = CameraFraming.zoneOverviewViewport(for: CGRect(x: 2000, y: 0, width: 300, height: 200), viewportSize: vpSize)
         let canvas5 = CanvasNSView(
@@ -12216,8 +12216,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         //    Use a fresh canvas with tiles so leaderJumpAssignments yields labeled tiles.
         let tileId7a = UUID(uuidString: "00000000-0000-0000-0000-000000001871")!
         let tileId7b = UUID(uuidString: "00000000-0000-0000-0000-000000001872")!
-        let tile7a = Tile(id: tileId7a, kind: .note, title: "T7A", frame: TileFrame(x: 40, y: 40, width: 200, height: 170), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let tile7b = Tile(id: tileId7b, kind: .note, title: "T7B", frame: TileFrame(x: 400, y: 300, width: 240, height: 180), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let tile7a = Tile(id: tileId7a, kind: .note, title: "T7A", frame: TileFrame(x: 40, y: 40, width: 200, height: 170), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let tile7b = Tile(id: tileId7b, kind: .note, title: "T7B", frame: TileFrame(x: 400, y: 300, width: 240, height: 180), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
         // Zone with ordinal "1" — tile labels are letters; no collision.
         let placement7 = ZonePlacement(zoneId: UUID(uuidString: "00000000-0000-0000-0000-000000001870")!, projectId: pId, origin: ZonePoint(x: 5000, y: 5000), size: ZoneSize(width: 300, height: 200), color: "blue", collapsed: false, hydrationPolicy: .automatic, navKey: nil)
         let canvas7 = CanvasNSView(
@@ -12305,8 +12305,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let aId = UUID(uuidString: "00000000-0000-0000-0000-0000000000A1")!
         let bId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B2")!
-        let tileA = Tile(id: aId, kind: .note, title: "A", frame: TileFrame(x: 40, y: 40, width: 200, height: 170), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let tileB = Tile(id: bId, kind: .note, title: "B", frame: TileFrame(x: 400, y: 300, width: 240, height: 180), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let tileA = Tile(id: aId, kind: .note, title: "A", frame: TileFrame(x: 40, y: 40, width: 200, height: 170), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: bId, kind: .note, title: "B", frame: TileFrame(x: 400, y: 300, width: 240, height: 180), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 0.3), tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
         canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -12382,8 +12382,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let zoneBId = UUID(uuidString: "00000000-0000-0000-0000-0000000016B0")!
         let zoneA = ZonePlacement(zoneId: zoneAId, projectId: nil, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 1200, height: 800), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "Alpha")
         let zoneB = ZonePlacement(zoneId: zoneBId, projectId: nil, origin: ZonePoint(x: 1600, y: 400), size: ZoneSize(width: 2200, height: 1200), color: "sky", collapsed: false, hydrationPolicy: .automatic, name: "Beta")
-        let tileA = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-0000000016A1")!, kind: .note, title: "A", frame: TileFrame(x: 100, y: 100, width: 300, height: 220), zIndex: 0, runtimeRef: nil, metadata: TileMetadata())
-        let tileB = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-0000000016B1")!, kind: .terminal, title: "B", frame: TileFrame(x: 1700, y: 500, width: 500, height: 320), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tileA = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-0000000016A1")!, kind: .note, title: "A", frame: TileFrame(x: 100, y: 100, width: 300, height: 220), zPosition: .fromLegacyRank(0), runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: UUID(uuidString: "00000000-0000-0000-0000-0000000016B1")!, kind: .terminal, title: "B", frame: TileFrame(x: 1700, y: 500, width: 500, height: 320), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         let startViewport = CanvasViewport(x: 0, y: 0, zoom: 1.0)
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: startViewport, tiles: [tileA, tileB], groups: [], lastActiveTileId: nil), zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: zoneA, displayName: "Alpha"), CanvasNSView.ZoneRenderModel(placement: zoneB, displayName: "Beta")])
         canvas.frame = NSRect(x: 0, y: 0, width: 1200, height: 800)
@@ -12481,7 +12481,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         )
         // Tile inside zone B's world rect (1400..2200, 0..600).
         let tileBId = UUID(uuidString: "00000000-0000-0000-0000-000000000B21")!
-        let tileInB = Tile(id: tileBId, kind: .note, title: "B-tile", frame: TileFrame(x: 1450, y: 50, width: 200, height: 150), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tileInB = Tile(id: tileBId, kind: .note, title: "B-tile", frame: TileFrame(x: 1450, y: 50, width: 200, height: 150), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         let canvas = CanvasNSView(
             canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileInB], groups: [], lastActiveTileId: nil),
             zoneRenderModels: [
@@ -12700,7 +12700,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             kind: .note,
             title: "Non-browser",
             frame: TileFrame(x: 30, y: 420, width: 220, height: 160),
-            zIndex: 2,
+            zPosition: .fromLegacyRank(2),
             runtimeRef: nil,
             metadata: TileMetadata()
         )
@@ -12814,9 +12814,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let aFrame = TileFrame(x: 300, y: 200, width: 100, height: 100)
         let bFrame = TileFrame(x: 600, y: 210, width: 100, height: 120) // nearer ahead-right
         let cFrame = TileFrame(x: 900, y: 190, width: 100, height: 100) // farther right
-        let tileA = Tile(id: aId, kind: .note, title: "A", frame: aFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let tileB = Tile(id: bId, kind: .note, title: "B", frame: bFrame, zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
-        let tileC = Tile(id: cId, kind: .note, title: "C", frame: cFrame, zIndex: 3, runtimeRef: nil, metadata: TileMetadata())
+        let tileA = Tile(id: aId, kind: .note, title: "A", frame: aFrame, zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: bId, kind: .note, title: "B", frame: bFrame, zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
+        let tileC = Tile(id: cId, kind: .note, title: "C", frame: cFrame, zPosition: .fromLegacyRank(3), runtimeRef: nil, metadata: TileMetadata())
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileA, tileB, tileC], groups: [], lastActiveTileId: nil))
         canvas.frame = NSRect(x: 0, y: 0, width: 1400, height: 900)
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -12968,9 +12968,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             canvasState: CanvasState(
                 viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
                 tiles: [
-                    Tile(id: selectedTileId, kind: .note, title: "Selected", frame: TileFrame(x: 24, y: 44, width: 140, height: 90), zIndex: 1, runtimeRef: nil, metadata: TileMetadata()),
-                    Tile(id: rightTileId, kind: .note, title: "Right", frame: TileFrame(x: 220, y: 44, width: 140, height: 90), zIndex: 2, runtimeRef: nil, metadata: TileMetadata()),
-                    Tile(id: downTileId, kind: .note, title: "Down", frame: TileFrame(x: 24, y: 180, width: 140, height: 90), zIndex: 3, runtimeRef: nil, metadata: TileMetadata()),
+                    Tile(id: selectedTileId, kind: .note, title: "Selected", frame: TileFrame(x: 24, y: 44, width: 140, height: 90), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata()),
+                    Tile(id: rightTileId, kind: .note, title: "Right", frame: TileFrame(x: 220, y: 44, width: 140, height: 90), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata()),
+                    Tile(id: downTileId, kind: .note, title: "Down", frame: TileFrame(x: 24, y: 180, width: 140, height: 90), zPosition: .fromLegacyRank(3), runtimeRef: nil, metadata: TileMetadata()),
                 ],
                 groups: [],
                 lastActiveTileId: selectedTileId
@@ -13042,9 +13042,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let plainTerminalTile = UUID(uuidString: "00000000-0000-0000-0000-000000000069")!
         let orphanAgentTile = UUID(uuidString: "00000000-0000-0000-0000-000000000070")!
         let agentTiles = [
-            Tile(id: agentTileA, kind: .terminal, title: "Agent A", frame: TileFrame(x: 420, y: 44, width: 140, height: 90), zIndex: 4, runtimeRef: nil, metadata: TileMetadata()),
-            Tile(id: agentTileB, kind: .terminal, title: "Agent B", frame: TileFrame(x: 580, y: 44, width: 140, height: 90), zIndex: 5, runtimeRef: nil, metadata: TileMetadata()),
-            Tile(id: plainTerminalTile, kind: .terminal, title: "Plain", frame: TileFrame(x: 740, y: 44, width: 140, height: 90), zIndex: 6, runtimeRef: nil, metadata: TileMetadata())
+            Tile(id: agentTileA, kind: .terminal, title: "Agent A", frame: TileFrame(x: 420, y: 44, width: 140, height: 90), zPosition: .fromLegacyRank(4), runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: agentTileB, kind: .terminal, title: "Agent B", frame: TileFrame(x: 580, y: 44, width: 140, height: 90), zPosition: .fromLegacyRank(5), runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: plainTerminalTile, kind: .terminal, title: "Plain", frame: TileFrame(x: 740, y: 44, width: 140, height: 90), zPosition: .fromLegacyRank(6), runtimeRef: nil, metadata: TileMetadata())
         ]
         for tile in agentTiles {
             let view = TileNSView(tile: tile)
@@ -13309,15 +13309,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         realCanvas.focusBroker = canvasBroker
         let frontTileId = UUID()
         let rearTileId = UUID()
-        let frontTile = Tile(id: frontTileId, kind: .note, title: "front", frame: TileFrame(x: 0, y: 0, width: 100, height: 100), zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
-        let rearTile = Tile(id: rearTileId, kind: .note, title: "rear", frame: TileFrame(x: 120, y: 0, width: 100, height: 100), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let frontTile = Tile(id: frontTileId, kind: .note, title: "front", frame: TileFrame(x: 0, y: 0, width: 100, height: 100), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
+        let rearTile = Tile(id: rearTileId, kind: .note, title: "rear", frame: TileFrame(x: 120, y: 0, width: 100, height: 100), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         realCanvas.install(tileView: TileNSView(tile: rearTile), for: rearTile)
         realCanvas.install(tileView: TileNSView(tile: frontTile), for: frontTile)
         try expect(canvasBroker.requestFocus(.tile(frontTileId), reason: .userClick), "real-canvas focused tile setup failed")
         realCanvas.removeTile(id: frontTileId)
         try expect(!realCanvas.canvasState.tiles.contains(where: { $0.id == frontTileId }), "real-canvas removal should remove deleted tile from canvasState")
         let survivorCandidates = realCanvas.canvasState.tiles
-            .sorted { $0.zIndex > $1.zIndex }
+            .sorted { lhs, rhs in
+                if lhs.zPosition != rhs.zPosition { return lhs.zPosition > rhs.zPosition }
+                return lhs.id.uuidString > rhs.id.uuidString
+            }
             .map { FocusSurfaceID.tile($0.id) }
         try expect(survivorCandidates == [.tile(rearTileId)], "real-canvas survivor candidates should derive from post-removal canvasState; candidates=\(survivorCandidates)")
         try expect(canvasBroker.recoverFocus(candidates: survivorCandidates, reason: .tileClosed), "real-canvas removal should recover to remaining tile")
@@ -13560,7 +13563,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 kind: .ticketQueue,
                 title: "CON Ticket Queue",
                 frame: TileFrame(x: 40, y: 60, width: 520, height: 480),
-                zIndex: 1,
+                zPosition: .fromLegacyRank(1),
                 runtimeRef: nil,
                 metadata: TileMetadata(linearTeamKey: "CON", linearTeamId: "9d6655c7-35cb-47ef-9b24-d0342700691d", linearQuery: "state:Todo")
             )],
@@ -13640,7 +13643,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         """
         try runSQLiteSQL(sql, databaseURL: db)
         _ = try ConductorQueueReader().read(projectRoot: projectRoot)
-        let tile = Tile(id: tileId, kind: .conductorQueue, title: "Conductor Queue", frame: TileFrame(x: 40, y: 60, width: 520, height: 480), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tile = Tile(id: tileId, kind: .conductorQueue, title: "Conductor Queue", frame: TileFrame(x: 40, y: 60, width: 520, height: 480), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         let state = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile], groups: [], lastActiveTileId: tileId)
         let store = ProjectStore(projectRoot: projectRoot)
         try store.saveCanvas(state)
@@ -13753,7 +13756,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try integrationStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: busyAgentTileId, launchProfileId: "claude", command: "/bin/zsh", args: [], cwd: integrationRoot.path, env: [:], title: "Busy Agent", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: working))
         try integrationStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: integrationAgentTileId, launchProfileId: "codex", command: "/bin/zsh", args: [], cwd: integrationRoot.path, env: [:], title: "Idle Agent", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: idle))
         let integrationEndpoint = RecordingEndpoint()
-        let integrationTile = Tile(id: integrationTileId, kind: .diffReview, title: "Diff Review", frame: TileFrame(x: 0, y: 0, width: 320, height: 240), zIndex: 1, runtimeRef: nil, metadata: TileMetadata(reviewId: integrationReviewId, diffSource: "workingTreeVsHEAD"))
+        let integrationTile = Tile(id: integrationTileId, kind: .diffReview, title: "Diff Review", frame: TileFrame(x: 0, y: 0, width: 320, height: 240), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(reviewId: integrationReviewId, diffSource: "workingTreeVsHEAD"))
         let integrationView = DiffReviewTileNSView(tile: integrationTile, model: GitDiffModel(files: []), sendCommentsToAgent: {
             do {
                 let sessions = try integrationStore.listSessions()
@@ -13940,7 +13943,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let tileId = UUID(uuidString: "00000000-0000-0000-0000-0000000006A1")!
         let startFrame = TileFrame(x: 80, y: 80, width: 200, height: 150)
-        let tile = Tile(id: tileId, kind: .note, title: "GATE", frame: startFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tile = Tile(id: tileId, kind: .note, title: "GATE", frame: startFrame, zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile], groups: [], lastActiveTileId: nil))
         let appDelegate = AppDelegate()
         appDelegate.canvasView = canvas
@@ -14036,8 +14039,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // tops to B (the 90° corner); snapAdjustment alone could not, since a
         // side-by-side dock has no X overlap to gate the Y alignment.
         let neighborFrame = TileFrame(x: 520, y: 120, width: 200, height: 150)
-        let tileA = Tile(id: aId, kind: .note, title: "DRAG_A", frame: startFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let tileB = Tile(id: bId, kind: .note, title: "DRAG_B", frame: neighborFrame, zIndex: 2, runtimeRef: nil, metadata: TileMetadata())
+        let tileA = Tile(id: aId, kind: .note, title: "DRAG_A", frame: startFrame, zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let tileB = Tile(id: bId, kind: .note, title: "DRAG_B", frame: neighborFrame, zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tileA, tileB], groups: [], lastActiveTileId: nil))
         canvas.frame = NSRect(x: 0, y: 0, width: 900, height: 420)
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
@@ -14163,10 +14166,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // `neighbors`. Returns A's committed world frame after EACH event, so a snap
         // and a later pull-out-of-snap can both be asserted within one gesture.
         func driveBottomResize(aFrame: TileFrame, neighbors: [(UUID, TileFrame)], worldDys: [CGFloat]) throws -> [TileFrame] {
-            let tileA = Tile(id: aId, kind: .note, title: "RESIZE_A", frame: aFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+            let tileA = Tile(id: aId, kind: .note, title: "RESIZE_A", frame: aFrame, zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
             var tiles = [tileA]
             for (id, f) in neighbors {
-                tiles.append(Tile(id: id, kind: .note, title: "N", frame: f, zIndex: 2, runtimeRef: nil, metadata: TileMetadata()))
+                tiles.append(Tile(id: id, kind: .note, title: "N", frame: f, zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata()))
             }
             let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: tiles, groups: [], lastActiveTileId: nil))
             canvas.frame = NSRect(x: 0, y: 0, width: 1100, height: 760)
@@ -14295,7 +14298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // One note tile; A is the resize action target.
         let tileAId = UUID(uuidString: "00000000-0000-0000-0000-0000000003A1")!
         let startFrame = TileFrame(x: 60, y: 60, width: 280, height: 200)
-        let tileA = Tile(id: tileAId, kind: .note, title: "ACTION_A", frame: startFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
+        let tileA = Tile(id: tileAId, kind: .note, title: "ACTION_A", frame: startFrame, zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: viewport, tiles: [tileA], groups: [], lastActiveTileId: nil))
 
@@ -14391,9 +14394,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let noteId = UUID(uuidString: "00000000-0000-0000-0000-0000000004ED")!
         let browserFrame = TileFrame(x: 40, y: 40, width: 480, height: 320)
         let noteFrame = TileFrame(x: 560, y: 40, width: 360, height: 240)
-        let browserTile = Tile(id: browserTileId, kind: .browser, title: "ACTION_BROWSER", frame: browserFrame, zIndex: 1, runtimeRef: nil, metadata: TileMetadata(url: "https://example.test/start"))
+        let browserTile = Tile(id: browserTileId, kind: .browser, title: "ACTION_BROWSER", frame: browserFrame, zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(url: "https://example.test/start"))
         let noteBody = "first line\nsecond line\nexport me"
-        let noteTile = Tile(id: noteTileId, kind: .note, title: "ACTION_NOTE", frame: noteFrame, zIndex: 2, runtimeRef: nil, metadata: TileMetadata(noteId: noteId))
+        let noteTile = Tile(id: noteTileId, kind: .note, title: "ACTION_NOTE", frame: noteFrame, zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata(noteId: noteId))
         let viewport = CanvasViewport(x: 0, y: 0, zoom: 1)
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: viewport, tiles: [browserTile, noteTile], groups: [], lastActiveTileId: nil))
 
@@ -14560,8 +14563,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             throw CheckError("focus mode modal surface should be representable")
         }
 
-        let primaryTile = Tile(id: primary, kind: .note, title: "Primary", frame: TileFrame(x: 10, y: 10, width: 200, height: 120), zIndex: 1, runtimeRef: nil, metadata: TileMetadata())
-        let agentTile = Tile(id: agentA, kind: .terminal, title: "Agent", frame: TileFrame(x: 260, y: 10, width: 200, height: 120), zIndex: 0, runtimeRef: nil, metadata: TileMetadata())
+        let primaryTile = Tile(id: primary, kind: .note, title: "Primary", frame: TileFrame(x: 10, y: 10, width: 200, height: 120), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        let agentTile = Tile(id: agentA, kind: .terminal, title: "Agent", frame: TileFrame(x: 260, y: 10, width: 200, height: 120), zPosition: .fromLegacyRank(0), runtimeRef: nil, metadata: TileMetadata())
         let savedState = CanvasState(viewport: CanvasViewport(x: 12, y: 34, zoom: 1.25), tiles: [primaryTile, agentTile], groups: [], lastActiveTileId: primary)
         let canvas = CanvasNSView(canvasState: savedState)
         let primaryView = TileNSView(tile: primaryTile)
@@ -14585,7 +14588,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             throw CheckError("focus-mode session did not reparent pane views")
         }
         canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 0.5))
-        canvas.updateTile(Tile(id: primary, kind: .note, title: "Primary", frame: TileFrame(x: 999, y: 999, width: 100, height: 100), zIndex: 99, runtimeRef: nil, metadata: TileMetadata()))
+        canvas.updateTile(Tile(id: primary, kind: .note, title: "Primary", frame: TileFrame(x: 999, y: 999, width: 100, height: 100), zPosition: .fromLegacyRank(99), runtimeRef: nil, metadata: TileMetadata()))
         session.restore()
         guard canvas.canvasState.viewport == savedState.viewport,
               canvas.canvasState.tiles == savedState.tiles,
@@ -14971,7 +14974,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 kind: .terminal,
                 title: "Shell",
                 frame: TileFrame(x: 20, y: 20, width: 640, height: 420),
-                zIndex: 1,
+                zPosition: .fromLegacyRank(1),
                 runtimeRef: nil,
                 metadata: TileMetadata(launchProfileId: "shell")
             )],
@@ -15238,7 +15241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 kind: .browser,
                 title: "Browser",
                 frame: TileFrame(x: 20, y: 20, width: 640, height: 420),
-                zIndex: 1,
+                zPosition: .fromLegacyRank(1),
                 runtimeRef: nil,
                 metadata: TileMetadata(url: initialURL)
             )],

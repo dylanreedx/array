@@ -176,13 +176,13 @@ final class TileSpawner {
             size: CanvasEngine.defaultFrame(for: .terminal),
             in: canvasView
         )
-        let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
         var tile = Tile(
             id: UUID(),
             kind: .terminal,
             title: profile.title,
             frame: frame,
-            zIndex: nextZ,
+            zPosition: nextZ,
             runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: launchProfileId, projectRelativeCwd: ".")
         )
@@ -635,13 +635,13 @@ final class TileSpawner {
             size: CanvasEngine.defaultFrame(for: .browser),
             in: canvasView
         )
-        let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
         var tile = Tile(
             id: UUID(),
             kind: .browser,
             title: "Browser",
             frame: frame,
-            zIndex: nextZ,
+            zPosition: nextZ,
             runtimeRef: nil,
             metadata: TileMetadata(url: urlString, browserProfileId: browserProfile(for: nil).id)
         )
@@ -716,14 +716,14 @@ final class TileSpawner {
             size: CanvasEngine.defaultFrame(for: .browser),
             in: canvasView
         )
-        let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
         let profile = browserProfile(for: profileId)
         var tile = Tile(
             id: UUID(),
             kind: .browser,
             title: "Browser",
             frame: frame,
-            zIndex: nextZ,
+            zPosition: nextZ,
             runtimeRef: nil,
             metadata: TileMetadata(url: urlString, browserProfileId: profile.id)
         )
@@ -881,7 +881,7 @@ final class TileSpawner {
             size: CanvasEngine.defaultFrame(for: .browserInspector),
             in: canvasView
         )
-        let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
         let now = Date()
         let inspectorTileId = UUID()
         let inspectorState = BrowserInspectorState(
@@ -897,7 +897,7 @@ final class TileSpawner {
             kind: .browserInspector,
             title: "Inspector — \(Self.inspectorDisplayName(title: summary?.title, url: summary?.url))",
             frame: frame,
-            zIndex: nextZ,
+            zPosition: nextZ,
             runtimeRef: nil,
             metadata: TileMetadata()
         )
@@ -1214,13 +1214,13 @@ final class TileSpawner {
             size: CanvasEngine.defaultFrame(for: .note),
             in: canvasView
         )
-        let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
         let tile = Tile(
             id: tileId,
             kind: .note,
             title: title,
             frame: frame,
-            zIndex: nextZ,
+            zPosition: nextZ,
             runtimeRef: nil,
             metadata: TileMetadata(noteId: noteId)
         )
@@ -1309,13 +1309,13 @@ final class TileSpawner {
             size: CanvasEngine.defaultFrame(for: .file),
             in: canvasView
         )
-        let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
         let tile = Tile(
             id: UUID(),
             kind: .file,
             title: title ?? URL(fileURLWithPath: trimmedPath).lastPathComponent,
             frame: frame,
-            zIndex: nextZ,
+            zPosition: nextZ,
             runtimeRef: nil,
             metadata: TileMetadata(filePath: trimmedPath)
         )
@@ -1347,13 +1347,13 @@ final class TileSpawner {
             size: CanvasEngine.defaultFrame(for: .runArtifacts),
             in: canvasView
         )
-        let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
         let tile = Tile(
             id: UUID(),
             kind: .runArtifacts,
             title: title ?? "Run: \(URL(fileURLWithPath: trimmedPath).lastPathComponent)",
             frame: frame,
-            zIndex: nextZ,
+            zPosition: nextZ,
             runtimeRef: nil,
             metadata: TileMetadata(filePath: trimmedPath)
         )
@@ -1825,8 +1825,8 @@ final class TileSpawner {
             BrowserTile(id: UUID(), tileId: rewriteTileId, url: deleteRewriteURLString, title: "Deleted Profile Tile", storageGroupId: deletedProfile.dataStoreIdentifier, profileId: deletedProfile.id, createdAt: Date(timeIntervalSince1970: 22), updatedAt: Date(timeIntervalSince1970: 22))
         ])
         var rewriteCanvasState: CanvasState? = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [
-            Tile(id: rewriteTileId, kind: .browser, title: "Deleted Profile Tile", frame: TileFrame(x: 0, y: 0, width: 800, height: 600), zIndex: 0, runtimeRef: nil, metadata: TileMetadata(url: deleteRewriteURLString, browserProfileId: deletedProfile.id)),
-            Tile(id: rewriteCanvasOnlyTileId, kind: .browser, title: "Canvas Only", frame: TileFrame(x: 10, y: 10, width: 800, height: 600), zIndex: 1, runtimeRef: nil, metadata: TileMetadata(url: deleteRewriteURLString, browserProfileId: deletedProfile.id))
+            Tile(id: rewriteTileId, kind: .browser, title: "Deleted Profile Tile", frame: TileFrame(x: 0, y: 0, width: 800, height: 600), zPosition: .fromLegacyRank(0), runtimeRef: nil, metadata: TileMetadata(url: deleteRewriteURLString, browserProfileId: deletedProfile.id)),
+            Tile(id: rewriteCanvasOnlyTileId, kind: .browser, title: "Canvas Only", frame: TileFrame(x: 10, y: 10, width: 800, height: 600), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(url: deleteRewriteURLString, browserProfileId: deletedProfile.id))
         ], groups: [], lastActiveTileId: rewriteTileId)
         let deleteRewrite = BrowserProfilePersistenceActions.deleteProfile(
             id: deletedProfile.id,
@@ -1928,7 +1928,7 @@ final class TileSpawner {
                 kind: .browser,
                 title: "Browser",
                 frame: TileFrame(x: 0, y: 0, width: 800, height: 600),
-                zIndex: 0,
+                zPosition: .fromLegacyRank(0),
                 runtimeRef: nil,
                 metadata: TileMetadata(url: fixtureURL.absoluteString, browserProfileId: profileA.id)
             )
@@ -2076,7 +2076,7 @@ final class TileSpawner {
         let activeTab = tabs[7]
         try store.saveCanvas(CanvasState(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-            tiles: [Tile(id: tileId, kind: .browser, title: "canvas browser", frame: TileFrame(x: 20, y: 20, width: 640, height: 420), zIndex: 1, runtimeRef: nil, metadata: TileMetadata(url: "about:blank"))],
+            tiles: [Tile(id: tileId, kind: .browser, title: "canvas browser", frame: TileFrame(x: 20, y: 20, width: 640, height: 420), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(url: "about:blank"))],
             groups: [], lastActiveTileId: tileId
         ))
         try store.saveBrowserState(BrowserState(tiles: [BrowserTile(
@@ -2124,7 +2124,7 @@ final class TileSpawner {
             kind: .browser,
             title: "Invalid Active Browser",
             frame: TileFrame(x: 700, y: 20, width: 640, height: 420),
-            zIndex: 2,
+            zPosition: .fromLegacyRank(2),
             runtimeRef: nil,
             metadata: TileMetadata(url: invalidActiveURL)
         )
@@ -2252,7 +2252,7 @@ final class TileSpawner {
                 kind: .browser,
                 title: canvasTitle,
                 frame: TileFrame(x: 20, y: 20, width: 640, height: 420),
-                zIndex: 1,
+                zPosition: .fromLegacyRank(1),
                 runtimeRef: RuntimeRef(kind: .browserTile, id: runtimeIdA),
                 metadata: TileMetadata(url: canvasURL)
             )],
@@ -2362,7 +2362,7 @@ final class TileSpawner {
                 kind: .browser,
                 title: canvasTitle,
                 frame: TileFrame(x: 20, y: 20, width: 640, height: 420),
-                zIndex: 1,
+                zPosition: .fromLegacyRank(1),
                 runtimeRef: RuntimeRef(kind: .browserTile, id: runtimeIdA),
                 metadata: TileMetadata(url: canvasURL)
             )],
@@ -4168,13 +4168,13 @@ final class TileSpawner {
             size: CanvasEngine.defaultFrame(for: .fileTree),
             in: canvasView
         )
-        let nextZ = (canvasView.canvasState.tiles.map(\.zIndex).max() ?? 0) + 1
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
         let tile = Tile(
             id: UUID(),
             kind: .fileTree,
             title: URL(fileURLWithPath: trimmedRootPath, isDirectory: true).lastPathComponent,
             frame: frame,
-            zIndex: nextZ,
+            zPosition: nextZ,
             runtimeRef: nil,
             metadata: TileMetadata(filePath: URL(fileURLWithPath: trimmedRootPath, isDirectory: true).standardizedFileURL.path)
         )
@@ -4398,7 +4398,7 @@ final class TileSpawner {
             kind: .fileTree,
             title: "project",
             frame: TileFrame(x: 20, y: 20, width: 420, height: 360),
-            zIndex: 7,
+            zPosition: .fromLegacyRank(7),
             runtimeRef: nil,
             metadata: TileMetadata()
         )
@@ -4554,7 +4554,7 @@ final class TileSpawner {
                 kind: .fileTree,
                 title: "descriptor-root",
                 frame: TileFrame(x: 20, y: 20, width: 420, height: 360),
-                zIndex: 1,
+                zPosition: .fromLegacyRank(1),
                 runtimeRef: nil,
                 metadata: TileMetadata(filePath: descriptorRoot.path)
             )
