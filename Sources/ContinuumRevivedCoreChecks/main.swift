@@ -8232,21 +8232,247 @@ do {
     print("convergence fuzz: 50 seeds × 200 steps, \(i4TotalCompactionEvents) compactions across \(i4SeedsWithCompaction)/50 seeds, \(i4TotalOfflineDeferredQueues) partition-deferred deliveries, \(i4TotalDroppedMessages) messages permanently dropped, canonical \(i4Seed1CanonicalBytes) bytes (seed 1)")
 }
 
-// MARK: - Invariant I5: Sync-boundary purity / taint scan (STUB — real assertion lands with the "Taint scan for sync-boundary purity (I5)" ticket)
+// MARK: - Sync-boundary purity taint scan (docs/38-tickets/09-taint-scan-i5.md)
 
 do {
-    // STUB: replace with real assertion when "Taint scan for sync-boundary purity (I5)"
-    // lands (needs taintCheck(_:) / TaintViolation from that ticket). When real: walk
-    // every SpatialOp and AgentActivityEvent instance and assert none carries a pid, pane
-    // target, runtime handle, or transcript body — the two provably-disjoint payload
-    // families from the "Sync/observation type split" ticket.
-    //
-    // Measured values that will appear in the real manifest:
-    //   spatial_op_field_count: Int, activity_event_field_count: Int, violation_count: Int (must be 0)
-    //
-    // For now this block asserts a real property of AgentActivityEvent, one of the two
-    // payload families this scan will walk — already exists today — non-vacuous, no
-    // local stand-in type ("SyncBoundaryPayload" does not exist and is not defined here).
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+
+    // ── Spatial ops ──────────────────────────────────────────────────────
+    // One LoggedOp per Op case (SpatialOp.swift), fixed UUID literals so the
+    // check is deterministic. `lamport` is 5_000_000 — ABOVE the pid ceiling
+    // (4_194_304) on purpose (see "Watch out for" in the ticket).
+    let fixedTile = UUID(uuidString: "FACADE00-0000-4000-8000-000000000001")!
+    let fixedZone = UUID(uuidString: "FACADE00-0000-4000-8000-000000000002")!
+    let fixedReplica = UUID(uuidString: "FACADE00-0000-4000-8000-000000000003")!
+    let fixedProject = UUID(uuidString: "FACADE00-0000-4000-8000-000000000004")!
+
+    // Every Op case, no gaps — SpatialOp.swift's 19 cases as shipped.
+    let ops: [Op] = [
+        .createTile(id: fixedTile, kind: .terminal, title: "auth",
+                    frame: TileFrame(x: 100, y: 200, width: 400, height: 300), zPosition: .first),
+        .deleteTile(id: fixedTile),
+        .createZone(id: fixedZone, projectId: fixedProject,
+                    origin: ZonePoint(x: 10, y: 20), size: ZoneSize(width: 500, height: 500),
+                    name: "Workspace", color: "#3478F6"),
+        .deleteZone(id: fixedZone),
+        .setTileFrame(id: fixedTile, frame: TileFrame(x: 10, y: 20, width: 30, height: 40)),
+        .setTileZIndex(id: fixedTile, z: .last),
+        .setTileTitle(id: fixedTile, title: "renamed"),
+        .setTileKind(id: fixedTile, kind: .note),
+        .setTileCollapsed(id: fixedTile, collapsed: true),
+        .setZoneOrigin(id: fixedZone, origin: ZonePoint(x: 5, y: 5)),
+        .setZoneSize(id: fixedZone, size: ZoneSize(width: 640, height: 480)),
+        .setZoneName(id: fixedZone, name: "Focus"),
+        .setZoneColor(id: fixedZone, color: "#FF00AA"),
+        .setZoneCollapsed(id: fixedZone, collapsed: false),
+        .setZoneProjectId(id: fixedZone, projectId: nil),
+        .setZonePosition(id: fixedZone, position: .first),
+        .setTileZone(tileId: fixedTile, zoneId: fixedZone),
+        .setLastActiveTile(id: fixedTile),
+        .setLastActiveZone(id: fixedZone),
+    ]
+    expect(ops.count == 19, "one fixture per Op case, no gaps; got \(ops.count)")
+
+    var scannedOpCount = 0
+    for op in ops {
+        let logged = LoggedOp(
+            opId: OpId(lamport: 5_000_000, replica: fixedReplica),  // above pid ceiling on purpose
+            op: op
+        )
+        let data = try encoder.encode(logged)
+        let json = try JSONSerialization.jsonObject(with: data)
+        let violations = taintCheck(json)
+        expect(violations.isEmpty,
+               "LoggedOp wrapping \(op) is taint-free; found: \(violations)")
+        scannedOpCount += 1
+    }
+    expect(scannedOpCount == 19, "scanned every Op case; got \(scannedOpCount)")
+
+    // ── Activity events ───────────────────────────────────────────────────
+    // One AgentActivityEvent per (tone × status) combination. Full cross-product
+    // so EVERY tone and EVERY status is exercised — no zip() that silently drops
+    // the shorter list.
+    let statuses: [AgentStatus] = [.configuring, .working, .idle, .needsAttention, .done, .stale]
+    let tones: [ActivityEventTone] = [.info, .tool, .approval, .error]
+    var scannedEventCount = 0
+    for tone in tones {
+        for status in statuses {
+            let event = AgentActivityEvent(
+                stamping: AgentActivityEventDraft(
+                    tileId: fixedTile,
+                    runId: nil,            // no runId in projection payloads
+                    tone: tone,
+                    kind: "turn.started",
+                    status: status,
+                    summary: "Refactoring auth guard",   // short; must stay < 512 chars
+                    occurredAt: Date(timeIntervalSinceReferenceDate: 0)  // fixed, not wall-clock
+                ),
+                sequence: 5_000_000,   // ABOVE the pid ceiling (4_194_304) — see note below
+                replicaId: fixedReplica
+            )
+            let data = try encoder.encode(event)
+            let json = try JSONSerialization.jsonObject(with: data)
+            let violations = taintCheck(json)
+            expect(violations.isEmpty,
+                   "AgentActivityEvent tone=\(tone) status=\(status) is taint-free; found: \(violations)")
+            scannedEventCount += 1
+        }
+    }
+    // 4 tones × 6 statuses = 24 combinations, all scanned clean.
+    expect(scannedEventCount == 24,
+           "scanned every tone×status combination; got \(scannedEventCount)")
+
+    // ── runId-populated fixture (review round 3 gap) ────────────────────────
+    // Every fixture above sets runId: nil (matching the ticket's locked
+    // breadcrumb, "no runId in projection payloads"), so runId's encoded
+    // representation is never actually walked by the scanner. One additional
+    // fixture with a benign runId string exercises that path so the Case-2
+    // rationale ("catches the case where runId is set to a pid-derived
+    // string") is backed by a fixture that actually scans a non-nil runId.
+    do {
+        let runIdEvent = AgentActivityEvent(
+            stamping: AgentActivityEventDraft(
+                tileId: fixedTile,
+                runId: "FACADE00-0000-4000-8000-000000000005",  // benign, non-pid-shaped
+                tone: .info,
+                kind: "turn.started",
+                status: .working,
+                summary: "Refactoring auth guard",
+                occurredAt: Date(timeIntervalSinceReferenceDate: 0)
+            ),
+            sequence: 5_000_000,
+            replicaId: fixedReplica
+        )
+        let data = try encoder.encode(runIdEvent)
+        let json = try JSONSerialization.jsonObject(with: data)
+        let violations = taintCheck(json)
+        expect(violations.isEmpty,
+               "AgentActivityEvent with a populated benign runId is taint-free; found: \(violations)")
+    }
+
+    // ── Overflow-guard fixtures (RETRY RULING C-20260701-008) ──────────────
+    // A genuine UInt64 > Int.max must actually flow through the real
+    // JSONEncoder → JSONSerialization → taintCheck pipeline: 5_000_000 (used
+    // above) is comfortably below Int.max and never exercises the
+    // `num.uint64Value > UInt64(Int.max)` early-return guard at all.
+    do {
+        let overflowLogged = LoggedOp(
+            opId: OpId(lamport: UInt64.max, replica: fixedReplica),
+            op: .setTileFrame(id: fixedTile, frame: TileFrame(x: 1, y: 1, width: 1, height: 1))
+        )
+        let data = try encoder.encode(overflowLogged)
+        let json = try JSONSerialization.jsonObject(with: data)
+        let violations = taintCheck(json)
+        expect(violations.isEmpty,
+               "LoggedOp with OpId.lamport == UInt64.max (genuine UInt64 > Int.max) is taint-free; found: \(violations)")
+    }
+    do {
+        let overflowEvent = AgentActivityEvent(
+            stamping: AgentActivityEventDraft(
+                tileId: fixedTile, runId: nil, tone: .info, kind: "turn.started",
+                status: .idle, summary: "overflow fixture",
+                occurredAt: Date(timeIntervalSinceReferenceDate: 0)
+            ),
+            sequence: UInt64.max,   // genuine UInt64 > Int.max
+            replicaId: fixedReplica
+        )
+        let data = try encoder.encode(overflowEvent)
+        let json = try JSONSerialization.jsonObject(with: data)
+        let violations = taintCheck(json)
+        expect(violations.isEmpty,
+               "AgentActivityEvent with sequence == UInt64.max (genuine UInt64 > Int.max) is taint-free; found: \(violations)")
+    }
+    // Direct, white-box exercise of the exact guard line: an NSNumber whose
+    // `uint64Value` exceeds `Int.max` must be recognized as clean BEFORE
+    // `intValue` is ever called on it (Done-when #3).
+    do {
+        let hugeNumber = NSNumber(value: UInt64.max)
+        let violations = taintCheck(["lamport": hugeNumber])
+        expect(violations.isEmpty,
+               "a raw NSNumber(UInt64.max) is guarded before intValue truncation; found: \(violations)")
+    }
+
+    // ── Scalar-leaf-only geometry bypass probe (RETRY RULING C-20260701-008) ──
+    // The geometry exemption must apply ONLY to a scalar numeric leaf found
+    // directly under a verified frame/origin/size dict — never through an
+    // array. This is the exact shape a prior attempt let slip through:
+    // the dict's own keys still match TileFrame's exactly, but `x`'s value
+    // is an array hiding a pid-shaped integer instead of a scalar Double.
+    do {
+        let bypassAttempt: [String: Any] = [
+            "frame": [
+                "x": [12345],
+                "y": 0,
+                "width": 0,
+                "height": 0,
+            ] as [String: Any]
+        ]
+        let bypassViolations = taintCheck(bypassAttempt)
+        expect(bypassViolations.contains(where: { $0.pattern == .pidShapedInteger }),
+               "a pid-shaped integer hidden inside a geometry-shaped array leaf (frame.x[12345]) is still caught; found: \(bypassViolations)")
+    }
+    // A second, distinct bypass shape (caught in review round 2): `frame`
+    // ITSELF is an array containing a geometry-shaped dict, rather than a
+    // plain object. A scanner that re-derives the "verified" field name by
+    // stripping the array-index suffix off the reaching path component
+    // (turning `"frame[0]"` back into `"frame"`) would wrongly re-verify
+    // the object inside the array as geometry, letting the pid-shaped `x`
+    // through. The exemption must never apply to a dict reached via array
+    // indexing, no matter how its own keys look.
+    do {
+        let arrayWrappedFrameAttempt: [String: Any] = [
+            "frame": [
+                [
+                    "x": 12345,
+                    "y": 0,
+                    "width": 0,
+                    "height": 0,
+                ] as [String: Any]
+            ]
+        ]
+        let arrayWrappedViolations = taintCheck(arrayWrappedFrameAttempt)
+        expect(arrayWrappedViolations.contains(where: { $0.pattern == .pidShapedInteger }),
+               "a pid-shaped integer inside a geometry-shaped dict that is itself an array element (frame[0].x = 12345) is still caught; found: \(arrayWrappedViolations)")
+    }
+
+    // ── Deliberate failure probe ──────────────────────────────────────────
+    // Confirm the scanner DOES catch a deliberately poisoned payload,
+    // so a future false-negative isn't invisible.
+    struct PoisonedPayload: Encodable {
+        let pid: Int           // pid-shaped integer
+        let pane: String       // matches ^%\d+$
+        let body: String       // exceeds 512 chars
+        let path: String       // host-local path
+    }
+    let poison = PoisonedPayload(
+        pid: 12345,
+        pane: "%42",
+        body: String(repeating: "x", count: 600),
+        path: "/Users/dylan/.claude/sessions/12345.json"
+    )
+    let poisonData = try encoder.encode(poison)
+    let poisonJson = try JSONSerialization.jsonObject(with: poisonData)
+    let poisonViolations = taintCheck(poisonJson)
+    expect(poisonViolations.count >= 4,
+           "scanner detects all four violation kinds in a known-bad payload; got \(poisonViolations.count)")
+}
+
+// MARK: - Invariant I5 manifest: Sync-boundary purity / taint scan (manifest wiring STUB — the real scan itself has LANDED, see "Sync-boundary purity taint scan" block above; this manifest's graduation to a real, scan-derived payload is the "Invariant spine harness" ticket's job, not this file's)
+
+do {
+    // NOTE (review round 3, docs/38-tickets/09-taint-scan-i5.md): the taint scan this
+    // invariant names is NOT a stub anymore — `taintCheck(_:keyPath:)` and the real
+    // LoggedOp/AgentActivityEvent scan block above this MARK are the landed
+    // implementation, and they run and pass on every invocation of this executable.
+    // What remains stubbed is ONLY this manifest's shape: per that ticket's own "How we
+    // test it" note, ticket 09 explicitly does not write a manifest, and folding the real
+    // scan's counts/violations into this block is out of scope for it — that wiring
+    // (spatial_op_field_count, activity_event_field_count, violation_count measured from
+    // the real scan) is the "Invariant spine harness" ticket's job. Until that ticket
+    // lands, this block keeps asserting a real, non-vacuous property of
+    // AgentActivityEvent (one of the two payload families the real scan already covers)
+    // so the manifest below is not entirely disconnected from a live assertion.
     let draft = AgentActivityEventDraft(
         tileId: UUID(uuidString: "B0000000-0000-4000-8000-000000000901")!,
         runId: nil,
@@ -8267,7 +8493,11 @@ do {
         measuredAt: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_800_000_000)),
         measurements: [
             "stub": .bool(true),
-            "depends_on": .string("Taint scan for sync-boundary purity (I5)"),
+            // NOT "the taint scan is unimplemented" — it has landed (see the real block
+            // above this MARK). This names the ticket that still owns graduating THIS
+            // manifest to report the real scan's measured counts/violations.
+            "manifest_wiring_depends_on": .string("Invariant spine harness"),
+            "real_scan_landed": .bool(true),
             // Measured from the non-vacuous assertion just run above (not stub metadata):
             // the actual round-tripped field values of the AgentActivityEvent fixture.
             "fixture_event_kind": .string(eventRound.kind),
