@@ -76,6 +76,7 @@ run_app_check() {
 
 run swift build
 run swift run ContinuumRevivedCoreChecks
+run swift run ContinuumRevivedSyncChecks
 run swift run ContinuumRevivedPaletteChecks
 run swift run ContinuumRevivedFileTreeChecks
 run swift run ContinuumRevivedPerfChecks

@@ -1065,6 +1065,53 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         sandbox.teardownAll()
         guard !sandbox.qaTempDirExists else { throw fail("sandbox temp dir survived teardown") }
 
+        // Delete-tombstone visual gate (ticket 05): three tiles, close the
+        // middle one through the REAL onTileCloseRequested -> removeTile path
+        // (the same wiring the lab uses at panel setup), and assert exactly the
+        // two survivors remain — by id, not count alone — with a non-degenerate
+        // render. This is the UI close path that later emits a deleteTile op
+        // once ticket 06 wires the op-log store.
+        do {
+            let ids = (1...3).map { UUID(uuidString: "00000000-0000-0000-0000-00000000D10\($0)")! }
+            let closeTiles = ids.enumerated().map { i, id in
+                Tile(id: id, kind: .note, title: "close-\(i + 1)",
+                     frame: TileFrame(x: Double(i) * 220 + 20, y: 40, width: 200, height: 150),
+                     zPosition: .fromLegacyRank(i + 1), runtimeRef: nil, metadata: TileMetadata())
+            }
+            let closeCanvas = CanvasNSView(
+                canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil),
+                activeZone: nil, zoneRenderModels: [], showsZoneChrome: false)
+            closeCanvas.frame = NSRect(x: 0, y: 0, width: 720, height: 260)
+            let closeWindow = NSWindow(contentRect: closeCanvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            closeWindow.contentView = closeCanvas
+            closeCanvas.onTileCloseRequested = { [weak closeCanvas] id in closeCanvas?.removeTile(id: id) }
+            for tile in closeTiles {
+                closeCanvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+            }
+            closeCanvas.layoutSubtreeIfNeeded()
+            guard closeCanvas.canvasState.tiles.count == 3 else { throw fail("delete gate: expected 3 tiles installed") }
+            closeCanvas.onTileCloseRequested?(ids[1])   // close the MIDDLE tile
+            closeCanvas.layoutSubtreeIfNeeded()
+            let surviving = Set(closeCanvas.canvasState.tiles.map(\.id))
+            guard surviving == [ids[0], ids[2]] else {
+                throw fail("delete gate: survivors must be exactly {first, last}, got \(surviving)")
+            }
+            let survivingViews = closeCanvas.subviews.compactMap { ($0 as? TileNSView)?.tile.id }
+            guard Set(survivingViews) == [ids[0], ids[2]] else {
+                throw fail("delete gate: rendered tile views must match survivors, got \(survivingViews)")
+            }
+            guard let rep = closeCanvas.bitmapImageRepForCachingDisplay(in: closeCanvas.bounds) else {
+                throw fail("delete gate: bitmap alloc failed")
+            }
+            closeCanvas.cacheDisplay(in: closeCanvas.bounds, to: rep)
+            let metrics = VisualSnapshot.metrics(of: rep)
+            guard metrics.width > 0, metrics.height > 0, !metrics.isBlank else {
+                throw fail("delete gate: render degenerate (\(metrics.distinctSampledColors) colors at \(metrics.width)x\(metrics.height))")
+            }
+            try rep.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("delete-tombstone.png"))
+            rendered.append(["entry": "delete.tombstone.gate", "tilesAfterClose": surviving.count, "width": metrics.width, "height": metrics.height])
+        }
+
         // Launcher pane legibility on the dark host (light-on-dark, accent button).
         let launcherHost = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 300))
         launcherHost.wantsLayer = true

@@ -17,6 +17,12 @@ let package = Package(
             path: "ThirdParty/GhosttyKit.xcframework"
         ),
         .target(name: "ContinuumRevivedCore"),
+        // Sync layer (ticket 06's home; stood up by ticket 05 with the
+        // tombstone vocabulary). Pure Swift, depends only on Core.
+        .target(
+            name: "ContinuumRevivedSync",
+            dependencies: ["ContinuumRevivedCore"]
+        ),
         .target(
             name: "ContinuumRevivedFileTree",
             dependencies: ["ContinuumRevivedCore"],
@@ -70,6 +76,10 @@ let package = Package(
         .executableTarget(
             name: "ContinuumRevivedCoreChecks",
             dependencies: ["ContinuumRevivedCore"]
+        ),
+        .executableTarget(
+            name: "ContinuumRevivedSyncChecks",
+            dependencies: ["ContinuumRevivedSync", "ContinuumRevivedCore"]
         ),
         .executableTarget(
             name: "ContinuumRevivedPaletteChecks",
