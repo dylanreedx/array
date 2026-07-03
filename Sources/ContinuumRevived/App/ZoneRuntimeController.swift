@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import ContinuumRevivedCore
 import Foundation
 
@@ -8,6 +9,9 @@ final class ZoneRuntimeController {
     let projectStore: any ProjectStoring
     let managedSessionStore: ManagedAgentSessionStore
     private(set) var project: Project
+
+    // Decision F seam: the null implementation is the only live wiring today.
+    var agentBus: any AgentMessageBus = NullAgentMessageBus()
 
     var runtimes: [GhosttyTerminalRuntime] = []
     var browserRuntimes: [WKWebViewBrowserRuntime] = []
@@ -640,6 +644,77 @@ final class ZoneRuntimeController {
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("zone-hydration-lifecycle", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: manifestURL, options: .atomic)
+        return manifestURL
+    }
+
+    // Ticket 74: flag-gated real-path check. The retry ruling exempts this
+    // self-check call site from the production grep gate.
+    static func runAgentMessageBusSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+
+        final class MockAgentMessageBus: AgentMessageBus {
+            private(set) var recorded: [AgentBusMessage] = []
+            private var handlers: [(AgentBusMessage) -> Void] = []
+
+            func post(_ message: AgentBusMessage) {
+                recorded.append(message)
+                for handler in handlers { handler(message) }
+            }
+
+            func subscribe(handler: @escaping (AgentBusMessage) -> Void) -> AnyCancellable {
+                handlers.append(handler)
+                return AnyCancellable {}
+            }
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-agent-message-bus-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let controller = try ZoneRuntimeController(root: tempRoot, acquireLock: false)
+        let startedAsNull = controller.agentBus is NullAgentMessageBus
+        try expect(startedAsNull, "agentBus defaults to NullAgentMessageBus")
+
+        let mock = MockAgentMessageBus()
+        controller.agentBus = mock
+        let acceptedReassignment = controller.agentBus is MockAgentMessageBus
+        try expect(acceptedReassignment, "agentBus accepts assignment of another AgentMessageBus implementation")
+
+        let testMessage = AgentBusMessage(
+            senderTileId: UUID(uuidString: "A0000000-0000-4000-8000-000000007401")!,
+            logicalTime: 1,
+            payload: .progressNote(text: "self-check probe")
+        )
+        controller.agentBus.post(testMessage)
+        let recordedExactlyOnce = mock.recorded == [testMessage]
+        try expect(recordedExactlyOnce, "controller.agentBus.post(testMessage) must reach the injected implementation exactly once")
+
+        let manifest: [String: Any] = [
+            "check": "agent-message-bus",
+            "startedAsNull": startedAsNull,
+            "acceptedReassignment": acceptedReassignment,
+            "recordedExactlyOnce": recordedExactlyOnce,
+            "tempProjectRoot": tempRoot.path
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("agent-message-bus", isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let manifestURL = directory.appendingPathComponent("manifest.json")
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

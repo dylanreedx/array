@@ -152,6 +152,7 @@ run_app_check .build/debug/continuum-revived --zone-save-isolation-check
 run_app_check .build/debug/continuum-revived --zone-project-session-naming-check
 run_app_check .build/debug/continuum-revived --zone-lazy-resume-check
 run_app_check .build/debug/continuum-revived --zone-registry-refcount-check
+run_app_check .build/debug/continuum-revived --agent-message-bus-check
 run_app_check .build/debug/continuum-revived --workspace-runtime-install-check
 run_app_check .build/debug/continuum-revived --workspace-switch-check
 run_app_check .build/debug/continuum-revived --workspace-profile-check

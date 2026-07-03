@@ -6800,6 +6800,10 @@ runSessionPrunerTests()
 runManagedAgentSessionRecordTests()
 runAgentAdapterTests()
 
+// MARK: - Ticket 74: Agent message-bus seam
+
+runAgentMessageBusTests()
+
 // MARK: - Ticket 54: Bootstrap auth every path
 
 try runAuthChecks()

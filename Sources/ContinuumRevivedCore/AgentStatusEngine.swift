@@ -68,6 +68,18 @@ public struct AgentStatusEngine: Equatable, Sendable {
         return status
     }
 
+    /// Hook for a future `AgentMessageBus` subscriber to deliver an inbound
+    /// message that updates status. The caller owns tile routing; this engine
+    /// intentionally has no tile identity.
+    public mutating func ingestBusMessage(_ message: AgentBusMessage, at now: Date = Date()) -> AgentStatus {
+        switch message.payload {
+        case .attentionChanged(_, let status):
+            return ingest(.explicit(status), at: now)
+        case .progressNote, .delegateTask:
+            return self.status
+        }
+    }
+
     private mutating func recompute(at now: Date) {
         let next: AgentStatus
         if let explicitStatus {
