@@ -347,3 +347,43 @@ Changed files:
   - reviewer wording updated to Opus-by-default via `CLAUDE_REVIEW_MODEL` + GPT-5.5.
 
 Continuation command should remove `STOP` only when Dylan wants the background loop to run again.
+
+### 2026-07-03 usage-lean daytime mode — Codex-primary loop (GPT-5.5 only)
+
+Dylan works during the day and wants Claude usage preserved. The Claude-driven loop was halted
+gracefully (`touch STOP` → stopped `stop-file-present` after its ticket-09 iteration) and replaced for
+daytime with **`scripts/codex-primary-loop.sh`** (committed `474be0f`) — a standalone driver with **zero
+Claude calls**:
+
+- **GPT-5.5 (`codex exec`) does everything per iteration:** reads the ledger/conflict-log/ruling
+  banners/packets, selects the first eligible ticket, implements, builds, runs the matrix, commits
+  (plain conventional message, ledger row folded in via `--amend`, tagged
+  `gpt-5.5 primary; pending Fable audit`).
+- **The bash driver is the objective gate:** after any commit it independently re-runs `swift build` +
+  `./scripts/run-matrix.sh` and **reverts** the commit if the gate fails — Codex cannot fake-green.
+  A commit accompanied by leftover dirt is also distrusted + reverted.
+- **Auto-escalation:** first attempt at `CODEX_EFFORT` (default `medium`); on failure the driver defers
+  the skip row so the deterministic selection re-picks the same ticket, and the retry runs at
+  `CODEX_ESCALATE_EFFORT` (default `high`). A second failure records the skip row (driver-written, so
+  selection advances — no livelock) and moves on. GPT-5.5 effort levels: none/minimal/low/medium/high/xhigh.
+- **Run state:** `~/.pi/overnight-runs/continuum-overnight/codex-run-*/logs/iter-N.log` + the launch log;
+  `.pi/overnight-logs/latest-run.txt` points at the active run. Stop with `touch STOP`.
+- **Launch:** `rm -f STOP && CODEX_EFFORT=medium nohup caffeinate -is ./scripts/codex-primary-loop.sh > /Users/dylan/.pi/overnight-runs/continuum-overnight/codex-launch-$(date +%Y%m%dT%H%M%S).log 2>&1 & disown`
+
+Context that led here (the amended-retry pattern paying off):
+
+- Retry rulings (`50db6db`) closed the gaps the reviewers found on 07/09/58/74; **07 landed in 21 min**
+  (`ce3a87f`, convergence fuzz: arm64-only pin per Dylan, per-seed oracle, permanent-DROP adversary).
+- **09 landed** (`da87b29`): substance was dual-cleared in run-20260703T065946; its sole rejection was a
+  harness false-positive (the then-untracked `codex-primary-loop.sh` polluting `git status`,
+  C-20260703-021). Resolved by committing the script, re-running the objective gate green, committing 09.
+- **Cycle tally: 03/04/05 + 06 + 55 + 07 + 09 landed.** Codex-primary queue: **58 → 74 → 56 → 66**
+  (56/66 dep-cleared by 07; the prompt encodes this). Never attempted by any loop: 27/30/38/39/40/41/69/70
+  (supervised / unbuilt substrate).
+- First codex-primary run live: `codex-run-20260703T081156`.
+
+Overwatch is lean during the day (read-only ~45-min checks, no subagents). **Deferred until Dylan asks
+(evening):** the full finalization per `_FINALIZATION_PROMPT.md` (multi-agent adversarial review, PR
+draft, morning report, ~40-comment educational walkthrough) **plus the Fable audit of every
+`gpt-5.5 primary; pending Fable audit` commit** — those land through the objective gate only, so the
+audit is the review of record.
