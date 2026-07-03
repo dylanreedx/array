@@ -119,3 +119,4 @@ be salvaged. These rows reset them for the loop to re-drive; if 07 lands, 56 →
 | 09-taint-scan-i5.md | done | da87b29 | matrix: green (headless) | Committed by overwatch: substance dual-cleared in run-20260703T065946 (Claude merge-ready; Codex cleared all substantive concerns over 3 rounds — scalar-leaf-only exemption, array-bypass probes, genuine UInt64>Int.max fixture). Sole rejection was a harness false-positive (untracked codex-primary-loop.sh polluting git status — C-20260703-021), resolved by committing that script (474be0f). Objective gate re-run green before this commit. |
 | 58-activity-projection-transport.md | done | 25b7fb5 | matrix: green (headless) | gpt-5.5 primary; pending Fable audit |
 | 74-agent-message-bus-seam.md | done | 175c992 | matrix: green (headless) | gpt-5.5 primary; pending Fable audit |
+| 56-transport-fuzz-soak.md | done | a019dae | matrix: green (headless) | gpt-5.5 primary; pending Fable audit |

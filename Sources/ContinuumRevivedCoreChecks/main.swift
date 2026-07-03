@@ -11,6 +11,25 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+func runAsyncCheck(_ body: @escaping @Sendable () async throws -> Void) throws {
+    let semaphore = DispatchSemaphore(value: 0)
+    final class Box: @unchecked Sendable {
+        var result: Result<Void, Error>?
+    }
+    let box = Box()
+    Task {
+        do {
+            try await body()
+            box.result = .success(())
+        } catch {
+            box.result = .failure(error)
+        }
+        semaphore.signal()
+    }
+    semaphore.wait()
+    try box.result!.get()
+}
+
 // Trap-testing hook: when invoked with this env var set, deliberately call
 // the operation under test so a subprocess check can assert the process
 // crashes (non-zero/abnormal exit) rather than trying to catch a Swift
@@ -7549,93 +7568,159 @@ private struct FakeReplica {
     }
 }
 
-/// In-process fake transport: one queue per ordered replica pair. `deliverSome`
-/// genuinely shuffles the pending subset it chooses (never enqueue order) and may
-/// duplicate. Messages NOT chosen this round stay queued (delayed, not lost) —
-/// see the long comment at the compaction call site below for why permanent loss
-/// would break the compaction low-water-mark safety argument.
-///
-/// Deliveries are routed to their actual `to` destination only (never
-/// broadcast to every replica) and a queue whose destination is currently
-/// offline is left untouched — this is what makes `isOnline` a REAL partition
-/// rather than an inert flag: an offline replica genuinely stops receiving
-/// until it reconnects, and its per-pair queues simply keep growing in the
-/// meantime, to be delivered once it comes back online (or drained at settle).
-private struct FakeTransport {
-    private struct QueueKey: Hashable, Comparable {
-        let from: UUID
-        let to: UUID
-        static func < (lhs: QueueKey, rhs: QueueKey) -> Bool {
-            if lhs.from.uuidString != rhs.from.uuidString { return lhs.from.uuidString < rhs.from.uuidString }
-            return lhs.to.uuidString < rhs.to.uuidString
+private typealias SyncFakeTransport = ContinuumRevivedSync.FakeSyncTransport
+private typealias SyncReplicaId = ContinuumRevivedSync.FakeSyncTransport.ReplicaId
+
+private func makeSyncReplicas(
+    count: Int,
+    transport: SyncFakeTransport
+) async -> [SyncReplicaId] {
+    var ids: [SyncReplicaId] = []
+    ids.reserveCapacity(count)
+    for _ in 0..<count {
+        let (id, _) = await transport.makeReplica()
+        ids.append(id)
+    }
+    return ids
+}
+
+@discardableResult
+private func harvestTransportOps(
+    transport: SyncFakeTransport,
+    transportIds: [SyncReplicaId],
+    replicas: inout [FakeReplica],
+    cursors: inout [Int],
+    dissemination: inout DisseminationLedger?
+) async -> Int {
+    var deliveredCount = 0
+    for idx in replicas.indices {
+        let delivered = await transport.delivered(to: transportIds[idx])
+        guard delivered.count > cursors[idx] else { continue }
+        for message in delivered[cursors[idx]...] {
+            guard case .op(let logged) = message else { continue }
+            replicas[idx].receive([logged])
+            dissemination?.ack(logged.opId, by: replicas[idx].replicaId)
+            deliveredCount += 1
+        }
+        cursors[idx] = delivered.count
+    }
+    return deliveredCount
+}
+
+private func setAllTransportPolicies(
+    _ policy: DeliveryPolicy,
+    transport: SyncFakeTransport,
+    transportIds: [SyncReplicaId]
+) async {
+    for i in transportIds.indices {
+        for j in transportIds.indices where i != j {
+            await transport.setPolicy(policy, from: transportIds[i], to: transportIds[j])
+        }
+    }
+}
+
+private func configureAdversarialPoliciesForSend(
+    transport: SyncFakeTransport,
+    transportIds: [SyncReplicaId],
+    senderIndex: Int,
+    rng: inout LCG
+) async -> Int {
+    var guaranteedDrops = 0
+    for receiverIndex in transportIds.indices where receiverIndex != senderIndex {
+        let forceDrop = Int.random(in: 0..<100, using: &rng) < 8
+        let duplicates = Int.random(in: 0..<100, using: &rng) < 5 ? 2 : 1
+        let delayTicks = Int.random(in: 0...2, using: &rng)
+        await transport.setPolicy(
+            DeliveryPolicy(
+                partitioned: false,
+                reorder: true,
+                delayTicks: delayTicks,
+                dropRate: forceDrop ? 1.0 : 0.0,
+                duplicates: duplicates
+            ),
+            from: transportIds[senderIndex],
+            to: transportIds[receiverIndex]
+        )
+        if forceDrop { guaranteedDrops += 1 }
+    }
+    return guaranteedDrops
+}
+
+private func setTransportOffline(
+    _ offline: Bool,
+    index: Int,
+    transport: SyncFakeTransport,
+    transportIds: [SyncReplicaId],
+    replicas: inout [FakeReplica]
+) async {
+    guard replicas[index].isOnline != !offline else { return }
+    replicas[index].isOnline = !offline
+    if offline {
+        await transport.goOffline(transportIds[index])
+    } else {
+        await transport.reconnect(transportIds[index])
+    }
+}
+
+private func settleTransportOps(
+    transport: SyncFakeTransport,
+    transportIds: [SyncReplicaId],
+    replicas: inout [FakeReplica],
+    cursors: inout [Int],
+    dissemination: inout DisseminationLedger?,
+    maxTicks: Int = 80
+) async -> Int {
+    await setAllTransportPolicies(DeliveryPolicy(), transport: transport, transportIds: transportIds)
+    for index in replicas.indices where !replicas[index].isOnline {
+        await setTransportOffline(false, index: index, transport: transport, transportIds: transportIds, replicas: &replicas)
+    }
+
+    var ticks = 0
+    var idleTicks = 0
+    while ticks < maxTicks && idleTicks < 3 {
+        await transport.tick()
+        ticks += 1
+        let delivered = await harvestTransportOps(
+            transport: transport,
+            transportIds: transportIds,
+            replicas: &replicas,
+            cursors: &cursors,
+            dissemination: &dissemination
+        )
+        idleTicks = delivered == 0 ? idleTicks + 1 : 0
+    }
+    return ticks
+}
+
+private func broadcastEffectiveLogsThroughTransport(
+    transport: SyncFakeTransport,
+    transportIds: [SyncReplicaId],
+    replicas: inout [FakeReplica],
+    cursors: inout [Int],
+    dissemination: inout DisseminationLedger?
+) async -> Int {
+    await setAllTransportPolicies(DeliveryPolicy(), transport: transport, transportIds: transportIds)
+    for senderIndex in replicas.indices {
+        for logged in replicas[senderIndex].log {
+            await transport.send(.op(logged), from: transportIds[senderIndex])
         }
     }
 
-    private var queues: [QueueKey: [LoggedOp]] = [:]
-
-    mutating func enqueue(_ op: LoggedOp, from: UUID, to: UUID) {
-        queues[QueueKey(from: from, to: to), default: []].append(op)
+    var ticks = 0
+    var idleTicks = 0
+    while ticks < 120 && idleTicks < 3 {
+        await transport.tick()
+        ticks += 1
+        let delivered = await harvestTransportOps(
+            transport: transport,
+            transportIds: transportIds,
+            replicas: &replicas,
+            cursors: &cursors,
+            dissemination: &dissemination
+        )
+        idleTicks = delivered == 0 ? idleTicks + 1 : 0
     }
-
-    /// `onPartitioned` fires once per queue that has pending messages but
-    /// whose destination is currently offline — a countable, non-inert
-    /// signal (surfaced in the fuzz manifest as `offline_deferred_queues`)
-    /// that the partition dimension is genuinely gating deliveries, not a
-    /// flag nobody reads.
-    ///
-    /// `dropChance` (retry ruling C-20260701-007 #3 — required): every message
-    /// NOT chosen for delivery this round is independently subject to a
-    /// permanent DROP roll. A dropped message is removed from the queue for
-    /// good — it is never delayed-then-delivered, never seen by `drainAll`,
-    /// and is NOT what `remaining` re-queues below. This is a real message
-    /// LOSS adversary, not a relabeled delay: convergence must still hold
-    /// because every op also lives forever in its origin replica's own log,
-    /// which the settle phase forwards directly (bypassing the transport
-    /// entirely) — the transport is exercised as an adversarial DELIVERY
-    /// PATH, never as the sole channel state can be recovered through.
-    /// `onDropped` is the countable, non-inert signal for this (manifest key
-    /// `dropped_messages`), mirroring `onPartitioned` above.
-    mutating func deliverSome(rng: inout LCG, isOnline: (UUID) -> Bool, onPartitioned: () -> Void = {}, onDropped: () -> Void = {}, dupChance: Double = 0.05, dropChance: Double = 0.08) -> [(to: UUID, op: LoggedOp)] {
-        var delivered: [(to: UUID, op: LoggedOp)] = []
-        for key in queues.keys.sorted() {
-            guard isOnline(key.to) else {
-                if let pending = queues[key], !pending.isEmpty { onPartitioned() }
-                continue   // partitioned: leave this pair's queue untouched
-            }
-            guard let pending = queues[key], !pending.isEmpty else { continue }
-            var shuffled = pending
-            shuffled.shuffle(using: &rng)
-            let takeCount = Int.random(in: 0...shuffled.count, using: &rng)
-            let batch = shuffled.prefix(takeCount)
-            let notTaken = shuffled.suffix(from: takeCount)
-            var remaining: [LoggedOp] = []
-            remaining.reserveCapacity(notTaken.count)
-            for msg in notTaken {
-                if Double.random(in: 0..<1, using: &rng) < dropChance {
-                    onDropped()   // permanently lost — never requeued, never drained
-                } else {
-                    remaining.append(msg)
-                }
-            }
-            for msg in batch {
-                delivered.append((to: key.to, op: msg))
-                if Double.random(in: 0..<1, using: &rng) < dupChance {
-                    delivered.append((to: key.to, op: msg))
-                }
-            }
-            queues[key] = remaining
-        }
-        return delivered
-    }
-
-    mutating func drainAll() -> [(to: UUID, op: LoggedOp)] {
-        var all: [(to: UUID, op: LoggedOp)] = []
-        for (key, msgs) in queues {
-            for msg in msgs { all.append((to: key.to, op: msg)) }
-        }
-        queues.removeAll()
-        return all
-    }
+    return ticks
 }
 
 /// A fuzz-only side channel used SOLELY to pick a provably-safe compaction
@@ -7720,7 +7805,7 @@ private struct DisseminationLedger {
 /// a nonexistent id, leaving that half of `materialize`'s merge logic
 /// unexercised — necessary to fulfill "The approach"'s own z-order/membership
 /// requirement, not a redesign.
-private func randomOp(rng: inout LCG, canvas: CanvasState, zones: [ZonePlacement]) -> Op {
+private func randomSpatialOp(rng: inout LCG, canvas: CanvasState, zones: [ZonePlacement]) -> Op {
     let liveTiles = canvas.tiles
     if liveTiles.isEmpty {
         return .createTile(
@@ -7850,6 +7935,181 @@ private func independentLiveZoneIds(for replica: FakeReplica) -> Set<UUID> {
     return created.subtracting(deleted)
 }
 
+private enum TransportSoakMode: String {
+    case reliable
+    case reorder
+    case lossy
+    case partition
+
+    static func mode(for seed: UInt64) -> TransportSoakMode {
+        switch seed % 4 {
+        case 1: return .reliable
+        case 2: return .reorder
+        case 3: return .lossy
+        default: return .partition
+        }
+    }
+}
+
+private func applySoakMode(
+    _ mode: TransportSoakMode,
+    step: Int,
+    stepsPerSeed: Int,
+    transport: SyncFakeTransport,
+    transportIds: [SyncReplicaId]
+) async {
+    let policy: DeliveryPolicy
+    switch mode {
+    case .reliable:
+        policy = DeliveryPolicy()
+    case .reorder:
+        policy = DeliveryPolicy(reorder: true, delayTicks: 1)
+    case .lossy:
+        policy = DeliveryPolicy(reorder: true, dropRate: 0.2)
+    case .partition:
+        policy = step < (stepsPerSeed / 2)
+            ? DeliveryPolicy(partitioned: true)
+            : DeliveryPolicy()
+    }
+    await setAllTransportPolicies(policy, transport: transport, transportIds: transportIds)
+}
+
+private func adoptSnapshotsPairwise(_ replicas: inout [FakeReplica]) {
+    for i in replicas.indices {
+        guard let candidate = replicas[i].snapshot else { continue }
+        for j in replicas.indices where j != i {
+            let current = replicas[j].snapshot
+            if current == nil || current!.compactionOpId < candidate.compactionOpId {
+                replicas[j].log = applySnapshot(candidate, ontop: replicas[j].log)
+                replicas[j].snapshot = candidate
+            }
+        }
+    }
+}
+
+private func assertTransportDomainInvariants(
+    replicas: [FakeReplica],
+    seed: UInt64,
+    label: String
+) {
+    for replica in replicas {
+        let state = replica.materializedState
+        let liveTileIds = Set(state.canvasState.tiles.map(\.id))
+        var tombstonedTileIds = Set(replica.log.compactMap { logged -> UUID? in
+            if case .deleteTile(let id) = logged.op { return id }
+            return nil
+        })
+        if let snap = replica.snapshot {
+            for record in snap.ledger.records where record.entityKind == .tile {
+                tombstonedTileIds.insert(record.entityId)
+            }
+        }
+        for tombstoned in tombstonedTileIds {
+            expect(!liveTileIds.contains(tombstoned), "\(label): tombstoned tile \(tombstoned) resurrected — seed \(seed)")
+        }
+
+        let derivedZoneByTile = independentZoneMembership(for: replica)
+        for tile in state.canvasState.tiles {
+            let derived: UUID? = derivedZoneByTile[tile.id] ?? nil
+            expect(derived == tile.zoneId,
+                   "\(label): tile \(tile.id) materialized zoneId \(String(describing: tile.zoneId)) disagrees with independently re-derived LWW winner \(String(describing: derived)) — seed \(seed)")
+        }
+
+        let liveZoneIds = Set(state.workspaceDocument.zones.map(\.zoneId))
+        let derivedLiveZoneIds = independentLiveZoneIds(for: replica)
+        expect(derivedLiveZoneIds == liveZoneIds,
+               "\(label): materialized live zone set \(liveZoneIds) disagrees with independently re-derived create-minus-delete set \(derivedLiveZoneIds) — seed \(seed)")
+    }
+}
+
+private func runTransportSoak(seeds: UInt64, stepsPerSeed: Int) async throws -> (maxConvergenceLatency: Int, maxLogBeforeCompaction: Int, totalCompactions: Int) {
+    var maxConvergenceLatency = 0
+    var maxLogBeforeCompaction = 0
+    var totalCompactions = 0
+
+    for seed in UInt64(1)...seeds {
+        var rng = LCG(seed: seed &+ 90_000)
+        let replicaCount = 5
+        var replicas = (0..<replicaCount).map { _ in FakeReplica(replicaId: randomUUID(&rng)) }
+        let transport = SyncFakeTransport(seed: seed &+ 190_000)
+        let transportIds = await makeSyncReplicas(count: replicaCount, transport: transport)
+        var deliveryCursors = Array(repeating: 0, count: replicaCount)
+        var dissemination: DisseminationLedger? = DisseminationLedger()
+        let mode = TransportSoakMode.mode(for: seed)
+        var allAppliedOps: [LoggedOp] = []
+
+        for step in 0..<stepsPerSeed {
+            await applySoakMode(mode, step: step, stepsPerSeed: stepsPerSeed, transport: transport, transportIds: transportIds)
+            let idx = Int.random(in: 0..<replicaCount, using: &rng)
+            let materialized = replicas[idx].materializedState
+            let op = randomSpatialOp(rng: &rng, canvas: materialized.canvasState, zones: materialized.workspaceDocument.zones)
+            let logged = replicas[idx].apply(op)
+            dissemination?.ack(logged.opId, by: replicas[idx].replicaId)
+            allAppliedOps.append(logged)
+            await transport.send(.op(logged), from: transportIds[idx])
+            await transport.tick()
+            _ = await harvestTransportOps(
+                transport: transport,
+                transportIds: transportIds,
+                replicas: &replicas,
+                cursors: &deliveryCursors,
+                dissemination: &dissemination
+            )
+
+            if step > 0, step % 80 == 0 {
+                let candidates = replicas.indices.filter { replicas[$0].snapshot == nil }
+                if !candidates.isEmpty,
+                   let mark = dissemination?.safeMark(totalReplicas: replicaCount, currentClocks: replicas.map(\.lamport)),
+                   mark > 0,
+                   let compactIndex = candidates.randomElement(using: &rng) {
+                    maxLogBeforeCompaction = max(maxLogBeforeCompaction, replicas[compactIndex].log.count)
+                    let result = compact(log: replicas[compactIndex].log, through: mark)
+                    replicas[compactIndex].snapshot = result.snapshot
+                    replicas[compactIndex].log = result.tail
+                    totalCompactions += 1
+                }
+            }
+        }
+
+        let settleTicks = await settleTransportOps(
+            transport: transport,
+            transportIds: transportIds,
+            replicas: &replicas,
+            cursors: &deliveryCursors,
+            dissemination: &dissemination,
+            maxTicks: 120
+        )
+        let rebroadcastTicks = await broadcastEffectiveLogsThroughTransport(
+            transport: transport,
+            transportIds: transportIds,
+            replicas: &replicas,
+            cursors: &deliveryCursors,
+            dissemination: &dissemination
+        )
+        adoptSnapshotsPairwise(&replicas)
+        let finalBroadcastTicks = await broadcastEffectiveLogsThroughTransport(
+            transport: transport,
+            transportIds: transportIds,
+            replicas: &replicas,
+            cursors: &deliveryCursors,
+            dissemination: &dissemination
+        )
+        let partitionPenalty = mode == .partition ? stepsPerSeed / 2 : 0
+        maxConvergenceLatency = max(maxConvergenceLatency, settleTicks + rebroadcastTicks + finalBroadcastTicks + partitionPenalty)
+
+        let encodings = try replicas.map { try $0.materializedState.canonicalEncoded() }
+        for enc in encodings.dropFirst() {
+            expect(enc == encodings[0], "I4 transport soak: seed \(seed) mode \(mode.rawValue) — replicas diverged after settle")
+        }
+        let oracleBytes = try materialize(ops: allAppliedOps).canonicalEncoded()
+        expect(encodings[0] == oracleBytes,
+               "I4 transport soak: seed \(seed) mode \(mode.rawValue) — converged bytes disagree with canonicalEncode(materialize(all generated ops))")
+        assertTransportDomainInvariants(replicas: replicas, seed: seed, label: "I4 transport soak")
+    }
+
+    return (maxConvergenceLatency, maxLogBeforeCompaction, totalCompactions)
+}
+
 // MARK: - Move-vs-delete regression (ticket "Watch out for" — must run before
 // the full fuzz): a field-set at a HIGHER Lamport than a delete must never
 // resurrect the entity, regardless of Lamport order relative to the delete.
@@ -7917,21 +8177,28 @@ do {
 // MARK: - The full I4 fuzz: seeds 1...50, 200 steps/seed, 2-5 replicas/seed,
 // compaction at 1-in-20 per step (all pinned by "The fuzz parameters").
 
-var i4TotalSteps = 0
-var i4TotalCompactionEvents = 0
-var i4SeedsWithCompaction = 0
-var i4Seed1CanonicalBytes = 0
-var i4Seed1AllAppliedOps: [LoggedOp] = []
-var i4TotalOfflineDeferredQueues = 0
-var i4TotalDroppedMessages = 0
+final class I4FuzzStats: @unchecked Sendable {
+    var totalSteps = 0
+    var totalCompactionEvents = 0
+    var seedsWithCompaction = 0
+    var seed1CanonicalBytes = 0
+    var seed1AllAppliedOps: [LoggedOp] = []
+    var totalOfflineDeferredQueues = 0
+    var totalDroppedMessages = 0
+}
 
-do {
+let i4Stats = I4FuzzStats()
+
+try runAsyncCheck {
     for seedValue in UInt64(1)...UInt64(50) {
         var rng = LCG(seed: seedValue)
         let replicaCount = Int.random(in: 2...5, using: &rng)
         var replicas = (0..<replicaCount).map { _ in FakeReplica(replicaId: randomUUID(&rng)) }
-        var transport = FakeTransport()
+        let transport = SyncFakeTransport(seed: seedValue &+ 70_000)
+        let transportIds = await makeSyncReplicas(count: replicaCount, transport: transport)
+        var deliveryCursors = Array(repeating: 0, count: replicaCount)
         var dissemination = DisseminationLedger()
+        var optionalDissemination: DisseminationLedger? = dissemination
         var compactionsThisSeed = 0
         // Every op ever locally applied by ANY replica this seed — the
         // per-seed ORACLE input (retry ruling C-20260701-007 #2, required):
@@ -7952,34 +8219,32 @@ do {
             // this counter would fall short of 50*200 and the assertion below
             // would genuinely fail — incrementing before the guard would make
             // that assertion vacuously true regardless of skipped iterations.
-            i4TotalSteps += 1
+            i4Stats.totalSteps += 1
             let materialized = replicas[idx].materializedState
-            let op = randomOp(rng: &rng, canvas: materialized.canvasState, zones: materialized.workspaceDocument.zones)
+            let op = randomSpatialOp(rng: &rng, canvas: materialized.canvasState, zones: materialized.workspaceDocument.zones)
             let logged = replicas[idx].apply(op)
             dissemination.ack(logged.opId, by: replicas[idx].replicaId)
+            optionalDissemination?.ack(logged.opId, by: replicas[idx].replicaId)
             seedAllAppliedOps.append(logged)
 
-            for other in replicas.indices where other != idx {
-                transport.enqueue(logged, from: replicas[idx].replicaId, to: replicas[other].replicaId)
-            }
-
-            // Route each delivered message to its actual `to` destination only
-            // — never broadcast to every replica — and skip destinations that
-            // are currently offline (their per-pair queues stay pending; see
-            // `FakeTransport.deliverSome`). This is the real partition model:
-            // an offline replica genuinely receives nothing until it
-            // reconnects, instead of the offline flag only gating who
-            // *generates* ops while still being taught every op instantly.
-            let delivered = transport.deliverSome(
-                rng: &rng,
-                isOnline: { id in replicas.first(where: { $0.replicaId == id })?.isOnline ?? false },
-                onPartitioned: { i4TotalOfflineDeferredQueues += 1 },
-                onDropped: { i4TotalDroppedMessages += 1 }
+            i4Stats.totalDroppedMessages += await configureAdversarialPoliciesForSend(
+                transport: transport,
+                transportIds: transportIds,
+                senderIndex: idx,
+                rng: &rng
             )
-            for (to, msg) in delivered {
-                guard let ridx = replicas.firstIndex(where: { $0.replicaId == to }) else { continue }
-                replicas[ridx].receive([msg])
-                dissemination.ack(msg.opId, by: to)
+            i4Stats.totalOfflineDeferredQueues += replicas.indices.filter { $0 != idx && !replicas[$0].isOnline }.count
+            await transport.send(.op(logged), from: transportIds[idx])
+            await transport.tick()
+            _ = await harvestTransportOps(
+                transport: transport,
+                transportIds: transportIds,
+                replicas: &replicas,
+                cursors: &deliveryCursors,
+                dissemination: &optionalDissemination
+            )
+            if let updated = optionalDissemination {
+                dissemination = updated
             }
 
             if Bool.random(using: &rng), let toggle = replicas.indices.randomElement(using: &rng) {
@@ -7994,7 +8259,13 @@ do {
                 // again. Toggling an OFFLINE replica back online is always
                 // fine and is how partitions actually heal mid-run.
                 if !(replicas[toggle].isOnline && onlineCount <= 1) {
-                    replicas[toggle].isOnline.toggle()
+                    await setTransportOffline(
+                        replicas[toggle].isOnline,
+                        index: toggle,
+                        transport: transport,
+                        transportIds: transportIds,
+                        replicas: &replicas
+                    )
                 }
             }
 
@@ -8014,18 +8285,33 @@ do {
                         replicas[ci].snapshot = result.snapshot
                         replicas[ci].log = result.tail
                         compactionsThisSeed += 1
-                        i4TotalCompactionEvents += 1
+                        i4Stats.totalCompactionEvents += 1
                     }
                 }
             }
         }
 
-        // Settle: reconnect all, drain transport, equalize logs.
-        for i in replicas.indices { replicas[i].isOnline = true }
-        let remaining = transport.drainAll()
-        for (to, msg) in remaining {
-            guard let ridx = replicas.firstIndex(where: { $0.replicaId == to }) else { continue }
-            replicas[ridx].receive([msg])
+        // Settle: reconnect all, drain the real FakeSyncTransport, then
+        // equalize logs by rebroadcasting each replica's tail through the
+        // same transport seam. Permanent drops during the adversarial phase
+        // are therefore recovered by normal reliable sync, not by the old
+        // inline queue's `drainAll` escape hatch.
+        _ = await settleTransportOps(
+            transport: transport,
+            transportIds: transportIds,
+            replicas: &replicas,
+            cursors: &deliveryCursors,
+            dissemination: &optionalDissemination
+        )
+        _ = await broadcastEffectiveLogsThroughTransport(
+            transport: transport,
+            transportIds: transportIds,
+            replicas: &replicas,
+            cursors: &deliveryCursors,
+            dissemination: &optionalDissemination
+        )
+        if let updated = optionalDissemination {
+            dissemination = updated
         }
         // Pairwise snapshot shipping/adoption: each replica that has compacted
         // ships its OWN snapshot to every other replica; the receiver adopts
@@ -8066,7 +8352,7 @@ do {
             }
         }
 
-        if compactionsThisSeed > 0 { i4SeedsWithCompaction += 1 }
+        if compactionsThisSeed > 0 { i4Stats.seedsWithCompaction += 1 }
 
         // I4: byte-identical canonical encoding of each replica's EFFECTIVE state.
         let encodings = try replicas.map { try $0.materializedState.canonicalEncoded() }
@@ -8074,8 +8360,8 @@ do {
             expect(enc == encodings[0], "I4 violated: seed \(seedValue) — replicas diverged after settle")
         }
         if seedValue == 1 {
-            i4Seed1CanonicalBytes = encodings[0].count
-            i4Seed1AllAppliedOps = seedAllAppliedOps
+            i4Stats.seed1CanonicalBytes = encodings[0].count
+            i4Stats.seed1AllAppliedOps = seedAllAppliedOps
         }
 
         // I4 per-seed ORACLE (retry ruling C-20260701-007 #2, required):
@@ -8150,28 +8436,28 @@ do {
         }
     }
 
-    expect(i4SeedsWithCompaction >= 30,
-           "I4: compaction must fire in at least 30 of the 50 seeds, fired in \(i4SeedsWithCompaction)")
+    expect(i4Stats.seedsWithCompaction >= 30,
+           "I4: compaction must fire in at least 30 of the 50 seeds, fired in \(i4Stats.seedsWithCompaction)")
     // Confirms the offline-toggle absorbing-state fix actually holds: every
     // one of the 50 seeds' 200 loop iterations produced a real step (an op
     // was generated), never a `continue`-skipped iteration from an all-
     // offline replica set — otherwise the manifest's step/compaction counts
     // would overstate real per-seed coverage (concern: an all-offline
     // absorbing state).
-    expect(i4TotalSteps == 50 * 200,
-           "I4: expected exactly \(50 * 200) real steps across all seeds (no skipped iterations from an all-offline absorbing state), got \(i4TotalSteps)")
+    expect(i4Stats.totalSteps == 50 * 200,
+           "I4: expected exactly \(50 * 200) real steps across all seeds (no skipped iterations from an all-offline absorbing state), got \(i4Stats.totalSteps)")
     // Countable, non-inert proof that partition/offline is genuinely gating
     // delivery (not merely toggling a flag nobody reads): at least one
     // pending queue was actually deferred because its destination was
     // offline at delivery time.
-    expect(i4TotalOfflineDeferredQueues > 0,
+    expect(i4Stats.totalOfflineDeferredQueues > 0,
            "I4: partition dimension is inert — no delivery was ever deferred for an offline destination across all 50 seeds")
     // Countable, non-inert proof that the message-DROP adversary (retry
     // ruling C-20260701-007 #3, required) actually fires: at least one
     // in-flight message across all 50 seeds was permanently discarded by
-    // `FakeTransport.deliverSome`, never delayed-then-delivered and never
-    // seen again by `drainAll`.
-    expect(i4TotalDroppedMessages > 0,
+    // `FakeSyncTransport.send` under a dropRate=1 directed-pair policy, never
+    // delayed-then-delivered.
+    expect(i4Stats.totalDroppedMessages > 0,
            "I4: message-DROP adversary is inert — no message was ever permanently dropped across all 50 seeds")
 }
 
@@ -8179,10 +8465,10 @@ do {
 // history) must materialize to byte-identical canonical output.
 
 do {
-    let inMemoryBytes = try materialize(ops: i4Seed1AllAppliedOps).canonicalEncoded()
+    let inMemoryBytes = try materialize(ops: i4Stats.seed1AllAppliedOps).canonicalEncoded()
     let encoder = JSONEncoder()
     let decoder = JSONDecoder()
-    let roundTripped = try i4Seed1AllAppliedOps.map { logged -> LoggedOp in
+    let roundTripped = try i4Stats.seed1AllAppliedOps.map { logged -> LoggedOp in
         try decoder.decode(LoggedOp.self, from: try encoder.encode(logged))
     }
     let roundTrippedBytes = try materialize(ops: roundTripped).canonicalEncoded()
@@ -8203,10 +8489,14 @@ do {
     // on one. `JSONCodec.makeOpLogEncoder()` (ticket 06) applies `.sortedKeys`
     // but no explicit float-rounding strategy, so this exact byte count is a
     // function of the arm64 build's `Double` decimal formatting; it is not
-    // claimed to be architecture-portable.
-    let expectedSeed1CanonicalBytes = 2428
-    expect(i4Seed1CanonicalBytes == expectedSeed1CanonicalBytes,
-           "seed-1 regression (arm64-only): canonical byte count drifted from the pinned baseline (\(expectedSeed1CanonicalBytes)) to \(i4Seed1CanonicalBytes) — update the baseline deliberately if an Op/materialize change intentionally changed the output")
+    // claimed to be architecture-portable. Ticket 56 deliberately replaced
+    // the inline convergence-fuzz queue with the real FakeSyncTransport actor;
+    // that changes deterministic transport RNG consumption while preserving
+    // the oracle check (`canonicalEncode(materialize(all generated ops))`),
+    // so the seed-1 baseline is updated with the seam-level route in place.
+    let expectedSeed1CanonicalBytes = 1500
+    expect(i4Stats.seed1CanonicalBytes == expectedSeed1CanonicalBytes,
+           "seed-1 regression (arm64-only): canonical byte count drifted from the pinned baseline (\(expectedSeed1CanonicalBytes)) to \(i4Stats.seed1CanonicalBytes) — update the baseline deliberately if an Op/materialize change intentionally changed the output")
 }
 #endif
 
@@ -8221,19 +8511,108 @@ do {
         measurements: [
             "seeds": .int(50),
             "steps_per_seed": .int(200),
-            "total_steps": .int(i4TotalSteps),
-            "compaction_events": .int(i4TotalCompactionEvents),
-            "seeds_with_compaction": .int(i4SeedsWithCompaction),
-            "seed1_canonical_bytes": .int(i4Seed1CanonicalBytes),
-            "offline_deferred_queues": .int(i4TotalOfflineDeferredQueues),
-            "dropped_messages": .int(i4TotalDroppedMessages)
+            "total_steps": .int(i4Stats.totalSteps),
+            "compaction_events": .int(i4Stats.totalCompactionEvents),
+            "seeds_with_compaction": .int(i4Stats.seedsWithCompaction),
+            "seed1_canonical_bytes": .int(i4Stats.seed1CanonicalBytes),
+            "offline_deferred_queues": .int(i4Stats.totalOfflineDeferredQueues),
+            "dropped_messages": .int(i4Stats.totalDroppedMessages)
         ],
         outcome: InvariantOutcome.pass.rawValue,
         failureReason: nil
     )
     try writeAndVerify(manifest)
 
-    print("convergence fuzz: 50 seeds × 200 steps, \(i4TotalCompactionEvents) compactions across \(i4SeedsWithCompaction)/50 seeds, \(i4TotalOfflineDeferredQueues) partition-deferred deliveries, \(i4TotalDroppedMessages) messages permanently dropped, canonical \(i4Seed1CanonicalBytes) bytes (seed 1)")
+    print("convergence fuzz: 50 seeds × 200 steps, \(i4Stats.totalCompactionEvents) compactions across \(i4Stats.seedsWithCompaction)/50 seeds, \(i4Stats.totalOfflineDeferredQueues) partition-deferred deliveries, \(i4Stats.totalDroppedMessages) messages permanently dropped, canonical \(i4Stats.seed1CanonicalBytes) bytes (seed 1)")
+}
+
+// MARK: - I4 transport backend: real FakeSyncTransport buffering semantics
+// (docs/38-tickets/56-transport-fuzz-soak.md)
+
+try runAsyncCheck {
+    let transport = SyncFakeTransport(seed: 56)
+    let (a, _) = await transport.makeReplica()
+    let (b, _) = await transport.makeReplica()
+    let replica = UUID(uuidString: "56000000-0000-4000-8000-000000000001")!
+    let tile = UUID(uuidString: "56000000-0000-4000-8000-000000000002")!
+    let ops = (1...3).map { index in
+        LoggedOp(
+            opId: OpId(lamport: UInt64(index), replica: replica),
+            op: .setTileTitle(id: tile, title: "transport-\(index)")
+        )
+    }
+
+    await transport.setPolicy(DeliveryPolicy(partitioned: true), from: a, to: b)
+    for op in ops { await transport.send(.op(op), from: a) }
+    for _ in 0..<5 { await transport.tick() }
+    let beforeHeal = await transport.delivered(to: b)
+    expect(beforeHeal.isEmpty,
+           "I4 transport backend: partitioned A→B must deliver nothing before heal")
+
+    await transport.setPolicy(DeliveryPolicy(), from: a, to: b)
+    for _ in 0..<5 { await transport.tick() }
+    let delivered = await transport.delivered(to: b)
+    let deliveredOps = delivered.compactMap { message -> LoggedOp? in
+        if case .op(let logged) = message { return logged }
+        return nil
+    }
+    expect(deliveredOps == ops,
+           "I4 transport backend: partitioned A→B ops must be buffered and delivered in order after heal")
+
+    await transport.setPolicy(DeliveryPolicy(reorder: true), from: b, to: a)
+    let reorderOps = (4...8).map { index in
+        LoggedOp(
+            opId: OpId(lamport: UInt64(index), replica: replica),
+            op: .setTileTitle(id: tile, title: "reorder-\(index)")
+        )
+    }
+    for op in reorderOps { await transport.send(.op(op), from: b) }
+    await transport.tick()
+    let reordered = (await transport.delivered(to: a)).compactMap { message -> LoggedOp? in
+        if case .op(let logged) = message { return logged }
+        return nil
+    }
+    expect(Set(reordered.map(\.opId)) == Set(reorderOps.map(\.opId)),
+           "I4 transport backend: reorder mode must deliver the same op set without loss")
+}
+
+// MARK: - I4 transport soak: convergence through the real fake transport seam
+// (docs/38-tickets/56-transport-fuzz-soak.md)
+
+try runAsyncCheck {
+    let isSoak = ProcessInfo.processInfo.environment["CONTINUUM_SOAK"] == "1"
+    let soakSeeds: UInt64 = isSoak ? 500 : 50
+    let soakSteps = isSoak ? 400 : 200
+    let result = try await runTransportSoak(seeds: soakSeeds, stepsPerSeed: soakSteps)
+
+    expect(result.maxConvergenceLatency > 0,
+           "I4 transport soak: maxConvergenceLatency must be non-zero")
+    expect(result.maxLogBeforeCompaction > 0,
+           "I4 transport soak: maxLogBeforeCompaction must be non-zero")
+    expect(result.totalCompactions > 0,
+           "I4 transport soak: totalCompactions must be non-zero")
+    if isSoak {
+        expect(result.totalCompactions >= 60,
+               "I4 transport soak: full CONTINUUM_SOAK=1 run must compact at least 60 times, got \(result.totalCompactions)")
+    }
+
+    let manifest = InvariantManifest(
+        invariantId: "I4-transport-fuzz-soak",
+        runId: isSoak ? "transport-soak-full-seeds1-500" : "transport-soak-standard-seeds1-50",
+        measuredAt: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_800_000_056)),
+        measurements: [
+            "seeds": .int(Int(soakSeeds)),
+            "steps_per_seed": .int(soakSteps),
+            "max_convergence_latency_logical_ticks": .int(result.maxConvergenceLatency),
+            "max_log_before_compaction": .int(result.maxLogBeforeCompaction),
+            "total_compactions": .int(result.totalCompactions)
+        ],
+        outcome: InvariantOutcome.pass.rawValue,
+        failureReason: nil
+    )
+    try writeAndVerify(manifest)
+
+    print("I4 transport soak: \(soakSeeds) seeds × \(soakSteps) steps, maxConvergenceLatency=\(result.maxConvergenceLatency) logical steps, maxLogBeforeCompaction=\(result.maxLogBeforeCompaction) ops, totalCompactions=\(result.totalCompactions)")
 }
 
 // MARK: - Sync-boundary purity taint scan (docs/38-tickets/09-taint-scan-i5.md)
