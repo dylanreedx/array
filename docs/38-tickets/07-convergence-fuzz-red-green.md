@@ -125,7 +125,7 @@ The existing spatial types being operated on (read from `CanvasState.swift` line
 - `CanvasState` (`CanvasState.swift:3`) — `tiles: [Tile]`, `groups: [TileGroup]`,
   `viewport: CanvasViewport`
 - `Tile` (`CanvasState.swift:39`) — `id: UUID`, `frame: TileFrame` (`CanvasState.swift:80`),
-  `zIndex: Int` (`:44`), `runtimeRef: RuntimeRef?` (`:45` — excluded from sync ops by the
+  `zPosition: FracIndex` (re-modeled from the old `zIndex: Int` by ticket 04), `runtimeRef: RuntimeRef?` (excluded from sync ops by the
   boundary-purity constraint, never appears in an `Op`, always `nil` in materialized output)
 - `TileGroup` (`CanvasState.swift:190`) — `id: UUID`, `tileIds: [UUID]` (`:193`, superseded
   by the membership register; the fuzz operates on the re-modeled membership, not this list)

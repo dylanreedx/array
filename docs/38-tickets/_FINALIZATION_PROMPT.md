@@ -29,6 +29,13 @@ Dylan explicitly approves. All final review is done by **Fable**.
    reason codes (from `_CONFLICT_LOG.md`); matrix status incl. headless GUI debt; **Codex-fallback
    commits flagged for Fable audit** (see below); architecture notes; risks; TestFlight/iOS/substrate
    readiness checklist.
+5. **Educational PR walkthrough → `docs/38-tickets/_PR_WALKTHROUGH.md` (Dylan explicitly wants this):**
+   ~**40 anchored comments** across the run's most vital + interesting areas, each entry:
+   `file:line — what this does / why it's done this way / the tradeoff or alternative rejected / what to
+   watch when extending it`. Written to TEACH Dylan the branch, not just certify it. Weight toward the
+   non-obvious: the schema-migration re-stamp seam, the LWW/tombstone convergence logic, the Op wire
+   format + why the transport uses an opaque envelope, the reader I5 boundary, and any subtle
+   invariant a future contributor would break. Aim for genuine insight per comment, not narration.
 
 ## Fable audit of Codex-fallback commits (mandatory)
 Every commit whose `_PROGRESS.md` row says "gpt-5.5 fallback; pending Fable audit" (cross-ref run
