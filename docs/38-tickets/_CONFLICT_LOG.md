@@ -39,9 +39,9 @@ log to add explicit rulings, prompt amendments, and recovery actions.
 
 | id | ticket | status | class | source | required ruling / recovery action | owner | resolved in |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| C-20260701-001 | `03-membership-tile-register.md` | open | `SCOPE-FENCE`, `MIGRATION-DATALOSS`, `REVIEW-REJECTED` | `_PROGRESS.md`, dry-run agents | Loosen/split schema re-stamp scope; run 03A–03D micro-sequence before marking 03 retryable. | Dylan/Fable | - |
-| C-20260701-002 | `04-zorder-fractional-index.md` | open | `SCOPE-FENCE`, `MIGRATION-DATALOSS`, `REVIEW-REJECTED` | `_PROGRESS.md`, dry-run agents | Split into FracIndex hardening, tile migration, workspace migration, render/hit-test migration. | Dylan/Fable | - |
-| C-20260701-003 | `05-delete-tombstone.md` | open | `DIRTY-UNTRACKED`, `DEP-BLOCKED`, `REVIEW-REJECTED` | `_PROGRESS.md`, stash list, dry-run agents | Retryable after file-hygiene guard; forbid drift into ticket 06 materialize/compactor. | Fable | - |
+| C-20260701-001 | `03-membership-tile-register.md` | resolved | `SCOPE-FENCE`, `MIGRATION-DATALOSS`, `REVIEW-REJECTED` | `_PROGRESS.md`, dry-run agents | Fence loosened by human-authorized ruling (see entry note); 03A–03D landed as one unit. | Dylan/Fable | 0468b4b |
+| C-20260701-002 | `04-zorder-fractional-index.md` | resolved | `SCOPE-FENCE`, `MIGRATION-DATALOSS`, `REVIEW-REJECTED` | `_PROGRESS.md`, dry-run agents | Split executed as 04A/04B/04C micro-commits (see entry note); no compat shim; legacy order preserved. | Dylan/Fable | 993c684, ab4811f, f2b0e44 |
+| C-20260701-003 | `05-delete-tombstone.md` | resolved | `DIRTY-UNTRACKED`, `DEP-BLOCKED`, `REVIEW-REJECTED` | `_PROGRESS.md`, stash list, dry-run agents | File-hygiene guard applied (git add -N + fresh-checkout build proof); ticket-06 scope untouched. | Fable | 99eabb8 |
 | C-20260701-004 | `08-sync-observation-type-split.md` | resolved | `DIRTY-UNTRACKED`, `PROVIDER-QUOTA`, `HARNESS-FAIL` | current dirty tree, run `20260701T195840` | Classify current uncommitted attempt before any new ticket; provider regex missed “session limit”. | Dylan/Fable | 368cf7e |
 | C-20260701-005 | `10-session-topology-snapshot.md` | resolved | `CONTRACT-CONFLICT` | `_HANDOFF.md`, dry-run agents | Prompt/ticket amendment: empty or whitespace tmux output is a valid zero-session snapshot; no `emptyInput` case. | Fable | c8e6a56 |
 | C-20260701-006 | `06-oplog-apply-compaction.md` | open | `DEP-BLOCKED` | dry-run agents | Do not attempt until 03/04/05 semantics are landed or explicitly decomposed. | Fable | - |
@@ -76,6 +76,21 @@ log to add explicit rulings, prompt amendments, and recovery actions.
   3. `03C-membership-mutation-semantics` — preserve all non-`zoneId` fields under stale callers.
   4. `03D-production-membership-projection` — real rendering/projection wiring + I5 check.
 - **Recovery:** Author packets/micro-tickets, then retry high-effort with schema and clobber gates.
+- **Ruling + Resolution (2026-07-02, human-authorized pass, commit `0468b4b`):** The ticket's
+  "Stop if" fence was AMENDED to permit the schema re-stamp/save paths and the production render
+  wiring. Fences loosened: (1) `CanvasState`/`WorkspaceDocument` `encode(to:)` now ALWAYS writes
+  `currentSchemaVersion` — this structurally covers `ProjectStore.saveCanvas`, `WorkspaceStore.save`,
+  and the `WorkspaceDocument` nested in `WorkspaceProfile` (no per-store edits needed; the prior
+  masquerade bug is impossible at the type level); decoders migrate supported older versions forward
+  in memory and stamp them current. (2) `CanvasNSView` (outside the original file list) gained the
+  production `setTileZone` sink — every membership mutation writes the `Tile.zoneId` register, which
+  persists via the existing canvas save path; `install(tileView:for:)` no longer clobbers the stored
+  register when replacing a tile record. (3) `WorkspaceRuntime` renders ambient zones from
+  `document.tiles(forZone:)` in install/switch/addZone. `setTiles(_:forZone:)` and `setTileZone` are
+  field-scoped (zoneId only). LWW checks fold through the production `setTileZone` write in `OpId`
+  order (no local fold state); I5 check scans the real `setTileZone` wire bytes from
+  `JSONCodec.makeOpLogEncoder()`. Schema sequence: canvas v1→2, workspace v2→3 (ticket 04 takes them
+  to 3/4). Matrix green (headless) at the commit.
 
 ## C-20260701-002 — `04-zorder-fractional-index.md`
 
@@ -96,6 +111,20 @@ log to add explicit rulings, prompt amendments, and recovery actions.
   3. `04C-workspace-zone-zposition-migration`
   4. `04D-engine-render-hittest-order`
 - **Recovery:** Run grep gate: no production `zIndex` except decode-only legacy keys.
+- **Ruling + Resolution (2026-07-02, human-authorized pass, commits `993c684`/`ab4811f`/`f2b0e44`):**
+  Landed as the prescribed split — 04A FracIndex hardening (Hashable, distribute, fromLegacyRank,
+  after/before with exhaustion-tie semantics), 04B tile migration (`Tile.zIndex` REMOVED, no
+  `init(zIndex:)` shim, ~150 call sites migrated under compile enforcement; canvas v2→3), 04C zone
+  migration (`ZonePlacement.zPosition`, stored `zoneZOrder` removed, workspace v3→4; legacy order
+  stamped listed-then-unlisted-on-top, never collapsed to 0.5). `bringToFront`/`bringZoneToFront`
+  are no-ops on the already-frontmost item; `renormalizeZOrder` deleted; all render/hit-test sorts
+  key on `(zPosition, id)` — zone hit-testing reads each placement's register, not array order.
+  Grep gate passes: remaining `zIndex` tokens are the decode-only legacy CodingKey, legacy JSON
+  migration fixtures, comments, and an unrelated CSS property. WIRE AMENDMENT needing human
+  sign-off: `Op.createTile` z payload → `zPosition: FracIndex` (key `"zPosition"`) and
+  `Op.setTileZIndex` payload → `z: FracIndex` (key `"z"`), amending ticket 02's frozen wire format
+  while the op log has zero producers/consumers/persisted data (pre-ticket-06); frozen fixtures
+  updated and a check pins that pre-amendment Int payloads fail loudly. Matrix green (headless).
 
 ## C-20260701-003 — `05-delete-tombstone.md`
 
@@ -114,6 +143,17 @@ log to add explicit rulings, prompt amendments, and recovery actions.
   2. `05B-tombstone-vocabulary`
   3. `05C-delete-policy-checks`
 - **Recovery:** Review package target membership and `git status --short` before any reviewer pass.
+- **Ruling + Resolution (2026-07-02, human-authorized pass, commit `99eabb8`):** Landed with the
+  file-hygiene guard: new files (`Sources/ContinuumRevivedSync/Tombstone.swift`,
+  `Sources/ContinuumRevivedSyncChecks/main.swift`) were `git add -N`'d before review and a fresh
+  checkout of the commit (`git archive HEAD`) builds and passes `ContinuumRevivedSyncChecks`.
+  `ContinuumRevivedSync` stood up per ticket 06's layout (pure Swift, Core-only dependency) with the
+  tombstone vocabulary ONLY — no materialize, no compactor, no tombstone state on the snapshot
+  types; `Op.deleteTile`/`deleteZone` already existed on Core's frozen enum (ticket 02), so no wire
+  change. Delete-wins policy pinned by a local test-only fold whose field-set upsert makes the
+  `isTombstoned` guard load-bearing (with a sanity leg proving resurrection WOULD occur without the
+  tombstone). New `ContinuumRevivedSyncChecks` line added to `run-matrix.sh` (additive). ComponentLab
+  close-middle-tile visual gate rides `--component-lab-check`. Matrix green (headless).
 
 ## C-20260701-004 — `08-sync-observation-type-split.md`
 
@@ -163,6 +203,11 @@ log to add explicit rulings, prompt amendments, and recovery actions.
 - **Evidence:** dry-run `explorer-20260702T004047Z-c55974`.
 - **Conflict:** Requires real membership, fractional z-order, and tombstone semantics from 03/04/05.
 - **Recovery:** Do not stub placeholder models. Attempt only after 03/04/05 or their micro-sequence lands.
+- **Update (2026-07-02):** 03/04/05 landed (`0468b4b`, `993c684`/`ab4811f`/`f2b0e44`, `99eabb8`) —
+  the dependency is satisfied. Note for the implementer: `Op.setTileZIndex` now carries
+  `z: FracIndex` and `Op.createTile` carries `zPosition: FracIndex` (C-002 wire amendment);
+  `materialize` writes `Tile.zPosition`/`Tile.zoneId`/`ZonePlacement.zPosition` registers and must
+  cite `TombstoneSet`'s delete-wins doc comment.
 
 ## C-20260701-007 — `07-convergence-fuzz-red-green.md`
 
