@@ -213,6 +213,83 @@ func runSpatialOpTests() {
         hi = mid
     }
 
+    // MARK: FracIndex hardening (ticket 04A)
+
+    // Hashable: equal values hash equal; a Set keyed on FracIndex behaves.
+    expect(
+        Set([FracIndex(value: 0.5), FracIndex(value: 0.5), FracIndex(value: 0.25)]).count == 2,
+        "FracIndex Hashable: duplicate values collapse in a Set"
+    )
+
+    // distribute(count:): n strictly increasing values, all inside (0, 1).
+    let distributed = FracIndex.distribute(count: 7)
+    expect(distributed.count == 7, "distribute(7) yields 7 positions")
+    expect(FracIndex.distribute(count: 0).isEmpty, "distribute(0) yields no positions")
+    for (a, b) in zip(distributed, distributed.dropFirst()) {
+        expect(a < b, "distribute() must be strictly increasing")
+    }
+    expect(
+        distributed.allSatisfy { $0.value > 0 && $0.value < 1 },
+        "distribute() values all inside the open interval"
+    )
+
+    // fromLegacyRank: strictly monotonic over mixed-sign ranks, all in (0, 1).
+    let legacyRanks = [-100_000, -99, -2, -1, 0, 1, 2, 3, 99, 1000, 100_000]
+    let mapped = legacyRanks.map(FracIndex.fromLegacyRank)
+    for (a, b) in zip(mapped, mapped.dropFirst()) {
+        expect(a < b, "fromLegacyRank must preserve strict integer order")
+    }
+    expect(mapped.allSatisfy { $0.value > 0 && $0.value < 1 }, "fromLegacyRank values all inside (0, 1)")
+    expect(
+        FracIndex.fromLegacyRank(5) == FracIndex.fromLegacyRank(5),
+        "fromLegacyRank is deterministic (equal ranks map to equal positions)"
+    )
+
+    // after(): 1_000 successive bring-to-fronts never leave (0, 1), are
+    // nondecreasing, stay strictly increasing for at least the first 50, and
+    // at precision exhaustion return the input (a tie) rather than trapping.
+    var front = FracIndex(value: 0.5)
+    var strictlyIncreasingPrefix = 0
+    var sawExhaustionTie = false
+    for i in 0..<1_000 {
+        let next = FracIndex.after(front)
+        expect(next.value > 0 && next.value < 1, "after() must stay inside (0, 1) at step \(i)")
+        expect(next.value >= front.value, "after() must never move an item DOWN at step \(i)")
+        if next.value > front.value {
+            if !sawExhaustionTie { strictlyIncreasingPrefix += 1 }
+        } else {
+            sawExhaustionTie = true
+        }
+        front = next
+    }
+    expect(strictlyIncreasingPrefix >= 50, "after() must produce distinct positions for at least the first 50 promotions, got \(strictlyIncreasingPrefix)")
+    expect(sawExhaustionTie, "1000 promotions must reach the documented precision-exhaustion tie (sort stays total via id tie-break)")
+
+    // before(): mirror-image floor behavior.
+    var back = FracIndex(value: 0.5)
+    for i in 0..<1_000 {
+        let next = FracIndex.before(back)
+        expect(next.value > 0 && next.value < 1, "before() must stay inside (0, 1) at step \(i)")
+        expect(next.value <= back.value, "before() must never move an item UP at step \(i)")
+        back = next
+    }
+
+    // Tie-break determinism: identical positions sort by id, same result on
+    // every pass, and swapping the ids reverses the order.
+    struct ZItem { let id: UUID; let z: FracIndex }
+    let idLow = UUID(uuidString: "0000000A-0000-4000-8000-000000000001")!
+    let idHigh = UUID(uuidString: "0000000B-0000-4000-8000-000000000001")!
+    let tie = FracIndex(value: 0.5)
+    func sortedIds(_ items: [ZItem]) -> [UUID] {
+        items.sorted { lhs, rhs in
+            if lhs.z != rhs.z { return lhs.z > rhs.z }
+            return lhs.id.uuidString > rhs.id.uuidString
+        }.map(\.id)
+    }
+    let orderA = sortedIds([ZItem(id: idLow, z: tie), ZItem(id: idHigh, z: tie)])
+    let orderB = sortedIds([ZItem(id: idHigh, z: tie), ZItem(id: idLow, z: tie)])
+    expect(orderA == [idHigh, idLow] && orderA == orderB, "tied FracIndex positions must sort deterministically by id, input-order-independent")
+
     // MARK: LoggedOp
     let loggedOp = LoggedOp(opId: OpId(lamport: 1, replica: replicaA), op: .setTileFrame(id: fixedId, frame: TileFrame(x: 10, y: 20, width: 300, height: 400)))
     let loggedOpEncoded = try! JSONCodec.makeOpLogEncoder().encode(loggedOp)

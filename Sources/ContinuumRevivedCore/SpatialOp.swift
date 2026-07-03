@@ -26,7 +26,7 @@ public struct OpId: Comparable, Codable, Hashable, Sendable {
 /// A fractional z-order position in the open interval (0, 1). Both boundary
 /// anchors (`first`, `last`) are concrete in-interval values, never sentinels,
 /// so every consumer of `FracIndex` treats all values uniformly.
-public struct FracIndex: Comparable, Codable, Sendable {
+public struct FracIndex: Comparable, Codable, Hashable, Sendable {
     public var value: Double
 
     public init(value: Double) {
@@ -44,6 +44,42 @@ public struct FracIndex: Comparable, Codable, Sendable {
     public static func between(_ lo: FracIndex, _ hi: FracIndex) -> FracIndex {
         precondition(lo.value < hi.value, "FracIndex.between requires lo.value < hi.value")
         return FracIndex(value: (lo.value + hi.value) / 2.0)
+    }
+
+    /// Distribute `count` positions evenly across (0, 1), strictly increasing.
+    /// Used by the schema migrations that convert a legacy rank ARRAY
+    /// (`zoneZOrder`) to per-item fractional positions.
+    public static func distribute(count: Int) -> [FracIndex] {
+        guard count > 0 else { return [] }
+        let step = 1.0 / Double(count + 1)
+        return (1...count).map { FracIndex(value: step * Double($0)) }
+    }
+
+    /// Order-preserving map from a legacy integer rank (the old `Tile.zIndex`)
+    /// into (0, 1): 0.5 + atan(rank)/pi. Strictly monotonic over the practical
+    /// Int range, so migrated tiles keep their exact relative order with no
+    /// global renumber pass; equal legacy ranks stay equal and resolve through
+    /// the deterministic (zPosition, id) sort like any other tie.
+    public static func fromLegacyRank(_ rank: Int) -> FracIndex {
+        FracIndex(value: 0.5 + atan(Double(rank)) / Double.pi)
+    }
+
+    /// A position strictly above `x` (the bring-to-front step): halfway
+    /// between `x` and the virtual 1.0 boundary. At double-precision
+    /// exhaustion no such value exists; returns `x` unchanged — a tie,
+    /// resolved by the (zPosition, id) sort, never a trap.
+    public static func after(_ x: FracIndex) -> FracIndex {
+        let candidate = x.value + (1.0 - x.value) / 2.0
+        guard candidate > x.value, candidate < 1.0 else { return x }
+        return FracIndex(value: candidate)
+    }
+
+    /// A position strictly below `x` (the send-to-back step); same exhaustion
+    /// semantics as `after(_:)`.
+    public static func before(_ x: FracIndex) -> FracIndex {
+        let candidate = x.value / 2.0
+        guard candidate < x.value, candidate > 0.0 else { return x }
+        return FracIndex(value: candidate)
     }
 
     public static func < (lhs: FracIndex, rhs: FracIndex) -> Bool {
