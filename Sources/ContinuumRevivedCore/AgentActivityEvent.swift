@@ -206,7 +206,7 @@ public func apply(_ tree: ActivityLogSnapshot, _ event: AgentActivityEvent) -> A
 
 // Stream item: exactly the two cases a subscriber can receive.
 // snapshot always arrives first; events tail from there.
-public enum ActivityStreamItem: Sendable {
+public enum ActivityStreamItem: Codable, Equatable, Sendable {
     case snapshot(ActivityLogSnapshot)
     case event(AgentActivityEvent)
 }

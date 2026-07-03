@@ -203,3 +203,6 @@ print("ContinuumRevivedSyncChecks passed: materialize + compact proven (LWW, tom
 // Ticket: docs/38-tickets/55-synctransport-seam.md
 try await runSyncTransportChecks()
 try await runSyncTransportBackendChecks()
+
+// Ticket: docs/38-tickets/58-activity-projection-transport.md
+try await runActivityProjectionChecks()

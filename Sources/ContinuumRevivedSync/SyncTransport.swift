@@ -45,6 +45,8 @@ public enum SyncTransportError: Error, Sendable, Equatable {
 public enum SyncMessage: Codable, Sendable, Equatable {
     case op(LoggedOp)
     case snapshot(CompactedSnapshot)
+    case activity(ActivityStreamItem)
+    case activitySubscribe(ActivitySubscribeRequest)
 }
 
 /// The transport boundary. Concrete implementations include
