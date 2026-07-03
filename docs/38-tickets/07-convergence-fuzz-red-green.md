@@ -1,5 +1,20 @@
 # Convergence fuzz: write the I4 RED→GREEN tripwire before any transport
 
+> **Retry rulings C-20260701-007 (read before implementing — supersede any conflicting line below):**
+> 1. **Arch (Dylan's ruling):** Apple Silicon (arm64) is the only supported arch. The seed-1 canonical
+>    byte-pin may stay but must be documented arm64-only; the x86_64 matrix arm is DROPPED — do not
+>    build or gate on it.
+> 2. **Per-seed oracle (required):** for every seed, assert the final converged bytes
+>    `== canonicalEncode(materialize(all generated ops))`. Convergence alone is insufficient — a bug
+>    dropping the same op on every replica still converges.
+> 3. **Message-DROP adversary (required):** the delivery adversary must be able to permanently DROP
+>    unselected messages, not only delay/reorder/duplicate.
+> 4. **Compaction fence (signed off):** `safeMark` compacting only through fully-acked points is
+>    correct-by-design per this ticket's own "provably acked" rule; watermark-race fuzzing is
+>    deferred to ticket 56. Do not widen compaction fuzzing here.
+> 5. Determinism ruling stands: seed-derived fixed UUIDs/timestamps only — no live `UUID()`/`Date()`.
+> A prior attempt is stashed (`git stash list`) and may be salvaged where its code survives review findings.
+
 ## What this delivers
 
 This ticket establishes the mandatory safety gate for the entire sync program: a seeded,

@@ -1,5 +1,15 @@
 # Agent message-bus seam
 
+> **Retry ruling C-20260703-019 (read before implementing — supersedes the conflicting Done-when pair):**
+> The Backend real-path check (instantiate a real `ZoneRuntimeController`, call
+> `controller.agentBus.post(testMessage)`) and the grep gate ("zero `agentBus.post`/`agentBus.subscribe`
+> hits in `Sources/ContinuumRevived` beyond the property declaration") are mutually exclusive under the
+> app-target architecture. **Ruling (precedent C-20260702-010, ticket 14):** the flag-wired self-check
+> call site inside `Sources/ContinuumRevived` is EXEMPT from the grep gate. The gate becomes: zero hits
+> other than (a) the property declaration and (b) the flag-wired self-check method, which must be gated
+> behind its check flag so no production path posts. The prior attempt's pure-Core half was
+> reviewer-clear and is stashed (`git stash list`) — salvage it.
+
 > **Ruling C-20260701-009 (read before implementing):** where this ticket says `ActivityTreeSnapshot`
 > meaning the **byTile fold read-model** (ticket 08's summary-per-tile snapshot), that type was renamed
 > to **`ActivityLogSnapshot`**. The name `ActivityTreeSnapshot` now belongs to ticket 11's SidebarTree

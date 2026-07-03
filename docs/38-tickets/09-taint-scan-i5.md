@@ -1,5 +1,16 @@
 # Taint scan for sync-boundary purity
 
+> **Retry rulings C-20260701-008 (read before implementing — supersede any conflicting line below):**
+> 1. **Scalar-leaf geometry exemption only:** the geometry allowance (C-008 taint ruling) applies to
+>    SCALAR numeric leaves (`frame.x/y/width/height` etc. as scalars) and must NEVER propagate through
+>    arrays or nested subtrees. The prior attempt's flag propagation
+>    (`SyncPayloadTaintScanner.swift:121-124` + suppression at `:160-162`) let a pid-shaped integer
+>    hide inside `{"frame":{"x":[12345],...}}` — add probes covering exactly that bypass shape.
+> 2. **Overflow fixture (required):** include a fixture carrying a genuine `UInt64 > Int.max` value so
+>    the Done-when #3 overflow guard is actually exercised (prior fixtures maxed at 5,000,000 and used
+>    `Int`, leaving an `intValue`-before-guard regression invisible).
+> A prior attempt is stashed (`git stash list`) and may be salvaged where its code survives review findings.
+
 ## What this delivers
 
 After this ticket lands, the project has a running core check that serializes every type

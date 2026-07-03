@@ -1,5 +1,18 @@
 # Activity projection over the sync transport
 
+> **Retry rulings C-20260703-020 (read before implementing — supersede any conflicting line below):**
+> 1. **Synchronous demux registration (the real production bug):** demux subscriptions MUST be
+>    registered synchronously BEFORE any send — in `ActivityProjectionReceiver.connect()` (the prior
+>    attempt sent `.activitySubscribe` before its receiveLoop Task registered; see
+>    `SyncMessageDemux.swift:52` drain-time broadcast) and symmetrically in
+>    `ActivityProjectionSender.start()`. Add a Checks case with a PRE-EXISTING spatial subscriber on
+>    the SAME shared demux — fresh/private-demux checks never gate this race.
+> 2. **Deterministic loopback harness:** the count-based delay model stranded trailing replay /
+>    cold-reconnect messages (~25% red). The harness must drain/flush pending until
+>    convergence-or-timeout, be deterministic across many runs, and prove convergence happens via the
+>    REAL replay / cold-reconnect path (not a lucky extra send).
+> A prior attempt is stashed (`git stash list`) and may be salvaged where its code survives review findings.
+
 > **Ruling C-20260701-009 (read before implementing):** where this ticket says `ActivityTreeSnapshot`
 > meaning the **byTile fold read-model** (ticket 08's summary-per-tile snapshot), that type was renamed
 > to **`ActivityLogSnapshot`**. The name `ActivityTreeSnapshot` now belongs to ticket 11's SidebarTree
