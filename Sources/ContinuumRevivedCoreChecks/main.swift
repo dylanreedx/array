@@ -1,4 +1,5 @@
 import ContinuumRevivedCore
+import ContinuumRevivedSync
 import CoreGraphics
 import Darwin
 import Foundation
@@ -7438,55 +7439,797 @@ do {
     try writeAndVerify(manifest)
 }
 
-// MARK: - Invariant I4: Convergence fuzz (STUB — real assertion lands with the "Convergence fuzz: write the I4 RED→GREEN tripwire" ticket)
+// MARK: - Invariant I4: Convergence fuzz (docs/38-tickets/07-convergence-fuzz-red-green.md)
 // TRIPWIRE: this fuzz must go RED→GREEN before any SyncTransport implementation is committed.
+//
+// Graduated from the STUB block ticket 13 left here (see git history) now that
+// materialize/compact/applySnapshot (ticket 06, ContinuumRevivedSync) are landed.
+// Pinned parameters (the ticket's single normative source): seeds 1...50, 200
+// steps/seed, 2...5 replicas/seed (drawn from the seed's own RNG), compaction at
+// 1-in-20 per step.
+
+/// A 64-bit LCG seeded per run so a failing seed reproduces byte-for-byte. Every
+/// source of randomness in this fuzz — replica ids, entity ids, op choice,
+/// transport shuffling — is drawn from this generator, never from `UUID()`/
+/// `Int.random` without an explicit `using:`, so re-running with `seed = <n>`
+/// reproduces the exact same run.
+struct LCG: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        state = seed &* 0x9E37_79B9_7F4A_7C15 &+ 1
+    }
+
+    mutating func next() -> UInt64 {
+        state = 6_364_136_223_846_793_005 &* state &+ 1_442_695_040_888_963_407
+        return state
+    }
+}
+
+private func randomUUID(_ rng: inout LCG) -> UUID {
+    var bytes = [UInt8](repeating: 0, count: 16)
+    for i in 0..<16 { bytes[i] = UInt8.random(in: 0...255, using: &rng) }
+    bytes[6] = (bytes[6] & 0x0F) | 0x40
+    bytes[8] = (bytes[8] & 0x3F) | 0x80
+    let tuple: uuid_t = (
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+    )
+    return UUID(uuid: tuple)
+}
+
+private func randomFracIndex(_ rng: inout LCG) -> FracIndex {
+    FracIndex(value: Double.random(in: 0.001...0.999, using: &rng))
+}
+
+private func randomFrame(_ rng: inout LCG) -> TileFrame {
+    TileFrame(
+        x: Double.random(in: -2000...2000, using: &rng),
+        y: Double.random(in: -2000...2000, using: &rng),
+        width: Double.random(in: 100...1200, using: &rng),
+        height: Double.random(in: 80...900, using: &rng)
+    )
+}
+
+private func randomPoint(_ rng: inout LCG) -> ZonePoint {
+    ZonePoint(x: Double.random(in: -3000...3000, using: &rng), y: Double.random(in: -3000...3000, using: &rng))
+}
+
+private func randomSize(_ rng: inout LCG) -> ZoneSize {
+    ZoneSize(width: Double.random(in: 200...2000, using: &rng), height: Double.random(in: 200...1600, using: &rng))
+}
+
+/// A replica is EITHER a full log, OR a compacted (snapshot, tail) pair — modeling
+/// both explicitly is what keeps materialization honest post-compaction (see
+/// `materializedState` below).
+private struct FakeReplica {
+    let replicaId: UUID
+    var lamport: UInt64 = 0
+    var log: [LoggedOp] = []
+    var snapshot: CompactedSnapshot?
+    var isOnline: Bool = true
+
+    /// Apply one op locally, advancing the Lamport clock.
+    mutating func apply(_ op: Op) -> LoggedOp {
+        lamport += 1
+        let logged = LoggedOp(opId: OpId(lamport: lamport, replica: replicaId), op: op)
+        log.append(logged)
+        return logged
+    }
+
+    /// Merge incoming ops; advance clock on receipt; ignore ops already folded
+    /// into a snapshot or already present (duplicate delivery).
+    mutating func receive(_ incoming: [LoggedOp]) {
+        for logged in incoming {
+            if let snap = snapshot, logged.opId <= snap.compactionOpId { continue }
+            if log.contains(where: { $0.opId == logged.opId }) { continue }
+            lamport = max(lamport, logged.opId.lamport) + 1
+            log.append(logged)
+        }
+    }
+
+    /// The effective materialized state: fold the tail atop the snapshot's state
+    /// if compacted, else fold the whole log. This is the ONLY convergence-safe
+    /// materialization for a compacted replica — a bare `materialize(ops: log)`
+    /// would omit all pre-watermark state. Real signatures shipped by ticket 06:
+    /// `materialize(onto:baseOpId:ledger:tail:)` and `applySnapshot(_:ontop:)`
+    /// (the breadcrumb's illustrative `materialize(ops:ontop:)` spelling doesn't
+    /// exist — this fuzz calls what ticket 06 actually shipped, per this
+    /// ticket's own "Where it lives" allowance).
+    var materializedState: MaterializedState {
+        if let snap = snapshot {
+            return materialize(onto: snap.state, baseOpId: snap.compactionOpId, ledger: snap.ledger, tail: log)
+        } else {
+            return materialize(ops: log)
+        }
+    }
+}
+
+/// In-process fake transport: one queue per ordered replica pair. `deliverSome`
+/// genuinely shuffles the pending subset it chooses (never enqueue order) and may
+/// duplicate. Messages NOT chosen this round stay queued (delayed, not lost) —
+/// see the long comment at the compaction call site below for why permanent loss
+/// would break the compaction low-water-mark safety argument.
+///
+/// Deliveries are routed to their actual `to` destination only (never
+/// broadcast to every replica) and a queue whose destination is currently
+/// offline is left untouched — this is what makes `isOnline` a REAL partition
+/// rather than an inert flag: an offline replica genuinely stops receiving
+/// until it reconnects, and its per-pair queues simply keep growing in the
+/// meantime, to be delivered once it comes back online (or drained at settle).
+private struct FakeTransport {
+    private struct QueueKey: Hashable, Comparable {
+        let from: UUID
+        let to: UUID
+        static func < (lhs: QueueKey, rhs: QueueKey) -> Bool {
+            if lhs.from.uuidString != rhs.from.uuidString { return lhs.from.uuidString < rhs.from.uuidString }
+            return lhs.to.uuidString < rhs.to.uuidString
+        }
+    }
+
+    private var queues: [QueueKey: [LoggedOp]] = [:]
+
+    mutating func enqueue(_ op: LoggedOp, from: UUID, to: UUID) {
+        queues[QueueKey(from: from, to: to), default: []].append(op)
+    }
+
+    /// `onPartitioned` fires once per queue that has pending messages but
+    /// whose destination is currently offline — a countable, non-inert
+    /// signal (surfaced in the fuzz manifest as `offline_deferred_queues`)
+    /// that the partition dimension is genuinely gating deliveries, not a
+    /// flag nobody reads.
+    ///
+    /// `dropChance` (retry ruling C-20260701-007 #3 — required): every message
+    /// NOT chosen for delivery this round is independently subject to a
+    /// permanent DROP roll. A dropped message is removed from the queue for
+    /// good — it is never delayed-then-delivered, never seen by `drainAll`,
+    /// and is NOT what `remaining` re-queues below. This is a real message
+    /// LOSS adversary, not a relabeled delay: convergence must still hold
+    /// because every op also lives forever in its origin replica's own log,
+    /// which the settle phase forwards directly (bypassing the transport
+    /// entirely) — the transport is exercised as an adversarial DELIVERY
+    /// PATH, never as the sole channel state can be recovered through.
+    /// `onDropped` is the countable, non-inert signal for this (manifest key
+    /// `dropped_messages`), mirroring `onPartitioned` above.
+    mutating func deliverSome(rng: inout LCG, isOnline: (UUID) -> Bool, onPartitioned: () -> Void = {}, onDropped: () -> Void = {}, dupChance: Double = 0.05, dropChance: Double = 0.08) -> [(to: UUID, op: LoggedOp)] {
+        var delivered: [(to: UUID, op: LoggedOp)] = []
+        for key in queues.keys.sorted() {
+            guard isOnline(key.to) else {
+                if let pending = queues[key], !pending.isEmpty { onPartitioned() }
+                continue   // partitioned: leave this pair's queue untouched
+            }
+            guard let pending = queues[key], !pending.isEmpty else { continue }
+            var shuffled = pending
+            shuffled.shuffle(using: &rng)
+            let takeCount = Int.random(in: 0...shuffled.count, using: &rng)
+            let batch = shuffled.prefix(takeCount)
+            let notTaken = shuffled.suffix(from: takeCount)
+            var remaining: [LoggedOp] = []
+            remaining.reserveCapacity(notTaken.count)
+            for msg in notTaken {
+                if Double.random(in: 0..<1, using: &rng) < dropChance {
+                    onDropped()   // permanently lost — never requeued, never drained
+                } else {
+                    remaining.append(msg)
+                }
+            }
+            for msg in batch {
+                delivered.append((to: key.to, op: msg))
+                if Double.random(in: 0..<1, using: &rng) < dupChance {
+                    delivered.append((to: key.to, op: msg))
+                }
+            }
+            queues[key] = remaining
+        }
+        return delivered
+    }
+
+    mutating func drainAll() -> [(to: UUID, op: LoggedOp)] {
+        var all: [(to: UUID, op: LoggedOp)] = []
+        for (key, msgs) in queues {
+            for msg in msgs { all.append((to: key.to, op: msg)) }
+        }
+        queues.removeAll()
+        return all
+    }
+}
+
+/// A fuzz-only side channel used SOLELY to pick a provably-safe compaction
+/// low-water mark.
+///
+/// The ticket's own breadcrumb heuristic ("mark = the min Lamport among the
+/// ops the compacting replica currently holds... always safe because nothing
+/// below it can still be in flight to that replica") is NOT actually sound in
+/// general: Lamport clocks only order causally-related events; two replicas
+/// that have never communicated can independently produce CONCURRENT ops at
+/// the exact same Lamport value. If replica B's own held minimum lamport is
+/// L, and a still-undelivered op from replica A also has lamport L, compacting
+/// B through L can produce a `compactionOpId` that (by the (lamport, replica)
+/// tie-break `applySnapshot`/`receive` use) dominates A's op even though B's
+/// own `compact()` call never actually folded it (B never had it) — A's op
+/// would then be silently discarded as "already folded" the moment it finally
+/// arrives, a genuine I4 divergence. The ticket's own "Watch out for" section
+/// requires a mark that is "provably at or below every op the replica has
+/// both received AND could have acked" — this type computes exactly that,
+/// using the fuzz's god-mode visibility (a real deployment would need an
+/// actual ack/quorum protocol for this signal; that protocol is out of this
+/// ticket's op-log-core scope, so the fuzz proves compaction is safe GIVEN a
+/// sound mark, which is the contract `compact`/`applySnapshot` actually make).
+///
+/// Trade-off this makes explicit: because `safeMark` only ever returns a
+/// Lamport that every replica has already fully acked, the ~170+ compaction
+/// events this fuzz fires across its 50 seeds can never themselves surface a
+/// mark-race / merge-equivalence divergence — every one of them compacts
+/// through an already-fully-disseminated point, by construction. That
+/// specific property (a WRONG mark causing divergence) is instead the direct
+/// responsibility of the targeted `compact(log:, through: 3)` /
+/// `materialize(onto:baseOpId:ledger:tail:)` check above, which pins an
+/// intentionally mid-log low-water mark and asserts merge-equivalence with
+/// the uncompacted fold. What the 50-seed fuzz's compaction events DO prove
+/// adversarially is that repeated, randomly-timed `(snapshot, tail)` splits
+/// and pairwise snapshot adoption (see the settle-phase comment below) never
+/// break I4 convergence under concurrent, reordered, dropped, and duplicated
+/// delivery — a real and non-trivial property, just a different one than
+/// "the mark-selection heuristic itself is adversarially fuzzed."
+private struct DisseminationLedger {
+    var ackedBy: [OpId: Set<UUID>] = [:]
+
+    mutating func ack(_ opId: OpId, by replica: UUID) {
+        ackedBy[opId, default: []].insert(replica)
+    }
+
+    /// The largest Lamport `L` such that (a) every op that currently exists
+    /// with lamport <= L has been seen by EVERY replica (so the compacting
+    /// replica's own log already IS the complete global picture for that
+    /// range), and (b) every replica's CURRENT clock already exceeds L (so
+    /// nobody can ever create a NEW op with lamport <= L in the future).
+    /// Both conditions are required: (a) alone is defeated by a currently-
+    /// silent replica creating a fresh low-Lamport op later; (b) alone is
+    /// defeated by an already-created, not-yet-delivered concurrent tie.
+    func safeMark(totalReplicas: Int, currentClocks: [UInt64]) -> UInt64 {
+        let clockFloor = currentClocks.min() ?? 0
+        let byLamport = Dictionary(grouping: ackedBy.keys) { $0.lamport }
+        var mark: UInt64 = 0
+        for lamport in byLamport.keys.sorted() where lamport <= clockFloor {
+            let opsHere = byLamport[lamport] ?? []
+            let fullyAcked = opsHere.allSatisfy { (ackedBy[$0]?.count ?? 0) >= totalReplicas }
+            if fullyAcked {
+                mark = lamport
+            } else {
+                break
+            }
+        }
+        return mark
+    }
+}
+
+/// Generates a random LEGAL `Op` against `canvas`/`zones` (a replica's own
+/// current materialized view) — never a duplicate-id create, a delete of a
+/// nonexistent id, or a reference to an id this replica doesn't currently
+/// know about. Weighted toward moves (setTileFrame — the most common real
+/// op), matching the ticket's "The approach". `createTile`/`setTileFrame`/
+/// `setTileZIndex`/`setTileZone` cover create/move/resize/z-order/membership
+/// verbatim from the ticket's category list; `createZone`/`deleteZone`/
+/// `setZoneOrigin`/`setZoneSize`/`setZonePosition` are added (the breadcrumb's
+/// own pick-list elides zone lifecycle with "…") because without ever
+/// creating a zone, every zone-targeted op would be a permanent no-op against
+/// a nonexistent id, leaving that half of `materialize`'s merge logic
+/// unexercised — necessary to fulfill "The approach"'s own z-order/membership
+/// requirement, not a redesign.
+private func randomOp(rng: inout LCG, canvas: CanvasState, zones: [ZonePlacement]) -> Op {
+    let liveTiles = canvas.tiles
+    if liveTiles.isEmpty {
+        return .createTile(
+            id: randomUUID(&rng),
+            kind: TileKind.allCases.randomElement(using: &rng)!,
+            title: "tile-\(Int.random(in: 0..<10_000, using: &rng))",
+            frame: randomFrame(&rng),
+            zPosition: randomFracIndex(&rng)
+        )
+    }
+
+    switch Int.random(in: 0..<100, using: &rng) {
+    case 0..<35:
+        // Move/resize: TileFrame carries both position and size (the Op model
+        // has no separate resize op), so this one case covers both categories.
+        let tile = liveTiles.randomElement(using: &rng)!
+        return .setTileFrame(id: tile.id, frame: randomFrame(&rng))
+    case 35..<45:
+        let tile = liveTiles.randomElement(using: &rng)!
+        return .setTileZIndex(id: tile.id, z: randomFracIndex(&rng))
+    case 45..<58:
+        let tile = liveTiles.randomElement(using: &rng)!
+        let zoneId = zones.isEmpty ? nil : (Bool.random(using: &rng) ? zones.randomElement(using: &rng)!.zoneId : nil)
+        return .setTileZone(tileId: tile.id, zoneId: zoneId)
+    case 58..<65:
+        let tile = liveTiles.randomElement(using: &rng)!
+        return .setTileTitle(id: tile.id, title: "retitled-\(Int.random(in: 0..<10_000, using: &rng))")
+    case 65..<70:
+        let tile = liveTiles.randomElement(using: &rng)!
+        return .setTileKind(id: tile.id, kind: TileKind.allCases.randomElement(using: &rng)!)
+    case 70..<80:
+        return .createTile(
+            id: randomUUID(&rng),
+            kind: TileKind.allCases.randomElement(using: &rng)!,
+            title: "tile-\(Int.random(in: 0..<10_000, using: &rng))",
+            frame: randomFrame(&rng),
+            zPosition: randomFracIndex(&rng)
+        )
+    case 80..<88:
+        let tile = liveTiles.randomElement(using: &rng)!
+        return .deleteTile(id: tile.id)
+    default:
+        if zones.isEmpty || Int.random(in: 0..<4, using: &rng) == 0 {
+            return .createZone(
+                id: randomUUID(&rng),
+                projectId: Bool.random(using: &rng) ? randomUUID(&rng) : nil,
+                origin: randomPoint(&rng),
+                size: randomSize(&rng),
+                name: "zone-\(Int.random(in: 0..<10_000, using: &rng))",
+                color: ["mint", "coral", "slate", "amber"].randomElement(using: &rng)!
+            )
+        }
+        let zone = zones.randomElement(using: &rng)!
+        switch Int.random(in: 0..<4, using: &rng) {
+        case 0: return .setZoneOrigin(id: zone.zoneId, origin: randomPoint(&rng))
+        case 1: return .setZoneSize(id: zone.zoneId, size: randomSize(&rng))
+        case 2: return .setZonePosition(id: zone.zoneId, position: randomFracIndex(&rng))
+        default: return .deleteZone(id: zone.zoneId)
+        }
+    }
+}
+
+/// Independently re-derives each tile's winning `zoneId` from the ops this
+/// replica currently holds (its tail if compacted, seeded from the
+/// snapshot's already-resolved membership; its whole log otherwise) using a
+/// SECOND, separately-coded LWW resolution — the highest `OpId` among
+/// `createTile`'s initial `nil` and every `setTileZone` targeting that tile
+/// wins. Cross-checked against `materialize`'s own `tile.zoneId` output below,
+/// this is what makes "every tile belongs to at most one zone" a real,
+/// falsifiable assertion (it would catch a `FieldTracker`/LWW comparison bug)
+/// rather than a structural tautology of the single-field membership
+/// register, which can never fail for that reason no matter what `materialize`
+/// does. Restores the spirit of the ticket breadcrumb's dropped
+/// `derivedZone`/`seenInZone` cross-check for the re-modeled data types.
+private func independentZoneMembership(for replica: FakeReplica) -> [UUID: UUID?] {
+    var winner: [UUID: (opId: OpId, zoneId: UUID?)] = [:]
+    if let snap = replica.snapshot {
+        for tile in snap.state.canvasState.tiles {
+            winner[tile.id] = (snap.compactionOpId, tile.zoneId)
+        }
+    }
+    for logged in replica.log {
+        switch logged.op {
+        case .createTile(let id, _, _, _, _):
+            if winner[id] == nil { winner[id] = (logged.opId, nil) }
+        case .setTileZone(let tileId, let zoneId):
+            if let current = winner[tileId] {
+                if logged.opId > current.opId { winner[tileId] = (logged.opId, zoneId) }
+            } else {
+                winner[tileId] = (logged.opId, zoneId)
+            }
+        default:
+            break
+        }
+    }
+    return winner.mapValues { $0.zoneId }
+}
+
+/// Independently re-derives the live zone id set for this replica — a zone is
+/// live iff it was ever created and never deleted, using pure set
+/// membership (delete-wins is order-independent for existence: the presence
+/// of any `deleteZone` op tombstones the id regardless of Lamport order, so
+/// no sort/comparison is needed here, unlike the per-field LWW above) — a
+/// SECOND, separately-coded derivation of zone add-wins/tombstoning.
+/// Cross-checked against `materialize`'s `zones` output below, this is what
+/// makes "the zone z-order list is a permutation of live zones" a real
+/// assertion against the re-modeled per-zone-`FracIndex` stacking (it would
+/// catch a real add-wins/tombstone bug), rather than a "no duplicate zone id"
+/// proxy that a register with no separate `zoneZOrder` list makes true by
+/// construction.
+private func independentLiveZoneIds(for replica: FakeReplica) -> Set<UUID> {
+    var created: Set<UUID> = []
+    var deleted: Set<UUID> = []
+    if let snap = replica.snapshot {
+        created.formUnion(snap.state.workspaceDocument.zones.map(\.zoneId))
+        for record in snap.ledger.records where record.entityKind == .zone {
+            deleted.insert(record.entityId)
+        }
+    }
+    for logged in replica.log {
+        switch logged.op {
+        case .createZone(let id, _, _, _, _, _): created.insert(id)
+        case .deleteZone(let id): deleted.insert(id)
+        default: break
+        }
+    }
+    return created.subtracting(deleted)
+}
+
+// MARK: - Move-vs-delete regression (ticket "Watch out for" — must run before
+// the full fuzz): a field-set at a HIGHER Lamport than a delete must never
+// resurrect the entity, regardless of Lamport order relative to the delete.
 
 do {
-    // STUB: replace with real assertion when "Convergence fuzz: write the I4 RED→GREEN
-    // tripwire" lands (needs MaterializedState / materialize(...) from the "Op-log apply
-    // & compaction" ticket). When real: shuffle the same set of ops across N simulated
-    // replicas and assert byte-identical encoded materialized state regardless of
-    // delivery order.
-    //
-    // Measured values that will appear in the real manifest:
-    //   replica_count: Int, op_count: Int, shuffle_count: Int, convergence_hash: String
-    //
-    // For now this block asserts real properties of OpId and LoggedOp — both already
-    // exist today (the "Op enum & LoggedOp envelope" ticket) — non-vacuous, no local
-    // stand-in type.
-    let replicaA = UUID(uuidString: "B0000000-0000-4000-8000-0000000008A1")!
-    let replicaB = UUID(uuidString: "B0000000-0000-4000-8000-0000000008B1")!
-    let earlier = OpId(lamport: 1, replica: replicaA)
-    let later = OpId(lamport: 2, replica: replicaB)
-    expect(earlier < later, "I4 stub: OpId total order is lamport-first, wall-clock-free")
+    let replica = UUID(uuidString: "C0000000-0000-4000-8000-000000000701")!
+    let tileId = UUID(uuidString: "C0000000-0000-4000-8000-000000000702")!
+    let frame1 = TileFrame(x: 0, y: 0, width: 300, height: 200)
+    let frame2 = TileFrame(x: 999, y: 999, width: 50, height: 50)
+    let ops: [LoggedOp] = [
+        LoggedOp(opId: OpId(lamport: 1, replica: replica), op: .createTile(id: tileId, kind: .terminal, title: "t", frame: frame1, zPosition: .first)),
+        LoggedOp(opId: OpId(lamport: 2, replica: replica), op: .setTileFrame(id: tileId, frame: frame1)),
+        LoggedOp(opId: OpId(lamport: 3, replica: replica), op: .deleteTile(id: tileId)),
+        LoggedOp(opId: OpId(lamport: 4, replica: replica), op: .setTileFrame(id: tileId, frame: frame2))
+    ]
+    let result = materialize(ops: ops)
+    expect(!result.canvasState.tiles.contains(where: { $0.id == tileId }),
+           "move-vs-delete: a setTileFrame at a HIGHER Lamport than deleteTile must never resurrect the tile")
+}
 
-    let loggedOp = LoggedOp(
-        opId: earlier,
-        op: .createTile(
-            id: UUID(uuidString: "B0000000-0000-4000-8000-0000000008C1")!,
-            kind: .terminal,
-            title: "I4 fixture",
-            frame: TileFrame(x: 0, y: 0, width: 400, height: 300),
-            zPosition: .fromLegacyRank(0)
-        )
-    )
-    let loggedOpData = try JSONEncoder().encode(loggedOp)
-    let loggedOpRound = try JSONDecoder().decode(LoggedOp.self, from: loggedOpData)
-    expect(loggedOpRound == loggedOp, "I4 stub: LoggedOp codable round-trip")
+// MARK: - canonicalEncode stability: two semantically-equal MaterializedState
+// values, constructed from differently-ORDERED (but same-multiset) input
+// arrays, must encode to identical bytes. Rules out hash-map/fold-order
+// non-determinism leaking into the canonical encoding.
 
+do {
+    let replicaX = UUID(uuidString: "C0000000-0000-4000-8000-000000000801")!
+    let replicaY = UUID(uuidString: "C0000000-0000-4000-8000-000000000802")!
+    let tileX = UUID(uuidString: "C0000000-0000-4000-8000-000000000803")!
+    let tileY = UUID(uuidString: "C0000000-0000-4000-8000-000000000804")!
+    let opA = LoggedOp(opId: OpId(lamport: 1, replica: replicaX), op: .createTile(id: tileX, kind: .terminal, title: "a", frame: TileFrame(x: 0, y: 0, width: 10, height: 10), zPosition: .first))
+    let opB = LoggedOp(opId: OpId(lamport: 2, replica: replicaY), op: .createTile(id: tileY, kind: .browser, title: "b", frame: TileFrame(x: 1, y: 1, width: 20, height: 20), zPosition: .last))
+    let orderOne = materialize(ops: [opA, opB])
+    let orderTwo = materialize(ops: [opB, opA])
+    let encodedOne = try orderOne.canonicalEncoded()
+    let encodedTwo = try orderTwo.canonicalEncoded()
+    expect(encodedOne == encodedTwo,
+           "canonicalEncode stability: two semantically-equal MaterializedState values built from differently-ordered input arrays must encode to identical bytes")
+}
+
+// MARK: - Compacted-replica materialization: tail folded atop snapshot state
+// must equal materializing the full uncompacted log. Fails loudly if a
+// snapshot is ever dropped on the floor.
+
+do {
+    let replicaC = UUID(uuidString: "C0000000-0000-4000-8000-000000000901")!
+    let tile1 = UUID(uuidString: "C0000000-0000-4000-8000-000000000902")!
+    let tile2 = UUID(uuidString: "C0000000-0000-4000-8000-000000000903")!
+    let fullLog: [LoggedOp] = [
+        LoggedOp(opId: OpId(lamport: 1, replica: replicaC), op: .createTile(id: tile1, kind: .terminal, title: "one", frame: TileFrame(x: 0, y: 0, width: 100, height: 100), zPosition: .first)),
+        LoggedOp(opId: OpId(lamport: 2, replica: replicaC), op: .createTile(id: tile2, kind: .note, title: "two", frame: TileFrame(x: 200, y: 200, width: 100, height: 100), zPosition: .last)),
+        LoggedOp(opId: OpId(lamport: 3, replica: replicaC), op: .setTileFrame(id: tile1, frame: TileFrame(x: 50, y: 50, width: 100, height: 100))),
+        LoggedOp(opId: OpId(lamport: 4, replica: replicaC), op: .deleteTile(id: tile2)),
+        LoggedOp(opId: OpId(lamport: 5, replica: replicaC), op: .setTileFrame(id: tile1, frame: TileFrame(x: 75, y: 75, width: 100, height: 100)))
+    ]
+    let fullResult = materialize(ops: fullLog)
+    let compaction = compact(log: fullLog, through: 3)
+    let composed = materialize(onto: compaction.snapshot.state, baseOpId: compaction.snapshot.compactionOpId, ledger: compaction.snapshot.ledger, tail: compaction.tail)
+    let fullBytes = try fullResult.canonicalEncoded()
+    let composedBytes = try composed.canonicalEncoded()
+    expect(fullBytes == composedBytes,
+           "compacted-replica materialization: tail folded atop snapshot state must equal materializing the full uncompacted log")
+}
+
+// MARK: - The full I4 fuzz: seeds 1...50, 200 steps/seed, 2-5 replicas/seed,
+// compaction at 1-in-20 per step (all pinned by "The fuzz parameters").
+
+var i4TotalSteps = 0
+var i4TotalCompactionEvents = 0
+var i4SeedsWithCompaction = 0
+var i4Seed1CanonicalBytes = 0
+var i4Seed1AllAppliedOps: [LoggedOp] = []
+var i4TotalOfflineDeferredQueues = 0
+var i4TotalDroppedMessages = 0
+
+do {
+    for seedValue in UInt64(1)...UInt64(50) {
+        var rng = LCG(seed: seedValue)
+        let replicaCount = Int.random(in: 2...5, using: &rng)
+        var replicas = (0..<replicaCount).map { _ in FakeReplica(replicaId: randomUUID(&rng)) }
+        var transport = FakeTransport()
+        var dissemination = DisseminationLedger()
+        var compactionsThisSeed = 0
+        // Every op ever locally applied by ANY replica this seed — the
+        // per-seed ORACLE input (retry ruling C-20260701-007 #2, required):
+        // the final converged bytes on every replica must equal
+        // `canonicalEncode(materialize(all generated ops))`, independent of
+        // which subset of those ops any single replica's own log/snapshot
+        // happens to be carrying. Convergence-with-each-other alone (the I4
+        // byte-identity check below) is NOT sufficient — a bug that drops the
+        // exact same op on every replica would still converge but diverge
+        // from this oracle.
+        var seedAllAppliedOps: [LoggedOp] = []
+
+        for _ in 0..<200 {
+            guard let idx = replicas.indices.filter({ replicas[$0].isOnline }).randomElement(using: &rng) else { continue }
+            // Counted AFTER the online-replica guard so this tallies steps
+            // that actually generated an op, not loop iterations. If the
+            // guard above ever `continue`d (an all-offline absorbing state),
+            // this counter would fall short of 50*200 and the assertion below
+            // would genuinely fail — incrementing before the guard would make
+            // that assertion vacuously true regardless of skipped iterations.
+            i4TotalSteps += 1
+            let materialized = replicas[idx].materializedState
+            let op = randomOp(rng: &rng, canvas: materialized.canvasState, zones: materialized.workspaceDocument.zones)
+            let logged = replicas[idx].apply(op)
+            dissemination.ack(logged.opId, by: replicas[idx].replicaId)
+            seedAllAppliedOps.append(logged)
+
+            for other in replicas.indices where other != idx {
+                transport.enqueue(logged, from: replicas[idx].replicaId, to: replicas[other].replicaId)
+            }
+
+            // Route each delivered message to its actual `to` destination only
+            // — never broadcast to every replica — and skip destinations that
+            // are currently offline (their per-pair queues stay pending; see
+            // `FakeTransport.deliverSome`). This is the real partition model:
+            // an offline replica genuinely receives nothing until it
+            // reconnects, instead of the offline flag only gating who
+            // *generates* ops while still being taught every op instantly.
+            let delivered = transport.deliverSome(
+                rng: &rng,
+                isOnline: { id in replicas.first(where: { $0.replicaId == id })?.isOnline ?? false },
+                onPartitioned: { i4TotalOfflineDeferredQueues += 1 },
+                onDropped: { i4TotalDroppedMessages += 1 }
+            )
+            for (to, msg) in delivered {
+                guard let ridx = replicas.firstIndex(where: { $0.replicaId == to }) else { continue }
+                replicas[ridx].receive([msg])
+                dissemination.ack(msg.opId, by: to)
+            }
+
+            if Bool.random(using: &rng), let toggle = replicas.indices.randomElement(using: &rng) {
+                let onlineCount = replicas.filter(\.isOnline).count
+                // Never let the last online replica go offline: that would
+                // enter an ABSORBING all-offline state where the "pick a
+                // random ONLINE replica" guard at the top of this loop has
+                // nothing to pick for every remaining step — silently
+                // skipping op generation (and permanently short-circuiting
+                // `i4TotalSteps`, which only increments AFTER that guard) with
+                // no way for a toggle to ever bring a replica back online
+                // again. Toggling an OFFLINE replica back online is always
+                // fine and is how partitions actually heal mid-run.
+                if !(replicas[toggle].isOnline && onlineCount <= 1) {
+                    replicas[toggle].isOnline.toggle()
+                }
+            }
+
+            // Compaction — 1-in-20 per step (pinned probability). Only a
+            // replica that has never compacted is eligible: `compact()` folds
+            // the log it is GIVEN into a fresh snapshot, so re-compacting an
+            // already-compacted replica's tail (which no longer holds the
+            // pre-mark ops) would silently drop the first snapshot's state —
+            // a data-loss bug distinct from (and in addition to) the mark-
+            // safety concern `DisseminationLedger` addresses above.
+            if Int.random(in: 0..<20, using: &rng) == 0 {
+                let candidates = replicas.indices.filter { replicas[$0].snapshot == nil }
+                if !candidates.isEmpty {
+                    let mark = dissemination.safeMark(totalReplicas: replicaCount, currentClocks: replicas.map(\.lamport))
+                    if mark > 0, let ci = candidates.randomElement(using: &rng) {
+                        let result = compact(log: replicas[ci].log, through: mark)
+                        replicas[ci].snapshot = result.snapshot
+                        replicas[ci].log = result.tail
+                        compactionsThisSeed += 1
+                        i4TotalCompactionEvents += 1
+                    }
+                }
+            }
+        }
+
+        // Settle: reconnect all, drain transport, equalize logs.
+        for i in replicas.indices { replicas[i].isOnline = true }
+        let remaining = transport.drainAll()
+        for (to, msg) in remaining {
+            guard let ridx = replicas.firstIndex(where: { $0.replicaId == to }) else { continue }
+            replicas[ridx].receive([msg])
+        }
+        // Pairwise snapshot shipping/adoption: each replica that has compacted
+        // ships its OWN snapshot to every other replica; the receiver adopts
+        // it ONLY if it is strictly newer (higher `compactionOpId`) than
+        // whatever it already holds. `OpId` is a total order, so this is a
+        // decision any real replica could make unassisted from a snapshot it
+        // receives over the wire — unlike precomputing a single global winner
+        // via harness-omniscient `.max(by:)` across every replica's snapshot
+        // before anyone has "seen" it, which normalizes replicas through
+        // knowledge no real transport step would give them. Adoption is
+        // idempotent and monotonic (a replica only ever moves to a STRICTLY
+        // higher snapshot, and ties can only occur between snapshots proven
+        // state-identical because `DisseminationLedger.safeMark` never issues
+        // a mark until every replica has acked every op at-or-below it), so
+        // the final state does not depend on iteration order — but unlike the
+        // old single global-max install, it is REACHED via actual pairwise
+        // `applySnapshot` hops (one per `(i, j)` pair that has something to
+        // offer), exercising real receipt/adoption of multiple compacted
+        // snapshots instead of asserting the answer into every replica at
+        // once. Never prune `j`'s tail against a snapshot `j` does not also
+        // adopt — that mismatch (prune without adopt) was the seed-2
+        // divergence the breadcrumb's literal nil-coalesce produced.
+        for i in replicas.indices {
+            guard let candidate = replicas[i].snapshot else { continue }
+            for j in replicas.indices where j != i {
+                let current = replicas[j].snapshot
+                if current == nil || current!.compactionOpId < candidate.compactionOpId {
+                    replicas[j].log = applySnapshot(candidate, ontop: replicas[j].log)
+                    replicas[j].snapshot = candidate
+                }
+            }
+        }
+        // Forward every replica's full effective (post-snapshot) log to every
+        // other replica — simulates full sync.
+        for i in replicas.indices {
+            for j in replicas.indices where j != i {
+                replicas[j].receive(replicas[i].log)
+            }
+        }
+
+        if compactionsThisSeed > 0 { i4SeedsWithCompaction += 1 }
+
+        // I4: byte-identical canonical encoding of each replica's EFFECTIVE state.
+        let encodings = try replicas.map { try $0.materializedState.canonicalEncoded() }
+        for enc in encodings.dropFirst() {
+            expect(enc == encodings[0], "I4 violated: seed \(seedValue) — replicas diverged after settle")
+        }
+        if seedValue == 1 {
+            i4Seed1CanonicalBytes = encodings[0].count
+            i4Seed1AllAppliedOps = seedAllAppliedOps
+        }
+
+        // I4 per-seed ORACLE (retry ruling C-20260701-007 #2, required):
+        // independently re-fold every op ever applied by any replica this
+        // seed, straight from `materialize`, and assert the converged bytes
+        // match. This is the check that would catch a bug where every
+        // replica agrees on the WRONG state (e.g. a class of ops silently
+        // dropped by every replica alike) — mutual byte-identity above can
+        // never see that, because it only compares replicas to each other.
+        let oracleBytes = try materialize(ops: seedAllAppliedOps).canonicalEncoded()
+        expect(encodings[0] == oracleBytes,
+               "I4 oracle violated: seed \(seedValue) — converged bytes disagree with canonicalEncode(materialize(all generated ops)); a bug dropping the same op on every replica would still 'converge' without this check")
+
+        // Domain invariants on every replica's materialized state.
+        for replica in replicas {
+            let state = replica.materializedState
+            let canvas = state.canvasState
+            let liveTileIds = Set(canvas.tiles.map(\.id))
+
+            var tombstonedTileIds = Set(replica.log.compactMap { logged -> UUID? in
+                if case .deleteTile(let id) = logged.op { return id }
+                return nil
+            })
+            if let snap = replica.snapshot {
+                for record in snap.ledger.records where record.entityKind == .tile {
+                    tombstonedTileIds.insert(record.entityId)
+                }
+            }
+            for tombstoned in tombstonedTileIds {
+                expect(!liveTileIds.contains(tombstoned), "domain: tombstoned tile \(tombstoned) resurrected — seed \(seedValue)")
+            }
+
+            // "Every tile belongs to at most one zone": cross-check
+            // materialize's `tile.zoneId` against an independently re-derived
+            // LWW winner (see `independentZoneMembership` doc comment for why
+            // this — not a "no duplicate tile id" proxy — is the falsifiable
+            // form of this invariant under the single-field membership
+            // register).
+            let derivedZoneByTile = independentZoneMembership(for: replica)
+            for tile in canvas.tiles {
+                let derived: UUID? = derivedZoneByTile[tile.id] ?? nil
+                expect(derived == tile.zoneId,
+                       "domain: tile \(tile.id) materialized zoneId \(String(describing: tile.zoneId)) disagrees with the independently re-derived LWW winner \(String(describing: derived)) — seed \(seedValue) (every tile belongs to at most one zone)")
+            }
+
+            // "The zone z-order list is a permutation of live zones":
+            // cross-check materialize's live zone set against an
+            // independently re-derived create-minus-delete set (see
+            // `independentLiveZoneIds` doc comment for why this — not a "no
+            // duplicate zone id" proxy — is the falsifiable form of this
+            // invariant now that stacking is a per-zone FracIndex with no
+            // separate `zoneZOrder` list).
+            let zones = state.workspaceDocument.zones
+            let liveZoneIds = Set(zones.map(\.zoneId))
+            let derivedLiveZoneIds = independentLiveZoneIds(for: replica)
+            expect(derivedLiveZoneIds == liveZoneIds,
+                   "domain: materialized live zone set \(liveZoneIds) disagrees with the independently re-derived create-minus-delete set \(derivedLiveZoneIds) — seed \(seedValue) (zone z-order list must be a permutation of live zones)")
+
+            // "No orphaned group member references a deleted tile": `TileGroup`
+            // is the legacy grouping mechanism the membership-as-LWW-register
+            // ticket (04B) re-modeled away — the fuzz never emits an `Op` that
+            // touches it, and `materialize` unconditionally rebuilds
+            // `canvas.groups` as `[]` (OpLog.swift), so `canvas.groups` is
+            // always empty here. Asserting over it would be vacuously true on
+            // every run regardless of whether membership were broken, which
+            // is false coverage credit, not a check. The real, falsifiable
+            // form of this invariant under the re-modeled membership register
+            // is the `tile.zoneId`-vs-independently-re-derived-LWW-winner
+            // cross-check directly above: a tile's single membership field is
+            // exactly the "no orphaned group member" invariant restated for
+            // the type that replaced `TileGroup.tileIds`.
+        }
+    }
+
+    expect(i4SeedsWithCompaction >= 30,
+           "I4: compaction must fire in at least 30 of the 50 seeds, fired in \(i4SeedsWithCompaction)")
+    // Confirms the offline-toggle absorbing-state fix actually holds: every
+    // one of the 50 seeds' 200 loop iterations produced a real step (an op
+    // was generated), never a `continue`-skipped iteration from an all-
+    // offline replica set — otherwise the manifest's step/compaction counts
+    // would overstate real per-seed coverage (concern: an all-offline
+    // absorbing state).
+    expect(i4TotalSteps == 50 * 200,
+           "I4: expected exactly \(50 * 200) real steps across all seeds (no skipped iterations from an all-offline absorbing state), got \(i4TotalSteps)")
+    // Countable, non-inert proof that partition/offline is genuinely gating
+    // delivery (not merely toggling a flag nobody reads): at least one
+    // pending queue was actually deferred because its destination was
+    // offline at delivery time.
+    expect(i4TotalOfflineDeferredQueues > 0,
+           "I4: partition dimension is inert — no delivery was ever deferred for an offline destination across all 50 seeds")
+    // Countable, non-inert proof that the message-DROP adversary (retry
+    // ruling C-20260701-007 #3, required) actually fires: at least one
+    // in-flight message across all 50 seeds was permanently discarded by
+    // `FakeTransport.deliverSome`, never delayed-then-delivered and never
+    // seen again by `drainAll`.
+    expect(i4TotalDroppedMessages > 0,
+           "I4: message-DROP adversary is inert — no message was ever permanently dropped across all 50 seeds")
+}
+
+// MARK: - Backend/real-path: LoggedOp JSON round-trip (seed 1's full op
+// history) must materialize to byte-identical canonical output.
+
+do {
+    let inMemoryBytes = try materialize(ops: i4Seed1AllAppliedOps).canonicalEncoded()
+    let encoder = JSONEncoder()
+    let decoder = JSONDecoder()
+    let roundTripped = try i4Seed1AllAppliedOps.map { logged -> LoggedOp in
+        try decoder.decode(LoggedOp.self, from: try encoder.encode(logged))
+    }
+    let roundTrippedBytes = try materialize(ops: roundTripped).canonicalEncoded()
+    expect(inMemoryBytes == roundTrippedBytes,
+           "backend: LoggedOp JSON round-trip (encode → decode → materialize) must produce byte-identical canonical output to the in-memory path")
+}
+
+// MARK: - Seed-1 regression: pinned canonical byte count. Any future change to
+// the Op enum or materialize logic that silently changes seed 1's output is
+// caught immediately by this hard-coded expectation.
+
+#if arch(arm64)
+do {
+    // Retry ruling C-20260701-007 #1 (Dylan's ruling, authoritative): Apple
+    // Silicon (arm64) is the only supported arch for this project, so this
+    // byte-pin is arm64-only BY DESIGN, guarded at compile time — there is no
+    // x86_64 matrix arm to gate on, and this check must never be built or run
+    // on one. `JSONCodec.makeOpLogEncoder()` (ticket 06) applies `.sortedKeys`
+    // but no explicit float-rounding strategy, so this exact byte count is a
+    // function of the arm64 build's `Double` decimal formatting; it is not
+    // claimed to be architecture-portable.
+    let expectedSeed1CanonicalBytes = 2428
+    expect(i4Seed1CanonicalBytes == expectedSeed1CanonicalBytes,
+           "seed-1 regression (arm64-only): canonical byte count drifted from the pinned baseline (\(expectedSeed1CanonicalBytes)) to \(i4Seed1CanonicalBytes) — update the baseline deliberately if an Op/materialize change intentionally changed the output")
+}
+#endif
+
+do {
     let manifest = InvariantManifest(
         invariantId: "I4-convergence-fuzz",
-        runId: UUID().uuidString,
+        // Retry ruling C-20260701-007 #5: seed-derived/fixed only, never a live
+        // UUID() — this manifest covers the whole pinned 1...50 seed range (not
+        // a single seed), so the run id is a fixed literal, not a UUID at all.
+        runId: "i4-convergence-fuzz-seeds1-50",
         measuredAt: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_800_000_000)),
         measurements: [
-            "stub": .bool(true),
-            "depends_on": .string("Op-log apply & compaction"),
-            "op_id_total_order_holds": .bool(earlier < later)
+            "seeds": .int(50),
+            "steps_per_seed": .int(200),
+            "total_steps": .int(i4TotalSteps),
+            "compaction_events": .int(i4TotalCompactionEvents),
+            "seeds_with_compaction": .int(i4SeedsWithCompaction),
+            "seed1_canonical_bytes": .int(i4Seed1CanonicalBytes),
+            "offline_deferred_queues": .int(i4TotalOfflineDeferredQueues),
+            "dropped_messages": .int(i4TotalDroppedMessages)
         ],
-        outcome: InvariantOutcome.stub.rawValue,
+        outcome: InvariantOutcome.pass.rawValue,
         failureReason: nil
     )
     try writeAndVerify(manifest)
+
+    print("convergence fuzz: 50 seeds × 200 steps, \(i4TotalCompactionEvents) compactions across \(i4SeedsWithCompaction)/50 seeds, \(i4TotalOfflineDeferredQueues) partition-deferred deliveries, \(i4TotalDroppedMessages) messages permanently dropped, canonical \(i4Seed1CanonicalBytes) bytes (seed 1)")
 }
 
 // MARK: - Invariant I5: Sync-boundary purity / taint scan (STUB — real assertion lands with the "Taint scan for sync-boundary purity (I5)" ticket)

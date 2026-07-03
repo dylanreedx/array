@@ -75,7 +75,9 @@ let package = Package(
         ),
         .executableTarget(
             name: "ContinuumRevivedCoreChecks",
-            dependencies: ["ContinuumRevivedCore"]
+            // Ticket 07 (convergence fuzz) drives materialize/compact/applySnapshot
+            // from the op-log core, which lives in ContinuumRevivedSync.
+            dependencies: ["ContinuumRevivedCore", "ContinuumRevivedSync"]
         ),
         .executableTarget(
             name: "ContinuumRevivedSyncChecks",
