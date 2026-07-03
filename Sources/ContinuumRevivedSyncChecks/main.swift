@@ -188,3 +188,9 @@ do {
 }
 
 print("ContinuumRevivedSyncChecks passed: delete-wins policy pinned (move-vs-delete, zone variant, siblings, idempotence, absorb contract), ledger round-trip byte-identical, I5 scan clean (\(scannedByteCount) bytes scanned)")
+
+// Ticket: docs/38-tickets/06-oplog-apply-compaction.md
+runOpLogChecks()
+try runOpLogBackendChecks()
+
+print("ContinuumRevivedSyncChecks passed: materialize + compact proven (LWW, tombstone-vs-write, zone/tile convergence, compaction × tombstone boundary, I5 taint scan, I7 round-trip, ProjectStore + WorkspaceStore backend round-trips)")

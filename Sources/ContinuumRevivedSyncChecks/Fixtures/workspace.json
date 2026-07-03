@@ -1,0 +1,29 @@
+{
+  "ambientTiles" : [
+
+  ],
+  "schemaVersion" : 4,
+  "viewport" : {
+    "x" : 0,
+    "y" : 0,
+    "zoom" : 1
+  },
+  "zones" : [
+    {
+      "collapsed" : false,
+      "color" : "mint",
+      "hydrationPolicy" : "automatic",
+      "name" : "Fixture Zone",
+      "origin" : {
+        "x" : 0,
+        "y" : 0
+      },
+      "size" : {
+        "height" : 600,
+        "width" : 800
+      },
+      "zPosition" : 0.25,
+      "zoneId" : "00000003-0000-4000-8000-000000000003"
+    }
+  ]
+}
