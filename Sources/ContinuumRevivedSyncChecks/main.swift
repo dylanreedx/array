@@ -14,6 +14,11 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+// Ticket: docs/38-tickets/55-synctransport-seam.md — I5 structural trap test.
+// Must run FIRST, before any other check does real work, so the subprocess
+// this spawns re-executes a clean, minimal path (see SyncTransportTests.swift).
+await runSyncTransportTrapTestIfRequested()
+
 let replicaA = UUID(uuidString: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA")!
 let replicaB = UUID(uuidString: "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB")!
 let tileT = UUID(uuidString: "0000D001-0000-4000-8000-000000000001")!
@@ -194,3 +199,7 @@ runOpLogChecks()
 try runOpLogBackendChecks()
 
 print("ContinuumRevivedSyncChecks passed: materialize + compact proven (LWW, tombstone-vs-write, zone/tile convergence, compaction × tombstone boundary, I5 taint scan, I7 round-trip, ProjectStore + WorkspaceStore backend round-trips)")
+
+// Ticket: docs/38-tickets/55-synctransport-seam.md
+try await runSyncTransportChecks()
+try await runSyncTransportBackendChecks()
