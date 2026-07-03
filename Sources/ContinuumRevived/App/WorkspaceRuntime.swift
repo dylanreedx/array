@@ -253,7 +253,7 @@ final class WorkspaceRuntime {
         // Wire the broker before setZones so _installLayer can register adapters.
         canvasView.focusBroker = focusBroker
 
-        canvasView.setZones(layers, zoneZOrder: document.zoneZOrder)
+        canvasView.setZones(layers)
         installedLayers = layers
 
         // Attach UI to the active controller so dirty tracking and focus callbacks work.
@@ -286,7 +286,7 @@ final class WorkspaceRuntime {
     func closeAll() {
         // Clear zone layers first (while the focusBroker ref is still live on the canvas)
         // so that ZoneLayer tile adapters are unregistered before the controllers close.
-        canvasView?.setZones([], zoneZOrder: [])
+        canvasView?.setZones([])
         canvasView?.focusBroker = nil
         canvasView = nil
         for projectId in acquiredProjectIds {
@@ -412,11 +412,10 @@ final class WorkspaceRuntime {
             collapsed: false,
             hydrationPolicy: .automatic,
             name: "Group",
-            navKey: nil
+            navKey: nil,
+            zPosition: FracIndex.after(document.zones.map(\.zPosition).max() ?? .first)
         )
         document.zones.append(placement)
-        document.zoneZOrder.removeAll { $0 == zoneId }
-        document.zoneZOrder.append(zoneId)
         document.lastActiveZoneId = zoneId
 
         // A new group zone starts with no members: no ambient tile's zoneId
@@ -535,7 +534,7 @@ final class WorkspaceRuntime {
         }
 
         // 4. Swap canvas: setZones unregisters old adapters + registers new ones (T05).
-        canvasView?.setZones(layers, zoneZOrder: targetDocument.zoneZOrder)
+        canvasView?.setZones(layers)
         installedLayers = layers
 
         // 5. Release departing (after setZones so adapters are already unregistered by T05).

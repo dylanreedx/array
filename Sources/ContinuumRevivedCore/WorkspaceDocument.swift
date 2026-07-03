@@ -3,12 +3,13 @@ import Foundation
 public struct WorkspaceDocument: Equatable, Sendable {
     /// v2: grouped `groupZoneTiles` bag. v3: flat `ambientTiles` list with
     /// membership on each tile's `zoneId` LWW register (ticket 03).
-    public static let currentSchemaVersion = 3
+    /// v4: zone stacking on `ZonePlacement.zPosition` fractional index; the
+    /// `zoneZOrder` array is a decode-only legacy migration key (ticket 04).
+    public static let currentSchemaVersion = 4
 
     public let schemaVersion: Int
     public var viewport: CanvasViewport
     public var zones: [ZonePlacement]
-    public var zoneZOrder: [UUID]
     public var lastActiveZoneId: UUID?
     /// The tiles that live in this workspace's group zones (and formerly-zoned
     /// ambient tiles with `zoneId == nil`). This is the authoritative store for
@@ -16,20 +17,72 @@ public struct WorkspaceDocument: Equatable, Sendable {
     /// from each tile's `zoneId` register, never from a per-zone list.
     public var ambientTiles: [Tile]
 
+    /// `zoneZOrder` is a RANK-STAMPING convenience mirroring the decoder's
+    /// legacy migration: zones listed in it receive evenly distributed
+    /// `zPosition` values in list order (later = frontmost), zones not listed
+    /// keep the `zPosition` carried by their placement. Pass `[]` (the
+    /// default) when placements already carry their positions. There is no
+    /// stored order array — stacking lives on each zone's register.
     public init(
         schemaVersion: Int = WorkspaceDocument.currentSchemaVersion,
         viewport: CanvasViewport,
         zones: [ZonePlacement],
-        zoneZOrder: [UUID],
+        zoneZOrder: [UUID] = [],
         lastActiveZoneId: UUID?,
         ambientTiles: [Tile] = []
     ) {
         self.schemaVersion = schemaVersion
         self.viewport = viewport
-        self.zones = zones
-        self.zoneZOrder = zoneZOrder
+        self.zones = Self.stampingZonePositions(zones, fromLegacyOrder: zoneZOrder)
         self.lastActiveZoneId = lastActiveZoneId
         self.ambientTiles = ambientTiles
+    }
+
+    /// Zones back-to-front: the (zPosition, zoneId) sort every render/hit-test
+    /// consumer derives stacking from. Never array order.
+    public var zonesInZOrder: [ZonePlacement] {
+        zones.sorted { lhs, rhs in
+            if lhs.zPosition != rhs.zPosition { return lhs.zPosition < rhs.zPosition }
+            return lhs.zoneId.uuidString < rhs.zoneId.uuidString
+        }
+    }
+
+    /// Promote a zone above every other zone via its fractional register.
+    /// No-op when the zone is already strictly frontmost (never churns or
+    /// lowers the front item).
+    public mutating func bringZoneToFront(_ zoneId: UUID) {
+        guard let i = zones.firstIndex(where: { $0.zoneId == zoneId }) else { return }
+        let othersMax = zones.filter { $0.zoneId != zoneId }.map(\.zPosition).max()
+        guard let othersMax else { return }                       // only zone — already front
+        guard zones[i].zPosition <= othersMax else { return }     // already strictly frontmost
+        zones[i].zPosition = FracIndex.after(othersMax)
+    }
+
+    /// The migration/stamping shared by the decoder (legacy `zoneZOrder` key)
+    /// and the memberwise init: listed zones get evenly distributed positions
+    /// in list order (later = frontmost); unlisted zones follow, above the
+    /// listed ones, in array order — matching the old renderer's "layers not
+    /// in zoneZOrder are appended last (= topmost)". Lossless: every relative
+    /// order the old representation could express is preserved.
+    private static func stampingZonePositions(
+        _ zones: [ZonePlacement],
+        fromLegacyOrder legacyOrder: [UUID]
+    ) -> [ZonePlacement] {
+        guard !legacyOrder.isEmpty, !zones.isEmpty else { return zones }
+        var rankSequence: [UUID] = []
+        for id in legacyOrder where zones.contains(where: { $0.zoneId == id }) && !rankSequence.contains(id) {
+            rankSequence.append(id)
+        }
+        for zone in zones where !rankSequence.contains(zone.zoneId) {
+            rankSequence.append(zone.zoneId)
+        }
+        let positions = FracIndex.distribute(count: rankSequence.count)
+        let rankMap = Dictionary(uniqueKeysWithValues: zip(rankSequence, positions))
+        return zones.map { zone in
+            var stamped = zone
+            if let position = rankMap[zone.zoneId] { stamped.zPosition = position }
+            return stamped
+        }
     }
 
     public func tiles(forZone zoneId: UUID) -> [Tile] {
@@ -87,7 +140,7 @@ public struct WorkspaceDocument: Equatable, Sendable {
         let origin = zones.isEmpty
             ? ZonePoint(x: 0, y: 0)
             : ZonePoint(x: maxX + gap, y: 0)
-        let placement = ZonePlacement(
+        var placement = ZonePlacement(
             zoneId: zoneId,
             projectId: projectId,
             origin: origin,
@@ -98,9 +151,8 @@ public struct WorkspaceDocument: Equatable, Sendable {
             name: "",
             navKey: nil
         )
+        placement.zPosition = FracIndex.after(zones.map(\.zPosition).max() ?? .first)
         zones.append(placement)
-        zoneZOrder.removeAll { $0 == zoneId }
-        zoneZOrder.append(zoneId)
         lastActiveZoneId = zoneId
         return placement
     }
@@ -115,7 +167,7 @@ public struct WorkspaceDocument: Equatable, Sendable {
     ) -> ZonePlacement {
         let maxX = zones.map { $0.origin.x + $0.size.width }.max() ?? 0
         let origin = zones.isEmpty ? ZonePoint(x: 0, y: 0) : ZonePoint(x: maxX + gap, y: 0)
-        let placement = ZonePlacement(
+        var placement = ZonePlacement(
             zoneId: zoneId,
             projectId: nil,
             origin: origin,
@@ -126,9 +178,8 @@ public struct WorkspaceDocument: Equatable, Sendable {
             name: name,
             navKey: nil
         )
+        placement.zPosition = FracIndex.after(zones.map(\.zPosition).max() ?? .first)
         zones.append(placement)
-        zoneZOrder.removeAll { $0 == zoneId }
-        zoneZOrder.append(zoneId)
         lastActiveZoneId = zoneId
         return placement
     }
@@ -136,7 +187,8 @@ public struct WorkspaceDocument: Equatable, Sendable {
 
 extension WorkspaceDocument: Codable {
     private enum CodingKeys: String, CodingKey {
-        // `groupZoneTiles` is decode-only: the pre-v3 on-disk shape. Never re-emitted.
+        // `groupZoneTiles` (pre-v3) and `zoneZOrder` (pre-v4) are decode-only
+        // legacy migration keys. Never re-emitted.
         case schemaVersion, viewport, zones, zoneZOrder, lastActiveZoneId, ambientTiles, groupZoneTiles
     }
 
@@ -151,8 +203,16 @@ extension WorkspaceDocument: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let decodedVersion = try container.decode(Int.self, forKey: .schemaVersion)
         viewport = try container.decode(CanvasViewport.self, forKey: .viewport)
-        zones = try container.decode([ZonePlacement].self, forKey: .zones)
-        zoneZOrder = try container.decode([UUID].self, forKey: .zoneZOrder)
+        var decodedZones = try container.decode([ZonePlacement].self, forKey: .zones)
+        if decodedVersion < 4 {
+            // Pre-v4 zone stacking lived in the ordered `zoneZOrder` array
+            // (later = frontmost; unlisted layers rendered on top). Stamp that
+            // order onto each zone's fractional register, preserving every
+            // relative position — never collapse to a shared placeholder.
+            let legacyOrder = try container.decodeIfPresent([UUID].self, forKey: .zoneZOrder) ?? []
+            decodedZones = Self.stampingZonePositions(decodedZones, fromLegacyOrder: legacyOrder)
+        }
+        zones = decodedZones
         lastActiveZoneId = try container.decodeIfPresent(UUID.self, forKey: .lastActiveZoneId)
 
         var tiles = try container.decodeIfPresent([Tile].self, forKey: .ambientTiles) ?? []
@@ -184,8 +244,9 @@ extension WorkspaceDocument: Codable {
         // WorkspaceProfile — so no save path can write new fields under an old stamp.
         try container.encode(Swift.max(schemaVersion, WorkspaceDocument.currentSchemaVersion), forKey: .schemaVersion)
         try container.encode(viewport, forKey: .viewport)
+        // Zone stacking rides each placement's zPosition; the legacy zoneZOrder
+        // key is never re-emitted.
         try container.encode(zones, forKey: .zones)
-        try container.encode(zoneZOrder, forKey: .zoneZOrder)
         try container.encodeIfPresent(lastActiveZoneId, forKey: .lastActiveZoneId)
         // Only the flat register-carrying list; the legacy grouped key is never re-emitted.
         try container.encode(ambientTiles, forKey: .ambientTiles)
@@ -202,6 +263,12 @@ public struct ZonePlacement: Equatable, Sendable {
     public var hydrationPolicy: ZoneHydrationPolicy
     public var name: String
     public var navKey: String?
+    /// Zone stacking as a fractional-index LWW register (ticket 04): the field
+    /// `Op.setZonePosition` folds into. Front-to-back order is the
+    /// (zPosition, zoneId) sort — never array order. Pre-v4 documents carry no
+    /// key here; the WorkspaceDocument decoder stamps positions from the
+    /// legacy `zoneZOrder` array.
+    public var zPosition: FracIndex
 
     public init(
         zoneId: UUID,
@@ -212,7 +279,8 @@ public struct ZonePlacement: Equatable, Sendable {
         collapsed: Bool,
         hydrationPolicy: ZoneHydrationPolicy,
         name: String = "",
-        navKey: String? = nil
+        navKey: String? = nil,
+        zPosition: FracIndex = .first
     ) {
         self.zoneId = zoneId
         self.projectId = projectId
@@ -223,12 +291,13 @@ public struct ZonePlacement: Equatable, Sendable {
         self.hydrationPolicy = hydrationPolicy
         self.name = name
         self.navKey = navKey
+        self.zPosition = zPosition
     }
 }
 
 extension ZonePlacement: Codable {
     private enum CodingKeys: String, CodingKey {
-        case zoneId, projectId, origin, size, color, collapsed, hydrationPolicy, name, navKey
+        case zoneId, projectId, origin, size, color, collapsed, hydrationPolicy, name, navKey, zPosition
     }
 
     public init(from decoder: Decoder) throws {
@@ -242,6 +311,9 @@ extension ZonePlacement: Codable {
         hydrationPolicy = try container.decode(ZoneHydrationPolicy.self, forKey: .hydrationPolicy)
         name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
         navKey = try container.decodeIfPresent(String.self, forKey: .navKey)
+        // Pre-v4 placeholder; the WorkspaceDocument decoder overwrites it from
+        // the legacy zoneZOrder ranks so relative order is never collapsed.
+        zPosition = try container.decodeIfPresent(FracIndex.self, forKey: .zPosition) ?? .first
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -255,6 +327,7 @@ extension ZonePlacement: Codable {
         try container.encode(hydrationPolicy, forKey: .hydrationPolicy)
         try container.encode(name, forKey: .name)
         try container.encodeIfPresent(navKey, forKey: .navKey)
+        try container.encode(zPosition, forKey: .zPosition)
     }
 }
 

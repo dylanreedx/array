@@ -219,15 +219,9 @@ public enum SidebarTreeBuilder {
         let workspaceRows = registry.workspaces.map { entry -> SidebarWorkspaceRow in
             let zones: [SidebarZoneRow]
             if let document = documents[entry.id] {
-                let zOrderIndex = Dictionary(
-                    uniqueKeysWithValues: document.zoneZOrder.enumerated().map { ($0.element, $0.offset) }
-                )
-                let sorted = document.zones.sorted { a, b in
-                    let ia = zOrderIndex[a.zoneId] ?? Int.min
-                    let ib = zOrderIndex[b.zoneId] ?? Int.min
-                    if ia != ib { return ia < ib }
-                    return a.zoneId.uuidString < b.zoneId.uuidString
-                }
+                // Zone order derives from each placement's zPosition register
+                // (ticket 04) — the same (zPosition, zoneId) sort the canvas uses.
+                let sorted = document.zonesInZOrder
                 zones = sorted.map { placement -> SidebarZoneRow in
                     let name: String
                     if let projectId = placement.projectId {

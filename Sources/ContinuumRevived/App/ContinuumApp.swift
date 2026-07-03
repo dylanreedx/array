@@ -5384,7 +5384,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         var unsavedDocument = documentB
         unsavedDocument.zones.append(ZonePlacement(zoneId: zoneB2, projectId: nil, origin: ZonePoint(x: 700, y: 0), size: ZoneSize(width: 640, height: 480), color: "purple", collapsed: false, hydrationPolicy: .automatic, name: "Unsaved", navKey: nil))
-        unsavedDocument.zoneZOrder.append(zoneB2)
+        unsavedDocument.bringZoneToFront(zoneB2)
         unsavedDocument.lastActiveZoneId = zoneB2
         runtime.replaceDocument(unsavedDocument, for: workspaceB)
         app.reloadWorkspaceTopBar()
@@ -6418,9 +6418,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let store = WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
             var document = try store.load()
             document.zones.removeAll { $0.zoneId == zoneId }
-            document.zoneZOrder.removeAll { $0 == zoneId }
             if document.lastActiveZoneId == zoneId {
-                document.lastActiveZoneId = document.zoneZOrder.last ?? document.zones.first?.zoneId
+                document.lastActiveZoneId = document.zonesInZOrder.last?.zoneId
             }
             document.setTiles([], forZone: zoneId)
             let saveController = WorkspaceDocumentSaveController(store: store)
@@ -6452,8 +6451,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // Only append if not already present (idempotent guard).
             guard !document.zones.contains(where: { $0.zoneId == placement.zoneId }) else { return }
             document.zones.append(placement)
-            document.zoneZOrder.removeAll { $0 == placement.zoneId }
-            document.zoneZOrder.append(placement.zoneId)
+            document.bringZoneToFront(placement.zoneId)
             document.lastActiveZoneId = placement.zoneId
             let saveController = WorkspaceDocumentSaveController(store: store)
             saveController.scheduleZoneLayoutSave(document)
@@ -7440,13 +7438,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     static func zoneRenderModels(from document: WorkspaceDocument?, registry: Registry) -> [CanvasNSView.ZoneRenderModel] {
         guard let document else { return [] }
-        let zOrder = Dictionary(uniqueKeysWithValues: document.zoneZOrder.enumerated().map { ($0.element, $0.offset) })
-        let orderedZones = document.zones.sorted { lhs, rhs in
-            let lhsOrder = zOrder[lhs.zoneId] ?? Int.min
-            let rhsOrder = zOrder[rhs.zoneId] ?? Int.min
-            if lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
-            return lhs.zoneId.uuidString < rhs.zoneId.uuidString
-        }
+        // Zone order derives from each placement's zPosition register (ticket 04).
+        let orderedZones = document.zonesInZOrder
         return orderedZones.map { zone in
             let projectEntry = registry.projects.first(where: { $0.id == zone.projectId })
             let name = projectEntry?.name ?? (zone.name.isEmpty ? "Zone" : zone.name)
@@ -7875,8 +7868,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(persistedZone != nil, "assertion 4: reloaded document must contain a zone for P")
         try expect(reloadedDoc1.lastActiveZoneId == persistedZone!.zoneId,
                    "assertion 4: lastActiveZoneId should be the new P zone")
-        try expect(reloadedDoc1.zoneZOrder.last == persistedZone!.zoneId,
-                   "assertion 4: zoneZOrder should end with the new P zone")
+        try expect(reloadedDoc1.zonesInZOrder.last?.zoneId == persistedZone!.zoneId,
+                   "assertion 4: zone stacking order should end with the new P zone")
 
         // 5. Idempotent: second addProjectZone(P) → refCount stays 1, same controller instance, no duplicate zone.
         delegate.addProjectZone(projectId: projectP)
@@ -12588,7 +12581,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(newZone.name == DefaultGroupZoneName.resolve(), "created group zone must have configured default name; got '\(newZone.name)'")
         let expectedOriginX = firstZone.origin.x + Double(firstZone.size.width) + 120
         try expect(abs(newZone.origin.x - expectedOriginX) < 0.001, "created group zone origin.x must be firstZone.right + 120 gap; got \(newZone.origin.x) want \(expectedOriginX)")
-        try expect(postDoc.zoneZOrder.last == newZone.zoneId, "created group zone must be last in zoneZOrder")
+        try expect(postDoc.zonesInZOrder.last?.zoneId == newZone.zoneId, "created group zone must be frontmost in zone stacking order")
         try expect(postDoc.lastActiveZoneId == newZone.zoneId, "created group zone must be lastActiveZoneId")
 
         // Assert 10 — registry projectIds unchanged (no project added for group zone).
@@ -15572,7 +15565,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(scratchZone.projectId == nil, "assertion 3: template group zone projectId nil")
         try expect(scratchZone.name == "Scratch", "assertion 3: template group zone name == 'Scratch'")
         try expect(loadedTmpl.document.viewport == srcDoc.viewport, "assertion 3: template viewport (10,20,1.5) preserved")
-        try expect(loadedTmpl.document.zoneZOrder == srcDoc.zoneZOrder, "assertion 3: template zoneZOrder preserved")
+        try expect(
+            loadedTmpl.document.zonesInZOrder.map(\.zoneId) == srcDoc.zonesInZOrder.map(\.zoneId),
+            "assertion 3: template zone stacking order preserved"
+        )
 
         // --- Assertion 4: captureMode is the distinguishing property; documents are equal. ---
         // ARCHITECTURE-NOTE: snapshot and template are layout-identical because WorkspaceDocument

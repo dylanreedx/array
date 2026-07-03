@@ -1158,17 +1158,15 @@ final class CanvasNSView: NSView {
             let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: canvasState.viewport)
             var navigationZones: [CanvasEngine.NavigationZone] = []
             var tilesByZone: [UUID: [Tile]] = [:]
-            // Rank the installed layer order into (0,1) so the engine's
-            // (zPosition, id) zone sort reproduces it exactly.
-            let orderedZonePositions = FracIndex.distribute(count: zoneLayerOrder.count)
-            for (index, zoneId) in zoneLayerOrder.enumerated() {
+            for zoneId in zoneLayerOrder {
                 guard let layer = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) else { continue }
                 guard !layer.placement.collapsed else { continue }
                 navigationZones.append(CanvasEngine.NavigationZone(
                     id: zoneId,
                     frame: CanvasEngine.zoneWorldFrame(layer.placement),
-                    // later in order = higher position = wins
-                    zPosition: orderedZonePositions[index]
+                    // The zone's own register decides who wins the hit-test —
+                    // the engine sorts by (zPosition, id), never array order.
+                    zPosition: layer.placement.zPosition
                 ))
                 tilesByZone[zoneId] = layer.tiles
             }
@@ -1846,8 +1844,11 @@ final class CanvasNSView: NSView {
     // z-order: back-to-front (index 0 = bottom, last = top).
     private var zoneLayerOrder: [UUID] = []
 
-    /// Replace the entire installed layer set in place.
-    func setZones(_ layers: [ZoneLayer], zoneZOrder: [UUID]) {
+    /// Replace the entire installed layer set in place. Install order (and so
+    /// zoneLayerOrder, back-to-front) derives from each placement's zPosition
+    /// register — the (zPosition, zoneId) sort — never from array order
+    /// (ticket 04).
+    func setZones(_ layers: [ZoneLayer]) {
         // Unregister + remove all currently installed layers.
         for layer in zoneLayers {
             for (_, view) in layer.tileViews {
@@ -1859,13 +1860,14 @@ final class CanvasNSView: NSView {
         zoneLayers = []
         zoneLayerOrder = []
 
-        // Install the new layers in z-order.
-        let orderedLayers = zoneZOrder.compactMap { id in layers.first { $0.placement.zoneId == id } }
-        for layer in orderedLayers {
-            _installLayer(layer)
+        // Install the new layers back-to-front by zone zPosition.
+        let orderedLayers = layers.sorted { lhs, rhs in
+            if lhs.placement.zPosition != rhs.placement.zPosition {
+                return lhs.placement.zPosition < rhs.placement.zPosition
+            }
+            return lhs.placement.zoneId.uuidString < rhs.placement.zoneId.uuidString
         }
-        // Any layers not in zoneZOrder are appended last.
-        for layer in layers where !zoneZOrder.contains(layer.placement.zoneId) {
+        for layer in orderedLayers {
             _installLayer(layer)
         }
 
@@ -2134,7 +2136,7 @@ final class CanvasNSView: NSView {
         try expect(zone.zoneId == zoneId, "expected deterministic single zone id")
         try expect(zone.projectId == projectId, "zone should reference project id")
         try expect(zone.origin == ZonePoint(x: 0, y: 0), "single-zone compatibility requires origin 0,0")
-        try expect(workspace.zoneZOrder == [zoneId], "zone z-order should contain only the single zone")
+        try expect(workspace.zonesInZOrder.map(\.zoneId) == [zoneId], "zone z-order should contain only the single zone")
         try expect(workspace.lastActiveZoneId == zoneId, "single zone should be active")
 
         let loadedCanvas = try projectStore.loadCanvas()
@@ -2892,9 +2894,11 @@ final class CanvasNSView: NSView {
         let tBId            = UUID(uuidString: "00000000-0000-0000-0000-000000004822")!
         let tGId            = UUID(uuidString: "00000000-0000-0000-0000-000000004824")!
 
-        let placementA = ZonePlacement(zoneId: layerAZoneId, projectId: layerAProjectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 640, height: 420), color: "blue", collapsed: false, hydrationPolicy: .automatic)
-        let placementB = ZonePlacement(zoneId: layerBZoneId, projectId: layerBProjectId, origin: ZonePoint(x: 760, y: 0), size: ZoneSize(width: 640, height: 420), color: "mint", collapsed: false, hydrationPolicy: .automatic)
-        let placementG = ZonePlacement(zoneId: layerGZoneId, projectId: nil, origin: ZonePoint(x: 0, y: 500), size: ZoneSize(width: 640, height: 300), color: "purple", collapsed: false, hydrationPolicy: .automatic)
+        // Explicit zPositions: install order must derive from the register
+        // (ticket 04), not from array order or zoneId luck.
+        let placementA = ZonePlacement(zoneId: layerAZoneId, projectId: layerAProjectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 640, height: 420), color: "blue", collapsed: false, hydrationPolicy: .automatic, zPosition: .fromLegacyRank(1))
+        let placementB = ZonePlacement(zoneId: layerBZoneId, projectId: layerBProjectId, origin: ZonePoint(x: 760, y: 0), size: ZoneSize(width: 640, height: 420), color: "mint", collapsed: false, hydrationPolicy: .automatic, zPosition: .fromLegacyRank(2))
+        let placementG = ZonePlacement(zoneId: layerGZoneId, projectId: nil, origin: ZonePoint(x: 0, y: 500), size: ZoneSize(width: 640, height: 300), color: "purple", collapsed: false, hydrationPolicy: .automatic, zPosition: .fromLegacyRank(3))
 
         let tA = Tile(id: tAId, kind: .note, title: "tA", frame: TileFrame(x: 40, y: 52, width: 180, height: 120), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         let tB = Tile(id: tBId, kind: .note, title: "tB", frame: TileFrame(x: 30, y: 40, width: 200, height: 140), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
@@ -2907,7 +2911,7 @@ final class CanvasNSView: NSView {
         let layerG = ZoneLayer(placement: placementG, renderModel: ZoneRenderModel(placement: placementG, displayName: "LayerG"), tiles: [tG])
         layerG.tileViews[tGId] = DescriptorTileNSView(tile: tG)
 
-        layerCanvas.setZones([layerA, layerB, layerG], zoneZOrder: [layerAZoneId, layerBZoneId, layerGZoneId])
+        layerCanvas.setZones([layerA, layerB, layerG])
         layerCanvas.layoutSubtreeIfNeeded()
 
         // Assertion 1: installed set + order
@@ -2955,11 +2959,11 @@ final class CanvasNSView: NSView {
         try expect(broker.requestFocus(.tile(tGId), reason: .userClick), "assertion 10: tG adapter should be registered after setZones")
 
         // Assertion 11: overlap → topmost LAYER wins
-        // layerOver: origin (0,0) size 200x200, tile tOver (10,10,150,150) zIndex 1, placed LAST in z-order
+        // layerOver: origin (0,0) size 200x200, tile tOver (10,10,150,150), frontmost via its zPosition register
         let layerOverZoneId   = UUID(uuidString: "00000000-0000-0000-0000-000000004815")!
         let layerOverProjectId = UUID(uuidString: "00000000-0000-0000-0000-000000004805")!
         let tOverId           = UUID(uuidString: "00000000-0000-0000-0000-000000004825")!
-        let placementOver = ZonePlacement(zoneId: layerOverZoneId, projectId: layerOverProjectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 200, height: 200), color: "orange", collapsed: false, hydrationPolicy: .automatic)
+        let placementOver = ZonePlacement(zoneId: layerOverZoneId, projectId: layerOverProjectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 200, height: 200), color: "orange", collapsed: false, hydrationPolicy: .automatic, zPosition: .fromLegacyRank(4))
         let tOver = Tile(id: tOverId, kind: .note, title: "tOver", frame: TileFrame(x: 10, y: 10, width: 150, height: 150), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
         let layerOver = ZoneLayer(placement: placementOver, renderModel: ZoneRenderModel(placement: placementOver, displayName: "LayerOver"), tiles: [tOver])
         layerOver.tileViews[tOverId] = DescriptorTileNSView(tile: tOver)
@@ -4679,8 +4683,7 @@ final class CanvasNSView: NSView {
                 var doc = try store7.load()
                 guard !doc.zones.contains(where: { $0.zoneId == placement.zoneId }) else { return }
                 doc.zones.append(placement)
-                doc.zoneZOrder.removeAll { $0 == placement.zoneId }
-                doc.zoneZOrder.append(placement.zoneId)
+                doc.bringZoneToFront(placement.zoneId)
                 try store7.save(doc)
             } catch {
                 // will be detected by the assertions below
@@ -4700,8 +4703,8 @@ final class CanvasNSView: NSView {
                    "assertion 7: reloaded zone origin == (120,150), got (\(persisted7.origin.x),\(persisted7.origin.y))")
         try expect(abs(persisted7.size.width - 400) < 0.5 && abs(persisted7.size.height - 320) < 0.5,
                    "assertion 7: reloaded zone size == (400,320), got (\(persisted7.size.width),\(persisted7.size.height))")
-        try expect(reloaded7.zoneZOrder.contains(persisted7.zoneId),
-                   "assertion 7: reloaded zoneZOrder must contain the created zone id")
+        try expect(reloaded7.zonesInZOrder.last?.zoneId == persisted7.zoneId,
+                   "assertion 7: reloaded zone order must end with the created zone (frontmost)")
 
         // ── Assertion 7b: create-guard asymmetry — ZoneLayer-only canvas body press ─
         // A canvas with a zone installed ONLY as a ZoneLayer (zoneRenderModels is empty)

@@ -1365,14 +1365,13 @@ do {
     expect(zone.color == "mint", "WorkspaceDocument fixture color")
     expect(zone.collapsed == false, "WorkspaceDocument fixture collapsed")
     expect(zone.hydrationPolicy == .automatic, "WorkspaceDocument fixture hydration policy")
-    expect(decoded.zoneZOrder == [zone.zoneId], "WorkspaceDocument fixture z-order")
+    expect(decoded.zonesInZOrder.map(\.zoneId) == [zone.zoneId], "WorkspaceDocument fixture z-order")
     expect(decoded.lastActiveZoneId == zone.zoneId, "WorkspaceDocument fixture last active zone")
 
     let future = WorkspaceDocument(
         schemaVersion: WorkspaceDocument.currentSchemaVersion + 1,
         viewport: decoded.viewport,
         zones: decoded.zones,
-        zoneZOrder: decoded.zoneZOrder,
         lastActiveZoneId: decoded.lastActiveZoneId
     )
     do {
@@ -2571,6 +2570,137 @@ do {
     try writeAndVerify(manifest)
 }
 
+// MARK: - Z-order as a fractional index — zone migration (T04C)
+
+do {
+    let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-zone-zorder-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: scratch) }
+
+    let zoneA = UUID(uuidString: "0000C0A1-0000-4000-8000-000000000001")!
+    let zoneB = UUID(uuidString: "0000C0A2-0000-4000-8000-000000000002")!
+    let zoneC = UUID(uuidString: "0000C0A3-0000-4000-8000-000000000003")!
+    func zoneJson(_ id: UUID, x: Double) -> String {
+        """
+        {"zoneId": "\(id.uuidString)", "origin": {"x": \(x), "y": 0},
+         "size": {"width": 800, "height": 600}, "color": "mint",
+         "collapsed": false, "hydrationPolicy": "automatic", "name": "Z"}
+        """
+    }
+    // zones array order: [A, B, C]; legacy zoneZOrder lists [B, A] (later =
+    // frontmost, so A is above B); C is UNLISTED — the old renderer appended
+    // unlisted layers last, i.e. topmost. Expected stacking: B < A < C.
+    let legacyDocJson = """
+    {"schemaVersion": 3, "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+     "zones": [\(zoneJson(zoneA, x: 0)), \(zoneJson(zoneB, x: 900)), \(zoneJson(zoneC, x: 1800))],
+     "zoneZOrder": ["\(zoneB.uuidString)", "\(zoneA.uuidString)"],
+     "ambientTiles": []}
+    """
+    let migrated = try JSONCodec.makeDecoder().decode(WorkspaceDocument.self, from: Data(legacyDocJson.utf8))
+    expect(migrated.schemaVersion == WorkspaceDocument.currentSchemaVersion, "T04C: legacy v3 doc stamped current in memory")
+    expect(
+        migrated.zonesInZOrder.map(\.zoneId) == [zoneB, zoneA, zoneC],
+        "T04C: legacy zoneZOrder ranks preserved — listed order kept (B under A), unlisted zone topmost, NOT collapsed to a shared placeholder"
+    )
+    let zPositions = migrated.zonesInZOrder.map(\.zPosition)
+    for (a, b) in zip(zPositions, zPositions.dropFirst()) {
+        expect(a < b, "T04C: migrated zone positions strictly increase (no collapse)")
+    }
+
+    let reEncoded = try String(decoding: JSONCodec.makeEncoder().encode(migrated), as: UTF8.self)
+    expect(!reEncoded.contains("zoneZOrder"), "T04C: re-save never emits the legacy zoneZOrder key")
+    expect(reEncoded.contains("\"zPosition\""), "T04C: re-save carries per-zone zPosition")
+    expect(
+        reEncoded.contains("\"schemaVersion\":\(WorkspaceDocument.currentSchemaVersion)"),
+        "T04C: re-save stamped to the current workspace schema"
+    )
+    let reDecoded = try JSONCodec.makeDecoder().decode(WorkspaceDocument.self, from: Data(reEncoded.utf8))
+    expect(reDecoded == migrated, "T04C: migrate -> save -> load is idempotent")
+
+    // A v1 workspace doc (pre-ambientTiles AND pre-zPosition) migrates through
+    // the whole chain to current in one load.
+    let v1DocJson = legacyDocJson.replacingOccurrences(of: "\"schemaVersion\": 3", with: "\"schemaVersion\": 1")
+    let v1Migrated = try JSONCodec.makeDecoder().decode(WorkspaceDocument.self, from: Data(v1DocJson.utf8))
+    expect(v1Migrated.schemaVersion == WorkspaceDocument.currentSchemaVersion, "T04C: v1 doc migrates through the full chain")
+    expect(v1Migrated.zonesInZOrder.map(\.zoneId) == [zoneB, zoneA, zoneC], "T04C: v1 doc zone order preserved through the chain")
+
+    // ── Real-path old-file upgrade through WorkspaceStore + AtomicWriter ──
+    let wsId = UUID(uuidString: "AAAAAAAA-0000-4000-8000-000000000004")!
+    let store = WorkspaceStore(workspaceId: wsId, applicationSupportDirectory: scratch, retainedBackups: 2)
+    try FileManager.default.createDirectory(at: store.layout.workspaceDirectory, withIntermediateDirectories: true)
+    try Data(legacyDocJson.utf8).write(to: store.layout.canvasFile)
+    let upgraded = try store.load()
+    expect(upgraded.zonesInZOrder.map(\.zoneId) == [zoneB, zoneA, zoneC], "T04C real-path: order survives the store load")
+    try store.save(upgraded)
+    let rawAfterSave = try String(contentsOf: store.layout.canvasFile, encoding: .utf8)
+    expect(!rawAfterSave.contains("zoneZOrder"), "T04C real-path: saved file carries no legacy key")
+    expect(
+        rawAfterSave.contains("\"schemaVersion\" : \(WorkspaceDocument.currentSchemaVersion)"),
+        "T04C real-path: saved file stamped v\(WorkspaceDocument.currentSchemaVersion)"
+    )
+    let secondLoad = try store.load()
+    expect(secondLoad == upgraded, "T04C real-path: second load is identical (idempotent)")
+
+    // ── bringZoneToFront: promotes above all, never churns the frontmost ──
+    var doc = migrated
+    doc.bringZoneToFront(zoneB)
+    expect(doc.zonesInZOrder.last?.zoneId == zoneB, "T04C: bringZoneToFront promotes B above A and C")
+    let afterPromotion = doc
+    doc.bringZoneToFront(zoneB)
+    expect(doc == afterPromotion, "T04C: bringZoneToFront on the frontmost zone is a no-op (never lowers/churns)")
+
+    // ── Convergence sub-case: concurrent setZonePosition ops, opposite
+    // arrival orders — byte-identical documents. ──
+    let replicaA = UUID(uuidString: "0000AB05-0000-4000-8000-00000000AB05")!
+    let replicaB = UUID(uuidString: "0000AB06-0000-4000-8000-00000000AB06")!
+    let zOps: [LoggedOp] = [
+        LoggedOp(opId: OpId(lamport: 2, replica: replicaA), op: .setZonePosition(id: zoneA, position: FracIndex(value: 0.9))),
+        LoggedOp(opId: OpId(lamport: 6, replica: replicaB), op: .setZonePosition(id: zoneA, position: FracIndex(value: 0.3))),
+        LoggedOp(opId: OpId(lamport: 4, replica: replicaA), op: .setZonePosition(id: zoneC, position: FracIndex(value: 0.05))),
+    ]
+    func foldZone(_ arrivalOrder: [LoggedOp]) throws -> Data {
+        var state = migrated
+        for logged in arrivalOrder.sorted(by: { $0.opId < $1.opId }) {
+            guard case let .setZonePosition(id, position) = logged.op else { continue }
+            if let i = state.zones.firstIndex(where: { $0.zoneId == id }) {
+                state.zones[i].zPosition = position   // the register Op.setZonePosition folds into
+            }
+        }
+        return try JSONCodec.makeOpLogEncoder().encode(state)
+    }
+    let zoneForward = try foldZone(zOps)
+    let zoneReversed = try foldZone(zOps.reversed())
+    expect(zoneForward == zoneReversed, "T04C convergence: opposite arrival orders -> byte-identical documents")
+    let zoneConverged = try JSONCodec.makeDecoder().decode(WorkspaceDocument.self, from: zoneForward)
+    expect(
+        zoneConverged.zones.first { $0.zoneId == zoneA }?.zPosition == FracIndex(value: 0.3),
+        "T04C convergence: highest OpId wins for zone A"
+    )
+    // Converged registers: C=0.05, B=0.25 (untouched), A=0.3 -> stacking [C, B, A].
+    expect(
+        zoneConverged.zonesInZOrder.map(\.zoneId) == [zoneC, zoneB, zoneA],
+        "T04C convergence: derived stacking reflects the converged registers"
+    )
+
+    let manifest = InvariantManifest(
+        invariantId: "ticket04-zorder-fracindex",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_800_000_000)),
+        measurements: [
+            "zonesMigrated": .int(migrated.zones.count),
+            "workspaceSchemaVersion": .string("3->\(WorkspaceDocument.currentSchemaVersion)"),
+            "unlistedZoneHandled": .bool(true),
+            "savedFileHasZoneZOrderKey": .bool(rawAfterSave.contains("zoneZOrder")),
+            "convergedByteCount": .int(zoneForward.count),
+            "via": .string("zone_zposition_migration")
+        ],
+        outcome: InvariantOutcome.pass.rawValue,
+        failureReason: nil
+    )
+    try writeAndVerify(manifest)
+}
+
 // MARK: - DefaultWorkspaceMigration
 
 do {
@@ -2621,7 +2751,7 @@ do {
     expect(loaded.zones.count == 1, "DefaultWorkspaceMigration creates one zone")
     expect(loaded.zones[0].projectId == projectId, "DefaultWorkspaceMigration zone references project")
     expect(loaded.zones[0].origin == ZonePoint(x: 0, y: 0), "DefaultWorkspaceMigration zone starts at origin")
-    expect(loaded.zoneZOrder == [zoneId], "DefaultWorkspaceMigration z-order matches zone")
+    expect(loaded.zonesInZOrder.map(\.zoneId) == [zoneId], "DefaultWorkspaceMigration z-order matches zone")
     expect(loaded.lastActiveZoneId == zoneId, "DefaultWorkspaceMigration records active zone")
 
     let secondWorkspaceId = try migration.ensureDefaultWorkspace(
@@ -5773,7 +5903,10 @@ do {
     expect(scratchZone.projectId == nil, "template: group zone projectId nil")
     expect(scratchZone.name == "Scratch", "template: group zone name preserved")
     expect(loaded2.document.viewport == srcDoc.viewport, "template: viewport preserved (10,20,1.5)")
-    expect(loaded2.document.zoneZOrder == srcDoc.zoneZOrder, "template: zoneZOrder preserved")
+    expect(
+        loaded2.document.zonesInZOrder.map(\.zoneId) == srcDoc.zonesInZOrder.map(\.zoneId),
+        "template: zone stacking order preserved"
+    )
 
     // 3. listProfiles — both profiles, sorted by createdAt, junk skipped.
     let junkURL = appSupport.appendingPathComponent("profiles/notjson.json")
