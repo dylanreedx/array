@@ -37,13 +37,13 @@ private func opsOnly(_ messages: [SyncMessage]) -> [LoggedOp] {
 /// smoke check below has something to observe.
 private actor NullSyncTransport: ContinuumRevivedSync.SyncTransport {
     let inbound: AsyncStream<SyncMessage>
-    let connectionState: AsyncStream<ConnectionState>
+    let connectionState: AsyncStream<ContinuumRevivedSync.ConnectionState>
     private let inboundContinuation: AsyncStream<SyncMessage>.Continuation
-    private let connectionContinuation: AsyncStream<ConnectionState>.Continuation
+    private let connectionContinuation: AsyncStream<ContinuumRevivedSync.ConnectionState>.Continuation
 
     init() {
         let (inboundStream, inboundContinuation) = AsyncStream<SyncMessage>.makeStream()
-        let (stateStream, connectionContinuation) = AsyncStream<ConnectionState>.makeStream()
+        let (stateStream, connectionContinuation) = AsyncStream<ContinuumRevivedSync.ConnectionState>.makeStream()
         self.inbound = inboundStream
         self.inboundContinuation = inboundContinuation
         self.connectionState = stateStream
@@ -54,7 +54,7 @@ private actor NullSyncTransport: ContinuumRevivedSync.SyncTransport {
         inboundContinuation.yield(message)
     }
 
-    func announce(_ state: ConnectionState) {
+    func announce(_ state: ContinuumRevivedSync.ConnectionState) {
         connectionContinuation.yield(state)
     }
 }

@@ -8,9 +8,9 @@ import Foundation
 
 private actor LoopbackSyncTransport: ContinuumRevivedSync.SyncTransport {
     let inbound: AsyncStream<SyncMessage>
-    let connectionState: AsyncStream<ConnectionState>
+    let connectionState: AsyncStream<ContinuumRevivedSync.ConnectionState>
     private let inboundContinuation: AsyncStream<SyncMessage>.Continuation
-    private let connectionContinuation: AsyncStream<ConnectionState>.Continuation
+    private let connectionContinuation: AsyncStream<ContinuumRevivedSync.ConnectionState>.Continuation
     private var peer: LoopbackSyncTransport?
     private var dropPredicate: (@Sendable (SyncMessage) -> Bool)?
     private var delaySteps = 0
@@ -20,7 +20,7 @@ private actor LoopbackSyncTransport: ContinuumRevivedSync.SyncTransport {
 
     init() {
         (inbound, inboundContinuation) = AsyncStream<SyncMessage>.makeStream()
-        (connectionState, connectionContinuation) = AsyncStream<ConnectionState>.makeStream()
+        (connectionState, connectionContinuation) = AsyncStream<ContinuumRevivedSync.ConnectionState>.makeStream()
     }
 
     func attach(_ peer: LoopbackSyncTransport) { self.peer = peer }
@@ -72,14 +72,14 @@ private actor LoopbackSyncTransport: ContinuumRevivedSync.SyncTransport {
 
 private actor BlackHoleTransport: ContinuumRevivedSync.SyncTransport {
     let inbound: AsyncStream<SyncMessage>
-    let connectionState: AsyncStream<ConnectionState>
+    let connectionState: AsyncStream<ContinuumRevivedSync.ConnectionState>
     private let inboundContinuation: AsyncStream<SyncMessage>.Continuation
-    private let connectionContinuation: AsyncStream<ConnectionState>.Continuation
+    private let connectionContinuation: AsyncStream<ContinuumRevivedSync.ConnectionState>.Continuation
     private(set) var sentMessages: [SyncMessage] = []
 
     init() {
         (inbound, inboundContinuation) = AsyncStream<SyncMessage>.makeStream()
-        (connectionState, connectionContinuation) = AsyncStream<ConnectionState>.makeStream()
+        (connectionState, connectionContinuation) = AsyncStream<ContinuumRevivedSync.ConnectionState>.makeStream()
     }
 
     func send(_ message: SyncMessage) async throws {

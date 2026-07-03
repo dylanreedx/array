@@ -120,3 +120,4 @@ be salvaged. These rows reset them for the loop to re-drive; if 07 lands, 56 →
 | 58-activity-projection-transport.md | done | 25b7fb5 | matrix: green (headless) | gpt-5.5 primary; pending Fable audit |
 | 74-agent-message-bus-seam.md | done | 175c992 | matrix: green (headless) | gpt-5.5 primary; pending Fable audit |
 | 56-transport-fuzz-soak.md | done | a019dae | matrix: green (headless) | gpt-5.5 primary; pending Fable audit |
+| 66-connection-supervisor.md | done | a38ee8f | matrix: green (headless) | gpt-5.5 primary; pending Fable audit |
