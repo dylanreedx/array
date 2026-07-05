@@ -127,3 +127,4 @@ be salvaged. These rows reset them for the loop to re-drive; if 07 lands, 56 →
 | 20-project-release-detach.md | done | dbd4692 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
 | 48-host-remotereach-model.md | done | 7de3fa8 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
 | 67-agent-adapter-protocol.md | done | 22832e1 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
+| 54-bootstrap-auth-every-path.md | done | a7f6339 | matrix: green (headless) | night3-A gpt-5.5; pending audit |

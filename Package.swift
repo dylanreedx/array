@@ -11,12 +11,20 @@ let package = Package(
         .executable(name: "ContinuumRevivedPaletteChecks", targets: ["ContinuumRevivedPaletteChecks"]),
         .library(name: "ContinuumRevivedCore", targets: ["ContinuumRevivedCore"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1")
+    ],
     targets: [
         .binaryTarget(
             name: "GhosttyKit",
             path: "ThirdParty/GhosttyKit.xcframework"
         ),
-        .target(name: "ContinuumRevivedCore"),
+        .target(
+            name: "ContinuumRevivedCore",
+            dependencies: [
+                .product(name: "GRDB", package: "GRDB.swift")
+            ]
+        ),
         // Sync layer (ticket 06's home; stood up by ticket 05 with the
         // tombstone vocabulary). Pure Swift, depends only on Core.
         .target(

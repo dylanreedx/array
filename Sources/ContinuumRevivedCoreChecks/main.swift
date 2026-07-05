@@ -7041,35 +7041,27 @@ do {
 }
 
 // Mechanical CI guard: ContinuumRevivedCore's target declaration in
-// Package.swift must keep an empty `dependencies:` array — the op-log
-// layer is pure Swift with zero external dependencies.
+// Package.swift may only carry the GRDB dependency required by ticket 54.
+// The op-log layer remains pure Swift; the allowed dependency belongs to the
+// auth store and is kept explicit here so arbitrary Core dependencies do not
+// creep in silently.
 do {
     let path = "Package.swift"
     guard let source = try? String(contentsOfFile: path, encoding: .utf8) else {
         fputs("FAIL: dependencies guard: could not read \(path) from cwd \(FileManager.default.currentDirectoryPath)\n", stderr)
         Foundation.exit(1)
     }
-    // Match `.target(name: "ContinuumRevivedCore")` specifically — NOT the
-    // `.library(name: "ContinuumRevivedCore", ...)` product declaration,
-    // which also contains the substring `name: "ContinuumRevivedCore"` and
-    // appears earlier in the file. Anchor on the `.target(` prefix so the
-    // guard inspects the actual target declaration that owns
-    // `dependencies:`, with no dependencies: argument at all (the empty
-    // case) — any dependencies: array appearing in that same target
-    // declaration fails the guard.
-    guard let range = source.range(of: ".target(name: \"ContinuumRevivedCore\"") else {
+    guard let targetStart = source.range(of: ".target(\n            name: \"ContinuumRevivedCore\""),
+          let syncComment = source.range(of: "// Sync layer", range: targetStart.upperBound..<source.endIndex) else {
         fputs("FAIL: dependencies guard: could not find ContinuumRevivedCore target declaration in Package.swift\n", stderr)
         Foundation.exit(1)
     }
-    // Look at the declaration up to the next `)` that closes the .target(...) call.
-    let afterName = source[range.upperBound...]
-    guard let closeParen = afterName.firstIndex(of: ")") else {
-        fputs("FAIL: dependencies guard: malformed ContinuumRevivedCore target declaration\n", stderr)
-        Foundation.exit(1)
-    }
-    let declaration = afterName[afterName.startIndex..<closeParen]
-    expect(!declaration.contains("dependencies"), "dependencies guard: ContinuumRevivedCore target must declare no dependencies, found: \(declaration)")
-    print("dependencies guard: ContinuumRevivedCore target has zero dependencies")
+    let declaration = String(source[targetStart.lowerBound..<syncComment.lowerBound])
+    let compactDeclaration = declaration.filter { !$0.isWhitespace }
+    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:[.product(name:"GRDB",package:"GRDB.swift")]),"#
+    expect(compactDeclaration == expectedDeclaration,
+           "dependencies guard: ContinuumRevivedCore target must include exactly the GRDB product dependency, found: \(declaration)")
+    print("dependencies guard: ContinuumRevivedCore target has only GRDB dependency")
 }
 
 // MARK: - Ticket 08: Sync/observation type split (ActivityStore)
