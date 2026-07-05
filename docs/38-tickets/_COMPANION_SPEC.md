@@ -5,8 +5,8 @@ used; **live and bidirectional** — move a tile on desktop, see it on the phone
 AND edit workspaces/canvas in the MVP; mostly observing + gating (approvals); push notifications are
 first-class with a mapped taxonomy and a real test method. UX gets dogfooded and iterated after.
 
-Display name **Continuum** · bundle id **io.bannockburn.continuum** (veto before morning upload if you
-want different — it's immutable once the App Store Connect record exists).
+Display name **Continuum** · bundle id **com.dylanreed.continuum** (Dylan's call 2026-07-04; immutable
+once the App Store Connect record exists tomorrow morning).
 
 ## 1. Architecture — the phone is a replica, not a viewer
 
