@@ -297,7 +297,13 @@ final class TileSpawner {
             return terminalFocusedPaneTargetProvider?()
         }()
         let paneTarget = try Self.runTmuxControlOperationSync {
-            if try await control.sessionExists(name: sessionName) {
+            if case .project = target {
+                do {
+                    return try await control.newWindow(inSession: sessionName, cwd: profile.cwd, innerCommand: innerCommand)
+                } catch {
+                    return try await control.newSession(name: sessionName, cwd: profile.cwd, innerCommand: innerCommand)
+                }
+            } else if try await control.sessionExists(name: sessionName) {
                 let cwd = try await Self.cwdForNewWindow(profileCwd: profile.cwd, control: control, focusedPaneTarget: focusedPaneTarget)
                 return try await control.newWindow(inSession: sessionName, cwd: cwd, innerCommand: innerCommand)
             } else {
@@ -3578,8 +3584,8 @@ final class TileSpawner {
         }
         let projectSessionName = TmuxSession.projectSessionName(projectId: projectId)
         let projectTargets = try projectCanvas.canvasState.tiles.map { try managedTarget(spawner: projectSpawner, tileId: $0.id) }.compactMap { $0 }
-        try expect(projectTmux.log.filter { if case .newSession = $0 { return true }; return false }.count == 1, "project spawns should create exactly one tmux session, log=\(projectTmux.log)")
-        try expect(projectTmux.log.filter { if case .newWindow = $0 { return true }; return false }.count == 2, "project spawns should create exactly two tmux windows, log=\(projectTmux.log)")
+        try expect(projectTmux.log.filter { if case .newSession = $0 { return true }; return false }.count == 1, "project spawns should create exactly one tmux session after the first newWindow fallback, log=\(projectTmux.log)")
+        try expect(projectTmux.log.filter { if case .newWindow = $0 { return true }; return false }.count == 3, "project spawns should try newWindow for every project tile, falling back to newSession only for the first missing session, log=\(projectTmux.log)")
         try expect(projectTargets.count == 3 && Set(projectTargets).count == 3, "project descriptors should persist three distinct pane targets, got \(projectTargets)")
         try expect(projectTmux.sessions[projectSessionName] == projectTargets, "fake project session should contain exactly persisted targets")
         for (index, descriptor) in projectDescriptors.enumerated() {
@@ -3629,6 +3635,61 @@ final class TileSpawner {
         )
         let deadRestartTarget = try managedTarget(spawner: projectSpawner, tileId: restartTileId)
         try expect(deadRestartTarget != nil && deadRestartTarget != liveTargetBeforeRestart, "restart with a dead target should persist a fresh managed pane target")
+
+        let nilTargetRecord = ManagedAgentSessionRecord(
+            tileId: restartTileId,
+            agentKind: .shell,
+            status: .running,
+            lastSeenAt: Date(),
+            runtimePayload: nil
+        )
+        try projectSpawner.managedSessionStore.upsert(nilTargetRecord)
+        let logCountBeforeNilRestart = projectTmux.log.count
+        _ = try restartAndDescriptor(tileId: restartTileId, spawner: projectSpawner, store: projectStore, canvas: projectCanvas)
+        let nilRestartLog = Array(projectTmux.log.dropFirst(logCountBeforeNilRestart))
+        try expect(!nilRestartLog.contains { if case .isAlive = $0 { return true }; return false }, "restart with nil target should not probe liveness, log=\(nilRestartLog)")
+        try expect(nilRestartLog.contains { call in
+            if case let .newWindow(session, cwd) = call {
+                return session == projectSessionName && cwd == projectRoot.path
+            }
+            return false
+        }, "restart with nil target should create a project window, log=\(nilRestartLog)")
+        let nilRestartTarget = try managedTarget(spawner: projectSpawner, tileId: restartTileId)
+        try expect(nilRestartTarget != nil, "restart with nil target should persist a fresh managed pane target")
+
+        let sessionGoneRoot = tempRoot.appendingPathComponent("project-window-session-gone", isDirectory: true)
+        try fileManager.createDirectory(at: sessionGoneRoot, withIntermediateDirectories: true)
+        let sessionGoneTmux = InMemoryTmuxControl()
+        let (sessionGoneSpawner, sessionGoneStore, sessionGoneCanvas, sessionGoneBrowser, sessionGoneGhostty) = try makeSpawner(
+            root: sessionGoneRoot,
+            defaults: projectDefaults,
+            resolver: { _ in fakeTmux.path },
+            tmuxControlFactory: { _ in sessionGoneTmux }
+        )
+        defer { sessionGoneGhostty.shutdown(); sessionGoneBrowser.shutdown() }
+        let sessionGoneProjectId = UUID()
+        let sessionGoneSessionName = TmuxSession.projectSessionName(projectId: sessionGoneProjectId)
+        sessionGoneSpawner.terminalProjectContextProvider = {
+            ProjectEntry(id: sessionGoneProjectId, name: "Session Gone", rootPath: sessionGoneRoot.path, workspaceId: nil, lastOpenedAt: Date(), pinned: false, missing: false)
+        }
+        sessionGoneSpawner.terminalSessionTargetProvider = { .project(projectId: sessionGoneProjectId) }
+        let (sessionGoneTile, _) = try spawnAndDescriptor(spawner: sessionGoneSpawner, store: sessionGoneStore, canvas: sessionGoneCanvas)
+        let sessionGoneOldTarget = try managedTarget(spawner: sessionGoneSpawner, tileId: sessionGoneTile.id)
+        try expect(sessionGoneOldTarget != nil, "session-gone setup should persist an initial target")
+        try Self.runTmuxControlOperationSync { try await sessionGoneTmux.killWindow(target: sessionGoneOldTarget ?? "") }
+        let sessionGoneLogCountBeforeRestart = sessionGoneTmux.log.count
+        _ = try restartAndDescriptor(tileId: sessionGoneTile.id, spawner: sessionGoneSpawner, store: sessionGoneStore, canvas: sessionGoneCanvas)
+        let sessionGoneRestartLog = Array(sessionGoneTmux.log.dropFirst(sessionGoneLogCountBeforeRestart))
+        try expect(
+            sessionGoneRestartLog.prefix(3) == [
+                .isAlive(target: sessionGoneOldTarget ?? ""),
+                .newWindow(session: sessionGoneSessionName, cwd: sessionGoneRoot.path),
+                .newSession(name: sessionGoneSessionName, cwd: sessionGoneRoot.path)
+            ],
+            "restart with a dead target and missing project session must try isAlive -> newWindow -> newSession, log=\(sessionGoneRestartLog)"
+        )
+        let sessionGoneNewTarget = try managedTarget(spawner: sessionGoneSpawner, tileId: sessionGoneTile.id)
+        try expect(sessionGoneNewTarget != nil && sessionGoneNewTarget != sessionGoneOldTarget, "session-gone restart should persist the newSession target")
 
         let flushDescriptorBefore = projectDescriptors[0]
         let flushRuntime = GhosttyTerminalRuntime(
@@ -3741,16 +3802,19 @@ final class TileSpawner {
         )
 
         let offDefaults = makeDefaults(enabled: false, path: fakeTmux.path)
+        let offTmux = InMemoryTmuxControl()
         let (offSpawner, offStore, offCanvas, offBrowser, offGhostty) = try makeSpawner(
             root: offRoot,
             defaults: offDefaults,
-            resolver: { _ in fakeTmux.path }
+            resolver: { _ in fakeTmux.path },
+            tmuxControlFactory: { _ in offTmux }
         )
         defer { offGhostty.shutdown(); offBrowser.shutdown() }
         let (_, offDescriptor) = try spawnAndDescriptor(spawner: offSpawner, store: offStore, canvas: offCanvas)
         try expect(offDescriptor.command != fakeTmux.path, "toggle-off should fall back to bare shell command")
         try expect(!offDescriptor.args.contains("new-session"), "toggle-off should not include tmux argv")
         try expect(offDescriptor.cwd == offRoot.path, "toggle-off should preserve bare cwd")
+        try expect(offTmux.log.isEmpty, "tmux-disabled spawn/restart path should not call TmuxControl, log=\(offTmux.log)")
 
         let absentDefaults = makeDefaults(enabled: true, path: "")
         let (absentSpawner, absentStore, absentCanvas, absentBrowser, absentGhostty) = try makeSpawner(
