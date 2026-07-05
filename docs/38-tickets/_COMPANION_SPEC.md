@@ -97,3 +97,53 @@ view/editor (op-emitting) → 62 approvals + scope gate → 63 push sender + N1�
 64 deep links → 65 category settings → T2 simulator push suite.** 61b (canvas editor) is the
 biggest new surface; if the night runs long it degrades gracefully: view-only canvas ships, edit
 gestures become the first morning-after item. Everything else is unchanged from _NIGHT3_PLAN.md.
+
+## 6. Screens (the design tonight's 61a/61b implement — wireframes in the sprint-map artifact, tab 5)
+
+**Navigation:** iOS tab bar — **Agents** (home) · **Canvas** · **Approvals** (badged) · **Settings**.
+Workspace switcher is a compact menu in the top bar of Agents + Canvas (shared selection). Agent
+detail pushes onto whichever tab invoked it. Dark-only v1 (matches desktop).
+
+### 6.1 Agents board (home — the screen Dylan lives on)
+- Top bar: workspace menu (name + attention count) · connection dot.
+- **Needs-you section pinned first** (orange-tinted rows): agents with pending approval/question.
+- Rows: status dot+pill (working=blue pulse, needs-you=orange, waiting=amber, done=green, idle=grey,
+  stale=hollow), kind glyph (pi/claude/codex/shell), tile title, one-line last-activity summary,
+  elapsed (tabular). Tap → detail. Pull-to-refresh forces a snapshot re-fetch.
+- Footer strip: connection state from the supervisor — `live` / `reconnecting (12s)` / `offline —
+  showing data as of 14:32`. Never hide staleness (I4 honesty).
+
+### 6.2 Agent detail
+- Header: title, kind, status pill, elapsed, workspace.
+- If pending: **approval/question card** at top — requested action summary, age, Approve / Deny
+  (scope-gated; buttons disabled with "observer scope" hint if not permitted).
+- Status timeline: folded event history (status transitions + summaries, newest first).
+- Actions: "Show on canvas" (switches to Canvas tab, centers tile).
+
+### 6.3 Canvas (the replica)
+- Pinch-zoom / pan; fit-all button. Tiles = rounded rects (title, kind glyph, status dot); zones =
+  tinted regions with headers; z-order honored (zPosition).
+- Observer scope: read-only, small lock badge in toolbar.
+- Operator scope edits: drag tile → ghost outline follows finger, **op emitted on drop**, subtle
+  pending shimmer until the transport acks; pinch-handles resize; drag into/out of zone highlights
+  membership change; long-press → Bring to front. Failure → toast + snap back (never silently lost).
+- Remote changes animate in (~1–3 s after desktop edit — the honest CloudKit cadence).
+
+### 6.4 Approvals inbox
+- All pending across workspaces, grouped by workspace; row: agent, action summary, age.
+- Swipe right = Approve, swipe left = Deny (with confirm); or open → full card.
+- Empty state: "Nothing needs you." + last-checked stamp.
+
+### 6.5 Pairing (first run) + Settings
+- First run: explainer → **scan the QR the desktop shows** (Settings → Devices → Pair new device) →
+  confirm device name + granted scope (observer default) → land on Agents. Token flow per ticket 60;
+  re-pair and unpair live in Settings → This device.
+- Settings: notification categories N1–N8 (toggles per §3 defaults; N7 shown but locked ON) + quiet
+  hours; Devices (this device's scope badge; operator granted from DESKTOP only — phone can't
+  self-escalate); Connection diagnostics (transport state, last sync, replica id); About.
+
+### 6.6 State rules (all screens)
+- **Cold connect:** skeleton rows ≤2 s (cursor:nil snapshot per B0b ruling), then live.
+- **Offline:** banner + all timestamps switch to "as of HH:MM" — stale data stays visible, never blanked.
+- **Empty workspace:** friendly zero-state with a pointer to spawn agents on desktop.
+- Haptics on: approval sent, op ack, connection regained. No sounds v1.
