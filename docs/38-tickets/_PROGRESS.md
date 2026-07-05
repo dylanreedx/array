@@ -142,3 +142,4 @@ be salvaged. These rows reset them for the loop to re-drive; if 07 lands, 56 →
 | 43-replace-mock-rollup.md | skipped | - | - | codex-primary: attempt did not commit (rc=0); see iter-2.log (after escalated high retry) |
 | 44-feed-sidebar-tree.md | skipped | - | - | codex-primary: attempt did not commit (rc=0); see iter-4.log (after escalated high retry) |
 | 45-render-left-dock.md | done | ee5c968 | matrix: green (headless) | night3-C gpt-5.5; pending audit; visual-gate-owed |
+| 46-dock-toggle-width.md | done | 3ef5997 | matrix: green (headless) | night3-C gpt-5.5; pending audit; visual-gate-owed |

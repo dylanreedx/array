@@ -20,6 +20,10 @@ public enum WorkspaceSidebarConfig {
 
     public static func resolveWidth(defaults: UserDefaults = .standard) -> Double {
         guard defaults.object(forKey: widthKey) != nil else { return defaultWidth }
+        if let stringValue = defaults.string(forKey: widthKey),
+           let width = Double(stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return clampedWidth(width)
+        }
         return clampedWidth(defaults.double(forKey: widthKey))
     }
 

@@ -2124,7 +2124,9 @@ enum ContinuumApp {
 
         let viewMenuItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
         let viewMenu = NSMenu(title: "View")
-        viewMenu.addItem(NSMenuItem(title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: ""))
+        let sidebarItem = NSMenuItem(title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "S")
+        sidebarItem.keyEquivalentModifierMask = [.command, .shift]
+        viewMenu.addItem(sidebarItem)
         viewMenu.addItem(NSMenuItem(title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: ""))
         viewMenuItem.submenu = viewMenu
         mainMenu.addItem(viewMenuItem)
@@ -2172,7 +2174,7 @@ enum ContinuumApp {
         try expectMenuItem(editMenu, title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
         guard let viewMenu = mainMenu.item(withTitle: "View")?.submenu else { throw SelfCheckError("missing View menu") }
-        try expectMenuItem(viewMenu, title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "")
+        try expectMenuItem(viewMenu, title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "S", modifiers: [.command, .shift])
         try expectMenuItem(viewMenu, title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: "")
 
         guard let debugMenu = mainMenu.item(withTitle: "Debug")?.submenu else { throw SelfCheckError("missing Debug menu") }
@@ -2294,6 +2296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var workspaceSidebarView: WorkspaceSidebarView?
     private var workspaceTopBarView: WorkspaceTopBarView?
     private var workspaceSplitView: NSSplitView?
+    private var isApplyingWorkspaceSidebarVisibility = false
     private var workspaceCreatePromptProvider: (() -> String?)?
     private var workspaceRenamePromptProvider: ((String) -> String?)?
     private var workspaceDeleteConfirmationProvider: ((WorkspaceDeleteConfirmationRequest) -> Bool)?
@@ -4726,6 +4729,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func applyWorkspaceSidebarVisibility(_ visible: Bool) {
         guard let splitView = workspaceSplitView,
               let sidebar = workspaceSidebarView else { return }
+        isApplyingWorkspaceSidebarVisibility = true
+        defer { isApplyingWorkspaceSidebarVisibility = false }
         sidebar.isHidden = !visible
         if visible {
             splitView.setPosition(CGFloat(WorkspaceSidebarConfig.resolveWidth()), ofDividerAt: 0)
@@ -4733,6 +4738,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             splitView.setPosition(0, ofDividerAt: 0)
         }
         splitView.adjustSubviews()
+        if !visible {
+            sidebar.isHidden = true
+        }
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -4758,6 +4766,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let splitView = notification.object as? NSSplitView,
               splitView === workspaceSplitView,
               let sidebar = workspaceSidebarView,
+              !isApplyingWorkspaceSidebarVisibility,
               !sidebar.isHidden else { return }
         WorkspaceSidebarConfig.setWidth(Double(sidebar.frame.width))
     }
@@ -5067,6 +5076,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         func viewportsNearlyEqual(_ lhs: CanvasViewport, _ rhs: CanvasViewport) -> Bool {
             max(abs(lhs.x - rhs.x), abs(lhs.y - rhs.y), abs(lhs.zoom - rhs.zoom)) < 0.001
         }
+        func dividerPosition(_ sidebar: WorkspaceSidebarView) -> Double {
+            sidebar.isHidden ? 0.0 : Double(sidebar.frame.width)
+        }
 
         let fm = FileManager.default
         let now = Date(timeIntervalSince1970: 1_900_100_000)
@@ -5167,6 +5179,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try registryStore.save(registry)
 
         let app = AppDelegate()
+        let standardDefaults = UserDefaults.standard
+        let originalSidebarVisible = standardDefaults.object(forKey: WorkspaceSidebarConfig.visibleKey)
+        let originalSidebarWidth = standardDefaults.object(forKey: WorkspaceSidebarConfig.widthKey)
+        defer {
+            if let originalSidebarVisible {
+                standardDefaults.set(originalSidebarVisible, forKey: WorkspaceSidebarConfig.visibleKey)
+            } else {
+                standardDefaults.removeObject(forKey: WorkspaceSidebarConfig.visibleKey)
+            }
+            if let originalSidebarWidth {
+                standardDefaults.set(originalSidebarWidth, forKey: WorkspaceSidebarConfig.widthKey)
+            } else {
+                standardDefaults.removeObject(forKey: WorkspaceSidebarConfig.widthKey)
+            }
+        }
         let browserEngine = BrowserEngineContext()
         defer { browserEngine.shutdown() }
         let zoneRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { projectId in
@@ -5199,8 +5226,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: 640))
         sidebar.onSelection = { selection in app.handleWorkspaceSidebarSelection(selection) }
         app.workspaceSidebarView = sidebar
+        let contentView = NSView(frame: NSRect(x: WorkspaceSidebarConfig.defaultWidth + 1, y: 0, width: 860, height: 640))
+        let splitView = NSSplitView(frame: NSRect(x: 0, y: 0, width: 1_160, height: 640))
+        splitView.isVertical = true
+        splitView.dividerStyle = .thin
+        splitView.addArrangedSubview(sidebar)
+        splitView.addArrangedSubview(contentView)
+        splitView.delegate = app
+        app.workspaceSplitView = splitView
+        splitView.layoutSubtreeIfNeeded()
         app.reloadWorkspaceSidebar()
         sidebar.layoutSubtreeIfNeeded()
+
+        WorkspaceSidebarConfig.setWidth(340)
+        app.setWorkspaceSidebarVisible(true)
+        splitView.layoutSubtreeIfNeeded()
+        let visibleAfterShow = !sidebar.isHidden
+        let positionAfterShow = dividerPosition(sidebar)
+        try expect(visibleAfterShow, "sidebar toggle check should show the sidebar")
+        try expect(abs(positionAfterShow - 340.0) <= 1.0, "sidebar toggle check should restore width 340, got \(positionAfterShow)")
+        app.setWorkspaceSidebarVisible(false)
+        splitView.layoutSubtreeIfNeeded()
+        let visibleAfterHide = !sidebar.isHidden
+        let positionAfterHide = dividerPosition(sidebar)
+        let widthAfterHide = WorkspaceSidebarConfig.resolveWidth()
+        try expect(
+            !visibleAfterHide,
+            "sidebar toggle check should hide the sidebar; isHidden=\(sidebar.isHidden) frame=\(sidebar.frame) collapsed=\(splitView.isSubviewCollapsed(sidebar))"
+        )
+        try expect(positionAfterHide <= 1.0, "sidebar toggle check should move hidden divider to 0, got \(positionAfterHide)")
+        try expect(widthAfterHide == 340.0, "hiding sidebar must not corrupt persisted width, got \(widthAfterHide)")
+        WorkspaceSidebarConfig.setWidth(340)
+        app.setWorkspaceSidebarVisible(true)
+        sidebar.setFrameSize(NSSize(width: 360, height: sidebar.frame.height))
+        app.splitViewDidResizeSubviews(Notification(name: NSSplitView.didResizeSubviewsNotification, object: splitView))
+        let widthAfterDividerMove = WorkspaceSidebarConfig.resolveWidth()
+        try expect(widthAfterDividerMove == 360.0, "visible divider move should persist width 360, got \(widthAfterDividerMove)")
 
         let currentTileClickDelivered = sidebar.clickTileRowForQA(workspaceId: workspaceA, zoneId: zoneA, tileId: tileA)
         let currentTileFocusWorked = currentTileClickDelivered
@@ -5262,6 +5323,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "currentTileFocusWorked": currentTileFocusWorked,
             "crossWorkspaceTileFocusWorked": crossWorkspaceTileFocusWorked,
             "missingTargetHandled": missingTargetHandled,
+            "visibleAfterShow": visibleAfterShow,
+            "positionAfterShow": positionAfterShow,
+            "visibleAfterHide": visibleAfterHide,
+            "positionAfterHide": positionAfterHide,
+            "widthAfterDividerMove": widthAfterDividerMove,
             "currentZoneViewport": ["x": measuredZoneViewport.x, "y": measuredZoneViewport.y, "zoom": measuredZoneViewport.zoom],
             "expectedCurrentZoneViewport": ["x": expectedZoneViewport.x, "y": expectedZoneViewport.y, "zoom": expectedZoneViewport.zoom],
             "selectedRowAfterMissingTarget": String(describing: sidebar.selectedTargetForQA),

@@ -374,7 +374,7 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher, sidebarLiveCard]
+        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher, sidebarLiveCard, activityDockCard]
     }
 
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
@@ -758,6 +758,20 @@ enum LabCatalog {
             summary: "Two workspaces, mixed statuses, current expanded. Confirms rollup precedence and collapse.",
             content: .staticCard(preferredSize: NSSize(width: 280, height: 640)) {
                 let view = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 280, height: 640))
+                view.reload(tree: LabFixtures.richSidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
+                return view
+            }
+        )
+    }
+
+    private static var activityDockCard: LabEntry {
+        LabEntry(
+            id: "chrome.activityDock",
+            category: "Chrome",
+            title: "Activity Dock",
+            summary: "Default visible dock at 280 pt with the richer sidebar fixture.",
+            content: .staticCard(preferredSize: NSSize(width: 280, height: 600)) {
+                let view = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 280, height: 600))
                 view.reload(tree: LabFixtures.richSidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
                 return view
             }

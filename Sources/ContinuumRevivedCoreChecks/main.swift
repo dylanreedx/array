@@ -4719,12 +4719,14 @@ do {
         (KeyChord(keyCode: 19, modifiers: .command), "global.spawnProfile.2"),
         (KeyChord(keyCode: 20, modifiers: .command), "global.spawnProfile.3"),
         (KeyChord(keyCode: 21, modifiers: .command), "global.spawnProfile.4"),
+        (KeyChord(keyCode: 1, modifiers: [.command, .shift]), "global.toggleWorkspaceSidebar"),
     ]
     for global in reservedGlobals { auditNoKnownConflict(global.chord, global.label) }
 
     // Positive anchors: throw's new chord is clear; the old chords ARE flagged;
     // and the allowlisted leader genuinely is a macOS chord (documents the finding).
     expect(KnownChordConflicts.conflict(for: KeyChord(keyCode: 124, modifiers: [.command, .control])) == nil, "throw ⌘⌃→ must be free of known conflicts")
+    expect(KnownChordConflicts.conflict(for: KeyChord(keyCode: 1, modifiers: [.command, .shift])) == nil, "sidebar toggle ⌘⇧S must be free of known conflicts")
     expect(KnownChordConflicts.conflict(for: KeyChord(keyCode: 124, modifiers: [.control, .option]))?.source == .rectangle, "⌃⌥→ must be flagged as a Rectangle conflict")
     expect(KnownChordConflicts.conflict(for: NavKeymap.default.leader)?.source == .macOS, "nav leader ⌃Space is a known macOS chord (allowlisted)")
 }
@@ -4876,7 +4878,15 @@ do {
     for shortcut in reservedCases {
         expect(globalLayerEntry(shortcut) != nil, "ShortcutCatalog: ReservedShortcut \(shortcut) has a .global entry")
     }
-    expect(globalEntries.count == reservedCases.count, "ShortcutCatalog: exactly one .global entry per ReservedShortcut case, got \(globalEntries.count)")
+    expect(globalEntries.count == reservedCases.count + 1, "ShortcutCatalog: exactly one .global entry per ReservedShortcut case plus the sidebar toggle, got \(globalEntries.count)")
+    guard let sidebarToggleEntry = globalEntries.first(where: { $0.id == "global.toggleWorkspaceSidebar" }) else {
+        expect(false, "ShortcutCatalog: missing global.toggleWorkspaceSidebar entry")
+        fatalError("unreachable")
+    }
+    expect(sidebarToggleEntry.label == "Show Activity Dock", "ShortcutCatalog: sidebar toggle label")
+    expect(sidebarToggleEntry.chordDisplay == "⌘⇧S", "ShortcutCatalog: sidebar toggle chord display")
+    expect(sidebarToggleEntry.configurable == false, "ShortcutCatalog: sidebar toggle is not configurable in this phase")
+    expect(sidebarToggleEntry.editTarget == nil, "ShortcutCatalog: sidebar toggle has no edit target")
 
     // configurable policy: globals are hardcoded (false) except the nav leader,
     // whose chord persists via NavKeymap (true). The leader carries the .leader
@@ -5990,6 +6000,8 @@ do {
         TerminalDisplayConfig.fontSizeKey,
         TerminalScrollConfig.preciseMultiplierKey,
         TerminalScrollConfig.lineMultiplierKey,
+        WorkspaceSidebarConfig.visibleKey,
+        WorkspaceSidebarConfig.widthKey,
         // WorkspaceProfileConfig.defaultCaptureModeKey and defaultApplyModeKey are
         // intentionally excluded: captureMode/applyMode have no behavioral effect yet
         // (WorkspaceDocument is layout-only; T13 session-state is in ProjectStore sibling
@@ -6067,6 +6079,31 @@ do {
 
     // The Keybindings section renders the ShortcutCatalog via a .shortcuts field.
     expect(allFields.contains { if case .shortcuts = $0 { return true } else { return false } }, "settings schema must include a .shortcuts field")
+
+    guard let activitySection = sections.first(where: { $0.id == "activity" }) else {
+        expect(false, "settings schema must include an Activity section")
+        fatalError("unreachable")
+    }
+    expect(activitySection.title == "Activity", "Activity settings section title")
+    expect(activitySection.fields.contains { $0.key == WorkspaceSidebarConfig.visibleKey }, "Activity settings section exposes sidebar visibility")
+    expect(activitySection.fields.contains { $0.key == WorkspaceSidebarConfig.widthKey }, "Activity settings section exposes sidebar width")
+
+    let sidebarSuiteName = "WorkspaceSidebarConfigChecks-\(UUID().uuidString)"
+    let sidebarDefaults = UserDefaults(suiteName: sidebarSuiteName)!
+    defer { sidebarDefaults.removePersistentDomain(forName: sidebarSuiteName) }
+    sidebarDefaults.removePersistentDomain(forName: sidebarSuiteName)
+    expect(WorkspaceSidebarConfig.resolveVisible(defaults: sidebarDefaults) == true, "workspace sidebar defaults visible")
+    expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 280.0, "workspace sidebar default width")
+    WorkspaceSidebarConfig.setVisible(false, defaults: sidebarDefaults)
+    expect(WorkspaceSidebarConfig.resolveVisible(defaults: sidebarDefaults) == false, "workspace sidebar visible round-trips false")
+    WorkspaceSidebarConfig.setWidth(350, defaults: sidebarDefaults)
+    expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 350.0, "workspace sidebar width round-trips in-range value")
+    WorkspaceSidebarConfig.setWidth(100, defaults: sidebarDefaults)
+    expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 220.0, "workspace sidebar width clamps to floor")
+    WorkspaceSidebarConfig.setWidth(500, defaults: sidebarDefaults)
+    expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 420.0, "workspace sidebar width clamps to ceiling")
+    sidebarDefaults.set("320", forKey: WorkspaceSidebarConfig.widthKey)
+    expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 320.0, "workspace sidebar width accepts Settings text-field numeric string")
 
     // Per-field UserDefaults behavior in an isolated suite. A suite still reads
     // the global domain as a fallback, so scrub the schema keys there for the
