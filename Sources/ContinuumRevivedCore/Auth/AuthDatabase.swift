@@ -6,8 +6,10 @@ enum AuthDatabase {
     static let fileName = "auth.db"
 
     static func queue(at databaseURL: URL?, fileManager: FileManager = .default) throws -> DatabaseQueue {
+        var configuration = Configuration()
+        configuration.busyMode = .timeout(2)
         guard let databaseURL else {
-            return try DatabaseQueue()
+            return try DatabaseQueue(configuration: configuration)
         }
         try fileManager.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         if !fileManager.fileExists(atPath: databaseURL.path) {
@@ -15,7 +17,7 @@ enum AuthDatabase {
             guard fd >= 0 else { throw AuthError.unknown }
             close(fd)
         }
-        let queue = try DatabaseQueue(path: databaseURL.path)
+        let queue = try DatabaseQueue(path: databaseURL.path, configuration: configuration)
         chmod(databaseURL.path, S_IRUSR | S_IWUSR)
         return queue
     }

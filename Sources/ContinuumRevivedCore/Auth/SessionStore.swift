@@ -100,14 +100,15 @@ public actor SessionStore {
 
     public func exchange(
         credential: String,
-        requested: Scope,
+        requested: Scope?,
         subject: String,
-        ttl: TimeInterval = 3_600,
+        ttl: TimeInterval = 2_592_000,
         pairingStore: PairingStore
     ) async throws -> AuthSession {
         let grant = try await pairingStore.consume(credential)
-        guard requested.isSubset(of: grant.scopes) else { throw AuthError.scopeNotGranted }
-        return try issue(scopes: requested, subject: subject, ttl: ttl)
+        let effective = requested ?? grant.scopes
+        guard grant.scopes.isSuperset(of: effective) else { throw AuthError.scopeNotGranted }
+        return try issue(scopes: effective, subject: subject, ttl: ttl)
     }
 
     public func verify(_ token: String) throws -> AuthSession {

@@ -4,6 +4,10 @@ import CoreGraphics
 import Darwin
 import Foundation
 
+if try runAuthSigningKeyRestartSubprocessIfRequested() {
+    Foundation.exit(0)
+}
+
 func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     if !condition() {
         fputs("FAIL: \(message)\n", stderr)

@@ -9,6 +9,7 @@ public struct Registry: Codable, Equatable, Sendable {
     public var workspaces: [WorkspaceEntry]
     public var projects: [ProjectEntry]
     public var settings: RegistrySettings
+    public var pairedDevices: [PairedDeviceEntry]
 
     public init(
         schemaVersion: Int = Registry.currentSchemaVersion,
@@ -16,7 +17,8 @@ public struct Registry: Codable, Equatable, Sendable {
         lastActiveProjectId: UUID?,
         workspaces: [WorkspaceEntry],
         projects: [ProjectEntry],
-        settings: RegistrySettings
+        settings: RegistrySettings,
+        pairedDevices: [PairedDeviceEntry] = []
     ) {
         self.schemaVersion = schemaVersion
         self.lastActiveWorkspaceId = lastActiveWorkspaceId
@@ -24,6 +26,7 @@ public struct Registry: Codable, Equatable, Sendable {
         self.workspaces = workspaces
         self.projects = projects
         self.settings = settings
+        self.pairedDevices = pairedDevices
     }
 
     public static func empty() -> Registry {
@@ -136,6 +139,37 @@ public struct Registry: Codable, Equatable, Sendable {
             lastActiveProjectId = replacementProjectIds.first
         }
         return true
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, lastActiveWorkspaceId, lastActiveProjectId, workspaces, projects, settings, pairedDevices
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        lastActiveWorkspaceId = try container.decodeIfPresent(UUID.self, forKey: .lastActiveWorkspaceId)
+        lastActiveProjectId = try container.decodeIfPresent(UUID.self, forKey: .lastActiveProjectId)
+        workspaces = try container.decode([WorkspaceEntry].self, forKey: .workspaces)
+        projects = try container.decode([ProjectEntry].self, forKey: .projects)
+        settings = try container.decode(RegistrySettings.self, forKey: .settings)
+        pairedDevices = try container.decodeIfPresent([PairedDeviceEntry].self, forKey: .pairedDevices) ?? []
+    }
+}
+
+public struct PairedDeviceEntry: Codable, Equatable, Sendable {
+    public var id: UUID
+    public var label: String
+    public var scopes: Scope
+    public var pairedAt: Date
+    public var lastSeenAt: Date?
+
+    public init(id: UUID, label: String, scopes: Scope, pairedAt: Date, lastSeenAt: Date?) {
+        self.id = id
+        self.label = label
+        self.scopes = scopes
+        self.pairedAt = pairedAt
+        self.lastSeenAt = lastSeenAt
     }
 }
 

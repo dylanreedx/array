@@ -94,12 +94,15 @@ public actor PairingStore {
     public func consume(_ credential: String) throws -> PairingGrant {
         if let bootstrapGrant,
            authConstantTimeEqual(Self.digest(credential), Self.digest(bootstrapGrant.credential)) {
+            if let expiresAt = bootstrapGrant.expiresAt, expiresAt <= clock.now() {
+                throw AuthError.expired
+            }
             return PairingGrant(
                 id: UUID(uuidString: "00000000-0000-4000-8000-000000000054")!,
                 credential: credential,
                 scopes: bootstrapGrant.scopes,
                 label: "bootstrap",
-                expiresAt: nil,
+                expiresAt: bootstrapGrant.expiresAt,
                 remainingUses: .unbounded
             )
         }
@@ -107,46 +110,45 @@ public actor PairingStore {
         let now = clock.now()
         let digest = Self.digest(credential)
         return try dbQueue.write { db in
-            guard let row = try Row.fetchOne(
-                db,
-                sql: "SELECT * FROM pairing_grants WHERE credential_digest = ?",
-                arguments: [digest]
-            ) else {
-                throw AuthError.unknown
-            }
-
-            guard let storedDigest: Data = row["credential_digest"],
-                  authConstantTimeEqual(storedDigest, digest) else {
-                throw AuthError.unknown
-            }
-            if (row["revoked_at"] as Double?) != nil { throw AuthError.revoked }
-            if (row["consumed_at"] as Double?) != nil { throw AuthError.alreadyUsed }
-            if let expiresAt = row["expires_at"] as Double?, expiresAt <= now.timeIntervalSince1970 {
-                throw AuthError.expired
-            }
-
             try db.execute(
                 sql: """
                 UPDATE pairing_grants
                    SET consumed_at = ?
-                 WHERE id = ? AND consumed_at IS NULL AND revoked_at IS NULL
+                 WHERE credential = ?
+                   AND consumed_at IS NULL
+                   AND revoked_at IS NULL
+                   AND (expires_at IS NULL OR expires_at > ?)
                 """,
-                arguments: [now.timeIntervalSince1970, row["id"] as String]
+                arguments: [now.timeIntervalSince1970, credential, now.timeIntervalSince1970]
             )
-            guard try Int.fetchOne(db, sql: "SELECT changes()") == 1 else {
-                guard let current = try Row.fetchOne(
+            if try Int.fetchOne(db, sql: "SELECT changes()") == 1 {
+                guard let row = try Row.fetchOne(
                     db,
-                    sql: "SELECT * FROM pairing_grants WHERE credential_digest = ?",
-                    arguments: [digest]
-                ) else {
+                    sql: "SELECT * FROM pairing_grants WHERE credential = ?",
+                    arguments: [credential]
+                ),
+                      let storedDigest: Data = row["credential_digest"],
+                      authConstantTimeEqual(storedDigest, digest) else {
                     throw AuthError.unknown
                 }
-                if (current["revoked_at"] as Double?) != nil { throw AuthError.revoked }
-                if (current["consumed_at"] as Double?) != nil { throw AuthError.alreadyUsed }
-                throw AuthError.unknown
+                return try Self.grant(from: row)
             }
 
-            return try Self.grant(from: row)
+            guard let current = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM pairing_grants WHERE credential = ?",
+                arguments: [credential]
+            ),
+                  let storedDigest: Data = current["credential_digest"],
+                  authConstantTimeEqual(storedDigest, digest) else {
+                throw AuthError.unknown
+            }
+            if (current["revoked_at"] as Double?) != nil { throw AuthError.revoked }
+            if let expiresAt = current["expires_at"] as Double?, expiresAt <= now.timeIntervalSince1970 {
+                throw AuthError.expired
+            }
+            if (current["consumed_at"] as Double?) != nil { throw AuthError.alreadyUsed }
+            throw AuthError.unknown
         }
     }
 

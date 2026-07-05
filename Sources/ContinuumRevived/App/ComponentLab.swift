@@ -352,7 +352,7 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, agentKindCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
+        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
     }
 
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
@@ -538,6 +538,45 @@ enum LabCatalog {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
+        return stack
+    }
+
+    private static var pairingTokenCard: LabEntry {
+        LabEntry(
+            id: "auth.pairingToken", category: "Auth", title: "Pairing Token",
+            summary: "Generated observer pairing URL with the credential carried only in the fragment.",
+            content: .staticCard(preferredSize: NSSize(width: 560, height: 126)) {
+                makePairingTokenView()
+            }
+        )
+    }
+
+    static func makePairingTokenView() -> NSView {
+        let credential = (try? PairingAlphabet.credential()) ?? "credential-generation-failed"
+        let url = PairingURL.issue(credential: credential, scopes: .observer)
+
+        let title = NSTextField(labelWithString: "Pairing Token")
+        title.font = .systemFont(ofSize: 14, weight: .semibold)
+        title.textColor = .labelColor
+
+        let urlLabel = NSTextField(wrappingLabelWithString: url.absoluteString)
+        urlLabel.identifier = NSUserInterfaceItemIdentifier("pairingToken.url")
+        urlLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        urlLabel.textColor = .labelColor
+        urlLabel.lineBreakMode = .byCharWrapping
+
+        let credentialLabel = NSTextField(labelWithString: credential)
+        credentialLabel.identifier = NSUserInterfaceItemIdentifier("pairingToken.credential")
+        credentialLabel.font = .monospacedDigitSystemFont(ofSize: 22, weight: .semibold)
+        credentialLabel.textColor = .controlAccentColor
+
+        let stack = NSStackView(views: [title, urlLabel, credentialLabel])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
+        stack.wantsLayer = true
+        stack.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
         return stack
     }
 
@@ -974,6 +1013,31 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         guard managedWindowTarget == "tmuxWindowTarget  → %42" else {
             throw fail("managed session window target label rendered '\(managedWindowTarget)'")
+        }
+        guard let pairingEntry = entries.first(where: { $0.id == "auth.pairingToken" }),
+              case let .staticCard(_, makePairingView) = pairingEntry.content else {
+            throw fail("missing auth.pairingToken card")
+        }
+        let pairingView = makePairingView()
+        guard let pairingURLLabel = pairingView.descendant(withIdentifier: "pairingToken.url") as? NSTextField,
+              let credentialLabel = pairingView.descendant(withIdentifier: "pairingToken.credential") as? NSTextField else {
+            throw fail("pairing token card missing URL or credential labels")
+        }
+        guard let pairingURL = URL(string: pairingURLLabel.stringValue),
+              let components = URLComponents(url: pairingURL, resolvingAgainstBaseURL: false) else {
+            throw fail("pairing token URL did not parse: \(pairingURLLabel.stringValue)")
+        }
+        guard pairingURLLabel.stringValue.contains("#token=") else {
+            throw fail("pairing token URL missing #token= fragment: \(pairingURLLabel.stringValue)")
+        }
+        guard components.queryItems == nil else {
+            throw fail("pairing token URL leaked query items: \(pairingURLLabel.stringValue)")
+        }
+        guard credentialLabel.stringValue.count == 12 else {
+            throw fail("pairing token credential length \(credentialLabel.stringValue.count), expected 12")
+        }
+        guard PairingAlphabet.containsOnlySymbols(credentialLabel.stringValue) else {
+            throw fail("pairing token credential contains non-crowd-safe characters: \(credentialLabel.stringValue)")
         }
 
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")

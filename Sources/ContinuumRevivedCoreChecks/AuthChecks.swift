@@ -26,9 +26,11 @@ private func runAuthChecksAsync() async throws {
     try await runScopeAuthSuite(clock: clock, signingKey: signingKey)
     try await runBootstrapAuthSuite(clock: clock, signingKey: signingKey)
     try await runPairingAuthSuite()
+    try await runPairingTokenTicket60Suite(signingKey: signingKey)
     try await runSessionAuthSuite()
     try await runMessageScopeSuite(signingKey: signingKey)
     try await runAuthRealPathSuite()
+    try runSigningKeyRestartSuite()
 
     print("AuthChecks passed")
 }
@@ -49,6 +51,10 @@ private final class LockedAuthResult: @unchecked Sendable {
             lock.unlock()
         }
     }
+}
+
+private final class LockedValueResult<T>: @unchecked Sendable {
+    var result: Result<T, Error>?
 }
 
 private func runScopeAuthSuite(clock: FakeClock, signingKey: Data) async throws {
@@ -98,6 +104,18 @@ private func runBootstrapAuthSuite(clock: FakeClock, signingKey: Data) async thr
     let second = try await sessions.exchange(credential: grant.credential, requested: .admin, subject: "mac-local", pairingStore: pairing)
     expect(first.scopes == .admin && second.scopes == .admin, "Auth BootstrapGrant: repeated exchanges preserve admin scope")
     expect(first.id != second.id && first.token != second.token, "Auth BootstrapGrant: re-exchange creates a fresh session")
+
+    let expiredGrant = BootstrapGrant(
+        credential: "expired-bootstrap",
+        scopes: .admin,
+        expiresAt: clock.now().addingTimeInterval(-1)
+    )
+    let expiredPairing = PairingStore(clock: clock, bootstrapGrant: expiredGrant)
+    await expectAuthError(
+        try await expiredPairing.consume(expiredGrant.credential),
+        .expired,
+        "Auth BootstrapGrant: expired bootstrap grant is rejected by TTL"
+    )
 
     await expectAuthError(
         try await sessions.exchange(credential: "not-a-bootstrap", requested: .admin, subject: "mac-local", pairingStore: pairing),
@@ -152,6 +170,225 @@ private func runPairingAuthSuite() async throws {
         .unknown,
         "Auth PairingStore: unknown credential is rejected"
     )
+}
+
+private func runPairingTokenTicket60Suite(signingKey: Data) async throws {
+    try runPairingAlphabetBiasCheck()
+    try await runPairingConcurrentConsumeCheck()
+    try await runPairingBackendExchangeRaceCheck(signingKey: signingKey)
+    try await runPairingDownscopeTrioCheck(signingKey: signingKey)
+    try await runSessionBitFlipCheck()
+    try runPairingURLRoundTripCheck()
+    try runRegistryPairedDevicesDecodeCheck()
+}
+
+private func runPairingAlphabetBiasCheck() throws {
+    let sampleCount = 100_000
+    var frequencies = Dictionary(uniqueKeysWithValues: PairingAlphabet.symbols.map { ($0, 0) })
+    for _ in 0..<sampleCount {
+        let credential = try PairingAlphabet.credential()
+        expect(credential.count == 12, "Ticket60 PairingAlphabet: credential length is 12")
+        expect(PairingAlphabet.containsOnlySymbols(credential), "Ticket60 PairingAlphabet: credential uses only crowd-safe symbols")
+        for character in credential {
+            frequencies[character, default: 0] += 1
+        }
+    }
+
+    let draws = sampleCount * 12
+    let expected = Double(draws) / Double(PairingAlphabet.symbols.count)
+    let standardDeviation = sqrt(Double(draws) * (1.0 / 32.0) * (31.0 / 32.0))
+    let tolerance = 4.5 * standardDeviation
+    let maxDeviation = frequencies.values.map { abs(Double($0) - expected) }.max() ?? 0
+    expect(maxDeviation <= tolerance, "Ticket60 PairingAlphabet: max frequency deviation \(maxDeviation) <= \(tolerance)")
+    print("Ticket60 PairingAlphabet sample draws=\(draws) maxDeviation=\(String(format: "%.2f", maxDeviation)) tolerance=\(String(format: "%.2f", tolerance))")
+}
+
+private func runPairingConcurrentConsumeCheck() async throws {
+    let pairing = PairingStore(clock: FakeClock(start: Date(timeIntervalSince1970: 1_800_400_000)))
+    let grant = try await pairing.issue(scopes: .observer, ttl: 300, label: "race")
+    let attempts = 50
+    let results = await withTaskGroup(of: Result<PairingGrant, AuthError>.self) { group in
+        for _ in 0..<attempts {
+            group.addTask {
+                do {
+                    return .success(try await pairing.consume(grant.credential))
+                } catch let error as AuthError {
+                    return .failure(error)
+                } catch {
+                    return .failure(.unknown)
+                }
+            }
+        }
+        var gathered: [Result<PairingGrant, AuthError>] = []
+        for await result in group {
+            gathered.append(result)
+        }
+        return gathered
+    }
+    let successes = results.filter {
+        if case .success = $0 { return true }
+        return false
+    }
+    let alreadyUsed = results.filter {
+        if case .failure(.alreadyUsed) = $0 { return true }
+        return false
+    }
+    expect(successes.count == 1, "Ticket60 PairingStore: concurrent consume has exactly one success, got \(successes.count)")
+    expect(alreadyUsed.count == attempts - 1, "Ticket60 PairingStore: concurrent consume losers are alreadyUsed, got \(alreadyUsed.count)")
+}
+
+private func runPairingBackendExchangeRaceCheck(signingKey: Data) async throws {
+    let tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("continuum-pairing-race-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let databaseURL = tempDir.appendingPathComponent("auth.db")
+    let issuingPairing = try PairingStore(databaseURL: databaseURL)
+    let grant = try await issuingPairing.issue(scopes: .observer, ttl: 300, label: "backend-race")
+    let attempts = 50
+
+    let results = await withTaskGroup(of: Result<AuthSession, AuthError>.self) { group in
+        for index in 0..<attempts {
+            group.addTask {
+                do {
+                    let pairing = try PairingStore(databaseURL: databaseURL)
+                    let sessions = try SessionStore(signingKey: signingKey, databaseURL: databaseURL)
+                    return .success(try await sessions.exchange(
+                        credential: grant.credential,
+                        requested: .observer,
+                        subject: "race-phone-\(index)",
+                        pairingStore: pairing
+                    ))
+                } catch let error as AuthError {
+                    return .failure(error)
+                } catch {
+                    return .failure(.unknown)
+                }
+            }
+        }
+
+        var gathered: [Result<AuthSession, AuthError>] = []
+        for await result in group {
+            gathered.append(result)
+        }
+        return gathered
+    }
+
+    let successes = results.compactMap { result -> AuthSession? in
+        if case let .success(session) = result { return session }
+        return nil
+    }
+    let alreadyUsed = results.filter {
+        if case .failure(.alreadyUsed) = $0 { return true }
+        return false
+    }
+    expect(successes.count == 1, "Ticket60 backend race: exactly one exchange succeeds across on-disk stores, got \(successes.count)")
+    expect(alreadyUsed.count == attempts - 1, "Ticket60 backend race: losers are alreadyUsed across on-disk stores, got \(alreadyUsed.count)")
+    expect(Set(successes.map(\.id)).count == 1, "Ticket60 backend race: only one distinct session id returned")
+
+    let sessionRows = try sqliteScalar(databaseURL: databaseURL, sql: "SELECT COUNT(*) FROM auth_sessions")
+    let consumedRows = try sqliteScalar(databaseURL: databaseURL, sql: "SELECT COUNT(*) FROM pairing_grants WHERE credential = '\(grant.credential)' AND consumed_at IS NOT NULL")
+    expect(sessionRows == 1, "Ticket60 backend race: SQLite persisted exactly one auth_sessions row, got \(sessionRows)")
+    expect(consumedRows == 1, "Ticket60 backend race: SQLite persisted exactly one consumed pairing row, got \(consumedRows)")
+    print("Ticket60 backend race attempts=\(attempts) successes=\(successes.count) alreadyUsed=\(alreadyUsed.count) sessionRows=\(sessionRows)")
+}
+
+private func runPairingDownscopeTrioCheck(signingKey: Data) async throws {
+    let clock = FakeClock(start: Date(timeIntervalSince1970: 1_800_500_000))
+    let sessions = SessionStore(signingKey: signingKey, clock: clock)
+
+    let rejectPairing = PairingStore(clock: clock)
+    let rejectGrant = try await rejectPairing.issue(scopes: .observer, ttl: 300, label: "reject")
+    await expectAuthError(
+        try await sessions.exchange(
+            credential: rejectGrant.credential,
+            requested: [.orchestrationRead, .orchestrationOperate],
+            subject: "phone",
+            pairingStore: rejectPairing
+        ),
+        .scopeNotGranted,
+        "Ticket60 Downscope: superset request is rejected"
+    )
+
+    let subsetPairing = PairingStore(clock: clock)
+    let subsetGrant = try await subsetPairing.issue(scopes: .operator, ttl: 300, label: "subset")
+    let subset = try await sessions.exchange(
+        credential: subsetGrant.credential,
+        requested: .orchestrationRead,
+        subject: "phone",
+        pairingStore: subsetPairing
+    )
+    expect(subset.scopes == .orchestrationRead, "Ticket60 Downscope: subset request mints only requested scope")
+
+    let nilPairing = PairingStore(clock: clock)
+    let nilGrant = try await nilPairing.issue(scopes: .observer, ttl: 300, label: "nil")
+    let ceiling = try await sessions.exchange(
+        credential: nilGrant.credential,
+        requested: nil,
+        subject: "phone",
+        pairingStore: nilPairing
+    )
+    expect(ceiling.scopes == .observer, "Ticket60 Downscope: nil requested grants ceiling")
+}
+
+private func runSessionBitFlipCheck() async throws {
+    let clock = FakeClock(start: Date(timeIntervalSince1970: 1_800_600_000))
+    let key = Data((0..<32).map { UInt8($0 + 11) })
+    let store = SessionStore(signingKey: key, clock: clock)
+    let session = try await store.issue(scopes: .observer, subject: "phone", ttl: 300)
+    let parts = session.token.split(separator: ".", maxSplits: 1).map(String.init)
+    expect(parts.count == 2, "Ticket60 Session token: token has payload and tag")
+
+    await expectAuthError(
+        try await store.verify(mutateFirstCharacter(parts[0]) + "." + parts[1]),
+        .invalidToken,
+        "Ticket60 Session token: flipped payload fails"
+    )
+    await expectAuthError(
+        try await store.verify(parts[0] + "." + mutateFirstCharacter(parts[1])),
+        .invalidToken,
+        "Ticket60 Session token: flipped tag fails"
+    )
+
+    let wrongKeyStore = SessionStore(signingKey: Data((0..<32).map { UInt8(200 - $0) }), clock: clock)
+    await expectAuthError(
+        try await wrongKeyStore.verify(session.token),
+        .invalidToken,
+        "Ticket60 Session token: wrong signing key fails"
+    )
+
+    let verified = try await store.verify(session.token)
+    expect(verified.id == session.id && verified.scopes == session.scopes, "Ticket60 Session token: valid token round-trips")
+}
+
+private func runPairingURLRoundTripCheck() throws {
+    let credential = "23456789ABCD"
+    let url = PairingURL.issue(credential: credential, scopes: .observer)
+    let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+    expect(url.absoluteString.contains("#token="), "Ticket60 PairingURL: URL contains #token= fragment")
+    expect(components?.queryItems == nil, "Ticket60 PairingURL: URL has no query items")
+    expect(!(components?.fragment ?? "").isEmpty, "Ticket60 PairingURL: fragment is non-empty")
+    expect(PairingURL.parse(url) == credential, "Ticket60 PairingURL: parse returns same credential")
+}
+
+private func runRegistryPairedDevicesDecodeCheck() throws {
+    let json = """
+    {
+      "schemaVersion": 1,
+      "lastActiveWorkspaceId": null,
+      "lastActiveProjectId": null,
+      "workspaces": [],
+      "projects": [],
+      "settings": {
+        "preferredEditor": "auto",
+        "zoomModifier": "command",
+        "openLastProjectOnLaunch": true
+      }
+    }
+    """.data(using: .utf8)!
+    let registry = try JSONDecoder().decode(Registry.self, from: json)
+    expect(registry.pairedDevices == [], "Ticket60 Registry: missing pairedDevices decodes as empty")
 }
 
 private func runSessionAuthSuite() async throws {
@@ -279,6 +516,112 @@ private func runAuthRealPathSuite() async throws {
         outcome: InvariantOutcome.pass.rawValue
     )
     try writeAndVerify(manifest)
+}
+
+func runAuthSigningKeyRestartSubprocessIfRequested() throws -> Bool {
+    let environment = ProcessInfo.processInfo.environment
+    guard let mode = environment["CONTINUUM_AUTH_RESTART_MODE"] else { return false }
+    guard let authDirectoryPath = environment["CONTINUUM_AUTH_RESTART_AUTH_DIR"] else {
+        throw NSError(domain: "AuthRestart", code: 1, userInfo: [NSLocalizedDescriptionKey: "missing CONTINUUM_AUTH_RESTART_AUTH_DIR"])
+    }
+    guard let databasePath = environment["CONTINUUM_AUTH_RESTART_DATABASE_URL"] else {
+        throw NSError(domain: "AuthRestart", code: 3, userInfo: [NSLocalizedDescriptionKey: "missing CONTINUUM_AUTH_RESTART_DATABASE_URL"])
+    }
+    let authDirectory = URL(fileURLWithPath: authDirectoryPath, isDirectory: true)
+    let databaseURL = URL(fileURLWithPath: databasePath)
+    let tokenURL = authDirectory.appendingPathComponent("session.token")
+    let sessionIDURL = authDirectory.appendingPathComponent("session.id")
+    let key = try SessionStore.loadOrCreateSigningKey(in: authDirectory)
+    let clock = FakeClock(start: Date(timeIntervalSince1970: 1_800_700_000))
+
+    switch mode {
+    case "sign":
+        let store = try SessionStore(signingKey: key, clock: clock, databaseURL: databaseURL)
+        let session = try awaitSync { try await store.issue(scopes: .observer, subject: "restart-phone", ttl: 300) }
+        try session.token.write(to: tokenURL, atomically: true, encoding: .utf8)
+        try session.id.uuidString.write(to: sessionIDURL, atomically: true, encoding: .utf8)
+    case "verify":
+        let token = try String(contentsOf: tokenURL, encoding: .utf8)
+        let sessionID = try String(contentsOf: sessionIDURL, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let store = try SessionStore(signingKey: key, clock: clock, databaseURL: databaseURL)
+        let verified = try awaitSync { try await store.verify(token) }
+        expect(verified.id.uuidString == sessionID, "Ticket60 signing restart: SessionStore.verify accepts token issued before restart")
+        expect(verified.scopes == .observer, "Ticket60 signing restart: verified session preserves scopes")
+    default:
+        throw NSError(domain: "AuthRestart", code: 2, userInfo: [NSLocalizedDescriptionKey: "unknown CONTINUUM_AUTH_RESTART_MODE \(mode)"])
+    }
+    return true
+}
+
+private func runSigningKeyRestartSuite() throws {
+    let tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("continuum-auth-restart-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    try runRestartChild(mode: "sign", authDirectory: tempDir)
+    try runRestartChild(mode: "verify", authDirectory: tempDir)
+}
+
+private func runRestartChild(mode: String, authDirectory: URL) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    process.arguments = []
+    var environment = ProcessInfo.processInfo.environment
+    environment["CONTINUUM_AUTH_RESTART_MODE"] = mode
+    environment["CONTINUUM_AUTH_RESTART_AUTH_DIR"] = authDirectory.path
+    environment["CONTINUUM_AUTH_RESTART_DATABASE_URL"] = authDirectory.appendingPathComponent("auth.db").path
+    process.environment = environment
+    try process.run()
+    process.waitUntilExit()
+    expect(process.terminationStatus == 0, "Ticket60 signing restart: child \(mode) exited \(process.terminationStatus)")
+}
+
+private func sqliteScalar(databaseURL: URL, sql: String) throws -> Int {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+    process.arguments = [databaseURL.path, sql]
+
+    let output = Pipe()
+    let errorOutput = Pipe()
+    process.standardOutput = output
+    process.standardError = errorOutput
+    try process.run()
+    process.waitUntilExit()
+
+    let stdout = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    let stderr = String(data: errorOutput.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    guard process.terminationStatus == 0 else {
+        throw NSError(
+            domain: "AuthSQLiteCheck",
+            code: Int(process.terminationStatus),
+            userInfo: [NSLocalizedDescriptionKey: "sqlite3 failed: \(stderr)"]
+        )
+    }
+    guard let value = Int(stdout.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+        throw NSError(
+            domain: "AuthSQLiteCheck",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "sqlite3 returned non-integer output: \(stdout)"]
+        )
+    }
+    return value
+}
+
+private func awaitSync<T>(_ body: @escaping @Sendable () async throws -> T) throws -> T {
+    let semaphore = DispatchSemaphore(value: 0)
+    let box = LockedValueResult<T>()
+    Task {
+        do {
+            box.result = Result<T, Error>.success(try await body())
+        } catch {
+            box.result = Result<T, Error>.failure(error)
+        }
+        semaphore.signal()
+    }
+    semaphore.wait()
+    return try box.result!.get()
 }
 
 private func expectAuthError<T>(_ expression: @autoclosure () async throws -> T, _ expected: AuthError, _ message: String) async {

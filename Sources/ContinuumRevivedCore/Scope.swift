@@ -20,4 +20,8 @@ public struct Scope: OptionSet, Codable, Hashable, Sendable {
     public func isSubset(of ceiling: Scope) -> Bool {
         ceiling.intersection(self) == self
     }
+
+    public func isSuperset(of requested: Scope) -> Bool {
+        requested.isSubset(of: self)
+    }
 }

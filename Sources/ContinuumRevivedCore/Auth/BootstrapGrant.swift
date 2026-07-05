@@ -4,20 +4,24 @@ import Security
 public struct BootstrapGrant: Equatable, Sendable {
     public var credential: String
     public var scopes: Scope
+    public var expiresAt: Date?
 
-    public init(credential: String, scopes: Scope = .admin) {
+    public init(credential: String, scopes: Scope = .admin, expiresAt: Date? = nil) {
         self.credential = credential
         self.scopes = scopes
+        self.expiresAt = expiresAt
     }
 
-    public static func seed(scopes: Scope = .admin) throws -> BootstrapGrant {
-        BootstrapGrant(credential: try AuthRandom.hex(byteCount: 32), scopes: scopes)
+    public static func seed(scopes: Scope = .admin, ttl: TimeInterval? = 86_400, now: Date = Date()) throws -> BootstrapGrant {
+        BootstrapGrant(
+            credential: try AuthRandom.hex(byteCount: 32),
+            scopes: scopes,
+            expiresAt: ttl.map { now.addingTimeInterval($0) }
+        )
     }
 }
 
 enum AuthRandom {
-    static let pairingAlphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
-
     static func bytes(count: Int) throws -> [UInt8] {
         var bytes = [UInt8](repeating: 0, count: count)
         let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
@@ -30,7 +34,6 @@ enum AuthRandom {
     }
 
     static func pairingCredential(length: Int = 12) throws -> String {
-        let bytes = try bytes(count: length)
-        return String(bytes.map { pairingAlphabet[Int($0) % pairingAlphabet.count] })
+        try PairingAlphabet.credential(length: length)
     }
 }

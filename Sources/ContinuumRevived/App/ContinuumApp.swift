@@ -2,6 +2,7 @@ import AppKit
 import ContinuumRevivedCore
 import Foundation
 import GhosttyKit
+import os
 import Security
 import WebKit
 
@@ -2116,6 +2117,16 @@ enum ContinuumApp {
         viewMenuItem.submenu = viewMenu
         mainMenu.addItem(viewMenuItem)
 
+        let debugMenuItem = NSMenuItem(title: "Debug", action: nil, keyEquivalent: "")
+        let debugMenu = NSMenu(title: "Debug")
+        let authItem = NSMenuItem(title: "Auth", action: nil, keyEquivalent: "")
+        let authMenu = NSMenu(title: "Auth")
+        authMenu.addItem(NSMenuItem(title: "Issue Pairing Token (Observer)", action: #selector(AppDelegate.issueObserverPairingTokenFromMenu(_:)), keyEquivalent: ""))
+        authItem.submenu = authMenu
+        debugMenu.addItem(authItem)
+        debugMenuItem.submenu = debugMenu
+        mainMenu.addItem(debugMenuItem)
+
         NSApp.mainMenu = mainMenu
     }
 
@@ -2151,6 +2162,10 @@ enum ContinuumApp {
         guard let viewMenu = mainMenu.item(withTitle: "View")?.submenu else { throw SelfCheckError("missing View menu") }
         try expectMenuItem(viewMenu, title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "")
         try expectMenuItem(viewMenu, title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: "")
+
+        guard let debugMenu = mainMenu.item(withTitle: "Debug")?.submenu else { throw SelfCheckError("missing Debug menu") }
+        guard let authMenu = debugMenu.item(withTitle: "Auth")?.submenu else { throw SelfCheckError("missing Debug > Auth menu") }
+        try expectMenuItem(authMenu, title: "Issue Pairing Token (Observer)", action: #selector(AppDelegate.issueObserverPairingTokenFromMenu(_:)), keyEquivalent: "")
     }
 
     private static func expectMenuItem(
@@ -2296,6 +2311,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var tmuxControlFactory: (String) -> any TmuxControl = { ProcessTmuxControl(tmuxPath: $0) }
     private var suppressTerminateOnWindowCloseForQA = false
     private let focusBroker = FocusBroker()
+    private let authPairingStore = PairingStore()
     private var navKeymap: NavKeymap = .default {
         didSet { leaderDwell = TimeInterval(navKeymap.leaderDwellMs) / 1000 }
     }
@@ -4381,6 +4397,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }()
         componentLabPanel = panel
         panel.show(near: window)
+    }
+
+    @objc func issueObserverPairingTokenFromMenu(_ sender: Any?) {
+        Task {
+            do {
+                let grant = try await authPairingStore.issue(scopes: .observer, ttl: 300, label: "Debug Observer")
+                let url = PairingURL.issue(credential: grant.credential, scopes: grant.scopes)
+                Logger(subsystem: "continuum.auth", category: "pairing").notice("pairing-url issued: \(url.absoluteString, privacy: .public)")
+            } catch {
+                Logger(subsystem: "continuum.auth", category: "pairing").error("pairing-url issue failed: \(String(describing: error), privacy: .public)")
+            }
+        }
     }
 
     private func makeSettingsPanel() -> SettingsPanel {
