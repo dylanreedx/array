@@ -128,3 +128,4 @@ be salvaged. These rows reset them for the loop to re-drive; if 07 lands, 56 →
 | 48-host-remotereach-model.md | done | 7de3fa8 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
 | 67-agent-adapter-protocol.md | done | 22832e1 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
 | 54-bootstrap-auth-every-path.md | done | a7f6339 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
+| 38-codex-reader.md | skipped | - | - | codex-primary: objective build/matrix gate failed post-commit; reverted (after escalated high retry) |
