@@ -120,12 +120,13 @@ be salvaged. These rows reset them for the loop to re-drive; if 07 lands, 56 →
 | 74-agent-message-bus-seam.md | done | 175c992 | matrix: green (headless) | gpt-5.5 primary; pending Fable audit |
 | 56-transport-fuzz-soak.md | done | a019dae | matrix: green (headless) | gpt-5.5 primary; pending Fable audit |
 | 66-connection-supervisor.md | done | a38ee8f | matrix: green (headless) | gpt-5.5 primary; pending Fable audit |
-| 23-private-managed-session-record.md | done | 04d4053 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
-| 21-idle-reaper-detach.md | done | 46fc321 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
-| 22-per-workspace-ambient-session.md | done | 4d4400e | matrix: green (headless) | night3-A gpt-5.5; pending audit |
-| 16-capture-tmux-window-target.md | done | 12084d8 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
-| 20-project-release-detach.md | done | dbd4692 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
-| 48-host-remotereach-model.md | done | 7de3fa8 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
-| 67-agent-adapter-protocol.md | done | 22832e1 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
-| 54-bootstrap-auth-every-path.md | done | a7f6339 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
+| 23-private-managed-session-record.md | done | a029ccd | matrix: green (headless) | night3-A gpt-5.5; pending audit |
+| 21-idle-reaper-detach.md | done | 2058b38 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
+| 22-per-workspace-ambient-session.md | done | 6a869bc | matrix: green (headless) | night3-A gpt-5.5; pending audit |
+| 16-capture-tmux-window-target.md | done | 4f13faf | matrix: green (headless) | night3-A gpt-5.5; pending audit |
+| 20-project-release-detach.md | done | 85163e1 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
+| 48-host-remotereach-model.md | done | d239222 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
+| 67-agent-adapter-protocol.md | done | 90960e8 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
+| 54-bootstrap-auth-every-path.md | done | 93c2fd5 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
 | 38-codex-reader.md | skipped | - | - | codex-primary: objective build/matrix gate failed post-commit; reverted (after escalated high retry) |
+| A10-night3-tail-hardening | done | 56a2b76 | matrix: green (headless) | night3-A gpt-5.5; pending audit |

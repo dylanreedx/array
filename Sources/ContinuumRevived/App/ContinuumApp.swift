@@ -10025,6 +10025,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         // install() requires project canvases loadable; storeA and storeB already have canvases saved.
         try runtime.install(into: workspaceCanvas, appRegistry: appRegistry)
+        let installClobberTileId = UUID(uuidString: "00000000-0000-0000-a100-0000000000a3")!
+        let installClobberZoneId = UUID(uuidString: "00000000-0000-0000-a100-0000000000a4")!
+        let installedMembershipTile = Tile(
+            id: installClobberTileId,
+            kind: .note,
+            title: "Install membership",
+            frame: TileFrame(x: 10, y: 20, width: 300, height: 200),
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        ).with(zoneId: installClobberZoneId)
+        let staleInstallTile = Tile(
+            id: installClobberTileId,
+            kind: .note,
+            title: "Install membership stale",
+            frame: TileFrame(x: 999, y: 999, width: 111, height: 111),
+            zPosition: .fromLegacyRank(9),
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+        workspaceCanvas.install(tileView: TileNSView(tile: installedMembershipTile), for: installedMembershipTile)
+        workspaceCanvas.install(tileView: TileNSView(tile: staleInstallTile), for: staleInstallTile)
+        try expect(
+            workspaceCanvas.canvasState.tiles.first(where: { $0.id == installClobberTileId })?.zoneId == installClobberZoneId,
+            "A10 install-clobber regression: replacing a tile view must preserve the stored membership register"
+        )
         // install() acquired both controllers (refCount: 2 each). Release the install's extra ref.
         // Actually install sets acquiredProjectIds = newlyAcquired. Since both were already at
         // refCount=1 before install (from register()), acquire() bumps to 2. We accept refCount=2
