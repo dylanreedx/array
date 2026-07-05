@@ -102,6 +102,28 @@ enum LabFixtures {
         ])
     }
 
+    static func richSidebarTree() -> SidebarTree {
+        let currentZone = SidebarZoneRow(
+            zoneId: UUID(), name: "continuum-revived", color: "#5B8DEF", navKey: "1", collapsed: false, projectId: UUID(),
+            agentStatusRollup: SidebarAgentStatusRollup(working: 1, needsAttention: 1),
+            tiles: [
+                SidebarTileRow(tileId: UUID(), title: "claude · feature/login", kind: .terminal, agentStatus: .needsAttention),
+                SidebarTileRow(tileId: UUID(), title: "shell", kind: .terminal, agentStatus: .working),
+                SidebarTileRow(tileId: UUID(), title: "localhost:3000", kind: .browser, agentStatus: nil)
+            ]
+        )
+        let scratchZone = SidebarZoneRow(
+            zoneId: UUID(), name: "notes", color: "#E0A458", navKey: "1", collapsed: false, projectId: nil,
+            tiles: [
+                SidebarTileRow(tileId: UUID(), title: "scratch.md", kind: .note, agentStatus: nil)
+            ]
+        )
+        return SidebarTree(workspaces: [
+            SidebarWorkspaceRow(workspaceId: workspaceId, name: "Continuum", zones: [currentZone]),
+            SidebarWorkspaceRow(workspaceId: altWorkspaceId, name: "Scratch", zones: [scratchZone])
+        ])
+    }
+
 }
 
 // MARK: - Sandbox
@@ -352,7 +374,7 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
+        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher, sidebarLiveCard]
     }
 
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
@@ -721,6 +743,22 @@ enum LabCatalog {
             content: .staticCard(preferredSize: NSSize(width: 720, height: 44)) {
                 let view = WorkspaceTopBarView(frame: NSRect(x: 0, y: 0, width: 720, height: 44))
                 view.reload(LabFixtures.topBarModel(save: .unsavedChanges, message: nil))
+                return view
+            }
+        )
+    }
+
+    // MARK: night3-C cards
+
+    private static var sidebarLiveCard: LabEntry {
+        LabEntry(
+            id: "chrome.sidebar.live",
+            category: "Chrome",
+            title: "Workspace Sidebar — Rich Fixture",
+            summary: "Two workspaces, mixed statuses, current expanded. Confirms rollup precedence and collapse.",
+            content: .staticCard(preferredSize: NSSize(width: 280, height: 640)) {
+                let view = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 280, height: 640))
+                view.reload(tree: LabFixtures.richSidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
                 return view
             }
         )

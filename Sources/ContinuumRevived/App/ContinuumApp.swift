@@ -847,6 +847,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--workspace-sidebar-default-visible-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runWorkspaceSidebarDefaultVisibleSelfCheck()
+                print("ContinuumRevivedWorkspaceSidebarDefaultVisibleChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--workspace-sidebar-actions-check") {
             do {
                 _ = NSApplication.shared
@@ -4884,6 +4896,147 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "widthPersistenceWorked": widthPersistenceWorked,
             "visibilityPersistenceWorked": visibilityPersistenceWorked,
             "paletteActionDiscoverable": paletteActionDiscoverable,
+            "artifactPath": artifact.path,
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runWorkspaceSidebarDefaultVisibleSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func tile(id: UUID, title: String, kind: TileKind, rank: Int) -> Tile {
+            Tile(
+                id: id,
+                kind: kind,
+                title: title,
+                frame: TileFrame(x: Double(rank) * 40, y: 0, width: 320, height: 220),
+                zPosition: .fromLegacyRank(rank),
+                runtimeRef: nil,
+                metadata: TileMetadata()
+            )
+        }
+
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("continuum-workspace-sidebar-default-visible-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let suiteName = "continuum-workspace-sidebar-default-visible-\(UUID().uuidString)"
+        guard let isolatedDefaults = UserDefaults(suiteName: suiteName) else {
+            throw CheckError.failed("could not create isolated defaults")
+        }
+        defer { isolatedDefaults.removePersistentDomain(forName: suiteName) }
+        try expect(isolatedDefaults.object(forKey: WorkspaceSidebarConfig.visibleKey) == nil, "isolated defaults must start without a sidebar visibility key")
+        try expect(isolatedDefaults.object(forKey: WorkspaceSidebarConfig.widthKey) == nil, "isolated defaults must start without a sidebar width key")
+        let defaultVisibleResolved = WorkspaceSidebarConfig.resolveVisible(defaults: isolatedDefaults)
+        try expect(defaultVisibleResolved, "fresh UserDefaults must resolve sidebar visible == defaultVisible (true)")
+
+        let standardDefaults = UserDefaults.standard
+        let originalVisible = standardDefaults.object(forKey: WorkspaceSidebarConfig.visibleKey)
+        let originalWidth = standardDefaults.object(forKey: WorkspaceSidebarConfig.widthKey)
+        standardDefaults.removeObject(forKey: WorkspaceSidebarConfig.visibleKey)
+        standardDefaults.removeObject(forKey: WorkspaceSidebarConfig.widthKey)
+        defer {
+            if let originalVisible {
+                standardDefaults.set(originalVisible, forKey: WorkspaceSidebarConfig.visibleKey)
+            } else {
+                standardDefaults.removeObject(forKey: WorkspaceSidebarConfig.visibleKey)
+            }
+            if let originalWidth {
+                standardDefaults.set(originalWidth, forKey: WorkspaceSidebarConfig.widthKey)
+            } else {
+                standardDefaults.removeObject(forKey: WorkspaceSidebarConfig.widthKey)
+            }
+        }
+
+        let currentWorkspace = UUID(uuidString: "00000000-0000-0000-0000-00000000E001")!
+        let otherWorkspace = UUID(uuidString: "00000000-0000-0000-0000-00000000E002")!
+        let zoneOne = UUID(uuidString: "00000000-0000-0000-0000-00000000E101")!
+        let otherZone = UUID(uuidString: "00000000-0000-0000-0000-00000000E102")!
+        let currentTiles = [
+            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000E201")!, title: "Shell Agent", kind: .terminal, rank: 1),
+            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000E202")!, title: "Docs Browser", kind: .browser, rank: 2),
+        ]
+        let otherTiles = [
+            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000E203")!, title: "Scratch Note", kind: .note, rank: 3),
+        ]
+
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = currentWorkspace
+        registry.workspaces = [
+            WorkspaceEntry(id: currentWorkspace, name: "Current Workspace", projectIds: [], createdAt: Date(timeIntervalSince1970: 0), updatedAt: Date(timeIntervalSince1970: 0)),
+            WorkspaceEntry(id: otherWorkspace, name: "Other Workspace", projectIds: [], createdAt: Date(timeIntervalSince1970: 0), updatedAt: Date(timeIntervalSince1970: 0)),
+        ]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+
+        let currentDocument = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [
+                ZonePlacement(zoneId: zoneOne, projectId: nil, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 900, height: 600), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "Build", navKey: "1"),
+            ],
+            zoneZOrder: [zoneOne],
+            lastActiveZoneId: zoneOne,
+            ambientTiles: currentTiles.map { $0.with(zoneId: zoneOne) }
+        )
+        let otherDocument = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [
+                ZonePlacement(zoneId: otherZone, projectId: nil, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 900, height: 600), color: "orange", collapsed: false, hydrationPolicy: .automatic, name: "Notes", navKey: "2"),
+            ],
+            zoneZOrder: [otherZone],
+            lastActiveZoneId: otherZone,
+            ambientTiles: otherTiles.map { $0.with(zoneId: otherZone) }
+        )
+        try WorkspaceStore(workspaceId: currentWorkspace, applicationSupportDirectory: appSupport).save(currentDocument)
+        try WorkspaceStore(workspaceId: otherWorkspace, applicationSupportDirectory: appSupport).save(otherDocument)
+
+        let app = AppDelegate()
+        app.registryStore = registryStore
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [],
+            groups: [],
+            lastActiveTileId: nil
+        ))
+        let content = app.makeWorkspaceContentView(canvasView: canvas, frame: NSRect(x: 0, y: 0, width: 1_200, height: 800))
+        content.layoutSubtreeIfNeeded()
+        guard let splitView = app.workspaceSplitView,
+              let sidebar = app.workspaceSidebarView else {
+            throw CheckError.failed("workspace sidebar mount did not retain split/sidebar views")
+        }
+        splitView.layoutSubtreeIfNeeded()
+        sidebar.layoutSubtreeIfNeeded()
+
+        let sidebarIsHiddenAfterMount = sidebar.isHidden
+        let sidebarWidthAfterMount = Double(sidebar.frame.width)
+        let workspaceRowsRenderedAfterMount = sidebar.workspaceRowsRenderedForQA
+        try expect(!sidebarIsHiddenAfterMount, "mount must leave sidebar visible with no user action")
+        try expect(sidebarWidthAfterMount > 0, "mount must allocate positive sidebar width, got \(sidebarWidthAfterMount)")
+        try expect(workspaceRowsRenderedAfterMount >= 1, "mount reload must render at least one workspace row, got \(workspaceRowsRenderedAfterMount)")
+
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let directory = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("workspace-sidebar-default-visible", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "workspace-sidebar-default-visible",
+            "defaultVisibleResolved": defaultVisibleResolved,
+            "sidebarIsHiddenAfterMount": sidebarIsHiddenAfterMount,
+            "dividerPositionAfterMount": sidebarWidthAfterMount,
+            "workspaceRowsRenderedAfterMount": workspaceRowsRenderedAfterMount,
             "artifactPath": artifact.path,
         ]
         try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
