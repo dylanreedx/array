@@ -31,6 +31,10 @@ public actor ActivityProjectionReceiver {
 
     /// Registers the receive stream before sending the subscription request.
     public func connect(cursor: ActivityCursor? = nil) async {
+        if let cursor {
+            let priorApplied = appliedSequenceByReplica[cursor.replicaId] ?? 0
+            appliedSequenceByReplica[cursor.replicaId] = max(priorApplied, cursor.sequence)
+        }
         if receiveTask == nil {
             let stream = await demux.subscribe()
             receiveTask = Task { [weak self] in

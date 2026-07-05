@@ -71,6 +71,12 @@ public actor ActivityProjectionSender {
     }
 
     private func serve(_ request: ActivitySubscribeRequest) async {
+        let stream = await store.subscribe()
+        var iterator = stream.makeAsyncIterator()
+        if let first = await iterator.next() {
+            if Task.isCancelled { return }
+            try? await demux.send(.activity(first))
+        }
         if let cursor = request.cursor {
             let missed = await store.replay(fromSequenceExclusive: cursor.sequence, replicaId: cursor.replicaId)
             for event in missed {
@@ -78,9 +84,7 @@ public actor ActivityProjectionSender {
                 try? await demux.send(.activity(.event(event)))
             }
         }
-        if Task.isCancelled { return }
-        let stream = await store.subscribe()
-        for await item in stream {
+        while let item = await iterator.next() {
             if Task.isCancelled { return }
             try? await demux.send(.activity(item))
         }

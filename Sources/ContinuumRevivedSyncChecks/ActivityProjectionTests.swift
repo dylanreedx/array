@@ -231,6 +231,60 @@ private func checkGapDetectionTriggersReplay() async {
     await receiver.stop()
 }
 
+private func checkFreshReceiverResumeFromPersistedCursorIsIncremental() async {
+    let replicaId = UUID()
+    let tileId = UUID()
+    let seedTransport = BlackHoleTransport()
+    let seededReceiver = ActivityProjectionReceiver(demux: SyncMessageDemux(transport: seedTransport), scope: .observer)
+    await seededReceiver.connect(cursor: ActivityCursor(sequence: 2, replicaId: replicaId))
+    let firstPostCursorEvent = AgentActivityEvent(stamping: makeDraft(tileId: tileId, status: .working, summary: "event 3"), sequence: 3, replicaId: replicaId)
+    await seedTransport.push(.activity(.event(firstPostCursorEvent)))
+    let seedConverged = await waitForConvergence(receiver: seededReceiver, expectedSequence: 3, timeoutSeconds: 1)
+    expect(seedConverged, "cursor resume: fresh receiver seeds local sequence state from persisted cursor")
+    await seededReceiver.stop()
+
+    let store = ActivityStore(replicaId: replicaId)
+    await store.append(makeDraft(tileId: tileId, status: .working, summary: "event 1"))
+    await store.append(makeDraft(tileId: tileId, status: .needsAttention, summary: "event 2"))
+
+    let persistedCursor = ActivityCursor(sequence: 2, replicaId: replicaId)
+
+    await store.append(makeDraft(tileId: tileId, status: .working, summary: "event 3"))
+    await store.append(makeDraft(tileId: tileId, status: .done, summary: "event 4"))
+
+    let (host, observer) = await makePair()
+    let sender = ActivityProjectionSender(store: store, demux: SyncMessageDemux(transport: host), authorizedScope: .observer)
+    await sender.start()
+    let receiver = ActivityProjectionReceiver(demux: SyncMessageDemux(transport: observer), scope: .observer)
+    await receiver.connect(cursor: persistedCursor)
+
+    let wireItems = await waitForDeliveredActivityItems(on: observer, atLeast: 3, timeoutSeconds: 2)
+    expect(wireItems.count >= 3, "cursor resume: snapshot plus post-cursor replay delivered")
+    guard case .snapshot(let firstSnapshot)? = wireItems.first else {
+        expect(false, "cursor resume: cursor-bearing serve starts with snapshot")
+        await sender.stop()
+        await receiver.stop()
+        return
+    }
+    expect(firstSnapshot.snapshotSequence == 4, "cursor resume: leading snapshot is current")
+
+    let replayedSequences = wireItems.dropFirst().compactMap { item -> UInt64? in
+        if case .event(let event) = item { return event.sequence }
+        return nil
+    }
+    expect(replayedSequences == [3, 4], "cursor resume: replay is incremental from persisted cursor, got \(replayedSequences)")
+
+    let converged = await waitForConvergence(receiver: receiver, expectedSequence: 4, timeoutSeconds: 2)
+    expect(converged, "cursor resume: fresh receiver converges through production receiver path")
+    let finalSnapshot = await receiver.currentSnapshot()
+    let storeSnapshot = await store.currentSnapshot()
+    expect(finalSnapshot == storeSnapshot, "cursor resume: fresh receiver equals store")
+    expect(finalSnapshot.byTile[tileId]?.recent.map(\.sequence) == [1, 2, 3, 4], "cursor resume: final snapshot has the full folded activity history")
+
+    await sender.stop()
+    await receiver.stop()
+}
+
 private func checkSharedDemuxRegistersBeforeSend() async {
     let replicaId = UUID()
     let tileId = UUID()
@@ -417,6 +471,7 @@ private func runActivityProjectionBackendCheck() async -> Double {
 func runActivityProjectionChecks() async throws {
     await checkSnapshotThenTailIsGapFree()
     await checkGapDetectionTriggersReplay()
+    await checkFreshReceiverResumeFromPersistedCursorIsIncremental()
     await checkSharedDemuxRegistersBeforeSend()
     await checkScopeGuardBlocksUnauthorizedSubscription()
     checkActivityStreamItemNoForbiddenFields()
@@ -438,5 +493,5 @@ func runActivityProjectionChecks() async throws {
     let readBack = try JSONDecoder().decode(InvariantManifest.self, from: Data(contentsOf: file))
     expect(readBack == manifest, "ticket58 manifest round-trips")
 
-    print("ContinuumRevivedSyncChecks passed: activity projection over sync transport — snapshot-then-tail, replay, shared demux registration, sender-bound scope, I5, bounded retry, deterministic backend (\(String(format: "%.2f", backendElapsedMs)) ms), manifest at \(file.path)")
+    print("ContinuumRevivedSyncChecks passed: activity projection over sync transport — snapshot-then-tail, cursor resume, replay, shared demux registration, sender-bound scope, I5, bounded retry, deterministic backend (\(String(format: "%.2f", backendElapsedMs)) ms), manifest at \(file.path)")
 }
