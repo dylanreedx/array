@@ -101,3 +101,10 @@ NOT tonight: **69** ACP driver (design-heavy — design tomorrow), **68** node s
 - **Dogfood checklist** (one doc): every `visual-gate-owed` + `device-gate-owed` item with exact
   "navigate here → do this → see exactly this" steps
 - Supervised GUI matrix pass (the 5 deferred surface checks) — can fold into the same sitting
+
+## Model-mix directive (Dylan, 2026-07-04 ~23:10 — binding for the rest of night 3)
+Target mix: **Fable 5–20%** (orchestration/steering/adjudication ONLY — review may be delegated),
+**Codex/GPT-5.5 ~50%** (default implementer at low + independent reviewer + Track A), **Sonnet 5 ~30%**
+(hard/creative implementers + thin drivers). ACTION at the next Track B/C iteration boundary:
+restart the loop with `CLAUDE_MODEL=fable CLAUDE_REVIEW_MODEL=opus` (Claude-side review → Opus;
+Fable keeps only the orchestrator seat). Codex-fallback overflow on Claude limits stays on.
