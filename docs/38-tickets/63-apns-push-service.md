@@ -1,5 +1,112 @@
 # APNS push service — fire on interruptive/terminal phase entry, deduplicated by state identity
 
+> **RULING BANNER — C-20260705-027 (night3 B6 = 63 push sender + N1–N8 payload builders,
+> orchestrator 2026-07-05). Binding; overrides the ticket text below where they conflict. The
+> companion spec (`_COMPANION_SPEC.md` §3–§4) supersedes the ticket's 4-category model with the
+> N1–N8 taxonomy, and the night-3 amendment supersedes the Keychain story: key config lives at
+> `~/.continuum/apns.env` (present tonight: `CONTINUUM_APNS_KEY_PATH` / `CONTINUUM_APNS_KEY_ID` /
+> `CONTINUUM_APPLE_TEAM_ID`; note the path value uses `$HOME` — the loader must expand it). The
+> `.p8` NEVER enters the repo, is never logged, never appears in a check's printed output.
+> Verified code facts as of cb85f2e: `AgentStatus` has NO `.failed` case
+> (`TerminalSessionDescriptor.swift:104`: configuring/working/idle/needsAttention/done/stale) —
+> the ticket's firing rule is adjusted below; `AgentActivityEvent` already carries
+> `tone`/`kind`/`status`/`approvalRequestId` (B5) and `runtimeError`'s message is `[BODY]`-tagged
+> (`AgentStatusEngine.swift:343`) so it may NEVER enter a payload; ticket 40's `SessionObserver`
+> is NOT built — the production status-transition call site does not exist yet; `PairingURL.scheme
+> == "continuum"` (`Auth/PairingURL.swift:26`) is the app's registered scheme and deep links reuse
+> it; `ios/Continuum/Resources/Continuum.entitlements` already has `aps-environment: development`;
+> the iOS Settings tab is a B8 placeholder; `requiredScope[.respondToApproval] ==
+> .orchestrationOperate` (B5's gate — the lock-screen Approve handler routes through it).**
+>
+> 1. **Scope of B6 (the queue line, not the full ticket):** desktop push SENDER + shared N1–N8
+>    payload builders + firing/dedup rules + the morning `--push-test` hook + lab card. NOT tonight:
+>    per-category Settings UI + persisted prefs (B8 owns ticket 65 — the sender consults an
+>    injectable `PushCategoryPreferences` seam, default = taxonomy defaults); deep-link VALIDATION
+>    (B7 owns 64 — B6 only constructs URLs); the simulator suite script (B9); the ticket's
+>    `DeviceRegistration` CKRecord / token-over-wire channel (see item 6); Mac-Keychain key storage
+>    and the paste-the-key Settings flow (VOID — superseded by apns.env).
+> 2. **Taxonomy is shared Core (night-3 shared-code rule):** a closed `PushCategory` enum N1–N8
+>    with, per case: a stable category identifier string (used identically by the payload builder
+>    and the iOS `UNNotificationCategory` registration — single constant, never two literals),
+>    interruption level (N1/N2/N7 time-sensitive, N3/N4 active, N5/N6/N8 passive), default-enabled
+>    (N1–N5 on, N6/N8 off), muteable (all except N7 — N7 ALWAYS delivers, the preferences seam is
+>    not consulted for it), action ids (N1: approve/deny; N2: open), and deep-link target (N1
+>    approval card / N2–N4+N8 agent detail / N5 agents board / N6 status footer / N7 devices) using
+>    scheme `PairingURL.scheme`. Builders are pure functions from typed context structs → an APNS
+>    JSON payload (`aps.alert` title/body, `aps.category`, `aps["interruption-level"]`, sound,
+>    `userInfo` with the deep link and — N1 only — the `approvalRequestId`; spec §3: the approve
+>    action carries ONLY the approval id, decisions round-trip through the scope gate). Every
+>    payload ≤4 KB, detail/body ≤160 chars, I5-clean.
+> 3. **Firing rule (adjusted for the real AgentStatus — no `.failed` case):** entry-edge semantics
+>    kept from the ticket. Interruptive/terminal set = {`.needsAttention`, `.done`}. Category
+>    classification from the triggering `AgentActivityEvent`: `.needsAttention` entry WITH
+>    `approvalRequestId` → N1; `.needsAttention` entry without → N2; `.done` entry with tone !=
+>    `.error` → N3; an event with tone `.error` (e.g. kind `runtimeError` / dirty exit) → N4
+>    regardless of status-set membership, with body = the FIXED string `"The agent run failed."`
+>    (the `[BODY]`-tagged message never crosses; ticket's redaction rule kept). N5–N8 builders
+>    exist and are table-checked, but their production triggers (digest timer, 66-supervisor
+>    edges, pairing events, reaper) are NOT wired tonight — `publisher-owed`, same as the N1–N4
+>    observer call site (ticket 40 not built; do NOT invent a SessionObserver). Dedup per the
+>    ticket: identity = state minus timestamp, per-tile map, in-memory only (do not persist),
+>    updated only after a 200; 410 → `tokenExpired`, identity NOT updated; 403
+>    ExpiredProviderToken → identity NOT updated, fresh JWT next attempt.
+> 4. **Sender (`APNSPushService` actor, Core, per the ticket):** config loaded from
+>    `~/.continuum/apns.env` ($HOME-expanded; missing/incomplete file → nil config → publish
+>    no-ops honestly — this IS the "behind the flag" behavior, no separate flag needed); JWT
+>    minted fresh per POST via CryptoKit P256 (`pemRepresentation` of the .p8), never cached;
+>    HTTP layer behind an injectable seam so checks exercise the REAL request construction
+>    (URL `/3/device/<token>`, `authorization: bearer <jwt>`, `apns-topic:
+>    dev.dylanreed.continuum`, `apns-push-type: alert`) without network; environment selectable
+>    sandbox|production (the spec's T3 "sandbox" label is corrected here: TestFlight builds
+>    register against PRODUCTION APNS — default production, overridable). Device token is
+>    config-injected: an optional `CONTINUUM_APNS_DEVICE_TOKEN` line in apns.env (morning: Dylan
+>    pastes the token the phone displays). No token → publish no-ops with an honest log line.
+> 5. **iOS side (minimal, honest):** request notification authorization +
+>    `registerForRemoteNotifications` at app start; register the `UNNotificationCategory` set from
+>    the SAME shared taxonomy constants (N1 Approve/Deny with `.authenticationRequired`, N2 Open);
+>    on token receipt show it as a copyable row (replace the Settings-tab placeholder body with
+>    this one diagnostics row — B8 still owns real Settings; keep the placeholder hint text for
+>    the rest). The lock-screen Approve/Deny handler routes through a pure Core helper
+>    `handlePushAction(actionId:userInfo:grantedScope:)` that returns a respond-intent ONLY when
+>    `authorize(.respondToApproval, …)` passes (spec §4 T1's "scope-gate round-trip against the
+>    real authorize() path"), then feeds B5's existing approvalResponse wire path. Token
+>    delivery phone→desktop over the wire is NOT built tonight (desktop CK inbound pump is the
+>    known publisher-owed gap) — `device-gate-owed` + `publisher-owed`.
+> 6. **Morning T3 hook:** a `--push-test` flag on the desktop app that builds one fixture payload
+>    per category N1–N8 and fires each through the REAL sender/apns.env/token path, printing the
+>    per-category HTTP outcome (or the honest "no device token configured" failure, exit
+>    non-zero). NOT wired into the matrix (it goes live against Apple); it is the T3 checklist
+>    tool.
+> 7. **Checks (matrix-wired, measured values, no `{passed:true}`):** Core tables — (a) payload
+>    builder over ALL 8 categories: JSON decodes, category id + interruption level + deep-link
+>    userInfo + action ids asserted per case, ≤4 KB, 160-char truncation, N4 fixed-string
+>    redaction (feed a hostile `runtimeError` message; assert it does NOT appear anywhere in the
+>    encoded payload); run the built payloads through `SyncPayloadTaintScanner` where its API
+>    applies; (b) firing-rule table: working→needsAttention(approval id)→N1, →needsAttention(no
+>    id)→N2, →done→N3, error-tone→N4, needsAttention→needsAttention same identity no-fire,
+>    approval→input refire (identity differs), done→done no-refire; (c) taxonomy invariants:
+>    ids unique + non-empty, defaults per spec §3, N7 unmuteable (preferences seam returning
+>    false for N7 still sends); (d) JWT signer: ephemeral P256 key, decode header/claims (alg
+>    ES256, kid, iss, iat within ±5 s), verify with the public key; (e) dedup/HTTP via the fake
+>    seam: identical identity → exactly one request; changed identity → second request; 410 and
+>    403 semantics per item 3; request-shape assertions per item 4; (f) apns.env loader: parse a
+>    FIXTURE env string (not the real file) incl. $HOME expansion; missing keys → nil config →
+>    no-op publish. Plus one gated real-env check: if `~/.continuum/apns.env` exists, load it,
+>    assert the real key parses and a JWT signs+verifies — print ONLY the key id/team id, never
+>    key material; absent file → print SKIPPED, exit 0.
+> 8. **ComponentLab (Dylan's directive — this is a Track-B desktop companion):** a "Push Smoke"
+>    lab card rendering all 8 fixture payloads (category, level, title/body, deep link, action
+>    ids) plus a firing/dedup outcome line (fire → dedup-suppressed → refire on phase change),
+>    with its `--component-lab-check` assertion extended to gate the card (8 rows, N1 shows
+>    approve/deny action ids), SAME commit. Patterns: tickets 14/67, B3/B5 cards.
+> 9. **Gates:** (a) `swift build` clean; (b) `CONTINUUM_SKIP_SURFACE_CHECKS=1
+>    ./scripts/run-matrix.sh` green incl. every new check; (c) `cd ios && xcodegen generate &&
+>    xcodebuild -project Continuum.xcodeproj -scheme Continuum -destination 'generic/platform=iOS
+>    Simulator' build` clean (`ios/project.yml` + entitlements stay source of truth). Ledger owed
+>    tags: `device-gate-owed` (real push to the phone, token paste, lock-screen actions end to
+>    end), `publisher-owed` (observer call site 40, N5–N8 triggers, token-over-wire),
+>    `visual-gate-owed` (lab card + banner screenshots via B9's simulator suite).
+
 ## What this delivers
 
 When an agent managed by Continuum enters a phase that demands the human's attention —
