@@ -376,7 +376,16 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher, sidebarLiveCard, activityDockCard, sidebarSelectedCard, managedAgentCard]
+        [
+            tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard,
+            agentsBoardCard, agentAdapterProjectionCard, managedSessionRecordCard,
+            sessionNamingCard, commandPaletteLauncher, settingsLauncher,
+            projectPickerLauncher, sidebarLiveCard, activityDockCard,
+            sidebarSelectedCard, managedAgentCard,
+
+            // MARK: night3-C cards
+            managedAgentApprovalDockCard
+        ]
     }
 
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
@@ -808,6 +817,64 @@ enum LabCatalog {
                 makeManagedAgentFixtureView()
             }
         )
+    }
+
+    private static var managedAgentApprovalDockCard: LabEntry {
+        LabEntry(
+            id: "managed-agent.approval-dock",
+            category: "Managed Agent",
+            title: "Approval dock - three states",
+            summary: "Working, waiting with orange dock and border, then done.",
+            content: .staticCard(preferredSize: NSSize(width: 560, height: 720)) {
+                makeManagedAgentApprovalDockPreview()
+            }
+        )
+    }
+
+    static func makeManagedAgentApprovalDockPreview() -> NSView {
+        let root = NSStackView()
+        root.orientation = .vertical
+        root.alignment = .leading
+        root.spacing = 12
+        root.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+
+        func stateView(title: String, status: AgentStatus, pending: Bool) -> ManagedAgentTileNSView {
+            let tile = Tile(
+                id: UUID(),
+                kind: .managedAgent,
+                title: title,
+                frame: TileFrame(x: 0, y: 0, width: 520, height: 210),
+                zPosition: .fromLegacyRank(1),
+                runtimeRef: nil,
+                metadata: TileMetadata(launchProfileId: "managed")
+            )
+            let view = ManagedAgentTileNSView(tile: tile)
+            view.frame = NSRect(x: 0, y: 0, width: 520, height: 210)
+            view.ingest(.sessionStateChanged(status == .done ? .stopped : .running))
+            view.ingest(.turnStarted(threadId: "thread-main", turnId: "turn-\(status.rawValue)"))
+            view.ingest(.contentDelta(threadId: "thread-main", turnId: "turn-\(status.rawValue)", streamKind: .assistant, delta: "Checking the auth change set."))
+            if status == .done {
+                view.ingest(.turnCompleted(threadId: "thread-main", turnId: "turn-\(status.rawValue)", outcome: .completed, errorMessage: nil))
+            }
+            if pending {
+                view.setPendingApprovalForQA(kind: .commandExecutionApproval, requestId: "approval-preview", detail: "npm test")
+            } else {
+                view.agentStatus = status
+            }
+            view.translatesAutoresizingMaskIntoConstraints = false
+            view.widthAnchor.constraint(equalToConstant: 520).isActive = true
+            view.heightAnchor.constraint(equalToConstant: 210).isActive = true
+            if pending {
+                view.layer?.borderColor = NSColor.systemOrange.withAlphaComponent(0.9).cgColor
+                view.layer?.borderWidth = 2
+            }
+            return view
+        }
+
+        root.addArrangedSubview(stateView(title: "Claude · feature/auth", status: .working, pending: false))
+        root.addArrangedSubview(stateView(title: "Claude · feature/auth", status: .needsAttention, pending: true))
+        root.addArrangedSubview(stateView(title: "Claude · feature/auth", status: .done, pending: false))
+        return root
     }
 
     static func managedAgentFixtureEvents(includeApproval: Bool = true) -> [AgentRuntimeEvent] {
@@ -1276,6 +1343,10 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard managedAgentView.currentAgentStatus == .needsAttention else {
             throw fail("managed agent fixture status \(managedAgentView.currentAgentStatus), expected needsAttention")
         }
+        guard entries.contains(where: { $0.id == "managed-agent.approval-dock" }) else {
+            throw fail("missing managed-agent.approval-dock card")
+        }
+        try runApprovalDockLiveCheck(fail: fail)
 
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -1288,6 +1359,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         var sidebarDistinctColors: Int?
         var selectedSidebarDistinctColors: Int?
         var managedAgentDistinctColors: Int?
+        var approvalDockDistinctColors: Int?
         for entry in entries {
             guard case let .staticCard(preferredSize, make) = entry.content else { continue }
             let size = preferredSize ?? NSSize(width: 560, height: 640)
@@ -1314,6 +1386,8 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                 selectedSidebarDistinctColors = metrics.distinctSampledColors
             } else if entry.id == "tiles.managedAgent" {
                 managedAgentDistinctColors = metrics.distinctSampledColors
+            } else if entry.id == "managed-agent.approval-dock" {
+                approvalDockDistinctColors = metrics.distinctSampledColors
             }
             rendered.append(["entry": entry.id, "width": metrics.width, "height": metrics.height, "distinctColors": metrics.distinctSampledColors])
         }
@@ -1328,6 +1402,9 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         guard let managedAgentDistinctColors else {
             throw fail("missing tiles.managedAgent render")
+        }
+        guard let approvalDockDistinctColors, approvalDockDistinctColors >= 6 else {
+            throw fail("managed-agent.approval-dock waiting-state render too flat: \(approvalDockDistinctColors ?? 0) colors")
         }
         guard managedAgentDistinctColors >= 3 else {
             throw fail("managed agent render too uniform: \(managedAgentDistinctColors) distinct colors")
@@ -1527,6 +1604,67 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: directory.appendingPathComponent("manifest.json"))
+    }
+
+    private static func runApprovalDockLiveCheck(fail: (String) -> Error) throws {
+        let tile = Tile(
+            id: UUID(uuidString: "72000000-0000-4000-8000-000000000072")!,
+            kind: .managedAgent,
+            title: "Claude · feature/auth",
+            frame: TileFrame(x: 80, y: 60, width: 520, height: 260),
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")
+        )
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [tile],
+            groups: [],
+            lastActiveTileId: nil
+        ))
+        let view = ManagedAgentTileNSView(tile: tile)
+        canvas.install(tileView: view, for: tile)
+        view.ingest(.sessionStateChanged(.running))
+        view.ingest(.turnStarted(threadId: "thread-main", turnId: "turn-live"))
+        view.ingest(.requestOpened(threadId: "thread-main", requestId: "approval-live", kind: .commandExecutionApproval))
+        view.setPendingApprovalForQA(kind: .commandExecutionApproval, requestId: "approval-live", detail: "npm test")
+        canvas.markActive(tileId: tile.id)
+
+        guard canvas.agentStatus(for: tile.id) == .needsAttention else {
+            throw fail("approval live check: canvas status did not become needsAttention")
+        }
+        guard canvas.attentionTileIds.contains(tile.id) else {
+            throw fail("approval live check: canvas did not track the attention tile")
+        }
+        guard canvas.qaAttentionBorderActive(for: tile.id) else {
+            throw fail("approval live check: attention border is not active")
+        }
+        guard !canvas.qaFocusBorderActive else {
+            throw fail("approval live check: focus border must be suppressed while attention is active")
+        }
+        guard view.qaApprovalDockVisible else {
+            throw fail("approval live check: approval dock is hidden")
+        }
+        guard view.qaApprovalDockDetailText.contains("Run command: npm test") else {
+            throw fail("approval live check: dock detail rendered '\(view.qaApprovalDockDetailText)'")
+        }
+        guard view.qaApprovalDockButtonTitles == ["Approve", "Approve for session", "Decline"] else {
+            throw fail("approval live check: dock buttons \(view.qaApprovalDockButtonTitles)")
+        }
+
+        view.qaClickApproval(.approve)
+        guard canvas.agentStatus(for: tile.id) != AgentStatus.needsAttention else {
+            throw fail("approval live check: status stayed needsAttention after approve")
+        }
+        guard canvas.attentionTileIds.isEmpty else {
+            throw fail("approval live check: attention set not cleared after approve")
+        }
+        guard !canvas.qaAttentionBorderActive(for: tile.id) else {
+            throw fail("approval live check: attention border stayed active after approve")
+        }
+        guard !view.qaApprovalDockVisible else {
+            throw fail("approval live check: dock stayed visible after approve")
+        }
     }
 }
 

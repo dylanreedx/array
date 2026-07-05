@@ -10,13 +10,17 @@ final class ManagedAgentTileNSView: TileNSView {
     private let phaseLabel = NSTextField(labelWithString: "")
     private let elapsedLabel = NSTextField(labelWithString: "0s")
     private let cardStack = NSStackView()
-    private let approvalDock = NSTextField(labelWithString: "Approval dock - ticket 72")
+    private let approvalDock = ApprovalDockView()
     private var cardViewsById: [String: TranscriptCardView] = [:]
+    private var pendingApprovals: [String: ApprovalDockRequest] = [:]
     private var model: ManagedAgentTranscriptModel
     private var descriptor: AgentDescriptor
     private var startedAt: Date?
+    private let threadId: String
+    var onApprovalDecision: ((String, ApprovalDecision) -> Void)?
 
     init(tile: Tile, threadId: String = "thread-main", descriptor: AgentDescriptor? = nil) {
+        self.threadId = threadId
         self.model = ManagedAgentTranscriptModel(threadId: threadId)
         self.descriptor = descriptor ?? AgentDescriptor(
             agentKind: .managed,
@@ -42,10 +46,12 @@ final class ManagedAgentTileNSView: TileNSView {
             if case .turnStarted = event { startedAt = Date() }
         }
         model.ingest(event)
+        updatePendingApproval(from: event)
         descriptor.status = model.currentStatus
         descriptor.statusUpdatedAt = Date()
         agentStatus = model.currentStatus
         applyHeader(status: model.currentStatus)
+        approvalDock.pendingRequest = pendingApprovals.values.sorted { $0.requestId < $1.requestId }.first
         reconcileCards()
     }
 
@@ -65,12 +71,12 @@ final class ManagedAgentTileNSView: TileNSView {
         scrollView.hasVerticalScroller = true
         scrollView.documentView = cardStack
 
-        approvalDock.font = .systemFont(ofSize: 11)
-        approvalDock.textColor = .tertiaryLabelColor
-        approvalDock.alignment = .center
-        approvalDock.wantsLayer = true
-        approvalDock.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.18).cgColor
         approvalDock.setContentCompressionResistancePriority(.required, for: .vertical)
+        approvalDock.onDecision = { [weak self] decision in
+            guard let self, let request = self.approvalDock.pendingRequest else { return }
+            self.onApprovalDecision?(request.requestId, decision)
+            self.ingest(.requestResolved(threadId: self.threadId, requestId: request.requestId, decision: decision.rawValue))
+        }
 
         let layout = NSStackView(views: [header, scrollView, approvalDock])
         layout.orientation = .vertical
@@ -83,10 +89,21 @@ final class ManagedAgentTileNSView: TileNSView {
             layout.topAnchor.constraint(equalTo: root.topAnchor),
             layout.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             header.heightAnchor.constraint(equalToConstant: 52),
-            approvalDock.heightAnchor.constraint(equalToConstant: 22),
+            approvalDock.heightAnchor.constraint(equalToConstant: 92),
             cardStack.widthAnchor.constraint(greaterThanOrEqualToConstant: 420)
         ])
         return root
+    }
+
+    private func updatePendingApproval(from event: AgentRuntimeEvent) {
+        switch event {
+        case .requestOpened(let threadId, let requestId, let kind) where threadId == self.threadId:
+            pendingApprovals[requestId] = ApprovalDockRequest(requestId: requestId, kind: kind, detail: nil)
+        case .requestResolved(let threadId, let requestId, _) where threadId == self.threadId:
+            pendingApprovals.removeValue(forKey: requestId)
+        default:
+            break
+        }
     }
 
     private func configureHeader() {
@@ -173,4 +190,17 @@ final class ManagedAgentTileNSView: TileNSView {
         case .configuring: return .systemPurple
         }
     }
+
+    func setPendingApprovalForQA(kind: ApprovalKind, requestId: String, detail: String) {
+        let request = ApprovalDockRequest(requestId: requestId, kind: kind, detail: detail)
+        pendingApprovals[requestId] = request
+        approvalDock.pendingRequest = request
+        agentStatus = .needsAttention
+        applyHeader(status: .needsAttention)
+    }
+
+    var qaApprovalDockVisible: Bool { !approvalDock.isHidden }
+    var qaApprovalDockDetailText: String { approvalDock.qaDetailText }
+    var qaApprovalDockButtonTitles: [String] { approvalDock.qaButtonTitles }
+    func qaClickApproval(_ decision: ApprovalDecision) { approvalDock.qaClick(decision) }
 }

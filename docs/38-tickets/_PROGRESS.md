@@ -145,3 +145,4 @@ be salvaged. These rows reset them for the loop to re-drive; if 07 lands, 56 →
 | 46-dock-toggle-width.md | done | 3ef5997 | matrix: green (headless) | night3-C gpt-5.5; pending audit; visual-gate-owed |
 | 47-jump-to-tile.md | done | 2755cd9 | matrix: green (headless) | night3-C gpt-5.5; pending audit; visual-gate-owed |
 | 71-managed-tile-kind-transcript.md | done | 9449ceb | matrix: green (headless) | night3-C gpt-5.5; pending audit; visual-gate-owed |
+| 72-approval-dock-border.md | done | 62b9757 | matrix: green (headless) | night3-C gpt-5.5; pending audit; visual-gate-owed |

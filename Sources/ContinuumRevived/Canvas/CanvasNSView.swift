@@ -643,6 +643,9 @@ final class CanvasNSView: NSView {
         if borderedTileId == id {
             borderedTileId = nil
         }
+        attentionTileIds.remove(id)
+        attentionBorderOverlays[id]?.removeFromSuperview()
+        attentionBorderOverlays.removeValue(forKey: id)
         delegate?.canvasSidebarModelDidChange(self)
         delegate?.canvasDidChange(self)
     }
@@ -662,6 +665,8 @@ final class CanvasNSView: NSView {
     /// is not clipped by the tile's `masksToBounds`. Lazily installed as the
     /// topmost subview so it renders above tiles; click-transparent.
     private var focusBorderOverlay: FocusBorderOverlayView?
+    private(set) var attentionTileIds: Set<UUID> = []
+    private var attentionBorderOverlays: [UUID: FocusBorderOverlayView] = [:]
 
     /// Canvas-owned translucent ghost shown at a dragged tile's snap destination
     /// while drag magnetization is in range. Topmost, click-transparent.
@@ -756,6 +761,12 @@ final class CanvasNSView: NSView {
             focusBorderOverlay?.hide()
             return
         }
+        // Attention-orange takes precedence: a focused tile that also needs a
+        // human decision is represented only by the orange attention ring.
+        guard !attentionTileIds.contains(targetId) else {
+            focusBorderOverlay?.hide()
+            return
+        }
         let overlay = focusBorderOverlayView()
         overlay.configure(
             color: Self.focusBorderColor(named: config.color).withAlphaComponent(0.7),
@@ -767,6 +778,42 @@ final class CanvasNSView: NSView {
         // it under later-added tile subviews.
         overlay.removeFromSuperview()
         addSubview(overlay, positioned: .above, relativeTo: nil)
+    }
+
+    func updateAttentionBorder(for tileId: UUID, status: AgentStatus?) {
+        let shouldShow = status == .needsAttention
+        let isShowing = attentionTileIds.contains(tileId)
+        guard shouldShow != isShowing else {
+            if shouldShow { applyAttentionBorders() }
+            return
+        }
+        if shouldShow {
+            attentionTileIds.insert(tileId)
+        } else {
+            attentionTileIds.remove(tileId)
+            attentionBorderOverlays[tileId]?.removeFromSuperview()
+            attentionBorderOverlays.removeValue(forKey: tileId)
+        }
+        applyAttentionBorders()
+        applyFocusBorder()
+    }
+
+    private func applyAttentionBorders() {
+        let color = Self.focusBorderColor(named: FocusBorderConfig.attentionColor).withAlphaComponent(0.8)
+        let gap = CGFloat(FocusBorderConfig.defaultGap)
+        for tileId in Array(attentionBorderOverlays.keys) where !attentionTileIds.contains(tileId) {
+            attentionBorderOverlays[tileId]?.removeFromSuperview()
+            attentionBorderOverlays.removeValue(forKey: tileId)
+        }
+        for tileId in attentionTileIds.sorted(by: { $0.uuidString < $1.uuidString }) {
+            guard let view = tileViews[tileId] else { continue }
+            let overlay = attentionBorderOverlays[tileId] ?? FocusBorderOverlayView(frame: .zero)
+            attentionBorderOverlays[tileId] = overlay
+            overlay.configure(color: color, gap: gap, animationDuration: FocusBorderConfig.attentionSpeed)
+            overlay.show(around: view.frame)
+            overlay.removeFromSuperview()
+            addSubview(overlay, positioned: .above, relativeTo: nil)
+        }
     }
 
     /// Re-resolve focus-border config and re-apply to the current bordered tile.
@@ -795,6 +842,13 @@ final class CanvasNSView: NSView {
         focusBorderOverlayView().show(around: view.frame)
     }
 
+    private func repositionAttentionBorderIfNeeded(for tileId: UUID) {
+        guard attentionTileIds.contains(tileId),
+              let view = tileViews[tileId],
+              let overlay = attentionBorderOverlays[tileId] else { return }
+        overlay.show(around: view.frame)
+    }
+
     /// Clear the focus border when scope leaves all tiles (scope→canvas/modal).
     /// Wired to `FocusBroker.onAcceptedCanvasScope`.
     func clearFocusBorder() {
@@ -820,6 +874,14 @@ final class CanvasNSView: NSView {
     /// QA: freeze the dash phase for a deterministic offscreen capture.
     func qaFreezeFocusBorder(phase: CGFloat = 0) {
         focusBorderOverlay?.qaFreeze(phase: phase)
+    }
+
+    func qaAttentionBorderActive(for tileId: UUID) -> Bool {
+        guard attentionTileIds.contains(tileId),
+              let view = tileViews[tileId],
+              let overlay = attentionBorderOverlays[tileId],
+              overlay.qaIsAnimating else { return false }
+        return overlay.frame == view.frame.insetBy(dx: -overlay.gap, dy: -overlay.gap)
     }
 
     func bringToFront(tileId: UUID) {
@@ -1438,6 +1500,7 @@ final class CanvasNSView: NSView {
             overlay.removeFromSuperview()
             addSubview(overlay, positioned: .above, relativeTo: nil)
         }
+        applyAttentionBorders()
     }
 
     // MARK: - Layout
@@ -1484,6 +1547,7 @@ final class CanvasNSView: NSView {
         // resize — the overlay lives on the canvas, not the tile, so it must be
         // repositioned here whenever the bordered tile's frame updates.
         repositionFocusBorderIfNeeded(for: tile.id)
+        repositionAttentionBorderIfNeeded(for: tile.id)
         // Authoritatively size the terminal surface from the tile's WORLD content
         // size × backing — independent of canvas zoom. Terminal chrome may grow
         // visually at low zoom for a usable grab target, but that camera-only
