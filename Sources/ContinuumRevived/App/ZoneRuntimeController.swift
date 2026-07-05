@@ -196,6 +196,12 @@ final class ZoneRuntimeController {
             }
             return fallbacks
         }
+        if let tmuxPath = TmuxLocator.resolve() {
+            startReaper(
+                tmuxControl: ProcessTmuxControl(tmuxPath: tmuxPath),
+                activitySnapshotSource: { nil }
+            )
+        }
     }
 
     func startReaper(
@@ -220,11 +226,14 @@ final class ZoneRuntimeController {
                 return await MainActor.run {
                     let tileIds = self.canvasView?.canvasState.tiles.map(\.id) ?? self.runtimes.map(\.tileId)
                     guard !tileIds.isEmpty else { return [] }
+                    let recordLastSeenAt = tileIds
+                        .compactMap { try? self.managedSessionStore.load(tileId: $0)?.lastSeenAt }
+                        .max()
                     return [
                         SessionPruner.SessionBinding(
                             sessionName: self.projectSessionName(),
                             tileIds: tileIds,
-                            lastSeenAt: self.project.createdAt
+                            lastSeenAt: recordLastSeenAt ?? self.project.createdAt
                         )
                     ]
                 }
