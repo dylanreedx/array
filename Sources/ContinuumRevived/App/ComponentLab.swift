@@ -384,7 +384,7 @@ enum LabCatalog {
             sidebarSelectedCard, managedAgentCard,
 
             // MARK: night3-C cards
-            managedAgentApprovalDockCard
+            managedAgentApprovalDockCard, managedAgentUserInputCard
         ]
     }
 
@@ -827,6 +827,20 @@ enum LabCatalog {
             summary: "Working, waiting with orange dock and border, then done.",
             content: .staticCard(preferredSize: NSSize(width: 560, height: 720)) {
                 makeManagedAgentApprovalDockPreview()
+            }
+        )
+    }
+
+    private static var managedAgentUserInputCard: LabEntry {
+        LabEntry(
+            id: "managed-agent.user-input-card",
+            category: "Managed Agent",
+            title: "User Input Card",
+            summary: "Inline answer-field card for user-input.requested events.",
+            content: .staticCard(preferredSize: NSSize(width: 480, height: 160)) {
+                let card = UserInputCardView(frame: NSRect(x: 0, y: 0, width: 480, height: 160))
+                card.configure(question: "What should I name the new migration file?")
+                return card
             }
         )
     }
@@ -1346,7 +1360,11 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard entries.contains(where: { $0.id == "managed-agent.approval-dock" }) else {
             throw fail("missing managed-agent.approval-dock card")
         }
+        guard entries.contains(where: { $0.id == "managed-agent.user-input-card" }) else {
+            throw fail("missing managed-agent.user-input-card card")
+        }
         try runApprovalDockLiveCheck(fail: fail)
+        try runUserInputCardLiveCheck(fail: fail)
 
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -1360,6 +1378,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         var selectedSidebarDistinctColors: Int?
         var managedAgentDistinctColors: Int?
         var approvalDockDistinctColors: Int?
+        var userInputCardDistinctColors: Int?
         for entry in entries {
             guard case let .staticCard(preferredSize, make) = entry.content else { continue }
             let size = preferredSize ?? NSSize(width: 560, height: 640)
@@ -1388,6 +1407,8 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                 managedAgentDistinctColors = metrics.distinctSampledColors
             } else if entry.id == "managed-agent.approval-dock" {
                 approvalDockDistinctColors = metrics.distinctSampledColors
+            } else if entry.id == "managed-agent.user-input-card" {
+                userInputCardDistinctColors = metrics.distinctSampledColors
             }
             rendered.append(["entry": entry.id, "width": metrics.width, "height": metrics.height, "distinctColors": metrics.distinctSampledColors])
         }
@@ -1405,6 +1426,9 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         guard let approvalDockDistinctColors, approvalDockDistinctColors >= 6 else {
             throw fail("managed-agent.approval-dock waiting-state render too flat: \(approvalDockDistinctColors ?? 0) colors")
+        }
+        guard let userInputCardDistinctColors, userInputCardDistinctColors >= 5 else {
+            throw fail("managed-agent.user-input-card render too flat: \(userInputCardDistinctColors ?? 0) colors")
         }
         guard managedAgentDistinctColors >= 3 else {
             throw fail("managed agent render too uniform: \(managedAgentDistinctColors) distinct colors")
@@ -1600,6 +1624,9 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                 "unselectedDistinctColors": sidebarDistinctColors,
                 "selectedDistinctColors": selectedSidebarDistinctColors,
                 "delta": selectedSidebarDistinctColors - sidebarDistinctColors
+            ],
+            "userInputCard": [
+                "distinctColors": userInputCardDistinctColors
             ]
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
@@ -1664,6 +1691,71 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         guard !view.qaApprovalDockVisible else {
             throw fail("approval live check: dock stayed visible after approve")
+        }
+    }
+
+    private static func runUserInputCardLiveCheck(fail: (String) -> Error) throws {
+        let tile = Tile(
+            id: UUID(uuidString: "73000000-0000-4000-8000-000000000073")!,
+            kind: .managedAgent,
+            title: "Claude · feature/migrations",
+            frame: TileFrame(x: 80, y: 60, width: 520, height: 260),
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")
+        )
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [tile],
+            groups: [],
+            lastActiveTileId: nil
+        ))
+        let view = ManagedAgentTileNSView(tile: tile)
+        var submitted: (requestId: String, answers: UserInputAnswers)?
+        view.onUserInputSubmit = { requestId, answers in
+            submitted = (requestId, answers)
+        }
+        canvas.install(tileView: view, for: tile)
+        view.ingest(.sessionStateChanged(.running))
+        view.ingest(.turnStarted(threadId: "thread-main", turnId: "turn-live-input"))
+        view.ingest(.contentDelta(threadId: "thread-main", turnId: "turn-live-input", streamKind: .assistant, delta: "I need one naming decision."))
+        view.ingest(.userInputRequested(threadId: "thread-main", requestId: "input-live", questions: [
+            UserInputQuestion(key: "filename", prompt: "What should I name the new migration file?")
+        ]))
+        canvas.markActive(tileId: tile.id)
+
+        guard view.qaPendingUserInputCount == 1 else {
+            throw fail("user input live check: pending count \(view.qaPendingUserInputCount), expected 1")
+        }
+        guard canvas.agentStatus(for: tile.id) == .needsAttention else {
+            throw fail("user input live check: canvas status did not become needsAttention")
+        }
+        guard canvas.attentionTileIds.contains(tile.id) else {
+            throw fail("user input live check: canvas did not track the attention tile")
+        }
+        guard view.qaUserInputCardCount == 1 else {
+            throw fail("user input live check: card count \(view.qaUserInputCardCount), expected 1")
+        }
+        guard view.qaUserInputQuestion(requestId: "input-live") == "What should I name the new migration file?" else {
+            throw fail("user input live check: question text mismatch")
+        }
+
+        view.qaSubmitUserInput(requestId: "input-live", answer: "AddWorkspaceZoneMigration.swift")
+        guard submitted?.requestId == "input-live" else {
+            throw fail("user input live check: submit requestId \(submitted?.requestId ?? "nil")")
+        }
+        guard submitted?.answers.answers == ["response": "AddWorkspaceZoneMigration.swift"] else {
+            throw fail("user input live check: submitted answers \(submitted?.answers.answers ?? [:])")
+        }
+        guard view.qaPendingUserInputCount == 0 else {
+            throw fail("user input live check: pending count stayed \(view.qaPendingUserInputCount)")
+        }
+        guard view.qaUserInputCardCount == 0 else {
+            throw fail("user input live check: card stayed visible after submit")
+        }
+        let statusAfterSubmit = canvas.agentStatus(for: tile.id)
+        guard statusAfterSubmit == .working else {
+            throw fail("user input live check: status after submit \(String(describing: statusAfterSubmit)), expected working")
         }
     }
 }

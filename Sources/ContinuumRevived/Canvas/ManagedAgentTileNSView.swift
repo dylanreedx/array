@@ -12,12 +12,15 @@ final class ManagedAgentTileNSView: TileNSView {
     private let cardStack = NSStackView()
     private let approvalDock = ApprovalDockView()
     private var cardViewsById: [String: TranscriptCardView] = [:]
+    private var inputCardViewsByRequestId: [String: UserInputCardView] = [:]
     private var pendingApprovals: [String: ApprovalDockRequest] = [:]
+    private var pendingUserInputs: [String: AgentUserInputRequest] = [:]
     private var model: ManagedAgentTranscriptModel
     private var descriptor: AgentDescriptor
     private var startedAt: Date?
     private let threadId: String
     var onApprovalDecision: ((String, ApprovalDecision) -> Void)?
+    var onUserInputSubmit: ((String, UserInputAnswers) -> Void)?
 
     init(tile: Tile, threadId: String = "thread-main", descriptor: AgentDescriptor? = nil) {
         self.threadId = threadId
@@ -47,6 +50,7 @@ final class ManagedAgentTileNSView: TileNSView {
         }
         model.ingest(event)
         updatePendingApproval(from: event)
+        updatePendingUserInput(from: event)
         descriptor.status = model.currentStatus
         descriptor.statusUpdatedAt = Date()
         agentStatus = model.currentStatus
@@ -106,6 +110,22 @@ final class ManagedAgentTileNSView: TileNSView {
         }
     }
 
+    private func updatePendingUserInput(from event: AgentRuntimeEvent) {
+        switch event {
+        case .userInputRequested(let threadId, let requestId, let questions) where threadId == self.threadId:
+            let question = questions.first?.prompt ?? "What should I answer?"
+            let request = AgentUserInputRequest(requestId: requestId, tileId: tile.id, question: question)
+            pendingUserInputs[requestId] = request
+            insertUserInputCard(for: request)
+        case .userInputResolved(let threadId, let requestId) where threadId == self.threadId:
+            pendingUserInputs.removeValue(forKey: requestId)
+            inputCardViewsByRequestId[requestId]?.dismissAnimated()
+            inputCardViewsByRequestId.removeValue(forKey: requestId)
+        default:
+            break
+        }
+    }
+
     private func configureHeader() {
         glyphLabel.font = .systemFont(ofSize: 18, weight: .bold)
         glyphLabel.alignment = .center
@@ -158,6 +178,31 @@ final class ManagedAgentTileNSView: TileNSView {
         }
     }
 
+    private func insertUserInputCard(for request: AgentUserInputRequest) {
+        if let existing = inputCardViewsByRequestId[request.requestId] {
+            existing.configure(question: request.question)
+            return
+        }
+        let card = UserInputCardView()
+        card.configure(question: request.question)
+        card.onSubmit = { [weak self, requestId = request.requestId] answer in
+            self?.respondToUserInput(requestId: requestId, answer: answer)
+        }
+        inputCardViewsByRequestId[request.requestId] = card
+        cardStack.addArrangedSubview(card)
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.widthAnchor.constraint(equalTo: cardStack.widthAnchor, constant: -24).isActive = true
+    }
+
+    func respondToUserInput(requestId: String, answer: String) {
+        guard var request = pendingUserInputs[requestId] else { return }
+        request.status = .resolved
+        request.answer = answer
+        pendingUserInputs[requestId] = request
+        onUserInputSubmit?(requestId, UserInputAnswers(answers: ["response": answer]))
+        ingest(.userInputResolved(threadId: threadId, requestId: requestId))
+    }
+
     private static func glyph(for status: AgentStatus) -> String {
         switch status {
         case .needsAttention: return "◆"
@@ -203,4 +248,12 @@ final class ManagedAgentTileNSView: TileNSView {
     var qaApprovalDockDetailText: String { approvalDock.qaDetailText }
     var qaApprovalDockButtonTitles: [String] { approvalDock.qaButtonTitles }
     func qaClickApproval(_ decision: ApprovalDecision) { approvalDock.qaClick(decision) }
+    var qaPendingUserInputCount: Int { pendingUserInputs.values.filter { $0.status == .pending }.count }
+    var qaUserInputCardCount: Int { inputCardViewsByRequestId.count }
+    func qaUserInputQuestion(requestId: String) -> String? {
+        inputCardViewsByRequestId[requestId]?.qaQuestionText
+    }
+    func qaSubmitUserInput(requestId: String, answer: String) {
+        inputCardViewsByRequestId[requestId]?.qaSubmit(answer)
+    }
 }

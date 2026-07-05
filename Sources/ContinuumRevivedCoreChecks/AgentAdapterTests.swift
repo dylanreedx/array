@@ -91,6 +91,28 @@ func runAgentAdapterTests() {
     expect(pendingInputSignals.hasPendingUserInput, "userInputRequested must set hasPendingUserInput")
     expect(deriveAgentStatus(signals: pendingInputSignals) == .needsAttention, "pending user input must derive needsAttention")
 
+    let resolvedInputSignals = deriveStatusSignals(
+        from: [
+            .sessionStateChanged(.running),
+            .userInputRequested(threadId: threadId, requestId: "input-1", questions: [
+                UserInputQuestion(key: "confirm", prompt: "Proceed?")
+            ]),
+            .userInputResolved(threadId: threadId, requestId: "input-1")
+        ],
+        threadId: threadId,
+        engineStatus: .idle
+    )
+    expect(!resolvedInputSignals.hasPendingUserInput, "userInputResolved must clear matching pending user input")
+    expect(deriveAgentStatus(signals: resolvedInputSignals) == .working, "resolved user input returns to working while running")
+
+    let inputRequest = AgentUserInputRequest(
+        requestId: "input-2",
+        tileId: UUID(uuidString: "73000000-0000-4000-8000-000000000073")!,
+        question: String(repeating: "a", count: 170) + "\nsecret"
+    )
+    expect(inputRequest.question.count == 160, "AgentUserInputRequest must cap question text at 160 chars")
+    expect(!inputRequest.question.contains("\n"), "AgentUserInputRequest must sanitize newlines at ingestion")
+
     let waitingSignals = deriveStatusSignals(
         from: [.sessionStateChanged(.waiting)],
         threadId: threadId,
