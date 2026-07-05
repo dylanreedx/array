@@ -99,6 +99,12 @@ pristine tree; print `CODEX_TICKET: <ticket-filename>` then `CODEX_RESULT: skipp
 NEVER fake-green. NEVER weaken a check.
 CODEXEOF
 
+# Optional external prompt (e.g. a night-specific fix queue) overrides the built-in one.
+if [ -n "${CODEX_PROMPT_FILE:-}" ] && [ -r "$CODEX_PROMPT_FILE" ]; then
+  PROMPT="$(cat "$CODEX_PROMPT_FILE")"
+  echo "[codex-loop] using prompt file: $CODEX_PROMPT_FILE"
+fi
+
 echo "[codex-loop] start $(date) — run dir $RUN_DIR (model=$CODEX_MODEL effort=$CODEX_EFFORT, escalate=$CODEX_ESCALATE_EFFORT)"
 
 RETRY_PENDING=""   # ticket that failed once and is owed an escalated retry
