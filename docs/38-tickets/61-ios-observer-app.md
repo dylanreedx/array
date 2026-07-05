@@ -1,5 +1,87 @@
 # iOS observer app — thin fleet-list client over the activity projection
 
+> **RULING BANNER — C-20260705-024 (night3 B3 = 61a agents board + agent detail, orchestrator
+> 2026-07-05). Binding; overrides the ticket text below where they conflict. The companion spec
+> (`_COMPANION_SPEC.md` §2.3–2.4, §6.1–6.2, §6.6) supersedes this ticket's target naming and file
+> layout; this banner reconciles both against the code that actually landed.**
+>
+> 1. **Surface = the existing `Continuum` iOS app target in `ios/`** (bundle id
+>    `dev.dylanreed.continuum`), NOT a new `ContinuumObserver` target. `ios/project.yml` is the
+>    source of truth — add the local package + regenerate via `xcodegen generate`; never hand-edit
+>    the pbxproj. Deliver: iOS tab-bar navigation per spec §6 (**Agents** home · Canvas · Approvals
+>    · Settings — the last three are labeled placeholder screens; they land with B4/B5/B8), the
+>    agents board (spec §6.1), and agent detail (spec §6.2). Dark-only v1. Replace the
+>    `AgentsBoardPlaceholder` scaffold.
+> 2. **Data path + cold connect (binding, B0b v1 ruling):** the board consumes
+>    `ContinuumRevivedSync.ActivityProjectionReceiver` and ALWAYS calls `connect(cursor: nil)`.
+>    No cursor persistence tonight. App wiring: this item IS the injection consumer that B2
+>    descoped — construct the receiver over `CloudKitSyncTransport` at app startup, guarded by a
+>    runtime iCloud-availability check; when unavailable, show the ticket's honest actionable
+>    error state ("Sign in to iCloud in Settings to observe your agents"), never a blank screen.
+>    The app only needs to BUILD tonight (generic simulator destination); the live CloudKit
+>    snapshot-then-tail leg is `device-gate-owed`. C-023 §4 still holds for CHECKS: never
+>    instantiate `CKContainer`/`CKDatabase` in any `*Checks` target.
+> 3. **Degraded grouping is the ruled v1 shape** (this ticket's own "Watch out" prescribes it).
+>    Verified fact: the projection wire types carry NO workspace/zone/title/kind metadata —
+>    `ActivityLogSnapshot.byTile: [UUID: TileActivity]` holds only `status`, `lastSummary`,
+>    `recent: [AgentActivityEvent]`, `updatedAt`; `TileActivity` has NO `transcript` field (the
+>    breadcrumbs below are stale on this). Therefore: the board is a FLAT attention-first list of
+>    tile rows (status glyph+pill, `lastSummary` line, relative elapsed from `updatedAt`); kind
+>    glyphs and workspace/zone grouping arrive with B4's spatial replica behind a runtime guard.
+>    Do NOT add fields to the frozen wire types tonight, do NOT sync `Registry`/
+>    `WorkspaceDocument`, and do NOT route through `SidebarTreeBuilder` on iOS tonight — only its
+>    precedence ladder (`needsAttention` → `working` → rest) is reused as logic.
+> 4. **Shared logic lives in Core, not `ios/`** (night-3 rule): add a pure
+>    `AgentsBoardProjection` component in `Sources/ContinuumRevivedCore/` — (a) fold
+>    `ActivityLogSnapshot` → attention-first `[AgentsBoardRow]` (priority: needsAttention=0,
+>    working=1, everything else=2; deterministic tie-break: `updatedAt` newest first, then
+>    `tileId`); (b) incremental `applyEvent(_:to:)` whose result is Equatable-identical to the
+>    full re-fold — checked; (c) `AgentStatus` → glyph + semantic color-TOKEN mapping (the six
+>    glyphs ●◆✓◌◍○ and color names verbatim from the table below; tokens are strings — mapping
+>    token→SwiftUI `Color` stays in the app layer). Table-driven checks for (a)/(b)/(c) go in
+>    `ContinuumRevivedCoreChecks`, wired into the matrix. Backend real-path check: drive the REAL
+>    `ActivityProjectionSender`/`ActivityProjectionReceiver` pair over `FakeSyncTransport`
+>    (`connect(cursor: nil)`, one snapshot + three incremental events) and fold the receiver's
+>    output through the SAME production `AgentsBoardProjection` code, asserting final row order
+>    and statuses — lives in `ContinuumRevivedSyncChecks`, measured values printed, no
+>    `{passed:true}`.
+> 5. **Agent detail scope:** header (status pill, `lastSummary`, elapsed) + timeline rendered
+>    from `TileActivity.recent` newest-first as simple tone-tinted event rows (kind, summary,
+>    time). There are no message/tool-call/plan/diff cards in the projection — do not invent
+>    them; an empty `recent` shows the honest "No transcript available" note. If
+>    `status == .needsAttention`, show the pending-attention card (latest needs-attention
+>    summary + age) with **Approve / Deny buttons rendered DISABLED** and the hint that actions
+>    land with ticket 62 (B5 wires them; scope gate per C-20260702-012). "Show on canvas" switches
+>    to the Canvas placeholder tab (B4 wires centering).
+> 6. **Cross-platform package surgery (orchestrator pre-probed 2026-07-05):** add `.iOS(.v17)`
+>    to `Package.swift` platforms and a `.library(name: "ContinuumRevivedSync", targets:
+>    ["ContinuumRevivedSync"])` product. Guard Process-dependent code with `#if os(macOS)`
+>    (pattern exists: `HarnessRunControl.swift`) — surgically: `Substrates/ProcessTmuxControl.swift`
+>    (whole file fine), `RemoteSession.swift` → guard ONLY `LocalTmuxConnectionDriver` (+ Process
+>    helpers); the protocols `RemoteSocket`/`ConnectionDriver`/`RemoteSession`,
+>    `ConnectionRemoteSession`, and `durableActivityStream` MUST stay cross-platform
+>    (`ConnectionSupervisor.swift` references them and its body MUST NOT change — B0 redesign
+>    pending; if it fails iOS compile for another reason, guard its whole file rather than edit
+>    it). `GitDiffEngine.swift`/`ConductorQueueReader.swift`: guard the Process-using
+>    implementation; `DiffReviewSource.gitSource` returns `GitDiffEngine.Source`, so keep `Source`
+>    cross-platform or guard that member minimally. Probe fact: with `.iOS(.v17)` declared, the
+>    only surfaced iOS compile error in Core was `ProcessTmuxControl.swift:148` — expect a short
+>    tail behind it, not a big cascade. macOS `swift build` + the FULL matrix must stay green;
+>    guards must not change macOS behavior.
+> 7. **ComponentLab (Dylan 2026-07-04 directive):** iOS SwiftUI views are exempt, but the shared
+>    Core component is not — ship an "Agents Board" lab card (fixture snapshot, mixed statuses
+>    incl. two `needsAttention`, showing sorted rows + glyph/color tokens) plus its lab
+>    self-check, in the SAME commit (patterns: ticket 14 card, ticket 67 projection rows).
+> 8. **Gates:** (a) `swift build` clean; (b) `CONTINUUM_SKIP_SURFACE_CHECKS=1
+>    ./scripts/run-matrix.sh` green including the new checks; (c) `cd ios && xcodegen generate &&
+>    xcodebuild -project Continuum.xcodeproj -scheme Continuum -destination 'generic/platform=iOS
+>    Simulator' build` clean. The ticket's simulator-screenshot visual gate is NOT attempted
+>    tonight → `visual-gate-owed` (board + detail screenshots, morning checklist); live CloudKit
+>    tail on a signed-in device/simulator → `device-gate-owed`. "Done when" items about
+>    SidebarTreeBuilder zone grouping, the transcript card taxonomy, and the XCUIScreen gate are
+>    ADJUSTED accordingly; the I5 expectation (no transcript bodies/pids/pane targets in anything
+>    iOS reads) is unchanged and already enforced by the projection types.
+
 ## What this delivers
 
 After this ticket lands, there is a working iOS application — a separate target in the Xcode project — that subscribes to the activity projection the Mac host publishes and renders a live, attention-first grouped list of every workspace, zone, and agent the host knows about. Tapping any agent row opens a read-only structured transcript showing its message and tool-call cards pulled from the same projection. A `needsAttention` agent's detail screen shows its sanitized approval request and the status glyph changes from the fleet list in real time as agents move through phases. The phone never spawns a tmux session, never drives an agent, and cannot mutate spatial state — the `Scope` OptionSet makes that guarantee at the type level, not a runtime conditional.
