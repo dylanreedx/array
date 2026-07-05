@@ -1,5 +1,112 @@
 # iOS approve action — symmetric `respondToApproval` over the control channel
 
+> **RULING BANNER — C-20260705-026 (night3 B5 = 62-ios-approve-action, orchestrator 2026-07-05).
+> Binding; overrides the ticket text below where they conflict. The ticket predates the landed
+> architecture: there is NO HTTP control channel — no `ControlChannelClient`, no Mac control-channel
+> server, no Bearer/HTTP status semantics (403/410/404), and ticket 70's production pending store /
+> adapter respond path is NOT built (skipped, C-20260703-018; ticket 40's SessionObserver also not
+> built yet). The approve action rides the landed `SyncMessage`/demux wire exactly like B3 (activity)
+> and B4 (spatial ops). Companion spec §2.4–2.5, §6.2, §6.4 supersede this ticket's surface
+> description. Verified code facts as of 4771fc3: `requiredScope[.respondToApproval] ==
+> .orchestrationRead` (`ScopeAuthorization.swift:23`) and `ContinuumRevivedCoreChecks/main.swift:868`
+> asserts bare `.observer` CAN authorize it — both violate C-20260702-012 and are fixed by THIS item;
+> `AgentActivityEvent` carries NO approval/request id (`AgentActivityEvent.swift:41-115`), so the
+> phone currently has nothing to respond WITH; `AgentAdapter.respondToRequest(threadId:requestId:
+> decision:)` + `ApprovalDecision` exist in `AgentStatusEngine.swift` (ticket 67); B3's
+> `PendingAttentionCard` (`ios/Continuum/Sources/ContinuumApp.swift:319-357`) has Approve/Deny
+> rendered `.disabled(true)` waiting for this item, and the Approvals tab is a placeholder reading
+> "Approvals land with ticket 62."**
+>
+> 1. **Scope gate FIRST (the reason this item is in the queue — C-20260702-012):** flip
+>    `requiredScope[.respondToApproval]` from `.orchestrationRead` to `.orchestrationOperate` in
+>    `ScopeAuthorization.swift`, and fix the check at `ContinuumRevivedCoreChecks/main.swift:868` —
+>    move `.respondToApproval` into the observer-denied table asserting `AuthError.missingScope(
+>    .orchestrationOperate)`. The ruling's "session owns the target approval" leg is NOT modeled
+>    tonight (approval→session ownership needs ticket 70's pending store; owed there). v1 gate =
+>    operator+ only, enforced BOTH client-side (button state) and desktop-side (authoritative).
+> 2. **Wire path (B4 precedent; frozen types respected):**
+>    (a) Add `approvalRequestId: String?` to `AgentActivityEvent` AND `AgentActivityEventDraft` —
+>    optional, `decodeIfPresent`/`encodeIfPresent` (adapter request ids are `String`). This is the
+>    ONE wire-type addition and it is I5-clean (an opaque id — spec §3: notifications carry ONLY the
+>    approval id; never detail text beyond the existing ≤500-char summary rule). Legacy-JSON
+>    key-absence decode check (old event JSON without the key → nil) + round-trip check required.
+>    (b) Two new `SyncMessage` cases: `.approvalResponse(ApprovalResponseRequest)` (phone→desktop:
+>    `tileId: UUID`, `requestId: String`, `decision: ApprovalDecision`) and
+>    `.approvalResponseAck(ApprovalResponseAck)` (desktop→phone: `requestId: String`, `outcome`, a
+>    NEW closed enum: `resolved | stale | unauthorized | unknownRequest`). NO threadId on the wire —
+>    the tileId→threadId mapping is host-local and lives behind the desktop seam (I5).
+>    (c) `CloudKitSyncTransport.send` is an exhaustive switch — handle BOTH new cases with an honest
+>    typed `SyncTransportError.sendFailed` (the desktop CK inbound pump does not exist — B4's
+>    publisher-owed gap; a CK record write nobody fetches would be a fake success). The phone card
+>    surfaces that through its normal error path. Live-CK leg: `device-gate-owed` +
+>    `publisher-owed`, same tags as B4.
+> 3. **Desktop-side responder (new, `ContinuumRevivedSync`):** an `ApprovalResponder` actor
+>    mirroring `SpatialOpSender`'s shape — init(seam, demux, authorizedScope); `start()` registers
+>    its demux subscription synchronously before returning (C-20260703-020 lesson); on
+>    `.approvalResponse`: (i) `authorize(.respondToApproval, grantedScopes: authorizedScope)` — on
+>    failure ack `.unauthorized` and NEVER invoke the seam; (ii) delegate to an injectable
+>    `protocol ApprovalResponding: Sendable` whose respond(tileId:requestId:decision:) returns a
+>    result distinguishing resolved / stale / unknownRequest; (iii) ack the outcome. The stale path
+>    must NOT re-invoke resolution — at most one seam resolution per requestId (the ticket's
+>    "sharpest edge", kept). The PRODUCTION consumer of the seam is ticket 70/69's adapter path —
+>    NOT built; do NOT invent a ZoneRuntimeController pending store tonight (`publisher-owed`).
+>    Checks use a fake seam that, on the first `.accept`, appends the resolution activity event
+>    (tone `.approval`, status `.working`, same tileId) to the SAME `ActivityStore` the projection
+>    sender serves — proving the projection-driven card-dismissal loop end to end.
+> 4. **iOS surface (spec §6.2 supersedes the ticket's three-button card):** wire B3's
+>    `PendingAttentionCard` — **Approve = `.accept`, Deny = `.decline`**; `.acceptForSession` /
+>    `.cancel` stay desktop-side in v1. Remove `.disabled(true)` + the "Actions land with ticket
+>    62" hint. Resolving state: tapped button shows a spinner, both disable. Ack handling:
+>    `.resolved` → dismissal comes from the projection update (source of truth — do not manually
+>    clear the card on ack alone); `.stale` → brief "Already resolved" inline note, dismissal again
+>    projection-driven; `.unauthorized` or transport send failure → inline error + re-enable
+>    buttons. Client-side gating: buttons disabled with an "observer scope" hint when
+>    `model.grantedScope` fails `authorize(.respondToApproval, …)` — B4's DEBUG
+>    `CONTINUUM_SCOPE_OVERRIDE=operator` hatch makes them live for morning dogfood. If the latest
+>    pending-attention event carries NO `approvalRequestId` (legacy/desktop-old events), buttons
+>    stay disabled with an honest "No approval id synced" hint — never send a fabricated id. The
+>    model gains the respond path over the SAME shared demux (one transport, one demux — B3 rule);
+>    register the ack listener before sending. **Approvals tab:** replace the placeholder (after
+>    this item its text would be a standing lie) with the MINIMAL honest inbox per spec §6.4:
+>    needs-attention rows via the Core helper below, tap → the SAME `AgentDetailView` (where the
+>    card lives), tab badge = attention count, "Nothing needs you." empty state. NO
+>    swipe-to-approve tonight (deferred alongside push).
+> 5. **Shared logic in Core (night-3 rule):** pure `AgentsBoardProjection` helpers —
+>    `approvalsInboxRows(from:)` (rows filtered `.needsAttention`, board order preserved) and
+>    `attentionCount(from:)`; plus a respondable-request helper that returns (tileId,
+>    approvalRequestId) from a `TileActivity` ONLY when the latest pending-attention event carries
+>    the id (nil otherwise) — all table-checked in `ContinuumRevivedCoreChecks`.
+> 6. **Checks (wired into the matrix; measured values printed; no `{passed:true}`):**
+>    Core — flipped scope table (item 1); `approvalRequestId` round-trip + legacy key-absence;
+>    inbox-rows/attention-count tables; respondable-request helper (nil-id → nil).
+>    Sync real-path (`ContinuumRevivedSyncChecks`, B4 pattern — REAL `ActivityProjectionSender` +
+>    `ApprovalResponder` + `ActivityProjectionReceiver` + fake seam over `FakeSyncTransport`):
+>    (a) seed a pending approval event WITH `approvalRequestId` → receiver fold shows
+>    `.needsAttention` + the id; (b) operator-scope respond `.accept` → seam invoked EXACTLY once
+>    with (tileId, requestId, .accept), ack `.resolved`, resolution event flows sender→receiver,
+>    folded status flips `.working` (the card-dismissal loop, measured); (c) SECOND identical
+>    respond → ack `.stale`, seam invocation count STILL 1; (d) an observer-scope responder
+>    instance → ack `.unauthorized`, seam never invoked (D6: the gate fires on every path);
+>    (e) unknown requestId → ack `.unknownRequest`. Print observed acks, counts, statuses.
+> 7. **ComponentLab (Dylan's 2026-07-04 directive):** iOS views exempt; the shared Core surface is
+>    not — add an "Approvals Inbox" lab card (fixture snapshot, ≥2 `needsAttention` rows, one WITH
+>    and one WITHOUT `approvalRequestId`, showing rows + attention count + a scope-gate outcome
+>    line for observer vs operator) + its lab self-check, SAME commit (patterns: tickets 14/67,
+>    B3's Agents Board card).
+> 8. **Out of scope tonight (owed, never faked):** APNS push + lock-screen actions (B6);
+>    deep-link validation incl. the malformed-URL logic case (B7 owns it); per-category settings
+>    (B8); swipe-to-approve; phone-side `.acceptForSession`/`.cancel`; the ownership leg of
+>    C-20260702-012 (ticket 70); production seam consumer + CK live leg (`publisher-owed` /
+>    `device-gate-owed` → morning checklist). The ticket's HTTP status-code assertions and
+>    `qa-runs/.../manifest.json` are VOID — superseded by item 6's Sync real-path check. The
+>    real-device dogfood snippet: `device-gate-owed`.
+> 9. **Gates:** (a) `swift build` clean; (b) `CONTINUUM_SKIP_SURFACE_CHECKS=1
+>    ./scripts/run-matrix.sh` green incl. every new check; (c) `cd ios && xcodegen generate &&
+>    xcodebuild -project Continuum.xcodeproj -scheme Continuum -destination 'generic/platform=iOS
+>    Simulator' build` clean (`ios/project.yml` stays the source of truth). Ledger owed tags:
+>    `visual-gate-owed` (simulator screenshots: card idle/resolving/stale/error + inbox with
+>    badge), `device-gate-owed`, `publisher-owed`.
+
 ## What this delivers
 
 A user who receives an "Approval needed" push on their iPhone can open the Continuum iOS
