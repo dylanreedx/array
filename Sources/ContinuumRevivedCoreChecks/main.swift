@@ -3191,6 +3191,127 @@ do {
     expect(existingRegistry.projects.first?.workspaceId == workspaceA, "DefaultWorkspaceMigration updates project entry workspace assignment")
 }
 
+do {
+    let migration = DefaultWorkspaceMigration()
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let projectId = UUID(uuidString: "26000000-0000-4000-8000-000000000001")!
+    let projectZoneId = UUID(uuidString: "26000000-0000-4000-8000-000000000002")!
+    let ambientZoneId = UUID(uuidString: "26000000-0000-4000-8000-000000000003")!
+    let projectTileId = UUID(uuidString: "26000000-0000-4000-8000-000000000010")!
+    let ambientTileId = UUID(uuidString: "26000000-0000-4000-8000-000000000011")!
+    let newTileId = UUID(uuidString: "26000000-0000-4000-8000-000000000012")!
+    let missingTileId = UUID(uuidString: "26000000-0000-4000-8000-000000000013")!
+
+    func tile(_ id: UUID, x: Double, y: Double, zoneId: UUID? = nil) -> Tile {
+        Tile(
+            id: id,
+            kind: .terminal,
+            title: "Terminal",
+            frame: TileFrame(x: x, y: y, width: 120, height: 80),
+            zPosition: .fromLegacyRank(1),
+            zoneId: zoneId,
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "shell")
+        )
+    }
+
+    func descriptor(_ id: UUID, tileId: UUID, args: [String]) -> TerminalSessionDescriptor {
+        TerminalSessionDescriptor(
+            id: id,
+            tileId: tileId,
+            launchProfileId: "shell",
+            command: "/bin/zsh",
+            args: args,
+            cwd: "/tmp/project",
+            env: [:],
+            title: "Shell",
+            createdAt: now,
+            lastStartedAt: now,
+            lastExit: nil
+        )
+    }
+
+    let projectTile = tile(projectTileId, x: 40, y: 40)
+    let ambientTile = tile(ambientTileId, x: 50, y: 50, zoneId: ambientZoneId)
+    let newTile = tile(newTileId, x: 90, y: 90)
+    let canvas = CanvasState(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        tiles: [projectTile, ambientTile, newTile],
+        groups: [],
+        lastActiveTileId: nil
+    )
+    let workspace = WorkspaceDocument(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        zones: [
+            ZonePlacement(zoneId: projectZoneId, projectId: projectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 400, height: 300), color: "blue", collapsed: false, hydrationPolicy: .automatic),
+            ZonePlacement(zoneId: ambientZoneId, projectId: nil, origin: ZonePoint(x: 500, y: 0), size: ZoneSize(width: 300, height: 240), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "Ambient")
+        ],
+        lastActiveZoneId: projectZoneId,
+        ambientTiles: [ambientTile]
+    )
+
+    let legacyProject = descriptor(
+        UUID(uuidString: "26000000-0000-4000-8000-000000000020")!,
+        tileId: projectTileId,
+        args: ["new-session", "-A", "-s", "continuum-\(projectTileId.uuidString)", "-c", "/tmp/project"]
+    )
+    let legacyAmbient = descriptor(
+        UUID(uuidString: "26000000-0000-4000-8000-000000000021")!,
+        tileId: ambientTileId,
+        args: ["new-session", "-A", "-s", "continuum-\(ambientTileId.uuidString)", "-c", "/tmp/project"]
+    )
+    let newShape = descriptor(
+        UUID(uuidString: "26000000-0000-4000-8000-000000000022")!,
+        tileId: newTileId,
+        args: ["attach-session", "-t", "%5"]
+    )
+    let missingTile = descriptor(
+        UUID(uuidString: "26000000-0000-4000-8000-000000000023")!,
+        tileId: missingTileId,
+        args: ["new-session", "-A", "-s", "continuum-\(missingTileId.uuidString)", "-c", "/tmp/project"]
+    )
+    let newPrefix = descriptor(
+        UUID(uuidString: "26000000-0000-4000-8000-000000000024")!,
+        tileId: projectTileId,
+        args: ["new-session", "-A", "-s", "continuum-proj-\(projectId.uuidString)", "-c", "/tmp/project"]
+    )
+
+    expect(migration.detectTopologyMigration(descriptors: [legacyProject], canvas: canvas, workspace: workspace) == .needed(legacyDescriptorIds: [legacyProject.id]), "ticket26: legacy project-zone descriptor should require migration")
+    expect(migration.detectTopologyMigration(descriptors: [legacyAmbient], canvas: canvas, workspace: workspace) == .notNeeded, "ticket26: identical ambient legacy descriptor must not migrate")
+    expect(migration.detectTopologyMigration(descriptors: [newShape], canvas: canvas, workspace: workspace) == .notNeeded, "ticket26: new attach-to-pane descriptor should not migrate")
+    expect(migration.detectTopologyMigration(descriptors: [missingTile], canvas: canvas, workspace: workspace) == .notNeeded, "ticket26: descriptor for missing tile should not migrate")
+    expect(migration.detectTopologyMigration(descriptors: [newPrefix], canvas: canvas, workspace: workspace) == .notNeeded, "ticket26: continuum-proj prefix should not be treated as legacy")
+
+    if case let .needed(ids) = migration.detectTopologyMigration(descriptors: [legacyProject, legacyAmbient, newShape], canvas: canvas, workspace: workspace) {
+        expect(ids == [legacyProject.id], "ticket26: mixed list should migrate only project-zone legacy descriptor")
+    } else {
+        expect(false, "ticket26: mixed list should report one migrating descriptor")
+    }
+    expect(migration.detectTopologyMigration(descriptors: [newShape, newPrefix], canvas: canvas, workspace: workspace) == .notNeeded, "ticket26: all-new list should not migrate")
+
+    let v2JSON = """
+    {"schemaVersion":2,"id":"26000000-0000-4000-8000-000000000025","tileId":"\(projectTileId.uuidString)","launchProfileId":"shell","command":"/bin/zsh","args":["new-session","-A","-s","continuum-\(projectTileId.uuidString)","-c","/tmp/project"],"cwd":"/tmp/project","env":{},"title":"Shell","createdAt":1,"lastStartedAt":1,"lastExit":null}
+    """.data(using: .utf8)!
+    let decodedLegacy = try JSONDecoder().decode(TerminalSessionDescriptor.self, from: v2JSON)
+    expect(migration.detectTopologyMigration(descriptors: [decodedLegacy], canvas: canvas, workspace: workspace) == .needed(legacyDescriptorIds: [decodedLegacy.id]), "ticket26: pre-upgrade descriptor JSON without target state should decode and migrate")
+
+    let manifest = InvariantManifest(
+        invariantId: "ticket26-topology-migration-detection",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: now),
+        measurements: [
+            "legacyProjectDetected": .bool(true),
+            "ambientLegacyDetected": .bool(false),
+            "missingTileDetected": .bool(false),
+            "mixedMigratingCount": .int(1),
+            "descriptorTargetFieldLocation": .string("managed-session-record-not-terminal-descriptor")
+        ],
+        outcome: InvariantOutcome.pass.rawValue,
+        failureReason: nil
+    )
+    try writeAndVerify(manifest)
+}
+
 // MARK: - AtomicWriter
 
 do {

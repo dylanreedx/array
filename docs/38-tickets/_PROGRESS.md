@@ -150,3 +150,4 @@ be salvaged. These rows reset them for the loop to re-drive; if 07 lands, 56 →
 | 17-dead-target-fallback.md | done | 60707b7 | matrix: green (headless) | night3-C gpt-5.5; pending audit; visual-gate-owed |
 
 | 18-cwd-inheritance-policy.md | done | 0dae896 | matrix: green (headless) | night3-C gpt-5.5; pending audit; visual-gate-owed |
+| 26-upgrade-migration.md | done | 634a748 | matrix: green (headless) | night3-C gpt-5.5; pending audit; visual-gate-owed |

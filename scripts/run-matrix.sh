@@ -182,6 +182,7 @@ run_app_check .build/debug/continuum-revived --viewport-sanitize-check
 run_app_check .build/debug/continuum-revived --project-lock-check
 run_app_check .build/debug/continuum-revived --project-root-resolution-check
 run_app_check .build/debug/continuum-revived --project-picker-resolution-check
+run_app_check .build/debug/continuum-revived --topology-migration-check
 run_app_check .build/debug/continuum-revived --terminal-tmux-persistence-check
 run_app_check .build/debug/continuum-revived --new-tile-cwd-check
 run_app_check .build/debug/continuum-revived --terminal-tmux-delete-lifecycle-check

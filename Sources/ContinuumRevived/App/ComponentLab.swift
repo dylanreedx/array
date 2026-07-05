@@ -384,7 +384,8 @@ enum LabCatalog {
             sidebarSelectedCard, managedAgentCard,
 
             // MARK: night3-C cards
-            managedAgentApprovalDockCard, managedAgentUserInputCard, newTileCwdPolicyCard
+            managedAgentApprovalDockCard, managedAgentUserInputCard, newTileCwdPolicyCard,
+            topologyMigrationNoteCard
         ]
     }
 
@@ -855,6 +856,46 @@ enum LabCatalog {
                 makeNewTileCwdPolicyPreview()
             }
         )
+    }
+
+    private static var topologyMigrationNoteCard: LabEntry {
+        LabEntry(
+            id: "terminal.topology-migration-note",
+            category: "Palettes & Settings",
+            title: "Topology Migration Note",
+            summary: "One-time upgrade copy for the stock alert shown before terminal restore.",
+            content: .staticCard(preferredSize: NSSize(width: 520, height: 180)) {
+                makeTopologyMigrationNotePreview()
+            }
+        )
+    }
+
+    static func makeTopologyMigrationNotePreview() -> NSView {
+        let root = NSStackView()
+        root.orientation = .vertical
+        root.alignment = .leading
+        root.spacing = 12
+        root.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
+
+        let title = NSTextField(labelWithString: "Session model updated")
+        title.identifier = NSUserInterfaceItemIdentifier("topologyMigration.title")
+        title.font = .systemFont(ofSize: 18, weight: .semibold)
+        title.textColor = .labelColor
+        root.addArrangedSubview(title)
+
+        let body = NSTextField(wrappingLabelWithString: AppDelegate.topologyMigrationInformativeText)
+        body.identifier = NSUserInterfaceItemIdentifier("topologyMigration.body")
+        body.font = .systemFont(ofSize: 13)
+        body.textColor = .secondaryLabelColor
+        body.preferredMaxLayoutWidth = 460
+        root.addArrangedSubview(body)
+
+        let button = NSButton(title: "OK", target: nil, action: nil)
+        button.identifier = NSUserInterfaceItemIdentifier("topologyMigration.ok")
+        button.bezelStyle = .rounded
+        button.controlSize = .regular
+        root.addArrangedSubview(button)
+        return root
     }
 
     static func makeNewTileCwdPolicyPreview() -> NSView {
@@ -1421,6 +1462,25 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             guard row.stringValue.hasPrefix("\(policy.rawValue) -> ") else {
                 throw fail("new terminal cwd policy row \(index) rendered '\(row.stringValue)', expected prefix \(policy.rawValue)")
             }
+        }
+        guard let topologyMigrationEntry = entries.first(where: { $0.id == "terminal.topology-migration-note" }),
+              case let .staticCard(_, makeTopologyMigrationView) = topologyMigrationEntry.content else {
+            throw fail("missing terminal.topology-migration-note card")
+        }
+        let topologyMigrationView = makeTopologyMigrationView()
+        guard let topologyTitle = topologyMigrationView.descendant(withIdentifier: "topologyMigration.title") as? NSTextField,
+              let topologyBody = topologyMigrationView.descendant(withIdentifier: "topologyMigration.body") as? NSTextField,
+              let topologyOK = topologyMigrationView.descendant(withIdentifier: "topologyMigration.ok") as? NSButton else {
+            throw fail("topology migration note card missing title, body, or OK button")
+        }
+        guard topologyTitle.stringValue == "Session model updated" else {
+            throw fail("topology migration note title rendered '\(topologyTitle.stringValue)'")
+        }
+        guard topologyBody.stringValue.contains("tmux") && topologyBody.stringValue.contains("restart once") else {
+            throw fail("topology migration note body missing tmux/restart copy: '\(topologyBody.stringValue)'")
+        }
+        guard topologyOK.title == "OK" else {
+            throw fail("topology migration note button rendered '\(topologyOK.title)'")
         }
         try runApprovalDockLiveCheck(fail: fail)
         try runUserInputCardLiveCheck(fail: fail)

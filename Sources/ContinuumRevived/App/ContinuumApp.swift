@@ -679,6 +679,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--topology-migration-check") {
+            do {
+                let artifact = try AppDelegate.runTopologyMigrationSelfCheck()
+                print("ContinuumRevivedTopologyMigrationChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--palette-first-responder-restore-check") {
             do {
                 _ = NSApplication.shared
@@ -2380,6 +2391,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         return lines.joined(separator: "\n") + "\n"
     }()
+    static let topologyMigrationNoteShownKey = "continuum.topology.migrationNoteShown"
+    static let topologyMigrationInformativeText = """
+    Continuum now groups terminal tiles by project, so your terminals share one tmux session per project. Your terminal tiles will restart once. Any running agents will need to be re-launched - they are still alive in tmux and can be found with `tmux ls` if needed.
+    """
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         launchStartTime = QAPerf.timestamp()
@@ -2433,6 +2448,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if let queueConfig = registry.projects.first(where: { $0.id == project.id })?.linearTicketQueue {
                 Self.materializeTicketQueueTile(in: &canvasState, config: queueConfig)
             }
+            try Self.applyTopologyMigrationIfNeeded(
+                projectStore: projectStore,
+                canvas: canvasState,
+                workspace: activeWorkspace?.document,
+                defaults: UserDefaults.standard,
+                presentAlert: Self.presentTopologyMigrationAlert
+            )
 
             let canvasView = CanvasNSView(canvasState: canvasState, activeZone: activeZone, zoneRenderModels: zoneRenderModels)
             canvasView.delegate = self
@@ -9888,6 +9910,189 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             tSec: 1.0,
             success: true
         )
+    }
+
+    @MainActor
+    static func applyTopologyMigrationIfNeeded(
+        projectStore: any ProjectStoring,
+        canvas: CanvasState,
+        workspace: WorkspaceDocument?,
+        defaults: UserDefaults,
+        presentAlert: @MainActor () -> Void = { AppDelegate.presentTopologyMigrationAlert() }
+    ) throws {
+        guard !defaults.bool(forKey: topologyMigrationNoteShownKey) else { return }
+        guard let workspace else {
+            defaults.set(true, forKey: topologyMigrationNoteShownKey)
+            return
+        }
+        let state = DefaultWorkspaceMigration().detectTopologyMigration(
+            descriptors: try projectStore.listSessions(),
+            canvas: canvas,
+            workspace: workspace
+        )
+        guard case let .needed(legacyDescriptorIds) = state else {
+            defaults.set(true, forKey: topologyMigrationNoteShownKey)
+            return
+        }
+
+        defaults.set(true, forKey: topologyMigrationNoteShownKey)
+        presentAlert()
+        for id in legacyDescriptorIds {
+            try projectStore.deleteSession(id: id)
+        }
+    }
+
+    @MainActor
+    static func presentTopologyMigrationAlert() {
+        let alert = NSAlert()
+        alert.messageText = "Session model updated"
+        alert.informativeText = topologyMigrationInformativeText
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    @MainActor
+    static func runTopologyMigrationSelfCheck() throws -> URL {
+        struct SelfCheckError: Error, CustomStringConvertible {
+            let description: String
+            init(_ description: String) { self.description = description }
+        }
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("continuum-topology-migration-check-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let projectId = UUID(uuidString: "26000000-0000-4000-8000-000000000101")!
+        let projectZoneId = UUID(uuidString: "26000000-0000-4000-8000-000000000102")!
+        let ambientZoneId = UUID(uuidString: "26000000-0000-4000-8000-000000000103")!
+        let key = AppDelegate.topologyMigrationNoteShownKey
+
+        func makeTile(_ id: UUID, x: Double, y: Double, zoneId: UUID? = nil) -> Tile {
+            Tile(
+                id: id,
+                kind: .terminal,
+                title: "Shell",
+                frame: TileFrame(x: x, y: y, width: 120, height: 80),
+                zPosition: .fromLegacyRank(1),
+                zoneId: zoneId,
+                runtimeRef: nil,
+                metadata: TileMetadata(launchProfileId: "shell")
+            )
+        }
+
+        func makeDescriptor(_ id: UUID, tileId: UUID) -> TerminalSessionDescriptor {
+            TerminalSessionDescriptor(
+                id: id,
+                tileId: tileId,
+                launchProfileId: "shell",
+                command: "/bin/zsh",
+                args: ["new-session", "-A", "-s", "continuum-\(tileId.uuidString)", "-c", "/tmp/project"],
+                cwd: "/tmp/project",
+                env: [:],
+                title: "Shell",
+                createdAt: now,
+                lastStartedAt: now,
+                lastExit: nil
+            )
+        }
+
+        func workspace(ambientTile: Tile? = nil) -> WorkspaceDocument {
+            WorkspaceDocument(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                zones: [
+                    ZonePlacement(zoneId: projectZoneId, projectId: projectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 400, height: 300), color: "blue", collapsed: false, hydrationPolicy: .automatic),
+                    ZonePlacement(zoneId: ambientZoneId, projectId: nil, origin: ZonePoint(x: 600, y: 0), size: ZoneSize(width: 300, height: 240), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "Ambient")
+                ],
+                lastActiveZoneId: projectZoneId,
+                ambientTiles: ambientTile.map { [$0] } ?? []
+            )
+        }
+
+        func freshDefaults(_ name: String) throws -> UserDefaults {
+            let suite = "continuum.topology.migration.check.\(name).\(UUID().uuidString)"
+            guard let defaults = UserDefaults(suiteName: suite) else {
+                throw SelfCheckError("could not create defaults suite \(suite)")
+            }
+            defaults.removePersistentDomain(forName: suite)
+            return defaults
+        }
+
+        let deleteRoot = root.appendingPathComponent("delete", isDirectory: true)
+        try fm.createDirectory(at: deleteRoot, withIntermediateDirectories: true)
+        let deleteStore = ProjectStore(projectRoot: deleteRoot)
+        let projectTileA = makeTile(UUID(uuidString: "26000000-0000-4000-8000-000000000110")!, x: 20, y: 20)
+        let projectTileB = makeTile(UUID(uuidString: "26000000-0000-4000-8000-000000000111")!, x: 180, y: 40)
+        try deleteStore.saveSession(makeDescriptor(UUID(uuidString: "26000000-0000-4000-8000-000000000120")!, tileId: projectTileA.id))
+        try deleteStore.saveSession(makeDescriptor(UUID(uuidString: "26000000-0000-4000-8000-000000000121")!, tileId: projectTileB.id))
+        let deleteCanvas = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [projectTileA, projectTileB], groups: [], lastActiveTileId: nil)
+        let deleteDefaults = try freshDefaults("delete")
+        var deletePresenterFlags: [Bool] = []
+        try AppDelegate.applyTopologyMigrationIfNeeded(
+            projectStore: deleteStore,
+            canvas: deleteCanvas,
+            workspace: workspace(),
+            defaults: deleteDefaults,
+            presentAlert: { deletePresenterFlags.append(deleteDefaults.bool(forKey: key)) }
+        )
+        let deleteSessions = try deleteStore.listSessions()
+        guard deletePresenterFlags == [true] else { throw SelfCheckError("topology migration presenter flags \(deletePresenterFlags), expected [true]") }
+        guard deleteDefaults.bool(forKey: key) else { throw SelfCheckError("topology migration defaults flag was not set") }
+        guard deleteSessions.isEmpty else { throw SelfCheckError("migrating descriptors survived: \(deleteSessions.map(\.id))") }
+
+        let ambientRoot = root.appendingPathComponent("ambient", isDirectory: true)
+        try fm.createDirectory(at: ambientRoot, withIntermediateDirectories: true)
+        let ambientStore = ProjectStore(projectRoot: ambientRoot)
+        let projectTile = makeTile(UUID(uuidString: "26000000-0000-4000-8000-000000000130")!, x: 30, y: 40)
+        let ambientTile = makeTile(UUID(uuidString: "26000000-0000-4000-8000-000000000131")!, x: 50, y: 50, zoneId: ambientZoneId)
+        try ambientStore.saveSession(makeDescriptor(UUID(uuidString: "26000000-0000-4000-8000-000000000140")!, tileId: projectTile.id))
+        try ambientStore.saveSession(makeDescriptor(UUID(uuidString: "26000000-0000-4000-8000-000000000141")!, tileId: ambientTile.id))
+        let ambientCanvas = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [projectTile, ambientTile], groups: [], lastActiveTileId: nil)
+        let ambientDefaults = try freshDefaults("ambient")
+        var ambientPresenterFlags: [Bool] = []
+        try AppDelegate.applyTopologyMigrationIfNeeded(
+            projectStore: ambientStore,
+            canvas: ambientCanvas,
+            workspace: workspace(ambientTile: ambientTile),
+            defaults: ambientDefaults,
+            presentAlert: { ambientPresenterFlags.append(ambientDefaults.bool(forKey: key)) }
+        )
+        let ambientSessions = try ambientStore.listSessions().sorted { $0.tileId.uuidString < $1.tileId.uuidString }
+        guard ambientPresenterFlags == [true] else { throw SelfCheckError("ambient migration presenter flags \(ambientPresenterFlags), expected [true]") }
+        guard ambientSessions.map(\.tileId) == [ambientTile.id] else { throw SelfCheckError("ambient descriptor was not the sole survivor: \(ambientSessions.map(\.tileId))") }
+
+        let idempotentTileA = makeTile(UUID(uuidString: "26000000-0000-4000-8000-000000000150")!, x: 40, y: 40)
+        let idempotentTileB = makeTile(UUID(uuidString: "26000000-0000-4000-8000-000000000151")!, x: 190, y: 50)
+        try ambientStore.saveSession(makeDescriptor(UUID(uuidString: "26000000-0000-4000-8000-000000000160")!, tileId: idempotentTileA.id))
+        try ambientStore.saveSession(makeDescriptor(UUID(uuidString: "26000000-0000-4000-8000-000000000161")!, tileId: idempotentTileB.id))
+        var idempotentPresenterFlags: [Bool] = []
+        try AppDelegate.applyTopologyMigrationIfNeeded(
+            projectStore: ambientStore,
+            canvas: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [idempotentTileA, idempotentTileB], groups: [], lastActiveTileId: nil),
+            workspace: workspace(),
+            defaults: ambientDefaults,
+            presentAlert: { idempotentPresenterFlags.append(ambientDefaults.bool(forKey: key)) }
+        )
+        let idempotentSessions = try ambientStore.listSessions()
+        guard idempotentPresenterFlags.isEmpty else { throw SelfCheckError("idempotent call presented alert: \(idempotentPresenterFlags)") }
+        guard idempotentSessions.count == 3 else { throw SelfCheckError("idempotent call should leave existing ambient + two new descriptors, got \(idempotentSessions.count)") }
+
+        let artifactDir = root.appendingPathComponent("artifact", isDirectory: true)
+        try fm.createDirectory(at: artifactDir, withIntermediateDirectories: true)
+        let artifact = artifactDir.appendingPathComponent("manifest.json", isDirectory: false)
+        let manifest: [String: Any] = [
+            "check": "ticket26-topology-migration",
+            "presenterFlagAtPresentTime": deletePresenterFlags,
+            "defaultsFlagAfterMigration": deleteDefaults.bool(forKey: key),
+            "deletedMigratingDescriptorCount": 2,
+            "ambientSurvivorTileId": ambientSessions.first?.tileId.uuidString ?? "",
+            "idempotentPresenterCount": idempotentPresenterFlags.count,
+            "idempotentSessionCount": idempotentSessions.count,
+            "visualGate": "visual-gate-owed"
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
     }
 
     static func runBrowserLRUBudgetSelfCheck() throws -> URL {
