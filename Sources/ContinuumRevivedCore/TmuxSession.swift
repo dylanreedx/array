@@ -113,6 +113,9 @@ public enum TmuxSession {
             "-o", "ServerAliveCountMax=\(RemoteReachConfig.serverAliveCountMax(defaults: defaults))",
             "-o", "BatchMode=no"
         ]
+        if let configFile = RemoteReachConfig.configFile(defaults: defaults) {
+            args.append(contentsOf: ["-F", configFile])
+        }
         if let port = target.port {
             args.append(contentsOf: ["-p", String(port)])
         }

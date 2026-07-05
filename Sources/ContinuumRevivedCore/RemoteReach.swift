@@ -39,6 +39,7 @@ public enum RemoteReachConfig {
     public static let serverAliveIntervalKey = "continuum.remote.ssh.serverAliveInterval"
     public static let serverAliveCountMaxKey = "continuum.remote.ssh.serverAliveCountMax"
     public static let connectTimeoutKey = "continuum.remote.ssh.connectTimeout"
+    public static let configFileKey = "continuum.remote.ssh.configFile"
 
     public static let defaultServerAliveInterval = 15
     public static let defaultServerAliveCountMax = 3
@@ -54,6 +55,15 @@ public enum RemoteReachConfig {
 
     public static func connectTimeout(defaults: UserDefaults = .standard) -> Int {
         intValue(forKey: connectTimeoutKey, defaultValue: defaultConnectTimeout, defaults: defaults)
+    }
+
+    public static func configFile(defaults: UserDefaults = .standard) -> String? {
+        guard let value = defaults.string(forKey: configFileKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
     }
 
     private static func intValue(forKey key: String, defaultValue: Int, defaults: UserDefaults) -> Int {
