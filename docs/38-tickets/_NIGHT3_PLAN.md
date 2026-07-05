@@ -108,3 +108,10 @@ Target mix: **Fable 5–20%** (orchestration/steering/adjudication ONLY — revi
 (hard/creative implementers + thin drivers). ACTION at the next Track B/C iteration boundary:
 restart the loop with `CLAUDE_MODEL=fable CLAUDE_REVIEW_MODEL=opus` (Claude-side review → Opus;
 Fable keeps only the orchestrator seat). Codex-fallback overflow on Claude limits stays on.
+
+## ComponentLab directive (Dylan, 2026-07-04 ~23:15)
+Every user-visible surface / reusable component landed tonight ships WITH its ComponentLab card +
+lab self-check in the same commit (pattern: ticket 14's card, 67's projection rows). Reviewers reject
+UI-bearing diffs without a lab entry. Desktop-side companions of the mobile work (pairing QR panel,
+Devices/scope settings, push-test trigger) included. The morning dogfood checklist routes through the
+lab so Dylan can review every new component in one place.

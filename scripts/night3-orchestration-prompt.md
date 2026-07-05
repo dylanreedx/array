@@ -50,6 +50,16 @@ If ALL items are done/skipped → `LOOP: STOP queue-drained`.
 - Reviewers: same dual review as always (Claude review model + Codex GPT-5.5); they read the fix-ticket
   spec / companion spec as the contract for B-items.
 
+## ComponentLab rule (Dylan's directive, 2026-07-04 — applies to EVERY item tonight)
+Any item that ships a user-visible surface or a reusable component MUST land with its ComponentLab
+entry in the same commit: a lab card demonstrating the component with realistic fixture data, plus a
+`--component-lab-check` assertion where the ticket defines one (follow the existing card/self-check
+patterns, e.g. ticket 14's "Session Naming" card and 67's adapter projection rows). This includes:
+the C3 sidebar/dock items, C4's 71/72/73 cards, and the DESKTOP-side companions of Track B (pairing
+QR panel, Devices/scope settings, push-test trigger). Reviewers REJECT a UI-bearing diff with no lab
+entry. iOS-only SwiftUI views are exempt (no macOS lab host) — but any shared Core/Sync component
+they consume that has a visual/desktop representation gets a card.
+
 ## Implementer routing (Dylan's directive, 2026-07-04)
 Pass `implementer` in the Workflow args for every item:
 - **`"codex"` (gpt-5.5 low) is the DEFAULT — use it for MOST items.** The specs/rulings are precise
