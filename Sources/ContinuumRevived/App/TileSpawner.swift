@@ -305,6 +305,11 @@ final class TileSpawner {
             }
         }
         guard TmuxSession.isValidPaneId(paneTarget) else {
+            if !paneTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try? Self.runTmuxControlOperationSync {
+                    try await control.killWindow(target: paneTarget)
+                }
+            }
             throw SpawnError.invalidPaneId(paneTarget)
         }
         return (TmuxSession.attachWindowProfile(paneTarget: paneTarget, cwd: profile.cwd, tmuxPath: tmuxPath), paneTarget)
@@ -3336,6 +3341,63 @@ final class TileSpawner {
                 settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
             )
         }
+        final class MalformedPaneTmuxControl: TmuxControl, @unchecked Sendable {
+            let malformedTarget: String
+            var sessions: Set<String> = []
+            var log: [InMemoryTmuxControl.TmuxCall] = []
+
+            init(malformedTarget: String) {
+                self.malformedTarget = malformedTarget
+            }
+
+            func newSession(name: String, cwd: String, innerCommand: [String]?) async throws -> String {
+                sessions.insert(name)
+                log.append(.newSession(name: name, cwd: cwd))
+                return malformedTarget
+            }
+
+            func newWindow(inSession: String, cwd: String, innerCommand: [String]?) async throws -> String {
+                log.append(.newWindow(session: inSession, cwd: cwd))
+                return malformedTarget
+            }
+
+            func killWindow(target: String) async throws {
+                log.append(.killWindow(target: target))
+            }
+
+            func killSession(name: String) async throws {
+                log.append(.killSession(name: name))
+            }
+
+            func detachSession(name: String) async throws {
+                log.append(.detachSession(name: name))
+            }
+
+            func sessionExists(name: String) async throws -> Bool {
+                log.append(.sessionExists(name: name))
+                return sessions.contains(name)
+            }
+
+            func isAlive(paneTarget: String) async throws -> Bool {
+                log.append(.isAlive(target: paneTarget))
+                return false
+            }
+
+            func paneCurrentPath(paneTarget: String) async throws -> String {
+                log.append(.paneCurrentPath(target: paneTarget))
+                return "/tmp"
+            }
+
+            func paneCurrentCommand(paneTarget: String) async throws -> String {
+                log.append(.paneCurrentCommand(target: paneTarget))
+                return "zsh"
+            }
+
+            func listSessions() async throws -> [TmuxSessionInfo] {
+                log.append(.listSessions)
+                return sessions.map { TmuxSessionInfo(name: $0, windowCount: 1, paneTargets: [malformedTarget]) }
+            }
+        }
         func makeSpawner(
             root: URL,
             defaults: UserDefaults,
@@ -3408,7 +3470,8 @@ final class TileSpawner {
         let absentRoot = tempRoot.appendingPathComponent("absent", isDirectory: true)
         let ambientRoot = tempRoot.appendingPathComponent("ambient-workspace", isDirectory: true)
         let ambientOffRoot = tempRoot.appendingPathComponent("ambient-off", isDirectory: true)
-        try [enabledRoot, offRoot, absentRoot, ambientRoot, ambientOffRoot].forEach { try fileManager.createDirectory(at: $0, withIntermediateDirectories: true) }
+        let malformedRoot = tempRoot.appendingPathComponent("malformed-pane", isDirectory: true)
+        try [enabledRoot, offRoot, absentRoot, ambientRoot, ambientOffRoot, malformedRoot].forEach { try fileManager.createDirectory(at: $0, withIntermediateDirectories: true) }
 
         let enabledDefaults = makeDefaults(enabled: true, path: fakeTmux.path)
         let enabledTmux = InMemoryTmuxControl()
@@ -3649,6 +3712,33 @@ final class TileSpawner {
             return nil
         }.first
         try expect(createdPane != nil, "save failure after project window creation should kill the captured pane, log=\(failureTmux.log)")
+
+        let malformedDefaults = makeDefaults(enabled: true, path: fakeTmux.path)
+        let malformedTmux = MalformedPaneTmuxControl(malformedTarget: "not-a-pane-id")
+        let (malformedSpawner, _, _, malformedBrowser, malformedGhostty) = try makeSpawner(
+            root: malformedRoot,
+            defaults: malformedDefaults,
+            resolver: { _ in fakeTmux.path },
+            tmuxControlFactory: { _ in malformedTmux }
+        )
+        defer { malformedGhostty.shutdown(); malformedBrowser.shutdown() }
+        let malformedProjectId = UUID()
+        let malformedSessionName = TmuxSession.projectSessionName(projectId: malformedProjectId)
+        malformedTmux.sessions.insert(malformedSessionName)
+        malformedSpawner.terminalProjectContextProvider = {
+            ProjectEntry(id: malformedProjectId, name: "Malformed Project", rootPath: malformedRoot.path, workspaceId: nil, lastOpenedAt: Date(), pinned: false, missing: false)
+        }
+        malformedSpawner.terminalSessionTargetProvider = { .project(projectId: malformedProjectId) }
+        switch malformedSpawner.spawnTerminal(profileId: "shell") {
+        case let .failure(error):
+            try expect(String(describing: error).contains("invalidPaneId"), "malformed pane capture should fail with invalidPaneId, got \(error)")
+        default:
+            throw CheckError.failed("project spawn should fail when tmux returns malformed pane id")
+        }
+        try expect(
+            malformedTmux.log.contains(.killWindow(target: "not-a-pane-id")),
+            "malformed pane-id capture should issue compensating kill-window for the created target, log=\(malformedTmux.log)"
+        )
 
         let offDefaults = makeDefaults(enabled: false, path: fakeTmux.path)
         let (offSpawner, offStore, offCanvas, offBrowser, offGhostty) = try makeSpawner(

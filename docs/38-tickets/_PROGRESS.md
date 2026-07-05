@@ -123,3 +123,4 @@ be salvaged. These rows reset them for the loop to re-drive; if 07 lands, 56 →
 | 23-private-managed-session-record.md | done | 04d4053 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
 | 21-idle-reaper-detach.md | done | 46fc321 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
 | 22-per-workspace-ambient-session.md | done | 4d4400e | matrix: green (headless) | night3-A gpt-5.5; pending audit |
+| 16-capture-tmux-window-target.md | done | 12084d8 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
