@@ -50,6 +50,8 @@ struct LabEntry {
 enum LabFixtures {
     static let workspaceId = UUID(uuidString: "00000000-0000-0000-0000-0000000000A1")!
     static let altWorkspaceId = UUID(uuidString: "00000000-0000-0000-0000-0000000000A2")!
+    static let selectedZoneId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B1")!
+    static let selectedTileId = UUID(uuidString: "00000000-0000-0000-0000-0000000000C1")!
     static let epoch = Date(timeIntervalSince1970: 1_700_000_000)
 
     static func tile(kind: TileKind, title: String) -> Tile {
@@ -85,10 +87,10 @@ enum LabFixtures {
 
     static func sidebarTree() -> SidebarTree {
         let alpha = SidebarZoneRow(
-            zoneId: UUID(), name: "continuum-revived", color: "#5B8DEF", navKey: "1", collapsed: false, projectId: UUID(),
+            zoneId: selectedZoneId, name: "continuum-revived", color: "#5B8DEF", navKey: "1", collapsed: false, projectId: UUID(),
             agentStatusRollup: SidebarAgentStatusRollup(working: 1, needsAttention: 1),
             tiles: [
-                SidebarTileRow(tileId: UUID(), title: "claude · feature/login", kind: .terminal, agentStatus: .working),
+                SidebarTileRow(tileId: selectedTileId, title: "claude · feature/login", kind: .terminal, agentStatus: .working),
                 SidebarTileRow(tileId: UUID(), title: "shell", kind: .terminal, agentStatus: nil),
                 SidebarTileRow(tileId: UUID(), title: "localhost:3000", kind: .browser, agentStatus: nil)
             ]
@@ -104,10 +106,10 @@ enum LabFixtures {
 
     static func richSidebarTree() -> SidebarTree {
         let currentZone = SidebarZoneRow(
-            zoneId: UUID(), name: "continuum-revived", color: "#5B8DEF", navKey: "1", collapsed: false, projectId: UUID(),
+            zoneId: selectedZoneId, name: "continuum-revived", color: "#5B8DEF", navKey: "1", collapsed: false, projectId: UUID(),
             agentStatusRollup: SidebarAgentStatusRollup(working: 1, needsAttention: 1),
             tiles: [
-                SidebarTileRow(tileId: UUID(), title: "claude · feature/login", kind: .terminal, agentStatus: .needsAttention),
+                SidebarTileRow(tileId: selectedTileId, title: "claude · feature/login", kind: .terminal, agentStatus: .needsAttention),
                 SidebarTileRow(tileId: UUID(), title: "shell", kind: .terminal, agentStatus: .working),
                 SidebarTileRow(tileId: UUID(), title: "localhost:3000", kind: .browser, agentStatus: nil)
             ]
@@ -374,7 +376,7 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher, sidebarLiveCard, activityDockCard]
+        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher, sidebarLiveCard, activityDockCard, sidebarSelectedCard]
     }
 
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
@@ -773,6 +775,27 @@ enum LabCatalog {
             content: .staticCard(preferredSize: NSSize(width: 280, height: 600)) {
                 let view = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 280, height: 600))
                 view.reload(tree: LabFixtures.richSidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
+                return view
+            }
+        )
+    }
+
+    // MARK: night3-C cards
+
+    private static var sidebarSelectedCard: LabEntry {
+        LabEntry(
+            id: "chrome.sidebar.selected",
+            category: "Chrome",
+            title: "Workspace Sidebar - tile selected",
+            summary: "Workspace tree with the clicked tile row selected.",
+            content: .staticCard(preferredSize: NSSize(width: 280, height: 560)) {
+                let view = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 280, height: 560))
+                view.reload(tree: LabFixtures.richSidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
+                _ = view.select(
+                    workspaceId: LabFixtures.workspaceId,
+                    zoneId: LabFixtures.selectedZoneId,
+                    tileId: LabFixtures.selectedTileId
+                )
                 return view
             }
         )
@@ -1203,6 +1226,8 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         var rendered: [[String: Any]] = []
+        var sidebarDistinctColors: Int?
+        var selectedSidebarDistinctColors: Int?
         for entry in entries {
             guard case let .staticCard(preferredSize, make) = entry.content else { continue }
             let size = preferredSize ?? NSSize(width: 560, height: 640)
@@ -1223,7 +1248,21 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             guard !metrics.isBlank else {
                 throw fail("\(entry.id): render is blank/uniform (\(metrics.distinctSampledColors) colors at \(metrics.width)x\(metrics.height))")
             }
+            if entry.id == "chrome.sidebar" {
+                sidebarDistinctColors = metrics.distinctSampledColors
+            } else if entry.id == "chrome.sidebar.selected" {
+                selectedSidebarDistinctColors = metrics.distinctSampledColors
+            }
             rendered.append(["entry": entry.id, "width": metrics.width, "height": metrics.height, "distinctColors": metrics.distinctSampledColors])
+        }
+        guard let sidebarDistinctColors else {
+            throw fail("missing chrome.sidebar render for selection delta gate")
+        }
+        guard let selectedSidebarDistinctColors else {
+            throw fail("missing chrome.sidebar.selected render for selection delta gate")
+        }
+        guard selectedSidebarDistinctColors > sidebarDistinctColors else {
+            throw fail("selected sidebar render should add distinct colors; selected=\(selectedSidebarDistinctColors) unselected=\(sidebarDistinctColors)")
         }
 
         // Interactive sandbox: spawn every fixture tile kind, assert they install,
@@ -1411,6 +1450,11 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                 "projectSessionName": projectLabel,
                 "ambientSessionName": ambientLabel,
                 "sessionName": sessionLabel
+            ],
+            "sidebarSelection": [
+                "unselectedDistinctColors": sidebarDistinctColors,
+                "selectedDistinctColors": selectedSidebarDistinctColors,
+                "delta": selectedSidebarDistinctColors - sidebarDistinctColors
             ]
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])

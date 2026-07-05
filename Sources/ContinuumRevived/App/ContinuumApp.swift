@@ -5123,9 +5123,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             )
         }
 
-        let tileAValue = tile(id: tileA, title: "Current Tile", x: 40, y: 40, rank: 1)
+        let tileAValue = tile(id: tileA, title: "Current Tile", x: 680, y: 460, rank: 1)
         let tileBValue = tile(id: tileB, title: "Zone Tile", x: 60, y: 60, rank: 1)
-        let tileCValue = tile(id: tileC, title: "Cross Workspace Tile", x: 50, y: 50, rank: 1)
+        let tileCValue = tile(id: tileC, title: "Cross Workspace Tile", x: 640, y: 420, rank: 1)
         let missingTileValue = tile(id: missingTile, title: "Stale Missing Tile", x: 80, y: 80, rank: 2)
 
         let projectAObject = makeProject(id: projectA, name: "Project A", root: projectARoot)
@@ -5263,12 +5263,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let widthAfterDividerMove = WorkspaceSidebarConfig.resolveWidth()
         try expect(widthAfterDividerMove == 360.0, "visible divider move should persist width 360, got \(widthAfterDividerMove)")
 
+        guard let expectedTileAViewport = canvas.framedViewportForTileJump(tileA) else {
+            throw CheckError.failed("tileA must be frameable before sidebar click")
+        }
         let currentTileClickDelivered = sidebar.clickTileRowForQA(workspaceId: workspaceA, zoneId: zoneA, tileId: tileA)
         let currentTileFocusWorked = currentTileClickDelivered
             && app.focusBroker.activeSurface == .tile(tileA)
             && canvas.canvasState.lastActiveTileId == tileA
             && sidebar.selectedTargetForQA == .tile(workspaceId: workspaceA, zoneId: zoneA, tileId: tileA)
-        try expect(currentTileFocusWorked, "current workspace tile row should focus tile and select its row")
+            && viewportsNearlyEqual(canvas.viewport, expectedTileAViewport)
+        let measuredTileAViewport = canvas.viewport
+        try expect(currentTileFocusWorked, "current workspace tile row should pan canvas to tile, focus it, and select its row")
 
         guard let expectedZoneViewport = canvas.fitZoneToViewport(zoneId: zoneB) else {
             throw CheckError.failed("current zone must be frameable before sidebar click")
@@ -5290,13 +5295,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(sidebar.clickWorkspaceRowForQA(workspaceA), "setup: workspace A row should switch back")
         try expect(runtime.workspaceId == workspaceA, "setup: runtime should be back on workspace A")
 
+        try expect(sidebar.clickWorkspaceRowForQA(workspaceB), "setup: workspace B row should switch before cross-workspace tile framing")
+        canvas.layoutSubtreeIfNeeded()
+        guard let expectedTileCViewport = canvas.framedViewportForTileJump(tileC) else {
+            throw CheckError.failed("tileC must be frameable after workspace switch")
+        }
+        try expect(sidebar.clickWorkspaceRowForQA(workspaceA), "setup: workspace A row should switch back before cross-workspace tile click")
+        try expect(runtime.workspaceId == workspaceA, "setup: runtime should be back on workspace A before cross-workspace tile click")
         let crossTileClickDelivered = sidebar.clickTileRowForQA(workspaceId: workspaceB, zoneId: zoneC, tileId: tileC)
         let crossWorkspaceTileFocusWorked = crossTileClickDelivered
             && runtime.workspaceId == workspaceB
             && app.focusBroker.activeSurface == .tile(tileC)
             && canvas.canvasState.lastActiveTileId == tileC
             && sidebar.selectedTargetForQA == .tile(workspaceId: workspaceB, zoneId: zoneC, tileId: tileC)
-        try expect(crossWorkspaceTileFocusWorked, "non-current tile row should switch then focus tile")
+            && viewportsNearlyEqual(canvas.viewport, expectedTileCViewport)
+        let measuredTileCViewport = canvas.viewport
+        try expect(crossWorkspaceTileFocusWorked, "non-current tile row should switch, pan canvas to tile, focus it, and select its row")
 
         try expect(sidebar.clickWorkspaceRowForQA(workspaceA), "setup: workspace A row should switch back before missing-target probe")
         try expect(runtime.workspaceId == workspaceA, "setup: runtime should be back on workspace A before missing-target probe")
@@ -5328,6 +5342,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "visibleAfterHide": visibleAfterHide,
             "positionAfterHide": positionAfterHide,
             "widthAfterDividerMove": widthAfterDividerMove,
+            "tileAViewport": ["x": measuredTileAViewport.x, "y": measuredTileAViewport.y, "zoom": measuredTileAViewport.zoom],
+            "expectedTileAViewport": ["x": expectedTileAViewport.x, "y": expectedTileAViewport.y, "zoom": expectedTileAViewport.zoom],
+            "tileCViewport": ["x": measuredTileCViewport.x, "y": measuredTileCViewport.y, "zoom": measuredTileCViewport.zoom],
+            "expectedTileCViewport": ["x": expectedTileCViewport.x, "y": expectedTileCViewport.y, "zoom": expectedTileCViewport.zoom],
             "currentZoneViewport": ["x": measuredZoneViewport.x, "y": measuredZoneViewport.y, "zoom": measuredZoneViewport.zoom],
             "expectedCurrentZoneViewport": ["x": expectedZoneViewport.x, "y": expectedZoneViewport.y, "zoom": expectedZoneViewport.zoom],
             "selectedRowAfterMissingTarget": String(describing: sidebar.selectedTargetForQA),
