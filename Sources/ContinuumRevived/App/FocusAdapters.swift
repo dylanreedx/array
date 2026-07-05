@@ -31,8 +31,8 @@ extension TileNSView: FocusSurfaceAdapter {
         case .conductorQueue: return .conductorQueue
         case .diffReview: return .diffReview
         case .runArtifacts: return .runArtifacts
+        case .managedAgent: return .managedAgent
         }
     }
 
 }
-

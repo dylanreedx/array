@@ -376,7 +376,7 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher, sidebarLiveCard, activityDockCard, sidebarSelectedCard]
+        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher, sidebarLiveCard, activityDockCard, sidebarSelectedCard, managedAgentCard]
     }
 
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
@@ -779,9 +779,6 @@ enum LabCatalog {
             }
         )
     }
-
-    // MARK: night3-C cards
-
     private static var sidebarSelectedCard: LabEntry {
         LabEntry(
             id: "chrome.sidebar.selected",
@@ -799,6 +796,52 @@ enum LabCatalog {
                 return view
             }
         )
+    }
+
+    private static var managedAgentCard: LabEntry {
+        LabEntry(
+            id: "tiles.managedAgent",
+            category: "Tiles",
+            title: "Managed Agent Tile",
+            summary: "Structured transcript card stack with a persistent managed-agent status header.",
+            content: .staticCard(preferredSize: NSSize(width: 560, height: 560)) {
+                makeManagedAgentFixtureView()
+            }
+        )
+    }
+
+    static func managedAgentFixtureEvents(includeApproval: Bool = true) -> [AgentRuntimeEvent] {
+        let threadId = "thread-main"
+        var events: [AgentRuntimeEvent] = [
+            .sessionStateChanged(.running),
+            .turnStarted(threadId: threadId, turnId: "turn-1"),
+            .contentDelta(threadId: threadId, turnId: "turn-1", streamKind: .assistant, delta: "I'll read the current guard, then refactor it to be idempotent."),
+            .itemStarted(threadId: threadId, itemId: "cmd-1", kind: .commandExecution, title: "swift test"),
+            .itemCompleted(threadId: threadId, itemId: "cmd-1", kind: .commandExecution, status: .completed),
+            .itemStarted(threadId: threadId, itemId: "file-1", kind: .fileChange, title: "Sources/Auth.swift")
+        ]
+        if includeApproval {
+            events.append(.requestOpened(threadId: threadId, requestId: "approval-1", kind: .commandExecutionApproval))
+        }
+        return events
+    }
+
+    static func makeManagedAgentFixtureView(includeApproval: Bool = true) -> ManagedAgentTileNSView {
+        let tile = Tile(
+            id: UUID(uuidString: "71000000-0000-4000-8000-000000000071")!,
+            kind: .managedAgent,
+            title: "Claude - feature/login",
+            frame: TileFrame(x: 0, y: 0, width: 560, height: 560),
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")
+        )
+        let view = ManagedAgentTileNSView(tile: tile)
+        view.frame = NSRect(x: 0, y: 0, width: 560, height: 560)
+        for event in managedAgentFixtureEvents(includeApproval: includeApproval) {
+            view.ingest(event)
+        }
+        return view
     }
 
 }
@@ -1217,6 +1260,22 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard PairingAlphabet.containsOnlySymbols(credentialLabel.stringValue) else {
             throw fail("pairing token credential contains non-crowd-safe characters: \(credentialLabel.stringValue)")
         }
+        guard let managedAgentEntry = entries.first(where: { $0.id == "tiles.managedAgent" }),
+              case let .staticCard(_, makeManagedAgentView) = managedAgentEntry.content else {
+            throw fail("missing tiles.managedAgent card")
+        }
+        guard let managedAgentView = makeManagedAgentView() as? ManagedAgentTileNSView else {
+            throw fail("tiles.managedAgent did not vend ManagedAgentTileNSView")
+        }
+        guard managedAgentView.transcriptCardCount >= 3 else {
+            throw fail("managed agent fixture rendered \(managedAgentView.transcriptCardCount) cards, expected at least 3")
+        }
+        guard managedAgentView.activeToolCount == 1 else {
+            throw fail("managed agent fixture active tool count \(managedAgentView.activeToolCount), expected 1")
+        }
+        guard managedAgentView.currentAgentStatus == .needsAttention else {
+            throw fail("managed agent fixture status \(managedAgentView.currentAgentStatus), expected needsAttention")
+        }
 
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -1228,6 +1287,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         var rendered: [[String: Any]] = []
         var sidebarDistinctColors: Int?
         var selectedSidebarDistinctColors: Int?
+        var managedAgentDistinctColors: Int?
         for entry in entries {
             guard case let .staticCard(preferredSize, make) = entry.content else { continue }
             let size = preferredSize ?? NSSize(width: 560, height: 640)
@@ -1252,6 +1312,8 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                 sidebarDistinctColors = metrics.distinctSampledColors
             } else if entry.id == "chrome.sidebar.selected" {
                 selectedSidebarDistinctColors = metrics.distinctSampledColors
+            } else if entry.id == "tiles.managedAgent" {
+                managedAgentDistinctColors = metrics.distinctSampledColors
             }
             rendered.append(["entry": entry.id, "width": metrics.width, "height": metrics.height, "distinctColors": metrics.distinctSampledColors])
         }
@@ -1263,6 +1325,12 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         guard selectedSidebarDistinctColors > sidebarDistinctColors else {
             throw fail("selected sidebar render should add distinct colors; selected=\(selectedSidebarDistinctColors) unselected=\(sidebarDistinctColors)")
+        }
+        guard let managedAgentDistinctColors else {
+            throw fail("missing tiles.managedAgent render")
+        }
+        guard managedAgentDistinctColors >= 3 else {
+            throw fail("managed agent render too uniform: \(managedAgentDistinctColors) distinct colors")
         }
 
         // Interactive sandbox: spawn every fixture tile kind, assert they install,

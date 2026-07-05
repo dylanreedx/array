@@ -30,6 +30,7 @@ public enum FocusSurfaceKind: String, Codable, Equatable, Hashable, Sendable {
     case conductorQueue
     case diffReview
     case runArtifacts
+    case managedAgent
     case palette
     case settings
     case appChrome

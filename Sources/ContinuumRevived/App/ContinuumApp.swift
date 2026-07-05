@@ -2573,6 +2573,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     installInitialDiffReviewTile(tile, in: canvasView)
                 case .runArtifacts:
                     installInitialRunArtifactsTile(tile, in: canvasView, via: spawner)
+                case .managedAgent:
+                    installInitialManagedAgentTile(tile, in: canvasView)
                 }
             }
 
@@ -3196,6 +3198,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case .runArtifacts:
             // Run artifact viewer tiles are read-only; retain the run directory.
             break
+        case .managedAgent:
+            break
         }
 
         canvasView.removeTile(id: id)
@@ -3428,6 +3432,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         } else {
             canvasView.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
         }
+    }
+
+    private func installInitialManagedAgentTile(_ tile: Tile, in canvasView: CanvasNSView) {
+        canvasView.install(tileView: ManagedAgentTileNSView(tile: tile), for: tile)
     }
 
     private func dispatchAgent(for row: LinearTicketQueueRow) {

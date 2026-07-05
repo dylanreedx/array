@@ -75,6 +75,37 @@ func approximatelyEqual(_ a: CGPoint, _ b: CGPoint, tolerance: Double = 0.001) -
     abs(a.x - b.x) < tolerance && abs(a.y - b.y) < tolerance
 }
 
+// MARK: - Managed agent transcript model
+
+do {
+    let threadId = "thread-main"
+    let events: [AgentRuntimeEvent] = [
+        .sessionStateChanged(.running),
+        .turnStarted(threadId: threadId, turnId: "turn-1"),
+        .contentDelta(threadId: threadId, turnId: "turn-1", streamKind: .assistant, delta: "I'll inspect the failing guard."),
+        .contentDelta(threadId: threadId, turnId: "turn-1", streamKind: .assistant, delta: " Then I'll make it idempotent."),
+        .itemStarted(threadId: threadId, itemId: "cmd-1", kind: .commandExecution, title: "swift test"),
+        .itemCompleted(threadId: threadId, itemId: "cmd-1", kind: .commandExecution, status: .completed),
+        .itemStarted(threadId: threadId, itemId: "file-1", kind: .fileChange, title: "Sources/Auth.swift"),
+        .requestOpened(threadId: threadId, requestId: "approval-1", kind: .commandExecutionApproval)
+    ]
+    var model = ManagedAgentTranscriptModel(threadId: threadId)
+    for event in events {
+        model.ingest(event)
+    }
+
+    expect(TileKind.allCases.contains(.managedAgent), "TileKind must include managedAgent")
+    expect(model.cards.count == 3, "managed transcript fixture should produce exactly three cards")
+    expect(model.cards.map(\.kind) == [.message, .toolCall, .diff], "managed transcript card kinds should be message/tool/diff")
+    expect(model.cards[0].title == "assistant", "assistant content deltas should create one assistant message card")
+    expect(model.cards[0].body == "I'll inspect the failing guard. Then I'll make it idempotent.", "assistant deltas should append to one card")
+    expect(model.cards[1].title == "swift test", "completed command card keeps its title")
+    expect(model.cards[1].status == .completed, "completed command card records completed status")
+    expect(model.cards[2].title == "Sources/Auth.swift", "in-progress file-change card keeps its title")
+    expect(model.activeToolCount == 1, "one in-progress file-change tool should remain active")
+    expect(model.currentStatus == .needsAttention, "pending approval must flip managed transcript status to needsAttention")
+}
+
 // MARK: - Focus history previous navigation
 
 do {

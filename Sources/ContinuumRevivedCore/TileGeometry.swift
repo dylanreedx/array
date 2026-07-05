@@ -53,6 +53,8 @@ public enum TileGeometry {
             return TilePreset(defaultSize: CGSize(width: 720, height: 520), aspect: .free, sizeQuantum: nil)
         case .runArtifacts:
             return TilePreset(defaultSize: CGSize(width: 640, height: 520), aspect: .free, sizeQuantum: nil)
+        case .managedAgent:
+            return TilePreset(defaultSize: CGSize(width: 640, height: 520), aspect: .free, sizeQuantum: nil)
         }
     }
 
@@ -77,6 +79,8 @@ public enum TileGeometry {
         case .diffReview:
             return CGSize(width: 360, height: 260)
         case .runArtifacts:
+            return CGSize(width: 320, height: 240)
+        case .managedAgent:
             return CGSize(width: 320, height: 240)
         }
     }
