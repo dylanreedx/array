@@ -11336,16 +11336,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let releaseTmuxControl = InMemoryTmuxControl()
         let releaseRoot = tempRoot.appendingPathComponent("release", isDirectory: true)
         try fileManager.createDirectory(at: releaseRoot, withIntermediateDirectories: true)
-        let (releaseDelegate, _, releaseBrowserEngine, _) = try makeDelegate(root: releaseRoot, defaults: defaults, fakeTmuxPath: fakeTmuxPath, tmuxControl: releaseTmuxControl)
+        let (releaseDelegate, _, releaseBrowserEngine, releaseStore) = try makeDelegate(root: releaseRoot, defaults: defaults, fakeTmuxPath: fakeTmuxPath, tmuxControl: releaseTmuxControl)
         defer { releaseBrowserEngine.shutdown() }
         guard let releaseRuntime = releaseDelegate.workspaceRuntime,
-              let releaseProjectId = releaseRuntime.activeController?.project.id else {
+              let releaseController = releaseRuntime.activeController else {
             throw CheckError.failed("release scenario should have an active project")
         }
+        let releaseProjectId = releaseController.project.id
+        let releaseRuntimeId = UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!
+        let releaseTileId = UUID(uuidString: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")!
+        let releaseRuntimeContext = try GhosttyRuntimeContext()
+        let liveReleaseRuntime = GhosttyTerminalRuntime(
+            id: releaseRuntimeId,
+            tileId: releaseTileId,
+            title: "Release Shell",
+            launchProfile: LaunchProfile(command: "/bin/zsh", arguments: [], cwd: releaseRoot.path, title: "Release Shell"),
+            ghostty: releaseRuntimeContext
+        )
+        releaseController.runtimes = [liveReleaseRuntime]
+        try releaseStore.saveSession(TerminalSessionDescriptor(
+            id: releaseRuntimeId,
+            tileId: releaseTileId,
+            launchProfileId: "shell",
+            command: "/bin/zsh",
+            args: [],
+            cwd: releaseRoot.path,
+            env: [:],
+            title: "Release Shell",
+            createdAt: Date(timeIntervalSince1970: 1_717_000_003),
+            lastStartedAt: Date(timeIntervalSince1970: 1_717_000_003),
+            lastExit: nil
+        ))
+        let releaseDescriptorBefore = try releaseStore.loadSession(id: releaseRuntimeId)
+        try expect(releaseDescriptorBefore.lastExit == nil, "release fixture should start with an unstamped live runtime descriptor")
         try expect(releaseRuntime.controller(for: releaseProjectId) != nil, "release scenario should start with a live controller")
         releaseRuntime.closeAll()
         try expect(releaseTmuxControl.log.isEmpty, "project release must detach only and issue no tmux kill command; got \(releaseTmuxControl.log)")
         try expect(releaseRuntime.controller(for: releaseProjectId) == nil, "project release should drop the registry controller")
+        let releaseLastExitStamped = try releaseStore.loadSession(id: releaseRuntimeId).lastExit != nil
+        try expect(releaseLastExitStamped, "project release should stamp lastExit on at least one live runtime descriptor")
 
         let sentinelTmuxControl = InMemoryTmuxControl()
         try expect(Self.runTmuxControlOperationSync({
@@ -11480,6 +11509,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "teardownTmuxCalls": teardownTmuxControl.log.map(String.init(describing:)),
             "releaseTmuxCalls": releaseTmuxControl.log.map(String.init(describing:)),
             "releaseProjectId": releaseProjectId.uuidString,
+            "releaseRuntimeId": releaseRuntimeId.uuidString,
+            "releaseLastExitStamped": releaseLastExitStamped,
             "sentinelTmuxCalls": sentinelTmuxControl.log.map(String.init(describing:)),
             "sentinelKillDetected": sentinelKillDetected,
             "disabledTmuxCalls": disabledTmuxControl.log.map(String.init(describing:)),

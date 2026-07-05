@@ -136,9 +136,8 @@ final class ZoneRuntimeController {
 
     // D16 (docs/38-locked-decisions.md): project release = DETACH, never kill.
     // This function intentionally issues no tmux command. The controller holds no
-    // TmuxControl, no Process, and no TmuxSession reference, so the no-kill property
-    // is enforced by the type rather than by convention. Sessions stay alive across
-    // workspace switches; only explicit user tile close may issue kill-window.
+    // TmuxControl or Process, so release has no executable tmux path. Sessions stay
+    // alive across workspace switches; only explicit user tile close may issue kill-window.
     func close() {
         guard !isClosed else { return }
         isClosed = true

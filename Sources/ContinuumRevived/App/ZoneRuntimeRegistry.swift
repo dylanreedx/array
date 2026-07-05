@@ -279,10 +279,10 @@ final class ZoneRuntimeRegistry {
 
         // 10. Release to zero is detach-only by construction.
         //
-        // ZoneRuntimeController has no tmux dependency to call through: no TmuxControl,
-        // no Process, no TmuxSession reference. This assertion proves release reaches
-        // close() (the closed guard fires) and records the no-kill property as a
-        // structural invariant rather than pretending there is a command log here.
+        // ZoneRuntimeController has no tmux execution dependency to call through: no
+        // TmuxControl and no Process. This assertion proves release reaches close()
+        // (the closed guard fires) and records the no-kill property as a structural
+        // invariant rather than pretending there is a command log here.
         let releaseRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: makeFactory())
         let releaseController = try releaseRegistry.acquire(projectId: P)
         releaseRegistry.release(projectId: P)
@@ -327,7 +327,7 @@ final class ZoneRuntimeRegistry {
             "closeOnZeroPolicy": "option-a-drop-box-skip-close",
             "releaseReachedNoKill": releaseReachedNoKill,
             "multiReleaseReachedNoKill": multiReleaseReachedNoKill,
-            "controllerHasNoTmuxDependency": true
+            "controllerHasNoTmuxExecutionDependency": true
         ]
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
