@@ -106,8 +106,30 @@
 >    Simulator' build` clean (`ios/project.yml` stays the source of truth). Ledger owed tags:
 >    `visual-gate-owed` (simulator screenshots: card idle/resolving/stale/error + inbox with
 >    badge), `device-gate-owed`, `publisher-owed`.
-
-## What this delivers
+>
+> **REV.2 — continuation adjudication (orchestrator, 2026-07-05, after 3 workflow rounds; B2/B3/B4
+> precedent: bounded continuation before any skip row). Round-3 verdicts: both reviewers rejected
+> with four concerns, all bounded. Rulings:**
+> 1. **KindClassifier scope creep (both reviewers) — REVERT, ruled out-of-contract.** The
+>    basename-split in `KindClassifier.swift` + its `SubstrateTests.swift` assertion are a rider on
+>    a shared fleet-wide classifier that nothing in the approvals path uses. The orchestrator
+>    reverts both files to HEAD directly (pure `git checkout`, no salvage needed). The idea itself
+>    (normalize `/bin/zsh` → `.shell`) is plausibly useful — recorded in the ledger row as a
+>    Track-A-tail candidate, NOT lost, NOT shipped unattended tonight.
+> 2. **Duplicate-send hazard (Codex, binding fix):** in `PendingAttentionCard.submit`, a
+>    `.resolved` or `.stale` ack must move the card to a terminal SETTLED state — spinner off,
+>    BOTH buttons remain disabled until the projection removes the card (dismissal stays
+>    projection-driven per banner item 4). `.unknownRequest` also settles (there is no valid
+>    retry target; keep its "no longer available" note). ONLY `.unauthorized` and thrown
+>    transport/send errors re-enable the buttons. Implement as one explicit terminal state (e.g.
+>    `@State settled: Bool`) gating `.disabled(...)` alongside `resolving`/`gateHint`.
+> 3. **Dead branch (Claude, cosmetic):** the `if outcome == .resolved || outcome == .stale`
+>    with two identical `resolving = nil` branches collapses into the item-2 rework — no
+>    identical-branch conditional survives.
+> 4. **Process:** one continuation fix pass (codex-high per the escalation rule) implements items
+>    2–3 ONLY (item 1 is an orchestrator revert; touch nothing else), re-proves all three gates
+>    (swift build, matrix, iOS sim build), then a FRESH full dual review (Claude review model +
+>    Codex) re-judges the whole diff. Both clear → commit; otherwise honest skip row.
 
 A user who receives an "Approval needed" push on their iPhone can open the Continuum iOS
 observer app, tap the waiting agent, and approve or decline the request with one tap — and
