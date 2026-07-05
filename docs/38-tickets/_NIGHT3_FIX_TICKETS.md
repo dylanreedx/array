@@ -74,3 +74,23 @@ A9 **38** codex reader — CLASSIFIED AUTONOMOUS (2026-07-04): same shape as pi/
    (35/36/37); metadata only (I5); its `paneStartedAt` dep = ticket 16's capture (landed).
 A10 tail: `setTileZIndex` legacy-Int-throws fixture; `install()`-clobber regression check;
    `FakeSyncTransport` rename/doc (from 56 audit); `_PROGRESS` dangling-hash sweep.
+
+## B0-r2 — retry ruling for fix-66 supervisor (overwatch, 2026-07-05 09:40)
+
+The round-3 skip row above IS the diagnosis; this section makes B0 eligible again. The rejected
+attempt is stashed as the stash titled "night3 B0 fix-66-supervisor rejected attempt r3" — inspect
+with `git stash list` + `git stash show -p <ref>`; do NOT blind-pop (other stashes exist, and the
+Auth files have since moved to GRDB in the merged tree). Salvage the 681-insertion structure (real
+run() loop with timer race + closed-socket observation, Clock-measured lastConnectedDuration,
+FakeSyncTransport integration check) and fix EXACTLY the two Codex concerns:
+1. **Explicit wake reason.** run() must distinguish a socket-closed wake from an ordinary
+   send() notifyWake(). Replace the shared notifyWake race with a dedicated signal (e.g. an
+   AsyncStream of WakeReason, or a closedSocketGeneration counter checked under the actor) so a
+   benign `.networkChanged(.online)` while `.connected` can NEVER be misread as socket loss and
+   must NOT close the live socket (defect-2 contract: 5 flaps == 1 open socket).
+2. **Flap check drives the production loop.** The 5-flap==1-socket check must start
+   `Task { await supervisor.run() }` and assert through it — no bypassing run(). Add one more
+   check: benign networkChanged while connected → still `.connected`, same socket instance,
+   zero `.socketClosed` events observed.
+Also note: iteration 3's interrupted B1 pairing attempt is stashed as "night3 B1 60-pairing
+interrupted attempt" — that stash belongs to B1, NOT B0; leave it alone during B0-r2.
