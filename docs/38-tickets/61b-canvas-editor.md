@@ -6,6 +6,45 @@
 > the base this builds on). Where this banner and the companion spec conflict, this banner
 > wins; it reconciles the spec against verified code facts.**
 
+> **REV.2 — continuation adjudication (orchestrator, 2026-07-05, B2/B3 precedent).** Round-3
+> state: all three gates green, Claude reviewer CLEAR, Codex rejected with 3 concerns.
+> Adjudication:
+>
+> 1. **BOUND (valid, the continuation fix):** `commitMove` (ios ContinuumApp.swift ~:733)
+>    emits the membership op even when the preceding `setTileFrame` send failed —
+>    `emitCanvasOp` swallows the failure, so a failed move still yields a `setTileZone`
+>    computed from the failed destination frame (partial mutation; violates this ticket's
+>    snap-back / never-silently-lost contract). Fix shape (shared logic stays out of `ios/`):
+>    (a) `CanvasEditIntent.moveDropOps(tile:currentZoneId:to:zones:) -> [Op]` — pure ordered
+>    op list for a drop (the `setTileFrame`, then `setTileZone` ONLY if the resolved target
+>    differs), table-checked in CoreChecks (no-change → 1 op; change → 2 ops in order);
+>    (b) `SpatialOpReceiver.emitAll(_ ops: [Op])` — sequential emit that STOPS at the first
+>    failure (the failed op's optimistic apply reverts as today; ops after the failure are
+>    never sent; earlier successes stand — a completed move without the membership change is
+>    a valid state, a membership change after a failed move is not); (c) `commitMove` calls
+>    `emitAll(moveDropOps(...))`; the single-op gesture paths may keep `emit`. Sync check:
+>    drive the REAL receiver over a transport whose send fails on the first op → store
+>    receives nothing, the second op is never sent (count sends), phone state reverted;
+>    and a success-path batch → both ops land in order.
+> 2. **OUT OF SCOPE (already owed, now named explicitly):** "no production path calls
+>    `CloudKitSyncTransport.fetchChanges()`/`ensureSubscription()`" is the live-CK tail pump.
+>    Verified: the ACTIVITY path shipped by 61a has the identical gap — it is the accepted
+>    `device-gate-owed` state of the whole track (B2's catch-up honesty ruling; no transport
+>    consumer pumps fetchChanges in production yet). The pump belongs to the desktop-publisher
+>    /live-leg follow-up plus ticket 63's silent-push nudge. The diff's cold-snapshot answer
+>    to `.spatialSubscribe` in CloudKitSyncTransport (mirroring `.activitySubscribe`) is
+>    RATIFIED. Owed tags on this item now read: `visual-gate-owed`, `device-gate-owed`,
+>    `publisher-owed` **incl. the fetchChanges/ensureSubscription tail pump**. No code change.
+> 3. **PROCEDURAL (no diff change):** the `_PROGRESS.md` ledger row is appended by the
+>    ORCHESTRATOR in the post-commit docs commit, per the harness contract used by every
+>    prior item tonight; the row will document the DEBUG `CONTINUUM_SCOPE_OVERRIDE=operator`
+>    escape hatch and all owed tags. A missing ledger row in the implementation diff is not
+>    a defect.
+>
+> Continuation contract: implement exactly rev.2 §1, re-run all three gates, dual re-review
+> the FULL diff (both reviewers read this rev.2 as part of the contract), commit only on
+> both-clear.
+
 ## Verified pre-flight facts (orchestrator probe, 2026-07-05 — do not re-litigate)
 
 - `SyncMessage` (Sources/ContinuumRevivedSync/SyncTransport.swift:45) ALREADY carries
