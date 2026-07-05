@@ -15,6 +15,10 @@ if (typeof A === 'string') { try { A = JSON.parse(A) } catch (e) { A = {} } }
 const TICKET = A.ticketPath
 const NAME = A.ticketName || TICKET || 'ticket'
 const EFFORT = ['low','medium','high'].includes(A.effort) ? A.effort : 'medium'
+// Implementer engine (Dylan 2026-07-04): gpt-5.5 LOW implements MOST items (well-scoped specs are
+// good enough); 'sonnet' is reserved for items the orchestrator classifies hard/creative. The review
+// stays the full extensive dual pass (Fable + Codex) regardless of who implemented.
+const IMPLEMENTER = A.implementer === 'sonnet' ? 'sonnet' : 'codex'
 const MAX_ROUNDS = 3
 const CLAUDE_REVIEW_MODEL = (typeof process !== 'undefined' && process.env && process.env.CLAUDE_REVIEW_MODEL) ? process.env.CLAUDE_REVIEW_MODEL : 'opus'
 
@@ -37,6 +41,22 @@ const IMPL_PROMPT = [
   'DO THE WORK: edit files under Sources/ (and tests) per the ticket. Implement the FULL ticket — if it says migrate call sites, migrate ALL of them (a compatibility shim that leaves old call sites working is a FAILURE of a compile-enforced migration, not a convenience). Write the ticket\'s Logic/Backend/UX tests where automatable; a test that only compares IDs or uses a local fold helper instead of the real production merge/apply path does not count. VERIFICATION CONVENTION (mandatory): this project has NO XCTest and `run-matrix.sh` never runs `swift test` — all checks are Swift EXECUTABLE targets (`*Checks`, e.g. ContinuumRevivedCoreChecks) that print measured values and exit non-zero on failure. Add your checks to the relevant `*Checks` executable (or a new one) AND wire it into `scripts/run-matrix.sh` so the matrix actually runs them. Do NOT write XCTestCase / `import XCTest` / a `Tests/` target — nothing runs it, so it does not gate and will be rejected. Then PROVE it: (1) `swift build` until clean; (2) `./scripts/run-matrix.sh` and read the result honestly. The harness sets CONTINUUM_SKIP_SURFACE_CHECKS=1, so the matrix will print "SKIPPED (headless): ...surface checks" and still end with "Matrix passed" — that is EXPECTED and correct (those checks render a terminal surface unavailable in this sandbox; a supervised GUI pass covers them). Treat "Matrix passed" as green; do NOT try to force the skipped checks to run or weaken anything.',
   'GIT RULE: do NOT commit (a later stage owns the commit). The ONE exception: after creating any NEW source/test file, run `git add -N <file>` (intent-to-add only — this makes it appear in `git diff` for the reviewers and prevents it being mistaken for a droppable untracked file; it does NOT commit). Do not otherwise touch git. Do NOT edit files outside what the ticket requires. NO fake-green: if you cannot reach a clean build + green matrix with an honest, complete implementation, report built/matrixGreen=false with the real reason — never weaken a test or add a shim to pass.',
   'Return {built, matrixGreen, changedFiles, summary, notes}.'
+].join('\n')
+
+// Thin driver: a low-effort Claude agent shells the ACTUAL implementation out to GPT-5.5 (Codex CLI)
+// and then verifies honestly itself. Keeps Claude burn minimal while the dual review stays extensive.
+const CODEX_DELEGATE = (innerPrompt, codexEffort) => [
+  'You are a THIN DRIVER. Delegate the implementation below to GPT-5.5 via the Codex CLI; do not implement it yourself.',
+  'Steps:',
+  '1. Write the instructions between BEGIN/END to a temp file (e.g. /tmp/codex-impl-$$.md).',
+  '2. Run: codex exec --model gpt-5.5 -c model_reasoning_effort=' + codexEffort + ' --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$(cat <that file>)"  — codex edits the working tree directly.',
+  '3. Codex must NOT commit. If it committed anyway, run `git reset --soft HEAD~1` to keep the changes uncommitted.',
+  '4. Verify YOURSELF (never trust codex\'s claims): `swift build`, then `CONTINUUM_SKIP_SURFACE_CHECKS=1 ./scripts/run-matrix.sh`; if the item touched ios/, also `cd ios && xcodegen generate && xcodebuild -project Continuum.xcodeproj -scheme Continuum -destination "generic/platform=iOS Simulator" build`. `git add -N` any new files.',
+  '5. If codex left small mechanical breakage, you may apply MINIMAL glue fixes. If it is substantively wrong or incomplete, report built/matrixGreen=false with precise notes (the repair round will feed them back) — NO fake-green, never weaken checks.',
+  'Return {built, matrixGreen, changedFiles, summary, notes} — summary should say what codex changed; notes flag anything you fixed or distrust.',
+  '--- BEGIN IMPLEMENTATION INSTRUCTIONS FOR CODEX ---',
+  innerPrompt,
+  '--- END ---'
 ].join('\n')
 
 const FIX_PROMPT = (concerns, round) => [
@@ -86,9 +106,13 @@ for (let round = 1; round <= MAX_ROUNDS && !committed; round++) {
   // (subtle review concerns need more reasoning than the first pass).
   phase('Implement')
   const implEffort = round === 1 ? EFFORT : 'high'
-  const implPrompt = round === 1 ? IMPL_PROMPT : FIX_PROMPT(concerns, round)
+  const rawPrompt = round === 1 ? IMPL_PROMPT : FIX_PROMPT(concerns, round)
   const label = round === 1 ? ('implement:' + NAME) : ('fix' + round + ':' + NAME)
-  const impl = await agent(implPrompt, { label, phase:'Implement', model:'sonnet', effort: implEffort, schema: IMPL_RESULT })
+  // codex engine: gpt-5.5 does the work (low round 1, high on repairs) behind a low-effort Sonnet
+  // driver that verifies honestly; sonnet engine: Sonnet implements directly at the item's effort.
+  const implPrompt = IMPLEMENTER === 'codex' ? CODEX_DELEGATE(rawPrompt, round === 1 ? 'low' : 'high') : rawPrompt
+  const agentEffort = IMPLEMENTER === 'codex' ? 'low' : implEffort
+  const impl = await agent(implPrompt, { label: label + (IMPLEMENTER === 'codex' ? ':g55' : ''), phase:'Implement', model:'sonnet', effort: agentEffort, schema: IMPL_RESULT })
 
   if (!impl || !impl.built || !impl.matrixGreen) {
     concerns = ['Build or matrix not green — ' + ((impl && impl.summary) || 'implementer returned no result') + ' | ' + ((impl && impl.notes) || '')]

@@ -50,6 +50,16 @@ If ALL items are done/skipped → `LOOP: STOP queue-drained`.
 - Reviewers: same dual review as always (Claude review model + Codex GPT-5.5); they read the fix-ticket
   spec / companion spec as the contract for B-items.
 
+## Implementer routing (Dylan's directive, 2026-07-04)
+Pass `implementer` in the Workflow args for every item:
+- **`"codex"` (gpt-5.5 low) is the DEFAULT — use it for MOST items.** The specs/rulings are precise
+  enough; repair rounds automatically escalate codex to high. Everything in B0/B0b/B1/B5–B9 and all
+  of Track C's scoped items goes here.
+- **`"sonnet"` ONLY for items you classify hard/creative** — expected: B2 (57 CloudKit transport),
+  B4 (61b canvas editor), C1 (40 session observer), and any item codex already failed twice on.
+- Review rigor is NOT reduced for codex-implemented items — the extensive Fable + Codex dual review
+  runs identically on everything, and commit still requires both clear + green gates.
+
 ## Ledger
 Append the row to `_PROGRESS.md` as usual (`night3` note prefix). Skips record precise findings.
 Emit exactly one LOOP token: `LOOP: CONTINUE <item>` / `LOOP: CONTINUE skipped:<item>` / `LOOP: STOP <reason>`.
