@@ -1,5 +1,47 @@
 # CloudKit private-database sync transport
 
+> **RULING BANNER — C-20260705-023 (night3 B2, orchestrator 2026-07-05). Binding; overrides the
+> ticket text below where they conflict.**
+>
+> 1. **Conformance surface = the landed ticket-55 seam**, `ContinuumRevivedSync.SyncTransport`
+>    (`Sources/ContinuumRevivedSync/SyncTransport.swift:56`): `send(_ message: SyncMessage) async
+>    throws` + `inbound: AsyncStream<SyncMessage>` + `connectionState: AsyncStream<ConnectionState>`.
+>    The breadcrumb `push/subscribe/fetchChanges` shape below describes the FROZEN ticket-12 Core
+>    seam (`Sources/ContinuumRevivedCore/Substrates/SyncTransport.swift`) — it is NOT the
+>    conformance target; do not modify that Core file. The breadcrumbs REMAIN authoritative for the
+>    CloudKit mechanics: `SyncOp` record schema keyed `"\(lamport)-\(replicaUUID)"` (idempotency by
+>    record ID; `.serverRecordChanged` treated as success), retry taxonomy + backoff (1/2/4/8 s
+>    capped 30, non-retryable errors propagate immediately), silent-push `CKQuerySubscription`
+>    named `"continuum-sync-ops"` with duplicate-subscription-as-success, LWW snapshot record.
+>    Message mapping: `.op(LoggedOp)` → `SyncOp` record; `.snapshot(CompactedSnapshot)` → LWW
+>    snapshot record keyed by a stable name; `.activity(ActivityStreamItem)` → design honestly
+>    (LWW or sequence-keyed records); `.activitySubscribe` is a peer-request message with no
+>    CloudKit peer semantics — a documented local trigger (fetch/refetch arming) rather than a
+>    stored record is acceptable. Received records surface through `inbound`; `fetchChanges`
+>    becomes an internal method on the concrete type (called by the app-lifecycle layer on
+>    push/foreground), not a protocol requirement.
+> 2. **C-20260701-009 applies:** read this ticket's `ActivityTreeSnapshot` as the shipped types —
+>    the seam's payloads are `CompactedSnapshot`/`ActivityStreamItem` (`ActivityLogSnapshot` is the
+>    byTile read model). Do not introduce a new `ActivityTreeSnapshot` type.
+> 3. **No app-startup injection tonight:** `Sources/ContinuumRevived/` has ZERO `SyncTransport`
+>    references — no coordinator/injection site exists (that wiring belongs to the supervisor/
+>    wiring tickets). Do NOT invent app-runtime wiring or touch `ContinuumApp.swift` for the swap;
+>    that Done-when line is descoped to the ticket that creates the seam's consumer. DO create
+>    `Sources/ContinuumRevived/ContinuumRevived.entitlements` with the two iCloud keys exactly as
+>    specified (the SwiftPM build has no Xcode project to reference it; it is the artifact for
+>    signed-app packaging — say so in a comment in the file or a sibling note).
+> 4. **Headless verification (night-3 amendment):** never instantiate `CKContainer`/`CKDatabase`
+>    in any check (unentitled process = crash); `CKRecord`/`CKError` VALUES are headless-safe and
+>    are what the logic checks use. The four logic suites (round-trip per Op case, record-name
+>    idempotency, malformed-record rejection, injected-sleep retry sequence incl. non-retryable
+>    passthrough) live in `ContinuumRevivedSyncChecks` (NOT CoreChecks — the types live in the Sync
+>    module) and are wired into `scripts/run-matrix.sh`. The gated
+>    `ContinuumRevivedSyncIntegrationChecks` target compiles, skips gracefully without
+>    `CLOUDKIT_ENABLED=1` (manifest records `cloudkit_available=false`), and the real-CK leg is
+>    tagged `device-gate-owed` for the morning checklist. Do NOT fake a green CK integration.
+> 5. **ComponentLab:** pure transport, no user-visible surface → exempt per the night-3 rule,
+>    unless the diff adds a desktop-visible component (then a lab card is required in-commit).
+
 ## What this delivers
 
 After this ticket, the `SyncTransport` seam has a real, production-grade implementation

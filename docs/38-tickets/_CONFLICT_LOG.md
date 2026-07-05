@@ -320,3 +320,27 @@ log to add explicit rulings, prompt amendments, and recovery actions.
   morning checklist. Stash@{1} is retained for audit, never popped.
 - **Prompt amendment:** rev.2 ruling banner written to the top of `60-pairing-token-model.md` (same
   mechanism as C-20260702-010).
+
+## C-20260705-023 — `57-cloudkit-transport-impl.md` (night3 B2 pre-flight ruling)
+
+- **Class:** `CONTRACT-CONFLICT` (stale ticket vs landed seam), `STALE-REFERENCES`
+- **Evidence (orchestrator pre-flight, 2026-07-05):** (a) the ticket's breadcrumbs conform to the
+  ticket-12 Core seam (`push`/`subscribe`/`fetchChanges` over `TransportLoggedOp`), but the night-3
+  queue line binds B2 to the ticket-55 seam that actually landed (`568532a`):
+  `ContinuumRevivedSync.SyncTransport` = `send(SyncMessage)` + `inbound` + `connectionState`
+  AsyncStreams — two same-named protocols exist in different modules by design (see the NOTE ON
+  NAMING in `Sources/ContinuumRevivedSync/SyncTransport.swift`). (b) The ticket's
+  `ActivityTreeSnapshot` prose predates the C-20260701-009 rename. (c) The ticket's app-startup
+  injection site does not exist — grep shows zero `SyncTransport` references in
+  `Sources/ContinuumRevived/`; no op-log coordinator is wired anywhere in the app target.
+  (d) The ticket places logic checks in `ContinuumRevivedCoreChecks`, but the transport's types
+  live in the Sync module → `ContinuumRevivedSyncChecks` is the correct home. (e) Headless CK:
+  instantiating `CKContainer` in an unentitled process crashes; `CKRecord`/`CKError` values are
+  safe.
+- **Winning directive:** conform to the 55 seam; keep the breadcrumbs' CloudKit mechanics (record
+  schema/idempotency/retry/subscription); read ATS per C-009; descope the app-startup swap to the
+  wiring ticket (create the entitlements file only); checks in SyncChecks headless-safe; gated
+  IntegrationChecks skip gracefully; real-CK leg `device-gate-owed`. Night-3 queue amendment
+  ("do NOT fake a green CK integration") restated as binding.
+- **Prompt amendment:** ruling banner written to the top of `57-cloudkit-transport-impl.md` (same
+  mechanism as C-20260702-010 / C-20260705-022).
