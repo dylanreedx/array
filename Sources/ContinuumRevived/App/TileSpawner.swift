@@ -52,6 +52,7 @@ final class TileSpawner {
     /// spawn agents into their own checkout.
     var terminalProjectContextProvider: (() -> ProjectEntry?)?
     var terminalSessionTargetProvider: (() -> TerminalSessionTarget?)?
+    var terminalFocusedPaneTargetProvider: (() -> String?)?
     var browserProfileSwitchHandler: ((UUID, UUID) -> Void)?
     var browserProfileCreateHandler: ((UUID) -> Void)?
     var browserProfileRenameHandler: ((UUID, UUID) -> Void)?
@@ -291,9 +292,14 @@ final class TileSpawner {
             sessionName = TmuxSession.ambientSessionName(workspaceId: workspaceId)
         }
         let innerCommand = Self.innerCommand(for: profile)
+        let focusedPaneTarget: String? = {
+            guard case .ambient = target else { return nil }
+            return terminalFocusedPaneTargetProvider?()
+        }()
         let paneTarget = try Self.runTmuxControlOperationSync {
             if try await control.sessionExists(name: sessionName) {
-                return try await control.newWindow(inSession: sessionName, cwd: profile.cwd, innerCommand: innerCommand)
+                let cwd = try await Self.cwdForNewWindow(profileCwd: profile.cwd, control: control, focusedPaneTarget: focusedPaneTarget)
+                return try await control.newWindow(inSession: sessionName, cwd: cwd, innerCommand: innerCommand)
             } else {
                 return try await control.newSession(name: sessionName, cwd: profile.cwd, innerCommand: innerCommand)
             }
@@ -302,6 +308,15 @@ final class TileSpawner {
             throw SpawnError.invalidPaneId(paneTarget)
         }
         return (TmuxSession.attachWindowProfile(paneTarget: paneTarget, cwd: profile.cwd, tmuxPath: tmuxPath), paneTarget)
+    }
+
+    private nonisolated static func cwdForNewWindow(profileCwd: String, control: any TmuxControl, focusedPaneTarget: String?) async throws -> String {
+        guard let focusedPaneTarget,
+              !focusedPaneTarget.isEmpty
+        else {
+            return profileCwd
+        }
+        return try await control.paneCurrentPath(paneTarget: focusedPaneTarget)
     }
 
     private static func innerCommand(for profile: LaunchProfile) -> [String]? {
@@ -3429,15 +3444,26 @@ final class TileSpawner {
         defer { ambientGhostty.shutdown(); ambientBrowser.shutdown() }
         let ambientWorkspaceId = UUID(uuidString: "A2222222-2222-4222-8222-222222222222")!
         ambientSpawner.terminalSessionTargetProvider = { .ambient(workspaceId: ambientWorkspaceId) }
+        var focusedPaneTarget: String?
+        ambientSpawner.terminalFocusedPaneTargetProvider = { focusedPaneTarget }
         var ambientDescriptors: [TerminalSessionDescriptor] = []
-        for _ in 0..<2 {
-            let (_, descriptor) = try spawnAndDescriptor(spawner: ambientSpawner, store: ambientStore, canvas: ambientCanvas)
-            ambientDescriptors.append(descriptor)
+        let (firstAmbientTile, firstAmbientDescriptor) = try spawnAndDescriptor(spawner: ambientSpawner, store: ambientStore, canvas: ambientCanvas)
+        ambientDescriptors.append(firstAmbientDescriptor)
+        focusedPaneTarget = try managedTarget(spawner: ambientSpawner, tileId: firstAmbientTile.id)
+        let inheritedCwd = ambientRoot.appendingPathComponent("focused-pane-cwd", isDirectory: true)
+        try fileManager.createDirectory(at: inheritedCwd, withIntermediateDirectories: true)
+        if let focusedPaneTarget, var stub = ambientTmux.livePanes[focusedPaneTarget] {
+            stub.cwd = inheritedCwd.path
+            ambientTmux.livePanes[focusedPaneTarget] = stub
         }
+        let (_, secondAmbientDescriptor) = try spawnAndDescriptor(spawner: ambientSpawner, store: ambientStore, canvas: ambientCanvas)
+        ambientDescriptors.append(secondAmbientDescriptor)
         let ambientSessionName = TmuxSession.ambientSessionName(workspaceId: ambientWorkspaceId)
         let ambientTargets = try ambientCanvas.canvasState.tiles.map { try managedTarget(spawner: ambientSpawner, tileId: $0.id) }.compactMap { $0 }
         try expect(ambientTmux.log.filter { if case .newSession = $0 { return true }; return false }.count == 1, "ambient spawns should create exactly one workspace tmux session, log=\(ambientTmux.log)")
         try expect(ambientTmux.log.filter { if case .newWindow = $0 { return true }; return false }.count == 1, "ambient spawns should create exactly one second workspace window, log=\(ambientTmux.log)")
+        try expect(ambientTmux.log.contains(.paneCurrentPath(target: focusedPaneTarget ?? "")), "second ambient spawn should read the focused pane cwd before creating a sibling window, log=\(ambientTmux.log)")
+        try expect(ambientTmux.log.contains(.newWindow(session: ambientSessionName, cwd: inheritedCwd.path)), "second ambient spawn should inherit focused pane cwd for new-window, log=\(ambientTmux.log)")
         try expect(!ambientTmux.log.contains { if case .killWindow = $0 { return true }; return false }, "successful ambient spawn should not compensate-kill a window, log=\(ambientTmux.log)")
         try expect(ambientTargets.count == 2 && Set(ambientTargets).count == 2, "ambient descriptors should persist two distinct pane targets, got \(ambientTargets)")
         try expect(ambientTmux.sessions[ambientSessionName] == ambientTargets, "fake ambient session should contain exactly persisted targets")

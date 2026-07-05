@@ -2482,6 +2482,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 }
                 return nil
             }
+            spawner.terminalFocusedPaneTargetProvider = { [weak self] in
+                guard let self,
+                      let tileId = canvasView.canvasState.lastActiveTileId,
+                      let record = self.managedSessionRecord(forTileId: tileId)
+                else { return nil }
+                return record.tmuxWindowTarget()
+            }
             spawner.browserProfileSwitchHandler = { [weak self] tileId, profileId in
                 self?.switchBrowserTileProfile(tileId: tileId, profileId: profileId)
             }
