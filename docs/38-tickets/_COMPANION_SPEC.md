@@ -5,7 +5,7 @@ used; **live and bidirectional** — move a tile on desktop, see it on the phone
 AND edit workspaces/canvas in the MVP; mostly observing + gating (approvals); push notifications are
 first-class with a mapped taxonomy and a real test method. UX gets dogfooded and iterated after.
 
-Display name **Continuum** · bundle id **com.dylanreed.continuum** (Dylan's call 2026-07-04; immutable
+Display name **Continuum** · bundle id **dev.dylanreed.continuum** (Dylan's call 2026-07-04; immutable
 once the App Store Connect record exists tomorrow morning).
 
 ## 1. Architecture — the phone is a replica, not a viewer
@@ -80,7 +80,7 @@ someone else's request.
 1. **T1 headless (tonight, in the matrix):** payload-builder checks — every category N1–N8 produces a
    correct APNS JSON (category id, interruption level, deep-link userInfo, action ids); scope-gate
    round-trip test for the Approve action against the real authorize() path.
-2. **T2 simulator (tonight, scripted):** `xcrun simctl push booted io.bannockburn.continuum <payload>.apns`
+2. **T2 simulator (tonight, scripted):** `xcrun simctl push booted dev.dylanreed.continuum <payload>.apns`
    for each category — verifies banner rendering, lock-screen actions, category settings honored,
    deep-link routing — **no real APNS needed**. A script `scripts/push-sim-test.sh` fires all 8 in
    sequence; screenshots into the morning report.
