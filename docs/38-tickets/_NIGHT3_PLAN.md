@@ -76,13 +76,22 @@ NOT tonight: **69** ACP driver (design-heavy — design tomorrow), **68** node s
 **49–53** remote/SSH real-substrate passes (loopback checks only), **25** reattach replay (real terminal),
 **42** pending Dylan's consent-UX ruling.
 
-## Decisions Dylan owes before launch
+## Decisions — RULED by Dylan 2026-07-04
 
-1. **54 auth:** pull in GRDB now (deliver the ticket as written) vs descope persistence (in-memory stays,
-   fix constant-time compare + `fatalError`→throw, ticket amended)?
-2. **42 consent UX:** simple first-run consent prompt OK?
-3. **APNS key tonight** (Keys → + in App Store Connect, 5 min) or push-behind-flag?
-4. Confirm parallel-worktree plan (vs strictly sequential A→B).
+1. **54 auth: GRDB NOW.** Add the GRDB dependency, back PairingStore/SessionStore with the on-disk 0600
+   DB per the ticket, fix the non-constant-time compare and `fatalError`→throw, wire the auth spine.
+   Rationale: Track B ships pairing (60) — in-memory grants would force re-pairing every relaunch.
+2. **42 consent UX: simple first-run consent prompt approved.** Buildable.
+3. **APNS: Dylan is creating the key tonight** (walkthrough below). The .p8 NEVER enters the repo —
+   store at `~/.continuum/secrets/` (0600); code reads key path + Key ID + Team ID from local config.
+   If the key isn't ready by Track B's 63 slot, 63 lands behind the flag as planned.
+4. **Parallel worktrees: APPROVED, with a mandatory lifecycle discipline:**
+   - Track A worktree is created fresh at launch: `git worktree add ../continuum-fixes -b night3/fixes`
+   - it works ONLY on `night3/fixes`; commits stay there until the 06:00 merge point
+   - merge = merge/cherry-pick into the main branch + combined build+matrix green
+   - THEN mandatory cleanup, same morning: `git worktree remove ../continuum-fixes` +
+     `git branch -d night3/fixes` (only after the merge is verified) — no orphan worktrees or branches
+     left behind; `git worktree list` must be back to baseline in the morning report.
 
 ## Morning deliverables
 
