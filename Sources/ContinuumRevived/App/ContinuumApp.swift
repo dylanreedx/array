@@ -1728,6 +1728,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--new-tile-cwd-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try TileSpawner.runNewTileCwdSelfCheck()
+                print("ContinuumRevivedNewTileCwdChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--persistence-crash-safe-check") {
             do {
                 let artifact = try AppDelegate.runPersistenceCrashSafeSelfCheck()
@@ -2519,6 +2531,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                       let record = self.managedSessionRecord(forTileId: tileId)
                 else { return nil }
                 return record.tmuxWindowTarget()
+            }
+            spawner.focusedTerminalCwdProvider = { [weak canvasView] in
+                guard let canvasView,
+                      let tileId = canvasView.canvasState.lastActiveTileId,
+                      let tileView = canvasView.tileView(for: tileId) as? TerminalTileNSView
+                else { return nil }
+                return tileView.runtime.capturedCwd
             }
             spawner.browserProfileSwitchHandler = { [weak self] tileId, profileId in
                 self?.switchBrowserTileProfile(tileId: tileId, profileId: profileId)

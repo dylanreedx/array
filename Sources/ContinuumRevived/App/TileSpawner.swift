@@ -30,6 +30,11 @@ final class TileSpawner {
         let resolution: LaunchProfileResolution
     }
 
+    private enum FreshTerminalProfileResolution {
+        case resolved(spec: LaunchProfileSpec, profile: LaunchProfile, projectRoot: String)
+        case failed(Outcome)
+    }
+
     weak var canvasView: CanvasNSView?
     private let ghostty: GhosttyRuntimeContext?
     private let browserEngine: BrowserEngineContext
@@ -53,6 +58,7 @@ final class TileSpawner {
     var terminalProjectContextProvider: (() -> ProjectEntry?)?
     var terminalSessionTargetProvider: (() -> TerminalSessionTarget?)?
     var terminalFocusedPaneTargetProvider: (() -> String?)?
+    var focusedTerminalCwdProvider: (() -> String?)?
     var browserProfileSwitchHandler: ((UUID, UUID) -> Void)?
     var browserProfileCreateHandler: ((UUID) -> Void)?
     var browserProfileRenameHandler: ((UUID, UUID) -> Void)?
@@ -73,6 +79,7 @@ final class TileSpawner {
     /// Lets runtime-owned key paths route reserved shortcuts through the app's
     /// FocusBroker instead of consuming them inside terminal/browser content.
     var reservedShortcutHandler: ((NSEvent) -> Bool)?
+    private var lastSpawnedCwd: String?
 
     init(
         canvasView: CanvasNSView,
@@ -120,8 +127,31 @@ final class TileSpawner {
     }
 
     func spawnTerminal(profileId: String, at worldPoint: CGPoint? = nil, allowTmuxPersistence: Bool = true) -> Outcome {
+        let spec: LaunchProfileSpec
+        let profile: LaunchProfile
+        let projectRoot: String
+        switch resolvedFreshTerminalProfile(profileId: profileId) {
+        case let .resolved(resolvedSpec, resolvedProfile, resolvedProjectRoot):
+            spec = resolvedSpec
+            profile = resolvedProfile
+            projectRoot = resolvedProjectRoot
+        case let .failed(outcome):
+            return outcome
+        }
+        let now = Date()
+        return spawnTerminal(
+            profile: profile,
+            launchProfileId: spec.id,
+            agentDescriptor: agentDescriptor(for: spec, projectRoot: projectRoot, at: now),
+            createdAt: now,
+            at: worldPoint,
+            allowTmuxPersistence: allowTmuxPersistence
+        )
+    }
+
+    private func resolvedFreshTerminalProfile(profileId: String) -> FreshTerminalProfileResolution {
         guard let spec = registry.spec(for: profileId) else {
-            return .unknownProfile(id: profileId)
+            return .failed(.unknownProfile(id: profileId))
         }
         let projectRoot = terminalProjectRoot()
         let resolution = registry.resolve(
@@ -133,18 +163,17 @@ final class TileSpawner {
         let profile: LaunchProfile
         switch resolution {
         case let .found(p): profile = p
-        case let .missing(name): return .missingCommand(executable: name)
-        case let .notConfigured(id): return .notConfigured(profileId: id)
+        case let .missing(name): return .failed(.missingCommand(executable: name))
+        case let .notConfigured(id): return .failed(.notConfigured(profileId: id))
         }
-        let now = Date()
-        return spawnTerminal(
-            profile: profile,
-            launchProfileId: spec.id,
-            agentDescriptor: agentDescriptor(for: spec, projectRoot: projectRoot, at: now),
-            createdAt: now,
-            at: worldPoint,
-            allowTmuxPersistence: allowTmuxPersistence
+        let inheritedCwd = resolvedSpawnCwd(projectRoot: projectRoot)
+        let effectiveProfile = LaunchProfile(
+            command: profile.command,
+            arguments: profile.arguments,
+            cwd: inheritedCwd,
+            title: profile.title
         )
+        return .resolved(spec: spec, profile: effectiveProfile, projectRoot: projectRoot)
     }
 
     func spawnHarnessRoleRun(role: HarnessRole, prompt: String, at worldPoint: CGPoint? = nil) -> Outcome {
@@ -257,6 +286,17 @@ final class TileSpawner {
 
     private func terminalProjectRoot() -> String {
         terminalProjectContextProvider?().map(\.rootPath) ?? project.rootPath
+    }
+
+    private func resolvedSpawnCwd(projectRoot: String) -> String {
+        let resolved = resolveNewTileCwd(
+            policy: NewTileCwdConfig.policy(defaults: defaults),
+            focused: focusedTerminalCwdProvider?(),
+            lastUsed: lastSpawnedCwd,
+            projectRoot: projectRoot
+        )
+        lastSpawnedCwd = resolved
+        return resolved
     }
 
     private func tmuxWrappedProfileIfAvailable(
@@ -3266,6 +3306,169 @@ final class TileSpawner {
             "tmuxCleanup": tmuxCleanup
         ]
         let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    static func runNewTileCwdSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func makeProject(root: URL, name: String) -> Project {
+            Project(
+                id: UUID(),
+                name: name,
+                rootPath: root.path,
+                createdAt: Date(),
+                updatedAt: Date(),
+                defaultLaunchProfileId: "shell",
+                editorPreference: .auto,
+                settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject, terminalClosePolicy: .askWhenRunning)
+            )
+        }
+        func makeDefaults(policy: NewTileCwdPolicy, tmuxEnabled: Bool = false, tmuxPath: String = "/usr/bin/false") -> UserDefaults {
+            let suiteName = "continuum.new-tile-cwd.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suiteName)!
+            defaults.removePersistentDomain(forName: suiteName)
+            defaults.setVolatileDomain([:], forName: UserDefaults.argumentDomain)
+            defaults.set(policy.rawValue, forKey: NewTileCwdConfig.userDefaultsKey)
+            defaults.set(tmuxEnabled, forKey: TmuxPersistenceConfig.enabledKey)
+            defaults.set(tmuxPath, forKey: TmuxPersistenceConfig.pathKey)
+            defaults.set(true, forKey: TmuxPersistenceConfig.ambientPerWorkspaceKey)
+            return defaults
+        }
+        func makeSpawner(
+            root: URL,
+            defaults: UserDefaults,
+            tmuxControlFactory: @escaping @Sendable (String) -> any TmuxControl = { _ in InMemoryTmuxControl() }
+        ) throws -> (TileSpawner, CanvasNSView, BrowserEngineContext) {
+            let project = makeProject(root: root, name: root.lastPathComponent)
+            let store = ProjectStore(projectRoot: root)
+            try store.saveProject(project)
+            try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+            let canvas = CanvasNSView(canvasState: try store.loadCanvas())
+            canvas.setFrameSize(CGSize(width: 1200, height: 800))
+            let browserEngine = BrowserEngineContext()
+            let spawner = TileSpawner(
+                canvasView: canvas,
+                ghostty: nil,
+                browserEngine: browserEngine,
+                projectStore: store,
+                project: project,
+                defaults: defaults,
+                tmuxPathResolver: { TmuxLocator.resolve(defaults: $0) },
+                tmuxControlFactory: tmuxControlFactory
+            )
+            return (spawner, canvas, browserEngine)
+        }
+        func resolvedProfile(spawner: TileSpawner) throws -> LaunchProfile {
+            switch spawner.resolvedFreshTerminalProfile(profileId: "shell") {
+            case let .resolved(_, profile, _):
+                return profile
+            case let .failed(outcome):
+                throw CheckError.failed("fresh profile resolution failed: \(outcome)")
+            }
+        }
+
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory.appendingPathComponent("continuum-new-tile-cwd-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        let focusedRoot = tempRoot.appendingPathComponent("focused", isDirectory: true)
+        let projectPolicyRoot = tempRoot.appendingPathComponent("project-policy", isDirectory: true)
+        let lastUsedRoot = tempRoot.appendingPathComponent("last-used", isDirectory: true)
+        let tmuxRoot = tempRoot.appendingPathComponent("tmux", isDirectory: true)
+        try [focusedRoot, projectPolicyRoot, lastUsedRoot, tmuxRoot].forEach {
+            try fileManager.createDirectory(at: $0, withIntermediateDirectories: true)
+        }
+
+        let focusedCwd = focusedRoot.appendingPathComponent("Sources", isDirectory: true)
+        let ignoredFocusCwd = projectPolicyRoot.appendingPathComponent("Ignored", isDirectory: true)
+        let secondFocusCwd = lastUsedRoot.appendingPathComponent("SecondFocus", isDirectory: true)
+        let tmuxFocusedCwd = tmuxRoot.appendingPathComponent("TmuxFocused", isDirectory: true)
+        try [focusedCwd, ignoredFocusCwd, secondFocusCwd, tmuxFocusedCwd].forEach {
+            try fileManager.createDirectory(at: $0, withIntermediateDirectories: true)
+        }
+
+        let focusedDefaults = makeDefaults(policy: .inheritFocus)
+        let (focusedSpawner, _, focusedBrowser) = try makeSpawner(root: focusedRoot, defaults: focusedDefaults)
+        defer { focusedBrowser.shutdown() }
+        focusedSpawner.focusedTerminalCwdProvider = { focusedCwd.path }
+        let focusedProfile = try resolvedProfile(spawner: focusedSpawner)
+        try expect(focusedProfile.cwd == focusedCwd.path, "inheritFocus fresh profile should use focused cwd, got \(focusedProfile.cwd)")
+        let focusedWrapped = try focusedSpawner.tmuxWrappedProfileIfAvailable(focusedProfile, tileId: UUID(), target: nil)
+        try expect(focusedWrapped.profile.cwd == focusedCwd.path, "tmux-disabled inheritFocus wrapper should preserve focused cwd")
+        try expect(focusedWrapped.windowTarget == nil, "tmux-disabled inheritFocus wrapper should not create a managed target")
+
+        let projectDefaults = makeDefaults(policy: .projectRoot)
+        let (projectSpawner, _, projectBrowser) = try makeSpawner(root: projectPolicyRoot, defaults: projectDefaults)
+        defer { projectBrowser.shutdown() }
+        projectSpawner.focusedTerminalCwdProvider = { ignoredFocusCwd.path }
+        let projectProfile = try resolvedProfile(spawner: projectSpawner)
+        try expect(projectProfile.cwd == projectPolicyRoot.path, "projectRoot policy should ignore focused cwd, got \(projectProfile.cwd)")
+
+        let lastDefaults = makeDefaults(policy: .lastUsed)
+        let (lastSpawner, _, lastBrowser) = try makeSpawner(root: lastUsedRoot, defaults: lastDefaults)
+        defer { lastBrowser.shutdown() }
+        lastSpawner.focusedTerminalCwdProvider = { secondFocusCwd.path }
+        let firstLastProfile = try resolvedProfile(spawner: lastSpawner)
+        lastSpawner.focusedTerminalCwdProvider = { nil }
+        let secondLastProfile = try resolvedProfile(spawner: lastSpawner)
+        try expect(firstLastProfile.cwd == lastUsedRoot.path, "lastUsed first fresh profile should fall back to project root, got \(firstLastProfile.cwd)")
+        try expect(secondLastProfile.cwd == lastUsedRoot.path, "lastUsed should reuse the spawner-local previous cwd, got \(secondLastProfile.cwd)")
+
+        let fakeTmux = tempRoot.appendingPathComponent("fake-tmux")
+        try "#!/bin/sh\nexit 0\n".write(to: fakeTmux, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeTmux.path)
+        let tmuxDefaults = makeDefaults(policy: .inheritFocus, tmuxEnabled: true, tmuxPath: fakeTmux.path)
+        let tmuxControl = InMemoryTmuxControl()
+        let (tmuxSpawner, _, tmuxBrowser) = try makeSpawner(
+            root: tmuxRoot,
+            defaults: tmuxDefaults,
+            tmuxControlFactory: { _ in tmuxControl }
+        )
+        defer { tmuxBrowser.shutdown() }
+        let workspaceId = UUID(uuidString: "A1818181-1818-4818-8818-181818181818")!
+        tmuxSpawner.focusedTerminalCwdProvider = { tmuxFocusedCwd.path }
+        let tmuxProfile = try resolvedProfile(spawner: tmuxSpawner)
+        let tmuxWrapped = try tmuxSpawner.tmuxWrappedProfileIfAvailable(tmuxProfile, tileId: UUID(), target: .ambient(workspaceId: workspaceId))
+        let ambientSessionName = TmuxSession.ambientSessionName(workspaceId: workspaceId)
+        try expect(tmuxControl.log.contains(.newSession(name: ambientSessionName, cwd: tmuxFocusedCwd.path)), "tmux fresh spawn should create session with inherited cwd, log=\(tmuxControl.log)")
+        try expect(tmuxWrapped.profile.arguments == ["attach-session", "-t", "%1"], "tmux wrapper should attach to captured pane target, got \(tmuxWrapped.profile.arguments)")
+        try expect(tmuxWrapped.profile.cwd == tmuxFocusedCwd.path, "tmux wrapper should preserve inherited cwd for descriptor persistence, got \(tmuxWrapped.profile.cwd)")
+
+        let terminalSection = SettingsSchema.sections().first { $0.id == "terminal" }
+        let hasSettingsChoice = terminalSection?.fields.contains {
+            if case let .choice(key, _, options, defaultValue) = $0 {
+                return key == NewTileCwdConfig.userDefaultsKey
+                    && options == NewTileCwdPolicy.allCases.map(\.rawValue)
+                    && defaultValue == NewTileCwdConfig.defaultPolicy.rawValue
+            }
+            return false
+        } ?? false
+        try expect(hasSettingsChoice, "Terminal settings must expose the newTileCwd choice field with all policies")
+
+        let artifact = tempRoot.appendingPathComponent("new-tile-cwd-manifest.json")
+        let manifest: [String: Any] = [
+            "check": "new-tile-cwd",
+            "inheritFocusProfileCwd": focusedProfile.cwd,
+            "projectRootProfileCwd": projectProfile.cwd,
+            "lastUsedFirstProfileCwd": firstLastProfile.cwd,
+            "lastUsedSecondProfileCwd": secondLastProfile.cwd,
+            "tmuxLog": tmuxControl.log.map(String.init(describing:)),
+            "tmuxWrappedProfileCwd": tmuxWrapped.profile.cwd,
+            "settingsChoicePresent": hasSettingsChoice
+        ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: artifact, options: .atomic)
         return artifact

@@ -192,6 +192,12 @@ public enum SettingsSchema {
                         label: "Shell Scroll Wheel Multiplier",
                         default: String(TerminalScrollConfig.lineMultiplierDefault)
                     ),
+                    .choice(
+                        key: NewTileCwdConfig.userDefaultsKey,
+                        label: "New Terminal Working Directory",
+                        options: NewTileCwdPolicy.allCases.map(\.rawValue),
+                        default: NewTileCwdConfig.defaultPolicy.rawValue
+                    ),
                 ]
             ),
             SettingsSection(

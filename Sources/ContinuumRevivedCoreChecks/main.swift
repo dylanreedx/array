@@ -191,6 +191,45 @@ do {
     expect(TerminalDisplayConfig.fontSize(defaults: displayDefaults) == TerminalDisplayConfig.defaultFontSize, "invalid font size falls back to readable default")
 }
 
+// MARK: - Ticket 18: new terminal cwd inheritance policy
+
+do {
+    let suiteName = "NewTileCwdConfigChecks-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+
+    let projectRoot = "/tmp/continuum-project"
+    let focused = "/tmp/continuum-project/Sources"
+    let lastUsed = "/tmp/continuum-project/Tests"
+
+    expect(NewTileCwdConfig.policy(defaults: defaults) == .inheritFocus, "new tile cwd policy defaults to inheritFocus")
+    defaults.set(NewTileCwdPolicy.projectRoot.rawValue, forKey: NewTileCwdConfig.userDefaultsKey)
+    expect(NewTileCwdConfig.policy(defaults: defaults) == .projectRoot, "new tile cwd policy reads projectRoot from defaults")
+    defaults.set("not-a-policy", forKey: NewTileCwdConfig.userDefaultsKey)
+    expect(NewTileCwdConfig.policy(defaults: defaults) == .inheritFocus, "invalid new tile cwd policy falls back to inheritFocus")
+
+    expect(
+        resolveNewTileCwd(policy: .inheritFocus, focused: focused, lastUsed: lastUsed, projectRoot: projectRoot) == focused,
+        "inheritFocus uses focused terminal cwd"
+    )
+    expect(
+        resolveNewTileCwd(policy: .inheritFocus, focused: nil, lastUsed: lastUsed, projectRoot: projectRoot) == projectRoot,
+        "inheritFocus falls back to project root without terminal focus"
+    )
+    expect(
+        resolveNewTileCwd(policy: .projectRoot, focused: focused, lastUsed: lastUsed, projectRoot: projectRoot) == projectRoot,
+        "projectRoot ignores focused and last-used cwd"
+    )
+    expect(
+        resolveNewTileCwd(policy: .lastUsed, focused: focused, lastUsed: lastUsed, projectRoot: projectRoot) == lastUsed,
+        "lastUsed uses the spawner-local last resolved cwd"
+    )
+    expect(
+        resolveNewTileCwd(policy: .lastUsed, focused: focused, lastUsed: nil, projectRoot: projectRoot) == projectRoot,
+        "lastUsed falls back to project root before the first spawn"
+    )
+}
+
 // MARK: - Chrome integration guardrail matrix
 
 do {

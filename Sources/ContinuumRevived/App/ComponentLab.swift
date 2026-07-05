@@ -384,7 +384,7 @@ enum LabCatalog {
             sidebarSelectedCard, managedAgentCard,
 
             // MARK: night3-C cards
-            managedAgentApprovalDockCard, managedAgentUserInputCard
+            managedAgentApprovalDockCard, managedAgentUserInputCard, newTileCwdPolicyCard
         ]
     }
 
@@ -843,6 +843,52 @@ enum LabCatalog {
                 return card
             }
         )
+    }
+
+    private static var newTileCwdPolicyCard: LabEntry {
+        LabEntry(
+            id: "terminal.new-tile-cwd",
+            category: "Palettes & Settings",
+            title: "New Terminal CWD Policy",
+            summary: "Settings fixture for inherit-focus, project-root, and last-used fresh terminal cwd policy.",
+            content: .staticCard(preferredSize: NSSize(width: 520, height: 180)) {
+                makeNewTileCwdPolicyPreview()
+            }
+        )
+    }
+
+    static func makeNewTileCwdPolicyPreview() -> NSView {
+        let root = NSStackView()
+        root.orientation = .vertical
+        root.alignment = .leading
+        root.spacing = 10
+        root.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+
+        let title = NSTextField(labelWithString: "New Terminal Working Directory")
+        title.identifier = NSUserInterfaceItemIdentifier("newTileCwd.title")
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        title.textColor = .labelColor
+        root.addArrangedSubview(title)
+
+        let fixtureRows: [(NewTileCwdPolicy, String)] = [
+            (.inheritFocus, "/Users/dylan/src/continuum/Sources"),
+            (.projectRoot, "/Users/dylan/src/continuum"),
+            (.lastUsed, "/Users/dylan/src/continuum/Tests")
+        ]
+        for (index, fixture) in fixtureRows.enumerated() {
+            let field = NSTextField(labelWithString: "\(fixture.0.rawValue) -> \(fixture.1)")
+            field.identifier = NSUserInterfaceItemIdentifier("newTileCwd.policy.\(index)")
+            field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            field.textColor = .secondaryLabelColor
+            root.addArrangedSubview(field)
+        }
+
+        let key = NSTextField(labelWithString: NewTileCwdConfig.userDefaultsKey)
+        key.identifier = NSUserInterfaceItemIdentifier("newTileCwd.defaultsKey")
+        key.font = .systemFont(ofSize: 11, weight: .regular)
+        key.textColor = .tertiaryLabelColor
+        root.addArrangedSubview(key)
+        return root
     }
 
     static func makeManagedAgentApprovalDockPreview() -> NSView {
@@ -1362,6 +1408,19 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         guard entries.contains(where: { $0.id == "managed-agent.user-input-card" }) else {
             throw fail("missing managed-agent.user-input-card card")
+        }
+        guard let newTileCwdEntry = entries.first(where: { $0.id == "terminal.new-tile-cwd" }),
+              case let .staticCard(_, makeNewTileCwdView) = newTileCwdEntry.content else {
+            throw fail("missing terminal.new-tile-cwd card")
+        }
+        let newTileCwdView = makeNewTileCwdView()
+        for (index, policy) in NewTileCwdPolicy.allCases.enumerated() {
+            guard let row = newTileCwdView.descendant(withIdentifier: "newTileCwd.policy.\(index)") as? NSTextField else {
+                throw fail("new terminal cwd policy card missing row \(index)")
+            }
+            guard row.stringValue.hasPrefix("\(policy.rawValue) -> ") else {
+                throw fail("new terminal cwd policy row \(index) rendered '\(row.stringValue)', expected prefix \(policy.rawValue)")
+            }
         }
         try runApprovalDockLiveCheck(fail: fail)
         try runUserInputCardLiveCheck(fail: fail)

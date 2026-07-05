@@ -148,3 +148,5 @@ be salvaged. These rows reset them for the loop to re-drive; if 07 lands, 56 →
 | 72-approval-dock-border.md | done | 62b9757 | matrix: green (headless) | night3-C gpt-5.5; pending audit; visual-gate-owed |
 | 73-waiting-for-input-card.md | done | 74c4827 | matrix: green (headless) | night3-C gpt-5.5; pending audit; visual-gate-owed |
 | 17-dead-target-fallback.md | done | 60707b7 | matrix: green (headless) | night3-C gpt-5.5; pending audit; visual-gate-owed |
+
+| 18-cwd-inheritance-policy.md | done | 0dae896 | matrix: green (headless) | night3-C gpt-5.5; pending audit; visual-gate-owed |
