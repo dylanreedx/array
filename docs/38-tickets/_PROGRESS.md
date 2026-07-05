@@ -130,3 +130,4 @@ be salvaged. These rows reset them for the loop to re-drive; if 07 lands, 56 →
 | 54-bootstrap-auth-every-path.md | done | 93c2fd5 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
 | 38-codex-reader.md | skipped | - | - | codex-primary: objective build/matrix gate failed post-commit; reverted (after escalated high retry) |
 | A10-night3-tail-hardening | done | 56a2b76 | matrix: green (headless) | night3-A gpt-5.5; pending audit |
+| 38-codex-reader.md | done | 0a12508 | matrix: green x3 (headless) | night3-A gpt-5.5 retry; hermetic-check ruling; pending audit |

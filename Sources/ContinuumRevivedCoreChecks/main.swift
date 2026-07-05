@@ -7078,6 +7078,7 @@ runSidebarActivityTreeSnapshotTests()
 runAgentStateReaderTests()
 runPiAgentStateReaderTests()
 runClaudeAgentStateReaderTests()
+runCodexAgentStateReaderTests()
 
 // MARK: - Ticket 12: Injectable substrates (TmuxControl, Clock, Host, SyncTransport)
 
