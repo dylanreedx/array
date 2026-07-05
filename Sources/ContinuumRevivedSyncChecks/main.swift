@@ -206,3 +206,6 @@ try await runSyncTransportBackendChecks()
 
 // Ticket: docs/38-tickets/58-activity-projection-transport.md
 try await runActivityProjectionChecks()
+
+// Ticket: docs/38-tickets/57-cloudkit-transport-impl.md
+try await runCloudKitSyncTransportChecks()

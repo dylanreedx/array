@@ -27,9 +27,15 @@ let package = Package(
         ),
         // Sync layer (ticket 06's home; stood up by ticket 05 with the
         // tombstone vocabulary). Pure Swift, depends only on Core.
+        // `linkedFramework("CloudKit")` (ticket 57): CloudKit is a system
+        // framework, not a Swift package; this library target needs the
+        // explicit link since it doesn't inherit the app target's link phase.
         .target(
             name: "ContinuumRevivedSync",
-            dependencies: ["ContinuumRevivedCore"]
+            dependencies: ["ContinuumRevivedCore"],
+            linkerSettings: [
+                .linkedFramework("CloudKit")
+            ]
         ),
         .target(
             name: "ContinuumRevivedFileTree",
@@ -54,7 +60,10 @@ let package = Package(
                 "Canvas/TerminalRestartTileNSView.swift",
                 "Canvas/TerminalTileNSView.swift",
                 "Canvas/TicketQueueTileNSView.swift",
-                "Canvas/TileNSView.swift"
+                "Canvas/TileNSView.swift",
+                // Ticket 57 (round-2 concern #4): see the same exclude entry
+                // on the ContinuumRevived target below for why.
+                "ContinuumRevived.entitlements"
             ],
             sources: [
                 "Canvas/FileTreeGitStatusProbe.swift",
@@ -74,7 +83,12 @@ let package = Package(
                 "Canvas/FileTreeGitStatusProbe.swift",
                 "Canvas/FileTreeScanner.swift",
                 "Canvas/FileTreeViewModel.swift",
-                "Canvas/FileTreeOutlineModel.swift"
+                "Canvas/FileTreeOutlineModel.swift",
+                // Ticket 57 (round-2 concern #4): the packaging artifact for a
+                // signed app, not a source file SwiftPM's automatic target
+                // discovery understands — excluding it avoids the "found 1
+                // file(s) which are unhandled" build warning.
+                "ContinuumRevived.entitlements"
             ],
             linkerSettings: [
                 .linkedFramework("Carbon"),
@@ -105,6 +119,14 @@ let package = Package(
                 "ContinuumRevivedFileTree",
                 "ContinuumRevivedCore"
             ]
+        ),
+        // Ticket 57: the real-CloudKit backend leg. Gated on CLOUDKIT_ENABLED=1
+        // (absent in the overnight matrix and any unprovisioned/unsigned
+        // environment); skips gracefully otherwise. See the ticket's
+        // "How we test it / Backend" and "Execution mode".
+        .executableTarget(
+            name: "ContinuumRevivedSyncIntegrationChecks",
+            dependencies: ["ContinuumRevivedSync", "ContinuumRevivedCore"]
         )
     ]
 )

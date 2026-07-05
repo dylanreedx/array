@@ -77,6 +77,14 @@ run_app_check() {
 run swift build
 run swift run ContinuumRevivedCoreChecks
 run swift run ContinuumRevivedSyncChecks
+# Ticket 57: gated real-CloudKit backend leg. Skips gracefully (exit 0,
+# cloudkit_available=false in the manifest) unless CLOUDKIT_ENABLED=1 is set
+# — never set in this matrix; the real leg is device-gate-owed. Explicitly
+# forced to 0 here (round-3 reviewer concern #3) so this invocation can never
+# accidentally go live against a real, unentitled CKContainer just because
+# CLOUDKIT_ENABLED=1 happens to be exported in the ambient shell environment
+# the matrix runs in.
+CLOUDKIT_ENABLED=0 run swift run ContinuumRevivedSyncIntegrationChecks
 run swift run ContinuumRevivedPaletteChecks
 run swift run ContinuumRevivedFileTreeChecks
 run swift run ContinuumRevivedPerfChecks
