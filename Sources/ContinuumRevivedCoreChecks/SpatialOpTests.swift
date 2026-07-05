@@ -121,6 +121,16 @@ func runSpatialOpTests() {
         "setTileZIndex fixture decode mismatch"
     )
 
+    let legacySetTileZIndexFixture = """
+    {"setTileZIndex":{"id":"11111111-1111-4111-8111-111111111111","zIndex":3}}
+    """
+    do {
+        _ = try JSONCodec.makeDecoder().decode(Op.self, from: Data(legacySetTileZIndexFixture.utf8))
+        expect(false, "decoding the pre-amendment setTileZIndex payload (Int zIndex) must throw, not succeed")
+    } catch {
+        // expected: loud failure, no silent misread
+    }
+
     let setTileFrameFixture = """
     {"setTileFrame":{"frame":{"height":400,"width":300,"x":10,"y":20},"id":"11111111-1111-4111-8111-111111111111"}}
     """

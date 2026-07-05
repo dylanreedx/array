@@ -136,9 +136,8 @@ final class ZoneRuntimeController {
 
     // D16 (docs/38-locked-decisions.md): project release = DETACH, never kill.
     // This function intentionally issues no tmux command. The controller holds no
-    // TmuxControl, no Process, and no TmuxSession reference, so the no-kill property
-    // is enforced by the type rather than by convention. Sessions stay alive across
-    // workspace switches; only explicit user tile close may issue kill-window.
+    // TmuxControl or Process, so release has no executable tmux path. Sessions stay
+    // alive across workspace switches; only explicit user tile close may issue kill-window.
     func close() {
         guard !isClosed else { return }
         isClosed = true
@@ -196,6 +195,12 @@ final class ZoneRuntimeController {
             }
             return fallbacks
         }
+        if let tmuxPath = TmuxLocator.resolve() {
+            startReaper(
+                tmuxControl: ProcessTmuxControl(tmuxPath: tmuxPath),
+                activitySnapshotSource: { nil }
+            )
+        }
     }
 
     func startReaper(
@@ -220,11 +225,14 @@ final class ZoneRuntimeController {
                 return await MainActor.run {
                     let tileIds = self.canvasView?.canvasState.tiles.map(\.id) ?? self.runtimes.map(\.tileId)
                     guard !tileIds.isEmpty else { return [] }
+                    let recordLastSeenAt = tileIds
+                        .compactMap { try? self.managedSessionStore.load(tileId: $0)?.lastSeenAt }
+                        .max()
                     return [
                         SessionPruner.SessionBinding(
                             sessionName: self.projectSessionName(),
                             tileIds: tileIds,
-                            lastSeenAt: self.project.createdAt
+                            lastSeenAt: recordLastSeenAt ?? self.project.createdAt
                         )
                     ]
                 }

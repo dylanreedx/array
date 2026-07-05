@@ -78,7 +78,7 @@ public actor SessionPruner {
             guard let self else { return }
             while !Task.isCancelled {
                 await self.sweep()
-                let interval = await self.configuration.sweepInterval
+                let interval = self.configuration.sweepInterval
                 let nanoseconds = UInt64(max(0, interval) * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: nanoseconds)
             }
@@ -101,7 +101,9 @@ public actor SessionPruner {
 
             let snapshot = await activitySnapshotSource()
             let hasActiveTurn = binding.tileIds.contains { tileId in
-                snapshot?.byTile[tileId]?.status == .working
+                guard let activity = snapshot?.byTile[tileId] else { return false }
+                if activity.status == .working { return true }
+                return now.timeIntervalSince(activity.updatedAt) < configuration.inactivityThreshold
             }
             guard !hasActiveTurn else { continue }
 

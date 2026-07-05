@@ -53,6 +53,20 @@ if ProcessInfo.processInfo.environment["CRCC_TRAP_TEST"] == "RemoteReach.tunnel.
     Foundation.exit(0) // unreachable if the fatalError traps, as expected
 }
 
+if let path = ProcessInfo.processInfo.environment["CRCC_PERSISTED_TUNNEL_PROJECT"] {
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let project = try decoder.decode(Project.self, from: data)
+    _ = TmuxSession.wrap(
+        profile: LaunchProfile(command: "/bin/zsh", arguments: [], cwd: project.rootPath, title: "Shell"),
+        tileId: UUID(uuidString: "A0000000-0000-4000-8000-000000004802")!,
+        tmuxPath: "/usr/bin/tmux",
+        reach: project.remoteEnvironment?.reach ?? .localhost
+    )
+    Foundation.exit(0) // unreachable when persisted tunnel data reaches the spawn wrapper.
+}
+
 func approximatelyEqual(_ a: CGPoint, _ b: CGPoint, tolerance: Double = 0.001) -> Bool {
     abs(a.x - b.x) < tolerance && abs(a.y - b.y) < tolerance
 }
@@ -457,6 +471,7 @@ do {
            "RemoteReachConfig default ServerAliveCountMax is used when unset")
     expect(RemoteReachConfig.connectTimeout(defaults: defaults) == RemoteReachConfig.defaultConnectTimeout,
            "RemoteReachConfig default ConnectTimeout is used when unset")
+    expect(RemoteReachConfig.configFile(defaults: defaults) == nil, "RemoteReachConfig configFile is nil when unset")
     defaults.set(20, forKey: RemoteReachConfig.serverAliveIntervalKey)
     defaults.set(7, forKey: RemoteReachConfig.serverAliveCountMaxKey)
     defaults.set(4, forKey: RemoteReachConfig.connectTimeoutKey)
@@ -536,6 +551,261 @@ do {
     process.waitUntilExit()
     expect(process.terminationStatus != 0, "RemoteReach tunnel wrap must trap instead of silently falling back")
 
+    func runProcess(
+        _ command: String,
+        _ arguments: [String],
+        environment: [String: String]? = nil,
+        allowFailure: Bool = false
+    ) throws -> (status: Int32, stdout: String, stderr: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: command)
+        process.arguments = arguments
+        if let environment {
+            process.environment = environment
+        }
+        let out = Pipe()
+        let err = Pipe()
+        process.standardOutput = out
+        process.standardError = err
+        try process.run()
+        process.waitUntilExit()
+        let stdout = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderr = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        if !allowFailure && process.terminationStatus != 0 {
+            throw NSError(
+                domain: "ContinuumRevivedCoreChecks.RemoteReachBackend",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: "\(command) \(arguments.joined(separator: " ")) failed: \(stdout)\(stderr)"]
+            )
+        }
+        return (process.terminationStatus, stdout, stderr)
+    }
+
+    func executablePath(_ name: String, fallbacks: [String]) throws -> String {
+        for fallback in fallbacks where FileManager.default.isExecutableFile(atPath: fallback) {
+            return fallback
+        }
+        let result = try runProcess("/usr/bin/env", ["which", name], allowFailure: true)
+        let path = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        if result.status == 0, FileManager.default.isExecutableFile(atPath: path) {
+            return path
+        }
+        throw NSError(
+            domain: "ContinuumRevivedCoreChecks.RemoteReachBackend",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "missing executable \(name)"]
+        )
+    }
+
+    func freeLoopbackPort() throws -> Int {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        if fd < 0 { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        defer { close(fd) }
+        var yes: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(0).bigEndian
+        addr.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        let bindStatus = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if bindStatus != 0 { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        var bound = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameStatus = withUnsafeMutablePointer(to: &bound) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(fd, $0, &length)
+            }
+        }
+        if nameStatus != 0 { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        return Int(UInt16(bigEndian: bound.sin_port))
+    }
+
+    let tmuxPath = try executablePath("tmux", fallbacks: ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"])
+    let sshdPath = try executablePath("sshd", fallbacks: ["/usr/sbin/sshd", "/usr/local/sbin/sshd"])
+    let sshKeygenPath = try executablePath("ssh-keygen", fallbacks: ["/usr/bin/ssh-keygen"])
+    let backendRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-remote-reach-backend-\(UUID().uuidString)", isDirectory: true)
+    let sshHome = backendRoot.appendingPathComponent("home", isDirectory: true)
+    let sshDir = sshHome.appendingPathComponent(".ssh", isDirectory: true)
+    let remoteCwd = backendRoot.appendingPathComponent("remote cwd", isDirectory: true)
+    try FileManager.default.createDirectory(at: sshDir, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: remoteCwd, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: backendRoot) }
+
+    let hostKey = backendRoot.appendingPathComponent("host_ed25519").path
+    let clientKey = sshDir.appendingPathComponent("id_ed25519").path
+    _ = try runProcess(sshKeygenPath, ["-q", "-t", "ed25519", "-N", "", "-f", hostKey])
+    _ = try runProcess(sshKeygenPath, ["-q", "-t", "ed25519", "-N", "", "-f", clientKey])
+    let clientPublicKey = try String(contentsOfFile: "\(clientKey).pub", encoding: .utf8)
+    try clientPublicKey.write(toFile: sshDir.appendingPathComponent("authorized_keys").path, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: sshHome.path)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: sshDir.path)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: clientKey)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sshDir.appendingPathComponent("authorized_keys").path)
+
+    let sshPort = try freeLoopbackPort()
+    let sshConfig = """
+    Host 127.0.0.1
+      HostName 127.0.0.1
+      IdentityFile \(clientKey)
+      UserKnownHostsFile \(sshDir.appendingPathComponent("known_hosts").path)
+      StrictHostKeyChecking no
+      LogLevel ERROR
+    """.data(using: .utf8)!
+    try sshConfig.write(to: sshDir.appendingPathComponent("config"))
+    let backendDefaultsName = "RemoteReachBackendChecks-\(UUID().uuidString)"
+    let backendDefaults = UserDefaults(suiteName: backendDefaultsName)!
+    defer { backendDefaults.removePersistentDomain(forName: backendDefaultsName) }
+    backendDefaults.set(sshDir.appendingPathComponent("config").path, forKey: RemoteReachConfig.configFileKey)
+    let sshdConfigURL = backendRoot.appendingPathComponent("sshd_config")
+    let sshdPidURL = backendRoot.appendingPathComponent("sshd.pid")
+    let sshdLogURL = backendRoot.appendingPathComponent("sshd.log")
+    let sshdConfig = """
+    Port \(sshPort)
+    ListenAddress 127.0.0.1
+    HostKey \(hostKey)
+    AuthorizedKeysFile \(sshDir.appendingPathComponent("authorized_keys").path)
+    PidFile \(sshdPidURL.path)
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    ChallengeResponseAuthentication no
+    PubkeyAuthentication yes
+    UsePAM no
+    PermitRootLogin no
+    StrictModes no
+    LogLevel ERROR
+    Subsystem sftp internal-sftp
+    """
+    try sshdConfig.write(to: sshdConfigURL, atomically: true, encoding: .utf8)
+
+    let sshd = Process()
+    sshd.executableURL = URL(fileURLWithPath: sshdPath)
+    sshd.arguments = ["-D", "-f", sshdConfigURL.path, "-E", sshdLogURL.path]
+    try sshd.run()
+    defer {
+        if sshd.isRunning {
+            sshd.terminate()
+            sshd.waitUntilExit()
+        }
+    }
+    Thread.sleep(forTimeInterval: 0.4)
+
+    let backendEnv = ProcessInfo.processInfo.environment.merging(["HOME": sshHome.path]) { _, new in new }
+    var probeStatus: Int32 = 255
+    for _ in 0..<20 {
+        let probe = try runProcess(
+            "/usr/bin/ssh",
+            ["-F", sshDir.appendingPathComponent("config").path, "-o", "BatchMode=yes", "-p", String(sshPort), "127.0.0.1", "true"],
+            environment: backendEnv,
+            allowFailure: true
+        )
+        probeStatus = probe.status
+        if probe.status == 0 { break }
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+    let sshdLog = (try? String(contentsOf: sshdLogURL, encoding: .utf8)) ?? ""
+    expect(probeStatus == 0, "loopback sshd should accept generated key on 127.0.0.1:\(sshPort); log=\(sshdLog)")
+
+    let backendTileId = UUID(uuidString: "A0000000-0000-4000-8000-000000004848")!
+    let backendSession = TmuxSession.sessionName(tileId: backendTileId)
+    let backendProfile = LaunchProfile(command: "/bin/sh", arguments: ["-lc", "sleep 10"], cwd: remoteCwd.path, title: "Remote Script")
+    let loopbackTarget = SSHTarget(alias: "continuum-test-local", hostname: "127.0.0.1", username: nil, port: sshPort)
+    let loopbackWrapped = TmuxSession.wrap(profile: backendProfile, tileId: backendTileId, tmuxPath: tmuxPath, reach: .sshForward(loopbackTarget), defaults: backendDefaults)
+    let remoteProcess = Process()
+    remoteProcess.executableURL = URL(fileURLWithPath: "/usr/bin/script")
+    remoteProcess.arguments = ["-q", "/dev/null", loopbackWrapped.command] + loopbackWrapped.arguments
+    remoteProcess.environment = backendEnv
+    remoteProcess.standardOutput = Pipe()
+    let remoteStderr = Pipe()
+    remoteProcess.standardError = remoteStderr
+    try remoteProcess.run()
+    defer {
+        if remoteProcess.isRunning {
+            remoteProcess.terminate()
+            remoteProcess.waitUntilExit()
+        }
+        _ = try? runProcess(tmuxPath, ["kill-session", "-t", backendSession], allowFailure: true)
+    }
+
+    var hasSessionStatus: Int32 = 1
+    for _ in 0..<50 {
+        hasSessionStatus = try runProcess(tmuxPath, ["has-session", "-t", backendSession], allowFailure: true).status
+        if hasSessionStatus == 0 { break }
+        if !remoteProcess.isRunning { break }
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+    if hasSessionStatus != 0 {
+        let remoteError = String(data: remoteStderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        expect(false, "ssh-wrapped LaunchProfile should create real tmux session \(backendSession); ssh stderr=\(remoteError)")
+    }
+    Thread.sleep(forTimeInterval: 2.0)
+    expect(remoteProcess.isRunning, "ssh keepalive settings should not kill the short-lived loopback attachment")
+    _ = try runProcess(tmuxPath, ["kill-session", "-t", backendSession])
+    let killedStatus = try runProcess(tmuxPath, ["has-session", "-t", backendSession], allowFailure: true).status
+    expect(killedStatus != 0, "ssh-wrapped tmux session should be removable by real tmux kill-session")
+
+    let localBackendTileId = UUID(uuidString: "A0000000-0000-4000-8000-000000004849")!
+    let localBackendSession = TmuxSession.sessionName(tileId: localBackendTileId)
+    let localBackendWrapped = TmuxSession.wrap(profile: backendProfile, tileId: localBackendTileId, tmuxPath: tmuxPath)
+    let localTmux = Process()
+    localTmux.executableURL = URL(fileURLWithPath: "/usr/bin/script")
+    localTmux.arguments = ["-q", "/dev/null", localBackendWrapped.command] + localBackendWrapped.arguments
+    localTmux.standardOutput = Pipe()
+    localTmux.standardError = Pipe()
+    try localTmux.run()
+    defer {
+        if localTmux.isRunning {
+            localTmux.terminate()
+            localTmux.waitUntilExit()
+        }
+        _ = try? runProcess(tmuxPath, ["kill-session", "-t", localBackendSession], allowFailure: true)
+    }
+    var localHasSessionStatus: Int32 = 1
+    for _ in 0..<50 {
+        localHasSessionStatus = try runProcess(tmuxPath, ["has-session", "-t", localBackendSession], allowFailure: true).status
+        if localHasSessionStatus == 0 { break }
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+    expect(localHasSessionStatus == 0, "default localhost reach should still create a real tmux session")
+    _ = try runProcess(tmuxPath, ["kill-session", "-t", localBackendSession])
+
+    let persistedTunnelProject = Project(
+        name: "persisted tunnel",
+        rootPath: remoteCwd.path,
+        createdAt: Date(timeIntervalSince1970: 1_800_000_048),
+        updatedAt: Date(timeIntervalSince1970: 1_800_000_049),
+        defaultLaunchProfileId: "shell",
+        editorPreference: .auto,
+        settings: ProjectSettings(
+            restorePolicy: .restoreDescriptors,
+            browserStoragePolicy: .perProject,
+            terminalClosePolicy: .askWhenRunning
+        ),
+        remoteEnvironment: RemoteEnvironment(label: "Relay", reach: .tunnel(relayHost: "relay.example"))
+    )
+    let persistedTunnelURL = backendRoot.appendingPathComponent("persisted-tunnel-project.json")
+    try encoder.encode(persistedTunnelProject).write(to: persistedTunnelURL)
+    let persistedTunnelProcess = Process()
+    persistedTunnelProcess.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    persistedTunnelProcess.environment = ProcessInfo.processInfo.environment.merging([
+        "CRCC_PERSISTED_TUNNEL_PROJECT": persistedTunnelURL.path
+    ]) { _, new in new }
+    let persistedTunnelStderr = Pipe()
+    persistedTunnelProcess.standardError = persistedTunnelStderr
+    try persistedTunnelProcess.run()
+    persistedTunnelProcess.waitUntilExit()
+    let persistedTunnelError = String(
+        data: persistedTunnelStderr.fileHandleForReading.readDataToEndOfFile(),
+        encoding: .utf8
+    ) ?? ""
+    expect(persistedTunnelProcess.terminationStatus != 0, "persisted tunnel project must crash in child process")
+    expect(persistedTunnelError.contains("tunnel reach path"), "persisted tunnel crash should include tunnel reach path, got \(persistedTunnelError)")
+
     let manifest = InvariantManifest(
         invariantId: "ticket48-remote-reach-model",
         runId: UUID().uuidString,
@@ -550,7 +820,14 @@ do {
                 .string(RemoteReachConfig.serverAliveCountMaxKey),
                 .string(RemoteReachConfig.connectTimeoutKey)
             ]),
-            "tunnel_trap_status": .int(Int(process.terminationStatus))
+            "tunnel_trap_status": .int(Int(process.terminationStatus)),
+            "backend_loopback_ssh_port": .int(sshPort),
+            "backend_loopback_tmux_session_created": .bool(hasSessionStatus == 0),
+            "backend_keepalive_process_running_after_2s": .bool(remoteProcess.isRunning),
+            "backend_loopback_tmux_session_killed": .bool(killedStatus != 0),
+            "backend_localhost_tmux_session_created": .bool(localHasSessionStatus == 0),
+            "backend_persisted_tunnel_trap_status": .int(Int(persistedTunnelProcess.terminationStatus)),
+            "backend_persisted_tunnel_trap_message_contains": .bool(persistedTunnelError.contains("tunnel reach path"))
         ],
         outcome: InvariantOutcome.pass.rawValue,
         failureReason: nil
@@ -1587,7 +1864,7 @@ do {
     let data = try JSONCodec.makeEncoder().encode(descriptor)
     let decoded = try JSONCodec.makeDecoder().decode(TerminalSessionDescriptor.self, from: data)
     expect(decoded == descriptor, "TerminalSessionDescriptor round trip")
-    let targetDescriptor = TerminalSessionDescriptor(
+    let scrollbackDescriptor = TerminalSessionDescriptor(
         id: descriptor.id,
         tileId: descriptor.tileId,
         launchProfileId: descriptor.launchProfileId,
@@ -1599,12 +1876,13 @@ do {
         createdAt: descriptor.createdAt,
         lastStartedAt: descriptor.lastStartedAt,
         lastExit: nil,
-        scrollback: "line one",
-        tmuxWindowTarget: "%9"
+        scrollback: "line one"
     )
-    expect(TerminalSessionDescriptor.currentSchemaVersion == 3, "TerminalSessionDescriptor current schema is v3 for tmuxWindowTarget")
-    let targetDecoded = try JSONCodec.makeDecoder().decode(TerminalSessionDescriptor.self, from: JSONCodec.makeEncoder().encode(targetDescriptor))
-    expect(targetDecoded == targetDescriptor, "TerminalSessionDescriptor v3 preserves tmuxWindowTarget and scrollback")
+    let scrollbackData = try JSONCodec.makeEncoder().encode(scrollbackDescriptor)
+    let scrollbackJSON = String(data: scrollbackData, encoding: .utf8) ?? ""
+    expect(!scrollbackJSON.contains("tmuxWindowTarget"), "TerminalSessionDescriptor JSON must not contain host-local tmuxWindowTarget")
+    let targetDecoded = try JSONCodec.makeDecoder().decode(TerminalSessionDescriptor.self, from: scrollbackData)
+    expect(targetDecoded == scrollbackDescriptor, "TerminalSessionDescriptor preserves scrollback without host-local tmuxWindowTarget")
     let v2SessionJSON = """
     {
       "schemaVersion": 2,
@@ -1622,7 +1900,7 @@ do {
     }
     """.data(using: .utf8)!
     let v2SessionDecoded = try JSONCodec.makeDecoder().decode(TerminalSessionDescriptor.self, from: v2SessionJSON)
-    expect(v2SessionDecoded.tmuxWindowTarget == nil, "TerminalSessionDescriptor v2 decode leaves absent tmuxWindowTarget nil")
+    expect(v2SessionDecoded.scrollback == "legacy", "TerminalSessionDescriptor v2 decode preserves scrollback without tmuxWindowTarget")
     let withExit = TerminalSessionDescriptor(
         id: descriptor.id,
         tileId: descriptor.tileId,
@@ -6763,35 +7041,27 @@ do {
 }
 
 // Mechanical CI guard: ContinuumRevivedCore's target declaration in
-// Package.swift must keep an empty `dependencies:` array — the op-log
-// layer is pure Swift with zero external dependencies.
+// Package.swift may only carry the GRDB dependency required by ticket 54.
+// The op-log layer remains pure Swift; the allowed dependency belongs to the
+// auth store and is kept explicit here so arbitrary Core dependencies do not
+// creep in silently.
 do {
     let path = "Package.swift"
     guard let source = try? String(contentsOfFile: path, encoding: .utf8) else {
         fputs("FAIL: dependencies guard: could not read \(path) from cwd \(FileManager.default.currentDirectoryPath)\n", stderr)
         Foundation.exit(1)
     }
-    // Match `.target(name: "ContinuumRevivedCore")` specifically — NOT the
-    // `.library(name: "ContinuumRevivedCore", ...)` product declaration,
-    // which also contains the substring `name: "ContinuumRevivedCore"` and
-    // appears earlier in the file. Anchor on the `.target(` prefix so the
-    // guard inspects the actual target declaration that owns
-    // `dependencies:`, with no dependencies: argument at all (the empty
-    // case) — any dependencies: array appearing in that same target
-    // declaration fails the guard.
-    guard let range = source.range(of: ".target(name: \"ContinuumRevivedCore\"") else {
+    guard let targetStart = source.range(of: ".target(\n            name: \"ContinuumRevivedCore\""),
+          let syncComment = source.range(of: "// Sync layer", range: targetStart.upperBound..<source.endIndex) else {
         fputs("FAIL: dependencies guard: could not find ContinuumRevivedCore target declaration in Package.swift\n", stderr)
         Foundation.exit(1)
     }
-    // Look at the declaration up to the next `)` that closes the .target(...) call.
-    let afterName = source[range.upperBound...]
-    guard let closeParen = afterName.firstIndex(of: ")") else {
-        fputs("FAIL: dependencies guard: malformed ContinuumRevivedCore target declaration\n", stderr)
-        Foundation.exit(1)
-    }
-    let declaration = afterName[afterName.startIndex..<closeParen]
-    expect(!declaration.contains("dependencies"), "dependencies guard: ContinuumRevivedCore target must declare no dependencies, found: \(declaration)")
-    print("dependencies guard: ContinuumRevivedCore target has zero dependencies")
+    let declaration = String(source[targetStart.lowerBound..<syncComment.lowerBound])
+    let compactDeclaration = declaration.filter { !$0.isWhitespace }
+    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:[.product(name:"GRDB",package:"GRDB.swift")]),"#
+    expect(compactDeclaration == expectedDeclaration,
+           "dependencies guard: ContinuumRevivedCore target must include exactly the GRDB product dependency, found: \(declaration)")
+    print("dependencies guard: ContinuumRevivedCore target has only GRDB dependency")
 }
 
 // MARK: - Ticket 08: Sync/observation type split (ActivityStore)
@@ -6808,6 +7078,7 @@ runSidebarActivityTreeSnapshotTests()
 runAgentStateReaderTests()
 runPiAgentStateReaderTests()
 runClaudeAgentStateReaderTests()
+runCodexAgentStateReaderTests()
 
 // MARK: - Ticket 12: Injectable substrates (TmuxControl, Clock, Host, SyncTransport)
 

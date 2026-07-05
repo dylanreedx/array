@@ -8,6 +8,13 @@ import Foundation
 // — this is how the convergence fuzz and transport soak (later tickets) drive
 // dropped/reordered delivery. The real CloudKit transport delivers continuously
 // via CKSubscription pushes; there is no manual flush there.
+//
+// NOTE ON NAMING: `ContinuumRevivedSync` also defines `SyncTransport` and
+// `FakeSyncTransport`, but for the Phase 6 transport envelope (`SyncMessage`,
+// connection state, adversarial replica queues). This Core substrate is the
+// older op-log push/subscribe seam over `TransportLoggedOp`. If a file needs
+// both, use module qualification rather than assuming the two fakes share an
+// API.
 public enum TransportMode: Sendable {
     case reliable
     case partition                  // drops all ops

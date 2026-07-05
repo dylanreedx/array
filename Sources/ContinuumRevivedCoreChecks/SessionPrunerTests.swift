@@ -86,6 +86,23 @@ private func runSessionPrunerLogicTests() async {
     do {
         let tmux = InMemoryTmuxControl()
         let clock = FakeClock(start: base.addingTimeInterval(60))
+        let recentShellActivity = makeActivitySnapshot(
+            tileId: tileId,
+            status: .idle,
+            at: clock.now().addingTimeInterval(-5)
+        )
+        let pruner = makePruner(tmux: tmux, clock: clock, threshold: 30, binding: binding) {
+            recentShellActivity
+        }
+
+        await pruner.sweep()
+        expect(tmux.log.isEmpty, "SessionPruner must count recent plain-shell activity even when status is idle")
+        measuredLogs.append(tmux.log.map(String.init(describing:)))
+    }
+
+    do {
+        let tmux = InMemoryTmuxControl()
+        let clock = FakeClock(start: base.addingTimeInterval(60))
         var mutableBinding = binding
         let pruner = makePruner(tmux: tmux, clock: clock, threshold: 30, binding: mutableBinding)
 

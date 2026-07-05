@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import GRDB
 
 public struct AuthSession: Equatable, Sendable {
     public var id: UUID
@@ -21,11 +22,6 @@ public struct AuthSession: Equatable, Sendable {
 }
 
 public actor SessionStore {
-    private struct SessionRow: Sendable {
-        var session: AuthSession
-        var revokedAt: Date?
-    }
-
     private struct Claims: Codable {
         var sid: UUID
         var sub: String
@@ -36,11 +32,20 @@ public actor SessionStore {
 
     private let clock: any Clock
     private let signingKey: SymmetricKey
-    private var rows: [UUID: SessionRow] = [:]
+    private let dbQueue: DatabaseQueue
+
+    public init(signingKey: Data, clock: any Clock = SystemClock(), databaseURL: URL? = nil) throws {
+        self.signingKey = SymmetricKey(data: signingKey)
+        self.clock = clock
+        self.dbQueue = try AuthDatabase.queue(at: databaseURL)
+        try Self.prepare(dbQueue)
+    }
 
     public init(signingKey: Data, clock: any Clock = SystemClock()) {
         self.signingKey = SymmetricKey(data: signingKey)
         self.clock = clock
+        self.dbQueue = try! AuthDatabase.queue(at: nil)
+        try! Self.prepare(dbQueue)
     }
 
     public static func loadOrCreateSigningKey(in authDirectory: URL, fileManager: FileManager = .default) throws -> Data {
@@ -73,7 +78,23 @@ public actor SessionStore {
         )
         let token = try token(for: claims)
         let session = AuthSession(id: id, subject: subject, scopes: scopes, issuedAt: now, expiresAt: expiresAt, token: token)
-        rows[id] = SessionRow(session: session, revokedAt: nil)
+        try dbQueue.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO auth_sessions
+                    (id, subject, scopes, issued_at, expires_at, token, revoked_at)
+                VALUES (?, ?, ?, ?, ?, ?, NULL)
+                """,
+                arguments: [
+                    id.uuidString,
+                    subject,
+                    scopes.rawValue,
+                    now.timeIntervalSince1970,
+                    expiresAt.timeIntervalSince1970,
+                    token
+                ]
+            )
+        }
         return session
     }
 
@@ -104,20 +125,68 @@ public actor SessionStore {
 
         let claims = try JSONDecoder().decode(Claims.self, from: payload)
         guard claims.exp > clock.now().timeIntervalSince1970 else { throw AuthError.expired }
-        guard let row = rows[claims.sid] else { throw AuthError.revoked }
-        guard row.revokedAt == nil else { throw AuthError.revoked }
-        return row.session
+        guard let row = try dbQueue.read({ db in
+            try Row.fetchOne(db, sql: "SELECT * FROM auth_sessions WHERE id = ?", arguments: [claims.sid.uuidString])
+        }) else {
+            throw AuthError.revoked
+        }
+        guard (row["revoked_at"] as Double?) == nil else { throw AuthError.revoked }
+        return try Self.session(from: row)
     }
 
     public func revoke(id: UUID) {
-        rows[id]?.revokedAt = clock.now()
+        let now = clock.now()
+        try? dbQueue.write { db in
+            try db.execute(
+                sql: "UPDATE auth_sessions SET revoked_at = ? WHERE id = ?",
+                arguments: [now.timeIntervalSince1970, id.uuidString]
+            )
+        }
     }
 
     public func revokeAll(except kept: UUID? = nil) {
         let now = clock.now()
-        for id in rows.keys where id != kept {
-            rows[id]?.revokedAt = now
+        try? dbQueue.write { db in
+            if let kept {
+                try db.execute(
+                    sql: "UPDATE auth_sessions SET revoked_at = ? WHERE id <> ?",
+                    arguments: [now.timeIntervalSince1970, kept.uuidString]
+                )
+            } else {
+                try db.execute(
+                    sql: "UPDATE auth_sessions SET revoked_at = ?",
+                    arguments: [now.timeIntervalSince1970]
+                )
+            }
         }
+    }
+
+    private static func prepare(_ dbQueue: DatabaseQueue) throws {
+        try dbQueue.write { db in
+            try db.execute(sql: """
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                id TEXT PRIMARY KEY NOT NULL,
+                subject TEXT NOT NULL,
+                scopes INTEGER NOT NULL,
+                issued_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                token TEXT NOT NULL,
+                revoked_at REAL
+            )
+            """)
+        }
+    }
+
+    private static func session(from row: Row) throws -> AuthSession {
+        guard let id = UUID(uuidString: row["id"] as String) else { throw AuthError.invalidToken }
+        return AuthSession(
+            id: id,
+            subject: row["subject"] as String,
+            scopes: Scope(rawValue: row["scopes"] as Int),
+            issuedAt: Date(timeIntervalSince1970: row["issued_at"] as Double),
+            expiresAt: Date(timeIntervalSince1970: row["expires_at"] as Double),
+            token: row["token"] as String
+        )
     }
 
     private func token(for claims: Claims) throws -> String {

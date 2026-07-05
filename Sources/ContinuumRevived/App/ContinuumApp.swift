@@ -2482,6 +2482,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 }
                 return nil
             }
+            spawner.terminalFocusedPaneTargetProvider = { [weak self] in
+                guard let self,
+                      let tileId = canvasView.canvasState.lastActiveTileId,
+                      let record = self.managedSessionRecord(forTileId: tileId)
+                else { return nil }
+                return record.tmuxWindowTarget()
+            }
             spawner.browserProfileSwitchHandler = { [weak self] tileId, profileId in
                 self?.switchBrowserTileProfile(tileId: tileId, profileId: profileId)
             }
@@ -3178,8 +3185,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         let control = tmuxControlFactory(tmuxPath)
 
-        let descriptor = terminalSessionDescriptor(forTileId: tileId)
-        if let target = descriptor?.tmuxWindowTarget, TmuxSession.isValidPaneId(target) {
+        let target = managedSessionRecord(forTileId: tileId)?.tmuxWindowTarget()
+        if let target, TmuxSession.isValidPaneId(target) {
             if let error = Self.runTmuxControlOperationSync({ try await control.killWindow(target: target) }) {
                 fputs("tmux kill-window failed for tile=\(tileId.uuidString) target=\(target): \(error)\n", stderr)
             }
@@ -3203,6 +3210,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return descriptor
         }
         return try? projectStore.listSessions().first(where: { $0.tileId == tileId })
+    }
+
+    private func managedSessionRecord(forTileId tileId: UUID) -> ManagedAgentSessionRecord? {
+        try? workspaceRuntime?.activeController?.managedSessionStore.load(tileId: tileId)
     }
 
     /// `TmuxControl` is async throughout (it may shell out to a real `tmux`
@@ -10014,6 +10025,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         // install() requires project canvases loadable; storeA and storeB already have canvases saved.
         try runtime.install(into: workspaceCanvas, appRegistry: appRegistry)
+        let installClobberTileId = UUID(uuidString: "00000000-0000-0000-a100-0000000000a3")!
+        let installClobberZoneId = UUID(uuidString: "00000000-0000-0000-a100-0000000000a4")!
+        let installedMembershipTile = Tile(
+            id: installClobberTileId,
+            kind: .note,
+            title: "Install membership",
+            frame: TileFrame(x: 10, y: 20, width: 300, height: 200),
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        ).with(zoneId: installClobberZoneId)
+        let staleInstallTile = Tile(
+            id: installClobberTileId,
+            kind: .note,
+            title: "Install membership stale",
+            frame: TileFrame(x: 999, y: 999, width: 111, height: 111),
+            zPosition: .fromLegacyRank(9),
+            runtimeRef: nil,
+            metadata: TileMetadata()
+        )
+        workspaceCanvas.install(tileView: TileNSView(tile: installedMembershipTile), for: installedMembershipTile)
+        workspaceCanvas.install(tileView: TileNSView(tile: staleInstallTile), for: staleInstallTile)
+        try expect(
+            workspaceCanvas.canvasState.tiles.first(where: { $0.id == installClobberTileId })?.zoneId == installClobberZoneId,
+            "A10 install-clobber regression: replacing a tile view must preserve the stored membership register"
+        )
         // install() acquired both controllers (refCount: 2 each). Release the install's extra ref.
         // Actually install sets acquiredProjectIds = newlyAcquired. Since both were already at
         // refCount=1 before install (from register()), acquire() bumps to 2. We accept refCount=2
@@ -11193,8 +11230,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             title: "Shell",
             createdAt: Date(timeIntervalSince1970: 1_717_000_000),
             lastStartedAt: Date(timeIntervalSince1970: 1_717_000_000),
-            lastExit: nil,
-            tmuxWindowTarget: terminalWindowTarget
+            lastExit: nil
+        ))
+        try ManagedAgentSessionStore(projectRoot: deleteRoot).upsert(ManagedAgentSessionRecord(
+            tileId: terminalTileId,
+            agentKind: .shell,
+            status: .running,
+            lastSeenAt: Date(timeIntervalSince1970: 1_717_000_000),
+            runtimePayload: try ManagedAgentSessionRecord.makeRuntimePayload(windowTarget: terminalWindowTarget, cwd: deleteRoot.path)
         ))
         let terminalView = TileNSView(tile: terminalTile)
         deleteCanvas.install(tileView: terminalView, for: terminalTile)
@@ -11238,8 +11281,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             title: "Throwing View",
             createdAt: Date(timeIntervalSince1970: 1_717_000_002),
             lastStartedAt: Date(timeIntervalSince1970: 1_717_000_002),
-            lastExit: nil,
-            tmuxWindowTarget: throwingViewWindowTarget
+            lastExit: nil
+        ))
+        try ManagedAgentSessionStore(projectRoot: throwingViewRoot).upsert(ManagedAgentSessionRecord(
+            tileId: throwingViewTileId,
+            agentKind: .shell,
+            status: .running,
+            lastSeenAt: Date(timeIntervalSince1970: 1_717_000_002),
+            runtimePayload: try ManagedAgentSessionRecord.makeRuntimePayload(windowTarget: throwingViewWindowTarget, cwd: throwingViewRoot.path)
         ))
         let throwingView = TileNSView(tile: throwingViewTile)
         throwingViewCanvas.install(tileView: throwingView, for: throwingViewTile)
@@ -11282,8 +11331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             title: "Legacy Shell",
             createdAt: Date(timeIntervalSince1970: 1_717_000_001),
             lastStartedAt: Date(timeIntervalSince1970: 1_717_000_001),
-            lastExit: nil,
-            tmuxWindowTarget: nil
+            lastExit: nil
         ))
         let legacyView = TileNSView(tile: legacyTile)
         legacyCanvas.install(tileView: legacyView, for: legacyTile)
@@ -11314,16 +11362,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let releaseTmuxControl = InMemoryTmuxControl()
         let releaseRoot = tempRoot.appendingPathComponent("release", isDirectory: true)
         try fileManager.createDirectory(at: releaseRoot, withIntermediateDirectories: true)
-        let (releaseDelegate, _, releaseBrowserEngine, _) = try makeDelegate(root: releaseRoot, defaults: defaults, fakeTmuxPath: fakeTmuxPath, tmuxControl: releaseTmuxControl)
+        let (releaseDelegate, _, releaseBrowserEngine, releaseStore) = try makeDelegate(root: releaseRoot, defaults: defaults, fakeTmuxPath: fakeTmuxPath, tmuxControl: releaseTmuxControl)
         defer { releaseBrowserEngine.shutdown() }
         guard let releaseRuntime = releaseDelegate.workspaceRuntime,
-              let releaseProjectId = releaseRuntime.activeController?.project.id else {
+              let releaseController = releaseRuntime.activeController else {
             throw CheckError.failed("release scenario should have an active project")
         }
+        let releaseProjectId = releaseController.project.id
+        let releaseRuntimeId = UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!
+        let releaseTileId = UUID(uuidString: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")!
+        let releaseRuntimeContext = try GhosttyRuntimeContext()
+        let liveReleaseRuntime = GhosttyTerminalRuntime(
+            id: releaseRuntimeId,
+            tileId: releaseTileId,
+            title: "Release Shell",
+            launchProfile: LaunchProfile(command: "/bin/zsh", arguments: [], cwd: releaseRoot.path, title: "Release Shell"),
+            ghostty: releaseRuntimeContext
+        )
+        releaseController.runtimes = [liveReleaseRuntime]
+        try releaseStore.saveSession(TerminalSessionDescriptor(
+            id: releaseRuntimeId,
+            tileId: releaseTileId,
+            launchProfileId: "shell",
+            command: "/bin/zsh",
+            args: [],
+            cwd: releaseRoot.path,
+            env: [:],
+            title: "Release Shell",
+            createdAt: Date(timeIntervalSince1970: 1_717_000_003),
+            lastStartedAt: Date(timeIntervalSince1970: 1_717_000_003),
+            lastExit: nil
+        ))
+        let releaseDescriptorBefore = try releaseStore.loadSession(id: releaseRuntimeId)
+        try expect(releaseDescriptorBefore.lastExit == nil, "release fixture should start with an unstamped live runtime descriptor")
         try expect(releaseRuntime.controller(for: releaseProjectId) != nil, "release scenario should start with a live controller")
         releaseRuntime.closeAll()
         try expect(releaseTmuxControl.log.isEmpty, "project release must detach only and issue no tmux kill command; got \(releaseTmuxControl.log)")
         try expect(releaseRuntime.controller(for: releaseProjectId) == nil, "project release should drop the registry controller")
+        let releaseLastExitStamped = try releaseStore.loadSession(id: releaseRuntimeId).lastExit != nil
+        try expect(releaseLastExitStamped, "project release should stamp lastExit on at least one live runtime descriptor")
 
         let sentinelTmuxControl = InMemoryTmuxControl()
         try expect(Self.runTmuxControlOperationSync({
@@ -11458,6 +11535,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "teardownTmuxCalls": teardownTmuxControl.log.map(String.init(describing:)),
             "releaseTmuxCalls": releaseTmuxControl.log.map(String.init(describing:)),
             "releaseProjectId": releaseProjectId.uuidString,
+            "releaseRuntimeId": releaseRuntimeId.uuidString,
+            "releaseLastExitStamped": releaseLastExitStamped,
             "sentinelTmuxCalls": sentinelTmuxControl.log.map(String.init(describing:)),
             "sentinelKillDetected": sentinelKillDetected,
             "disabledTmuxCalls": disabledTmuxControl.log.map(String.init(describing:)),

@@ -52,7 +52,7 @@ public enum AuthError: Error, Equatable, Sendable, CustomStringConvertible {
 
 public func authorize(_ message: ControlMessage, grantedScopes: Scope) throws {
     guard let required = requiredScope[message] else {
-        fatalError("No scope entry for \(message) - add one before shipping this message type.")
+        throw AuthError.unscopedMessage(message)
     }
     guard grantedScopes.contains(required) else {
         throw AuthError.missingScope(required)

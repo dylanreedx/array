@@ -1,0 +1,12 @@
+{"type":"sessionStateChanged","state":"starting"}
+{"type":"sessionStateChanged","state":"running"}
+{"type":"turnStarted","threadId":"thread-main","turnId":"turn-1"}
+{"type":"itemStarted","threadId":"thread-main","itemId":"item-1","kind":"commandExecution","title":"run build"}
+{"type":"contentDelta","threadId":"thread-main","turnId":"turn-1","streamKind":"assistant","delta":"Preparing command."}
+{"type":"tokenUsageUpdated","threadId":"thread-main","snapshot":{"inputTokens":120,"outputTokens":34,"totalCostUsd":0.015}}
+{"type":"requestOpened","threadId":"thread-main","requestId":"request-1","kind":"commandExecutionApproval"}
+{"type":"contentDelta","threadId":"thread-main","turnId":"turn-1","streamKind":"commandOutput","delta":"Waiting for approval."}
+{"type":"requestResolved","threadId":"thread-main","requestId":"request-1","decision":"approve"}
+{"type":"itemCompleted","threadId":"thread-main","itemId":"item-1","kind":"commandExecution","status":"completed"}
+{"type":"turnCompleted","threadId":"thread-main","turnId":"turn-1","outcome":"completed"}
+{"type":"sessionStateChanged","state":"ready"}

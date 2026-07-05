@@ -221,8 +221,9 @@ private func runAuthRealPathSuite() async throws {
 
     let clock = FakeClock(start: Date(timeIntervalSince1970: 1_800_300_000))
     let bootstrap = BootstrapGrant(credential: "realpath-bootstrap", scopes: .admin)
-    let pairing = PairingStore(clock: clock, bootstrapGrant: bootstrap)
-    let sessions = SessionStore(signingKey: key, clock: clock)
+    let dbURL = authDir.appendingPathComponent("auth.db")
+    let pairing = try PairingStore(clock: clock, bootstrapGrant: bootstrap, databaseURL: dbURL)
+    let sessions = try SessionStore(signingKey: key, clock: clock, databaseURL: dbURL)
     let admin = try await sessions.exchange(credential: bootstrap.credential, requested: .admin, subject: "mac-local", pairingStore: pairing)
     let verifiedAdmin = try await sessions.verify(admin.token)
     expect(verifiedAdmin.scopes == .admin, "Auth real path: bootstrap admin token verifies")
@@ -231,10 +232,25 @@ private func runAuthRealPathSuite() async throws {
     let observer = try await sessions.exchange(credential: oneTime.credential, requested: .observer, subject: "phone", pairingStore: pairing)
     let verifiedObserver = try await sessions.verify(observer.token)
     expect(verifiedObserver.scopes == .observer, "Auth real path: observer pairing token verifies")
+    var dbStat = stat()
+    expect(stat(dbURL.path, &dbStat) == 0, "Auth real path: auth.db can be stat'd")
+    expect((dbStat.st_mode & 0o777) == 0o600, "Auth real path: auth.db permissions are 0600")
+
+    let relaunchedSessions = try SessionStore(signingKey: key, clock: clock, databaseURL: dbURL)
+    let relaunchedObserver = try await relaunchedSessions.verify(observer.token)
+    expect(relaunchedObserver.id == observer.id && relaunchedObserver.scopes == .observer,
+           "Auth real path: fresh SessionStore verifies persisted observer session")
+
+    let relaunchedPairing = try PairingStore(clock: clock, bootstrapGrant: bootstrap, databaseURL: dbURL)
     await expectAuthError(
-        try await sessions.exchange(credential: oneTime.credential, requested: .observer, subject: "phone-2", pairingStore: pairing),
+        try await relaunchedSessions.exchange(
+            credential: oneTime.credential,
+            requested: .observer,
+            subject: "phone-2",
+            pairingStore: relaunchedPairing
+        ),
         .alreadyUsed,
-        "Auth real path: double exchange is alreadyUsed"
+        "Auth real path: consumed pairing state survives fresh PairingStore"
     )
     expectThrowsAuth(.missingScope(.orchestrationOperate), "Auth real path: observer moveTile denied") {
         try authorize(.moveTile, session: observer)
@@ -250,7 +266,10 @@ private func runAuthRealPathSuite() async throws {
         "double_exchange_error": .string(AuthError.alreadyUsed.description),
         "move_tile_denied": .bool(true),
         "subscribe_activity_allowed": .bool(true),
-        "signing_key_mode": .string(String(format: "%03o", statBuf.st_mode & 0o777))
+        "signing_key_mode": .string(String(format: "%03o", statBuf.st_mode & 0o777)),
+        "auth_db_mode": .string(String(format: "%03o", dbStat.st_mode & 0o777)),
+        "fresh_session_store_verified": .bool(true),
+        "fresh_pairing_store_rejected_reuse": .bool(true)
     ]
     let manifest = InvariantManifest(
         invariantId: "ticket54-auth",

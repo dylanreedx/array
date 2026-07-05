@@ -143,4 +143,80 @@ func runAgentAdapterTests() {
     }
     let adapter = ProbeAdapter()
     expect(adapter.providerKind == .managed, "AgentAdapter providerKind must use closed AgentKind.managed")
+
+    runManagedSessionWithApprovalFixtureCheck()
+}
+
+private func runManagedSessionWithApprovalFixtureCheck() {
+    let fixtureURL = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .appendingPathComponent("Fixtures", isDirectory: true)
+        .appendingPathComponent("managed-session-with-approval.jsonl", isDirectory: false)
+
+    guard let fixtureText = try? String(contentsOf: fixtureURL, encoding: .utf8) else {
+        fputs("FAIL: AgentAdapter integration fixture missing at \(fixtureURL.path)\n", stderr)
+        Foundation.exit(1)
+    }
+
+    let decoder = JSONDecoder()
+    let lines = fixtureText
+        .split(separator: "\n", omittingEmptySubsequences: true)
+        .map(String.init)
+    let events = lines.enumerated().map { offset, line -> AgentRuntimeEvent in
+        guard let data = line.data(using: .utf8) else {
+            fputs("FAIL: AgentAdapter fixture line \(offset + 1) is not UTF-8\n", stderr)
+            Foundation.exit(1)
+        }
+        do {
+            return try decoder.decode(AgentRuntimeEvent.self, from: data)
+        } catch {
+            fputs("FAIL: AgentAdapter fixture line \(offset + 1) failed Codable decode: \(error)\n", stderr)
+            Foundation.exit(1)
+        }
+    }
+
+    expect(events.count == 12, "AgentAdapter fixture must contain the committed 12-event managed-session sequence, got \(events.count)")
+
+    let threadId = "thread-main"
+    var accumulated: [AgentRuntimeEvent] = []
+    var statuses: [AgentStatus] = []
+    for event in events {
+        accumulated.append(event)
+        let signals = deriveStatusSignals(from: accumulated, threadId: threadId, engineStatus: .idle)
+        statuses.append(deriveAgentStatus(signals: signals))
+    }
+
+    let statusPhases = statuses.reduce(into: [AgentStatus]()) { phases, status in
+        if phases.last != status {
+            phases.append(status)
+        }
+    }
+    expect(
+        statusPhases == [.configuring, .working, .needsAttention, .working, .done],
+        "AgentAdapter fixture status phases must be configuring -> working -> needsAttention -> working -> done, got \(statusPhases)"
+    )
+
+    let openedIndex = events.firstIndex {
+        if case .requestOpened("thread-main", "request-1", .commandExecutionApproval) = $0 {
+            return true
+        }
+        return false
+    }
+    expect(openedIndex != nil, "AgentAdapter fixture must include requestOpened for request-1")
+    if let openedIndex {
+        expect(statuses[openedIndex] == .needsAttention, "AgentAdapter fixture requestOpened must derive needsAttention")
+    }
+
+    let resolvedIndex = events.firstIndex {
+        if case .requestResolved("thread-main", "request-1", "approve") = $0 {
+            return true
+        }
+        return false
+    }
+    expect(resolvedIndex != nil, "AgentAdapter fixture must include requestResolved approval for request-1")
+    if let resolvedIndex {
+        expect(statuses[resolvedIndex] == .working, "AgentAdapter fixture requestResolved must return to working")
+    }
+
+    expect(statuses.last == .done, "AgentAdapter fixture final ready-after-completed boundary must derive done")
 }
