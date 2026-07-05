@@ -209,3 +209,6 @@ try await runActivityProjectionChecks()
 
 // Ticket: docs/38-tickets/57-cloudkit-transport-impl.md
 try await runCloudKitSyncTransportChecks()
+
+// Ticket: docs/38-tickets/61b-canvas-editor.md
+try await runSpatialSyncChecks()

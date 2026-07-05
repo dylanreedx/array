@@ -35,7 +35,7 @@ private struct ContinuumRootView: View {
                 .tabItem { Label("Agents", systemImage: "person.2.fill") }
                 .tag(ContinuumTab.agents)
 
-            PlaceholderScreen(title: "Canvas", subtitle: "Canvas lands with ticket B4.")
+            CanvasTabView()
                 .tabItem { Label("Canvas", systemImage: "square.grid.2x2") }
                 .tag(ContinuumTab.canvas)
 
@@ -63,8 +63,16 @@ private final class AgentsBoardModel: ObservableObject {
     @Published var snapshot: ActivityLogSnapshot = .empty
     @Published var rows: [AgentsBoardRow] = []
 
+    // Ticket: docs/38-tickets/61b-canvas-editor.md
+    @Published var canvasScene: CanvasScene = CanvasScene(zones: [], tiles: [])
+    @Published var canvasFocusRequest: UUID?
+    @Published var canvasEditError: String?
+    let grantedScope: Scope = AgentsBoardModel.resolveGrantedScope()
+
     private var task: Task<Void, Never>?
     private var receiver: ActivityProjectionReceiver?
+    private var spatialReceiver: SpatialOpReceiver?
+    private var spatialTask: Task<Void, Never>?
 
     func start() async {
         guard task == nil else { return }
@@ -83,14 +91,28 @@ private final class AgentsBoardModel: ObservableObject {
         }
 
         let transport = CloudKitSyncTransport(containerIdentifier: continuumCloudKitContainerIdentifier)
-        let receiver = ActivityProjectionReceiver(demux: SyncMessageDemux(transport: transport), scope: .observer)
-        self.receiver = receiver
+        // ONE transport, ONE demux — the spatial receiver below is a second
+        // independent subscriber over the SAME demux the activity receiver
+        // uses (ticket 61b banner (c).7), never a second transport.
+        let demux = SyncMessageDemux(transport: transport)
 
+        let receiver = ActivityProjectionReceiver(demux: demux, scope: .observer)
+        self.receiver = receiver
         task = Task { [weak self] in
             await receiver.connect(cursor: nil)
             let stream = await receiver.subscribe()
             for await item in stream {
                 await self?.consume(item)
+            }
+        }
+
+        let spatial = SpatialOpReceiver(demux: demux)
+        self.spatialReceiver = spatial
+        spatialTask = Task { [weak self] in
+            await spatial.connect()
+            let stream = await spatial.subscribe()
+            for await materialized in stream {
+                await self?.consumeSpatial(materialized)
             }
         }
     }
@@ -108,6 +130,56 @@ private final class AgentsBoardModel: ObservableObject {
         }
         rows = AgentsBoardProjection.rows(from: snapshot)
         state = .live
+    }
+
+    private func consumeSpatial(_ materialized: MaterializedState) {
+        canvasScene = CanvasSceneProjection.scene(canvasState: materialized.canvasState, workspaceDocument: materialized.workspaceDocument)
+    }
+
+    /// "Show on canvas" centers the tile when the canvas already has it;
+    /// otherwise it is a plain tab switch (ticket 61b banner (c).10) — the
+    /// caller always switches tabs, this only arms the centering request.
+    func requestCanvasFocus(tileId: UUID) {
+        guard canvasScene.tiles.contains(where: { $0.tileId == tileId }) else { return }
+        canvasFocusRequest = tileId
+    }
+
+    /// Emits one op per gesture end. On failure the receiver has already
+    /// reverted its optimistic local apply (fanned back through
+    /// `consumeSpatial`, so `canvasScene` snaps back automatically) — this
+    /// only surfaces a non-blocking error.
+    func emitCanvasOp(_ op: Op) async {
+        guard let spatialReceiver else { return }
+        do {
+            try await spatialReceiver.emit(op)
+        } catch {
+            canvasEditError = "Couldn't sync your change — it was reverted."
+        }
+    }
+
+    /// Sends an ordered op list from a single gesture end (e.g. a drag-drop's
+    /// move + membership change) via `SpatialOpReceiver.emitAll`, which stops
+    /// at the first failure — surfaces the same non-blocking error `emitCanvasOp`
+    /// does, never emits a membership change after a failed move.
+    func emitCanvasOps(_ ops: [Op]) async {
+        guard let spatialReceiver else { return }
+        do {
+            try await spatialReceiver.emitAll(ops)
+        } catch {
+            canvasEditError = "Couldn't sync your change — it was reverted."
+        }
+    }
+
+    /// DEBUG-only escape hatch for the morning visual gate (ticket 61b banner
+    /// (c).9): without it the editor is unreachable for dogfooding, since
+    /// pairing (which raises scope beyond `.observer`) hasn't shipped yet.
+    private static func resolveGrantedScope() -> Scope {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CONTINUUM_SCOPE_OVERRIDE"] == "operator" {
+            return .operator
+        }
+        #endif
+        return .observer
     }
 }
 
@@ -193,6 +265,7 @@ private struct AgentDetailView: View {
                         PendingAttentionCard(activity: activity)
                     }
                     Button {
+                        model.requestCanvasFocus(tileId: tileId)
                         selectedTab = .canvas
                     } label: {
                         Label("Show on canvas", systemImage: "square.grid.2x2")
@@ -413,6 +486,353 @@ private struct EmptyBoardView: View {
             Text("Spawn agents on the desktop to populate this board.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Canvas tab (ticket 61b)
+
+private struct CanvasTabView: View {
+    @EnvironmentObject private var model: AgentsBoardModel
+
+    @State private var scale: CGFloat = 0.35
+    @State private var pan: CGSize = .zero
+    @GestureState private var pinchDelta: CGFloat = 1.0
+    @GestureState private var panTranslation: CGSize = .zero
+
+    @State private var activeDragTileId: UUID?
+    @GestureState private var tileDragTranslation: CGSize = .zero
+    @State private var activeResizeTileId: UUID?
+    @GestureState private var resizeTranslation: CGSize = .zero
+    @State private var hoveredZoneId: UUID?
+
+    private var canEdit: Bool { CanvasEditIntent.isEditingPermitted(scope: model.grantedScope) }
+    // Hard-blocks the camera (pan/zoom) from moving while a tile drag or
+    // resize is in progress — the editor contract requires gesture-end edits
+    // to be evaluated against a fixed camera, never a camera that shifted
+    // mid-gesture underneath the tile.
+    private var isEditingTile: Bool { activeDragTileId != nil || activeResizeTileId != nil }
+    private var effectiveScale: CGFloat { scale * pinchDelta }
+    private var effectivePan: CGSize {
+        CGSize(width: pan.width + panTranslation.width, height: pan.height + panTranslation.height)
+    }
+
+    var body: some View {
+        NavigationStack {
+            GeometryReader { geo in
+                ZStack(alignment: .topLeading) {
+                    AppColors.background.ignoresSafeArea()
+                    if model.canvasScene.zones.isEmpty && model.canvasScene.tiles.isEmpty {
+                        CanvasEmptyStateView()
+                    } else {
+                        canvasContent
+                            .contentShape(Rectangle())
+                            .gesture(panGesture)
+                            .simultaneousGesture(zoomGesture)
+                            // Tile drag/resize are attached to descendant views
+                            // with `.highPriorityGesture` (below) so they win
+                            // the arena over these ancestor camera gestures;
+                            // `isEditingTile` additionally hard-guards the
+                            // camera state updates as defense in depth.
+                    }
+                    overlayChrome(in: geo.size)
+                }
+                .onChange(of: model.canvasFocusRequest) { tileId in
+                    guard let tileId, let tile = model.canvasScene.tiles.first(where: { $0.tileId == tileId }) else { return }
+                    center(on: tile, in: geo.size)
+                    model.canvasFocusRequest = nil
+                }
+            }
+            .navigationTitle("Canvas")
+        }
+    }
+
+    private var canvasContent: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(model.canvasScene.zones) { zone in
+                zoneView(zone)
+            }
+            ForEach(model.canvasScene.tiles) { tile in
+                tileView(tile)
+            }
+        }
+    }
+
+    private func overlayChrome(in size: CGSize) -> some View {
+        VStack {
+            HStack {
+                if !canEdit {
+                    LockBadge()
+                }
+                Spacer()
+                Button {
+                    fitAll(in: size)
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .padding(10)
+                        .background(AppColors.panel)
+                        .clipShape(Circle())
+                        .foregroundStyle(.primary)
+                }
+            }
+            .padding()
+            Spacer()
+            if let editError = model.canvasEditError {
+                Text(editError)
+                    .font(.caption)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.red.opacity(0.85))
+                    .foregroundStyle(.white)
+                    .clipShape(Capsule())
+                    .padding(.bottom, 16)
+                    .task {
+                        try? await Task.sleep(for: .seconds(3))
+                        model.canvasEditError = nil
+                    }
+            }
+        }
+    }
+
+    // MARK: Zones
+
+    private func zoneView(_ zone: CanvasSceneZone) -> some View {
+        let point = screenPoint(worldX: zone.origin.x + zone.size.width / 2, worldY: zone.origin.y + zone.size.height / 2)
+        return VStack(alignment: .leading, spacing: 0) {
+            Text(zone.name.isEmpty ? "Zone" : zone.name)
+                .font(.caption.weight(.semibold))
+                .padding(6)
+                .foregroundStyle(.primary)
+            Spacer()
+        }
+        .frame(width: zone.size.width * effectiveScale, height: zone.size.height * effectiveScale, alignment: .topLeading)
+        .background(zoneTint(for: zone.tintToken).opacity(hoveredZoneId == zone.zoneId ? 0.35 : 0.16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(zoneTint(for: zone.tintToken).opacity(hoveredZoneId == zone.zoneId ? 0.9 : 0.5), lineWidth: hoveredZoneId == zone.zoneId ? 2.5 : 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .position(point)
+    }
+
+    // MARK: Tiles
+
+    private func tileView(_ tile: CanvasSceneTile) -> some View {
+        let dragOffset = activeDragTileId == tile.tileId ? tileDragTranslation : .zero
+        let resizeOffset = activeResizeTileId == tile.tileId ? resizeTranslation : .zero
+        let width = max(40, tile.frame.width * effectiveScale + resizeOffset.width)
+        let height = max(30, tile.frame.height * effectiveScale + resizeOffset.height)
+        let center = screenPoint(worldX: tile.frame.x + tile.frame.width / 2, worldY: tile.frame.y + tile.frame.height / 2)
+        let position = CGPoint(x: center.x + dragOffset.width + resizeOffset.width / 2, y: center.y + dragOffset.height + resizeOffset.height / 2)
+
+        return ZStack(alignment: .bottomTrailing) {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(AppColors.panel)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(activeDragTileId == tile.tileId || activeResizeTileId == tile.tileId ? Color.orange : Color.white.opacity(0.15), lineWidth: activeDragTileId == tile.tileId ? 2 : 1)
+                )
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: tile.kindGlyphToken)
+                        .font(.caption)
+                    statusDot(for: tile.tileId)
+                    Spacer()
+                }
+                Text(tile.title)
+                    .font(.caption2)
+                    .lineLimit(1)
+            }
+            .padding(6)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+            if canEdit {
+                Image(systemName: "arrow.down.right.and.arrow.up.left")
+                    .font(.caption2)
+                    .padding(5)
+                    .background(Circle().fill(AppColors.panel))
+                    .padding(4)
+                    .highPriorityGesture(resizeGesture(tile: tile))
+            }
+        }
+        .frame(width: width, height: height)
+        .position(position)
+        .modifier(EditableTileGestures(canEdit: canEdit, tile: tile, dragGesture: tileDragGesture(tile: tile), longPress: bringToFrontAction(tile: tile)))
+    }
+
+    private func statusDot(for tileId: UUID) -> some View {
+        let token = model.rows.first(where: { $0.tileId == tileId })?.presentation.colorToken
+        return Circle().fill(token.map { AppColors.color(for: $0) } ?? Color.gray.opacity(0.4)).frame(width: 7, height: 7)
+    }
+
+    private func bringToFrontAction(tile: CanvasSceneTile) -> () -> Void {
+        {
+            guard let op = CanvasEditIntent.bringToFront(tile: tile.tileId, scene: model.canvasScene) else { return }
+            Task { await model.emitCanvasOp(op) }
+        }
+    }
+
+    // MARK: Gestures
+
+    private var panGesture: some Gesture {
+        DragGesture()
+            .updating($panTranslation) { value, state, _ in
+                guard !isEditingTile else { return }
+                state = value.translation
+            }
+            .onEnded { value in
+                guard !isEditingTile else { return }
+                pan.width += value.translation.width
+                pan.height += value.translation.height
+            }
+    }
+
+    private var zoomGesture: some Gesture {
+        MagnificationGesture()
+            .updating($pinchDelta) { value, state, _ in
+                guard !isEditingTile else { return }
+                state = value
+            }
+            .onEnded { value in
+                guard !isEditingTile else { return }
+                scale = min(3.0, max(0.05, scale * value))
+            }
+    }
+
+    private func tileDragGesture(tile: CanvasSceneTile) -> some Gesture {
+        DragGesture(minimumDistance: 4, coordinateSpace: .global)
+            .updating($tileDragTranslation) { value, state, _ in state = value.translation }
+            .onChanged { value in
+                activeDragTileId = tile.tileId
+                let worldPoint = ZonePoint(
+                    x: tile.frame.x + tile.frame.width / 2 + value.translation.width / effectiveScale,
+                    y: tile.frame.y + tile.frame.height / 2 + value.translation.height / effectiveScale
+                )
+                hoveredZoneId = CanvasEditIntent.dropTarget(point: worldPoint, zones: model.canvasScene.zones)
+            }
+            .onEnded { value in
+                let newFrame = TileFrame(
+                    x: tile.frame.x + value.translation.width / effectiveScale,
+                    y: tile.frame.y + value.translation.height / effectiveScale,
+                    width: tile.frame.width,
+                    height: tile.frame.height
+                )
+                activeDragTileId = nil
+                hoveredZoneId = nil
+                Task { await commitMove(tile: tile, to: newFrame) }
+            }
+    }
+
+    private func resizeGesture(tile: CanvasSceneTile) -> some Gesture {
+        DragGesture(minimumDistance: 2, coordinateSpace: .global)
+            .updating($resizeTranslation) { value, state, _ in state = value.translation }
+            .onChanged { _ in activeResizeTileId = tile.tileId }
+            .onEnded { value in
+                let newFrame = TileFrame(
+                    x: tile.frame.x,
+                    y: tile.frame.y,
+                    width: max(80, tile.frame.width + value.translation.width / effectiveScale),
+                    height: max(60, tile.frame.height + value.translation.height / effectiveScale)
+                )
+                activeResizeTileId = nil
+                Task { await model.emitCanvasOp(CanvasEditIntent.resizeEnded(tile: tile.tileId, to: newFrame)) }
+            }
+    }
+
+    // Exactly one gesture end, up to two ops: the move, then (only if the
+    // drop target's zone differs from the tile's current zone) the
+    // membership change — sent as one ordered batch via `emitAll` so a failed
+    // move never lets a membership change happen after it (61b rev.2 §1).
+    private func commitMove(tile: CanvasSceneTile, to frame: TileFrame) async {
+        let ops = CanvasEditIntent.moveDropOps(tile: tile.tileId, currentZoneId: tile.zoneId, to: frame, zones: model.canvasScene.zones)
+        await model.emitCanvasOps(ops)
+    }
+
+    // MARK: World <-> screen mapping
+
+    private func screenPoint(worldX: Double, worldY: Double) -> CGPoint {
+        CGPoint(x: worldX * effectiveScale + effectivePan.width, y: worldY * effectiveScale + effectivePan.height)
+    }
+
+    private func fitAll(in size: CGSize) {
+        let zoneRects = model.canvasScene.zones.map { CGRect(x: $0.origin.x, y: $0.origin.y, width: $0.size.width, height: $0.size.height) }
+        let tileRects = model.canvasScene.tiles.map { CGRect(x: $0.frame.x, y: $0.frame.y, width: $0.frame.width, height: $0.frame.height) }
+        let all = zoneRects + tileRects
+        guard let first = all.first else { return }
+        let union = all.dropFirst().reduce(first) { $0.union($1) }
+        let margin: CGFloat = 40
+        let targetScale = min((size.width - margin * 2) / max(union.width, 1), (size.height - margin * 2) / max(union.height, 1))
+        scale = min(3.0, max(0.05, targetScale))
+        pan = CGSize(width: margin - union.minX * scale, height: margin - union.minY * scale)
+    }
+
+    private func center(on tile: CanvasSceneTile, in size: CGSize) {
+        let worldCenter = CGPoint(x: tile.frame.x + tile.frame.width / 2, y: tile.frame.y + tile.frame.height / 2)
+        pan = CGSize(width: size.width / 2 - worldCenter.x * scale, height: size.height / 2 - worldCenter.y * scale)
+    }
+}
+
+/// Applies the drag + long-press (bring-to-front) gestures only when editing
+/// is permitted (`.orchestrationOperate`) — observer scope stays read-only.
+/// The drag is attached with `.highPriorityGesture` (not `.simultaneousGesture`)
+/// so it wins the gesture arena over the ancestor canvas pan/zoom gestures:
+/// a tile drag must never also move the camera underneath it.
+private struct EditableTileGestures<DragG: Gesture>: ViewModifier {
+    let canEdit: Bool
+    let tile: CanvasSceneTile
+    let dragGesture: DragG
+    let longPress: () -> Void
+
+    func body(content: Content) -> some View {
+        if canEdit {
+            content
+                .highPriorityGesture(dragGesture)
+                .onLongPressGesture(minimumDuration: 0.6, perform: longPress)
+        } else {
+            content
+        }
+    }
+}
+
+private func zoneTint(for token: String) -> Color {
+    switch token.lowercased() {
+    case "mint": return .mint
+    case "amber": return .orange
+    case "blue": return .blue
+    case "teal": return .teal
+    case "purple": return .purple
+    case "pink": return .pink
+    case "red": return .red
+    case "green": return .green
+    default: return .gray
+    }
+}
+
+private struct LockBadge: View {
+    var body: some View {
+        Label("Read only", systemImage: "lock.fill")
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(AppColors.panel)
+            .clipShape(Capsule())
+    }
+}
+
+private struct CanvasEmptyStateView: View {
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "square.grid.2x2")
+                .font(.system(size: 30, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text("No canvas synced yet")
+                .font(.headline)
+            Text("The desktop publisher isn't wired up yet — this fills in once it is.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

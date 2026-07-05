@@ -47,6 +47,16 @@ public enum SyncMessage: Codable, Sendable, Equatable {
     case snapshot(CompactedSnapshot)
     case activity(ActivityStreamItem)
     case activitySubscribe(ActivitySubscribeRequest)
+    case spatialSubscribe(SpatialSubscribeRequest)
+}
+
+/// Spatial subscription control message — the `.subscribeSpatial` analog of
+/// `ActivitySubscribeRequest`. Empty for now: cold connect always serves the
+/// full snapshot in v1 (no cursor tonight — ticket 61b banner (a).1); the
+/// envelope is synthesized-`Codable`, so adding a cursor later is cheap and
+/// unfrozen.
+public struct SpatialSubscribeRequest: Codable, Sendable, Equatable {
+    public init() {}
 }
 
 /// The transport boundary. Concrete implementations include

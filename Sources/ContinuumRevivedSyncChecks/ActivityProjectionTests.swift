@@ -93,7 +93,10 @@ private actor BlackHoleTransport: ContinuumRevivedSync.SyncTransport {
     func allSentMessages() -> [SyncMessage] { sentMessages }
 }
 
-private final class FakeReplicaSyncTransport: ContinuumRevivedSync.SyncTransport, @unchecked Sendable {
+// Not `private` — ticket 61b's SpatialSyncTests.swift reuses this exact
+// adapter (the "61a adapter precedent") to drive the SpatialOpSender/Receiver
+// real-path check over the same FakeSyncTransport substrate.
+final class FakeReplicaSyncTransport: ContinuumRevivedSync.SyncTransport, @unchecked Sendable {
     private let fake: ContinuumRevivedSync.FakeSyncTransport
     private let replicaId: ContinuumRevivedSync.FakeSyncTransport.ReplicaId
     let inbound: AsyncStream<SyncMessage>

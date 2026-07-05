@@ -9327,4 +9327,9 @@ do {
 
 runAgentsBoardProjectionChecks()
 
+// Ticket: docs/38-tickets/61b-canvas-editor.md
+runCanvasSceneProjectionChecks()
+runCanvasEditIntentChecks()
+runCanvasEditIntentMoveDropOpsChecks()
+
 print("ContinuumRevivedCoreChecks passed")

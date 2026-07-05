@@ -315,6 +315,8 @@ public struct CloudKitSyncTransport: SyncTransport, Sendable {
             try await pushActivityItem(item)
         case .activitySubscribe(let request):
             try await triggerActivityRefetch(request)
+        case .spatialSubscribe:
+            try await triggerSpatialRefetch()
         }
     }
 
@@ -412,6 +414,23 @@ public struct CloudKitSyncTransport: SyncTransport, Sendable {
             let snapshot = try? JSONDecoder().decode(ActivityLogSnapshot.self, from: data)
         else { return }
         inboundContinuation.yield(.activity(.snapshot(snapshot)))
+    }
+
+    /// `.spatialSubscribe` is the same peer-request-with-no-peer shape as
+    /// `.activitySubscribe` above (ticket 61b): honestly a local trigger that
+    /// refetches the current spatial `CompactedSnapshot` LWW record and
+    /// surfaces it on `inbound`. No tail push here — ongoing `.op` traffic
+    /// arrives however it always has, via `fetchChanges()`'s zone-change poll
+    /// (`forwardChangedRecord`'s `CKRecordTypes.syncOp` case, already wired).
+    private func triggerSpatialRefetch() async throws {
+        let recordId = CKRecord.ID(recordName: CKStableRecordNames.compactedSnapshot, zoneID: cloudKitSyncZoneID)
+        guard
+            let results = try? await db.records(for: [recordId]),
+            case .success(let record)? = results[recordId],
+            let data = record[CompactedSnapshotField.payload] as? Data,
+            let snapshot = try? JSONDecoder().decode(CompactedSnapshot.self, from: data)
+        else { return }
+        inboundContinuation.yield(.snapshot(snapshot))
     }
 
     // MARK: - Zone lifecycle

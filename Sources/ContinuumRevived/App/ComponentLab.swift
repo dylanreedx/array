@@ -352,7 +352,7 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
+        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, canvasSceneCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
     }
 
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
@@ -456,6 +456,80 @@ enum LabCatalog {
             label.identifier = NSUserInterfaceItemIdentifier("agentsBoard.row.\(index + 1)")
             label.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
             label.textColor = color(forToken: row.presentation.colorToken)
+            stack.addArrangedSubview(label)
+        }
+        return stack
+    }
+
+    static var canvasSceneCard: LabEntry {
+        LabEntry(
+            id: "canvas.scene",
+            category: "Chrome",
+            title: "Canvas Scene",
+            summary: "Spatial state folded through CanvasSceneProjection: zones with tint tokens, tiles with glyph tokens + render order + membership.",
+            content: .staticCard(preferredSize: NSSize(width: 460, height: 220)) {
+                makeCanvasSceneView(scene: canvasSceneFixture())
+            }
+        )
+    }
+
+    /// 2 zones + 4 tiles, one membership, distinct z-orders — ticket
+    /// 61b's ComponentLab fixture, folded through the REAL `CanvasSceneProjection`.
+    static func canvasSceneFixture() -> CanvasScene {
+        let zoneAlpha = UUID(uuidString: "61B00000-0000-4000-8000-0000000000A1")!
+        let zoneBeta = UUID(uuidString: "61B00000-0000-4000-8000-0000000000B2")!
+        let tileA = UUID(uuidString: "61B00000-0000-4000-8000-00000000000A")!
+        let tileB = UUID(uuidString: "61B00000-0000-4000-8000-00000000000B")!
+        let tileC = UUID(uuidString: "61B00000-0000-4000-8000-00000000000C")!
+        let tileD = UUID(uuidString: "61B00000-0000-4000-8000-00000000000D")!
+
+        let canvasState = CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [
+                Tile(id: tileA, kind: .terminal, title: "shell", frame: TileFrame(x: 0, y: 0, width: 480, height: 320), zPosition: FracIndex(value: 0.15), zoneId: nil, runtimeRef: nil, metadata: TileMetadata()),
+                // The one membership: tileB lives in zoneAlpha.
+                Tile(id: tileB, kind: .browser, title: "localhost:3000", frame: TileFrame(x: 500, y: 0, width: 480, height: 320), zPosition: FracIndex(value: 0.35), zoneId: zoneAlpha, runtimeRef: nil, metadata: TileMetadata()),
+                Tile(id: tileC, kind: .note, title: "scratch.md", frame: TileFrame(x: 0, y: 400, width: 320, height: 240), zPosition: FracIndex(value: 0.55), zoneId: nil, runtimeRef: nil, metadata: TileMetadata()),
+                Tile(id: tileD, kind: .fileTree, title: "files", frame: TileFrame(x: 400, y: 400, width: 320, height: 240), zPosition: FracIndex(value: 0.75), zoneId: nil, runtimeRef: nil, metadata: TileMetadata())
+            ],
+            groups: [],
+            lastActiveTileId: nil
+        )
+        let workspaceDocument = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [
+                ZonePlacement(zoneId: zoneAlpha, projectId: nil, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 1000, height: 700), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "Alpha", navKey: nil, zPosition: FracIndex(value: 0.3)),
+                ZonePlacement(zoneId: zoneBeta, projectId: nil, origin: ZonePoint(x: 1200, y: 0), size: ZoneSize(width: 800, height: 600), color: "amber", collapsed: false, hydrationPolicy: .automatic, name: "Beta", navKey: nil, zPosition: FracIndex(value: 0.6))
+            ],
+            lastActiveZoneId: nil
+        )
+        return CanvasSceneProjection.scene(canvasState: canvasState, workspaceDocument: workspaceDocument)
+    }
+
+    static func makeCanvasSceneView(scene: CanvasScene) -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+
+        let title = NSTextField(labelWithString: "Canvas Scene")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.textColor = .labelColor
+        stack.addArrangedSubview(title)
+
+        for (index, zone) in scene.zones.enumerated() {
+            let label = NSTextField(labelWithString: "\(zone.name) [\(zone.tintToken)] z=\(zone.zPosition.value)")
+            label.identifier = NSUserInterfaceItemIdentifier("canvasScene.zone.\(index + 1)")
+            label.font = .monospacedSystemFont(ofSize: 12, weight: .semibold)
+            label.textColor = .labelColor
+            stack.addArrangedSubview(label)
+        }
+        for (index, tile) in scene.tiles.enumerated() {
+            let membership = scene.zones.first { $0.zoneId == tile.zoneId }?.name ?? "ambient"
+            let label = NSTextField(labelWithString: "#\(index + 1) \(tile.kindGlyphToken) — \(tile.title) (\(membership))")
+            label.identifier = NSUserInterfaceItemIdentifier("canvasScene.tile.\(index + 1)")
+            label.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            label.textColor = .labelColor
             stack.addArrangedSubview(label)
         }
         return stack
@@ -1062,6 +1136,41 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         guard agentsBoardRow4.contains("✓ done [green] gamma finished cleanly") else {
             throw fail("agents board row 4 rendered '\(agentsBoardRow4)'")
+        }
+        guard let canvasSceneEntry = entries.first(where: { $0.id == "canvas.scene" }),
+              case let .staticCard(_, makeCanvasSceneView) = canvasSceneEntry.content else {
+            throw fail("missing canvas.scene projection card")
+        }
+        let canvasSceneView = makeCanvasSceneView()
+        func canvasSceneText(_ identifier: String) throws -> String {
+            guard let field = canvasSceneView.descendant(withIdentifier: identifier) as? NSTextField else {
+                throw fail("canvas scene card missing label \(identifier)")
+            }
+            return field.stringValue
+        }
+        let canvasSceneZone1 = try canvasSceneText("canvasScene.zone.1")
+        let canvasSceneZone2 = try canvasSceneText("canvasScene.zone.2")
+        guard canvasSceneZone1 == "Alpha [mint] z=0.3" else {
+            throw fail("canvas scene zone 1 rendered '\(canvasSceneZone1)'")
+        }
+        guard canvasSceneZone2 == "Beta [amber] z=0.6" else {
+            throw fail("canvas scene zone 2 rendered '\(canvasSceneZone2)'")
+        }
+        let canvasSceneTile1 = try canvasSceneText("canvasScene.tile.1")
+        let canvasSceneTile2 = try canvasSceneText("canvasScene.tile.2")
+        let canvasSceneTile3 = try canvasSceneText("canvasScene.tile.3")
+        let canvasSceneTile4 = try canvasSceneText("canvasScene.tile.4")
+        guard canvasSceneTile1 == "#1 terminal — shell (ambient)" else {
+            throw fail("canvas scene tile 1 rendered '\(canvasSceneTile1)'")
+        }
+        guard canvasSceneTile2 == "#2 globe — localhost:3000 (Alpha)" else {
+            throw fail("canvas scene tile 2 rendered '\(canvasSceneTile2)'")
+        }
+        guard canvasSceneTile3 == "#3 note.text — scratch.md (ambient)" else {
+            throw fail("canvas scene tile 3 rendered '\(canvasSceneTile3)'")
+        }
+        guard canvasSceneTile4 == "#4 folder — files (ambient)" else {
+            throw fail("canvas scene tile 4 rendered '\(canvasSceneTile4)'")
         }
         guard let adapterEntry = entries.first(where: { $0.id == "agent.adapter.projection" }),
               case let .staticCard(_, makeAdapterView) = adapterEntry.content else {
