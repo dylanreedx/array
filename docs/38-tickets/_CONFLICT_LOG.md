@@ -344,3 +344,21 @@ log to add explicit rulings, prompt amendments, and recovery actions.
   ("do NOT fake a green CK integration") restated as binding.
 - **Prompt amendment:** ruling banner written to the top of `57-cloudkit-transport-impl.md` (same
   mechanism as C-20260702-010 / C-20260705-022).
+
+### C-20260705-023 rev.2 — post-round-3 adjudication (same night)
+
+- **What happened:** the B2 workflow (sonnet impl, 3 rounds) produced a complete implementation
+  (1185 insertions, build + matrix green all rounds) but did not clear: the implementer deviated
+  from C-023 point 1 by using a custom `ContinuumSyncZone` + `CKRecordZoneSubscription` instead of
+  the breadcrumbs' default-zone `CKQuerySubscription`. The Claude reviewer judged the deviation
+  technically REQUIRED (private-DB default zone does not support zone-change tokens; the literal
+  ruling was internally contradictory) and everything else mergeable, but blocked for ratification
+  since the path is device-gate-owed and unverifiable headlessly. Codex added three mechanical
+  concerns (wrong-shaped duplicate subscription treated as success; integration-check metric
+  overclaims subscription delivery; outbound UInt64→Int64 force-conversion traps).
+- **Adjudication:** C-023 was an orchestrator ruling, so the orchestrator ratifies its own
+  amendment: custom zone + zone subscription RATIFIED (subscription ID unchanged); Dylan's
+  explicit sign-off is folded into the morning device gate (silent push → fetchChanges → SyncOp
+  ≤10 s). The three Codex concerns are made BINDING FIXES. One bounded repair + fresh dual-review
+  continuation runs before any skip row (precedent: B1's same-night re-drive under rev.2).
+- **Prompt amendment:** REV.2 block appended to the ticket banner.

@@ -41,6 +41,38 @@
 >    tagged `device-gate-owed` for the morning checklist. Do NOT fake a green CK integration.
 > 5. **ComponentLab:** pure transport, no user-visible surface → exempt per the night-3 rule,
 >    unless the diff adds a desktop-visible component (then a lab card is required in-commit).
+>
+> **REV.2 (orchestrator adjudication, 2026-07-05, post round-3 dual review — supersedes point 1's
+> subscription/zone mechanics):**
+>
+> - **RATIFIED: custom zone + zone subscription.** The round-1–3 implementation writes all records
+>   to a custom `CKRecordZone` (`ContinuumSyncZone`) and registers a `CKRecordZoneSubscription`
+>   (subscription ID stays `"continuum-sync-ops"`) instead of the breadcrumbs' default-zone
+>   `CKQuerySubscription`. The Claude reviewer confirmed the deviation is technically REQUIRED:
+>   the private-DB default zone does not support `CKFetchRecordZoneChangesOperation` change
+>   tokens, so the breadcrumbs' query-subscription + zone-changes-fetch pairing is internally
+>   contradictory and could never deliver a tail; the custom-zone pairing matches the ticket's own
+>   "unblocks" description of the iOS observer. C-023 was an ORCHESTRATOR ruling (not Dylan's) and
+>   is hereby amended; the real-device confirmation (silent push on the zone subscription →
+>   `fetchChanges` → SyncOp delivered ≤10 s) is `device-gate-owed` on the morning checklist,
+>   flagged for Dylan's explicit ratification there.
+> - **BINDING FIXES (from the round-3 review; each must land before commit):**
+>   1. `ensureSubscription()` duplicate handling (`CloudKitSyncTransport.swift:448-471`): on
+>      `serverRejectedRequest`, fetch the existing `"continuum-sync-ops"` subscription and verify
+>      it is a `CKRecordZoneSubscription` for `cloudKitSyncZoneID` with
+>      `shouldSendContentAvailable` — if it is anything else (e.g. a stale `CKQuerySubscription`),
+>      delete and recreate it; never treat a wrong-shaped subscription as success.
+>   2. Integration check honesty (`ContinuumRevivedSyncIntegrationChecks/main.swift:92-108`): the
+>      gated check exercises the catch-up path, not silent-push delivery — rename the manifest key
+>      `subscription_delivered` → `subscription_catchup_delivered`, and add a server-side
+>      verification that the fetched subscription's type/zone/notificationInfo match the expected
+>      shape. Real silent-push delivery remains `device-gate-owed`; the manifest must not imply
+>      otherwise.
+>   3. Outbound integer safety (`CloudKitSyncTransport.swift:136, :351`): outgoing `UInt64`
+>      Lamport/activity sequence values must use CHECKED conversion to `Int64` — values above
+>      `Int64.max` throw a typed `TransportError` (or encode losslessly some other way), never
+>      trap. Add a logic check covering outbound overflow alongside the existing negative-inbound
+>      case.
 
 ## What this delivers
 
