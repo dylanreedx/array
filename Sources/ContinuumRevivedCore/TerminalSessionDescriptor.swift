@@ -19,8 +19,6 @@ public struct TerminalSessionDescriptor: Codable, Equatable, Sendable {
     /// Display-only scrollback snapshot captured at flush. nil = no snapshot.
     /// Decoded with decodeIfPresent so v1 session files (no scrollback key) still load.
     public var scrollback: String?
-    /// Stable tmux `%pane_id` for project-scoped terminal windows. nil for legacy ambient sessions.
-    public var tmuxWindowTarget: String?
 
     public init(
         schemaVersion: Int = TerminalSessionDescriptor.currentSchemaVersion,
@@ -36,8 +34,7 @@ public struct TerminalSessionDescriptor: Codable, Equatable, Sendable {
         lastStartedAt: Date,
         lastExit: TerminalLastExit?,
         agentDescriptor: AgentDescriptor? = nil,
-        scrollback: String? = nil,
-        tmuxWindowTarget: String? = nil
+        scrollback: String? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.id = id
@@ -53,12 +50,11 @@ public struct TerminalSessionDescriptor: Codable, Equatable, Sendable {
         self.lastExit = lastExit
         self.agentDescriptor = agentDescriptor
         self.scrollback = scrollback
-        self.tmuxWindowTarget = tmuxWindowTarget
     }
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, id, tileId, launchProfileId, command, args, cwd, env, title
-        case createdAt, lastStartedAt, lastExit, agentDescriptor, scrollback, tmuxWindowTarget
+        case createdAt, lastStartedAt, lastExit, agentDescriptor, scrollback
     }
 
     public init(from decoder: Decoder) throws {
@@ -77,7 +73,6 @@ public struct TerminalSessionDescriptor: Codable, Equatable, Sendable {
         lastExit = try container.decodeIfPresent(TerminalLastExit.self, forKey: .lastExit)
         agentDescriptor = try container.decodeIfPresent(AgentDescriptor.self, forKey: .agentDescriptor)
         scrollback = try container.decodeIfPresent(String.self, forKey: .scrollback)
-        tmuxWindowTarget = try container.decodeIfPresent(String.self, forKey: .tmuxWindowTarget)
     }
 
     public func restoredForBoot(now: Date = Date()) -> TerminalSessionDescriptor {

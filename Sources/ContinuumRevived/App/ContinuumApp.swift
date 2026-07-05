@@ -3178,8 +3178,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         let control = tmuxControlFactory(tmuxPath)
 
-        let descriptor = terminalSessionDescriptor(forTileId: tileId)
-        if let target = descriptor?.tmuxWindowTarget, TmuxSession.isValidPaneId(target) {
+        let target = managedSessionRecord(forTileId: tileId)?.tmuxWindowTarget()
+        if let target, TmuxSession.isValidPaneId(target) {
             if let error = Self.runTmuxControlOperationSync({ try await control.killWindow(target: target) }) {
                 fputs("tmux kill-window failed for tile=\(tileId.uuidString) target=\(target): \(error)\n", stderr)
             }
@@ -3203,6 +3203,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return descriptor
         }
         return try? projectStore.listSessions().first(where: { $0.tileId == tileId })
+    }
+
+    private func managedSessionRecord(forTileId tileId: UUID) -> ManagedAgentSessionRecord? {
+        try? workspaceRuntime?.activeController?.managedSessionStore.load(tileId: tileId)
     }
 
     /// `TmuxControl` is async throughout (it may shell out to a real `tmux`
@@ -11193,8 +11197,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             title: "Shell",
             createdAt: Date(timeIntervalSince1970: 1_717_000_000),
             lastStartedAt: Date(timeIntervalSince1970: 1_717_000_000),
-            lastExit: nil,
-            tmuxWindowTarget: terminalWindowTarget
+            lastExit: nil
+        ))
+        try ManagedAgentSessionStore(projectRoot: deleteRoot).upsert(ManagedAgentSessionRecord(
+            tileId: terminalTileId,
+            agentKind: .shell,
+            status: .running,
+            lastSeenAt: Date(timeIntervalSince1970: 1_717_000_000),
+            runtimePayload: try ManagedAgentSessionRecord.makeRuntimePayload(windowTarget: terminalWindowTarget, cwd: deleteRoot.path)
         ))
         let terminalView = TileNSView(tile: terminalTile)
         deleteCanvas.install(tileView: terminalView, for: terminalTile)
@@ -11238,8 +11248,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             title: "Throwing View",
             createdAt: Date(timeIntervalSince1970: 1_717_000_002),
             lastStartedAt: Date(timeIntervalSince1970: 1_717_000_002),
-            lastExit: nil,
-            tmuxWindowTarget: throwingViewWindowTarget
+            lastExit: nil
+        ))
+        try ManagedAgentSessionStore(projectRoot: throwingViewRoot).upsert(ManagedAgentSessionRecord(
+            tileId: throwingViewTileId,
+            agentKind: .shell,
+            status: .running,
+            lastSeenAt: Date(timeIntervalSince1970: 1_717_000_002),
+            runtimePayload: try ManagedAgentSessionRecord.makeRuntimePayload(windowTarget: throwingViewWindowTarget, cwd: throwingViewRoot.path)
         ))
         let throwingView = TileNSView(tile: throwingViewTile)
         throwingViewCanvas.install(tileView: throwingView, for: throwingViewTile)
@@ -11282,8 +11298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             title: "Legacy Shell",
             createdAt: Date(timeIntervalSince1970: 1_717_000_001),
             lastStartedAt: Date(timeIntervalSince1970: 1_717_000_001),
-            lastExit: nil,
-            tmuxWindowTarget: nil
+            lastExit: nil
         ))
         let legacyView = TileNSView(tile: legacyTile)
         legacyCanvas.install(tileView: legacyView, for: legacyTile)

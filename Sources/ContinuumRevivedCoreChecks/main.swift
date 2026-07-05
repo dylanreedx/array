@@ -1587,7 +1587,7 @@ do {
     let data = try JSONCodec.makeEncoder().encode(descriptor)
     let decoded = try JSONCodec.makeDecoder().decode(TerminalSessionDescriptor.self, from: data)
     expect(decoded == descriptor, "TerminalSessionDescriptor round trip")
-    let targetDescriptor = TerminalSessionDescriptor(
+    let scrollbackDescriptor = TerminalSessionDescriptor(
         id: descriptor.id,
         tileId: descriptor.tileId,
         launchProfileId: descriptor.launchProfileId,
@@ -1599,12 +1599,13 @@ do {
         createdAt: descriptor.createdAt,
         lastStartedAt: descriptor.lastStartedAt,
         lastExit: nil,
-        scrollback: "line one",
-        tmuxWindowTarget: "%9"
+        scrollback: "line one"
     )
-    expect(TerminalSessionDescriptor.currentSchemaVersion == 3, "TerminalSessionDescriptor current schema is v3 for tmuxWindowTarget")
-    let targetDecoded = try JSONCodec.makeDecoder().decode(TerminalSessionDescriptor.self, from: JSONCodec.makeEncoder().encode(targetDescriptor))
-    expect(targetDecoded == targetDescriptor, "TerminalSessionDescriptor v3 preserves tmuxWindowTarget and scrollback")
+    let scrollbackData = try JSONCodec.makeEncoder().encode(scrollbackDescriptor)
+    let scrollbackJSON = String(data: scrollbackData, encoding: .utf8) ?? ""
+    expect(!scrollbackJSON.contains("tmuxWindowTarget"), "TerminalSessionDescriptor JSON must not contain host-local tmuxWindowTarget")
+    let targetDecoded = try JSONCodec.makeDecoder().decode(TerminalSessionDescriptor.self, from: scrollbackData)
+    expect(targetDecoded == scrollbackDescriptor, "TerminalSessionDescriptor preserves scrollback without host-local tmuxWindowTarget")
     let v2SessionJSON = """
     {
       "schemaVersion": 2,
@@ -1622,7 +1623,7 @@ do {
     }
     """.data(using: .utf8)!
     let v2SessionDecoded = try JSONCodec.makeDecoder().decode(TerminalSessionDescriptor.self, from: v2SessionJSON)
-    expect(v2SessionDecoded.tmuxWindowTarget == nil, "TerminalSessionDescriptor v2 decode leaves absent tmuxWindowTarget nil")
+    expect(v2SessionDecoded.scrollback == "legacy", "TerminalSessionDescriptor v2 decode preserves scrollback without tmuxWindowTarget")
     let withExit = TerminalSessionDescriptor(
         id: descriptor.id,
         tileId: descriptor.tileId,
