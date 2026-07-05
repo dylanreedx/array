@@ -77,6 +77,8 @@ public func durableActivityStream(
     }
 }
 
+#if os(macOS)
+
 public actor LocalTmuxConnectionDriver: ConnectionDriver {
     public init() {}
 
@@ -133,3 +135,5 @@ private actor LocalTmuxRemoteSocket: RemoteSocket {
         throw ConnectionError.probeFailed(errorText.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 }
+
+#endif

@@ -352,7 +352,7 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
+        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
     }
 
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
@@ -395,6 +395,70 @@ enum LabCatalog {
                 makeAgentKindView(descriptor: AgentDescriptor(agentKind: .claude, worktreePath: "/tmp/project", status: .working, statusUpdatedAt: LabFixtures.epoch))
             }
         )
+    }
+
+    static var agentsBoardCard: LabEntry {
+        LabEntry(
+            id: "agents.board",
+            category: "Chrome",
+            title: "Agents Board",
+            summary: "Activity projection rows sorted attention-first with glyph and color tokens.",
+            content: .staticCard(preferredSize: NSSize(width: 620, height: 190)) {
+                makeAgentsBoardView(rows: agentsBoardRows())
+            }
+        )
+    }
+
+    static func agentsBoardRows() -> [AgentsBoardRow] {
+        let replica = UUID(uuidString: "61000000-0000-4000-8000-0000000000CC")!
+        let base = Date(timeIntervalSinceReferenceDate: 6_167)
+        func event(tileId: UUID, sequence: UInt64, status: AgentStatus, summary: String, offset: TimeInterval) -> AgentActivityEvent {
+            AgentActivityEvent(
+                stamping: AgentActivityEventDraft(
+                    tileId: tileId,
+                    runId: nil,
+                    tone: status == .needsAttention ? .approval : .info,
+                    kind: status == .needsAttention ? "needs-attention" : "status.\(status.rawValue)",
+                    status: status,
+                    summary: summary,
+                    occurredAt: base.addingTimeInterval(offset)
+                ),
+                sequence: sequence,
+                replicaId: replica
+            )
+        }
+        let alpha = UUID(uuidString: "61000000-0000-4000-8000-0000000000A1")!
+        let beta = UUID(uuidString: "61000000-0000-4000-8000-0000000000B2")!
+        let gamma = UUID(uuidString: "61000000-0000-4000-8000-0000000000C3")!
+        let delta = UUID(uuidString: "61000000-0000-4000-8000-0000000000D4")!
+        let snapshot = [
+            event(tileId: gamma, sequence: 1, status: .done, summary: "gamma finished cleanly", offset: 1),
+            event(tileId: alpha, sequence: 2, status: .needsAttention, summary: "alpha needs approval", offset: 4),
+            event(tileId: delta, sequence: 3, status: .working, summary: "delta is running checks", offset: 3),
+            event(tileId: beta, sequence: 4, status: .needsAttention, summary: "beta needs input", offset: 2),
+        ].reduce(ActivityLogSnapshot.empty) { apply($0, $1) }
+        return AgentsBoardProjection.rows(from: snapshot)
+    }
+
+    static func makeAgentsBoardView(rows: [AgentsBoardRow]) -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+
+        let title = NSTextField(labelWithString: "Agents Board")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.textColor = .labelColor
+        stack.addArrangedSubview(title)
+
+        for (index, row) in rows.enumerated() {
+            let label = NSTextField(labelWithString: "\(row.presentation.glyph) \(row.status.rawValue) [\(row.presentation.colorToken)] \(row.lastSummary)")
+            label.identifier = NSUserInterfaceItemIdentifier("agentsBoard.row.\(index + 1)")
+            label.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            label.textColor = color(forToken: row.presentation.colorToken)
+            stack.addArrangedSubview(label)
+        }
+        return stack
     }
 
     static func makeAgentKindView(descriptor: AgentDescriptor) -> NSView {
@@ -496,6 +560,18 @@ enum LabCatalog {
         case .stale: return .systemGray
         case .idle: return .systemTeal
         case .configuring: return .systemPurple
+        }
+    }
+
+    private static func color(forToken token: String) -> NSColor {
+        switch token {
+        case "blue": return .systemBlue
+        case "orange": return .systemOrange
+        case "green": return .systemGreen
+        case "gray": return .systemGray
+        case "teal": return .systemTeal
+        case "tertiaryLabel": return .tertiaryLabelColor
+        default: return .secondaryLabelColor
         }
     }
 
@@ -960,6 +1036,33 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard kindLabel.stringValue == "Kind -> claude" else {
             throw fail("agent.kind label rendered '\(kindLabel.stringValue)', expected 'Kind -> claude'")
         }
+        guard let agentsBoardEntry = entries.first(where: { $0.id == "agents.board" }),
+              case let .staticCard(_, makeAgentsBoardView) = agentsBoardEntry.content else {
+            throw fail("missing agents.board projection card")
+        }
+        let agentsBoardView = makeAgentsBoardView()
+        func agentsBoardText(_ row: Int) throws -> String {
+            guard let field = agentsBoardView.descendant(withIdentifier: "agentsBoard.row.\(row)") as? NSTextField else {
+                throw fail("agents board card missing row \(row)")
+            }
+            return field.stringValue
+        }
+        let agentsBoardRow1 = try agentsBoardText(1)
+        let agentsBoardRow2 = try agentsBoardText(2)
+        let agentsBoardRow3 = try agentsBoardText(3)
+        let agentsBoardRow4 = try agentsBoardText(4)
+        guard agentsBoardRow1.contains("◆ needsAttention [orange] alpha needs approval") else {
+            throw fail("agents board row 1 rendered '\(agentsBoardRow1)'")
+        }
+        guard agentsBoardRow2.contains("◆ needsAttention [orange] beta needs input") else {
+            throw fail("agents board row 2 rendered '\(agentsBoardRow2)'")
+        }
+        guard agentsBoardRow3.contains("● working [blue] delta is running checks") else {
+            throw fail("agents board row 3 rendered '\(agentsBoardRow3)'")
+        }
+        guard agentsBoardRow4.contains("✓ done [green] gamma finished cleanly") else {
+            throw fail("agents board row 4 rendered '\(agentsBoardRow4)'")
+        }
         guard let adapterEntry = entries.first(where: { $0.id == "agent.adapter.projection" }),
               case let .staticCard(_, makeAdapterView) = adapterEntry.content else {
             throw fail("missing agent.adapter.projection card")
@@ -1234,6 +1337,12 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             "rendered": rendered,
             "sandbox": ["tilesInstalled": 5, "zoomClampHigh": zoomHigh, "zoomClampLow": zoomLow],
             "agentKind": ["label": kindLabel.stringValue],
+            "agentsBoard": [
+                "row1": agentsBoardRow1,
+                "row2": agentsBoardRow2,
+                "row3": agentsBoardRow3,
+                "row4": agentsBoardRow4
+            ],
             "agentAdapterProjection": [
                 "row1": adapterRow1,
                 "row2": adapterRow2,

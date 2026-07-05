@@ -9325,4 +9325,6 @@ do {
     try writeAndVerify(manifest)
 }
 
+runAgentsBoardProjectionChecks()
+
 print("ContinuumRevivedCoreChecks passed")

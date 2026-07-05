@@ -16,6 +16,11 @@ targets:
     type: application
     platform: iOS
     sources: [Continuum/Sources]
+    dependencies:
+      - package: continuum-revived
+        product: ContinuumRevivedCore
+      - package: continuum-revived
+        product: ContinuumRevivedSync
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.dylanreed.continuum
@@ -24,3 +29,6 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Continuum/Resources/Continuum.entitlements
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Continuum
+packages:
+  continuum-revived:
+    path: ..

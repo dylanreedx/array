@@ -23,10 +23,13 @@ public struct PiAgentStateReader: AgentStateReader {
     public let kind: AgentKind = .pi
 
     private let globalAgentRunsRoot: URL
+    public static var defaultGlobalAgentRunsRoot: URL {
+        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent(".pi/agent-runs", isDirectory: true)
+    }
 
     public init(
-        globalAgentRunsRoot: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".pi/agent-runs", isDirectory: true)
+        globalAgentRunsRoot: URL = Self.defaultGlobalAgentRunsRoot
     ) {
         self.globalAgentRunsRoot = globalAgentRunsRoot
     }

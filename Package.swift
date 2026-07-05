@@ -4,12 +4,14 @@ import PackageDescription
 let package = Package(
     name: "continuum-revived",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v14),
+        .iOS(.v17)
     ],
     products: [
         .executable(name: "continuum-revived", targets: ["ContinuumRevived"]),
         .executable(name: "ContinuumRevivedPaletteChecks", targets: ["ContinuumRevivedPaletteChecks"]),
-        .library(name: "ContinuumRevivedCore", targets: ["ContinuumRevivedCore"])
+        .library(name: "ContinuumRevivedCore", targets: ["ContinuumRevivedCore"]),
+        .library(name: "ContinuumRevivedSync", targets: ["ContinuumRevivedSync"])
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1")

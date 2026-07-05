@@ -93,6 +93,26 @@ private actor BlackHoleTransport: ContinuumRevivedSync.SyncTransport {
     func allSentMessages() -> [SyncMessage] { sentMessages }
 }
 
+private final class FakeReplicaSyncTransport: ContinuumRevivedSync.SyncTransport, @unchecked Sendable {
+    private let fake: ContinuumRevivedSync.FakeSyncTransport
+    private let replicaId: ContinuumRevivedSync.FakeSyncTransport.ReplicaId
+    let inbound: AsyncStream<SyncMessage>
+    let connectionState: AsyncStream<ContinuumRevivedSync.ConnectionState>
+
+    init(fake: ContinuumRevivedSync.FakeSyncTransport, replicaId: ContinuumRevivedSync.FakeSyncTransport.ReplicaId, inbound: AsyncStream<SyncMessage>) {
+        self.fake = fake
+        self.replicaId = replicaId
+        self.inbound = inbound
+        let (states, continuation) = AsyncStream<ContinuumRevivedSync.ConnectionState>.makeStream()
+        continuation.yield(.connected)
+        self.connectionState = states
+    }
+
+    func send(_ message: SyncMessage) async throws {
+        await fake.send(message, from: replicaId)
+    }
+}
+
 private final class OneShotEventDrop: @unchecked Sendable {
     private let lock = NSLock()
     private var pending: Set<UInt64>
@@ -123,7 +143,8 @@ private func makeDraft(
     tileId: UUID,
     tone: ActivityEventTone = .info,
     status: AgentStatus,
-    summary: String = "activity"
+    summary: String = "activity",
+    occurredAt: Date = Date(timeIntervalSinceReferenceDate: 100)
 ) -> AgentActivityEventDraft {
     AgentActivityEventDraft(
         tileId: tileId,
@@ -132,7 +153,7 @@ private func makeDraft(
         kind: "status",
         status: status,
         summary: summary,
-        occurredAt: Date(timeIntervalSinceReferenceDate: 100)
+        occurredAt: occurredAt
     )
 }
 
@@ -468,6 +489,64 @@ private func runActivityProjectionBackendCheck() async -> Double {
     return elapsedMs
 }
 
+private func waitForFakeReceiverConvergence(
+    fake: ContinuumRevivedSync.FakeSyncTransport,
+    receiver: ActivityProjectionReceiver,
+    expectedSequence: UInt64,
+    timeoutSeconds: Double
+) async -> Bool {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(timeoutSeconds))
+    while ContinuousClock.now < deadline {
+        await fake.tick()
+        if await receiver.currentSnapshot().snapshotSequence == expectedSequence { return true }
+        try? await Task.sleep(for: .milliseconds(2))
+    }
+    return await receiver.currentSnapshot().snapshotSequence == expectedSequence
+}
+
+private func checkAgentsBoardProjectionOverFakeSyncTransportRealPath() async {
+    let replicaId = UUID(uuidString: "61000000-0000-4000-8000-00000000F001")!
+    let tileA = UUID(uuidString: "61000000-0000-4000-8000-00000000F00A")!
+    let tileB = UUID(uuidString: "61000000-0000-4000-8000-00000000F00B")!
+    let tileC = UUID(uuidString: "61000000-0000-4000-8000-00000000F00C")!
+    let base = Date(timeIntervalSinceReferenceDate: 6_161)
+    let store = ActivityStore(replicaId: replicaId)
+    await store.append(makeDraft(tileId: tileA, status: .done, summary: "A initially done", occurredAt: base))
+    await store.append(makeDraft(tileId: tileB, status: .working, summary: "B initially working", occurredAt: base.addingTimeInterval(1)))
+
+    let fake = ContinuumRevivedSync.FakeSyncTransport(seed: 61)
+    let (hostReplica, hostInbound) = await fake.makeReplica()
+    let (observerReplica, observerInbound) = await fake.makeReplica()
+    let hostTransport = FakeReplicaSyncTransport(fake: fake, replicaId: hostReplica, inbound: hostInbound)
+    let observerTransport = FakeReplicaSyncTransport(fake: fake, replicaId: observerReplica, inbound: observerInbound)
+    let sender = ActivityProjectionSender(store: store, demux: SyncMessageDemux(transport: hostTransport), authorizedScope: .observer)
+    await sender.start()
+    let receiver = ActivityProjectionReceiver(demux: SyncMessageDemux(transport: observerTransport), scope: .observer, gapRetryBackoff: .milliseconds(5))
+    await receiver.connect(cursor: nil)
+
+    let snapshotArrived = await waitForFakeReceiverConvergence(fake: fake, receiver: receiver, expectedSequence: 2, timeoutSeconds: 2)
+    expect(snapshotArrived, "agents board real path: cold connect(cursor:nil) receives the initial snapshot over FakeSyncTransport")
+
+    await store.append(makeDraft(tileId: tileC, tone: .approval, status: .needsAttention, summary: "C needs review", occurredAt: base.addingTimeInterval(2)))
+    await store.append(makeDraft(tileId: tileA, tone: .approval, status: .needsAttention, summary: "A needs approval", occurredAt: base.addingTimeInterval(3)))
+    await store.append(makeDraft(tileId: tileB, status: .done, summary: "B finished", occurredAt: base.addingTimeInterval(4)))
+
+    let tailArrived = await waitForFakeReceiverConvergence(fake: fake, receiver: receiver, expectedSequence: 5, timeoutSeconds: 2)
+    expect(tailArrived, "agents board real path: three incremental events tail through the production receiver")
+
+    let finalSnapshot = await receiver.currentSnapshot()
+    let rows = AgentsBoardProjection.rows(from: finalSnapshot)
+    expect(rows.map { $0.tileId } == [tileA, tileC, tileB], "agents board real path: rows are attention-first with newest tie-break inside priority")
+    expect(rows.map { $0.status } == [AgentStatus.needsAttention, AgentStatus.needsAttention, AgentStatus.done], "agents board real path: final statuses match the sent tail")
+    let measuredOrder = rows.map { $0.tileId.uuidString }.joined(separator: ",")
+    let measuredStatuses = rows.map { $0.status.rawValue }.joined(separator: ",")
+    let measuredSummaries = rows.map { $0.lastSummary }.joined(separator: " | ")
+    print("agents board real path: fakeSyncTransport coldConnectCursor=nil snapshotSequence=\(finalSnapshot.snapshotSequence) measuredOrder=\(measuredOrder) statuses=\(measuredStatuses) summaries=\(measuredSummaries)")
+
+    await sender.stop()
+    await receiver.stop()
+}
+
 func runActivityProjectionChecks() async throws {
     await checkSnapshotThenTailIsGapFree()
     await checkGapDetectionTriggersReplay()
@@ -477,6 +556,7 @@ func runActivityProjectionChecks() async throws {
     checkActivityStreamItemNoForbiddenFields()
     await checkGapRetryExhaustionFallsBackToColdReconnect()
     let backendElapsedMs = await runActivityProjectionBackendCheck()
+    await checkAgentsBoardProjectionOverFakeSyncTransportRealPath()
 
     let manifest = InvariantManifest(
         invariantId: "ticket58-activity-projection-transport",

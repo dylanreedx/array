@@ -55,6 +55,7 @@ public struct GitDiffEngine {
     }
 
     private func runGit(arguments: [String], repositoryURL: URL) throws -> String {
+        #if os(macOS)
         let process = Process()
         process.executableURL = gitExecutableURL
         process.arguments = arguments
@@ -104,9 +105,15 @@ public struct GitDiffEngine {
             throw DiffError.gitFailed(exitCode: process.terminationStatus, stderr: String(data: errorData, encoding: .utf8) ?? "")
         }
         return String(data: outputData, encoding: .utf8) ?? ""
+        #else
+        _ = arguments
+        _ = repositoryURL
+        throw DiffError.invalidRepository("git diff is only available on macOS")
+        #endif
     }
 }
 
+#if os(macOS)
 private final class GitDiffProcessOutput: @unchecked Sendable {
     private let lock = NSLock()
     private(set) var data = Data()
@@ -124,6 +131,7 @@ private final class GitDiffProcessOutput: @unchecked Sendable {
         return result
     }
 }
+#endif
 
 public struct GitDiffModel: Equatable, Codable, Sendable {
     public var files: [GitDiffFile]

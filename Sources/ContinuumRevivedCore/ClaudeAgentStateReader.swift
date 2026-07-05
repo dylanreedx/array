@@ -50,9 +50,12 @@ public struct ClaudeAgentStateReader: AgentStateReader {
     private let homeURL: URL
     private let now: @Sendable () -> Date
     private let config: ClaudeReaderConfig
+    public static var defaultHomeURL: URL {
+        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+    }
 
     public init(
-        homeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+        homeURL: URL = Self.defaultHomeURL,
         now: @Sendable @escaping () -> Date = { Date() },
         config: ClaudeReaderConfig = ClaudeReaderConfig()
     ) {

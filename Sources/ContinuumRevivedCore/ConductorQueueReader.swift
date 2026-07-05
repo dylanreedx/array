@@ -122,6 +122,7 @@ public struct ConductorQueueReader: Sendable {
     }
 
     private func runSQLite(databaseURL: URL, sql: String) throws -> String {
+        #if os(macOS)
         guard FileManager.default.isExecutableFile(atPath: sqlitePath) else {
             throw ReaderError.sqliteUnavailable
         }
@@ -179,6 +180,11 @@ public struct ConductorQueueReader: Sendable {
             throw ReaderError.sqliteFailed(exitCode: process.terminationStatus, stderr: stderr)
         }
         return String(data: stdoutData, encoding: .utf8) ?? "[]"
+        #else
+        _ = databaseURL
+        _ = sql
+        throw ReaderError.sqliteUnavailable
+        #endif
     }
 }
 

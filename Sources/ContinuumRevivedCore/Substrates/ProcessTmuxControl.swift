@@ -1,5 +1,7 @@
 import Foundation
 
+#if os(macOS)
+
 // Ticket: docs/38-tickets/12-injectable-substrates.md
 //
 // The real `TmuxControl` implementation, backed by an actual tmux subprocess via
@@ -167,3 +169,5 @@ public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {
         )
     }
 }
+
+#endif

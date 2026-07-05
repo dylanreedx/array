@@ -24,10 +24,13 @@ public struct CodexAgentStateReader: AgentStateReader {
 
     private let sessionsRoot: URL
     private let config: CodexReaderConfig
+    public static var defaultSessionsRoot: URL {
+        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent(".codex/sessions", isDirectory: true)
+    }
 
     public init(
-        sessionsRoot: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex/sessions", isDirectory: true),
+        sessionsRoot: URL = Self.defaultSessionsRoot,
         freshWorkingWindow: TimeInterval = 30,
         staleWindow: TimeInterval = 900,
         tailLineLimit: Int = 50,
