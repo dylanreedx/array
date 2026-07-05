@@ -81,6 +81,22 @@
 >    SidebarTreeBuilder zone grouping, the transcript card taxonomy, and the XCUIScreen gate are
 >    ADJUSTED accordingly; the I5 expectation (no transcript bodies/pids/pane targets in anything
 >    iOS reads) is unchanged and already enforced by the projection types.
+>
+> **REV.2 — continuation adjudication (orchestrator, 2026-07-05).** Round-3 state: gates green,
+> Claude reviewer CLEAR, Codex rejected with two valid surgical concerns; both are hereby bound
+> as the continuation-round fixes (B2/C-023 precedent):
+> 1. Within a tile, the canonical event order is the projection's `(sequence, replicaId)` ring
+>    order of `TileActivity.recent` — the detail timeline renders that order reversed for
+>    newest-first, and the pending-attention card selects the LAST needs-attention event in ring
+>    order. No wall-clock `occurredAt` re-sorting or `max(by: occurredAt)` selection within a
+>    tile (clock skew / multi-replica hazard). The board-level cross-tile tie-break in §4
+>    (`updatedAt` newest first, then `tileId`) is a display choice across tiles and stands.
+> 2. SwiftUI row identity for event lists must be the composite `(replicaId, sequence)` (e.g. a
+>    string key `"\(replicaId)-\(sequence)"`), never bare `sequence`, which is only unique per
+>    replica.
+> Continuation contract: fix exactly these two in `ios/Continuum/Sources/ContinuumApp.swift`
+> (plus shared-Core helper if the ordering logic properly belongs in `AgentsBoardProjection`),
+> re-run all three §8 gates, dual re-review the full diff, commit only on both-clear.
 
 ## What this delivers
 
