@@ -293,3 +293,30 @@ log to add explicit rulings, prompt amendments, and recovery actions.
   same mechanism as C-20260701-005 / `feded6b`.
 - **Recovery:** Re-drive the workflow from the dirty round-3 tree (attempt is otherwise
   reviewer-shaped: naming functions, controller methods, Core checks, Component Lab panel all present).
+
+## C-20260705-022 — `60-pairing-token-model.md` (original ruling + rev.2)
+
+- **Class:** `CONTRACT-CONFLICT`, `PARALLEL-WORKTREE-OVERLAP`, then `STALE-RULING` after the merge
+- **Evidence (original, 2026-07-05 00:30, recovered from stash@{1} — the interrupted iteration never
+  committed it):** Ticket 60 mandates GRDB-backed `PairingStore`/`SessionStore` + Keychain signing key,
+  but (a) the night-3 plan's Track B line reads "60 pairing token model (pure Swift, no substrate)",
+  (b) an in-memory auth substrate already existed on this branch (`40d565f`), and (c) Track A's A8
+  (ticket 54) had ALREADY landed a GRDB rework of those exact files on `night3/fixes` (`93c2fd5`)
+  merging at ~06:00. Implementing 60 as written would rewrite the same files a second time and
+  guarantee a three-way conflict at the merge point. Original ruling: extend the in-memory substrate,
+  NO GRDB, signing key stays the 0600 file.
+- **What changed:** the iteration was killed mid-flight (machine sleep + quota; attempt stashed as
+  "night3 B1 60-pairing interrupted attempt"), and the ~06:00 Track A merge landed (`6a076ec`) —
+  the Auth substrate on this branch is now ticket-54's GRDB implementation. The original ruling's
+  "NO GRDB" premise (avoiding the parallel-worktree collision) is resolved by the merge itself.
+- **Winning directive / ruling rev.2 (orchestrator, 2026-07-05 ~09:45):** the GRDB substrate is the
+  base; 60 extends it additively (PairingURL, Registry.pairedDevices, optional-requested + 30-day
+  exchange, bootstrap TTL-expiry, full check suite, ComponentLab card). The 8 cleanly-applying salvage
+  files from stash@{1} were pre-applied to the working tree by the orchestrator; the 2 store hunks
+  that no longer apply are re-cut against the GRDB stores as surgical edits; the salvaged restart
+  check adapts from the obsolete `restoredSessions:` shim to real GRDB persistence (shared temp
+  key file + shared on-disk databaseURL across two subprocess invocations). Signing key stays the
+  0600 file (headless Keychain ACL prompts are a run-wedging hazard); Keychain migration owed on the
+  morning checklist. Stash@{1} is retained for audit, never popped.
+- **Prompt amendment:** rev.2 ruling banner written to the top of `60-pairing-token-model.md` (same
+  mechanism as C-20260702-010).

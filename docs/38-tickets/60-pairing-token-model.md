@@ -1,5 +1,50 @@
 # One-time pairing token — issue, exchange, and down-scope
 
+> **NIGHT-3 SCOPING RULING (C-20260705-022 rev.2, orchestrator, 2026-07-05 ~09:45) — binding on
+> tonight's attempt; overrides the conflicting storage wording below.** The original C-022 ruling
+> (written 00:30, recovered from the interrupted-attempt stash) said "NO GRDB tonight" because Track A
+> was rebuilding the Auth stores GRDB-backed in a parallel worktree. That premise is now RESOLVED: the
+> ~06:00 merge landed (`6a076ec`), and `Sources/ContinuumRevivedCore/Auth/` is the ticket-54 GRDB
+> substrate (`PairingStore`/`SessionStore` on `DatabaseQueue`, `AuthDatabase`, atomic guarded consume,
+> 0600 `signing.key` file, `AuthError` in ScopeAuthorization.swift). Revised rules:
+>
+> 1. **The GRDB-backed substrate IS the base — extend it additively, do not rewrite it.** Keep churn
+>    in `PairingStore.swift`/`SessionStore.swift` surgical. Do not rename existing `AuthError` cases
+>    (`unknown`/`revoked`/`alreadyUsed`/`expired`/`scopeNotGranted`/`invalidToken`); do not touch
+>    `Package.swift` (GRDB dep already present). `SessionStore.exchange(...)` is the accepted home for
+>    the exchange — the ticket's free-function packaging is NOT required.
+> 2. **Salvage is PRE-APPLIED.** The orchestrator applied the 8 cleanly-applying files from the
+>    interrupted attempt (stash@{1} "night3 B1 60-pairing interrupted attempt") to the working tree:
+>    `PairingURL.swift` (PairingAlphabet rejection-sampling + fragment-only URL), `Registry.swift`
+>    (pairedDevices + decodeIfPresent migration + PairedDeviceEntry), `Scope.isSuperset`,
+>    `BootstrapGrant.expiresAt` + AuthRandom→PairingAlphabet delegation, `AuthChecks.swift` (full
+>    ticket-60 suite), checks `main.swift` subprocess hook, ComponentLab card, ContinuumApp debug menu.
+>    Do NOT pop or drop the stash — it stays for audit. Remaining work:
+>    a. **Surgical GRDB store edits** (the two hunks that no longer applied): bootstrap-path TTL-expiry
+>       check in `PairingStore.consume` (throw `.expired` when `bootstrapGrant.expiresAt <= clock.now()`,
+>       return the grant's real `expiresAt`, keep the constant-time credential compare);
+>       `SessionStore.exchange` takes `requested: Scope?` (nil → grant ceiling), default
+>       `ttl: 2_592_000` (30 days), guard `grant.scopes.isSuperset(of: effective)`.
+>    b. **Adapt the salvaged AuthChecks to the GRDB API**: `restoredSessions:` does not exist —
+>       the restart-survival suite must instead share BOTH a temp `signing.key` file AND an on-disk
+>       `databaseURL` across the two subprocess invocations (sessions now persist for real via GRDB);
+>       drop the obsolete `AuthSession: Codable` conformance need if nothing else requires it. No-arg
+>       store inits give isolated in-memory DBs (`AuthDatabase.queue(at: nil)`) — correct for logic checks.
+>    c. **Ensure the suite actually gates**: the salvaged main.swift hunk only adds the subprocess
+>       early-exit hook — `main.swift` must also CALL the ticket-60 suite so the matrix runs it and
+>       prints measured values; confirm in run-matrix output.
+> 3. **Signing key stays the existing 0600 on-disk file** (`SessionStore.loadOrCreateSigningKey`) —
+>    headless Keychain ACLs across rebuilt unsigned check binaries can wedge the run with interactive
+>    prompts. Keychain migration is an owed morning item.
+> 4. ALL listed logic checks remain required (100k-sample bias, concurrent single-use race,
+>    expired/revoked consume, down-scope trio, HMAC bit-flips, token string round-trip, bootstrap
+>    unbounded + TTL-expiry, URL fragment round-trip, Registry pairedDevices decode-migration) in
+>    `ContinuumRevivedCoreChecks`, wired into `scripts/run-matrix.sh`.
+> 5. **ComponentLab rule applies (Dylan 2026-07-04):** the "Pairing Token" lab card + lab self-check
+>    (`#token=` fragment present, `queryItems` nil, credential exactly 12 chars, all chars in the
+>    32-symbol alphabet) ships in the same commit. `Debug ▸ Auth ▸ Issue Pairing Token (Observer)` is
+>    code-complete; its Console.app look is `visual-gate-owed` (morning checklist).
+
 ## What this delivers
 
 When this ticket lands, Continuum has a complete, self-contained pairing-token subsystem living in `ContinuumRevivedCore`. A host process can issue a one-time, short-lived credential — delivered as a URL fragment — that a connecting device exchanges exactly once for a scoped bearer session. The exchange enforces down-scope-only: the session the device receives can only carry a subset of what the pairing token authorized, never more. A token that has been used, expired, or revoked cannot be exchanged again; every one of those failure modes is a typed error, not a silent allow.
