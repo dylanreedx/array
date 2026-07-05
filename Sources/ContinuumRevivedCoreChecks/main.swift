@@ -7357,6 +7357,64 @@ func writeAndVerify(_ manifest: InvariantManifest) throws {
     print("\(manifest.invariantId): manifest at \(file.path)")
 }
 
+struct NoMirrorCheckManifest: Codable, Equatable {
+    var runId: String
+    var tmuxAbsent: Bool
+    var projSession: String
+    var paneA: String
+    var paneB: String
+    var intendedWindowA: String
+    var intendedWindowB: String
+    var activeWindowA: String
+    var activeWindowB: String
+    var activeWindowShared: String
+    var i2Distinct: Bool
+    var sharedViewExemptionCorrect: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case runId = "run_id"
+        case tmuxAbsent = "tmux_absent"
+        case projSession = "proj_session"
+        case paneA = "pane_a"
+        case paneB = "pane_b"
+        case intendedWindowA = "intended_window_a"
+        case intendedWindowB = "intended_window_b"
+        case activeWindowA = "active_window_a"
+        case activeWindowB = "active_window_b"
+        case activeWindowShared = "active_window_shared"
+        case i2Distinct = "i2_distinct"
+        case sharedViewExemptionCorrect = "shared_view_exemption_correct"
+    }
+
+    static func skipped(runId: String) -> NoMirrorCheckManifest {
+        NoMirrorCheckManifest(
+            runId: runId,
+            tmuxAbsent: true,
+            projSession: "",
+            paneA: "",
+            paneB: "",
+            intendedWindowA: "",
+            intendedWindowB: "",
+            activeWindowA: "",
+            activeWindowB: "",
+            activeWindowShared: "",
+            i2Distinct: false,
+            sharedViewExemptionCorrect: false
+        )
+    }
+}
+
+func writeNoMirrorManifest(_ manifest: NoMirrorCheckManifest, to runDir: URL) throws -> URL {
+    try FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
+    let path = runDir.appendingPathComponent("manifest.json")
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try encoder.encode(manifest).write(to: path, options: .atomic)
+    let readBack = try JSONDecoder().decode(NoMirrorCheckManifest.self, from: Data(contentsOf: path))
+    expect(readBack == manifest, "I2: no-mirror manifest must round-trip through the real filesystem")
+    return path
+}
+
 // MARK: - InvariantManifest Codable conditional-encode check
 //
 // Ticket contract ("How we test it"): an InvariantManifest with outcome "fail" and a
@@ -7881,47 +7939,163 @@ do {
     try writeAndVerify(manifest)
 }
 
-// MARK: - Invariant I2: No-mirror (STUB — real assertion lands with the "Grouped view session per tile" ticket)
+// MARK: - Invariant I2: No-mirror pure logic
 
 do {
-    // STUB: replace with real assertion when "Grouped view session per tile" lands.
-    // When real: assert that a tile's grouped/mirrored view session never duplicates the
-    // primary window's tmux target — one canonical window per tile, any group view is a
-    // read-only attach, never a second live pane.
-    //
-    // Measured values that will appear in the real manifest:
-    //   tile_count: Int, primary_window_count: Int, mirrored_window_count: Int (must be 0)
-    //
-    // For now this block asserts one real property of TileGroup, the type this future
-    // mechanism will lean on for "which tiles are grouped together" — non-vacuous, no
-    // local stand-in type.
-    let group = TileGroup(
-        id: UUID(uuidString: "B0000000-0000-4000-8000-000000000801")!,
-        title: "I2 stub group",
-        tileIds: [UUID(uuidString: "B0000000-0000-4000-8000-000000000802")!],
-        color: "mint",
-        collapsed: false
-    )
-    let groupData = try JSONEncoder().encode(group)
-    let groupRound = try JSONDecoder().decode(TileGroup.self, from: groupData)
-    expect(groupRound == group, "I2 stub: TileGroup codable round-trip")
+    expect(TmuxSession.i2Verdict(
+        intendedA: "@1",
+        intendedB: "@2",
+        observedA: "@1",
+        observedB: "@2"
+    ) == .distinct, "I2: distinct observed window ids must satisfy no-mirror")
+    expect(TmuxSession.i2Verdict(
+        intendedA: "@1",
+        intendedB: "@1",
+        observedA: "@1",
+        observedB: "@1"
+    ) == .deliberateSharedView, "I2: same declared intent and same observed window is a deliberate shared view")
+    expect(TmuxSession.i2Verdict(
+        intendedA: "@1",
+        intendedB: "@2",
+        observedA: "@1",
+        observedB: "@1"
+    ) == .accidentalMirror, "I2: distinct declared intent and same observed window is an accidental mirror")
 
-    let manifest = InvariantManifest(
-        invariantId: "I2-no-mirror",
-        runId: UUID().uuidString,
-        measuredAt: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_800_000_000)),
-        measurements: [
-            "stub": .bool(true),
-            "depends_on": .string("Grouped view session per tile"),
-            // Measured from the non-vacuous assertion just run above (not stub metadata):
-            // the actual round-tripped tile membership and color of the fixture group.
-            "fixture_tile_id_count": .int(groupRound.tileIds.count),
-            "fixture_group_color": .string(groupRound.color)
-        ],
-        outcome: InvariantOutcome.stub.rawValue,
-        failureReason: nil
+    expect(TmuxSession.isValidWindowId("@3"), "I2: @3 is a valid tmux window_id")
+    expect(!TmuxSession.isValidWindowId("%3"), "I2: %3 is a pane id, not a window_id")
+    expect(!TmuxSession.isValidWindowId("3"), "I2: 3 is a window index, not a stable window_id")
+    expect(!TmuxSession.isValidWindowId("@"), "I2: bare @ is not a valid window_id")
+    expect(!TmuxSession.isValidWindowId(""), "I2: empty string is not a valid window_id")
+    expect(TmuxSession.isValidPaneId("%7"), "I2: %7 is a valid tmux pane_id")
+    expect(!TmuxSession.isValidPaneId("@7"), "I2: @7 is a window_id, not a pane_id")
+
+    let groupedArgs = TmuxSession.groupedViewSessionArguments(
+        viewSessionName: "continuum-view-X",
+        projectSessionName: "continuum-proj-Y"
     )
-    try writeAndVerify(manifest)
+    expect(groupedArgs.first == "new-session", "I2: grouped view helper must build a tmux new-session argv")
+    expect(groupedArgs.contains("-A"), "I2: grouped view helper must attach existing view sessions")
+    let groupedTargetIndex = groupedArgs.firstIndex(of: "-t").map { groupedArgs.index(after: $0) }
+    let groupedNameIndex = groupedArgs.firstIndex(of: "-s").map { groupedArgs.index(after: $0) }
+    expect(groupedTargetIndex != nil && groupedTargetIndex! < groupedArgs.endIndex && groupedArgs[groupedTargetIndex!] == "continuum-proj-Y",
+           "I2: grouped view helper must target the project session after -t")
+    expect(groupedNameIndex != nil && groupedNameIndex! < groupedArgs.endIndex && groupedArgs[groupedNameIndex!] == "continuum-view-X",
+           "I2: grouped view helper must name the view session after -s")
+
+    let activeArgs = TmuxSession.activeWindowTargetArguments(viewSessionName: "continuum-view-X")
+    expect(activeArgs == ["display-message", "-p", "-t", "continuum-view-X", "#{window_id}"],
+           "I2: active-window helper must query stable window_id for the view session")
+}
+
+// MARK: - Invariant I2: No-mirror real tmux path
+
+let noMirrorRunId = String(UUID().uuidString.prefix(8))
+let noMirrorRunDir = URL(fileURLWithPath: "qa-runs/no-mirror-\(noMirrorRunId)", isDirectory: true)
+
+i2Check: do {
+    guard let tmuxPath = TmuxLocator.resolve() else {
+        let manifest = NoMirrorCheckManifest.skipped(runId: noMirrorRunId)
+        let path = try writeNoMirrorManifest(manifest, to: noMirrorRunDir)
+        print("SKIP I2: tmux not found - tmux_absent:true - manifest at \(path.path)")
+        break i2Check
+    }
+
+#if os(macOS)
+    let tmux = ProcessTmuxControl(tmuxPath: tmuxPath)
+    let projectSession = "continuum-proj-i2-\(noMirrorRunId)"
+    let viewSessionA = "continuum-view-i2a-\(noMirrorRunId)"
+    let viewSessionB = "continuum-view-i2b-\(noMirrorRunId)"
+    let viewSessionShared = "continuum-view-i2s-\(noMirrorRunId)"
+
+    defer {
+        for session in [viewSessionShared, viewSessionB, viewSessionA, projectSession] {
+            _ = try? tmux.run(["kill-session", "-t", session])
+        }
+    }
+
+    func trimmedTmux(_ arguments: [String]) throws -> String {
+        try tmux.run(arguments).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func windowId(for target: String) throws -> String {
+        try trimmedTmux(["display-message", "-p", "-t", target, "#{window_id}"])
+    }
+
+    let paneA = try trimmedTmux(["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", projectSession, "-c", "/tmp"])
+    let paneB = try trimmedTmux(TmuxSession.newWindowArguments(projectSessionName: projectSession, cwd: "/tmp", innerCommand: nil))
+    expect(TmuxSession.isValidPaneId(paneA), "I2: project session pane A must be a valid pane id, got \(paneA)")
+    expect(TmuxSession.isValidPaneId(paneB), "I2: project session pane B must be a valid pane id, got \(paneB)")
+    expect(paneA != paneB, "I2: two project windows must produce distinct pane ids")
+
+    let intendedWindowA = try windowId(for: paneA)
+    let intendedWindowB = try windowId(for: paneB)
+    expect(TmuxSession.isValidWindowId(intendedWindowA), "I2: pane A owner must be a valid window_id, got \(intendedWindowA)")
+    expect(TmuxSession.isValidWindowId(intendedWindowB), "I2: pane B owner must be a valid window_id, got \(intendedWindowB)")
+    expect(intendedWindowA != intendedWindowB, "I2: project panes must belong to distinct windows")
+
+    _ = try trimmedTmux(TmuxSession.groupedViewSessionArguments(viewSessionName: viewSessionA, projectSessionName: projectSession))
+    _ = try trimmedTmux(TmuxSession.selectWindowArguments(viewSessionName: viewSessionA, windowTarget: intendedWindowA))
+    _ = try trimmedTmux(TmuxSession.groupedViewSessionArguments(viewSessionName: viewSessionB, projectSessionName: projectSession))
+    _ = try trimmedTmux(TmuxSession.selectWindowArguments(viewSessionName: viewSessionB, windowTarget: intendedWindowB))
+
+    let activeA = try trimmedTmux(TmuxSession.activeWindowTargetArguments(viewSessionName: viewSessionA))
+    let activeB = try trimmedTmux(TmuxSession.activeWindowTargetArguments(viewSessionName: viewSessionB))
+    expect(TmuxSession.isValidWindowId(activeA), "I2: view A active window must be a valid window_id, got \(activeA)")
+    expect(TmuxSession.isValidWindowId(activeB), "I2: view B active window must be a valid window_id, got \(activeB)")
+
+    let mainVerdict = TmuxSession.i2Verdict(
+        intendedA: intendedWindowA,
+        intendedB: intendedWindowB,
+        observedA: activeA,
+        observedB: activeB
+    )
+    expect(mainVerdict == .distinct,
+           "I2: grouped view sessions pinned to distinct windows must stay distinct, got \(mainVerdict) A=\(activeA) B=\(activeB)")
+
+    _ = try trimmedTmux(TmuxSession.groupedViewSessionArguments(viewSessionName: viewSessionShared, projectSessionName: projectSession))
+    _ = try trimmedTmux(TmuxSession.selectWindowArguments(viewSessionName: viewSessionShared, windowTarget: intendedWindowA))
+    let activeShared = try trimmedTmux(TmuxSession.activeWindowTargetArguments(viewSessionName: viewSessionShared))
+    expect(TmuxSession.isValidWindowId(activeShared), "I2: shared probe active window must be a valid window_id, got \(activeShared)")
+    expect(activeShared == activeA, "I2: shared probe must observe the same window as A for the exemption assertions")
+
+    let deliberateVerdict = TmuxSession.i2Verdict(
+        intendedA: intendedWindowA,
+        intendedB: intendedWindowA,
+        observedA: activeA,
+        observedB: activeShared
+    )
+    let accidentalVerdict = TmuxSession.i2Verdict(
+        intendedA: intendedWindowB,
+        intendedB: intendedWindowA,
+        observedA: activeShared,
+        observedB: activeA
+    )
+    expect(deliberateVerdict == .deliberateSharedView,
+           "I2: same declared intent and same observed window must be deliberate shared view, got \(deliberateVerdict)")
+    expect(accidentalVerdict == .accidentalMirror,
+           "I2: distinct declared intent and same observed window must be accidental mirror, got \(accidentalVerdict)")
+
+    let manifest = NoMirrorCheckManifest(
+        runId: noMirrorRunId,
+        tmuxAbsent: false,
+        projSession: projectSession,
+        paneA: paneA,
+        paneB: paneB,
+        intendedWindowA: intendedWindowA,
+        intendedWindowB: intendedWindowB,
+        activeWindowA: activeA,
+        activeWindowB: activeB,
+        activeWindowShared: activeShared,
+        i2Distinct: mainVerdict == .distinct,
+        sharedViewExemptionCorrect: deliberateVerdict == .deliberateSharedView && accidentalVerdict == .accidentalMirror
+    )
+    let manifestPath = try writeNoMirrorManifest(manifest, to: noMirrorRunDir)
+    print("PASS I2: A=\(activeA) B=\(activeB) distinct; shared=\(activeShared); manifest at \(manifestPath.path)")
+#else
+    let manifest = NoMirrorCheckManifest.skipped(runId: noMirrorRunId)
+    let path = try writeNoMirrorManifest(manifest, to: noMirrorRunDir)
+    print("SKIP I2: Process-backed tmux checks require macOS - tmux_absent:true - manifest at \(path.path)")
+#endif
 }
 
 // MARK: - Invariant I3: No-session-leak (STUB — real assertion lands with the "Project session naming & lifecycle ownership" ticket)

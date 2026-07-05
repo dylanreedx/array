@@ -63,6 +63,18 @@ public enum TmuxSession {
         (command: tmuxPath, arguments: ["kill-session", "-t", viewSessionName(tileId: tileId)])
     }
 
+    public static func groupedViewSessionArguments(viewSessionName: String, projectSessionName: String) -> [String] {
+        ["new-session", "-d", "-t", projectSessionName, "-s", viewSessionName, "-A"]
+    }
+
+    public static func selectWindowArguments(viewSessionName: String, windowTarget: String) -> [String] {
+        ["select-window", "-t", "\(viewSessionName):\(windowTarget)"]
+    }
+
+    public static func activeWindowTargetArguments(viewSessionName: String) -> [String] {
+        ["display-message", "-p", "-t", viewSessionName, "#{window_id}"]
+    }
+
     public static func killWindowCommand(target: String, tmuxPath: String) -> (command: String, arguments: [String]) {
         (command: tmuxPath, arguments: ["kill-window", "-t", target])
     }
@@ -86,6 +98,20 @@ public enum TmuxSession {
 
     public static func isValidPaneId(_ value: String) -> Bool {
         value.hasPrefix("%") && !value.dropFirst().isEmpty && value.dropFirst().allSatisfy(\.isNumber)
+    }
+
+    public static func isValidWindowId(_ value: String) -> Bool {
+        value.hasPrefix("@") && !value.dropFirst().isEmpty && value.dropFirst().allSatisfy(\.isNumber)
+    }
+
+    public static func i2Verdict(intendedA: String, intendedB: String, observedA: String, observedB: String) -> I2Verdict {
+        if observedA != observedB {
+            return .distinct
+        }
+        if intendedA == intendedB {
+            return .deliberateSharedView
+        }
+        return .accidentalMirror
     }
 
     /// Project-scoped session name (phase 1+). `ZoneRuntimeController` is the
@@ -129,6 +155,14 @@ public enum TmuxSession {
     private static func shouldPassInnerCommand(_ profile: LaunchProfile) -> Bool {
         !(profile.title == "Shell" && profile.arguments.isEmpty)
     }
+}
+
+public enum I2Verdict: String, Codable, Equatable, Sendable, CustomStringConvertible {
+    case distinct
+    case deliberateSharedView
+    case accidentalMirror
+
+    public var description: String { rawValue }
 }
 
 public enum TerminalSessionTarget: Sendable, Equatable {

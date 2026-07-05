@@ -44,22 +44,22 @@ public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {
         if let innerCommand, !innerCommand.isEmpty {
             arguments.append(contentsOf: innerCommand)
         }
-        let result = try run(arguments)
+        let result = try runProcess(arguments)
         return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     public func newWindow(inSession: String, cwd: String, innerCommand: [String]?) async throws -> String {
         let arguments = TmuxSession.newWindowArguments(projectSessionName: inSession, cwd: cwd, innerCommand: innerCommand)
-        let result = try run(arguments)
+        let result = try runProcess(arguments)
         return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     public func killWindow(target: String) async throws {
-        _ = try run(["kill-window", "-t", target])
+        _ = try runProcess(["kill-window", "-t", target])
     }
 
     public func killSession(name: String) async throws {
-        _ = try run(["kill-session", "-t", name])
+        _ = try runProcess(["kill-session", "-t", name])
     }
 
     public func detachSession(name: String) async throws {
@@ -89,7 +89,7 @@ public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {
         // Same unreliable-target problem as `isAlive`: `display-message -t
         // <pane_id>` can silently ignore an invalid/stale `-t` when no client
         // is attached. List every pane's id + cwd instead and match exactly.
-        let result = try run(["list-panes", "-a", "-F", "#{pane_id}\t#{pane_current_path}"])
+        let result = try runProcess(["list-panes", "-a", "-F", "#{pane_id}\t#{pane_current_path}"])
         for line in result.stdout.split(separator: "\n", omittingEmptySubsequences: true) {
             let parts = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
             if parts.first.map(String.init) == paneTarget, parts.count == 2 {
@@ -103,7 +103,7 @@ public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {
         guard try await isAlive(paneTarget: paneTarget) else {
             throw TmuxControlError.paneNotFound(target: paneTarget)
         }
-        let result = try run(["display-message", "-p", "-t", paneTarget, "#{pane_current_command}"])
+        let result = try runProcess(["display-message", "-p", "-t", paneTarget, "#{pane_current_command}"])
         return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -130,6 +130,10 @@ public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {
         }
     }
 
+    public func run(_ arguments: [String]) throws -> String {
+        try runProcess(arguments).stdout
+    }
+
     // MARK: - Process plumbing (not part of the public surface)
 
     private struct RunResult {
@@ -138,7 +142,7 @@ public final class ProcessTmuxControl: TmuxControl, @unchecked Sendable {
         let stderr: String
     }
 
-    private func run(_ arguments: [String]) throws -> RunResult {
+    private func runProcess(_ arguments: [String]) throws -> RunResult {
         let result = runIgnoringFailure(arguments)
         guard result.exitCode == 0 else {
             throw TmuxProcessError(arguments: arguments, exitCode: result.exitCode, stderr: result.stderr)
