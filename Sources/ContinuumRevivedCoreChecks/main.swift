@@ -865,9 +865,9 @@ do {
 
     try authorize(.subscribeActivity, grantedScopes: .observer)
     try authorize(.subscribeSpatial, grantedScopes: .observer)
-    try authorize(.respondToApproval, grantedScopes: .observer)
 
     let observerDenied: [(ControlMessage, Scope)] = [
+        (.respondToApproval, .orchestrationOperate),
         (.moveTile, .orchestrationOperate),
         (.resizeTile, .orchestrationOperate),
         (.spawnTerminal, .orchestrationOperate),

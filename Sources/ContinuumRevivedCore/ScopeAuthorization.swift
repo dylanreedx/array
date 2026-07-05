@@ -20,7 +20,7 @@ public let requiredScope: [ControlMessage: Scope] = [
     .resizeTile: .orchestrationOperate,
     .spawnTerminal: .orchestrationOperate,
     .sendKeys: .terminalOperate,
-    .respondToApproval: .orchestrationRead,
+    .respondToApproval: .orchestrationOperate,
     .listDevices: .accessRead,
     .pairDevice: .accessWrite,
     .revokeDevice: .accessWrite,

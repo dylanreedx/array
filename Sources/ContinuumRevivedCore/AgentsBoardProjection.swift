@@ -36,6 +36,16 @@ public struct AgentsBoardRow: Equatable, Sendable, Identifiable {
     }
 }
 
+public struct ApprovalResponseTarget: Equatable, Sendable {
+    public let tileId: UUID
+    public let approvalRequestId: String
+
+    public init(tileId: UUID, approvalRequestId: String) {
+        self.tileId = tileId
+        self.approvalRequestId = approvalRequestId
+    }
+}
+
 public enum AgentsBoardProjection {
     public static func rows(from snapshot: ActivityLogSnapshot) -> [AgentsBoardRow] {
         snapshot.byTile.map { tileId, activity in
@@ -61,6 +71,23 @@ public enum AgentsBoardProjection {
 
     public static func latestPendingAttentionEvent(in activity: TileActivity) -> AgentActivityEvent? {
         activity.recent.last { $0.status == .needsAttention || $0.tone == .approval }
+    }
+
+    public static func approvalsInboxRows(from snapshot: ActivityLogSnapshot) -> [AgentsBoardRow] {
+        rows(from: snapshot).filter { $0.status == .needsAttention }
+    }
+
+    public static func attentionCount(from snapshot: ActivityLogSnapshot) -> Int {
+        approvalsInboxRows(from: snapshot).count
+    }
+
+    public static func respondableRequest(in activity: TileActivity) -> ApprovalResponseTarget? {
+        guard let event = latestPendingAttentionEvent(in: activity),
+              event.status == .needsAttention,
+              let approvalRequestId = event.approvalRequestId else {
+            return nil
+        }
+        return ApprovalResponseTarget(tileId: event.tileId, approvalRequestId: approvalRequestId)
     }
 
     public static func presentation(for status: AgentStatus) -> AgentStatusPresentation {

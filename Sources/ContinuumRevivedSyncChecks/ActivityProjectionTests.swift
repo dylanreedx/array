@@ -147,7 +147,8 @@ private func makeDraft(
     tone: ActivityEventTone = .info,
     status: AgentStatus,
     summary: String = "activity",
-    occurredAt: Date = Date(timeIntervalSinceReferenceDate: 100)
+    occurredAt: Date = Date(timeIntervalSinceReferenceDate: 100),
+    approvalRequestId: String? = nil
 ) -> AgentActivityEventDraft {
     AgentActivityEventDraft(
         tileId: tileId,
@@ -156,7 +157,8 @@ private func makeDraft(
         kind: "status",
         status: status,
         summary: summary,
-        occurredAt: occurredAt
+        occurredAt: occurredAt,
+        approvalRequestId: approvalRequestId
     )
 }
 
@@ -550,6 +552,173 @@ private func checkAgentsBoardProjectionOverFakeSyncTransportRealPath() async {
     await receiver.stop()
 }
 
+private actor FakeApprovalSeam: ApprovalResponding {
+    private let store: ActivityStore
+    private var resolved: Set<String> = []
+    private(set) var callCount = 0
+    private(set) var invocations: [(tileId: UUID, requestId: String, decision: ApprovalDecision)] = []
+
+    init(store: ActivityStore) {
+        self.store = store
+    }
+
+    func respond(tileId: UUID, requestId: String, decision: ApprovalDecision) async -> ApprovalRespondResult {
+        callCount += 1
+        guard requestId != "unknown-request" else { return .unknownRequest }
+        guard !resolved.contains(requestId) else { return .stale }
+        resolved.insert(requestId)
+        invocations.append((tileId: tileId, requestId: requestId, decision: decision))
+        if decision == .accept {
+            await store.append(makeDraft(
+                tileId: tileId,
+                tone: .approval,
+                status: .working,
+                summary: "approval resolved",
+                occurredAt: Date(timeIntervalSinceReferenceDate: 6_262)
+            ))
+        }
+        return .resolved
+    }
+
+    func invocationCount() -> Int { invocations.count }
+    func totalCallCount() -> Int { callCount }
+    func allInvocations() -> [(tileId: UUID, requestId: String, decision: ApprovalDecision)] { invocations }
+}
+
+private actor ApprovalAckCollector {
+    private var acks: [ApprovalResponseAck] = []
+    func add(_ ack: ApprovalResponseAck) { acks.append(ack) }
+    func all() -> [ApprovalResponseAck] { acks }
+}
+
+private func waitForApprovalAck(
+    fake: ContinuumRevivedSync.FakeSyncTransport,
+    collector: ApprovalAckCollector,
+    requestId: String,
+    count: Int = 1,
+    timeoutSeconds: Double = 2
+) async -> [ApprovalResponseAck] {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(timeoutSeconds))
+    while ContinuousClock.now < deadline {
+        await fake.tick()
+        let matches = await collector.all().filter { $0.requestId == requestId }
+        if matches.count >= count { return matches }
+        try? await Task.sleep(for: .milliseconds(2))
+    }
+    return await collector.all().filter { $0.requestId == requestId }
+}
+
+private func checkApprovalResponderOverFakeSyncTransportRealPath() async {
+    let replicaId = UUID(uuidString: "62000000-0000-4000-8000-00000000F001")!
+    let tileId = UUID(uuidString: "62000000-0000-4000-8000-00000000F00A")!
+    let requestId = "approval-62"
+    let base = Date(timeIntervalSinceReferenceDate: 6_260)
+    let store = ActivityStore(replicaId: replicaId)
+    await store.append(makeDraft(
+        tileId: tileId,
+        tone: .approval,
+        status: .needsAttention,
+        summary: "approve deploy",
+        occurredAt: base,
+        approvalRequestId: requestId
+    ))
+
+    let fake = ContinuumRevivedSync.FakeSyncTransport(seed: 62)
+    let (hostReplica, hostInbound) = await fake.makeReplica()
+    let (observerReplica, observerInbound) = await fake.makeReplica()
+    let hostTransport = FakeReplicaSyncTransport(fake: fake, replicaId: hostReplica, inbound: hostInbound)
+    let observerTransport = FakeReplicaSyncTransport(fake: fake, replicaId: observerReplica, inbound: observerInbound)
+    let hostDemux = SyncMessageDemux(transport: hostTransport)
+    let observerDemux = SyncMessageDemux(transport: observerTransport)
+    let sender = ActivityProjectionSender(store: store, demux: hostDemux, authorizedScope: .observer)
+    await sender.start()
+    let seam = FakeApprovalSeam(store: store)
+    let responder = ApprovalResponder(seam: seam, demux: hostDemux, authorizedScope: .operator)
+    await responder.start()
+
+    let receiver = ActivityProjectionReceiver(demux: observerDemux, scope: .observer, gapRetryBackoff: .milliseconds(5))
+    await receiver.connect(cursor: nil)
+    let ackCollector = ApprovalAckCollector()
+    let ackStream = await observerDemux.subscribe()
+    let ackTask = Task {
+        for await message in ackStream {
+            if case .approvalResponseAck(let ack) = message {
+                await ackCollector.add(ack)
+            }
+        }
+    }
+
+    let seeded = await waitForFakeReceiverConvergence(fake: fake, receiver: receiver, expectedSequence: 1, timeoutSeconds: 2)
+    expect(seeded, "approval responder real path: pending approval event reaches receiver")
+    let seededSnapshot = await receiver.currentSnapshot()
+    let seededActivity = seededSnapshot.byTile[tileId]
+    expect(seededActivity?.status == .needsAttention, "approval responder real path: receiver folds needsAttention")
+    expect(AgentsBoardProjection.respondableRequest(in: seededActivity!)?.approvalRequestId == requestId, "approval responder real path: receiver exposes approvalRequestId")
+
+    try? await observerDemux.send(.approvalResponse(ApprovalResponseRequest(tileId: tileId, requestId: requestId, decision: .accept)))
+    let resolvedAcks = await waitForApprovalAck(fake: fake, collector: ackCollector, requestId: requestId)
+    expect(resolvedAcks.last?.outcome == .resolved, "approval responder real path: operator accept acks resolved")
+    let resolvedConverged = await waitForFakeReceiverConvergence(fake: fake, receiver: receiver, expectedSequence: 2, timeoutSeconds: 2)
+    expect(resolvedConverged, "approval responder real path: resolution activity flows back through projection")
+    let resolvedSnapshot = await receiver.currentSnapshot()
+    expect(resolvedSnapshot.byTile[tileId]?.status == .working, "approval responder real path: folded status clears needsAttention")
+    let firstInvocationCount = await seam.invocationCount()
+    expect(firstInvocationCount == 1, "approval responder real path: first accept invokes seam exactly once")
+    let firstInvocations = await seam.allInvocations()
+    let firstInvocation = firstInvocations.first
+    expect(
+        firstInvocations.count == 1 &&
+            firstInvocation?.tileId == tileId &&
+            firstInvocation?.requestId == requestId &&
+            firstInvocation?.decision == .accept,
+        "approval responder real path: first accept forwards exact tileId, requestId, and .accept decision to seam"
+    )
+    let firstCallCount = await seam.totalCallCount()
+    expect(firstCallCount == 1, "approval responder real path: first accept calls seam exactly once")
+
+    try? await observerDemux.send(.approvalResponse(ApprovalResponseRequest(tileId: tileId, requestId: requestId, decision: .accept)))
+    let staleAcks = await waitForApprovalAck(fake: fake, collector: ackCollector, requestId: requestId, count: 2)
+    expect(staleAcks.last?.outcome == .stale, "approval responder real path: second identical accept acks stale")
+    let staleInvocationCount = await seam.invocationCount()
+    expect(staleInvocationCount == 1, "approval responder real path: stale second accept does not re-invoke seam")
+    let staleCallCount = await seam.totalCallCount()
+    expect(staleCallCount == 1, "approval responder real path: stale second accept does not call seam again")
+
+    let unauthorizedSeam = FakeApprovalSeam(store: store)
+    let unauthorizedTransport = BlackHoleTransport()
+    let unauthorizedDemux = SyncMessageDemux(transport: unauthorizedTransport)
+    let unauthorizedResponder = ApprovalResponder(seam: unauthorizedSeam, demux: unauthorizedDemux, authorizedScope: .observer)
+    await unauthorizedResponder.start()
+    await unauthorizedTransport.push(.approvalResponse(ApprovalResponseRequest(tileId: tileId, requestId: "unauthorized-request", decision: .decline)))
+    try? await Task.sleep(for: .milliseconds(50))
+    let unauthorizedAck = await unauthorizedTransport.allSentMessages().compactMap { message -> ApprovalResponseAck? in
+        if case .approvalResponseAck(let ack) = message { return ack }
+        return nil
+    }.last
+    expect(unauthorizedAck?.outcome == .unauthorized, "approval responder real path: observer-scope responder acks unauthorized")
+    let unauthorizedInvocationCount = await unauthorizedSeam.invocationCount()
+    expect(unauthorizedInvocationCount == 0, "approval responder real path: unauthorized path never invokes seam")
+    await unauthorizedResponder.stop()
+
+    try? await observerDemux.send(.approvalResponse(ApprovalResponseRequest(tileId: tileId, requestId: "unknown-request", decision: .decline)))
+    let unknownAcks = await waitForApprovalAck(fake: fake, collector: ackCollector, requestId: "unknown-request")
+    expect(unknownAcks.last?.outcome == .unknownRequest, "approval responder real path: unknown request acks unknownRequest")
+
+    let allAcks = await ackCollector.all()
+    let measuredAcks = allAcks.map { "\($0.requestId):\($0.outcome.rawValue)" }.joined(separator: ",")
+    let finalStatus = (await receiver.currentSnapshot()).byTile[tileId]?.status.rawValue ?? "nil"
+    let finalInvocationCount = await seam.invocationCount()
+    let finalInvocations = await seam.allInvocations()
+    let finalUnauthorizedInvocationCount = await unauthorizedSeam.invocationCount()
+    let measuredInvocations = finalInvocations.map { "\($0.tileId.uuidString):\($0.requestId):\($0.decision.rawValue)" }.joined(separator: ",")
+    print("approval responder real path: acks=\(measuredAcks) seamInvocations=\(finalInvocationCount) invocationTuples=\(measuredInvocations) finalStatus=\(finalStatus) unauthorizedInvocations=\(finalUnauthorizedInvocationCount)")
+
+    ackTask.cancel()
+    await responder.stop()
+    await sender.stop()
+    await receiver.stop()
+}
+
 func runActivityProjectionChecks() async throws {
     await checkSnapshotThenTailIsGapFree()
     await checkGapDetectionTriggersReplay()
@@ -560,6 +729,7 @@ func runActivityProjectionChecks() async throws {
     await checkGapRetryExhaustionFallsBackToColdReconnect()
     let backendElapsedMs = await runActivityProjectionBackendCheck()
     await checkAgentsBoardProjectionOverFakeSyncTransportRealPath()
+    await checkApprovalResponderOverFakeSyncTransportRealPath()
 
     let manifest = InvariantManifest(
         invariantId: "ticket58-activity-projection-transport",

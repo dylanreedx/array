@@ -352,7 +352,7 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, canvasSceneCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
+        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, approvalsInboxCard, canvasSceneCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
     }
 
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
@@ -409,6 +409,18 @@ enum LabCatalog {
         )
     }
 
+    static var approvalsInboxCard: LabEntry {
+        LabEntry(
+            id: "approvals.inbox",
+            category: "Chrome",
+            title: "Approvals Inbox",
+            summary: "Needs-attention rows folded through the shared approvals helpers, including scope gating.",
+            content: .staticCard(preferredSize: NSSize(width: 680, height: 160)) {
+                makeApprovalsInboxView(snapshot: approvalsInboxSnapshot())
+            }
+        )
+    }
+
     static func agentsBoardRows() -> [AgentsBoardRow] {
         let replica = UUID(uuidString: "61000000-0000-4000-8000-0000000000CC")!
         let base = Date(timeIntervalSinceReferenceDate: 6_167)
@@ -440,6 +452,35 @@ enum LabCatalog {
         return AgentsBoardProjection.rows(from: snapshot)
     }
 
+    static func approvalsInboxSnapshot() -> ActivityLogSnapshot {
+        let replica = UUID(uuidString: "62000000-0000-4000-8000-0000000000CC")!
+        let base = Date(timeIntervalSinceReferenceDate: 6_267)
+        func event(tileId: UUID, sequence: UInt64, status: AgentStatus, summary: String, offset: TimeInterval, approvalRequestId: String? = nil) -> AgentActivityEvent {
+            AgentActivityEvent(
+                stamping: AgentActivityEventDraft(
+                    tileId: tileId,
+                    runId: nil,
+                    tone: status == .needsAttention ? .approval : .info,
+                    kind: status == .needsAttention ? "needs-attention" : "status.\(status.rawValue)",
+                    status: status,
+                    summary: summary,
+                    occurredAt: base.addingTimeInterval(offset),
+                    approvalRequestId: approvalRequestId
+                ),
+                sequence: sequence,
+                replicaId: replica
+            )
+        }
+        let withId = UUID(uuidString: "62000000-0000-4000-8000-0000000000A1")!
+        let withoutId = UUID(uuidString: "62000000-0000-4000-8000-0000000000B2")!
+        let working = UUID(uuidString: "62000000-0000-4000-8000-0000000000C3")!
+        return [
+            event(tileId: working, sequence: 1, status: .working, summary: "gamma is running", offset: 1),
+            event(tileId: withId, sequence: 2, status: .needsAttention, summary: "alpha approve deploy", offset: 3, approvalRequestId: "approval-alpha"),
+            event(tileId: withoutId, sequence: 3, status: .needsAttention, summary: "beta legacy request", offset: 2),
+        ].reduce(ActivityLogSnapshot.empty) { apply($0, $1) }
+    }
+
     static func makeAgentsBoardView(rows: [AgentsBoardRow]) -> NSView {
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -458,6 +499,64 @@ enum LabCatalog {
             label.textColor = color(forToken: row.presentation.colorToken)
             stack.addArrangedSubview(label)
         }
+        return stack
+    }
+
+    static func makeApprovalsInboxView(snapshot: ActivityLogSnapshot) -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+
+        let title = NSTextField(labelWithString: "Approvals Inbox — attentionCount=\(AgentsBoardProjection.attentionCount(from: snapshot))")
+        title.identifier = NSUserInterfaceItemIdentifier("approvalsInbox.count")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.textColor = .labelColor
+        stack.addArrangedSubview(title)
+
+        let rows = AgentsBoardProjection.approvalsInboxRows(from: snapshot)
+        for (index, row) in rows.enumerated() {
+            let target = snapshot.byTile[row.tileId].flatMap { AgentsBoardProjection.respondableRequest(in: $0) }
+            let request = target?.approvalRequestId ?? "no-id"
+            let label = NSTextField(labelWithString: "\(row.presentation.glyph) \(row.lastSummary) request=\(request)")
+            label.identifier = NSUserInterfaceItemIdentifier("approvalsInbox.row.\(index + 1)")
+            label.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            label.textColor = color(forToken: row.presentation.colorToken)
+            stack.addArrangedSubview(label)
+        }
+
+        let observerGate: String
+        func scopeName(_ scope: Scope) -> String {
+            switch scope {
+            case .orchestrationRead:
+                "orchestrationRead"
+            case .orchestrationOperate:
+                "orchestrationOperate"
+            case .terminalOperate:
+                "terminalOperate"
+            case .accessRead:
+                "accessRead"
+            case .accessWrite:
+                "accessWrite"
+            default:
+                "\(scope.rawValue)"
+            }
+        }
+        do {
+            try authorize(.respondToApproval, grantedScopes: .observer)
+            observerGate = "observer=allowed"
+        } catch AuthError.missingScope(let scope) {
+            observerGate = "observer=missing:\(scopeName(scope))"
+        } catch {
+            observerGate = "observer=error"
+        }
+        let operatorGate = (try? authorize(.respondToApproval, grantedScopes: .operator)) != nil ? "operator=allowed" : "operator=denied"
+        let scope = NSTextField(labelWithString: "\(observerGate) \(operatorGate)")
+        scope.identifier = NSUserInterfaceItemIdentifier("approvalsInbox.scope")
+        scope.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
+        scope.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(scope)
+
         return stack
     }
 
@@ -1136,6 +1235,33 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         guard agentsBoardRow4.contains("✓ done [green] gamma finished cleanly") else {
             throw fail("agents board row 4 rendered '\(agentsBoardRow4)'")
+        }
+        guard let approvalsInboxEntry = entries.first(where: { $0.id == "approvals.inbox" }),
+              case let .staticCard(_, makeApprovalsInboxView) = approvalsInboxEntry.content else {
+            throw fail("missing approvals.inbox card")
+        }
+        let approvalsInboxView = makeApprovalsInboxView()
+        func approvalsInboxText(_ identifier: String) throws -> String {
+            guard let field = approvalsInboxView.descendant(withIdentifier: identifier) as? NSTextField else {
+                throw fail("approvals inbox card missing label \(identifier)")
+            }
+            return field.stringValue
+        }
+        let approvalsCount = try approvalsInboxText("approvalsInbox.count")
+        guard approvalsCount == "Approvals Inbox — attentionCount=2" else {
+            throw fail("approvals inbox count rendered '\(approvalsCount)'")
+        }
+        let approvalsRow1 = try approvalsInboxText("approvalsInbox.row.1")
+        let approvalsRow2 = try approvalsInboxText("approvalsInbox.row.2")
+        guard approvalsRow1.contains("◆ alpha approve deploy request=approval-alpha") else {
+            throw fail("approvals inbox row 1 rendered '\(approvalsRow1)'")
+        }
+        guard approvalsRow2.contains("◆ beta legacy request request=no-id") else {
+            throw fail("approvals inbox row 2 rendered '\(approvalsRow2)'")
+        }
+        let approvalsScope = try approvalsInboxText("approvalsInbox.scope")
+        guard approvalsScope == "observer=missing:orchestrationOperate operator=allowed" else {
+            throw fail("approvals inbox scope rendered '\(approvalsScope)'")
         }
         guard let canvasSceneEntry = entries.first(where: { $0.id == "canvas.scene" }),
               case let .staticCard(_, makeCanvasSceneView) = canvasSceneEntry.content else {

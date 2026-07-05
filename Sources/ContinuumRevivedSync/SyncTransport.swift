@@ -48,6 +48,37 @@ public enum SyncMessage: Codable, Sendable, Equatable {
     case activity(ActivityStreamItem)
     case activitySubscribe(ActivitySubscribeRequest)
     case spatialSubscribe(SpatialSubscribeRequest)
+    case approvalResponse(ApprovalResponseRequest)
+    case approvalResponseAck(ApprovalResponseAck)
+}
+
+public struct ApprovalResponseRequest: Codable, Sendable, Equatable {
+    public let tileId: UUID
+    public let requestId: String
+    public let decision: ApprovalDecision
+
+    public init(tileId: UUID, requestId: String, decision: ApprovalDecision) {
+        self.tileId = tileId
+        self.requestId = requestId
+        self.decision = decision
+    }
+}
+
+public enum ApprovalResponseOutcome: String, Codable, Sendable, Equatable {
+    case resolved
+    case stale
+    case unauthorized
+    case unknownRequest
+}
+
+public struct ApprovalResponseAck: Codable, Sendable, Equatable {
+    public let requestId: String
+    public let outcome: ApprovalResponseOutcome
+
+    public init(requestId: String, outcome: ApprovalResponseOutcome) {
+        self.requestId = requestId
+        self.outcome = outcome
+    }
 }
 
 /// Spatial subscription control message — the `.subscribeSpatial` analog of

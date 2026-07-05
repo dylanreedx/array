@@ -317,6 +317,10 @@ public struct CloudKitSyncTransport: SyncTransport, Sendable {
             try await triggerActivityRefetch(request)
         case .spatialSubscribe:
             try await triggerSpatialRefetch()
+        case .approvalResponse:
+            throw SyncTransportError.sendFailed(reason: "approvalResponse over CloudKit is publisher-owed; desktop inbound pump is not built")
+        case .approvalResponseAck:
+            throw SyncTransportError.sendFailed(reason: "approvalResponseAck over CloudKit is publisher-owed; desktop inbound pump is not built")
         }
     }
 

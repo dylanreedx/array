@@ -27,6 +27,7 @@ private enum ContinuumTab: Hashable {
 }
 
 private struct ContinuumRootView: View {
+    @EnvironmentObject private var model: AgentsBoardModel
     @State private var selectedTab: ContinuumTab = .agents
 
     var body: some View {
@@ -39,8 +40,9 @@ private struct ContinuumRootView: View {
                 .tabItem { Label("Canvas", systemImage: "square.grid.2x2") }
                 .tag(ContinuumTab.canvas)
 
-            PlaceholderScreen(title: "Approvals", subtitle: "Approvals land with ticket 62.")
+            ApprovalsInboxView(selectedTab: $selectedTab)
                 .tabItem { Label("Approvals", systemImage: "checkmark.seal") }
+                .badge(model.attentionCount)
                 .tag(ContinuumTab.approvals)
 
             PlaceholderScreen(title: "Settings", subtitle: "Settings land with ticket B8.")
@@ -53,6 +55,8 @@ private struct ContinuumRootView: View {
 
 @MainActor
 private final class AgentsBoardModel: ObservableObject {
+    private static let approvalAckTimeout: Duration = .seconds(5)
+
     enum State: Equatable {
         case loading
         case unavailable(String)
@@ -62,6 +66,7 @@ private final class AgentsBoardModel: ObservableObject {
     @Published var state: State = .loading
     @Published var snapshot: ActivityLogSnapshot = .empty
     @Published var rows: [AgentsBoardRow] = []
+    @Published var lastApprovalAck: ApprovalResponseAck?
 
     // Ticket: docs/38-tickets/61b-canvas-editor.md
     @Published var canvasScene: CanvasScene = CanvasScene(zones: [], tiles: [])
@@ -73,6 +78,7 @@ private final class AgentsBoardModel: ObservableObject {
     private var receiver: ActivityProjectionReceiver?
     private var spatialReceiver: SpatialOpReceiver?
     private var spatialTask: Task<Void, Never>?
+    private var demux: SyncMessageDemux?
 
     func start() async {
         guard task == nil else { return }
@@ -95,6 +101,7 @@ private final class AgentsBoardModel: ObservableObject {
         // independent subscriber over the SAME demux the activity receiver
         // uses (ticket 61b banner (c).7), never a second transport.
         let demux = SyncMessageDemux(transport: transport)
+        self.demux = demux
 
         let receiver = ActivityProjectionReceiver(demux: demux, scope: .observer)
         self.receiver = receiver
@@ -119,6 +126,50 @@ private final class AgentsBoardModel: ObservableObject {
 
     func activity(for tileId: UUID) -> TileActivity? {
         snapshot.byTile[tileId]
+    }
+
+    var approvalRows: [AgentsBoardRow] {
+        AgentsBoardProjection.approvalsInboxRows(from: snapshot)
+    }
+
+    var attentionCount: Int {
+        AgentsBoardProjection.attentionCount(from: snapshot)
+    }
+
+    func respondToApproval(tileId: UUID, requestId: String, decision: ApprovalDecision) async throws -> ApprovalResponseOutcome {
+        guard let demux else {
+            throw ApprovalSendError.unavailable
+        }
+        let stream = await demux.subscribe()
+        let ackTask = Task<ApprovalResponseOutcome, Error> {
+            for await message in stream {
+                guard case .approvalResponseAck(let ack) = message, ack.requestId == requestId else { continue }
+                await MainActor.run { self.lastApprovalAck = ack }
+                return ack.outcome
+            }
+            throw ApprovalSendError.unavailable
+        }
+        defer { ackTask.cancel() }
+        do {
+            try await demux.send(.approvalResponse(ApprovalResponseRequest(tileId: tileId, requestId: requestId, decision: decision)))
+            return try await withThrowingTaskGroup(of: ApprovalResponseOutcome.self) { group in
+                group.addTask {
+                    try await ackTask.value
+                }
+                group.addTask {
+                    try await Task.sleep(for: Self.approvalAckTimeout)
+                    throw ApprovalSendError.ackTimedOut
+                }
+                guard let outcome = try await group.next() else {
+                    throw ApprovalSendError.unavailable
+                }
+                group.cancelAll()
+                return outcome
+            }
+        } catch {
+            ackTask.cancel()
+            throw error
+        }
     }
 
     private func consume(_ item: ActivityStreamItem) {
@@ -183,6 +234,20 @@ private final class AgentsBoardModel: ObservableObject {
     }
 }
 
+private enum ApprovalSendError: LocalizedError {
+    case unavailable
+    case ackTimedOut
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable:
+            "Approval channel is not connected."
+        case .ackTimedOut:
+            "Approval response timed out."
+        }
+    }
+}
+
 private struct AgentsBoardView: View {
     @EnvironmentObject private var model: AgentsBoardModel
     @Binding var selectedTab: ContinuumTab
@@ -212,6 +277,39 @@ private struct AgentsBoardView: View {
             }
             .background(AppColors.background.ignoresSafeArea())
             .navigationTitle("Agents")
+            .navigationDestination(for: UUID.self) { tileId in
+                AgentDetailView(tileId: tileId, selectedTab: $selectedTab)
+            }
+        }
+    }
+}
+
+private struct ApprovalsInboxView: View {
+    @EnvironmentObject private var model: AgentsBoardModel
+    @Binding var selectedTab: ContinuumTab
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if model.approvalRows.isEmpty {
+                    Text("Nothing needs you.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(AppColors.background.ignoresSafeArea())
+                } else {
+                    List(model.approvalRows) { row in
+                        NavigationLink(value: row.tileId) {
+                            AgentRowView(row: row)
+                        }
+                        .listRowBackground(Color.orange.opacity(0.12))
+                    }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .background(AppColors.background.ignoresSafeArea())
+                }
+            }
+            .navigationTitle("Approvals")
             .navigationDestination(for: UUID.self) { tileId in
                 AgentDetailView(tileId: tileId, selectedTab: $selectedTab)
             }
@@ -262,7 +360,13 @@ private struct AgentDetailView: View {
                 if let row, let activity {
                     DetailHeader(row: row)
                     if row.status == .needsAttention {
-                        PendingAttentionCard(activity: activity)
+                        PendingAttentionCard(activity: activity, grantedScope: model.grantedScope) { target, decision in
+                            try await model.respondToApproval(
+                                tileId: target.tileId,
+                                requestId: target.approvalRequestId,
+                                decision: decision
+                            )
+                        }
                     }
                     Button {
                         model.requestCanvasFocus(tileId: tileId)
@@ -318,9 +422,32 @@ private struct DetailHeader: View {
 
 private struct PendingAttentionCard: View {
     let activity: TileActivity
+    let grantedScope: Scope
+    var onRespond: (ApprovalResponseTarget, ApprovalDecision) async throws -> ApprovalResponseOutcome
+
+    @State private var resolving: ApprovalDecision?
+    @State private var settled = false
+    @State private var note: String?
+    @State private var isError = false
 
     private var latest: AgentActivityEvent? {
         AgentsBoardProjection.latestPendingAttentionEvent(in: activity)
+    }
+
+    private var target: ApprovalResponseTarget? {
+        AgentsBoardProjection.respondableRequest(in: activity)
+    }
+
+    private var gateHint: String? {
+        if target == nil {
+            return "No approval id synced"
+        }
+        do {
+            try authorize(.respondToApproval, grantedScopes: grantedScope)
+            return nil
+        } catch {
+            return "Observer scope"
+        }
     }
 
     var body: some View {
@@ -339,20 +466,86 @@ private struct PendingAttentionCard: View {
                 .font(.subheadline)
                 .foregroundStyle(.primary)
             HStack(spacing: 10) {
-                Button("Approve") {}
-                    .buttonStyle(.borderedProminent)
-                    .disabled(true)
-                Button("Deny") {}
-                    .buttonStyle(.bordered)
-                    .disabled(true)
+                approvalButton("Approve", decision: .accept, prominent: true)
+                approvalButton("Deny", decision: .decline, prominent: false)
             }
-            Text("Actions land with ticket 62.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if let note {
+                Text(note)
+                    .font(.caption)
+                    .foregroundStyle(isError ? .red : .secondary)
+            } else if let gateHint {
+                Text(gateHint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding()
         .background(Color.orange.opacity(0.14))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder
+    private func approvalButton(_ title: String, decision: ApprovalDecision, prominent: Bool) -> some View {
+        if prominent {
+            Button {
+                Task { await submit(decision) }
+            } label: {
+                HStack(spacing: 6) {
+                    if resolving == decision {
+                        ProgressView()
+                    }
+                    Text(title)
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(resolving != nil || settled || gateHint != nil)
+        } else {
+            Button {
+                Task { await submit(decision) }
+            } label: {
+                HStack(spacing: 6) {
+                    if resolving == decision {
+                        ProgressView()
+                    }
+                    Text(title)
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .disabled(resolving != nil || settled || gateHint != nil)
+        }
+    }
+
+    private func submit(_ decision: ApprovalDecision) async {
+        guard let target else { return }
+        resolving = decision
+        note = nil
+        isError = false
+        do {
+            let outcome = try await onRespond(target, decision)
+            resolving = nil
+            switch outcome {
+            case .resolved:
+                note = nil
+                settled = true
+            case .stale:
+                note = "Already resolved"
+                isError = false
+                settled = true
+            case .unauthorized:
+                note = "Not authorized to approve"
+                isError = true
+            case .unknownRequest:
+                note = "Approval is no longer available"
+                isError = true
+                settled = true
+            }
+        } catch {
+            note = (error as? LocalizedError)?.errorDescription ?? "Couldn't send approval"
+            isError = true
+            resolving = nil
+        }
     }
 }
 

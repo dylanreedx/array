@@ -244,9 +244,10 @@ public enum ApprovalKind: String, Codable, Equatable, Sendable {
 }
 
 public enum ApprovalDecision: String, Codable, Equatable, Sendable {
-    case approve
-    case approveForSession
+    case accept
+    case acceptForSession
     case decline
+    case cancel
 }
 
 public enum ContentStreamKind: String, Codable, Equatable, Sendable {

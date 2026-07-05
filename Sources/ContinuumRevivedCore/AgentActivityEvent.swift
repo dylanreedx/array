@@ -29,12 +29,15 @@ public struct AgentActivityEventDraft: Sendable {
     public let status: AgentStatus
     public let summary: String
     public let occurredAt: Date
+    public let approvalRequestId: String?
 
     public init(tileId: UUID, runId: String?, tone: ActivityEventTone,
-                kind: String, status: AgentStatus, summary: String, occurredAt: Date) {
+                kind: String, status: AgentStatus, summary: String, occurredAt: Date,
+                approvalRequestId: String? = nil) {
         self.tileId = tileId; self.runId = runId; self.tone = tone
         self.kind = kind; self.status = status; self.summary = summary
         self.occurredAt = occurredAt
+        self.approvalRequestId = approvalRequestId
     }
 }
 
@@ -50,6 +53,7 @@ public struct AgentActivityEvent: Codable, Equatable, Sendable {
     public let status: AgentStatus      // the DERIVED status — from TerminalSessionDescriptor.swift:85
     public let summary: String          // short human label — NEVER a transcript body; I5 enforced here
     public let occurredAt: Date         // wall-clock only for display; ordering uses sequence
+    public let approvalRequestId: String? // opaque adapter request id, present only for pending approvals
 
     // Stamp a draft into a full event. The store owns sequence + replicaId.
     public init(stamping draft: AgentActivityEventDraft, sequence: UInt64, replicaId: UUID) {
@@ -62,6 +66,7 @@ public struct AgentActivityEvent: Codable, Equatable, Sendable {
         self.status = draft.status
         self.summary = draft.summary
         self.occurredAt = draft.occurredAt
+        self.approvalRequestId = draft.approvalRequestId
     }
 
     // Fields that MUST NOT appear here (I5 — sync-boundary purity, locked-decisions D3):
@@ -83,7 +88,7 @@ public struct AgentActivityEvent: Codable, Equatable, Sendable {
     //     `timeIntervalSinceReferenceDate` is Date's actual internal storage, so
     //     round-tripping through it involves no arithmetic conversion and is always exact.
     private enum CodingKeys: String, CodingKey {
-        case sequence, replicaId, tileId, runId, tone, kind, status, summary, occurredAtReferenceInterval
+        case sequence, replicaId, tileId, runId, tone, kind, status, summary, occurredAtReferenceInterval, approvalRequestId
     }
 
     public init(from decoder: Decoder) throws {
@@ -98,6 +103,7 @@ public struct AgentActivityEvent: Codable, Equatable, Sendable {
         summary = try container.decode(String.self, forKey: .summary)
         let referenceInterval = try container.decode(Double.self, forKey: .occurredAtReferenceInterval)
         occurredAt = Date(timeIntervalSinceReferenceDate: referenceInterval)
+        approvalRequestId = try container.decodeIfPresent(String.self, forKey: .approvalRequestId)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -111,6 +117,7 @@ public struct AgentActivityEvent: Codable, Equatable, Sendable {
         try container.encode(status, forKey: .status)
         try container.encode(summary, forKey: .summary)
         try container.encode(occurredAt.timeIntervalSinceReferenceDate, forKey: .occurredAtReferenceInterval)
+        try container.encodeIfPresent(approvalRequestId, forKey: .approvalRequestId)
     }
 }
 
