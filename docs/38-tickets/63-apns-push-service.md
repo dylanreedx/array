@@ -143,6 +143,29 @@
 > 5. **Gates unchanged (rev.1 item 9).** Continuation is one codex-high fix round + fresh dual
 >    review; commit only on green + both clear.
 
+> **RULING BANNER — C-20260705-027 rev.3 (final micro-continuation, orchestrator 2026-07-05
+> ~21:05). Continuation run wf_d243e1ff-1f0: both rev.2 rounds landed (payload-derived gating,
+> `publish(payload:)` sole public entry with identity derived internally, all-8 category
+> registration, time-sensitive entitlement, de-tautologized checks incl. real-key sign+verify);
+> Claude/Opus cleared TWICE after independently running every gate. Codex's remaining concerns
+> adjudicated: its sandbox build failure (`/tmp` cache Operation-not-permitted) is ENVIRONMENTAL,
+> not a diff defect — reviewers judge the diff; the driver + Claude reviewer own gate execution.
+> Its one code concern is REAL and in rev.2's class (payload/gating desync must be
+> unrepresentable):**
+>
+> 1. **`PushPayload.userInfo` reserved-key clobber (APNSPushService.swift:130):** in
+>    `encodedJSON` the `for (key, value) in userInfo` loop runs AFTER the reserved top-level
+>    keys are set, so caller-supplied userInfo can overwrite `aps` / `category` / `deepLink` /
+>    `actionIds` / `target` / `approvalRequestId` — desynchronizing the JSON actually sent from
+>    the payload the service gates on. Fix: reserved keys WIN — write them after the userInfo
+>    merge (or strip reserved keys from userInfo first); the reserved-key set is one shared
+>    constant next to `encodedJSON`. Add a hostile-userInfo check: build a payload whose
+>    userInfo tries to clobber every reserved key; assert the encoded JSON's `aps.alert`,
+>    `aps.category`, interruption level, and deep link all survive intact.
+> 2. **Nothing else moves.** No API reshuffles, no new surface; this is a fix to one function +
+>    one check. Fresh dual review both sides; the Codex reviewer is instructed NOT to attempt
+>    building (environmental) — diff judgment only. Commit on green + both clear.
+
 ## What this delivers
 
 When an agent managed by Continuum enters a phase that demands the human's attention —
