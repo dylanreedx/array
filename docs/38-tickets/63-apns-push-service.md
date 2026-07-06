@@ -107,6 +107,42 @@
 >    end), `publisher-owed` (observer call site 40, N5–N8 triggers, token-over-wire),
 >    `visual-gate-owed` (lab card + banner screenshots via B9's simulator suite).
 
+> **RULING BANNER — C-20260705-027 rev.2 (continuation adjudication, orchestrator 2026-07-05
+> ~20:30). Run wf_efe8c218-336: round 1 green build + dual rejection; round 2 fixed all 5
+> concerns, Claude/Opus reviewer CLEARED, Codex rejected with 4 new concerns; round 3 died on
+> the Codex usage limit (reset 20:33) with the tree untouched. The implementation is ALIVE in
+> the working tree (uncommitted). All 4 Codex concerns are adjudicated REAL and in-contract;
+> one codex-high continuation fixes them, then a FRESH dual review (both reviewers re-run —
+> round 2's Claude clear does not carry over). Binding fixes:**
+>
+> 1. **Identity/payload category desync (APNSPushService.swift:517-539):** the preference and
+>    dedup gates key on `identity.category` while the wire carries `payload.category`, and
+>    `publish(payload:identity:)` is public — a caller can pass an N7 identity with a muteable
+>    payload and bypass the preferences seam. Close the seam at the type level: the service must
+>    derive the gating category from the PAYLOAD (single source of truth) — either compute the
+>    identity internally from the payload or make the public entry point take the payload alone;
+>    a mismatched public (payload, identity) pair must be unrepresentable, not merely unused by
+>    fixtures. Add a check proving the gate keys off the payload's category.
+> 2. **iOS category registration (ios ContinuumApp.swift:74-81):** register ALL EIGHT
+>    `UNNotificationCategory` ids from the shared taxonomy constants — N1 Approve/Deny
+>    (`.authenticationRequired`), N2 Open, N3–N8 with empty action sets (rev.1 item 5 named only
+>    N1/N2; rev.2 binds the full set — one loop over `PushCategory.allCases`, zero literals).
+> 3. **Time-sensitive entitlement:** add `com.apple.developer.usernotifications.time-sensitive`
+>    (bool true) to `ios/Continuum/Resources/Continuum.entitlements` — requesting
+>    `.timeSensitive` authorization without it does not provision time-sensitive delivery.
+>    `project.yml` stays source of truth; regenerate. Real delivery behavior remains
+>    `device-gate-owed`.
+> 4. **Check honesty (APNSPushServiceTests.swift):** (a) the payload table must assert category
+>    id / interruption level / action ids against an INDEPENDENT literal spec map (the spec §3
+>    table transcribed as literals in the check), not against `PushCategory`'s own computed
+>    properties — as written it is tautological; (b) add a muteable-category suppression case: a
+>    false-returning preferences seam suppresses N3 (and the N7 locked-on case stays); (c) assert
+>    the deny action id on N1; (d) `runRealAPNSEnvJWTGateCheck` must VERIFY the real-key JWT
+>    signature against the key's public key (ruling item 7: "signs+verifies"), not just count
+>    three segments — still printing only key id/team id.
+> 5. **Gates unchanged (rev.1 item 9).** Continuation is one codex-high fix round + fresh dual
+>    review; commit only on green + both clear.
+
 ## What this delivers
 
 When an agent managed by Continuum enters a phase that demands the human's attention —
