@@ -2699,14 +2699,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self?.workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
                 self?.workspaceRuntime?.enforceBrowserRuntimeBudget()
             }
-            // docs/38-tickets/40-session-observer.md round-3 concern: the
-            // observer's StatusWriter already pushes the live tile view
-            // (ZoneRuntimeController.startSessionObserver); this refreshes
-            // the other two existing surfaces `updateAgentStatus` refreshes
-            // on every other status-changing path.
+            // The observer writer persists one changed tile at a time; the
+            // canvas consumes the resulting full active snapshot so plain
+            // tiles are cleared and zone rollups stay derived from one source.
             workspaceRuntime?.activeController?.onAgentStatusWritten = { [weak self] _, _ in
-                self?.refreshAgentAttentionSurface()
-                self?.reloadWorkspaceSidebar()
+                guard let self else { return }
+                self.applyObserverStatuses(self.currentObservedAgentStatusesByTileId())
             }
             workspaceRuntime?.activeController?.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
             installFocusHistoryHook()
@@ -4163,6 +4161,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             sessions[index].agentDescriptor = descriptor
             try? projectStore?.saveSession(sessions[index])
         }
+        refreshAgentAttentionSurface()
+        reloadWorkspaceSidebar()
+    }
+
+    private static func canvasBadgeStatus(_ status: AgentStatus?) -> AgentStatus? {
+        switch status {
+        case .working, .needsAttention, .done, .stale:
+            return status
+        case .configuring, .idle, nil:
+            return nil
+        }
+    }
+
+    private static func canvasRollup(from sidebar: SidebarAgentStatusRollup) -> CanvasNSView.AgentStatusRollup {
+        CanvasNSView.AgentStatusRollup(
+            working: sidebar.working,
+            needsAttention: sidebar.needsAttention,
+            done: sidebar.done,
+            stale: sidebar.stale
+        )
+    }
+
+    private static func canvasRollupsByZone(
+        statuses: [UUID: AgentStatus],
+        canvas: CanvasNSView
+    ) -> [UUID: CanvasNSView.AgentStatusRollup] {
+        var sidebarRollups: [UUID: SidebarAgentStatusRollup] = [:]
+        for (tileId, status) in statuses {
+            guard let zoneId = canvas.qaZoneMembership(of: tileId) else { continue }
+            sidebarRollups[zoneId, default: .empty].add(status)
+        }
+        return sidebarRollups.mapValues(canvasRollup(from:))
+    }
+
+    private func currentObservedAgentStatusesByTileId() -> [UUID: AgentStatus] {
+        guard let canvasView else { return [:] }
+        let activeTileIds = Set(canvasView.canvasState.tiles.map(\.id))
+        var statuses: [UUID: AgentStatus] = [:]
+        if let sessions = try? projectStore?.listSessions() {
+            for session in sessions where activeTileIds.contains(session.tileId) {
+                if let status = session.agentDescriptor?.status {
+                    statuses[session.tileId] = status
+                }
+            }
+        }
+        return statuses
+    }
+
+    private func applyObserverStatuses(_ statuses: [UUID: AgentStatus]) {
+        guard let canvasView else { return }
+        for tile in canvasView.canvasState.tiles {
+            canvasView.tileView(for: tile.id)?.agentStatus = Self.canvasBadgeStatus(statuses[tile.id])
+        }
+
+        let rollupsByZone = Self.canvasRollupsByZone(statuses: statuses, canvas: canvasView)
+        let updatedModels = canvasView.zoneRenderModels.map { model in
+            var updated = model
+            updated.agentStatusRollup = rollupsByZone[model.placement.zoneId] ?? .empty
+            return updated
+        }
+        canvasView.updateZoneRenderModels(updatedModels)
         refreshAgentAttentionSurface()
         reloadWorkspaceSidebar()
     }
@@ -7691,9 +7750,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return orderedZones.map { zone in
             let projectEntry = registry.projects.first(where: { $0.id == zone.projectId })
             let name = projectEntry?.name ?? (zone.name.isEmpty ? "Zone" : zone.name)
-            let rollup = projectEntry.map(Self.agentStatusRollup(for:)) ?? .empty
             let qaVerdict = projectEntry.flatMap { QARunManifestReader.latest(projectRoot: URL(fileURLWithPath: $0.rootPath, isDirectory: true)) }
-            return CanvasNSView.ZoneRenderModel(placement: zone, displayName: name, agentStatusRollup: rollup, qaVerdict: qaVerdict)
+            return CanvasNSView.ZoneRenderModel(placement: zone, displayName: name, agentStatusRollup: .empty, qaVerdict: qaVerdict)
         }
     }
 
@@ -7872,6 +7930,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
 
         let artifact = try CanvasNSView.runAgentStatusBadgeSelfCheck()
+        let rollupWorkingA = UUID(uuidString: "00000000-0000-0000-0000-000000008361")!
+        let rollupWorkingB = UUID(uuidString: "00000000-0000-0000-0000-000000008362")!
+        let rollupNeeds = UUID(uuidString: "00000000-0000-0000-0000-000000008363")!
+        let rollupConfiguring = UUID(uuidString: "00000000-0000-0000-0000-000000008364")!
+        let rollupIdle = UUID(uuidString: "00000000-0000-0000-0000-000000008365")!
+        let rollupZone = ZonePlacement(
+            zoneId: UUID(uuidString: "00000000-0000-0000-0000-000000008366")!,
+            projectId: UUID(uuidString: "00000000-0000-0000-0000-000000008367")!,
+            origin: ZonePoint(x: 0, y: 0),
+            size: ZoneSize(width: 640, height: 360),
+            color: "blue",
+            collapsed: false,
+            hydrationPolicy: .automatic
+        )
+        let rollupCanvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [
+                Tile(id: rollupWorkingA, kind: .terminal, title: "working-a", frame: TileFrame(x: 10, y: 50, width: 100, height: 80), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata()),
+                Tile(id: rollupWorkingB, kind: .terminal, title: "working-b", frame: TileFrame(x: 120, y: 50, width: 100, height: 80), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata()),
+                Tile(id: rollupNeeds, kind: .terminal, title: "needs", frame: TileFrame(x: 230, y: 50, width: 100, height: 80), zPosition: .fromLegacyRank(3), runtimeRef: nil, metadata: TileMetadata()),
+                Tile(id: rollupConfiguring, kind: .terminal, title: "configuring", frame: TileFrame(x: 340, y: 50, width: 100, height: 80), zPosition: .fromLegacyRank(4), runtimeRef: nil, metadata: TileMetadata()),
+                Tile(id: rollupIdle, kind: .terminal, title: "idle", frame: TileFrame(x: 450, y: 50, width: 100, height: 80), zPosition: .fromLegacyRank(5), runtimeRef: nil, metadata: TileMetadata())
+            ], groups: [], lastActiveTileId: nil),
+            activeZone: rollupZone,
+            zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: rollupZone, displayName: "Rollup")],
+            showsZoneChrome: false
+        )
+        let bridged = Self.canvasRollupsByZone(statuses: [
+            rollupWorkingA: .working,
+            rollupWorkingB: .working,
+            rollupNeeds: .needsAttention
+        ], canvas: rollupCanvas)[rollupZone.zoneId]
+        try expect(bridged == CanvasNSView.AgentStatusRollup(working: 2, needsAttention: 1, done: 0, stale: 0), "bridge should count working/needs and ignore absent non-agents")
+        var nonTerminalSidebar = SidebarAgentStatusRollup.empty
+        nonTerminalSidebar.add(.working)
+        nonTerminalSidebar.add(.configuring)
+        nonTerminalSidebar.add(.idle)
+        let nonTerminalCanvas = Self.canvasRollup(from: nonTerminalSidebar)
+        try expect(nonTerminalSidebar.working == 1 && nonTerminalSidebar.unknown == 2, "sidebar rollup should classify configuring/idle as unknown")
+        try expect(nonTerminalCanvas == CanvasNSView.AgentStatusRollup(working: 1, needsAttention: 0, done: 0, stale: 0), "canvas bridge should drop unknown configuring/idle counts")
+        try expect(Self.canvasBadgeStatus(.working) == .working, "working should produce a tile badge")
+        try expect(Self.canvasBadgeStatus(.needsAttention) == .needsAttention, "needsAttention should produce a tile badge")
+        try expect(Self.canvasBadgeStatus(.done) == .done, "done should produce a tile badge")
+        try expect(Self.canvasBadgeStatus(.stale) == .stale, "stale should produce a tile badge")
+        try expect(Self.canvasBadgeStatus(.configuring) == nil, "configuring should not produce a tile badge")
+        try expect(Self.canvasBadgeStatus(.idle) == nil, "idle should not produce a tile badge")
+        try expect(Self.canvasBadgeStatus(nil) == nil, "absent status should not produce a tile badge")
+        try expect(SidebarAgentStatusRollup(working: 2, needsAttention: 1).dominantKind == .needsAttention, "needsAttention should dominate working in the shared rollup type")
+
         let fm = FileManager.default
         let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("continuum-agent-status-production-\(UUID().uuidString)", isDirectory: true)
@@ -7901,9 +8007,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let workingTileId = UUID(uuidString: "00000000-0000-0000-0000-000000008344")!
         let needsTileId = UUID(uuidString: "00000000-0000-0000-0000-000000008345")!
         let orphanTileId = UUID(uuidString: "00000000-0000-0000-0000-000000008346")!
+        let plainTileId = UUID(uuidString: "00000000-0000-0000-0000-000000008347")!
         try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [
             Tile(id: workingTileId, kind: .terminal, title: "Agent · Claude", frame: TileFrame(x: 0, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata()),
-            Tile(id: needsTileId, kind: .terminal, title: "Agent · Codex", frame: TileFrame(x: 220, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
+            Tile(id: needsTileId, kind: .terminal, title: "Agent · Codex", frame: TileFrame(x: 220, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: plainTileId, kind: .terminal, title: "Shell", frame: TileFrame(x: 440, y: 0, width: 160, height: 120), zPosition: .fromLegacyRank(3), runtimeRef: nil, metadata: TileMetadata())
         ], groups: [], lastActiveTileId: workingTileId))
         try store.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: workingTileId, launchProfileId: "claude", command: "/bin/zsh", args: [], cwd: projectRoot.path, env: [:], title: "Agent · Claude", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: .claude, worktreePath: projectRoot.path, status: .working, statusUpdatedAt: now)))
         try store.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: needsTileId, launchProfileId: "codex", command: "/bin/zsh", args: [], cwd: projectRoot.path, env: [:], title: "Agent · Codex", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: .codex, worktreePath: projectRoot.path, status: .needsAttention, statusUpdatedAt: now)))
@@ -7912,8 +8020,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let productionCanvas = CanvasNSView(canvasState: try store.loadCanvas(), activeZone: zone, zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: zone, displayName: "Agent Project")])
         productionCanvas.install(tileView: TileNSView(tile: productionCanvas.canvasState.tiles[0]), for: productionCanvas.canvasState.tiles[0])
         productionCanvas.install(tileView: TileNSView(tile: productionCanvas.canvasState.tiles[1]), for: productionCanvas.canvasState.tiles[1])
-        productionCanvas.tileView(for: workingTileId)?.agentStatus = AgentStatus.working
-        productionCanvas.tileView(for: needsTileId)?.agentStatus = AgentStatus.needsAttention
+        productionCanvas.install(tileView: TileNSView(tile: productionCanvas.canvasState.tiles[2]), for: productionCanvas.canvasState.tiles[2])
+        productionCanvas.tileView(for: workingTileId)?.agentStatus = AgentStatus.configuring
+        productionCanvas.tileView(for: needsTileId)?.agentStatus = AgentStatus.configuring
+        productionCanvas.tileView(for: plainTileId)?.agentStatus = AgentStatus.stale
+        let coldStartRollupText = productionCanvas.zoneChromeSnapshot(for: zoneId)?.agentRollupText
         let delegate = AppDelegate()
         delegate.canvasView = productionCanvas
         let agentBrowserEngine = BrowserEngineContext()
@@ -7942,6 +8053,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ghostty: nil,
             browserEngine: agentBrowserEngine
         )
+        delegate.applyObserverStatuses([
+            workingTileId: .working,
+            needsTileId: .needsAttention
+        ])
+        let observedWorkingStatus = productionCanvas.agentStatus(for: workingTileId)
+        let observedNeedsAttentionStatus = productionCanvas.agentStatus(for: needsTileId)
+        let observedPlainStatus = productionCanvas.agentStatus(for: plainTileId)
+        let observedRollupText = productionCanvas.zoneChromeSnapshot(for: zoneId)?.agentRollupText
+        try expect(observedWorkingStatus == .working, "observer path should push .working into the working tile view")
+        try expect(observedNeedsAttentionStatus == .needsAttention, "observer path should push .needsAttention into the needs-attention tile view")
+        try expect(observedPlainStatus == nil, "observer path should clear a plain tile absent from the status snapshot")
+        try expect(observedRollupText == "1 working · 1 needs you", "observer path should update zone chrome rollup text from the live snapshot")
         delegate.refreshAgentAttentionSurface(notify: false)
         try expect(NSApplication.shared.dockTile.badgeLabel == "1", "production refresh should count current needs-attention agent tiles")
         productionCanvas.removeTile(id: needsTileId)
@@ -7950,7 +8073,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let models = try loadActiveZoneRenderModels(from: RegistryStore(applicationSupportDirectory: appSupport))
         try expect(models.count == 1, "production zone render model should load")
-        try expect(models[0].agentStatusRollup.displayText == "2 stale", "production zone render model should derive rollup from current restored project sessions only")
+        try expect(models[0].agentStatusRollup.displayText == nil, "production zone render model should not synchronously re-read session rollups during structural rebuilds")
         try expect(dockBadgeLabel(needsAttentionCount: 0) == nil, "zero needs-attention agents should clear the dock badge")
         try expect(dockBadgeLabel(needsAttentionCount: 2) == "2", "dock badge should show the measured needs-attention count")
         try expect(shouldNotifyNeedsAttention(previousCount: 0, newCount: 1, appIsActive: false), "inactive transition into needs-attention should request notification")
@@ -7959,7 +8082,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         NSApplication.shared.dockTile.badgeLabel = dockBadgeLabel(needsAttentionCount: 1)
         try expect(NSApplication.shared.dockTile.badgeLabel == "1", "dock tile badge label should be writable from the agent attention surface")
         NSApplication.shared.dockTile.badgeLabel = nil
-        return artifact
+
+        let observerDir = URL(fileURLWithPath: fm.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: ""), isDirectory: true)
+            .appendingPathComponent("observer-rollup-wiring", isDirectory: true)
+        try fm.createDirectory(at: observerDir, withIntermediateDirectories: true)
+        let observerArtifact = observerDir.appendingPathComponent("manifest.json")
+        let observerManifest: [String: Any] = [
+            "check": "observer-rollup-wiring",
+            "canvasBadgeManifest": artifact.path,
+            "coldStartRollupText": coldStartRollupText as Any,
+            "observedWorkingStatus": observedWorkingStatus?.rawValue as Any,
+            "observedNeedsAttentionStatus": observedNeedsAttentionStatus?.rawValue as Any,
+            "zoneRollupText": observedRollupText as Any,
+            "plainTileHasBadge": observedPlainStatus != nil
+        ]
+        try JSONSerialization.data(withJSONObject: observerManifest, options: [.prettyPrinted, .sortedKeys]).write(to: observerArtifact, options: .atomic)
+        return observerArtifact
     }
 
     private static func mainWindowTitle(for project: Project, registry: Registry? = nil) -> String {

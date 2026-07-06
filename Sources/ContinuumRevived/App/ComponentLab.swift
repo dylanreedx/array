@@ -352,7 +352,7 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, approvalsInboxCard, canvasSceneCard, pushSmokeCard, notifyCategoriesCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
+        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, observerRollupCard, agentsBoardCard, approvalsInboxCard, canvasSceneCard, pushSmokeCard, notifyCategoriesCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
     }
 
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
@@ -395,6 +395,63 @@ enum LabCatalog {
                 makeAgentKindView(descriptor: AgentDescriptor(agentKind: .claude, worktreePath: "/tmp/project", status: .working, statusUpdatedAt: LabFixtures.epoch))
             }
         )
+    }
+
+    static var observerRollupCard: LabEntry {
+        LabEntry(
+            id: "observer.rollup",
+            category: "Agent Status",
+            title: "Observer rollup — live feed simulation",
+            summary: "Canvas zone chrome and tile badges driven by an observer status snapshot.",
+            content: .staticCard(preferredSize: NSSize(width: 640, height: 340)) {
+                makeObserverRollupView()
+            }
+        )
+    }
+
+    static func makeObserverRollupView() -> CanvasNSView {
+        let projectId = UUID(uuidString: "00000000-0000-0000-0000-00000000A431")!
+        let zoneId = UUID(uuidString: "00000000-0000-0000-0000-00000000A432")!
+        let workingId = UUID(uuidString: "00000000-0000-0000-0000-00000000A433")!
+        let needsId = UUID(uuidString: "00000000-0000-0000-0000-00000000A434")!
+        let plainId = UUID(uuidString: "00000000-0000-0000-0000-00000000A435")!
+        let zone = ZonePlacement(
+            zoneId: zoneId,
+            projectId: projectId,
+            origin: ZonePoint(x: 12, y: 12),
+            size: ZoneSize(width: 616, height: 316),
+            color: "blue",
+            collapsed: false,
+            hydrationPolicy: .automatic,
+            name: "Agent Status"
+        )
+        let tiles = [
+            Tile(id: workingId, kind: .terminal, title: "claude · working", frame: TileFrame(x: 42, y: 72, width: 170, height: 122), zPosition: .fromLegacyRank(1), zoneId: zoneId, runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: needsId, kind: .terminal, title: "codex · needs", frame: TileFrame(x: 236, y: 72, width: 170, height: 122), zPosition: .fromLegacyRank(2), zoneId: zoneId, runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: plainId, kind: .terminal, title: "shell", frame: TileFrame(x: 430, y: 72, width: 150, height: 122), zPosition: .fromLegacyRank(3), zoneId: zoneId, runtimeRef: nil, metadata: TileMetadata())
+        ]
+        let canvas = CanvasNSView(
+            canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: tiles, groups: [], lastActiveTileId: workingId),
+            activeZone: zone,
+            zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: zone, displayName: "Agent Status")],
+            showsZoneChrome: true
+        )
+        canvas.frame = NSRect(x: 0, y: 0, width: 640, height: 340)
+        for tile in tiles {
+            canvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
+        }
+        canvas.tileView(for: workingId)?.agentStatus = .working
+        canvas.tileView(for: needsId)?.agentStatus = .needsAttention
+        canvas.tileView(for: plainId)?.agentStatus = nil
+        canvas.updateZoneRenderModels([
+            CanvasNSView.ZoneRenderModel(
+                placement: zone,
+                displayName: "Agent Status",
+                agentStatusRollup: CanvasNSView.AgentStatusRollup(working: 1, needsAttention: 1, done: 0, stale: 0)
+            )
+        ])
+        canvas.layoutSubtreeIfNeeded()
+        return canvas
     }
 
     static var agentsBoardCard: LabEntry {
@@ -1294,6 +1351,25 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         guard kindLabel.stringValue == "Kind -> claude" else {
             throw fail("agent.kind label rendered '\(kindLabel.stringValue)', expected 'Kind -> claude'")
+        }
+        guard let observerRollupEntry = entries.first(where: { $0.id == "observer.rollup" }),
+              case let .staticCard(_, makeObserverRollupView) = observerRollupEntry.content else {
+            throw fail("missing observer.rollup card")
+        }
+        guard let observerCanvas = makeObserverRollupView() as? CanvasNSView else {
+            throw fail("observer.rollup card did not return a CanvasNSView")
+        }
+        let observerZoneId = UUID(uuidString: "00000000-0000-0000-0000-00000000A432")!
+        let observerWorkingId = UUID(uuidString: "00000000-0000-0000-0000-00000000A433")!
+        let observerNeedsId = UUID(uuidString: "00000000-0000-0000-0000-00000000A434")!
+        let observerPlainId = UUID(uuidString: "00000000-0000-0000-0000-00000000A435")!
+        guard observerCanvas.zoneChromeSnapshot(for: observerZoneId)?.agentRollupText == "1 working · 1 needs you" else {
+            throw fail("observer.rollup zone text rendered '\(observerCanvas.zoneChromeSnapshot(for: observerZoneId)?.agentRollupText ?? "nil")'")
+        }
+        guard observerCanvas.tileChromeSnapshot(for: observerWorkingId)?.agentStatus == .working,
+              observerCanvas.tileChromeSnapshot(for: observerNeedsId)?.agentStatus == .needsAttention,
+              observerCanvas.tileChromeSnapshot(for: observerPlainId)?.agentStatus == nil else {
+            throw fail("observer.rollup tile badge states did not render working/needs/nil")
         }
         guard let agentsBoardEntry = entries.first(where: { $0.id == "agents.board" }),
               case let .staticCard(_, makeAgentsBoardView) = agentsBoardEntry.content else {

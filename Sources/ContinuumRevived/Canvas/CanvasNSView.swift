@@ -65,7 +65,7 @@ final class CanvasNSView: NSView {
     /// persisted zone-local; layout/hit-testing consume world frames through
     /// CanvasEngine. With the default origin (0,0), this is behavior-neutral.
     let activeZone: ZonePlacement?
-    fileprivate let zoneRenderModels: [ZoneRenderModel]
+    private(set) var zoneRenderModels: [ZoneRenderModel]
     private var tileViews: [UUID: TileNSView] = [:]
     private let showsZoneChrome: Bool
     private var zoneChromeViews: [UUID: ZoneChromeNSView] = [:]
@@ -1215,6 +1215,15 @@ final class CanvasNSView: NSView {
 
     func zoneChromeSnapshot(for zoneId: UUID) -> ZoneChromeNSView.Snapshot? {
         zoneChromeViews[zoneId]?.snapshot
+    }
+
+    func updateZoneRenderModels(_ models: [ZoneRenderModel]) {
+        zoneRenderModels = models
+        zoneDisplayByZoneId = Dictionary(models.map { ($0.placement.zoneId, $0) }, uniquingKeysWith: { first, _ in first })
+        for model in models {
+            zoneChromeViews[model.placement.zoneId]?.update(model: model)
+        }
+        layoutZoneChromeViews()
     }
 
     func tileChromeSnapshot(for tileId: UUID) -> TileNSView.ChromeSnapshot? {
