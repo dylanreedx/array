@@ -644,6 +644,65 @@ private func runPushTest() async throws {
     }
 }
 
+private struct PushPayloadDumpError: Error, CustomStringConvertible {
+    let description: String
+}
+
+private func writePushPayloadDump(to directory: URL) throws {
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    for category in PushCategory.allCases {
+        let data = try PushPayloadBuilder.fixturePayload(for: category).encodedJSON()
+        let url = directory.appendingPathComponent("\(category.rawValue).apns")
+        try data.write(to: url, options: .atomic)
+        print("push-payload-dump wrote \(url.path) bytes=\(data.count)")
+    }
+}
+
+private func runPushPayloadDump(arguments: [String]) throws {
+    guard let flagIndex = arguments.firstIndex(of: "--push-payload-dump"),
+          arguments.indices.contains(arguments.index(after: flagIndex)) else {
+        throw PushPayloadDumpError(description: "usage: continuum-revived --push-payload-dump <dir>")
+    }
+    let path = arguments[arguments.index(after: flagIndex)]
+    guard !path.isEmpty else {
+        throw PushPayloadDumpError(description: "usage: continuum-revived --push-payload-dump <dir>")
+    }
+    try writePushPayloadDump(to: URL(fileURLWithPath: path, isDirectory: true))
+}
+
+private func runPushPayloadDumpCheck() throws {
+    let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        .appendingPathComponent("continuum-push-payload-dump-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+    try writePushPayloadDump(to: tempRoot)
+
+    let expectedFiles = PushCategory.allCases.map { "\($0.rawValue).apns" }
+    let actualFiles = try FileManager.default.contentsOfDirectory(atPath: tempRoot.path).sorted()
+    guard actualFiles == expectedFiles else {
+        throw PushPayloadDumpError(description: "dump files mismatch expected=\(expectedFiles) actual=\(actualFiles)")
+    }
+
+    for category in PushCategory.allCases {
+        let url = tempRoot.appendingPathComponent("\(category.rawValue).apns")
+        let data = try Data(contentsOf: url)
+        guard data.count <= 4096 else {
+            throw PushPayloadDumpError(description: "\(category.rawValue).apns too large bytes=\(data.count)")
+        }
+        let object = try JSONSerialization.jsonObject(with: data)
+        guard let root = object as? [String: Any],
+              let aps = root["aps"] as? [String: Any],
+              let payloadCategory = aps["category"] as? String else {
+            throw PushPayloadDumpError(description: "\(category.rawValue).apns missing aps.category")
+        }
+        guard payloadCategory == category.identifier else {
+            throw PushPayloadDumpError(description: "\(category.rawValue).apns aps.category expected=\(category.identifier) actual=\(payloadCategory)")
+        }
+        print("push-payload-dump-check \(category.rawValue) file=\(url.lastPathComponent) bytes=\(data.count) aps.category=\(payloadCategory)")
+    }
+    print("push-payload-dump-check files=\(actualFiles.count) maxBytes=4096")
+}
+
 @main
 enum ContinuumApp {
     @MainActor
@@ -651,6 +710,26 @@ enum ContinuumApp {
 
     @MainActor
     static func main() {
+        if CommandLine.arguments.contains("--push-payload-dump") {
+            do {
+                try runPushPayloadDump(arguments: CommandLine.arguments)
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit((error as? PushPayloadDumpError)?.description.hasPrefix("usage:") == true ? 2 : 1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--push-payload-dump-check") {
+            do {
+                try runPushPayloadDumpCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--push-test") {
             do {
                 try runBlockingPushTest()

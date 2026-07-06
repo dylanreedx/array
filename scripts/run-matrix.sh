@@ -88,6 +88,7 @@ CLOUDKIT_ENABLED=0 run swift run ContinuumRevivedSyncIntegrationChecks
 run swift run ContinuumRevivedPaletteChecks
 run swift run ContinuumRevivedFileTreeChecks
 run swift run ContinuumRevivedPerfChecks
+run_app_check .build/debug/continuum-revived --push-payload-dump-check
 run_app_check .build/debug/continuum-revived --palette-duplicate-root-check
 run_app_check .build/debug/continuum-revived --palette-first-responder-restore-check
 run_app_check .build/debug/continuum-revived --settings-panel-check
