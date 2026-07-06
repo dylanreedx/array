@@ -5644,6 +5644,80 @@ do {
     expect(box.update?.snapshots["run-live"]?.events.events.map(\.type) == ["started", "append"], "RunArtifactsWatcher live callback emits the appended event snapshot")
 }
 
+// MARK: - AgentStoreWatcher push updates
+
+do {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("continuum-agent-store-watcher-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: root) }
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+
+    final class AgentStoreWatcherBox: @unchecked Sendable {
+        var callbacks: [(UUID, String)] = []
+    }
+
+    func pollUntil(timeout: TimeInterval, interval: TimeInterval = 0.02, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(interval))
+        }
+        return condition()
+    }
+
+    func appendText(_ text: String, to url: URL) throws {
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(text.utf8))
+    }
+
+    let tileId = UUID()
+    let firstURL = root.appendingPathComponent("session.jsonl")
+    let secondURL = root.appendingPathComponent("status.json")
+    try Data().write(to: firstURL)
+    try Data().write(to: secondURL)
+
+    let box = AgentStoreWatcherBox()
+    let watcher = AgentStoreWatcher(config: AgentStoreWatcher.Config(debounceInterval: 0.08, maxReadsPerSecond: 10))
+    watcher.watch(url: firstURL, tileId: tileId) { id, url in box.callbacks.append((id, url.lastPathComponent)) }
+    watcher.watch(url: secondURL, tileId: tileId) { id, url in box.callbacks.append((id, url.lastPathComponent)) }
+    defer { watcher.stop() }
+
+    for i in 0..<10 {
+        try appendText("line \(i)\n", to: firstURL)
+    }
+    expect(pollUntil(timeout: 1.0) { box.callbacks.count == 1 }, "AgentStoreWatcher debounces rapid writes to one callback")
+    expect(box.callbacks.first?.0 == tileId, "AgentStoreWatcher callback reports the watched tile id")
+
+    try "{\"status\":\"done\"}".write(to: secondURL, atomically: true, encoding: .utf8)
+    expect(pollUntil(timeout: 1.0) { box.callbacks.count == 2 }, "AgentStoreWatcher watches multiple files for the same tile")
+    expect(Set(box.callbacks.map(\.1)).isSuperset(of: ["session.jsonl", "status.json"]), "AgentStoreWatcher reports the changed file URL")
+
+    watcher.unwatch(url: firstURL)
+    let callbacksBeforeUnwatchedWrite = box.callbacks.count
+    try appendText("after-unwatch\n", to: firstURL)
+    _ = pollUntil(timeout: 0.25) { false }
+    expect(box.callbacks.count == callbacksBeforeUnwatchedWrite, "AgentStoreWatcher unwatch(url:) stops delivery")
+
+    let missingURL = root.appendingPathComponent("missing.jsonl")
+    watcher.watch(url: missingURL, tileId: UUID()) { _, _ in box.callbacks.append((UUID(), "missing")) }
+    expect(true, "AgentStoreWatcher tolerates missing files at arm time")
+
+    let cappedURL = root.appendingPathComponent("capped.jsonl")
+    try Data().write(to: cappedURL)
+    let cappedBox = AgentStoreWatcherBox()
+    let cappedWatcher = AgentStoreWatcher(config: AgentStoreWatcher.Config(debounceInterval: 0.01, maxReadsPerSecond: 2))
+    cappedWatcher.watch(url: cappedURL, tileId: tileId) { id, url in cappedBox.callbacks.append((id, url.lastPathComponent)) }
+    defer { cappedWatcher.stop() }
+    for i in 0..<6 {
+        try appendText("event \(i)\n", to: cappedURL)
+        _ = pollUntil(timeout: 0.05) { cappedBox.callbacks.count > i }
+    }
+    _ = pollUntil(timeout: 0.4) { false }
+    expect(cappedBox.callbacks.count <= 2, "AgentStoreWatcher enforces maxReadsPerSecond per tile")
+}
+
 // MARK: - Canvas sanitation
 
 do {

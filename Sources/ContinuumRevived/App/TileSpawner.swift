@@ -2769,6 +2769,9 @@ final class TileSpawner {
         let canvasOnDisk = try store.loadCanvas()
         let tile = canvasOnDisk.tiles.first(where: { $0.id == tileId })
         let rendered = view.textView.string
+        try Data("{\"id\":\"code-scout-fixture\",\"role\":\"code-scout\",\"status\":\"running\",\"task\":\"inspect CON-92\",\"cwd\":\"/tmp/project\",\"createdAt\":\"2026-06-13T00:00:00Z\",\"updatedAt\":\"2026-06-13T00:02:00Z\"}".utf8).write(to: runDir.appendingPathComponent("run.json"))
+        canvas.refreshRunArtifactsTiles()
+        let refreshedRendered = view.textView.string
 
         let restoredCanvas = CanvasNSView(canvasState: canvasOnDisk)
         guard let tile else { throw CheckError.failed("canvas should persist runArtifacts tile") }
@@ -2781,6 +2784,7 @@ final class TileSpawner {
             "runDirectory": runDir.path,
             "tileId": tileId.uuidString,
             "renderedText": rendered,
+            "refreshedText": refreshedRendered,
             "canvasTileKinds": canvasOnDisk.tiles.map { $0.kind.rawValue },
             "restoredViewInstalled": restoredView != nil
         ]
@@ -2798,6 +2802,7 @@ final class TileSpawner {
         try expect(tile.metadata.filePath == runDir.path, "runArtifacts tile metadata should persist run dir path")
         try expect(rendered.contains("Run ID: code-scout-fixture"), "viewer should render run id")
         try expect(rendered.contains("Status: done"), "viewer should render status")
+        try expect(refreshedRendered.contains("Status: running"), "observer refresh hook should reload runArtifacts tile content")
         try expect(rendered.contains("inspect CON-92"), "viewer should render task")
         try expect(rendered.contains("Events: 1 parsed, 1 bad"), "viewer should render event summary")
         try expect(rendered.contains("CON-92 fixture final output"), "viewer should render final.md")

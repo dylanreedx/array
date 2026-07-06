@@ -62,8 +62,6 @@ final class SessionObserver {
         // so `stop()`/`tileDidClose` can cancel it — a bare `asyncAfter`
         // closure cannot be cancelled once scheduled.
         var pendingReadWorkItem: DispatchWorkItem? = nil
-        // production-only FSEvents-style watcher; nil under test doubles
-        var watcherSource: DispatchSourceFileSystemObject? = nil
     }
 
     private(set) var observations: [UUID: TileObservation] = [:]
@@ -86,6 +84,7 @@ final class SessionObserver {
     private let windowTargetLookup: WindowTargetLookup
     private let writeStatus: StatusWriter
     private let watchQueue: DispatchQueue
+    private let storeWatcher: AgentStoreWatcher
     private var detectionTimer: DispatchSourceTimer?
     private let clock: @MainActor () -> Date
 
@@ -111,6 +110,10 @@ final class SessionObserver {
         self.debounceInterval = TimeInterval(SessionObserverConfig.debounceMs(defaults: defaults)) / 1000.0
         self.maxChangesPerMinute = SessionObserverConfig.maxChangesPerMinute(defaults: defaults)
         self.detectionPollInterval = TimeInterval(SessionObserverConfig.detectionPollSeconds(defaults: defaults))
+        self.storeWatcher = AgentStoreWatcher(
+            config: AgentStoreWatcher.Config(debounceInterval: self.debounceInterval, maxReadsPerSecond: 10),
+            queue: self.watchQueue
+        )
     }
 
     deinit {
@@ -138,9 +141,9 @@ final class SessionObserver {
         detectionTimer?.cancel()
         detectionTimer = nil
         for (_, obs) in observations {
-            obs.watcherSource?.cancel()
             obs.pendingReadWorkItem?.cancel()
         }
+        storeWatcher.stop()
         observations.removeAll()
         // Round-4 concern: invalidate every in-flight detection generation so
         // a `detectAndRegister` Task that resumes after this `stop()` (it was
@@ -172,8 +175,8 @@ final class SessionObserver {
 
     // Called from ZoneRuntimeController when a tile closes.
     func tileDidClose(tileId: UUID) {
-        observations[tileId]?.watcherSource?.cancel()
         observations[tileId]?.pendingReadWorkItem?.cancel() // C3: see stop()
+        storeWatcher.unwatchAll(for: tileId)
         observations.removeValue(forKey: tileId)
         // Round-4 concern: drop the tile's generation so an already-queued
         // `detectAndRegister` for this tile (scheduled by `tileDidSpawn` or
@@ -255,7 +258,7 @@ final class SessionObserver {
         // early-return before `registerWatcherIfNeeded` ever sees the
         // changed URL, silently leaving the observer watching the stale file.
         let storeChanged = existing?.storeURL != resolved.storeURL
-        let needsRetry = reader(for: resolved.kind) != nil && (resolved.storeURL == nil || existing?.watcherSource == nil)
+        let needsRetry = reader(for: resolved.kind) != nil && (resolved.storeURL == nil || storeWatcher.activeWatchCount(for: tileId) == 0)
         if let existing, existing.detectedKind == resolved.kind, existing.windowTarget == target, !needsRetry, !storeChanged {
             return // fully settled; nothing to do
         }
@@ -369,46 +372,57 @@ final class SessionObserver {
 
     private func registerWatcherIfNeeded(_ obs: inout TileObservation, storeURL: URL?) {
         if obs.storeURL != storeURL {
-            obs.watcherSource?.cancel()
-            obs.watcherSource = nil
+            storeWatcher.unwatchAll(for: obs.tileId)
         }
         obs.storeURL = storeURL
 
         guard let storeURL, reader(for: obs.detectedKind) != nil else {
-            obs.watcherSource?.cancel()
-            obs.watcherSource = nil
+            storeWatcher.unwatchAll(for: obs.tileId)
             return
         }
-        guard obs.watcherSource == nil else { return } // already watching this exact URL
-
-        // Pi's `locate()` returns the run directory; the file that actually
-        // changes as the agent works is `events.jsonl` inside it.
-        let watchURL = obs.detectedKind == .pi
-            ? storeURL.appendingPathComponent("events.jsonl", isDirectory: false)
-            : storeURL
-
-        let fd = open(watchURL.path, O_EVTONLY)
-        guard fd >= 0 else { return } // file not created yet; retried next slow pass
+        guard Self.isLocalStoreURL(storeURL) else {
+            storeWatcher.unwatchAll(for: obs.tileId)
+            return
+        }
+        guard storeWatcher.activeWatchCount(for: obs.tileId) == 0 else { return } // already watching this store
 
         let tileId = obs.tileId
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd,
-            eventMask: [.write, .extend, .rename, .delete],
-            queue: watchQueue
-        )
-        // `@Sendable` is load-bearing here too — see `scheduleDetectionTimer`.
-        source.setEventHandler { @Sendable [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.fileDidChange(tileId: tileId, at: self.clock())
+        for url in watchURLs(for: obs.detectedKind, storeURL: storeURL) {
+            storeWatcher.watch(url: url, tileId: tileId) { [weak self] id, _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.debouncedStoreWatcherDidChange(tileId: id, at: self.clock())
+                }
             }
         }
-        source.setCancelHandler { @Sendable in close(fd) }
-        source.resume()
-        obs.watcherSource = source
+    }
+
+    private func watchURLs(for kind: AgentKind, storeURL: URL) -> [URL] {
+        if kind == .pi {
+            return ["run.json", "events.jsonl", "status.json"].map {
+                storeURL.appendingPathComponent($0, isDirectory: false)
+            }
+        }
+        return [storeURL]
+    }
+
+    private static func isLocalStoreURL(_ url: URL) -> Bool {
+        if let scheme = url.scheme, scheme != "file" { return false }
+        guard let host = url.host, !host.isEmpty else { return true }
+        return host == "localhost" || host == "127.0.0.1" || host == "::1"
     }
 
     // MARK: - Fast path: FSEvents callback -> one-shot debounce timer
+
+    private func debouncedStoreWatcherDidChange(tileId: UUID, at now: Date) {
+        guard var obs = observations[tileId] else { return }
+        obs.dirtyAt = now.addingTimeInterval(-debounceInterval)
+        obs.readScheduled = true
+        obs.pendingReadWorkItem?.cancel()
+        obs.pendingReadWorkItem = nil
+        observations[tileId] = obs
+        _ = serviceRead(tileId: tileId, at: now)
+    }
 
     /// Runs (via the `Task { @MainActor ... }` hop above) whenever the watched
     /// file changes. Never calls tmux — the fast path is pure filesystem,
@@ -616,7 +630,11 @@ final class SessionObserver {
     }
 
     func watcherActiveForTesting(_ tileId: UUID) -> Bool {
-        observations[tileId]?.watcherSource != nil
+        storeWatcher.activeWatchCount(for: tileId) > 0
+    }
+
+    func watcherCountForTesting(_ tileId: UUID) -> Int {
+        storeWatcher.activeWatchCount(for: tileId)
     }
 
     /// Fires the exact same slow-cadence detection routine the
@@ -1631,6 +1649,72 @@ extension SessionObserver {
             "restart: the watcher must be re-registered (live) on the new store after the restart is detected"
         )
 
+        // === Test 6b: ticket 41 — Pi push watching covers run.json, not only
+        // events.jsonl. The observer uses the real PiAgentStateReader against
+        // a temp project store and must publish .done after an in-place
+        // run.json overwrite, without waiting for the slow detection poll.
+        let piSuite = "continuum.sessionObserver.piPush.\(UUID().uuidString)"
+        guard let piDefaults = UserDefaults(suiteName: piSuite) else {
+            throw SelfCheckError.failed("could not create isolated Pi push UserDefaults suite")
+        }
+        defer { piDefaults.removePersistentDomain(forName: piSuite) }
+        piDefaults.set("50", forKey: SessionObserverConfig.debounceMsKey)
+
+        let piRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuum-session-observer-selfcheck-pi-push-\(UUID().uuidString)", isDirectory: true)
+        let piProject = piRoot.appendingPathComponent("project", isDirectory: true)
+        let piRunId = "run-\(UUID().uuidString)"
+        let piRunDirectory = piProject
+            .appendingPathComponent(".pi/agent-runs", isDirectory: true)
+            .appendingPathComponent(piRunId, isDirectory: true)
+        try FileManager.default.createDirectory(at: piRunDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: piRoot) }
+        let piRunJSON = piRunDirectory.appendingPathComponent("run.json")
+        let piEvents = piRunDirectory.appendingPathComponent("events.jsonl")
+        try #"{"id":"pi-push","role":"implementer","status":"running"}"#.write(to: piRunJSON, atomically: false, encoding: .utf8)
+        try #"{"ts":"1","type":"started"}"#.write(to: piEvents, atomically: false, encoding: .utf8)
+
+        var piWrites: [(tileId: UUID, status: AgentStatus)] = []
+        let piPushObserver = SessionObserver(
+            readers: Readers(
+                claude: claudeReader,
+                codex: codexReader,
+                pi: PiAgentStateReader(globalAgentRunsRoot: piRoot.appendingPathComponent("unused-global", isDirectory: true))
+            ),
+            paneCommandQuery: { _ in "pi\t333" },
+            windowTargetLookup: { _ in "%8" },
+            writeStatus: { tileId, status, _ in piWrites.append((tileId, status)) },
+            defaults: piDefaults
+        )
+        let piDescriptor = TerminalSessionDescriptor(
+            id: UUID(),
+            tileId: UUID(),
+            launchProfileId: "pi",
+            command: "pi",
+            args: [],
+            cwd: piProject.path,
+            env: [:],
+            title: "pi-push",
+            createdAt: h0,
+            lastStartedAt: h0,
+            lastExit: nil,
+            agentDescriptor: AgentDescriptor(agentKind: .pi, worktreePath: nil, status: .working, statusUpdatedAt: h0, runId: piRunId)
+        )
+        piPushObserver.tileDidSpawn(piDescriptor)
+        try expect(
+            pollUntil(timeout: 1.0) {
+                piPushObserver.storeURLForTesting(piDescriptor.tileId) == piRunDirectory
+                    && piPushObserver.watcherCountForTesting(piDescriptor.tileId) >= 2
+            },
+            "ticket 41 Pi push: initial detection must register file watchers for the Pi run directory"
+        )
+        try #"{"id":"pi-push","role":"implementer","status":"done"}"#.write(to: piRunJSON, atomically: false, encoding: .utf8)
+        try expect(
+            pollUntil(timeout: 1.0) { piWrites.contains { $0.tileId == piDescriptor.tileId && $0.status == .done } },
+            "ticket 41 Pi push: an in-place run.json status change must publish .done via the watcher path"
+        )
+        piPushObserver.stop()
+
         // === Test 7: C1 (round-3 continuation) — the codex-no-rollout
         // "under-claim to .configuring, retry next slow pass" write must be
         // transition-gated. `needsRetry` in `detectAndRegister` is
@@ -1840,6 +1924,7 @@ extension SessionObserver {
             "managedSkipped": true,
             "managedSkipCheckDrainedControlTile": true,
             "restartReregisteredWatcherOnNewStore": true,
+            "piRunJSONPushDeliveredDone": piWrites.contains { $0.tileId == piDescriptor.tileId && $0.status == .done },
             "codexNoRolloutConfiguringWrites": codexConfiguringWrites.count,
             "stopCancelsPendingReadTimer": stopReader.readCallCount == 0 && stopWrites.isEmpty,
             "raceTileDidCloseDidNotResurrectObservation": closeRaceObserver.detectedKindForTesting(closeRaceDescriptor.tileId) == nil,

@@ -278,6 +278,7 @@ final class ZoneRuntimeController {
                 // (existing surfaces, not a new one — ruling item 8's
                 // no-new-surface constraint is unaffected).
                 self.canvasView?.tileView(for: tileId)?.agentStatus = status
+                self.canvasView?.refreshRunArtifactsTiles()
                 self.onAgentStatusWritten?(tileId, status)
             }
         )

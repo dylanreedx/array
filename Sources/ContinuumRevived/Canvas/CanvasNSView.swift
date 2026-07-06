@@ -431,6 +431,17 @@ final class CanvasNSView: NSView {
         tileViews[tileId]?.agentStatus
     }
 
+    func refreshRunArtifactsTiles() {
+        for view in tileViews.values {
+            (view as? RunArtifactsTileNSView)?.reloadRunArtifacts()
+        }
+        for layer in zoneLayers {
+            for view in layer.tileViews.values {
+                (view as? RunArtifactsTileNSView)?.reloadRunArtifacts()
+            }
+        }
+    }
+
     func install(tileView: TileNSView, for tile: Tile) {
         let previousTile = canvasState.tiles.first(where: { $0.id == tile.id })
         // Replacing an existing tile (e.g. restart placeholder → live terminal)

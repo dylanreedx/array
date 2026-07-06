@@ -55,6 +55,10 @@ final class RunArtifactsTileNSView: TileNSView {
         return true
     }
 
+    func reloadRunArtifacts() {
+        loadRunArtifacts()
+    }
+
     private func loadRunArtifacts() {
         guard let runDirectoryPath, !runDirectoryPath.isEmpty else {
             textView.string = "Run artifacts path missing."
