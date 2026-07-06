@@ -29,6 +29,7 @@ final class ZoneRuntimeController {
     /// other status-changing path (round-3 concern: observer writes must not
     /// be the one path that leaves the dock badge/sidebar stale).
     var onAgentStatusWritten: ((UUID, AgentStatus) -> Void)?
+    var onObservedAgentStatusesChanged: (([UUID: AgentStatus]) -> Void)?
     /// Test-only override for the observer's readers, bypassing the default
     /// `ClaudeAgentStateReader()`/`CodexAgentStateReader()`/`PiAgentStateReader()`
     /// construction in `startSessionObserver()`. `NSHomeDirectory()` does not
@@ -163,6 +164,7 @@ final class ZoneRuntimeController {
 
         stopReaper()
         sessionObserver?.stop()
+        onObservedAgentStatusesChanged?([:])
         flushPendingSaves()
         detachUI()
 
@@ -279,6 +281,9 @@ final class ZoneRuntimeController {
                 self.onAgentStatusWritten?(tileId, status)
             }
         )
+        observer.onStatusesChanged = { [weak self] statuses in
+            self?.onObservedAgentStatusesChanged?(statuses)
+        }
         sessionObserver = observer
         observer.start(tiles: (try? projectStore.listSessions()) ?? [])
     }

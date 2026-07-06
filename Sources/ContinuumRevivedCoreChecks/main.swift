@@ -6812,6 +6812,71 @@ do {
     expect(tree == tree2, "sidebar tree: build must be deterministic — two calls on same inputs must be equal")
 }
 
+do {
+    let workspaceId = UUID(uuidString: "00000000-0000-0000-0000-000000004401")!
+    let projectId = UUID(uuidString: "00000000-0000-0000-0000-000000004402")!
+    let zoneId = UUID(uuidString: "00000000-0000-0000-0000-000000004403")!
+    let tileA = UUID(uuidString: "00000000-0000-0000-0000-000000004411")!
+    let tileB = UUID(uuidString: "00000000-0000-0000-0000-000000004412")!
+    let now = Date(timeIntervalSince1970: 1_900_400_000)
+    let registry = Registry(
+        lastActiveWorkspaceId: workspaceId,
+        lastActiveProjectId: projectId,
+        workspaces: [
+            WorkspaceEntry(id: workspaceId, name: "Observer Workspace", projectIds: [projectId], createdAt: now, updatedAt: now)
+        ],
+        projects: [
+            ProjectEntry(id: projectId, name: "Observer Project", rootPath: "/tmp/observer", workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false)
+        ],
+        settings: RegistrySettings(preferredEditor: .auto, zoomModifier: .command, openLastProjectOnLaunch: true)
+    )
+    let placement = ZonePlacement(
+        zoneId: zoneId,
+        projectId: projectId,
+        origin: ZonePoint(x: 0, y: 0),
+        size: ZoneSize(width: 320, height: 220),
+        color: "blue",
+        collapsed: false,
+        hydrationPolicy: .automatic,
+        name: ""
+    )
+    let canvas = CanvasState(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        tiles: [
+            Tile(id: tileA, kind: .terminal, title: "cold tile", frame: TileFrame(x: 0, y: 0, width: 100, height: 80), zPosition: .fromLegacyRank(1), zoneId: zoneId, runtimeRef: nil, metadata: TileMetadata()),
+            Tile(id: tileB, kind: .terminal, title: "observer tile", frame: TileFrame(x: 120, y: 0, width: 100, height: 80), zPosition: .fromLegacyRank(2), zoneId: zoneId, runtimeRef: nil, metadata: TileMetadata())
+        ],
+        groups: [],
+        lastActiveTileId: tileA
+    )
+    let document = WorkspaceDocument(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        zones: [placement],
+        zoneZOrder: [zoneId],
+        lastActiveZoneId: zoneId
+    )
+
+    let coldTree = SidebarTreeBuilder.build(
+        registry: registry,
+        documents: [workspaceId: document],
+        projectCanvases: [projectId: canvas],
+        agentStatusesByTileId: [tileA: .stale]
+    )
+    let coldTile = coldTree.workspaces[0].zones[0].tiles.first { $0.tileId == tileA }
+    expect(coldTile?.agentStatus == .stale, "sidebar tree live map: cold-start .stale status must render")
+
+    let overrideTree = SidebarTreeBuilder.build(
+        registry: registry,
+        documents: [workspaceId: document],
+        projectCanvases: [projectId: canvas],
+        agentStatusesByTileId: [tileA: .working, tileB: .needsAttention]
+    )
+    let overrideTileA = overrideTree.workspaces[0].zones[0].tiles.first { $0.tileId == tileA }
+    let overrideTileB = overrideTree.workspaces[0].zones[0].tiles.first { $0.tileId == tileB }
+    expect(overrideTileA?.agentStatus == .working, "sidebar tree live map: observer override .working status must render")
+    expect(overrideTileB?.agentStatus == .needsAttention, "sidebar tree live map: observer-only .needsAttention status must render")
+}
+
 // MARK: - T18 zoneJumpLabels core assignment table
 
 do {

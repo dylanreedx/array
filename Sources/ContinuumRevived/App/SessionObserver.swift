@@ -67,6 +67,7 @@ final class SessionObserver {
     }
 
     private(set) var observations: [UUID: TileObservation] = [:]
+    var onStatusesChanged: (([UUID: AgentStatus]) -> Void)?
     // Concern (Codex, round-4 continuation): `tileDidSpawn` queues an async
     // `detectAndRegister` with no guard against a `stop()`/`tileDidClose`
     // that lands while it's still suspended (on `paneCommandQuery`'s
@@ -147,6 +148,7 @@ final class SessionObserver {
         // generation and bails instead of recreating a stopped observer's
         // state.
         tileGenerations.removeAll()
+        publishStatusesChanged()
     }
 
     // Called from ZoneRuntimeController when a tile spawns.
@@ -178,6 +180,7 @@ final class SessionObserver {
         // `runDetectionPass` before this close) cannot match it on resume and
         // recreate a watcher/observation for a tile that no longer exists.
         tileGenerations.removeValue(forKey: tileId)
+        publishStatusesChanged()
     }
 
     // MARK: - Slow-cadence detection
@@ -291,6 +294,7 @@ final class SessionObserver {
 
         if shouldWriteConfiguring {
             writeStatus(tileId, .configuring, now)
+            publishStatusesChanged()
         }
     }
 
@@ -516,6 +520,16 @@ final class SessionObserver {
         // Seam 2: the injected writer does the load-mutate-saveSession on the
         // controller side.
         writeStatus(tileId, derived, snapshot.asOf)
+        publishStatusesChanged()
+    }
+
+    private func publishStatusesChanged() {
+        let statuses = observations.reduce(into: [UUID: AgentStatus]()) { result, pair in
+            if let status = pair.value.lastWrittenStatus {
+                result[pair.key] = status
+            }
+        }
+        onStatusesChanged?(statuses)
     }
 
     private func buildSignals(from snapshot: AgentSnapshot, engineStatus: AgentStatus, kind: AgentKind, at now: Date) -> StatusSignals {

@@ -352,7 +352,7 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, observerRollupCard, agentsBoardCard, approvalsInboxCard, canvasSceneCard, pushSmokeCard, notifyCategoriesCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
+        [tileSandbox, sidebarCard, observerSidebarCard, topBarCard, pairingTokenCard, agentKindCard, observerRollupCard, agentsBoardCard, approvalsInboxCard, canvasSceneCard, pushSmokeCard, notifyCategoriesCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
     }
 
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
@@ -1030,6 +1030,53 @@ enum LabCatalog {
         )
     }
 
+    private static var observerSidebarCard: LabEntry {
+        LabEntry(
+            id: "chrome.sidebar.observerFeed", category: "Chrome", title: "Observer-fed Sidebar",
+            summary: "Workspace sidebar rows and zone rollups from a live observer status snapshot.",
+            content: .staticCard(preferredSize: NSSize(width: 300, height: 420)) {
+                let view = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 300, height: 420))
+                view.reload(tree: observerSidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
+                return view
+            }
+        )
+    }
+
+    private static func observerSidebarTree() -> SidebarTree {
+        let activeZoneId = UUID(uuidString: "00000000-0000-0000-0000-00000000B441")!
+        let queueZoneId = UUID(uuidString: "00000000-0000-0000-0000-00000000B442")!
+        let needsTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000B451")!
+        let workingTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000B452")!
+        let idleTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000B453")!
+        let active = SidebarZoneRow(
+            zoneId: activeZoneId,
+            name: "agent queue",
+            color: "blue",
+            navKey: "1",
+            collapsed: false,
+            projectId: UUID(uuidString: "00000000-0000-0000-0000-00000000B461")!,
+            agentStatusRollup: SidebarAgentStatusRollup(working: 1, needsAttention: 1),
+            tiles: [
+                SidebarTileRow(tileId: needsTileId, title: "claude · review fix", kind: .terminal, agentStatus: .needsAttention),
+                SidebarTileRow(tileId: workingTileId, title: "codex · matrix", kind: .terminal, agentStatus: .working)
+            ]
+        )
+        let queue = SidebarZoneRow(
+            zoneId: queueZoneId,
+            name: "scratch",
+            color: "mint",
+            navKey: "2",
+            collapsed: false,
+            projectId: nil,
+            tiles: [
+                SidebarTileRow(tileId: idleTileId, title: "release notes", kind: .note, agentStatus: nil)
+            ]
+        )
+        return SidebarTree(workspaces: [
+            SidebarWorkspaceRow(workspaceId: LabFixtures.workspaceId, name: "Continuum", zones: [active, queue])
+        ])
+    }
+
     private static var topBarCard: LabEntry {
         LabEntry(
             id: "chrome.topbar", category: "Chrome", title: "Workspace Top Bar",
@@ -1351,6 +1398,27 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         guard kindLabel.stringValue == "Kind -> claude" else {
             throw fail("agent.kind label rendered '\(kindLabel.stringValue)', expected 'Kind -> claude'")
+        }
+        guard let observerSidebarEntry = entries.first(where: { $0.id == "chrome.sidebar.observerFeed" }),
+              case let .staticCard(_, makeObserverSidebarView) = observerSidebarEntry.content else {
+            throw fail("missing chrome.sidebar.observerFeed card")
+        }
+        guard let observerSidebar = makeObserverSidebarView() as? WorkspaceSidebarView else {
+            throw fail("observer-fed sidebar card did not return WorkspaceSidebarView")
+        }
+        let observerSidebarWorkspaceId = LabFixtures.workspaceId
+        let observerSidebarZoneId = UUID(uuidString: "00000000-0000-0000-0000-00000000B441")!
+        let observerSidebarNeedsTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000B451")!
+        let observerSidebarWorkingTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000B452")!
+        observerSidebar.layoutSubtreeIfNeeded()
+        guard observerSidebar.tileStatusGlyphForQA(workspaceId: observerSidebarWorkspaceId, zoneId: observerSidebarZoneId, tileId: observerSidebarNeedsTileId) == "◆",
+              observerSidebar.tileStatusTextForQA(workspaceId: observerSidebarWorkspaceId, zoneId: observerSidebarZoneId, tileId: observerSidebarNeedsTileId) == "needs you",
+              observerSidebar.tileStatusGlyphForQA(workspaceId: observerSidebarWorkspaceId, zoneId: observerSidebarZoneId, tileId: observerSidebarWorkingTileId) == "●",
+              observerSidebar.tileStatusTextForQA(workspaceId: observerSidebarWorkspaceId, zoneId: observerSidebarZoneId, tileId: observerSidebarWorkingTileId) == "working" else {
+            throw fail("observer-fed sidebar card did not render needs-attention and working tile rows")
+        }
+        guard observerSidebar.zoneStatusTextForQA(workspaceId: observerSidebarWorkspaceId, zoneId: observerSidebarZoneId) == "1 working · 1 needs you" else {
+            throw fail("observer-fed sidebar zone rollup rendered '\(observerSidebar.zoneStatusTextForQA(workspaceId: observerSidebarWorkspaceId, zoneId: observerSidebarZoneId) ?? "nil")'")
         }
         guard let observerRollupEntry = entries.first(where: { $0.id == "observer.rollup" }),
               case let .staticCard(_, makeObserverRollupView) = observerRollupEntry.content else {

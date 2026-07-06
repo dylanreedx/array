@@ -2455,6 +2455,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
     private var canvasView: CanvasNSView?
     private var workspaceSidebarView: WorkspaceSidebarView?
+    private var observedAgentStatuses: [UUID: AgentStatus] = [:]
     private var workspaceTopBarView: WorkspaceTopBarView?
     private var workspaceSplitView: NSSplitView?
     private var workspaceCreatePromptProvider: (() -> String?)?
@@ -2705,6 +2706,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             workspaceRuntime?.activeController?.onAgentStatusWritten = { [weak self] _, _ in
                 guard let self else { return }
                 self.applyObserverStatuses(self.currentObservedAgentStatusesByTileId())
+            }
+            workspaceRuntime?.activeController?.onObservedAgentStatusesChanged = { [weak self] statuses in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.observedAgentStatuses = statuses
+                    self.applyObserverStatuses(statuses)
+                }
             }
             workspaceRuntime?.activeController?.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
             installFocusHistoryHook()
@@ -4827,7 +4835,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             documents[workspaceRuntime.workspaceId] = workspaceRuntime.document
         }
         let projectCanvases = workspaceSidebarProjectCanvasSnapshots(registry: registry)
-        let agentStatuses = workspaceSidebarAgentStatuses(registry: registry, projectCanvases: projectCanvases)
+        var agentStatuses = workspaceSidebarAgentStatuses(registry: registry, projectCanvases: projectCanvases)
+        for (tileId, status) in observedAgentStatuses {
+            agentStatuses[tileId] = status
+        }
         return SidebarTreeBuilder.build(
             registry: registry,
             documents: documents,
@@ -5556,6 +5567,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             && sidebar.zoneStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId)?.contains("2 done") == true
         try expect(statusChangeUpdatedSidebar, "agent status update should refresh the sidebar row view model")
 
+        app.observedAgentStatuses = [workingTileId: .needsAttention, doneTileId: .working]
+        app.reloadWorkspaceSidebar()
+        sidebar.layoutSubtreeIfNeeded()
+        let observerNeedsOverrideText = sidebar.tileStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId, tileId: workingTileId) ?? ""
+        let observerWorkingOverrideText = sidebar.tileStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId, tileId: doneTileId) ?? ""
+        let observerZoneStatusText = sidebar.zoneStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId) ?? ""
+        let observerOverrideWon = observerNeedsOverrideText == "needs you"
+            && observerWorkingOverrideText == "working"
+            && observerZoneStatusText.contains("2 needs you")
+            && observerZoneStatusText.contains("1 working")
+        try expect(
+            observerOverrideWon,
+            "observer-supplied statuses should override canvas/session values in the live sidebar path (workingTile='\(observerNeedsOverrideText)', doneTile='\(observerWorkingOverrideText)', zone='\(observerZoneStatusText)')"
+        )
+
+        app.observedAgentStatuses = [:]
+        app.reloadWorkspaceSidebar()
+        sidebar.layoutSubtreeIfNeeded()
+        let observerClearReverted = sidebar.tileStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId, tileId: workingTileId) == "done"
+            && sidebar.zoneStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId)?.contains("2 done") == true
+        try expect(observerClearReverted, "clearing observer output should revert the sidebar to canvas/session values")
+
         let agentStatusGlyphsRendered = initialGlyphsRendered && statusChangeUpdatedSidebar
         let sidebarIdentityPreserved = ObjectIdentifier(sidebar) == sidebarIdentity
         try expect(sidebarIdentityPreserved, "check must update the existing sidebar instance, not rebuild the app/window")
@@ -5575,6 +5608,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "agentStatusGlyphsRendered": agentStatusGlyphsRendered,
             "noNewStatusPipeline": true,
             "statusChangeUpdatedSidebar": statusChangeUpdatedSidebar,
+            "observerNeedsOverrideText": observerNeedsOverrideText,
+            "observerWorkingOverrideText": observerWorkingOverrideText,
+            "observerZoneStatusText": observerZoneStatusText,
+            "observerOverrideWon": observerOverrideWon,
+            "observerClearReverted": observerClearReverted,
             "sidebarIdentityPreserved": sidebarIdentityPreserved,
             "projectZoneStatusText": sidebar.zoneStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId) ?? "",
             "artifactPath": artifact.path,
