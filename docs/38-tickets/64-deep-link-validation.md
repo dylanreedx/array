@@ -1,5 +1,91 @@
 # Deep-link validation — parse, resolve, and guard the agent push tap-target
 
+> **RULING BANNER — C-20260705-028 (night3 B7 = 64 deep-link validation, orchestrator
+> 2026-07-05). Binding; overrides the ticket text below where they conflict. This ticket was
+> written before B2–B6 landed; the types it names are superseded. Verified code facts as of
+> 5af822d: ticket 63's builders emit FIVE deep-link shapes via `PushDeepLinkTarget`
+> (`APNSPushService.swift:226-239`): `.approvalCard` → `continuum://approval/<requestId>?tileId=<uuid>`
+> (note the QUERY parameter — the ticket's "no query parameters" rule is amended for this one
+> landed shape only), `.agentDetail` → `continuum://agent/<uuid>`, `.agentsBoard` →
+> `continuum://agents`, `.statusFooter` → `continuum://status`, `.devices` →
+> `continuum://devices`; the push payload's top-level key is `deepLink` (`encodedJSON`,
+> `APNSPushService.swift:140`). There is NO `ActivityProjectionSnapshot`/`SidebarTileRow` on the
+> projection wire — the landed types are `ActivityLogSnapshot.byTile: [UUID: TileActivity]`
+> (`AgentActivityEvent.swift:131-134`) and `AgentsBoardProjection` (61a flat board — no
+> workspace/zone tree). The iOS app is `ios/Continuum/Sources/ContinuumApp.swift`: TabView with
+> per-tab `NavigationStack`s that have NO programmatic path binding yet
+> (`AgentsBoardView` :332, `navigationDestination(for: UUID.self)` :356); the notification
+> response handler (:60-72) currently handles ONLY the approve/deny/open ACTION buttons via
+> `handlePushAction` (`APNSPushService.swift:618` returns nil for the default tap — a plain tap
+> on a banner currently does nothing). `PairingURL.scheme == "continuum"`
+> (`Auth/PairingURL.swift:26`) and pairing URLs carry credentials in the FRAGMENT — host `pair`
+> must be rejected by this parser (pairing has its own parser) and fragments must never be
+> logged.**
+>
+> 1. **Parser scope (supersedes the single-case enum):** `ContinuumDeepLink` in
+>    `Sources/ContinuumRevivedCore/DeepLink.swift` parses ALL FIVE landed shapes into typed
+>    cases: `.agent(tileId: UUID)`, `.approval(requestId: String, tileId: UUID)`, `.agentsBoard`,
+>    `.status`, `.devices`. Typed `DeepLinkError` per the ticket, extended as needed
+>    (`.unsupportedScheme`, `.unknownHost` — including `pair`, `.malformedPath`,
+>    `.invalidTileId`, plus approval-shape failures: missing/non-UUID `tileId` query item, empty
+>    requestId path component → `.malformedPath`). Defensive strictness kept: shapes that don't
+>    define a query/fragment REJECT URLs carrying one; `.approval` accepts exactly the one
+>    `tileId` query item; trailing-slash/empty-segment cases → `.malformedPath` via
+>    `split(omittingEmptySubsequences:)`. (N1 always carries a non-empty requestId by B6's
+>    firing rule — the builder's `?? ""` arm is defensive dead code; an empty-requestId approval
+>    link is honestly malformed.)
+> 2. **Resolution (landed projection types):** `resolve(_:in: ActivityLogSnapshot) throws ->
+>    ResolvedDeepLink`. `.agent`/`.approval` require `snapshot.byTile[tileId]` present, else
+>    `.tileNotFound(tileId:)` (covers cold-launch `.empty` snapshot, tombstoned, and stale-push
+>    races — banner copy "This agent is no longer active"). `ResolvedDeepLink` is the navigation
+>    currency: `.agentDetail(tileId: UUID, approvalRequestId: String?)` (approval links resolve
+>    to the agent detail — that's where the B5 approval card lives), `.agentsBoard`, and
+>    `.settings` (BOTH `.status` and `.devices` map here tonight — no status footer or devices
+>    screen exists on iOS; the Settings tab is the diagnostics home. Honest fallback, revisit
+>    when those surfaces land). `.agentsBoard`/`.settings` resolve without consulting the
+>    snapshot.
+> 3. **Pure tap-decision function in Core (shared-code rule):** the full raw-input path —
+>    `userInfo` dictionary → extract `deepLink` string → parse → resolve → typed navigation
+>    intent OR typed failure — is a pure Core function (e.g. `resolvePushTap(userInfo:snapshot:)`)
+>    so CoreChecks gate the REAL decision path, not a re-implementation. The iOS coordinator is
+>    thin glue: on `UNNotificationDefaultActionIdentifier` it calls that function with
+>    `model.snapshot` and applies the intent (switch tab + push onto a NEW programmatic
+>    `NavigationPath`/`[UUID]` binding added to the Agents stack); on any failure it shows the
+>    non-blocking resolution banner. NO deferred navigation, NO caching the raw URL for later
+>    (ticket's watch-out kept). Existing action-button path (`handlePushAction`) unchanged —
+>    B7 adds the default-tap route beside it. `DeepLinkError` exhaustively switched per
+>    Done-when.
+> 4. **Logging/I5:** log scheme+host+path ONLY (the `redactedForLog` shape); never query (it
+>    carries tileId), never fragment (pairing credentials live in fragments elsewhere in this
+>    scheme — hard rule). The redaction helper may live in Core so it's checkable.
+> 5. **Checks (this repo's convention — NO XCTest, supersedes the ticket's
+>    `ContinuumRevivedCoreTests` naming):** new `DeepLinkTests.swift` in
+>    `ContinuumRevivedCoreChecks` called from `main.swift`, matrix-wired (CoreChecks already
+>    runs). Required tables: (a) **builder↔parser pin** — for each of the 8
+>    `PushPayloadBuilder.fixturePayload(for:)` payloads, extract the REAL `deepLink` string,
+>    parse must succeed and the parsed case must match the category's `deepLinkTarget` (single
+>    source of truth, no independent literal list of what "should" parse); (b) rejection table
+>    (wrong scheme, unknown host incl. `pair`, zero/extra segments, trailing slash, non-UUID
+>    segment, empty approval requestId, missing/invalid approval `tileId` query, unexpected
+>    query on `.agent`, fragment present); (c) resolve table over fixture `ActivityLogSnapshot`s
+>    (present / absent / previously-present-now-omitted / `.empty` cold snapshot); (d) redaction
+>    (URL with query+fragment → logged form contains neither); (e) `resolvePushTap` table
+>    (default tap happy path, nil/absent `deepLink` key, malformed value, tile-absent →
+>    typed failures; action-button ids still route to the B5/B6 path, not navigation). Round-trip
+>    invariant kept from the ticket.
+> 6. **ComponentLab (night-3 rule):** "Deep Link" card in
+>    `Sources/ContinuumRevived/App/ComponentLab.swift` (follow the Push Smoke card pattern,
+>    :428): rows for the 8 builder fixture links with parse→resolve outcome against a fixture
+>    snapshot (one tile present/needsAttention, one absent) plus hostile rows (malformed shapes →
+>    typed error names); extend the `--component-lab-check` assertion. The Mac app gets NO
+>    `continuum://` route handling (ticket's scope-enforcement rule kept — the card renders
+>    data only).
+> 7. **Gates tonight:** `swift build` + full matrix green + `cd ios && xcodegen generate &&
+>    xcodebuild … -destination 'generic/platform=iOS Simulator' build` clean. The ticket's
+>    backend real-path check (live simulator push, real banner tap, cold-launch leg) and the
+>    dogfood snippet are `device-gate-owed`; banner/nav visuals are `visual-gate-owed` (B9 sim
+>    suite + morning screenshots). Do NOT fake either.
+
 ## What this delivers
 
 When the iOS companion app receives a `continuum://agent/<tileId>` push notification and
