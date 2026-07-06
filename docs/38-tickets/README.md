@@ -2,7 +2,7 @@
 
 This folder is the buildable decomposition of the agent-orchestration program described in
 [`../38-agent-orchestration-architecture.md`](../38-agent-orchestration-architecture.md).
-Seventy-four tickets, each self-contained and grounded in real code seams, take Continuum
+Seventy-seven tickets, each self-contained and grounded in real code seams, take Continuum
 from today's single-session terminal canvas to a synced, observable, remotely-reachable,
 agent-aware workspace. Read the overview first for the why; each ticket here is the how.
 
@@ -32,6 +32,8 @@ Counts: **43 autonomous · 17 supervised · 11 needs-substrate · 3 unclassified
   projection, the scope + pairing-token model, the iOS observer, APNS push.
 - **Phase 7 — Managed agents & bus** (`66`–`74`): the connection supervisor, the agent
   adapter + ACP driver, the managed-agent tile, approvals→needsAttention, the agent bus seam.
+- **Phase 8 — Companion dogfood finish** (`75`–`77`): desktop publisher wiring, signed/device
+  dogfood harness, and canvas mirror polish for the first physical-iPhone testing session.
 
 ## Overnight-executable set (autonomous, in dependency order)
 
