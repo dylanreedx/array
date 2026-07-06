@@ -1,5 +1,74 @@
 # SessionObserver: per-project agent detection, reader dispatch, and status budgets
 
+> ## RULING C-20260706-031 (orchestrator pre-flight, night3 C1 — binding; supersedes conflicting text below)
+>
+> This ticket predates several landed tickets. Where the body below conflicts with the landed tree,
+> THIS banner wins. The implementer follows the ticket's architecture (seams 1–3, debounce, budget,
+> slow-detection cadence, watch-out list) with these adjustments:
+>
+> 1. **Verification convention supersedes the ticket's XCTest plan.** No `ContinuumRevivedCoreTests`,
+>    no `swift test`, no XCTest anywhere. Logic checks (budget 15→10 writes, debounce 5-rapid+1-late→2
+>    reads, detection dispatch table, engine-mutation persistence) live in an app self-check flag
+>    `--session-observer-check` handled in the ContinuumRevived app target (constructing the observer
+>    with fake readers / fake pane query / fake lookup / recording StatusWriter and injected `now`
+>    values throughout), wired as an additive `run_app_check` line in `scripts/run-matrix.sh`. The
+>    ticket's Backend tier (real tmux + real FSEvents + real Claude reader + temp JSONL, .working
+>    within budget) becomes a second flag that must run WITH tmux enabled: name it with the
+>    `--terminal-tmux-` prefix (e.g. `--terminal-tmux-observer-check`) so run_app_check's existing
+>    case keeps tmux on — do NOT edit the case pattern or weaken anything. It must skip-exit-0 with a
+>    printed SKIPPED line when no usable tmux binary is present (gated-check precedent: the CloudKit
+>    leg). Use the ticket's poll-with-timeout shape (≤1 s timeout, 50 ms polls), never fixed sleeps.
+> 2. **Reader seam = the LANDED protocol** (`Sources/ContinuumRevivedCore/AgentStateReader.swift:43`):
+>    `detect(processName:)`, `locate(pid:cwd:runId:)`, `read(storeURL:asOf:)`. `ReaderLocator` and
+>    `read(locator:)` never existed — do NOT add them. Flow: slow-path detection resolves the pane
+>    command, maps kind, asks the claiming reader `locate(pid:cwd:runId:)` for the store URL, and
+>    registers the FSEvents watcher on that URL; the fast path calls `read(storeURL:asOf:)` with the
+>    observer-supplied `asOf`. The pid for Claude's locate comes from tmux on the SLOW path only:
+>    extend the injected pane query to return command AND pid in one `display-message` call
+>    (format `"#{pane_current_command}\t#{pane_pid}"`, precedent `SessionTopologySnapshot.swift:15`).
+>    The injected query type is `(String) async throws -> ...` over the plain pane-id String —
+>    `TmuxWindowTarget` as a type does not exist; window targets are `String` pane ids everywhere.
+> 3. **Detection table adjusted to the landed classifier** (`AgentKind.from(processName:)`,
+>    `KindClassifier.swift:16`, ticket 34): `zsh|bash|fish|sh` → `.shell`; `node` with no located
+>    rollout → **`.unknown`** (the body's `.shell` expectation is superseded; observer behavior is
+>    identical — no reader, no watcher). Layer reader `detect()` opt-ins over the base mapping
+>    (Codex may claim `node`/`codex`; proof = `locate()` returning a URL). `codex` command with
+>    `locate() == nil` keeps kind `.codex`, registers no watcher, writes `.configuring`, retries next
+>    slow pass (Watch-out preserved). `.managed` tiles are skipped entirely (adapters own them).
+> 4. **Seam 3 adjusted to the landed engine.** `AgentStatusEngine.ingest(.explicit(_))` short-circuits
+>    smoothing by design (explicit wins in `recompute`, `AgentStatusEngine.swift:84`), so the body's
+>    fourth test (explicit working→idle inside the window stays working) is UNIMPLEMENTABLE and
+>    superseded. Binding: each `TileObservation` owns one engine, mutated IN PLACE (subscript/inout,
+>    write the observation back — the real hazard); reader snapshots ingest as
+>    `.explicit(snapshot.status)`. The check pins the landed semantics instead: (a) persistence +
+>    hysteresis ownership via INFERRED signals — ingest `.outputActivity` at t0, `.promptObserved` at
+>    t0+2 s (inside `workingHysteresis` 5 s) → `.working` returned, which only holds if the first
+>    mutation persisted on the stored engine; (b) explicit pass-through — `.explicit(.working)` then
+>    `.explicit(.idle)` flips immediately. `deriveAgentStatus` stays a pure priority resolver.
+> 5. **Seam 1/2 anchors (landed).** `WindowTargetLookup = @MainActor (UUID) -> String?`; the
+>    controller supplies it from its existing resolution (`managedSessionStore.load(tileId:)` →
+>    `record.tmuxWindowTarget()`, `ZoneRuntimeController.swift:272` pattern). `StatusWriter` body =
+>    the `close()` lastExit shape (`ZoneRuntimeController.swift:150-154`): load session by store id,
+>    mutate `agentDescriptor.status`/`statusUpdatedAt`, `saveSession`. Start the observer in
+>    `attachUI(...)` (~line 165), stop it in `close()` next to `stopReaper()` before
+>    `flushPendingSaves()`; `stop()` idempotent. Wire `tileDidSpawn`/`tileDidClose` from the
+>    controller's spawn/close paths.
+> 6. **Configurable-first (Dylan doctrine).** The three knobs — debounce (250 ms), budget
+>    (10 changes/min/tile), detection poll (5 s) — ship with persisted defaults + Settings entries in
+>    the same commit, following the existing `.text` numeric pattern
+>    (`SettingsSchema.swift:122`, Zone Hydration Debounce ms key): a `SessionObserverConfig` with
+>    stable keys, sane-minimum clamps, observer reads it at construction. No hardcoded literals.
+> 7. **Out of scope (reviewers: do not demand these).** No APNS call site, no ActivityStore/projection
+>    publishing, no CloudKit — ticket 75 (2026-07-06) owns the desktop publisher bridge, 41 owns the
+>    FSEvents push watch, 70 owns approvals→needsAttention. The observer's ONLY output is
+>    `AgentDescriptor.status`/`statusUpdatedAt` through the injected StatusWriter. Keep the diff
+>    surgical: no KindClassifier riders (a basename-normalize rider was already reverted once, C-026).
+> 8. **ComponentLab: no new card required** — no new user-visible surface ships tonight (sidebar
+>    tickets 43–47 are unbuilt); B9 exemption precedent. `--component-lab-check` must stay green
+>    (non-regression). The body's dogfood snippet (live Claude session → sidebar transition) is
+>    recorded as `visual-gate-owed` on the morning checklist; the real-tmux matrix leg is NOT owed —
+>    it runs headless.
+
 ## What this delivers
 
 A `SessionObserver` — owned by `ZoneRuntimeController` — that watches every live terminal
