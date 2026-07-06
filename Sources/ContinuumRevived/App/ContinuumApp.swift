@@ -1743,6 +1743,29 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--session-observer-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try SessionObserver.runSelfCheck()
+                print("ContinuumRevivedSessionObserverChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--terminal-tmux-observer-check") {
+            do {
+                let outcome = try SessionObserver.runTmuxIntegrationSelfCheck()
+                print(outcome.message)
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-save-isolation-check") {
             do {
                 _ = NSApplication.shared
@@ -2006,6 +2029,25 @@ enum ContinuumApp {
         guard ghosttyInitStatus == GHOSTTY_SUCCESS else {
             fputs("ghostty_init failed\n", stderr)
             Foundation.exit(1)
+        }
+
+        // C4 (round-3 continuation): moved below `ghostty_init()` — this
+        // check now constructs a real `GhosttyRuntimeContext` (to drive
+        // `spawner.restartTerminalTile(tileId:)`, the real production
+        // spawn/restart path), and `ghostty_config_new()` segfaults without
+        // the one-time global `ghostty_init()` bootstrap above having run
+        // first. Every other check that constructs `GhosttyRuntimeContext()`
+        // is likewise dispatched after this point for the same reason.
+        if CommandLine.arguments.contains("--terminal-tmux-observer-wiring-check") {
+            do {
+                _ = NSApplication.shared
+                let message = try SessionObserver.runProductionWiringSelfCheck()
+                print(message)
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
         }
 
         if CommandLine.arguments.contains("--ghostty-zoom-scale-spike") {
@@ -2657,6 +2699,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self?.workspaceRuntime?.registerLiveBrowser(tileId: runtime.tileId)
                 self?.workspaceRuntime?.enforceBrowserRuntimeBudget()
             }
+            // docs/38-tickets/40-session-observer.md round-3 concern: the
+            // observer's StatusWriter already pushes the live tile view
+            // (ZoneRuntimeController.startSessionObserver); this refreshes
+            // the other two existing surfaces `updateAgentStatus` refreshes
+            // on every other status-changing path.
+            workspaceRuntime?.activeController?.onAgentStatusWritten = { [weak self] _, _ in
+                self?.refreshAgentAttentionSurface()
+                self?.reloadWorkspaceSidebar()
+            }
             workspaceRuntime?.activeController?.attachUI(canvasView: canvasView, tileSpawner: spawner, focusBroker: focusBroker)
             installFocusHistoryHook()
 
@@ -3130,6 +3181,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         runtimes.removeAll { $0.id == runtimeId }
         runtime.terminate(policy: .force)
+        // C2 (round-3 continuation): an exited runtime must tear down its
+        // observation/watcher BEFORE the restart placeholder goes in, same as
+        // the deliberate-delete path below — otherwise a stale observation
+        // survives the exit and the observer keeps issuing writes against a
+        // tile that no longer has a live runtime.
+        workspaceRuntime?.activeController?.sessionObserverTileDidClose(tileId: tileId)
 
         guard let canvasView,
               let tile = canvasView.canvasState.tiles.first(where: { $0.id == tileId })
@@ -3265,6 +3322,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 runtime.terminate(policy: .force)
                 try? projectStore?.deleteSession(id: runtime.id)
             }
+            // C2 (round-3 continuation): unconditional, not just the
+            // live-runtime branch above — a tile deleted while it has no live
+            // `GhosttyTerminalRuntime` entry (e.g. a restart placeholder after
+            // `handleRuntimeExited`) must still drop its observation/watcher.
+            // `tileDidClose` is idempotent, so calling it again in the
+            // live-runtime case above is harmless.
+            workspaceRuntime?.activeController?.sessionObserverTileDidClose(tileId: id)
         case .browser:
             if let runtime = browserRuntimes.first(where: { $0.tileId == id }) {
                 browserRuntimes.removeAll { $0.id == runtime.id }

@@ -21,6 +21,24 @@ final class ZoneRuntimeController {
     weak var canvasView: CanvasNSView?
     weak var tileSpawner: TileSpawner?
     var onBrowserRuntimeHydrated: ((WKWebViewBrowserRuntime) -> Void)?
+    /// Fired after `SessionObserver`'s `StatusWriter` persists a status
+    /// change and pushes it onto the live tile view (docs/38-tickets/
+    /// 40-session-observer.md). `AppDelegate` wires this to
+    /// `refreshAgentAttentionSurface()`/`reloadWorkspaceSidebar()` — the
+    /// same existing surfaces `updateAgentStatus` already refreshes on every
+    /// other status-changing path (round-3 concern: observer writes must not
+    /// be the one path that leaves the dock badge/sidebar stale).
+    var onAgentStatusWritten: ((UUID, AgentStatus) -> Void)?
+    /// Test-only override for the observer's readers, bypassing the default
+    /// `ClaudeAgentStateReader()`/`CodexAgentStateReader()`/`PiAgentStateReader()`
+    /// construction in `startSessionObserver()`. `NSHomeDirectory()` does not
+    /// observe `setenv("HOME", ...)` once a process has launched (verified:
+    /// it still resolves the real user home), so a check driving the real
+    /// production wiring end to end has no other way to point the Claude
+    /// reader's `homeURL` at an isolated directory instead of the developer's
+    /// real `~/.claude` — the same seam `TileSpawner` already exposes for
+    /// `managedSessionStore`/`tmuxPathResolver`/`tmuxControlFactory`.
+    var sessionObserverReadersOverrideForTesting: SessionObserver.Readers?
     private weak var focusBroker: FocusBroker?
 
     private var saveTimer: Timer?
@@ -28,6 +46,7 @@ final class ZoneRuntimeController {
     private var noteSaveTimer: Timer?
     private var fileTreeSaveTimer: Timer?
     private var sessionPruner: SessionPruner?
+    private var sessionObserver: SessionObserver?
     private var isCanvasDirty = false
     private var isBrowserDirty = false
     private var isNoteDirty = false
@@ -143,6 +162,7 @@ final class ZoneRuntimeController {
         isClosed = true
 
         stopReaper()
+        sessionObserver?.stop()
         flushPendingSaves()
         detachUI()
 
@@ -167,6 +187,9 @@ final class ZoneRuntimeController {
         self.tileSpawner = tileSpawner
         self.focusBroker = focusBroker
         canvasView.focusBroker = focusBroker
+        tileSpawner.terminalSpawnedHandler = { [weak self] descriptor in
+            self?.sessionObserverTileDidSpawn(descriptor)
+        }
         // Lockstep: every accepted tile focus (via requestFocus OR
         // acceptExistingFocus, both fire this) marks the tile active on the
         // canvas, so `activeSurface` and `lastActiveTileId` can never drift.
@@ -195,12 +218,99 @@ final class ZoneRuntimeController {
             }
             return fallbacks
         }
+        startSessionObserver()
         if let tmuxPath = TmuxLocator.resolve() {
             startReaper(
                 tmuxControl: ProcessTmuxControl(tmuxPath: tmuxPath),
                 activitySnapshotSource: { nil }
             )
         }
+    }
+
+    // docs/38-tickets/40-session-observer.md, ruling C-20260706-031 items 2/5:
+    // wires the three injected seams. `windowTargetLookup` and `writeStatus`
+    // never touch anything the observer couldn't reach itself — this is the
+    // controller's own load-mutate-saveSession shape, same as `close()`'s
+    // `lastExit` write.
+    private func startSessionObserver() {
+        sessionObserver?.stop() // guards a second attachUI() the same way startReaper() does
+        let tmuxPath = TmuxLocator.resolve()
+        let observer = SessionObserver(
+            readers: sessionObserverReadersOverrideForTesting ?? SessionObserver.Readers(
+                claude: ClaudeAgentStateReader(),
+                codex: CodexAgentStateReader(),
+                pi: PiAgentStateReader()
+            ),
+            paneCommandQuery: { target in
+                guard let tmuxPath else { throw TmuxControlError.paneNotFound(target: target) }
+                return try await SessionObserver.liveDisplayMessageQuery(tmuxPath: tmuxPath, target: target)
+            },
+            windowTargetLookup: { [weak self] tileId in
+                guard let self else { return nil }
+                return (try? self.managedSessionStore.load(tileId: tileId))?.tmuxWindowTarget()
+            },
+            writeStatus: { [weak self] tileId, status, asOf in
+                guard let self else { return }
+                // Resolve tileId -> persisted descriptor the same way
+                // `updateAgentStatus`/`stopHarnessRun` already do elsewhere
+                // in this file, not via `self.runtimes` (a live-ghostty-only
+                // list): a tile can be legitimately observed/detected
+                // (`windowTargetLookup` only needs `managedSessionStore`)
+                // before or without a live `GhosttyTerminalRuntime` entry
+                // existing, and gating the WRITE on that entry while
+                // detection isn't gated on it would silently drop otherwise-
+                // valid status changes (round-3 concern: production wiring
+                // must actually persist, not just be reachable).
+                guard var descriptor = (try? self.projectStore.listSessions())?.first(where: { $0.tileId == tileId }) else { return }
+                guard descriptor.agentDescriptor != nil else { return }
+                descriptor.agentDescriptor?.status = status
+                descriptor.agentDescriptor?.statusUpdatedAt = asOf
+                try? self.projectStore.saveSession(descriptor)
+                // Round-3 concern (Codex): the persisted write alone leaves
+                // the live canvas stale — `canvasView.agentStatus`/the tile
+                // view's own `agentStatus` property is what current
+                // consumers (`currentAgentTileIds`, `updateAgentStatus`'s own
+                // precedent) actually read, so push it the same way
+                // `updateAgentStatus` does. `onAgentStatusWritten` lets the
+                // owning `AppDelegate` refresh the dock badge and sidebar
+                // (existing surfaces, not a new one — ruling item 8's
+                // no-new-surface constraint is unaffected).
+                self.canvasView?.tileView(for: tileId)?.agentStatus = status
+                self.onAgentStatusWritten?(tileId, status)
+            }
+        )
+        sessionObserver = observer
+        observer.start(tiles: (try? projectStore.listSessions()) ?? [])
+    }
+
+    /// Called from the tile-spawn path (`TileSpawner.terminalSpawnedHandler`,
+    /// wired by `AppDelegate`) whenever a new terminal tile comes to life
+    /// while the observer is already running.
+    func sessionObserverTileDidSpawn(_ descriptor: TerminalSessionDescriptor) {
+        sessionObserver?.tileDidSpawn(descriptor)
+    }
+
+    /// Called from the deliberate tile-close path (`AppDelegate.deleteTile`)
+    /// so the observer drops its watcher/state for a tile that no longer
+    /// exists.
+    func sessionObserverTileDidClose(tileId: UUID) {
+        sessionObserver?.tileDidClose(tileId: tileId)
+    }
+
+    /// Test-only: exposes the real observer's detected kind for a tile so a
+    /// production-wiring check (`--terminal-tmux-observer-wiring-check`) can
+    /// distinguish "stuck" from "correctly detected." Two boot-ordering
+    /// hazards land here: `windowTargetLookup` returning `nil` (no
+    /// `managedSessionStore` record yet) leaves `detectAndRegister` returning
+    /// before an observation ever exists; a stale/dead pre-restore `%pane_id`
+    /// that still resolves (real tmux's `display-message -p` on a dead pane
+    /// exits 0 with empty fields, not an error) DOES create an observation,
+    /// but one permanently stuck at `.unknown` — `detectAndRegister`'s
+    /// "fully settled" early-return re-derives the same empty result every
+    /// slow-cadence pass. Either way the tile never becomes `.claude` until
+    /// something re-notifies the observer with a fresh target.
+    func sessionObserverDetectedKindForTesting(_ tileId: UUID) -> AgentKind? {
+        sessionObserver?.detectedKindForTesting(tileId)
     }
 
     func startReaper(

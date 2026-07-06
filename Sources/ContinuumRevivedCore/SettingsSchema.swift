@@ -123,6 +123,9 @@ public enum SettingsSchema {
                     .toggle(key: ZoneRuntimeBudgetConfig.closeOnZeroKey, label: "Close Project Runtime When Unused", default: ZoneRuntimeBudgetConfig.defaultCloseOnZero),
                     // WorkspaceProfileConfig capture/apply modes are intentionally absent
                     // until a session-state bridge is designed (no behavioral effect yet).
+                    .text(key: SessionObserverConfig.debounceMsKey, label: "Agent Status Debounce (ms)", default: String(SessionObserverConfig.defaultDebounceMs)),
+                    .text(key: SessionObserverConfig.maxChangesPerMinuteKey, label: "Agent Status Change Budget (per minute)", default: String(SessionObserverConfig.defaultMaxChangesPerMinute)),
+                    .text(key: SessionObserverConfig.detectionPollSecondsKey, label: "Agent Detection Poll Interval (s)", default: String(SessionObserverConfig.defaultDetectionPollSeconds)),
                 ]
             ),
             SettingsSection(

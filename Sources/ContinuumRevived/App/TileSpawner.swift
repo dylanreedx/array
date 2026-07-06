@@ -58,6 +58,11 @@ final class TileSpawner {
     var browserProfileRenameHandler: ((UUID, UUID) -> Void)?
     var browserProfileDeleteHandler: ((UUID, UUID) -> Void)?
 
+    /// Called right after a new terminal session descriptor is persisted, so
+    /// the owning `ZoneRuntimeController` can hand it to its
+    /// `SessionObserver` (docs/38-tickets/40-session-observer.md).
+    var terminalSpawnedHandler: ((TerminalSessionDescriptor) -> Void)?
+
     /// Called after every browser-tile state change (URL, title, loading, error)
     /// so the AppDelegate can schedule a debounced BrowserState save.
     var browserPersistenceHandler: (() -> Void)?
@@ -230,6 +235,7 @@ final class TileSpawner {
             try projectStore.saveSession(descriptor)
             writeInitialManagedSessionRecord(for: descriptor, windowTarget: wrappedProfile.windowTarget, at: now)
             try projectStore.saveCanvas(canvasView.canvasState)
+            terminalSpawnedHandler?(descriptor)
         } catch {
             if let target = wrappedProfile.windowTarget {
                 try? Self.runTmuxControlOperationSync { [tmuxControlFactory] in
@@ -478,8 +484,23 @@ final class TileSpawner {
         )
         do {
             try projectStore.saveSession(descriptor)
+            // Concern (Codex, C4 wiring-check follow-up): the pre-restart
+            // descriptor (e.g. the exited one `handleRuntimeExited` stamped
+            // `lastExit` on and deliberately left on disk) is superseded the
+            // instant a new descriptor is persisted for this tile — leaving
+            // both around makes every `listSessions().first(where: {
+            // $0.tileId == tileId })` lookup in this codebase (including the
+            // SessionObserver `StatusWriter`) non-deterministic, since
+            // `listSessions()` is directory-read order, not creation order.
+            // Delete it now instead of waiting for the next boot's
+            // `pruneExitedSessions` sweep, so at most one descriptor exists
+            // per tileId immediately after a restart.
+            if let staleId = persistedDescriptor?.id, staleId != descriptor.id {
+                try? projectStore.deleteSession(id: staleId)
+            }
             writeInitialManagedSessionRecord(for: descriptor, windowTarget: wrappedProfile.windowTarget ?? persistedWindowTarget, at: now)
             try projectStore.saveCanvas(canvasView.canvasState)
+            terminalSpawnedHandler?(descriptor)
         } catch {
             return .failure(error)
         }
