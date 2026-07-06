@@ -26,7 +26,7 @@ B4 61b canvas view + editor (spec §2.2; ops on gesture-end; editing behind oper
 B5 62-ios-approve-action (scope gate per C-20260702-012)
 B6 63 push sender + N1–N8 payload builders (key config at `~/.continuum/apns.env`; the .p8 NEVER
     enters the repo; if key/env absent, land behind the flag)
-B7 64-deep-link-validation
+B7 64-deep-link-validation  ← DEFERRED 2026-07-05 (3 orchestrator no-token/auth halts + a real C-028 concern; ledger row `deferred`; partials in git stash). SKIP THIS — do NOT attempt it tonight; begin at B8.
 B8 65-notify-categories-setting
 B9 T2 simulator push suite: `scripts/push-sim-test.sh` firing all 8 categories via `xcrun simctl push`
 C1 40-session-observer   C2 41-fsevents-push-watch   C3 43→47 sidebar/dock (one item each)
