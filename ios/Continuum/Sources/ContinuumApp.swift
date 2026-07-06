@@ -5,7 +5,7 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
-private let continuumCloudKitContainerIdentifier = "iCloud.dev.dylanreed.continuum"
+private let continuumCloudKitContainerIdentifier = "iCloud.dev.dylanreedx.continuum"
 
 @main
 struct ContinuumApp: App {

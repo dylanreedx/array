@@ -1,6 +1,6 @@
 name: Continuum
 options:
-  bundleIdPrefix: dev.dylanreed
+  bundleIdPrefix: dev.dylanreedx
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
@@ -23,7 +23,7 @@ targets:
         product: ContinuumRevivedSync
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.dylanreed.continuum
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dylanreedx.continuum
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         CODE_SIGN_ENTITLEMENTS: Continuum/Resources/Continuum.entitlements

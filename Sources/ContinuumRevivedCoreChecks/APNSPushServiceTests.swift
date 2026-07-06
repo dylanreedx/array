@@ -235,7 +235,7 @@ private func runAPNSDedupHTTPChecks() async throws {
     let request = http.requests[0].request
     expect(request.url?.absoluteString == "https://api.sandbox.push.apple.com/3/device/device-token", "APNS sandbox URL shape")
     expect(request.value(forHTTPHeaderField: "authorization")?.hasPrefix("bearer ") == true, "APNS authorization bearer header")
-    expect(request.value(forHTTPHeaderField: "apns-topic") == "dev.dylanreed.continuum", "APNS topic header")
+    expect(request.value(forHTTPHeaderField: "apns-topic") == "dev.dylanreedx.continuum", "APNS topic header")
     expect(request.value(forHTTPHeaderField: "apns-push-type") == "alert", "APNS push type alert")
     print("APNS dedup/http: requests=\(http.requests.count) url=\(request.url?.host ?? "?") first=\(first) dup=\(second) changed=\(changed) 410=\(expired) 403Expired=\(expiredRetry) 403Plain=\(plain403Retry)")
 }

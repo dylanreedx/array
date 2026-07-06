@@ -561,7 +561,7 @@ public actor APNSPushService {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("bearer \(jwt)", forHTTPHeaderField: "authorization")
-        request.setValue("dev.dylanreed.continuum", forHTTPHeaderField: "apns-topic")
+        request.setValue("dev.dylanreedx.continuum", forHTTPHeaderField: "apns-topic")
         request.setValue("alert", forHTTPHeaderField: "apns-push-type")
         let response = try await httpClient.send(request, body: try payload.encodedJSON())
         switch response.statusCode {
