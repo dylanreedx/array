@@ -38,6 +38,10 @@ try runAsyncCheck {
     try await runConnectionSupervisorChecks()
 }
 
+try runAsyncCheck {
+    try await runAPNSPushServiceChecks()
+}
+
 // Trap-testing hook: when invoked with this env var set, deliberately call
 // the operation under test so a subprocess check can assert the process
 // crashes (non-zero/abnormal exit) rather than trying to catch a Swift

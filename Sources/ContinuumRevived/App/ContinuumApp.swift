@@ -600,6 +600,50 @@ private func runBrowserKeychainVaultSelfCheck() throws -> URL {
     return artifact
 }
 
+private struct PushTestError: Error, CustomStringConvertible {
+    let description: String
+}
+
+private func runBlockingPushTest() throws {
+    let semaphore = DispatchSemaphore(value: 0)
+    final class Box: @unchecked Sendable { var result: Result<Void, Error>? }
+    let box = Box()
+    Task {
+        do {
+            try await runPushTest()
+            box.result = .success(())
+        } catch {
+            box.result = .failure(error)
+        }
+        semaphore.signal()
+    }
+    semaphore.wait()
+    try box.result!.get()
+}
+
+private func runPushTest() async throws {
+    guard let config = APNSEnvLoader.load() else {
+        throw PushTestError(description: "no APNS config loaded from ~/.continuum/apns.env")
+    }
+    guard let token = config.deviceToken, !token.isEmpty else {
+        print("APNS push-test: no device token configured in ~/.continuum/apns.env")
+        throw PushTestError(description: "no device token configured")
+    }
+    let service = APNSPushService(config: config, preferences: AllEnabledPushCategoryPreferences())
+    var failures: [String] = []
+    for category in PushCategory.allCases {
+        let payload = try PushPayloadBuilder.fixturePayload(for: category)
+        let outcome = try await service.publish(payload: payload)
+        print("APNS push-test \(category.rawValue) \(category.identifier): \(outcome)")
+        if !outcome.isSent {
+            failures.append("\(category.rawValue)=\(outcome)")
+        }
+    }
+    if !failures.isEmpty {
+        throw PushTestError(description: "APNS push-test failures: \(failures.joined(separator: ", "))")
+    }
+}
+
 @main
 enum ContinuumApp {
     @MainActor
@@ -607,6 +651,16 @@ enum ContinuumApp {
 
     @MainActor
     static func main() {
+        if CommandLine.arguments.contains("--push-test") {
+            do {
+                try runBlockingPushTest()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--menu-contract-check") {
             do {
                 _ = NSApplication.shared

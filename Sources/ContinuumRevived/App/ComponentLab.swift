@@ -352,7 +352,7 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, approvalsInboxCard, canvasSceneCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
+        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, approvalsInboxCard, canvasSceneCard, pushSmokeCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
     }
 
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
@@ -419,6 +419,44 @@ enum LabCatalog {
                 makeApprovalsInboxView(snapshot: approvalsInboxSnapshot())
             }
         )
+    }
+
+    static var pushSmokeCard: LabEntry {
+        LabEntry(
+            id: "push.smoke",
+            category: "Chrome",
+            title: "Push Smoke",
+            summary: "N1-N8 APNS fixture payloads plus firing/dedup table output.",
+            content: .staticCard(preferredSize: NSSize(width: 900, height: 315)) {
+                makePushSmokeView()
+            }
+        )
+    }
+
+    static func makePushSmokeView() -> NSView {
+        func label(_ identifier: String, _ text: String, size: CGFloat = 11) -> NSTextField {
+            let field = NSTextField(labelWithString: text)
+            field.identifier = NSUserInterfaceItemIdentifier(identifier)
+            field.font = .monospacedSystemFont(ofSize: size, weight: .regular)
+            field.textColor = .labelColor
+            field.lineBreakMode = .byTruncatingTail
+            return field
+        }
+        let rows: [NSView] = PushCategory.allCases.enumerated().map { index, category in
+            let payload = (try? PushPayloadBuilder.fixturePayload(for: category)) ?? PushPayload(category: category, title: "invalid", body: "invalid", deepLink: "\(PairingURL.scheme)://invalid")
+            let actions = category.actionIds.isEmpty ? "-" : category.actionIds.joined(separator: ",")
+            return label(
+                "pushSmoke.row.\(index + 1)",
+                "\(category.rawValue) \(category.identifier) level=\(category.interruptionLevel.rawValue) title=\(payload.title) body=\(payload.body) link=\(payload.deepLink) actions=\(actions)"
+            )
+        }
+        let outcome = label("pushSmoke.outcome", "firing: fire -> dedup-suppressed -> refire on phase change")
+        outcome.textColor = .secondaryLabelColor
+        let stack = NSStackView(views: [label("pushSmoke.title", "Push Smoke", size: 13)] + rows + [outcome])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 5
+        return stack
     }
 
     static func agentsBoardRows() -> [AgentsBoardRow] {
@@ -1263,6 +1301,28 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard approvalsScope == "observer=missing:orchestrationOperate operator=allowed" else {
             throw fail("approvals inbox scope rendered '\(approvalsScope)'")
         }
+        guard let pushSmokeEntry = entries.first(where: { $0.id == "push.smoke" }),
+              case let .staticCard(_, makePushSmokeView) = pushSmokeEntry.content else {
+            throw fail("missing push.smoke card")
+        }
+        let pushSmokeView = makePushSmokeView()
+        func pushSmokeText(_ identifier: String) throws -> String {
+            guard let field = pushSmokeView.descendant(withIdentifier: identifier) as? NSTextField else {
+                throw fail("push smoke card missing label \(identifier)")
+            }
+            return field.stringValue
+        }
+        let pushRows = try (1...8).map { try pushSmokeText("pushSmoke.row.\($0)") }
+        guard pushRows.count == 8 else {
+            throw fail("push smoke row count \(pushRows.count), expected 8")
+        }
+        guard pushRows[0].contains(PushCategory.approveActionId), pushRows[0].contains(PushCategory.denyActionId) else {
+            throw fail("push smoke N1 row missing approve/deny actions: \(pushRows[0])")
+        }
+        let pushOutcome = try pushSmokeText("pushSmoke.outcome")
+        guard pushOutcome == "firing: fire -> dedup-suppressed -> refire on phase change" else {
+            throw fail("push smoke outcome rendered '\(pushOutcome)'")
+        }
         guard let canvasSceneEntry = entries.first(where: { $0.id == "canvas.scene" }),
               case let .staticCard(_, makeCanvasSceneView) = canvasSceneEntry.content else {
             throw fail("missing canvas.scene projection card")
@@ -1577,6 +1637,10 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                 "row2": agentsBoardRow2,
                 "row3": agentsBoardRow3,
                 "row4": agentsBoardRow4
+            ],
+            "pushSmoke": [
+                "rows": pushRows,
+                "outcome": pushOutcome
             ],
             "agentAdapterProjection": [
                 "row1": adapterRow1,

@@ -2,11 +2,14 @@ import CloudKit
 import ContinuumRevivedCore
 import ContinuumRevivedSync
 import SwiftUI
+import UIKit
+import UserNotifications
 
 private let continuumCloudKitContainerIdentifier = "iCloud.dev.dylanreed.continuum"
 
 @main
 struct ContinuumApp: App {
+    @UIApplicationDelegateAdaptor(PushNotificationAppDelegate.self) private var pushDelegate
     @StateObject private var model = AgentsBoardModel()
 
     var body: some Scene {
@@ -14,7 +17,79 @@ struct ContinuumApp: App {
             ContinuumRootView()
                 .environmentObject(model)
                 .preferredColorScheme(.dark)
-                .task { await model.start() }
+                .task {
+                    pushDelegate.model = model
+                    await model.start()
+                }
+        }
+    }
+}
+
+private final class PushNotificationAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    weak var model: AgentsBoardModel?
+
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.setNotificationCategories(Self.notificationCategories())
+        center.requestAuthorization(options: [.alert, .sound, .badge, .timeSensitive]) { granted, error in
+            if let error {
+                print("notification authorization failed: \(error.localizedDescription)")
+            }
+            guard granted else { return }
+            DispatchQueue.main.async {
+                UIApplication.shared.registerForRemoteNotifications()
+            }
+        }
+        return true
+    }
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        let token = deviceToken.map { String(format: "%02x", $0) }.joined()
+        Task { @MainActor in
+            model?.apnsDeviceToken = token
+        }
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        Task { @MainActor in
+            model?.apnsDeviceToken = "registration failed: \(error.localizedDescription)"
+        }
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        let userInfo = response.notification.request.content.userInfo
+        guard let model else { return }
+        let grantedScope = await MainActor.run { model.grantedScope }
+        guard let intent = handlePushAction(actionId: response.actionIdentifier, userInfo: userInfo, grantedScope: grantedScope) else {
+            return
+        }
+        do {
+            _ = try await model.respondToApproval(tileId: intent.tileId, requestId: intent.requestId, decision: intent.decision)
+        } catch {
+            print("push approval response failed: \(error.localizedDescription)")
+        }
+    }
+
+    private static func notificationCategories() -> Set<UNNotificationCategory> {
+        Set(PushCategory.allCases.map { category in
+            UNNotificationCategory(identifier: category.identifier, actions: notificationActions(for: category), intentIdentifiers: [], options: [])
+        })
+    }
+
+    private static func notificationActions(for category: PushCategory) -> [UNNotificationAction] {
+        switch category {
+        case .approvalRequested:
+            return [
+                UNNotificationAction(identifier: PushCategory.approveActionId, title: PushCategory.approveActionTitle, options: [.authenticationRequired]),
+                UNNotificationAction(identifier: PushCategory.denyActionId, title: PushCategory.denyActionTitle, options: [.authenticationRequired])
+            ]
+        case .agentWaitingForInput:
+            return [
+                UNNotificationAction(identifier: PushCategory.openActionId, title: PushCategory.openActionTitle, options: [.foreground])
+            ]
+        case .agentFinished, .agentFailed, .stillWorkingDigest, .desktopConnectionChanged, .deviceSecurityChanged, .sessionReapedOrRevived:
+            return []
         }
     }
 }
@@ -45,7 +120,7 @@ private struct ContinuumRootView: View {
                 .badge(model.attentionCount)
                 .tag(ContinuumTab.approvals)
 
-            PlaceholderScreen(title: "Settings", subtitle: "Settings land with ticket B8.")
+            SettingsDiagnosticsView()
                 .tabItem { Label("Settings", systemImage: "gearshape") }
                 .tag(ContinuumTab.settings)
         }
@@ -67,6 +142,7 @@ private final class AgentsBoardModel: ObservableObject {
     @Published var snapshot: ActivityLogSnapshot = .empty
     @Published var rows: [AgentsBoardRow] = []
     @Published var lastApprovalAck: ApprovalResponseAck?
+    @Published var apnsDeviceToken: String?
 
     // Ticket: docs/38-tickets/61b-canvas-editor.md
     @Published var canvasScene: CanvasScene = CanvasScene(zones: [], tiles: [])
@@ -1047,6 +1123,36 @@ private struct PlaceholderScreen: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(AppColors.background.ignoresSafeArea())
             .navigationTitle(title)
+        }
+    }
+}
+
+private struct SettingsDiagnosticsView: View {
+    @EnvironmentObject private var model: AgentsBoardModel
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Push Diagnostics") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("APNS device token")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(model.apnsDeviceToken ?? "Waiting for APNS registration")
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .lineLimit(nil)
+                    }
+                    .padding(.vertical, 4)
+                }
+                Section {
+                    Text("Settings land with ticket B8.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(AppColors.background.ignoresSafeArea())
+            .navigationTitle("Settings")
         }
     }
 }
