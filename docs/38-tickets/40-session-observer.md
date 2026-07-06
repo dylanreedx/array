@@ -68,6 +68,40 @@
 >    (non-regression). The body's dogfood snippet (live Claude session → sidebar transition) is
 >    recorded as `visual-gate-owed` on the morning checklist; the real-tmux matrix leg is NOT owed —
 >    it runs headless.
+>
+> ### REV.2 — continuation adjudication (orchestrator, night3, after round-3 split rejection)
+>
+> Round 3: build+matrix green, Claude rejected on 1 concern, Codex on 3. All four are REAL and
+> bounded (B2–B6 continuation precedent). The continuation fixes EXACTLY these, in place, no
+> re-architecture:
+>
+> C1. **Transition-gate the detection-time `.configuring` write** (Claude concern,
+>     `SessionObserver.swift` detectAndRegister). The codex-no-rollout retry path currently calls
+>     `writeStatus(_, .configuring, _)` on EVERY 5 s pass, bypassing both the budget and the
+>     only-if-changed rule, hammering saveSession + sidebar reload + attention refresh. Fix: emit it
+>     only on an actual transition — consult and set `lastWrittenStatus` (write at most once until
+>     the state genuinely changes). A check drives ≥3 slow passes over a codex-no-rollout fake and
+>     asserts exactly ONE StatusWriter invocation.
+> C2. **Complete the teardown lifecycle** (Codex, `ContinuumApp.swift` handleRuntimeExited +
+>     deleteTile). Every path that ends a tile's live runtime must call
+>     `sessionObserverTileDidClose`: add it to handleRuntimeExited (before the restart placeholder)
+>     and make deleteTile call it unconditionally (it is idempotent), not just in the live-runtime
+>     branch. No stale observation/watcher may survive a runtime exit.
+> C3. **Cancellable one-shot read timers** (Codex, `SessionObserver.swift` stop()/debounce). The
+>     ticket text is explicit: stop() "must cancel any pending one-shot read timers". Replace the
+>     bare `asyncAfter` with a stored cancellable per tile (`DispatchWorkItem` or
+>     `DispatchSourceTimer`), cancelled in both `stop()` and `tileDidClose`. Extend the check: fire a
+>     change, call stop() inside the debounce window, wait past the interval, assert ZERO reader
+>     calls and ZERO writes after stop.
+> C4. **Wiring check must gate the production spawn path** (Codex,
+>     `--terminal-tmux-observer-wiring-check`). The check currently calls
+>     `controller.sessionObserverTileDidSpawn(...)` directly, so deleting the TileSpawner
+>     `terminalSpawnedHandler` call sites would not fail it. Rework it to drive the REAL
+>     TileSpawner spawn/restart notification path (invoke the production handler wiring, not the
+>     observer entry point), such that removing the handler call breaks the check.
+>
+> Continuation = one fix round (sonnet, high — sonnet implemented) + fresh FULL dual review of the
+> whole diff; commit only on green gates + both reviewers clear, else honest skip (no round 3).
 
 ## What this delivers
 
