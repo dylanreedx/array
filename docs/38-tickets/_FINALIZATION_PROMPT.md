@@ -12,13 +12,20 @@ Dylan explicitly approves. All final review is done by **Fable**.
 - Tree should be clean or hold only known human-owned dirty work (03/04/05). Classify before finalizing.
 
 ## Deliverables (produce all, local)
-1. **Branch review — Fable, adversarial.** Review `git diff <base>...HEAD` (base = `main`, or
-   `feature/component-lab` if that's the merge target). It's large, so review **by subsystem**: store/
-   protocol seam, op-log/sync envelope, session topology, readers/status, injectable substrates, UI/
-   visual. Per subsystem check: correctness, incomplete migrations (compat shims defeating a compile-
-   enforced change), tautological/bypassing tests, **I5 taint** (no transcript body / secret / host-
-   local data across a sync or activity boundary), scope creep, matrix + headless-GUI debt. Emit
-   merge-blocking issues, nits, and risks.
+1. **Branch review — Fable, adversarial.** Review `git diff <base>...HEAD` — **base = `main`** (the
+   confirmed merge target; Dylan approved `overnight/agent-orchestration → main` AFTER this review).
+   Track C (`night3/c-items`) must be merged into the branch BEFORE this review so the diff is complete.
+   It's large, so review **by subsystem**: store/protocol seam, op-log/sync envelope, session topology,
+   readers/status, injectable substrates, desktop UI/visual (incl. Track C sidebar/dock/managed-tile
+   chrome), **and the mobile companion** (iOS app in `ios/`, CloudKit transport, activity projection +
+   cursor-resume, APNS push sender + N1–N8 taxonomy, deep-link resolution, approval-over-sync-wire +
+   operator scope gate, pairing/GRDB auth). Per subsystem check: correctness, incomplete migrations
+   (compat shims defeating a compile-enforced change), tautological/bypassing tests, **I5 taint** (no
+   transcript body / secret / host-local data across a sync or activity boundary — extra scrutiny on the
+   CloudKit + push payload builders), scope creep, matrix + headless-GUI debt, **device-gate-owed**
+   legs (real CloudKit round-trip, real APNS push) that were correctly deferred not faked. Emit
+   merge-blocking issues, nits, and risks. **Known open:** B0 ConnectionSupervisor is an honest-skip
+   (two attempts stashed) — flag it as the top merge-time caveat, do not treat as done.
 2. **PR draft → `docs/38-tickets/_PR_DRAFT.md`** (local, no push): title; summary; per-ticket bullets
    (ticket → commit → what shipped → how verified); **"still owed"** (the supervised full-matrix GUI
    pass — surface checks were skipped headless; blocked tickets 03/04/05/06/07/09 and why); risk
@@ -35,7 +42,11 @@ Dylan explicitly approves. All final review is done by **Fable**.
    watch when extending it`. Written to TEACH Dylan the branch, not just certify it. Weight toward the
    non-obvious: the schema-migration re-stamp seam, the LWW/tombstone convergence logic, the Op wire
    format + why the transport uses an opaque envelope, the reader I5 boundary, and any subtle
-   invariant a future contributor would break. Aim for genuine insight per comment, not narration.
+   invariant a future contributor would break. Also weight toward the mobile subsystem's non-obvious
+   parts: the snapshot-first cursor-resume seam (B0b — why the receiver seeds appliedSequenceByReplica),
+   the CloudKit custom-zone/subscription envelope over the 55 SyncTransport seam, the N1–N8 push taxonomy
+   + payload-derived category gating, deep-link resolvePushTap as a pure Core seam, and
+   approval-over-sync-wire with the operator scope gate. Aim for genuine insight per comment, not narration.
 
 ## Fable audit of Codex-fallback commits (mandatory)
 Every commit whose `_PROGRESS.md` row says "gpt-5.5 fallback; pending Fable audit" (cross-ref run
