@@ -527,7 +527,7 @@ public actor APNSPushService {
     private let injectedSigner: APNSJWTSigner?
     private var lastPublished: [UUID: PushPublishedIdentity] = [:]
 
-    public init(config: APNSConfig? = APNSEnvLoader.load(), httpClient: any APNSHTTPClient = URLSessionAPNSHTTPClient(), preferences: any PushCategoryPreferences = DefaultPushCategoryPreferences(), signer: APNSJWTSigner? = nil) {
+    public init(config: APNSConfig? = APNSEnvLoader.load(), httpClient: any APNSHTTPClient = URLSessionAPNSHTTPClient(), preferences: any PushCategoryPreferences = PersistedPushCategoryPreferences(), signer: APNSJWTSigner? = nil) {
         self.config = config
         self.httpClient = httpClient
         self.preferences = preferences

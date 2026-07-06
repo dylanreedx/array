@@ -352,7 +352,7 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, approvalsInboxCard, canvasSceneCard, pushSmokeCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
+        [tileSandbox, sidebarCard, topBarCard, pairingTokenCard, agentKindCard, agentsBoardCard, approvalsInboxCard, canvasSceneCard, pushSmokeCard, notifyCategoriesCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
     }
 
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
@@ -453,6 +453,54 @@ enum LabCatalog {
         let outcome = label("pushSmoke.outcome", "firing: fire -> dedup-suppressed -> refire on phase change")
         outcome.textColor = .secondaryLabelColor
         let stack = NSStackView(views: [label("pushSmoke.title", "Push Smoke", size: 13)] + rows + [outcome])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 5
+        return stack
+    }
+
+    static var notifyCategoriesCard: LabEntry {
+        LabEntry(
+            id: "notify.categories",
+            category: "Chrome",
+            title: "Notify Categories",
+            summary: "Agents settings toggle rows backed by persisted push category gates.",
+            content: .staticCard(preferredSize: NSSize(width: 620, height: 245)) {
+                makeNotifyCategoriesView()
+            }
+        )
+    }
+
+    static func makeNotifyCategoriesView() -> NSView {
+        func label(_ identifier: String, _ text: String, size: CGFloat = 11) -> NSTextField {
+            let field = NSTextField(labelWithString: text)
+            field.identifier = NSUserInterfaceItemIdentifier(identifier)
+            field.font = .monospacedSystemFont(ofSize: size, weight: .regular)
+            field.textColor = .labelColor
+            field.lineBreakMode = .byTruncatingTail
+            return field
+        }
+        let suiteName = "Continuum.ComponentLab.NotifyCategories"
+        UserDefaults().removePersistentDomain(forName: suiteName)
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+        let preferences = PersistedPushCategoryPreferences(defaults: defaults)
+        let agents = SettingsSchema.sections().first { $0.id == "agents" }
+        let toggleFields = agents?.fields.compactMap { field -> SettingsField? in
+            if case .toggle = field { return field }
+            return nil
+        } ?? []
+        let categories = PushCategory.allCases.filter(\.isMuteable)
+        let rows: [NSView] = zip(toggleFields, categories).enumerated().map { index, pair in
+            let (field, category) = pair
+            let state = field.currentValue(in: defaults) == .bool(true) ? "on" : "off"
+            let gate = preferences.isEnabled(category) ? "allow" : "mute"
+            return label(
+                "notifyCategories.row.\(index + 1)",
+                "\(category.rawValue) \(field.label) key=\(field.key ?? "-") default=\(state) gate=\(gate)"
+            )
+        }
+        let stack = NSStackView(views: [label("notifyCategories.title", "Notify Categories", size: 13)] + rows)
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 5
@@ -1322,6 +1370,36 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         let pushOutcome = try pushSmokeText("pushSmoke.outcome")
         guard pushOutcome == "firing: fire -> dedup-suppressed -> refire on phase change" else {
             throw fail("push smoke outcome rendered '\(pushOutcome)'")
+        }
+        guard let notifyCategoriesEntry = entries.first(where: { $0.id == "notify.categories" }),
+              case let .staticCard(_, makeNotifyCategoriesView) = notifyCategoriesEntry.content else {
+            throw fail("missing notify.categories card")
+        }
+        let notifyCategoriesView = makeNotifyCategoriesView()
+        func notifyCategoriesText(_ identifier: String) throws -> String {
+            guard let field = notifyCategoriesView.descendant(withIdentifier: identifier) as? NSTextField else {
+                throw fail("notify categories card missing label \(identifier)")
+            }
+            return field.stringValue
+        }
+        let notifyRows = try (1...7).map { try notifyCategoriesText("notifyCategories.row.\($0)") }
+        guard notifyRows.count == 7 else {
+            throw fail("notify categories row count \(notifyRows.count), expected 7")
+        }
+        let expectedNotifyDefaults: [(PushCategory, String)] = [
+            (.approvalRequested, "default=on gate=allow"),
+            (.agentWaitingForInput, "default=on gate=allow"),
+            (.agentFinished, "default=on gate=allow"),
+            (.agentFailed, "default=on gate=allow"),
+            (.stillWorkingDigest, "default=on gate=allow"),
+            (.desktopConnectionChanged, "default=off gate=mute"),
+            (.sessionReapedOrRevived, "default=off gate=mute"),
+        ]
+        for (index, expected) in expectedNotifyDefaults.enumerated() {
+            let (category, fragment) = expected
+            guard notifyRows[index].contains(category.rawValue), notifyRows[index].contains(fragment) else {
+                throw fail("notify categories row \(index + 1) rendered '\(notifyRows[index])'")
+            }
         }
         guard let canvasSceneEntry = entries.first(where: { $0.id == "canvas.scene" }),
               case let .staticCard(_, makeCanvasSceneView) = canvasSceneEntry.content else {

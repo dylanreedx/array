@@ -178,6 +178,21 @@ public enum SettingsSchema {
                 ]
             ),
             SettingsSection(
+                id: "agents",
+                title: "Agents",
+                iconSystemName: "bell.badge",
+                fields: [
+                    .info(label: "Choose which agent events send a push notification. Security alerts always notify."),
+                    .toggle(key: PersistedPushCategoryPreferences.key(for: .approvalRequested), label: "Approval Requests", default: PushCategory.approvalRequested.defaultEnabled),
+                    .toggle(key: PersistedPushCategoryPreferences.key(for: .agentWaitingForInput), label: "Waiting for Input", default: PushCategory.agentWaitingForInput.defaultEnabled),
+                    .toggle(key: PersistedPushCategoryPreferences.key(for: .agentFinished), label: "Agent Finished", default: PushCategory.agentFinished.defaultEnabled),
+                    .toggle(key: PersistedPushCategoryPreferences.key(for: .agentFailed), label: "Agent Failed", default: PushCategory.agentFailed.defaultEnabled),
+                    .toggle(key: PersistedPushCategoryPreferences.key(for: .stillWorkingDigest), label: "Still-Working Digest", default: PushCategory.stillWorkingDigest.defaultEnabled),
+                    .toggle(key: PersistedPushCategoryPreferences.key(for: .desktopConnectionChanged), label: "Desktop Connection Changes", default: PushCategory.desktopConnectionChanged.defaultEnabled),
+                    .toggle(key: PersistedPushCategoryPreferences.key(for: .sessionReapedOrRevived), label: "Session Reaped or Revived", default: PushCategory.sessionReapedOrRevived.defaultEnabled),
+                ]
+            ),
+            SettingsSection(
                 id: "appearance",
                 title: "Appearance",
                 iconSystemName: "paintbrush",

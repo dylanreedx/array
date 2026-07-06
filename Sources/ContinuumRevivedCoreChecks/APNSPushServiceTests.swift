@@ -110,6 +110,8 @@ private func runPushTaxonomyInvariantChecks() throws {
     expect(ids.allSatisfy { !$0.isEmpty }, "push category ids non-empty")
     expect(PushCategory.allCases.filter(\.defaultEnabled) == [.approvalRequested, .agentWaitingForInput, .agentFinished, .agentFailed, .stillWorkingDigest], "push defaults N1-N5 on, N6/N8 off")
     expect(!PushCategory.deviceSecurityChanged.isMuteable, "N7 is unmuteable")
+    let config = APNSConfig(keyPath: "/tmp/missing.p8", keyId: "KID", teamId: "TEAM", deviceToken: "token", environment: .sandbox)
+    try runPersistedPushCategoryPreferenceChecks(config: config)
     final class RecordingOffPrefs: PushCategoryPreferences, @unchecked Sendable {
         var queried: [PushCategory] = []
         func isEnabled(_ category: PushCategory) -> Bool {
@@ -117,7 +119,6 @@ private func runPushTaxonomyInvariantChecks() throws {
             return false
         }
     }
-    let config = APNSConfig(keyPath: "/tmp/missing.p8", keyId: "KID", teamId: "TEAM", deviceToken: "token", environment: .sandbox)
     let n3Prefs = RecordingOffPrefs()
     let n3HTTP = RecordingAPNSHTTPClient(statuses: [200])
     let n3Service = APNSPushService(config: config, httpClient: n3HTTP, preferences: n3Prefs, signer: .ephemeralForChecks(teamId: "TEAM", keyId: "KID"))
@@ -141,6 +142,76 @@ private func runPushTaxonomyInvariantChecks() throws {
     }
     expect(allEnabledHTTP.requests.count == PushCategory.allCases.count, "all-enabled preferences sent all N1-N8 through HTTP seam")
     print("APNS taxonomy invariants: ids=\(ids.joined(separator: ",")) defaults=\(PushCategory.allCases.filter(\.defaultEnabled).map(\.rawValue)) n3Suppressed=\(n3Outcome) n7Muteable=\(PushCategory.deviceSecurityChanged.isMuteable)")
+}
+
+private func runPersistedPushCategoryPreferenceChecks(config: APNSConfig) throws {
+    let defaults = cleanDefaultsSuite(named: "ContinuumRevivedCoreChecks.NotifyCategories")
+    let preferences = PersistedPushCategoryPreferences(defaults: defaults)
+    for category in PushCategory.allCases {
+        expect(preferences.isEnabled(category) == category.defaultEnabled, "\(category.rawValue): blank persisted preference mirrors defaultEnabled")
+    }
+
+    defaults.set(false, forKey: PersistedPushCategoryPreferences.key(for: .agentFinished))
+    for category in PushCategory.allCases {
+        let expected = category == .agentFinished ? false : category.defaultEnabled
+        expect(preferences.isEnabled(category) == expected, "\(category.rawValue): single N3 off write does not affect other categories")
+    }
+    defaults.set(true, forKey: PersistedPushCategoryPreferences.key(for: .agentFinished))
+    expect(preferences.isEnabled(.agentFinished), "N3 persisted preference round-trips off->on")
+
+    for category in PushCategory.allCases {
+        defaults.set(false, forKey: PersistedPushCategoryPreferences.key(for: category))
+        expect(!preferences.isEnabled(category), "\(category.rawValue): persisted false wins")
+        defaults.set(true, forKey: PersistedPushCategoryPreferences.key(for: category))
+        expect(preferences.isEnabled(category), "\(category.rawValue): persisted true wins")
+    }
+
+    guard let agents = SettingsSchema.sections().first(where: { $0.id == "agents" }) else {
+        throw NSError(domain: "PersistedPushCategoryPreferencesChecks", code: 1, userInfo: [NSLocalizedDescriptionKey: "missing agents settings section"])
+    }
+    let toggleFields = agents.fields.compactMap { field -> SettingsField? in
+        if case .toggle = field { return field }
+        return nil
+    }
+    let muteableCategories = PushCategory.allCases.filter(\.isMuteable)
+    expect(toggleFields.count == 7, "agents section exposes exactly 7 muteable category toggles")
+    expect(toggleFields.map(\.key) == muteableCategories.map { PersistedPushCategoryPreferences.key(for: $0) }, "agents section toggle keys match muteable push category order")
+    for (field, category) in zip(toggleFields, muteableCategories) {
+        expect(field.currentValue(in: defaults) == .bool(preferences.isEnabled(category)), "\(category.rawValue): settings currentValue reads fixture defaults")
+        field.setValue(.bool(false), in: defaults)
+        expect(field.currentValue(in: defaults) == .bool(false) && !preferences.isEnabled(category), "\(category.rawValue): settings toggle writes false to persisted preference")
+        field.setValue(.bool(true), in: defaults)
+        expect(field.currentValue(in: defaults) == .bool(true) && preferences.isEnabled(category), "\(category.rawValue): settings toggle writes true to persisted preference")
+    }
+
+    let sendDefaults = cleanDefaultsSuite(named: "ContinuumRevivedCoreChecks.NotifyCategories.SendPath")
+    sendDefaults.set(false, forKey: PersistedPushCategoryPreferences.key(for: .agentFinished))
+    sendDefaults.set(false, forKey: PersistedPushCategoryPreferences.key(for: .deviceSecurityChanged))
+    let n3HTTP = RecordingAPNSHTTPClient(statuses: [200])
+    let n3Service = APNSPushService(config: config, httpClient: n3HTTP, preferences: PersistedPushCategoryPreferences(defaults: sendDefaults), signer: .ephemeralForChecks(teamId: "TEAM", keyId: "KID"))
+    let n3Outcome = try awaitSync { try await n3Service.publish(payload: PushPayloadBuilder.fixturePayload(for: .agentFinished)) }
+    expect(n3Outcome == .categoryDisabled && n3HTTP.requests.isEmpty, "persisted N3 off suppresses real APNS send before HTTP")
+
+    let n1HTTP = RecordingAPNSHTTPClient(statuses: [200])
+    let n1Service = APNSPushService(config: config, httpClient: n1HTTP, preferences: PersistedPushCategoryPreferences(defaults: sendDefaults), signer: .ephemeralForChecks(teamId: "TEAM", keyId: "KID"))
+    let n1Outcome = try awaitSync { try await n1Service.publish(payload: PushPayloadBuilder.fixturePayload(for: .approvalRequested)) }
+    expect(n1Outcome == .sent(statusCode: 200) && n1HTTP.requests.count == 1, "untouched N1 default sends through real APNS service")
+
+    let n7HTTP = RecordingAPNSHTTPClient(statuses: [200])
+    let n7Service = APNSPushService(config: config, httpClient: n7HTTP, preferences: PersistedPushCategoryPreferences(defaults: sendDefaults), signer: .ephemeralForChecks(teamId: "TEAM", keyId: "KID"))
+    let n7Outcome = try awaitSync { try await n7Service.publish(payload: PushPayloadBuilder.fixturePayload(for: .deviceSecurityChanged)) }
+    expect(n7Outcome == .sent(statusCode: 200) && n7HTTP.requests.count == 1, "N7 sends even when persisted key is forced false")
+
+    print("Persisted push preferences: blankDefaults=defaultEnabled toggles=\(toggleFields.count) n3=\(n3Outcome) n1=\(n1Outcome) n7=\(n7Outcome)")
+}
+
+private func cleanDefaultsSuite(named suiteName: String) -> UserDefaults {
+    UserDefaults().removePersistentDomain(forName: suiteName)
+    guard let defaults = UserDefaults(suiteName: suiteName) else {
+        fatalError("Could not create UserDefaults suite \(suiteName)")
+    }
+    defaults.removePersistentDomain(forName: suiteName)
+    return defaults
 }
 
 private func runPushJWTSignerChecks() throws {
