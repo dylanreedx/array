@@ -1,5 +1,71 @@
 # Notify categories: four user-toggleable push preferences
 
+> **RULING BANNER — C-20260706-029 (night3 B8 = 65 notify-categories-setting, orchestrator
+> 2026-07-06). Binding; overrides the ticket text below where they conflict. This ticket was
+> written before B6 (63, commit `0cf3562`) landed the push sender; its 4-category
+> `NotifyCategories`/`AgentPushPhase` model is SUPERSEDED by the N1–N8 `PushCategory` taxonomy
+> (ruling C-20260705-027: N1–N8 shared Core supersedes the 4-category model). Verified code
+> facts as of `6d005d2`: `PushCategory` N1–N8 lives at `APNSPushService.swift:18-26` with
+> `defaultEnabled` (`:48-55`, N1–N5 `true`; N6/N7/N8 `false`), `isMuteable` (`:57` — every
+> category EXCEPT N7 `deviceSecurityChanged`), the `PushCategoryPreferences` protocol
+> (`:86-88`) with `DefaultPushCategoryPreferences` (`:90-93`) and
+> `AllEnabledPushCategoryPreferences` (`:95-98`), and the production send gate ALREADY wired at
+> `:551`: `if category.isMuteable, !preferences.isEnabled(category) { <suppress> }` —
+> `APNSPushService.init` (`:530`) defaults `preferences:` to `DefaultPushCategoryPreferences()`;
+> the `--push-test` T3 hook (`ContinuumApp.swift:632`) passes `AllEnabledPushCategoryPreferences`
+> explicitly. `SettingsField` is an enum with `.toggle(key:label:default:)` and `.info(label:)`
+> (`SettingsField.swift:12,20`) plus `currentValue(in:)`/`setValue(_:in:)` (`:49,:70`);
+> `SettingsSchema.sections()` has "terminal" at `SettingsSchema.swift:143` and "appearance" at
+> `:180`.**
+>
+> 1. **Do NOT create `NotifyCategories.swift` or `AgentPushPhase`** — the seam exists. Deliver
+>    instead `PersistedPushCategoryPreferences` (new file
+>    `Sources/ContinuumRevivedCore/PersistedPushCategoryPreferences.swift`), a
+>    `UserDefaults`-backed conformer to the LANDED `PushCategoryPreferences`: injectable
+>    `UserDefaults` (default `.standard`), per-category key
+>    `"continuum.notify." + category.rawValue` (i.e. `continuum.notify.N1` …
+>    `continuum.notify.N8` — exposed via a static `key(for:)` so the schema and checks share
+>    it), reader = persisted bool when the key is present, else `category.defaultEnabled`.
+>    The key strings are contract from this commit on (ticket's "Watch out for" applies to
+>    these 8, not the four `continuum.notify.approval`-style names, which are DEAD).
+> 2. **Defaults mirror `defaultEnabled`, NOT all-true.** The ticket's "all four default to
+>    `true`" predates the taxonomy: N1–N5 default on; N6 (`desktopConnectionChanged`) and N8
+>    (`sessionReapedOrRevived`) default OFF per C-027's landed `defaultEnabled`. The
+>    "default-true must not drift" guard becomes: blank defaults ⇒
+>    `isEnabled(c) == c.defaultEnabled` for ALL EIGHT categories, proven by a check.
+> 3. **Settings section:** append `SettingsSection(id: "agents", title: "Agents",
+>    iconSystemName: "bell.badge", …)` between "terminal" and "appearance" exactly as the
+>    ticket says, but the fields are: one leading `.info` line + SEVEN `.toggle` fields — one
+>    per MUTEABLE category (N7 `deviceSecurityChanged` gets NO toggle: the send gate never
+>    consults preferences for it, so a toggle would be a lie; the `.info` copy may note that
+>    security alerts always notify). Each toggle binds
+>    `key: PersistedPushCategoryPreferences.key(for: <category>)`,
+>    `default: <category>.defaultEnabled`, human label (e.g. "Approval Requests",
+>    "Waiting for Input", "Agent Finished", "Agent Failed", "Still-Working Digest",
+>    "Desktop Connection Changes", "Session Reaped or Revived").
+> 4. **Production wiring:** flip `APNSPushService.init`'s `preferences:` default from
+>    `DefaultPushCategoryPreferences()` to `PersistedPushCategoryPreferences()` so every
+>    production construction respects the toggles with zero call-site churn.
+>    `--push-test` KEEPS its explicit `AllEnabledPushCategoryPreferences` (T3 must fire all 8
+>    regardless of toggles). `DefaultPushCategoryPreferences` remains for existing checks.
+> 5. **Checks (ContinuumRevivedCoreChecks, fake `UserDefaults(suiteName:)` — never
+>    `.standard`):** (a) blank suite ⇒ all 8 match `defaultEnabled`; (b) write one muteable
+>    category off ⇒ only it flips; (c) off→on round-trip; (d) loop all 8: write false ⇒ false,
+>    write true ⇒ true; (e) agents section shape: exactly 7 toggles, keys == `key(for:)` of the
+>    7 muteable categories, `currentValue`/`setValue` round-trip through the fake suite;
+>    (f) send-path integration through the REAL `APNSPushService` with
+>    `PersistedPushCategoryPreferences(defaults: fakeSuite)` + the existing fake HTTP client
+>    seam: N3 toggled off ⇒ its send is suppressed (no HTTP request recorded), N1 untouched ⇒
+>    request fires, and N7 with its key forced `false` STILL sends (the `isMuteable` guard).
+> 6. **ComponentLab card (2026-07-04 directive):** a "Notify Categories" card rendering the
+>    agents-section toggle rows + live gate values from a fixture defaults suite, following the
+>    existing card pattern (e.g. ticket 14 / 63's cards), with a `--component-lab-check`
+>    assertion covering row count (7) and per-row default state.
+> 7. **Gates:** desktop-only item — `swift build` + matrix green headless; the ticket's
+>    Backend relaunch-persistence leg and the UX leg (Settings ▸ Agents rows render, toggles
+>    flip live) fold into ONE `visual-gate-owed` morning-checklist entry (supervised execution
+>    mode). No iOS changes in this item.
+
 ## What this delivers
 
 Four user-configurable notification toggles — **Approval**, **Input**, **Completion**, and
