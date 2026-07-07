@@ -1,6 +1,6 @@
 # Canvas mirror magic polish — make iPhone feel like a live desktop mirror
 
-Status: **new / supervised + needs-substrate, 2026-07-06.** This is the UX/quality layer after ticket 75's desktop publisher and ticket 76's dogfood kit. It exists because a technically synced canvas can still feel broken if it boots blank, appears at the wrong zoom, lacks status, or updates without clear feedback.
+Status: **deferred / rewrite after freshness substrate, 2026-07-06.** This is the UX/quality layer after ticket 75's desktop publisher and ticket 76's dogfood kit. Do **not** polish against an unpaired/same-iCloud substrate. After `80-companion-offline-freshness.md`, this ticket should treat `Live`, `Syncing`, `Stale`, `Mac asleep/offline`, and `Unpaired` as first-class mirror states.
 
 ## Product goal
 

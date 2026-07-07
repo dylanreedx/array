@@ -10,8 +10,9 @@ verification rules differ.
 1. `docs/38-tickets/_NIGHT3_PLAN.md` — tonight's contract
 2. `docs/38-tickets/_NIGHT3_FIX_TICKETS.md` — B0/B0b specs + audit rulings
 3. `docs/38-tickets/_COMPANION_SPEC.md` — the mobile product spec (architecture, surfaces, N1–N8 taxonomy, test tiers)
-4. `docs/38-tickets/_PROGRESS.md` (newest rows supersede older rows for the same item) + `git log --oneline`
-5. The numbered ticket file for the item, if one exists (57/60/61/62/63/64/65 and Track C tickets), INCLUDING any ruling banners
+4. `docs/38-tickets/_PAIR_TO_INSTANCE_PLAN.md` — 2026-07-06 auth/freshness-first companion amendment; CloudKit is transport only, not pairing/auth/source-of-truth
+5. `docs/38-tickets/_PROGRESS.md` (newest rows supersede older rows for the same item) + `git log --oneline`
+6. The numbered ticket file for the item, if one exists (57/60/61/62/63/64/65/79/80 and Track C tickets), INCLUDING any ruling banners
 
 ## The night-3 queue (STRICT order; first not-done, not-skipped item)
 B0 fix-66-supervisor (CRITICAL, per _NIGHT3_FIX_TICKETS.md — 4 defects, file:line given)
@@ -31,7 +32,15 @@ B8 65-notify-categories-setting
 B9 T2 simulator push suite: `scripts/push-sim-test.sh` firing all 8 categories via `xcrun simctl push`
 C1 40-session-observer   C2 41-fsevents-push-watch   C3 43→47 sidebar/dock (one item each)
 C4 71, 72, 73 (one each)   C5 17, 18, 26, 29, 27 then 30, 28 (one each)
-If ALL items are done/skipped → `LOOP: STOP queue-drained`.
+D0 79-pair-to-instance-auth-boundary (auth-first companion amendment; do before Phase-8 ticket 75/76/77 work)
+D1 80-companion-offline-freshness (freshness/asleep/offline model; do before rewritten ticket 75 publisher)
+If ALL items are done/skipped and D0/D1 are done/deferred → `LOOP: STOP queue-drained`.
+
+## 2026-07-06 companion auth/freshness amendment
+
+Dylan ruled that the iPhone should pair to a **Continuum instance**, not merely share an iCloud/CloudKit account. CloudKit may remain as a dogfood transport, but iCloud account availability must not imply identity, scope, pairing, authorization, or source of truth.
+
+Offline is also an explicit state: a paired phone can be live, syncing, stale, Mac-asleep/offline, or unpaired. Cached canvas/agent state should remain visible with `as of` copy; mutating actions are disabled while stale/offline for MVP. `75-desktop-companion-sync-publisher.md`, `76-morning-companion-dogfood-kit.md`, and `77-canvas-mirror-magic-polish.md` are deferred in `_PROGRESS.md` until 79+80 land and ticket 75 is rewritten around paired-session transport plus heartbeat/freshness metadata.
 
 ## Verification rules
 - Desktop items: unchanged — `swift build` + `CONTINUUM_SKIP_SURFACE_CHECKS=1 ./scripts/run-matrix.sh`

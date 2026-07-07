@@ -115,3 +115,11 @@ lab self-check in the same commit (pattern: ticket 14's card, 67's projection ro
 UI-bearing diffs without a lab entry. Desktop-side companions of the mobile work (pairing QR panel,
 Devices/scope settings, push-test trigger) included. The morning dogfood checklist routes through the
 lab so Dylan can review every new component in one place.
+
+## Post-night3 amendment — pair to Continuum instance + honest asleep/offline state (2026-07-06)
+
+Dylan's companion direction changes the Phase-8 priority. The iPhone should explicitly pair to a Continuum instance and derive scope from Continuum-owned user/device/session records. CloudKit may remain as a dogfood transport, but same-iCloud reachability is not pairing, identity, authorization, or source of truth.
+
+Offline/freshness is now part of the architecture: a paired phone may be live, syncing, stale, Mac-asleep/offline, or unpaired. Cached canvas/agent state should remain visible with `as of` copy, and mutating actions should be disabled while stale/offline for MVP.
+
+Before resuming the desktop companion publisher/dogfood/mirror-polish work, read `_PAIR_TO_INSTANCE_PLAN.md` and implement `79-pair-to-instance-auth-boundary.md` followed by `80-companion-offline-freshness.md`. Tickets 75–77 are deferred in `_PROGRESS.md` until ticket 75 is rewritten around paired-session transport and heartbeat/freshness metadata.

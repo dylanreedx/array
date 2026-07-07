@@ -147,3 +147,23 @@ detail pushes onto whichever tab invoked it. Dark-only v1 (matches desktop).
 - **Offline:** banner + all timestamps switch to "as of HH:MM" — stale data stays visible, never blanked.
 - **Empty workspace:** friendly zero-state with a pointer to spawn agents on desktop.
 - Haptics on: approval sent, op ack, connection regained. No sounds v1.
+
+## 2026-07-06 amendment — explicit instance pairing + asleep/offline semantics
+
+The v1 spec above still describes the desired mobile surfaces, but the auth/source-of-truth assumption is amended:
+
+- The iPhone pairs to a **Continuum instance**, not to iCloud.
+- CloudKit may remain the same-iCloud dogfood transport, but it is not identity, ownership, scope, or truth.
+- Pairing is personal/MVP device enrollment: physical QR/token from the Mac, one local owner user, long-lived device session until revoked.
+- Capability scope comes from the Continuum session, not a static iOS default or iCloud account membership.
+
+Read `_PAIR_TO_INSTANCE_PLAN.md` first. Implement `79-pair-to-instance-auth-boundary.md` before rewriting/resuming ticket 75.
+
+Offline/freshness is also a first-class product state, not an error fallback:
+
+- A paired phone can be live, syncing, stale, asleep/offline, or unpaired.
+- If cached canvas/agent state exists, keep showing it with `as of` copy; never blank it just because the Mac is asleep.
+- “Canvas asleep” is friendly UI copy for cached/stale mode. Diagnostics should state what is known: last heartbeat, last snapshot, last fetch, last error.
+- Mutating actions are disabled while stale/offline for MVP; no offline approval/canvas-op queue yet.
+
+Implement `80-companion-offline-freshness.md` before the desktop publisher rewrite so ticket 75 publishes the right heartbeat/freshness metadata from the start.

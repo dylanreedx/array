@@ -6,6 +6,8 @@ Seventy-seven tickets, each self-contained and grounded in real code seams, take
 from today's single-session terminal canvas to a synced, observable, remotely-reachable,
 agent-aware workspace. Read the overview first for the why; each ticket here is the how.
 
+2026-07-06 amendment: companion work now takes an auth/freshness-first turn. Read `_PAIR_TO_INSTANCE_PLAN.md`, `79-pair-to-instance-auth-boundary.md`, and `80-companion-offline-freshness.md` before resuming Phase 8. Tickets 75–77 are deferred until the phone pairs to an explicit Continuum instance and the UI can distinguish live/syncing/stale/Mac-asleep/offline cached state.
+
 Every ticket carries an **execution mode**:
 - **Autonomous** — provable by pure Core checks, real-path checks, and the matrix, with no
   human eyes and no real cloud/device. These are what the overnight loop runs unattended.

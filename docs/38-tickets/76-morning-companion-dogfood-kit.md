@@ -1,6 +1,6 @@
 # Morning companion dogfood kit — one-command setup, health checks, and artifacts
 
-Status: **new / supervised + needs-substrate, 2026-07-06.** Follow-up to ticket 75. This ticket is about making Dylan's first morning test session smooth: no guessing which binary is signed, which container is active, whether the phone is connected, or why the canvas is empty.
+Status: **deferred / rewrite after 75, 2026-07-06.** Follow-up to ticket 75. Do **not** run this as a same-iCloud-only dogfood kit. After `79-pair-to-instance-auth-boundary.md`, `80-companion-offline-freshness.md`, and the rewritten 75 land, this kit should verify: paired Continuum instance, device/session scope, heartbeat/freshness state, cached stale canvas behavior, and signed/entitled transport.
 
 ## Problem statement
 

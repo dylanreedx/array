@@ -1,6 +1,8 @@
 # Desktop companion sync publisher — signed CloudKit bridge for live iPhone dogfood
 
-Status: **new / supervised + needs-substrate, 2026-07-06.** Created after physical-phone dogfood showed the iOS app can launch but does not receive the desktop app's live agents/canvas. This ticket captures the missing desktop-side publisher/inbound bridge left as `publisher-owed` by night-3 Track B.
+Status: **deferred / rewrite required, 2026-07-06.** Originally created after physical-phone dogfood showed the iOS app can launch but does not receive the desktop app's live agents/canvas. Do **not** implement this ticket as written until `79-pair-to-instance-auth-boundary.md` and `80-companion-offline-freshness.md` land.
+
+2026-07-06 amendment: the desktop publisher must be reframed as a paired-device publisher, not a same-iCloud authority. CloudKit can remain the dogfood transport, but outgoing snapshots/events need instance/session/freshness metadata; inbound phone actions must be authorized by paired device/session scope; stale/asleep/offline state must remain visible instead of looking like an empty canvas.
 
 ## Problem statement
 
