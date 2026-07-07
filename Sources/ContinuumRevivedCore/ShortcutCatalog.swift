@@ -77,6 +77,13 @@ public enum ShortcutCatalog {
             configurable: true,
             editTarget: .leader
         ))
+        entries.append(ShortcutCatalogEntry(
+            id: "global.toggleWorkspaceSidebar",
+            label: "Show Activity Dock",
+            chordDisplay: "⌘⇧S",
+            layer: .global,
+            configurable: false
+        ))
         return entries
     }
 

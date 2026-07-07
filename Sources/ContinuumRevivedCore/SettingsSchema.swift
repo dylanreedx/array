@@ -93,6 +93,23 @@ public enum SettingsSchema {
                 ]
             ),
             SettingsSection(
+                id: "activity",
+                title: "Activity",
+                iconSystemName: "sidebar.left",
+                fields: [
+                    .toggle(
+                        key: WorkspaceSidebarConfig.visibleKey,
+                        label: "Show Activity Dock",
+                        default: WorkspaceSidebarConfig.defaultVisible
+                    ),
+                    .text(
+                        key: WorkspaceSidebarConfig.widthKey,
+                        label: "Activity Dock Width (pt)",
+                        default: String(Int(WorkspaceSidebarConfig.defaultWidth))
+                    ),
+                ]
+            ),
+            SettingsSection(
                 id: "sessions",
                 title: "Sessions",
                 iconSystemName: "clock.arrow.circlepath",
@@ -177,6 +194,12 @@ public enum SettingsSchema {
                         key: TerminalScrollConfig.lineMultiplierKey,
                         label: "Shell Scroll Wheel Multiplier",
                         default: String(TerminalScrollConfig.lineMultiplierDefault)
+                    ),
+                    .choice(
+                        key: NewTileCwdConfig.userDefaultsKey,
+                        label: "New Terminal Working Directory",
+                        options: NewTileCwdPolicy.allCases.map(\.rawValue),
+                        default: NewTileCwdConfig.defaultPolicy.rawValue
                     ),
                 ]
             ),

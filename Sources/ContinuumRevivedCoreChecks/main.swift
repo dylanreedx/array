@@ -81,6 +81,37 @@ func approximatelyEqual(_ a: CGPoint, _ b: CGPoint, tolerance: Double = 0.001) -
     abs(a.x - b.x) < tolerance && abs(a.y - b.y) < tolerance
 }
 
+// MARK: - Managed agent transcript model
+
+do {
+    let threadId = "thread-main"
+    let events: [AgentRuntimeEvent] = [
+        .sessionStateChanged(.running),
+        .turnStarted(threadId: threadId, turnId: "turn-1"),
+        .contentDelta(threadId: threadId, turnId: "turn-1", streamKind: .assistant, delta: "I'll inspect the failing guard."),
+        .contentDelta(threadId: threadId, turnId: "turn-1", streamKind: .assistant, delta: " Then I'll make it idempotent."),
+        .itemStarted(threadId: threadId, itemId: "cmd-1", kind: .commandExecution, title: "swift test"),
+        .itemCompleted(threadId: threadId, itemId: "cmd-1", kind: .commandExecution, status: .completed),
+        .itemStarted(threadId: threadId, itemId: "file-1", kind: .fileChange, title: "Sources/Auth.swift"),
+        .requestOpened(threadId: threadId, requestId: "approval-1", kind: .commandExecutionApproval)
+    ]
+    var model = ManagedAgentTranscriptModel(threadId: threadId)
+    for event in events {
+        model.ingest(event)
+    }
+
+    expect(TileKind.allCases.contains(.managedAgent), "TileKind must include managedAgent")
+    expect(model.cards.count == 3, "managed transcript fixture should produce exactly three cards")
+    expect(model.cards.map(\.kind) == [.message, .toolCall, .diff], "managed transcript card kinds should be message/tool/diff")
+    expect(model.cards[0].title == "assistant", "assistant content deltas should create one assistant message card")
+    expect(model.cards[0].body == "I'll inspect the failing guard. Then I'll make it idempotent.", "assistant deltas should append to one card")
+    expect(model.cards[1].title == "swift test", "completed command card keeps its title")
+    expect(model.cards[1].status == .completed, "completed command card records completed status")
+    expect(model.cards[2].title == "Sources/Auth.swift", "in-progress file-change card keeps its title")
+    expect(model.activeToolCount == 1, "one in-progress file-change tool should remain active")
+    expect(model.currentStatus == .needsAttention, "pending approval must flip managed transcript status to needsAttention")
+}
+
 // MARK: - Focus history previous navigation
 
 do {
@@ -164,6 +195,45 @@ do {
     expect(TerminalDisplayConfig.fontSize(defaults: displayDefaults) == TerminalDisplayConfig.maxFontSize, "terminal display config clamps oversized font size")
     displayDefaults.set("not-a-number", forKey: TerminalDisplayConfig.fontSizeKey)
     expect(TerminalDisplayConfig.fontSize(defaults: displayDefaults) == TerminalDisplayConfig.defaultFontSize, "invalid font size falls back to readable default")
+}
+
+// MARK: - Ticket 18: new terminal cwd inheritance policy
+
+do {
+    let suiteName = "NewTileCwdConfigChecks-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+
+    let projectRoot = "/tmp/continuum-project"
+    let focused = "/tmp/continuum-project/Sources"
+    let lastUsed = "/tmp/continuum-project/Tests"
+
+    expect(NewTileCwdConfig.policy(defaults: defaults) == .inheritFocus, "new tile cwd policy defaults to inheritFocus")
+    defaults.set(NewTileCwdPolicy.projectRoot.rawValue, forKey: NewTileCwdConfig.userDefaultsKey)
+    expect(NewTileCwdConfig.policy(defaults: defaults) == .projectRoot, "new tile cwd policy reads projectRoot from defaults")
+    defaults.set("not-a-policy", forKey: NewTileCwdConfig.userDefaultsKey)
+    expect(NewTileCwdConfig.policy(defaults: defaults) == .inheritFocus, "invalid new tile cwd policy falls back to inheritFocus")
+
+    expect(
+        resolveNewTileCwd(policy: .inheritFocus, focused: focused, lastUsed: lastUsed, projectRoot: projectRoot) == focused,
+        "inheritFocus uses focused terminal cwd"
+    )
+    expect(
+        resolveNewTileCwd(policy: .inheritFocus, focused: nil, lastUsed: lastUsed, projectRoot: projectRoot) == projectRoot,
+        "inheritFocus falls back to project root without terminal focus"
+    )
+    expect(
+        resolveNewTileCwd(policy: .projectRoot, focused: focused, lastUsed: lastUsed, projectRoot: projectRoot) == projectRoot,
+        "projectRoot ignores focused and last-used cwd"
+    )
+    expect(
+        resolveNewTileCwd(policy: .lastUsed, focused: focused, lastUsed: lastUsed, projectRoot: projectRoot) == lastUsed,
+        "lastUsed uses the spawner-local last resolved cwd"
+    )
+    expect(
+        resolveNewTileCwd(policy: .lastUsed, focused: focused, lastUsed: nil, projectRoot: projectRoot) == projectRoot,
+        "lastUsed falls back to project root before the first spawn"
+    )
 }
 
 // MARK: - Chrome integration guardrail matrix
@@ -3127,6 +3197,127 @@ do {
     expect(existingRegistry.projects.first?.workspaceId == workspaceA, "DefaultWorkspaceMigration updates project entry workspace assignment")
 }
 
+do {
+    let migration = DefaultWorkspaceMigration()
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let projectId = UUID(uuidString: "26000000-0000-4000-8000-000000000001")!
+    let projectZoneId = UUID(uuidString: "26000000-0000-4000-8000-000000000002")!
+    let ambientZoneId = UUID(uuidString: "26000000-0000-4000-8000-000000000003")!
+    let projectTileId = UUID(uuidString: "26000000-0000-4000-8000-000000000010")!
+    let ambientTileId = UUID(uuidString: "26000000-0000-4000-8000-000000000011")!
+    let newTileId = UUID(uuidString: "26000000-0000-4000-8000-000000000012")!
+    let missingTileId = UUID(uuidString: "26000000-0000-4000-8000-000000000013")!
+
+    func tile(_ id: UUID, x: Double, y: Double, zoneId: UUID? = nil) -> Tile {
+        Tile(
+            id: id,
+            kind: .terminal,
+            title: "Terminal",
+            frame: TileFrame(x: x, y: y, width: 120, height: 80),
+            zPosition: .fromLegacyRank(1),
+            zoneId: zoneId,
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "shell")
+        )
+    }
+
+    func descriptor(_ id: UUID, tileId: UUID, args: [String]) -> TerminalSessionDescriptor {
+        TerminalSessionDescriptor(
+            id: id,
+            tileId: tileId,
+            launchProfileId: "shell",
+            command: "/bin/zsh",
+            args: args,
+            cwd: "/tmp/project",
+            env: [:],
+            title: "Shell",
+            createdAt: now,
+            lastStartedAt: now,
+            lastExit: nil
+        )
+    }
+
+    let projectTile = tile(projectTileId, x: 40, y: 40)
+    let ambientTile = tile(ambientTileId, x: 50, y: 50, zoneId: ambientZoneId)
+    let newTile = tile(newTileId, x: 90, y: 90)
+    let canvas = CanvasState(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        tiles: [projectTile, ambientTile, newTile],
+        groups: [],
+        lastActiveTileId: nil
+    )
+    let workspace = WorkspaceDocument(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        zones: [
+            ZonePlacement(zoneId: projectZoneId, projectId: projectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 400, height: 300), color: "blue", collapsed: false, hydrationPolicy: .automatic),
+            ZonePlacement(zoneId: ambientZoneId, projectId: nil, origin: ZonePoint(x: 500, y: 0), size: ZoneSize(width: 300, height: 240), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "Ambient")
+        ],
+        lastActiveZoneId: projectZoneId,
+        ambientTiles: [ambientTile]
+    )
+
+    let legacyProject = descriptor(
+        UUID(uuidString: "26000000-0000-4000-8000-000000000020")!,
+        tileId: projectTileId,
+        args: ["new-session", "-A", "-s", "continuum-\(projectTileId.uuidString)", "-c", "/tmp/project"]
+    )
+    let legacyAmbient = descriptor(
+        UUID(uuidString: "26000000-0000-4000-8000-000000000021")!,
+        tileId: ambientTileId,
+        args: ["new-session", "-A", "-s", "continuum-\(ambientTileId.uuidString)", "-c", "/tmp/project"]
+    )
+    let newShape = descriptor(
+        UUID(uuidString: "26000000-0000-4000-8000-000000000022")!,
+        tileId: newTileId,
+        args: ["attach-session", "-t", "%5"]
+    )
+    let missingTile = descriptor(
+        UUID(uuidString: "26000000-0000-4000-8000-000000000023")!,
+        tileId: missingTileId,
+        args: ["new-session", "-A", "-s", "continuum-\(missingTileId.uuidString)", "-c", "/tmp/project"]
+    )
+    let newPrefix = descriptor(
+        UUID(uuidString: "26000000-0000-4000-8000-000000000024")!,
+        tileId: projectTileId,
+        args: ["new-session", "-A", "-s", "continuum-proj-\(projectId.uuidString)", "-c", "/tmp/project"]
+    )
+
+    expect(migration.detectTopologyMigration(descriptors: [legacyProject], canvas: canvas, workspace: workspace) == .needed(legacyDescriptorIds: [legacyProject.id]), "ticket26: legacy project-zone descriptor should require migration")
+    expect(migration.detectTopologyMigration(descriptors: [legacyAmbient], canvas: canvas, workspace: workspace) == .notNeeded, "ticket26: identical ambient legacy descriptor must not migrate")
+    expect(migration.detectTopologyMigration(descriptors: [newShape], canvas: canvas, workspace: workspace) == .notNeeded, "ticket26: new attach-to-pane descriptor should not migrate")
+    expect(migration.detectTopologyMigration(descriptors: [missingTile], canvas: canvas, workspace: workspace) == .notNeeded, "ticket26: descriptor for missing tile should not migrate")
+    expect(migration.detectTopologyMigration(descriptors: [newPrefix], canvas: canvas, workspace: workspace) == .notNeeded, "ticket26: continuum-proj prefix should not be treated as legacy")
+
+    if case let .needed(ids) = migration.detectTopologyMigration(descriptors: [legacyProject, legacyAmbient, newShape], canvas: canvas, workspace: workspace) {
+        expect(ids == [legacyProject.id], "ticket26: mixed list should migrate only project-zone legacy descriptor")
+    } else {
+        expect(false, "ticket26: mixed list should report one migrating descriptor")
+    }
+    expect(migration.detectTopologyMigration(descriptors: [newShape, newPrefix], canvas: canvas, workspace: workspace) == .notNeeded, "ticket26: all-new list should not migrate")
+
+    let v2JSON = """
+    {"schemaVersion":2,"id":"26000000-0000-4000-8000-000000000025","tileId":"\(projectTileId.uuidString)","launchProfileId":"shell","command":"/bin/zsh","args":["new-session","-A","-s","continuum-\(projectTileId.uuidString)","-c","/tmp/project"],"cwd":"/tmp/project","env":{},"title":"Shell","createdAt":1,"lastStartedAt":1,"lastExit":null}
+    """.data(using: .utf8)!
+    let decodedLegacy = try JSONDecoder().decode(TerminalSessionDescriptor.self, from: v2JSON)
+    expect(migration.detectTopologyMigration(descriptors: [decodedLegacy], canvas: canvas, workspace: workspace) == .needed(legacyDescriptorIds: [decodedLegacy.id]), "ticket26: pre-upgrade descriptor JSON without target state should decode and migrate")
+
+    let manifest = InvariantManifest(
+        invariantId: "ticket26-topology-migration-detection",
+        runId: UUID().uuidString,
+        measuredAt: ISO8601DateFormatter().string(from: now),
+        measurements: [
+            "legacyProjectDetected": .bool(true),
+            "ambientLegacyDetected": .bool(false),
+            "missingTileDetected": .bool(false),
+            "mixedMigratingCount": .int(1),
+            "descriptorTargetFieldLocation": .string("managed-session-record-not-terminal-descriptor")
+        ],
+        outcome: InvariantOutcome.pass.rawValue,
+        failureReason: nil
+    )
+    try writeAndVerify(manifest)
+}
+
 // MARK: - AtomicWriter
 
 do {
@@ -4725,12 +4916,14 @@ do {
         (KeyChord(keyCode: 19, modifiers: .command), "global.spawnProfile.2"),
         (KeyChord(keyCode: 20, modifiers: .command), "global.spawnProfile.3"),
         (KeyChord(keyCode: 21, modifiers: .command), "global.spawnProfile.4"),
+        (KeyChord(keyCode: 1, modifiers: [.command, .shift]), "global.toggleWorkspaceSidebar"),
     ]
     for global in reservedGlobals { auditNoKnownConflict(global.chord, global.label) }
 
     // Positive anchors: throw's new chord is clear; the old chords ARE flagged;
     // and the allowlisted leader genuinely is a macOS chord (documents the finding).
     expect(KnownChordConflicts.conflict(for: KeyChord(keyCode: 124, modifiers: [.command, .control])) == nil, "throw ⌘⌃→ must be free of known conflicts")
+    expect(KnownChordConflicts.conflict(for: KeyChord(keyCode: 1, modifiers: [.command, .shift])) == nil, "sidebar toggle ⌘⇧S must be free of known conflicts")
     expect(KnownChordConflicts.conflict(for: KeyChord(keyCode: 124, modifiers: [.control, .option]))?.source == .rectangle, "⌃⌥→ must be flagged as a Rectangle conflict")
     expect(KnownChordConflicts.conflict(for: NavKeymap.default.leader)?.source == .macOS, "nav leader ⌃Space is a known macOS chord (allowlisted)")
 }
@@ -4882,7 +5075,15 @@ do {
     for shortcut in reservedCases {
         expect(globalLayerEntry(shortcut) != nil, "ShortcutCatalog: ReservedShortcut \(shortcut) has a .global entry")
     }
-    expect(globalEntries.count == reservedCases.count, "ShortcutCatalog: exactly one .global entry per ReservedShortcut case, got \(globalEntries.count)")
+    expect(globalEntries.count == reservedCases.count + 1, "ShortcutCatalog: exactly one .global entry per ReservedShortcut case plus the sidebar toggle, got \(globalEntries.count)")
+    guard let sidebarToggleEntry = globalEntries.first(where: { $0.id == "global.toggleWorkspaceSidebar" }) else {
+        expect(false, "ShortcutCatalog: missing global.toggleWorkspaceSidebar entry")
+        fatalError("unreachable")
+    }
+    expect(sidebarToggleEntry.label == "Show Activity Dock", "ShortcutCatalog: sidebar toggle label")
+    expect(sidebarToggleEntry.chordDisplay == "⌘⇧S", "ShortcutCatalog: sidebar toggle chord display")
+    expect(sidebarToggleEntry.configurable == false, "ShortcutCatalog: sidebar toggle is not configurable in this phase")
+    expect(sidebarToggleEntry.editTarget == nil, "ShortcutCatalog: sidebar toggle has no edit target")
 
     // configurable policy: globals are hardcoded (false) except the nav leader,
     // whose chord persists via NavKeymap (true). The leader carries the .leader
@@ -6070,6 +6271,8 @@ do {
         TerminalDisplayConfig.fontSizeKey,
         TerminalScrollConfig.preciseMultiplierKey,
         TerminalScrollConfig.lineMultiplierKey,
+        WorkspaceSidebarConfig.visibleKey,
+        WorkspaceSidebarConfig.widthKey,
         // WorkspaceProfileConfig.defaultCaptureModeKey and defaultApplyModeKey are
         // intentionally excluded: captureMode/applyMode have no behavioral effect yet
         // (WorkspaceDocument is layout-only; T13 session-state is in ProjectStore sibling
@@ -6147,6 +6350,31 @@ do {
 
     // The Keybindings section renders the ShortcutCatalog via a .shortcuts field.
     expect(allFields.contains { if case .shortcuts = $0 { return true } else { return false } }, "settings schema must include a .shortcuts field")
+
+    guard let activitySection = sections.first(where: { $0.id == "activity" }) else {
+        expect(false, "settings schema must include an Activity section")
+        fatalError("unreachable")
+    }
+    expect(activitySection.title == "Activity", "Activity settings section title")
+    expect(activitySection.fields.contains { $0.key == WorkspaceSidebarConfig.visibleKey }, "Activity settings section exposes sidebar visibility")
+    expect(activitySection.fields.contains { $0.key == WorkspaceSidebarConfig.widthKey }, "Activity settings section exposes sidebar width")
+
+    let sidebarSuiteName = "WorkspaceSidebarConfigChecks-\(UUID().uuidString)"
+    let sidebarDefaults = UserDefaults(suiteName: sidebarSuiteName)!
+    defer { sidebarDefaults.removePersistentDomain(forName: sidebarSuiteName) }
+    sidebarDefaults.removePersistentDomain(forName: sidebarSuiteName)
+    expect(WorkspaceSidebarConfig.resolveVisible(defaults: sidebarDefaults) == true, "workspace sidebar defaults visible")
+    expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 280.0, "workspace sidebar default width")
+    WorkspaceSidebarConfig.setVisible(false, defaults: sidebarDefaults)
+    expect(WorkspaceSidebarConfig.resolveVisible(defaults: sidebarDefaults) == false, "workspace sidebar visible round-trips false")
+    WorkspaceSidebarConfig.setWidth(350, defaults: sidebarDefaults)
+    expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 350.0, "workspace sidebar width round-trips in-range value")
+    WorkspaceSidebarConfig.setWidth(100, defaults: sidebarDefaults)
+    expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 220.0, "workspace sidebar width clamps to floor")
+    WorkspaceSidebarConfig.setWidth(500, defaults: sidebarDefaults)
+    expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 420.0, "workspace sidebar width clamps to ceiling")
+    sidebarDefaults.set("320", forKey: WorkspaceSidebarConfig.widthKey)
+    expect(WorkspaceSidebarConfig.resolveWidth(defaults: sidebarDefaults) == 320.0, "workspace sidebar width accepts Settings text-field numeric string")
 
     // Per-field UserDefaults behavior in an isolated suite. A suite still reads
     // the global domain as a fallback, so scrub the schema keys there for the
@@ -7274,6 +7502,64 @@ func writeAndVerify(_ manifest: InvariantManifest) throws {
     print("\(manifest.invariantId): manifest at \(file.path)")
 }
 
+struct NoMirrorCheckManifest: Codable, Equatable {
+    var runId: String
+    var tmuxAbsent: Bool
+    var projSession: String
+    var paneA: String
+    var paneB: String
+    var intendedWindowA: String
+    var intendedWindowB: String
+    var activeWindowA: String
+    var activeWindowB: String
+    var activeWindowShared: String
+    var i2Distinct: Bool
+    var sharedViewExemptionCorrect: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case runId = "run_id"
+        case tmuxAbsent = "tmux_absent"
+        case projSession = "proj_session"
+        case paneA = "pane_a"
+        case paneB = "pane_b"
+        case intendedWindowA = "intended_window_a"
+        case intendedWindowB = "intended_window_b"
+        case activeWindowA = "active_window_a"
+        case activeWindowB = "active_window_b"
+        case activeWindowShared = "active_window_shared"
+        case i2Distinct = "i2_distinct"
+        case sharedViewExemptionCorrect = "shared_view_exemption_correct"
+    }
+
+    static func skipped(runId: String) -> NoMirrorCheckManifest {
+        NoMirrorCheckManifest(
+            runId: runId,
+            tmuxAbsent: true,
+            projSession: "",
+            paneA: "",
+            paneB: "",
+            intendedWindowA: "",
+            intendedWindowB: "",
+            activeWindowA: "",
+            activeWindowB: "",
+            activeWindowShared: "",
+            i2Distinct: false,
+            sharedViewExemptionCorrect: false
+        )
+    }
+}
+
+func writeNoMirrorManifest(_ manifest: NoMirrorCheckManifest, to runDir: URL) throws -> URL {
+    try FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
+    let path = runDir.appendingPathComponent("manifest.json")
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try encoder.encode(manifest).write(to: path, options: .atomic)
+    let readBack = try JSONDecoder().decode(NoMirrorCheckManifest.self, from: Data(contentsOf: path))
+    expect(readBack == manifest, "I2: no-mirror manifest must round-trip through the real filesystem")
+    return path
+}
+
 // MARK: - InvariantManifest Codable conditional-encode check
 //
 // Ticket contract ("How we test it"): an InvariantManifest with outcome "fail" and a
@@ -7798,47 +8084,163 @@ do {
     try writeAndVerify(manifest)
 }
 
-// MARK: - Invariant I2: No-mirror (STUB — real assertion lands with the "Grouped view session per tile" ticket)
+// MARK: - Invariant I2: No-mirror pure logic
 
 do {
-    // STUB: replace with real assertion when "Grouped view session per tile" lands.
-    // When real: assert that a tile's grouped/mirrored view session never duplicates the
-    // primary window's tmux target — one canonical window per tile, any group view is a
-    // read-only attach, never a second live pane.
-    //
-    // Measured values that will appear in the real manifest:
-    //   tile_count: Int, primary_window_count: Int, mirrored_window_count: Int (must be 0)
-    //
-    // For now this block asserts one real property of TileGroup, the type this future
-    // mechanism will lean on for "which tiles are grouped together" — non-vacuous, no
-    // local stand-in type.
-    let group = TileGroup(
-        id: UUID(uuidString: "B0000000-0000-4000-8000-000000000801")!,
-        title: "I2 stub group",
-        tileIds: [UUID(uuidString: "B0000000-0000-4000-8000-000000000802")!],
-        color: "mint",
-        collapsed: false
-    )
-    let groupData = try JSONEncoder().encode(group)
-    let groupRound = try JSONDecoder().decode(TileGroup.self, from: groupData)
-    expect(groupRound == group, "I2 stub: TileGroup codable round-trip")
+    expect(TmuxSession.i2Verdict(
+        intendedA: "@1",
+        intendedB: "@2",
+        observedA: "@1",
+        observedB: "@2"
+    ) == .distinct, "I2: distinct observed window ids must satisfy no-mirror")
+    expect(TmuxSession.i2Verdict(
+        intendedA: "@1",
+        intendedB: "@1",
+        observedA: "@1",
+        observedB: "@1"
+    ) == .deliberateSharedView, "I2: same declared intent and same observed window is a deliberate shared view")
+    expect(TmuxSession.i2Verdict(
+        intendedA: "@1",
+        intendedB: "@2",
+        observedA: "@1",
+        observedB: "@1"
+    ) == .accidentalMirror, "I2: distinct declared intent and same observed window is an accidental mirror")
 
-    let manifest = InvariantManifest(
-        invariantId: "I2-no-mirror",
-        runId: UUID().uuidString,
-        measuredAt: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_800_000_000)),
-        measurements: [
-            "stub": .bool(true),
-            "depends_on": .string("Grouped view session per tile"),
-            // Measured from the non-vacuous assertion just run above (not stub metadata):
-            // the actual round-tripped tile membership and color of the fixture group.
-            "fixture_tile_id_count": .int(groupRound.tileIds.count),
-            "fixture_group_color": .string(groupRound.color)
-        ],
-        outcome: InvariantOutcome.stub.rawValue,
-        failureReason: nil
+    expect(TmuxSession.isValidWindowId("@3"), "I2: @3 is a valid tmux window_id")
+    expect(!TmuxSession.isValidWindowId("%3"), "I2: %3 is a pane id, not a window_id")
+    expect(!TmuxSession.isValidWindowId("3"), "I2: 3 is a window index, not a stable window_id")
+    expect(!TmuxSession.isValidWindowId("@"), "I2: bare @ is not a valid window_id")
+    expect(!TmuxSession.isValidWindowId(""), "I2: empty string is not a valid window_id")
+    expect(TmuxSession.isValidPaneId("%7"), "I2: %7 is a valid tmux pane_id")
+    expect(!TmuxSession.isValidPaneId("@7"), "I2: @7 is a window_id, not a pane_id")
+
+    let groupedArgs = TmuxSession.groupedViewSessionArguments(
+        viewSessionName: "continuum-view-X",
+        projectSessionName: "continuum-proj-Y"
     )
-    try writeAndVerify(manifest)
+    expect(groupedArgs.first == "new-session", "I2: grouped view helper must build a tmux new-session argv")
+    expect(groupedArgs.contains("-A"), "I2: grouped view helper must attach existing view sessions")
+    let groupedTargetIndex = groupedArgs.firstIndex(of: "-t").map { groupedArgs.index(after: $0) }
+    let groupedNameIndex = groupedArgs.firstIndex(of: "-s").map { groupedArgs.index(after: $0) }
+    expect(groupedTargetIndex != nil && groupedTargetIndex! < groupedArgs.endIndex && groupedArgs[groupedTargetIndex!] == "continuum-proj-Y",
+           "I2: grouped view helper must target the project session after -t")
+    expect(groupedNameIndex != nil && groupedNameIndex! < groupedArgs.endIndex && groupedArgs[groupedNameIndex!] == "continuum-view-X",
+           "I2: grouped view helper must name the view session after -s")
+
+    let activeArgs = TmuxSession.activeWindowTargetArguments(viewSessionName: "continuum-view-X")
+    expect(activeArgs == ["display-message", "-p", "-t", "continuum-view-X", "#{window_id}"],
+           "I2: active-window helper must query stable window_id for the view session")
+}
+
+// MARK: - Invariant I2: No-mirror real tmux path
+
+let noMirrorRunId = String(UUID().uuidString.prefix(8))
+let noMirrorRunDir = URL(fileURLWithPath: "qa-runs/no-mirror-\(noMirrorRunId)", isDirectory: true)
+
+i2Check: do {
+    guard let tmuxPath = TmuxLocator.resolve() else {
+        let manifest = NoMirrorCheckManifest.skipped(runId: noMirrorRunId)
+        let path = try writeNoMirrorManifest(manifest, to: noMirrorRunDir)
+        print("SKIP I2: tmux not found - tmux_absent:true - manifest at \(path.path)")
+        break i2Check
+    }
+
+#if os(macOS)
+    let tmux = ProcessTmuxControl(tmuxPath: tmuxPath)
+    let projectSession = "continuum-proj-i2-\(noMirrorRunId)"
+    let viewSessionA = "continuum-view-i2a-\(noMirrorRunId)"
+    let viewSessionB = "continuum-view-i2b-\(noMirrorRunId)"
+    let viewSessionShared = "continuum-view-i2s-\(noMirrorRunId)"
+
+    defer {
+        for session in [viewSessionShared, viewSessionB, viewSessionA, projectSession] {
+            _ = try? tmux.run(["kill-session", "-t", session])
+        }
+    }
+
+    func trimmedTmux(_ arguments: [String]) throws -> String {
+        try tmux.run(arguments).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func windowId(for target: String) throws -> String {
+        try trimmedTmux(["display-message", "-p", "-t", target, "#{window_id}"])
+    }
+
+    let paneA = try trimmedTmux(["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", projectSession, "-c", "/tmp"])
+    let paneB = try trimmedTmux(TmuxSession.newWindowArguments(projectSessionName: projectSession, cwd: "/tmp", innerCommand: nil))
+    expect(TmuxSession.isValidPaneId(paneA), "I2: project session pane A must be a valid pane id, got \(paneA)")
+    expect(TmuxSession.isValidPaneId(paneB), "I2: project session pane B must be a valid pane id, got \(paneB)")
+    expect(paneA != paneB, "I2: two project windows must produce distinct pane ids")
+
+    let intendedWindowA = try windowId(for: paneA)
+    let intendedWindowB = try windowId(for: paneB)
+    expect(TmuxSession.isValidWindowId(intendedWindowA), "I2: pane A owner must be a valid window_id, got \(intendedWindowA)")
+    expect(TmuxSession.isValidWindowId(intendedWindowB), "I2: pane B owner must be a valid window_id, got \(intendedWindowB)")
+    expect(intendedWindowA != intendedWindowB, "I2: project panes must belong to distinct windows")
+
+    _ = try trimmedTmux(TmuxSession.groupedViewSessionArguments(viewSessionName: viewSessionA, projectSessionName: projectSession))
+    _ = try trimmedTmux(TmuxSession.selectWindowArguments(viewSessionName: viewSessionA, windowTarget: intendedWindowA))
+    _ = try trimmedTmux(TmuxSession.groupedViewSessionArguments(viewSessionName: viewSessionB, projectSessionName: projectSession))
+    _ = try trimmedTmux(TmuxSession.selectWindowArguments(viewSessionName: viewSessionB, windowTarget: intendedWindowB))
+
+    let activeA = try trimmedTmux(TmuxSession.activeWindowTargetArguments(viewSessionName: viewSessionA))
+    let activeB = try trimmedTmux(TmuxSession.activeWindowTargetArguments(viewSessionName: viewSessionB))
+    expect(TmuxSession.isValidWindowId(activeA), "I2: view A active window must be a valid window_id, got \(activeA)")
+    expect(TmuxSession.isValidWindowId(activeB), "I2: view B active window must be a valid window_id, got \(activeB)")
+
+    let mainVerdict = TmuxSession.i2Verdict(
+        intendedA: intendedWindowA,
+        intendedB: intendedWindowB,
+        observedA: activeA,
+        observedB: activeB
+    )
+    expect(mainVerdict == .distinct,
+           "I2: grouped view sessions pinned to distinct windows must stay distinct, got \(mainVerdict) A=\(activeA) B=\(activeB)")
+
+    _ = try trimmedTmux(TmuxSession.groupedViewSessionArguments(viewSessionName: viewSessionShared, projectSessionName: projectSession))
+    _ = try trimmedTmux(TmuxSession.selectWindowArguments(viewSessionName: viewSessionShared, windowTarget: intendedWindowA))
+    let activeShared = try trimmedTmux(TmuxSession.activeWindowTargetArguments(viewSessionName: viewSessionShared))
+    expect(TmuxSession.isValidWindowId(activeShared), "I2: shared probe active window must be a valid window_id, got \(activeShared)")
+    expect(activeShared == activeA, "I2: shared probe must observe the same window as A for the exemption assertions")
+
+    let deliberateVerdict = TmuxSession.i2Verdict(
+        intendedA: intendedWindowA,
+        intendedB: intendedWindowA,
+        observedA: activeA,
+        observedB: activeShared
+    )
+    let accidentalVerdict = TmuxSession.i2Verdict(
+        intendedA: intendedWindowB,
+        intendedB: intendedWindowA,
+        observedA: activeShared,
+        observedB: activeA
+    )
+    expect(deliberateVerdict == .deliberateSharedView,
+           "I2: same declared intent and same observed window must be deliberate shared view, got \(deliberateVerdict)")
+    expect(accidentalVerdict == .accidentalMirror,
+           "I2: distinct declared intent and same observed window must be accidental mirror, got \(accidentalVerdict)")
+
+    let manifest = NoMirrorCheckManifest(
+        runId: noMirrorRunId,
+        tmuxAbsent: false,
+        projSession: projectSession,
+        paneA: paneA,
+        paneB: paneB,
+        intendedWindowA: intendedWindowA,
+        intendedWindowB: intendedWindowB,
+        activeWindowA: activeA,
+        activeWindowB: activeB,
+        activeWindowShared: activeShared,
+        i2Distinct: mainVerdict == .distinct,
+        sharedViewExemptionCorrect: deliberateVerdict == .deliberateSharedView && accidentalVerdict == .accidentalMirror
+    )
+    let manifestPath = try writeNoMirrorManifest(manifest, to: noMirrorRunDir)
+    print("PASS I2: A=\(activeA) B=\(activeB) distinct; shared=\(activeShared); manifest at \(manifestPath.path)")
+#else
+    let manifest = NoMirrorCheckManifest.skipped(runId: noMirrorRunId)
+    let path = try writeNoMirrorManifest(manifest, to: noMirrorRunDir)
+    print("SKIP I2: Process-backed tmux checks require macOS - tmux_absent:true - manifest at \(path.path)")
+#endif
 }
 
 // MARK: - Invariant I3: No-session-leak (STUB — real assertion lands with the "Project session naming & lifecycle ownership" ticket)

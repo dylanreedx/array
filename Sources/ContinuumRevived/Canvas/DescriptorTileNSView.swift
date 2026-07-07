@@ -42,6 +42,7 @@ final class DescriptorTileNSView: TileNSView {
         case .conductorQueue: return NSColor(red: 0.10, green: 0.14, blue: 0.18, alpha: 1)
         case .diffReview: return NSColor(red: 0.16, green: 0.12, blue: 0.18, alpha: 1)
         case .runArtifacts: return NSColor(red: 0.12, green: 0.15, blue: 0.18, alpha: 1)
+        case .managedAgent: return NSColor(red: 0.10, green: 0.13, blue: 0.17, alpha: 1)
         }
     }
 }

@@ -1,5 +1,10 @@
 import Foundation
 
+public enum TopologyMigrationState: Equatable, Sendable {
+    case notNeeded
+    case needed(legacyDescriptorIds: [UUID])
+}
+
 public struct DefaultWorkspaceMigration: Sendable {
     public static let defaultWorkspaceName = "Default"
     public static let defaultZoneColor = "blue"
@@ -82,6 +87,20 @@ public struct DefaultWorkspaceMigration: Sendable {
         return nil
     }
 
+    public func detectTopologyMigration(
+        descriptors: [TerminalSessionDescriptor],
+        canvas: CanvasState,
+        workspace: WorkspaceDocument
+    ) -> TopologyMigrationState {
+        let legacyIds = descriptors.compactMap { descriptor -> UUID? in
+            guard hasLegacyPerTileSessionName(descriptor.args) else { return nil }
+            guard canvas.tiles.contains(where: { $0.id == descriptor.tileId }) else { return nil }
+            guard tileIsInProjectZone(tileId: descriptor.tileId, canvas: canvas, workspace: workspace) else { return nil }
+            return descriptor.id
+        }
+        return legacyIds.isEmpty ? .notNeeded : .needed(legacyDescriptorIds: legacyIds)
+    }
+
     private func attach(projectId: UUID, toWorkspace workspaceId: UUID, registry: inout Registry, updatedAt: Date) {
         if let workspaceIndex = registry.workspaces.firstIndex(where: { $0.id == workspaceId }) {
             if !registry.workspaces[workspaceIndex].projectIds.contains(projectId) {
@@ -92,5 +111,46 @@ public struct DefaultWorkspaceMigration: Sendable {
         if let projectIndex = registry.projects.firstIndex(where: { $0.id == projectId }) {
             registry.projects[projectIndex].workspaceId = workspaceId
         }
+    }
+
+    private func hasLegacyPerTileSessionName(_ args: [String]) -> Bool {
+        guard args.count >= 2 else { return false }
+        for index in args.indices.dropLast() where args[index] == "-s" {
+            let name = args[args.index(after: index)]
+            if name.hasPrefix("continuum-"),
+               !name.hasPrefix("continuum-proj-"),
+               !name.hasPrefix("continuum-ws-"),
+               !name.hasPrefix("continuum-view-") {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func tileIsInProjectZone(
+        tileId: UUID,
+        canvas: CanvasState,
+        workspace: WorkspaceDocument
+    ) -> Bool {
+        for zone in workspace.zones where zone.projectId == nil {
+            if workspace.tiles(forZone: zone.zoneId).contains(where: { $0.id == tileId }) {
+                return false
+            }
+        }
+        guard let tile = canvas.tiles.first(where: { $0.id == tileId }) else { return false }
+        let center = ZonePoint(
+            x: tile.frame.x + tile.frame.width / 2,
+            y: tile.frame.y + tile.frame.height / 2
+        )
+        for zone in workspace.zones where zone.projectId != nil {
+            let frame = CanvasEngine.zoneWorldFrame(zone)
+            if center.x >= frame.x,
+               center.x <= frame.x + frame.width,
+               center.y >= frame.y,
+               center.y <= frame.y + frame.height {
+                return true
+            }
+        }
+        return false
     }
 }

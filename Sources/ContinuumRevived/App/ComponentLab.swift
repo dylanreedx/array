@@ -50,6 +50,8 @@ struct LabEntry {
 enum LabFixtures {
     static let workspaceId = UUID(uuidString: "00000000-0000-0000-0000-0000000000A1")!
     static let altWorkspaceId = UUID(uuidString: "00000000-0000-0000-0000-0000000000A2")!
+    static let selectedZoneId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B1")!
+    static let selectedTileId = UUID(uuidString: "00000000-0000-0000-0000-0000000000C1")!
     static let epoch = Date(timeIntervalSince1970: 1_700_000_000)
 
     static func tile(kind: TileKind, title: String) -> Tile {
@@ -85,10 +87,10 @@ enum LabFixtures {
 
     static func sidebarTree() -> SidebarTree {
         let alpha = SidebarZoneRow(
-            zoneId: UUID(), name: "continuum-revived", color: "#5B8DEF", navKey: "1", collapsed: false, projectId: UUID(),
+            zoneId: selectedZoneId, name: "continuum-revived", color: "#5B8DEF", navKey: "1", collapsed: false, projectId: UUID(),
             agentStatusRollup: SidebarAgentStatusRollup(working: 1, needsAttention: 1),
             tiles: [
-                SidebarTileRow(tileId: UUID(), title: "claude · feature/login", kind: .terminal, agentStatus: .working),
+                SidebarTileRow(tileId: selectedTileId, title: "claude · feature/login", kind: .terminal, agentStatus: .working),
                 SidebarTileRow(tileId: UUID(), title: "shell", kind: .terminal, agentStatus: nil),
                 SidebarTileRow(tileId: UUID(), title: "localhost:3000", kind: .browser, agentStatus: nil)
             ]
@@ -99,6 +101,28 @@ enum LabFixtures {
         )
         return SidebarTree(workspaces: [
             SidebarWorkspaceRow(workspaceId: workspaceId, name: "Continuum", zones: [alpha, beta])
+        ])
+    }
+
+    static func richSidebarTree() -> SidebarTree {
+        let currentZone = SidebarZoneRow(
+            zoneId: selectedZoneId, name: "continuum-revived", color: "#5B8DEF", navKey: "1", collapsed: false, projectId: UUID(),
+            agentStatusRollup: SidebarAgentStatusRollup(working: 1, needsAttention: 1),
+            tiles: [
+                SidebarTileRow(tileId: selectedTileId, title: "claude · feature/login", kind: .terminal, agentStatus: .needsAttention),
+                SidebarTileRow(tileId: UUID(), title: "shell", kind: .terminal, agentStatus: .working),
+                SidebarTileRow(tileId: UUID(), title: "localhost:3000", kind: .browser, agentStatus: nil)
+            ]
+        )
+        let scratchZone = SidebarZoneRow(
+            zoneId: UUID(), name: "notes", color: "#E0A458", navKey: "1", collapsed: false, projectId: nil,
+            tiles: [
+                SidebarTileRow(tileId: UUID(), title: "scratch.md", kind: .note, agentStatus: nil)
+            ]
+        )
+        return SidebarTree(workspaces: [
+            SidebarWorkspaceRow(workspaceId: workspaceId, name: "Continuum", zones: [currentZone]),
+            SidebarWorkspaceRow(workspaceId: altWorkspaceId, name: "Scratch", zones: [scratchZone])
         ])
     }
 
@@ -352,7 +376,17 @@ final class LabSandboxContext: NSObject {
 @MainActor
 enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
-        [tileSandbox, sidebarCard, observerSidebarCard, topBarCard, pairingTokenCard, agentKindCard, observerRollupCard, agentsBoardCard, approvalsInboxCard, canvasSceneCard, pushSmokeCard, notifyCategoriesCard, agentAdapterProjectionCard, managedSessionRecordCard, sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher]
+        [
+            tileSandbox, sidebarCard, observerSidebarCard, topBarCard, pairingTokenCard, agentKindCard,
+            observerRollupCard, agentsBoardCard, approvalsInboxCard, canvasSceneCard, pushSmokeCard,
+            notifyCategoriesCard, agentAdapterProjectionCard, managedSessionRecordCard,
+            sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher,
+            sidebarLiveCard, activityDockCard, sidebarSelectedCard, managedAgentCard,
+
+            // MARK: night3-C cards
+            managedAgentApprovalDockCard, managedAgentUserInputCard, newTileCwdPolicyCard,
+            topologyMigrationNoteCard
+        ]
     }
 
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
@@ -1089,6 +1123,258 @@ enum LabCatalog {
         )
     }
 
+    // MARK: night3-C cards
+
+    private static var sidebarLiveCard: LabEntry {
+        LabEntry(
+            id: "chrome.sidebar.live",
+            category: "Chrome",
+            title: "Workspace Sidebar — Rich Fixture",
+            summary: "Two workspaces, mixed statuses, current expanded. Confirms rollup precedence and collapse.",
+            content: .staticCard(preferredSize: NSSize(width: 280, height: 640)) {
+                let view = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 280, height: 640))
+                view.reload(tree: LabFixtures.richSidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
+                return view
+            }
+        )
+    }
+
+    private static var activityDockCard: LabEntry {
+        LabEntry(
+            id: "chrome.activityDock",
+            category: "Chrome",
+            title: "Activity Dock",
+            summary: "Default visible dock at 280 pt with the richer sidebar fixture.",
+            content: .staticCard(preferredSize: NSSize(width: 280, height: 600)) {
+                let view = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 280, height: 600))
+                view.reload(tree: LabFixtures.richSidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
+                return view
+            }
+        )
+    }
+    private static var sidebarSelectedCard: LabEntry {
+        LabEntry(
+            id: "chrome.sidebar.selected",
+            category: "Chrome",
+            title: "Workspace Sidebar - tile selected",
+            summary: "Workspace tree with the clicked tile row selected.",
+            content: .staticCard(preferredSize: NSSize(width: 280, height: 560)) {
+                let view = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 280, height: 560))
+                view.reload(tree: LabFixtures.sidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
+                _ = view.select(
+                    workspaceId: LabFixtures.workspaceId,
+                    zoneId: LabFixtures.selectedZoneId,
+                    tileId: LabFixtures.selectedTileId
+                )
+                return view
+            }
+        )
+    }
+
+    private static var managedAgentCard: LabEntry {
+        LabEntry(
+            id: "tiles.managedAgent",
+            category: "Tiles",
+            title: "Managed Agent Tile",
+            summary: "Structured transcript card stack with a persistent managed-agent status header.",
+            content: .staticCard(preferredSize: NSSize(width: 560, height: 560)) {
+                makeManagedAgentFixtureView()
+            }
+        )
+    }
+
+    private static var managedAgentApprovalDockCard: LabEntry {
+        LabEntry(
+            id: "managed-agent.approval-dock",
+            category: "Managed Agent",
+            title: "Approval dock - three states",
+            summary: "Working, waiting with orange dock and border, then done.",
+            content: .staticCard(preferredSize: NSSize(width: 560, height: 720)) {
+                makeManagedAgentApprovalDockPreview()
+            }
+        )
+    }
+
+    private static var managedAgentUserInputCard: LabEntry {
+        LabEntry(
+            id: "managed-agent.user-input-card",
+            category: "Managed Agent",
+            title: "User Input Card",
+            summary: "Inline answer-field card for user-input.requested events.",
+            content: .staticCard(preferredSize: NSSize(width: 480, height: 160)) {
+                let card = UserInputCardView(frame: NSRect(x: 0, y: 0, width: 480, height: 160))
+                card.configure(question: "What should I name the new migration file?")
+                return card
+            }
+        )
+    }
+
+    private static var newTileCwdPolicyCard: LabEntry {
+        LabEntry(
+            id: "terminal.new-tile-cwd",
+            category: "Palettes & Settings",
+            title: "New Terminal CWD Policy",
+            summary: "Settings fixture for inherit-focus, project-root, and last-used fresh terminal cwd policy.",
+            content: .staticCard(preferredSize: NSSize(width: 520, height: 180)) {
+                makeNewTileCwdPolicyPreview()
+            }
+        )
+    }
+
+    private static var topologyMigrationNoteCard: LabEntry {
+        LabEntry(
+            id: "terminal.topology-migration-note",
+            category: "Palettes & Settings",
+            title: "Topology Migration Note",
+            summary: "One-time upgrade copy for the stock alert shown before terminal restore.",
+            content: .staticCard(preferredSize: NSSize(width: 520, height: 180)) {
+                makeTopologyMigrationNotePreview()
+            }
+        )
+    }
+
+    static func makeTopologyMigrationNotePreview() -> NSView {
+        let root = NSStackView()
+        root.orientation = .vertical
+        root.alignment = .leading
+        root.spacing = 12
+        root.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
+
+        let title = NSTextField(labelWithString: "Session model updated")
+        title.identifier = NSUserInterfaceItemIdentifier("topologyMigration.title")
+        title.font = .systemFont(ofSize: 18, weight: .semibold)
+        title.textColor = .labelColor
+        root.addArrangedSubview(title)
+
+        let body = NSTextField(wrappingLabelWithString: AppDelegate.topologyMigrationInformativeText)
+        body.identifier = NSUserInterfaceItemIdentifier("topologyMigration.body")
+        body.font = .systemFont(ofSize: 13)
+        body.textColor = .secondaryLabelColor
+        body.preferredMaxLayoutWidth = 460
+        root.addArrangedSubview(body)
+
+        let button = NSButton(title: "OK", target: nil, action: nil)
+        button.identifier = NSUserInterfaceItemIdentifier("topologyMigration.ok")
+        button.bezelStyle = .rounded
+        button.controlSize = .regular
+        root.addArrangedSubview(button)
+        return root
+    }
+
+    static func makeNewTileCwdPolicyPreview() -> NSView {
+        let root = NSStackView()
+        root.orientation = .vertical
+        root.alignment = .leading
+        root.spacing = 10
+        root.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+
+        let title = NSTextField(labelWithString: "New Terminal Working Directory")
+        title.identifier = NSUserInterfaceItemIdentifier("newTileCwd.title")
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        title.textColor = .labelColor
+        root.addArrangedSubview(title)
+
+        let fixtureRows: [(NewTileCwdPolicy, String)] = [
+            (.inheritFocus, "/Users/dylan/src/continuum/Sources"),
+            (.projectRoot, "/Users/dylan/src/continuum"),
+            (.lastUsed, "/Users/dylan/src/continuum/Tests")
+        ]
+        for (index, fixture) in fixtureRows.enumerated() {
+            let field = NSTextField(labelWithString: "\(fixture.0.rawValue) -> \(fixture.1)")
+            field.identifier = NSUserInterfaceItemIdentifier("newTileCwd.policy.\(index)")
+            field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            field.textColor = .secondaryLabelColor
+            root.addArrangedSubview(field)
+        }
+
+        let key = NSTextField(labelWithString: NewTileCwdConfig.userDefaultsKey)
+        key.identifier = NSUserInterfaceItemIdentifier("newTileCwd.defaultsKey")
+        key.font = .systemFont(ofSize: 11, weight: .regular)
+        key.textColor = .tertiaryLabelColor
+        root.addArrangedSubview(key)
+        return root
+    }
+
+    static func makeManagedAgentApprovalDockPreview() -> NSView {
+        let root = NSStackView()
+        root.orientation = .vertical
+        root.alignment = .leading
+        root.spacing = 12
+        root.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+
+        func stateView(title: String, status: AgentStatus, pending: Bool) -> ManagedAgentTileNSView {
+            let tile = Tile(
+                id: UUID(),
+                kind: .managedAgent,
+                title: title,
+                frame: TileFrame(x: 0, y: 0, width: 520, height: 210),
+                zPosition: .fromLegacyRank(1),
+                runtimeRef: nil,
+                metadata: TileMetadata(launchProfileId: "managed")
+            )
+            let view = ManagedAgentTileNSView(tile: tile)
+            view.frame = NSRect(x: 0, y: 0, width: 520, height: 210)
+            view.ingest(.sessionStateChanged(status == .done ? .stopped : .running))
+            view.ingest(.turnStarted(threadId: "thread-main", turnId: "turn-\(status.rawValue)"))
+            view.ingest(.contentDelta(threadId: "thread-main", turnId: "turn-\(status.rawValue)", streamKind: .assistant, delta: "Checking the auth change set."))
+            if status == .done {
+                view.ingest(.turnCompleted(threadId: "thread-main", turnId: "turn-\(status.rawValue)", outcome: .completed, errorMessage: nil))
+            }
+            if pending {
+                view.setPendingApprovalForQA(kind: .commandExecutionApproval, requestId: "approval-preview", detail: "npm test")
+            } else {
+                view.agentStatus = status
+            }
+            view.translatesAutoresizingMaskIntoConstraints = false
+            view.widthAnchor.constraint(equalToConstant: 520).isActive = true
+            view.heightAnchor.constraint(equalToConstant: 210).isActive = true
+            if pending {
+                view.layer?.borderColor = NSColor.systemOrange.withAlphaComponent(0.9).cgColor
+                view.layer?.borderWidth = 2
+            }
+            return view
+        }
+
+        root.addArrangedSubview(stateView(title: "Claude · feature/auth", status: .working, pending: false))
+        root.addArrangedSubview(stateView(title: "Claude · feature/auth", status: .needsAttention, pending: true))
+        root.addArrangedSubview(stateView(title: "Claude · feature/auth", status: .done, pending: false))
+        return root
+    }
+
+    static func managedAgentFixtureEvents(includeApproval: Bool = true) -> [AgentRuntimeEvent] {
+        let threadId = "thread-main"
+        var events: [AgentRuntimeEvent] = [
+            .sessionStateChanged(.running),
+            .turnStarted(threadId: threadId, turnId: "turn-1"),
+            .contentDelta(threadId: threadId, turnId: "turn-1", streamKind: .assistant, delta: "I'll read the current guard, then refactor it to be idempotent."),
+            .itemStarted(threadId: threadId, itemId: "cmd-1", kind: .commandExecution, title: "swift test"),
+            .itemCompleted(threadId: threadId, itemId: "cmd-1", kind: .commandExecution, status: .completed),
+            .itemStarted(threadId: threadId, itemId: "file-1", kind: .fileChange, title: "Sources/Auth.swift")
+        ]
+        if includeApproval {
+            events.append(.requestOpened(threadId: threadId, requestId: "approval-1", kind: .commandExecutionApproval))
+        }
+        return events
+    }
+
+    static func makeManagedAgentFixtureView(includeApproval: Bool = true) -> ManagedAgentTileNSView {
+        let tile = Tile(
+            id: UUID(uuidString: "71000000-0000-4000-8000-000000000071")!,
+            kind: .managedAgent,
+            title: "Claude - feature/login",
+            frame: TileFrame(x: 0, y: 0, width: 560, height: 560),
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")
+        )
+        let view = ManagedAgentTileNSView(tile: tile)
+        view.frame = NSRect(x: 0, y: 0, width: 560, height: 560)
+        for event in managedAgentFixtureEvents(includeApproval: includeApproval) {
+            view.ingest(event)
+        }
+        return view
+    }
+
 }
 
 // MARK: - Panel
@@ -1659,6 +1945,62 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard PairingAlphabet.containsOnlySymbols(credentialLabel.stringValue) else {
             throw fail("pairing token credential contains non-crowd-safe characters: \(credentialLabel.stringValue)")
         }
+        guard let managedAgentEntry = entries.first(where: { $0.id == "tiles.managedAgent" }),
+              case let .staticCard(_, makeManagedAgentView) = managedAgentEntry.content else {
+            throw fail("missing tiles.managedAgent card")
+        }
+        guard let managedAgentView = makeManagedAgentView() as? ManagedAgentTileNSView else {
+            throw fail("tiles.managedAgent did not vend ManagedAgentTileNSView")
+        }
+        guard managedAgentView.transcriptCardCount >= 3 else {
+            throw fail("managed agent fixture rendered \(managedAgentView.transcriptCardCount) cards, expected at least 3")
+        }
+        guard managedAgentView.activeToolCount == 1 else {
+            throw fail("managed agent fixture active tool count \(managedAgentView.activeToolCount), expected 1")
+        }
+        guard managedAgentView.currentAgentStatus == .needsAttention else {
+            throw fail("managed agent fixture status \(managedAgentView.currentAgentStatus), expected needsAttention")
+        }
+        guard entries.contains(where: { $0.id == "managed-agent.approval-dock" }) else {
+            throw fail("missing managed-agent.approval-dock card")
+        }
+        guard entries.contains(where: { $0.id == "managed-agent.user-input-card" }) else {
+            throw fail("missing managed-agent.user-input-card card")
+        }
+        guard let newTileCwdEntry = entries.first(where: { $0.id == "terminal.new-tile-cwd" }),
+              case let .staticCard(_, makeNewTileCwdView) = newTileCwdEntry.content else {
+            throw fail("missing terminal.new-tile-cwd card")
+        }
+        let newTileCwdView = makeNewTileCwdView()
+        for (index, policy) in NewTileCwdPolicy.allCases.enumerated() {
+            guard let row = newTileCwdView.descendant(withIdentifier: "newTileCwd.policy.\(index)") as? NSTextField else {
+                throw fail("new terminal cwd policy card missing row \(index)")
+            }
+            guard row.stringValue.hasPrefix("\(policy.rawValue) -> ") else {
+                throw fail("new terminal cwd policy row \(index) rendered '\(row.stringValue)', expected prefix \(policy.rawValue)")
+            }
+        }
+        guard let topologyMigrationEntry = entries.first(where: { $0.id == "terminal.topology-migration-note" }),
+              case let .staticCard(_, makeTopologyMigrationView) = topologyMigrationEntry.content else {
+            throw fail("missing terminal.topology-migration-note card")
+        }
+        let topologyMigrationView = makeTopologyMigrationView()
+        guard let topologyTitle = topologyMigrationView.descendant(withIdentifier: "topologyMigration.title") as? NSTextField,
+              let topologyBody = topologyMigrationView.descendant(withIdentifier: "topologyMigration.body") as? NSTextField,
+              let topologyOK = topologyMigrationView.descendant(withIdentifier: "topologyMigration.ok") as? NSButton else {
+            throw fail("topology migration note card missing title, body, or OK button")
+        }
+        guard topologyTitle.stringValue == "Session model updated" else {
+            throw fail("topology migration note title rendered '\(topologyTitle.stringValue)'")
+        }
+        guard topologyBody.stringValue.contains("tmux") && topologyBody.stringValue.contains("restart once") else {
+            throw fail("topology migration note body missing tmux/restart copy: '\(topologyBody.stringValue)'")
+        }
+        guard topologyOK.title == "OK" else {
+            throw fail("topology migration note button rendered '\(topologyOK.title)'")
+        }
+        try runApprovalDockLiveCheck(fail: fail)
+        try runUserInputCardLiveCheck(fail: fail)
 
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -1668,6 +2010,11 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         var rendered: [[String: Any]] = []
+        var sidebarDistinctColors: Int?
+        var selectedSidebarDistinctColors: Int?
+        var managedAgentDistinctColors: Int?
+        var approvalDockDistinctColors: Int?
+        var userInputCardDistinctColors: Int?
         for entry in entries {
             guard case let .staticCard(preferredSize, make) = entry.content else { continue }
             let size = preferredSize ?? NSSize(width: 560, height: 640)
@@ -1688,7 +2035,39 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             guard !metrics.isBlank else {
                 throw fail("\(entry.id): render is blank/uniform (\(metrics.distinctSampledColors) colors at \(metrics.width)x\(metrics.height))")
             }
+            if entry.id == "chrome.sidebar" {
+                sidebarDistinctColors = metrics.distinctSampledColors
+            } else if entry.id == "chrome.sidebar.selected" {
+                selectedSidebarDistinctColors = metrics.distinctSampledColors
+            } else if entry.id == "tiles.managedAgent" {
+                managedAgentDistinctColors = metrics.distinctSampledColors
+            } else if entry.id == "managed-agent.approval-dock" {
+                approvalDockDistinctColors = metrics.distinctSampledColors
+            } else if entry.id == "managed-agent.user-input-card" {
+                userInputCardDistinctColors = metrics.distinctSampledColors
+            }
             rendered.append(["entry": entry.id, "width": metrics.width, "height": metrics.height, "distinctColors": metrics.distinctSampledColors])
+        }
+        guard let sidebarDistinctColors else {
+            throw fail("missing chrome.sidebar render for selection delta gate")
+        }
+        guard let selectedSidebarDistinctColors else {
+            throw fail("missing chrome.sidebar.selected render for selection delta gate")
+        }
+        guard selectedSidebarDistinctColors != sidebarDistinctColors else {
+            throw fail("selected sidebar render should visibly differ; selected=\(selectedSidebarDistinctColors) unselected=\(sidebarDistinctColors)")
+        }
+        guard let managedAgentDistinctColors else {
+            throw fail("missing tiles.managedAgent render")
+        }
+        guard let approvalDockDistinctColors, approvalDockDistinctColors >= 6 else {
+            throw fail("managed-agent.approval-dock waiting-state render too flat: \(approvalDockDistinctColors ?? 0) colors")
+        }
+        guard let userInputCardDistinctColors, userInputCardDistinctColors >= 5 else {
+            throw fail("managed-agent.user-input-card render too flat: \(userInputCardDistinctColors ?? 0) colors")
+        }
+        guard managedAgentDistinctColors >= 3 else {
+            throw fail("managed agent render too uniform: \(managedAgentDistinctColors) distinct colors")
         }
 
         // Interactive sandbox: spawn every fixture tile kind, assert they install,
@@ -1880,10 +2259,144 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                 "projectSessionName": projectLabel,
                 "ambientSessionName": ambientLabel,
                 "sessionName": sessionLabel
+            ],
+            "sidebarSelection": [
+                "unselectedDistinctColors": sidebarDistinctColors,
+                "selectedDistinctColors": selectedSidebarDistinctColors,
+                "delta": selectedSidebarDistinctColors - sidebarDistinctColors
+            ],
+            "userInputCard": [
+                "distinctColors": userInputCardDistinctColors
             ]
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: directory.appendingPathComponent("manifest.json"))
+    }
+
+    private static func runApprovalDockLiveCheck(fail: (String) -> Error) throws {
+        let tile = Tile(
+            id: UUID(uuidString: "72000000-0000-4000-8000-000000000072")!,
+            kind: .managedAgent,
+            title: "Claude · feature/auth",
+            frame: TileFrame(x: 80, y: 60, width: 520, height: 260),
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")
+        )
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [tile],
+            groups: [],
+            lastActiveTileId: nil
+        ))
+        let view = ManagedAgentTileNSView(tile: tile)
+        canvas.install(tileView: view, for: tile)
+        view.ingest(.sessionStateChanged(.running))
+        view.ingest(.turnStarted(threadId: "thread-main", turnId: "turn-live"))
+        view.ingest(.requestOpened(threadId: "thread-main", requestId: "approval-live", kind: .commandExecutionApproval))
+        view.setPendingApprovalForQA(kind: .commandExecutionApproval, requestId: "approval-live", detail: "npm test")
+        canvas.markActive(tileId: tile.id)
+
+        guard canvas.agentStatus(for: tile.id) == .needsAttention else {
+            throw fail("approval live check: canvas status did not become needsAttention")
+        }
+        guard canvas.attentionTileIds.contains(tile.id) else {
+            throw fail("approval live check: canvas did not track the attention tile")
+        }
+        guard canvas.qaAttentionBorderActive(for: tile.id) else {
+            throw fail("approval live check: attention border is not active")
+        }
+        guard !canvas.qaFocusBorderActive else {
+            throw fail("approval live check: focus border must be suppressed while attention is active")
+        }
+        guard view.qaApprovalDockVisible else {
+            throw fail("approval live check: approval dock is hidden")
+        }
+        guard view.qaApprovalDockDetailText.contains("Run command: npm test") else {
+            throw fail("approval live check: dock detail rendered '\(view.qaApprovalDockDetailText)'")
+        }
+        guard view.qaApprovalDockButtonTitles == ["Approve", "Approve for session", "Decline"] else {
+            throw fail("approval live check: dock buttons \(view.qaApprovalDockButtonTitles)")
+        }
+
+        view.qaClickApproval(.accept)
+        guard canvas.agentStatus(for: tile.id) != AgentStatus.needsAttention else {
+            throw fail("approval live check: status stayed needsAttention after approve")
+        }
+        guard canvas.attentionTileIds.isEmpty else {
+            throw fail("approval live check: attention set not cleared after approve")
+        }
+        guard !canvas.qaAttentionBorderActive(for: tile.id) else {
+            throw fail("approval live check: attention border stayed active after approve")
+        }
+        guard !view.qaApprovalDockVisible else {
+            throw fail("approval live check: dock stayed visible after approve")
+        }
+    }
+
+    private static func runUserInputCardLiveCheck(fail: (String) -> Error) throws {
+        let tile = Tile(
+            id: UUID(uuidString: "73000000-0000-4000-8000-000000000073")!,
+            kind: .managedAgent,
+            title: "Claude · feature/migrations",
+            frame: TileFrame(x: 80, y: 60, width: 520, height: 260),
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")
+        )
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [tile],
+            groups: [],
+            lastActiveTileId: nil
+        ))
+        let view = ManagedAgentTileNSView(tile: tile)
+        var submitted: (requestId: String, answers: UserInputAnswers)?
+        view.onUserInputSubmit = { requestId, answers in
+            submitted = (requestId, answers)
+        }
+        canvas.install(tileView: view, for: tile)
+        view.ingest(.sessionStateChanged(.running))
+        view.ingest(.turnStarted(threadId: "thread-main", turnId: "turn-live-input"))
+        view.ingest(.contentDelta(threadId: "thread-main", turnId: "turn-live-input", streamKind: .assistant, delta: "I need one naming decision."))
+        view.ingest(.userInputRequested(threadId: "thread-main", requestId: "input-live", questions: [
+            UserInputQuestion(key: "filename", prompt: "What should I name the new migration file?")
+        ]))
+        canvas.markActive(tileId: tile.id)
+
+        guard view.qaPendingUserInputCount == 1 else {
+            throw fail("user input live check: pending count \(view.qaPendingUserInputCount), expected 1")
+        }
+        guard canvas.agentStatus(for: tile.id) == .needsAttention else {
+            throw fail("user input live check: canvas status did not become needsAttention")
+        }
+        guard canvas.attentionTileIds.contains(tile.id) else {
+            throw fail("user input live check: canvas did not track the attention tile")
+        }
+        guard view.qaUserInputCardCount == 1 else {
+            throw fail("user input live check: card count \(view.qaUserInputCardCount), expected 1")
+        }
+        guard view.qaUserInputQuestion(requestId: "input-live") == "What should I name the new migration file?" else {
+            throw fail("user input live check: question text mismatch")
+        }
+
+        view.qaSubmitUserInput(requestId: "input-live", answer: "AddWorkspaceZoneMigration.swift")
+        guard submitted?.requestId == "input-live" else {
+            throw fail("user input live check: submit requestId \(submitted?.requestId ?? "nil")")
+        }
+        guard submitted?.answers.answers == ["response": "AddWorkspaceZoneMigration.swift"] else {
+            throw fail("user input live check: submitted answers \(submitted?.answers.answers ?? [:])")
+        }
+        guard view.qaPendingUserInputCount == 0 else {
+            throw fail("user input live check: pending count stayed \(view.qaPendingUserInputCount)")
+        }
+        guard view.qaUserInputCardCount == 0 else {
+            throw fail("user input live check: card stayed visible after submit")
+        }
+        let statusAfterSubmit = canvas.agentStatus(for: tile.id)
+        guard statusAfterSubmit == .working else {
+            throw fail("user input live check: status after submit \(String(describing: statusAfterSubmit)), expected working")
+        }
     }
 }
 

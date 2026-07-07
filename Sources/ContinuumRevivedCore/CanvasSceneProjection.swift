@@ -86,6 +86,7 @@ public enum CanvasSceneGlyph {
         case .conductorQueue: return "list.bullet.rectangle"
         case .diffReview: return "arrow.triangle.branch"
         case .runArtifacts: return "shippingbox"
+        case .managedAgent: return "person.crop.square"
         }
     }
 }

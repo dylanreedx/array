@@ -38,6 +38,16 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         }
     }
 
+    private final class SidebarRowView: NSTableRowView {
+        override func drawSelection(in dirtyRect: NSRect) {
+            super.drawSelection(in: dirtyRect)
+            guard isSelected else { return }
+            let stripe = NSRect(x: 2, y: bounds.minY + 3, width: 3, height: max(0, bounds.height - 6))
+            NSColor.controlAccentColor.setFill()
+            stripe.fill()
+        }
+    }
+
     private let scrollView: NSScrollView
     private let outlineView: NSOutlineView
     private let column: NSTableColumn
@@ -185,6 +195,10 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
         (item as? SidebarItem)?.children.isEmpty == false
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
+        SidebarRowView()
     }
 
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {

@@ -44,7 +44,10 @@ class TileNSView: NSView {
     }
 
     var agentStatus: AgentStatus? {
-        didSet { titleBar?.agentStatus = agentStatus }
+        didSet {
+            titleBar?.agentStatus = agentStatus
+            canvas?.updateAttentionBorder(for: tile.id, status: agentStatus)
+        }
     }
 
     /// Non-empty description of why the tile is in a failed/stale state (e.g. a

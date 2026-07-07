@@ -63,6 +63,7 @@ let package = Package(
                 "Canvas/TerminalTileNSView.swift",
                 "Canvas/TicketQueueTileNSView.swift",
                 "Canvas/TileNSView.swift",
+                "Canvas/UserInputCardView.swift",
                 // Ticket 57 (round-2 concern #4): see the same exclude entry
                 // on the ContinuumRevived target below for why.
                 "ContinuumRevived.entitlements"

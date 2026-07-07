@@ -46,7 +46,7 @@ public enum TileActionCatalog {
             map["browserForward"] = (TileChord(keyCode: 30, modifiers: .command), .browserForward)
         case .note:
             map["noteExport"] = (TileChord(keyCode: 14, modifiers: .command), .noteExport)
-        case .terminal, .browserInspector, .file, .fileTree, .ticketQueue, .conductorQueue, .diffReview, .runArtifacts:
+        case .terminal, .browserInspector, .file, .fileTree, .ticketQueue, .conductorQueue, .diffReview, .runArtifacts, .managedAgent:
             break
         }
         return map

@@ -171,6 +171,7 @@ public enum TileKind: String, Codable, Equatable, Sendable, CaseIterable {
     case conductorQueue
     case diffReview
     case runArtifacts
+    case managedAgent
 }
 
 public struct TileFrame: Codable, Equatable, Sendable {

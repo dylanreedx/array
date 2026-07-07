@@ -812,6 +812,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--topology-migration-check") {
+            do {
+                let artifact = try AppDelegate.runTopologyMigrationSelfCheck()
+                print("ContinuumRevivedTopologyMigrationChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--palette-first-responder-restore-check") {
             do {
                 _ = NSApplication.shared
@@ -973,6 +984,18 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 let artifact = try AppDelegate.runWorkspaceSidebarShellSelfCheck()
                 print("ContinuumRevivedWorkspaceSidebarShellChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--workspace-sidebar-default-visible-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try AppDelegate.runWorkspaceSidebarDefaultVisibleSelfCheck()
+                print("ContinuumRevivedWorkspaceSidebarDefaultVisibleChecks passed: \(artifact.path)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -1872,6 +1895,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--new-tile-cwd-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try TileSpawner.runNewTileCwdSelfCheck()
+                print("ContinuumRevivedNewTileCwdChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--persistence-crash-safe-check") {
             do {
                 let artifact = try AppDelegate.runPersistenceCrashSafeSelfCheck()
@@ -2287,7 +2322,9 @@ enum ContinuumApp {
 
         let viewMenuItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
         let viewMenu = NSMenu(title: "View")
-        viewMenu.addItem(NSMenuItem(title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: ""))
+        let sidebarItem = NSMenuItem(title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "S")
+        sidebarItem.keyEquivalentModifierMask = [.command, .shift]
+        viewMenu.addItem(sidebarItem)
         viewMenu.addItem(NSMenuItem(title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: ""))
         viewMenuItem.submenu = viewMenu
         mainMenu.addItem(viewMenuItem)
@@ -2335,7 +2372,7 @@ enum ContinuumApp {
         try expectMenuItem(editMenu, title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
         guard let viewMenu = mainMenu.item(withTitle: "View")?.submenu else { throw SelfCheckError("missing View menu") }
-        try expectMenuItem(viewMenu, title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "")
+        try expectMenuItem(viewMenu, title: "Show Workspace Sidebar", action: #selector(AppDelegate.toggleWorkspaceSidebarFromMenu(_:)), keyEquivalent: "S", modifiers: [.command, .shift])
         try expectMenuItem(viewMenu, title: "Component Lab", action: #selector(AppDelegate.openComponentLabFromMenu(_:)), keyEquivalent: "")
 
         guard let debugMenu = mainMenu.item(withTitle: "Debug")?.submenu else { throw SelfCheckError("missing Debug menu") }
@@ -2458,6 +2495,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var observedAgentStatuses: [UUID: AgentStatus] = [:]
     private var workspaceTopBarView: WorkspaceTopBarView?
     private var workspaceSplitView: NSSplitView?
+    private var isApplyingWorkspaceSidebarVisibility = false
     private var workspaceCreatePromptProvider: (() -> String?)?
     private var workspaceRenamePromptProvider: ((String) -> String?)?
     private var workspaceDeleteConfirmationProvider: ((WorkspaceDeleteConfirmationRequest) -> Bool)?
@@ -2529,6 +2567,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         return lines.joined(separator: "\n") + "\n"
     }()
+    static let topologyMigrationNoteShownKey = "continuum.topology.migrationNoteShown"
+    static let topologyMigrationInformativeText = """
+    Continuum now groups terminal tiles by project, so your terminals share one tmux session per project. Your terminal tiles will restart once. Any running agents will need to be re-launched - they are still alive in tmux and can be found with `tmux ls` if needed.
+    """
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         launchStartTime = QAPerf.timestamp()
@@ -2586,6 +2628,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if let queueConfig = registry.projects.first(where: { $0.id == project.id })?.linearTicketQueue {
                 Self.materializeTicketQueueTile(in: &canvasState, config: queueConfig)
             }
+            try Self.applyTopologyMigrationIfNeeded(
+                projectStore: projectStore,
+                canvas: canvasState,
+                workspace: activeWorkspace?.document,
+                defaults: UserDefaults.standard,
+                presentAlert: Self.presentTopologyMigrationAlert
+            )
 
             let canvasView = CanvasNSView(canvasState: canvasState, activeZone: activeZone, zoneRenderModels: zoneRenderModels)
             canvasView.delegate = self
@@ -2685,6 +2734,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 else { return nil }
                 return record.tmuxWindowTarget()
             }
+            spawner.focusedTerminalCwdProvider = { [weak canvasView] in
+                guard let canvasView,
+                      let tileId = canvasView.canvasState.lastActiveTileId,
+                      let tileView = canvasView.tileView(for: tileId) as? TerminalTileNSView
+                else { return nil }
+                return tileView.runtime.capturedCwd
+            }
             spawner.browserProfileSwitchHandler = { [weak self] tileId, profileId in
                 self?.switchBrowserTileProfile(tileId: tileId, profileId: profileId)
             }
@@ -2752,6 +2808,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     installInitialDiffReviewTile(tile, in: canvasView)
                 case .runArtifacts:
                     installInitialRunArtifactsTile(tile, in: canvasView, via: spawner)
+                case .managedAgent:
+                    installInitialManagedAgentTile(tile, in: canvasView)
                 }
             }
 
@@ -3388,6 +3446,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case .runArtifacts:
             // Run artifact viewer tiles are read-only; retain the run directory.
             break
+        case .managedAgent:
+            break
         }
 
         canvasView.removeTile(id: id)
@@ -3620,6 +3680,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         } else {
             canvasView.install(tileView: DescriptorTileNSView(tile: tile), for: tile)
         }
+    }
+
+    private func installInitialManagedAgentTile(_ tile: Tile, in canvasView: CanvasNSView) {
+        canvasView.install(tileView: ManagedAgentTileNSView(tile: tile), for: tile)
     }
 
     private func dispatchAgent(for row: LinearTicketQueueRow) {
@@ -4991,6 +5055,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func applyWorkspaceSidebarVisibility(_ visible: Bool) {
         guard let splitView = workspaceSplitView,
               let sidebar = workspaceSidebarView else { return }
+        isApplyingWorkspaceSidebarVisibility = true
+        defer { isApplyingWorkspaceSidebarVisibility = false }
         sidebar.isHidden = !visible
         if visible {
             splitView.setPosition(CGFloat(WorkspaceSidebarConfig.resolveWidth()), ofDividerAt: 0)
@@ -4998,6 +5064,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             splitView.setPosition(0, ofDividerAt: 0)
         }
         splitView.adjustSubviews()
+        if !visible {
+            sidebar.isHidden = true
+        }
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -5023,6 +5092,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let splitView = notification.object as? NSSplitView,
               splitView === workspaceSplitView,
               let sidebar = workspaceSidebarView,
+              !isApplyingWorkspaceSidebarVisibility,
               !sidebar.isHidden else { return }
         WorkspaceSidebarConfig.setWidth(Double(sidebar.frame.width))
     }
@@ -5167,6 +5237,147 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return artifact
     }
 
+    static func runWorkspaceSidebarDefaultVisibleSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self { case let .failed(message): return message }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func tile(id: UUID, title: String, kind: TileKind, rank: Int) -> Tile {
+            Tile(
+                id: id,
+                kind: kind,
+                title: title,
+                frame: TileFrame(x: Double(rank) * 40, y: 0, width: 320, height: 220),
+                zPosition: .fromLegacyRank(rank),
+                runtimeRef: nil,
+                metadata: TileMetadata()
+            )
+        }
+
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("continuum-workspace-sidebar-default-visible-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let suiteName = "continuum-workspace-sidebar-default-visible-\(UUID().uuidString)"
+        guard let isolatedDefaults = UserDefaults(suiteName: suiteName) else {
+            throw CheckError.failed("could not create isolated defaults")
+        }
+        defer { isolatedDefaults.removePersistentDomain(forName: suiteName) }
+        try expect(isolatedDefaults.object(forKey: WorkspaceSidebarConfig.visibleKey) == nil, "isolated defaults must start without a sidebar visibility key")
+        try expect(isolatedDefaults.object(forKey: WorkspaceSidebarConfig.widthKey) == nil, "isolated defaults must start without a sidebar width key")
+        let defaultVisibleResolved = WorkspaceSidebarConfig.resolveVisible(defaults: isolatedDefaults)
+        try expect(defaultVisibleResolved, "fresh UserDefaults must resolve sidebar visible == defaultVisible (true)")
+
+        let standardDefaults = UserDefaults.standard
+        let originalVisible = standardDefaults.object(forKey: WorkspaceSidebarConfig.visibleKey)
+        let originalWidth = standardDefaults.object(forKey: WorkspaceSidebarConfig.widthKey)
+        standardDefaults.removeObject(forKey: WorkspaceSidebarConfig.visibleKey)
+        standardDefaults.removeObject(forKey: WorkspaceSidebarConfig.widthKey)
+        defer {
+            if let originalVisible {
+                standardDefaults.set(originalVisible, forKey: WorkspaceSidebarConfig.visibleKey)
+            } else {
+                standardDefaults.removeObject(forKey: WorkspaceSidebarConfig.visibleKey)
+            }
+            if let originalWidth {
+                standardDefaults.set(originalWidth, forKey: WorkspaceSidebarConfig.widthKey)
+            } else {
+                standardDefaults.removeObject(forKey: WorkspaceSidebarConfig.widthKey)
+            }
+        }
+
+        let currentWorkspace = UUID(uuidString: "00000000-0000-0000-0000-00000000E001")!
+        let otherWorkspace = UUID(uuidString: "00000000-0000-0000-0000-00000000E002")!
+        let zoneOne = UUID(uuidString: "00000000-0000-0000-0000-00000000E101")!
+        let otherZone = UUID(uuidString: "00000000-0000-0000-0000-00000000E102")!
+        let currentTiles = [
+            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000E201")!, title: "Shell Agent", kind: .terminal, rank: 1),
+            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000E202")!, title: "Docs Browser", kind: .browser, rank: 2),
+        ]
+        let otherTiles = [
+            tile(id: UUID(uuidString: "00000000-0000-0000-0000-00000000E203")!, title: "Scratch Note", kind: .note, rank: 3),
+        ]
+
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = currentWorkspace
+        registry.workspaces = [
+            WorkspaceEntry(id: currentWorkspace, name: "Current Workspace", projectIds: [], createdAt: Date(timeIntervalSince1970: 0), updatedAt: Date(timeIntervalSince1970: 0)),
+            WorkspaceEntry(id: otherWorkspace, name: "Other Workspace", projectIds: [], createdAt: Date(timeIntervalSince1970: 0), updatedAt: Date(timeIntervalSince1970: 0)),
+        ]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+
+        let currentDocument = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [
+                ZonePlacement(zoneId: zoneOne, projectId: nil, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 900, height: 600), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "Build", navKey: "1"),
+            ],
+            zoneZOrder: [zoneOne],
+            lastActiveZoneId: zoneOne,
+            ambientTiles: currentTiles.map { $0.with(zoneId: zoneOne) }
+        )
+        let otherDocument = WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [
+                ZonePlacement(zoneId: otherZone, projectId: nil, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 900, height: 600), color: "orange", collapsed: false, hydrationPolicy: .automatic, name: "Notes", navKey: "2"),
+            ],
+            zoneZOrder: [otherZone],
+            lastActiveZoneId: otherZone,
+            ambientTiles: otherTiles.map { $0.with(zoneId: otherZone) }
+        )
+        try WorkspaceStore(workspaceId: currentWorkspace, applicationSupportDirectory: appSupport).save(currentDocument)
+        try WorkspaceStore(workspaceId: otherWorkspace, applicationSupportDirectory: appSupport).save(otherDocument)
+
+        let app = AppDelegate()
+        app.registryStore = registryStore
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            tiles: [],
+            groups: [],
+            lastActiveTileId: nil
+        ))
+        let content = app.makeWorkspaceContentView(canvasView: canvas, frame: NSRect(x: 0, y: 0, width: 1_200, height: 800))
+        content.layoutSubtreeIfNeeded()
+        guard let splitView = app.workspaceSplitView,
+              let sidebar = app.workspaceSidebarView else {
+            throw CheckError.failed("workspace sidebar mount did not retain split/sidebar views")
+        }
+        splitView.layoutSubtreeIfNeeded()
+        sidebar.layoutSubtreeIfNeeded()
+
+        let sidebarIsHiddenAfterMount = sidebar.isHidden
+        let sidebarWidthAfterMount = Double(sidebar.frame.width)
+        let workspaceRowsRenderedAfterMount = sidebar.workspaceRowsRenderedForQA
+        try expect(!sidebarIsHiddenAfterMount, "mount must leave sidebar visible with no user action")
+        try expect(sidebarWidthAfterMount > 0, "mount must allocate positive sidebar width, got \(sidebarWidthAfterMount)")
+        try expect(workspaceRowsRenderedAfterMount >= 1, "mount reload must render at least one workspace row, got \(workspaceRowsRenderedAfterMount)")
+
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let directory = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("workspace-sidebar-default-visible", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let manifest: [String: Any] = [
+            "check": "workspace-sidebar-default-visible",
+            "defaultVisibleResolved": defaultVisibleResolved,
+            "sidebarIsHiddenAfterMount": sidebarIsHiddenAfterMount,
+            "dividerPositionAfterMount": sidebarWidthAfterMount,
+            "workspaceRowsRenderedAfterMount": workspaceRowsRenderedAfterMount,
+            "artifactPath": artifact.path,
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: artifact, options: .atomic)
+        return artifact
+    }
+
     static func runWorkspaceSidebarActionsSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)
@@ -5190,6 +5401,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         func viewportsNearlyEqual(_ lhs: CanvasViewport, _ rhs: CanvasViewport) -> Bool {
             max(abs(lhs.x - rhs.x), abs(lhs.y - rhs.y), abs(lhs.zoom - rhs.zoom)) < 0.001
+        }
+        func dividerPosition(_ sidebar: WorkspaceSidebarView) -> Double {
+            sidebar.isHidden ? 0.0 : Double(sidebar.frame.width)
         }
 
         let fm = FileManager.default
@@ -5235,9 +5449,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             )
         }
 
-        let tileAValue = tile(id: tileA, title: "Current Tile", x: 40, y: 40, rank: 1)
+        let tileAValue = tile(id: tileA, title: "Current Tile", x: 680, y: 460, rank: 1)
         let tileBValue = tile(id: tileB, title: "Zone Tile", x: 60, y: 60, rank: 1)
-        let tileCValue = tile(id: tileC, title: "Cross Workspace Tile", x: 50, y: 50, rank: 1)
+        let tileCValue = tile(id: tileC, title: "Cross Workspace Tile", x: 640, y: 420, rank: 1)
         let missingTileValue = tile(id: missingTile, title: "Stale Missing Tile", x: 80, y: 80, rank: 2)
 
         let projectAObject = makeProject(id: projectA, name: "Project A", root: projectARoot)
@@ -5291,6 +5505,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try registryStore.save(registry)
 
         let app = AppDelegate()
+        let standardDefaults = UserDefaults.standard
+        let originalSidebarVisible = standardDefaults.object(forKey: WorkspaceSidebarConfig.visibleKey)
+        let originalSidebarWidth = standardDefaults.object(forKey: WorkspaceSidebarConfig.widthKey)
+        defer {
+            if let originalSidebarVisible {
+                standardDefaults.set(originalSidebarVisible, forKey: WorkspaceSidebarConfig.visibleKey)
+            } else {
+                standardDefaults.removeObject(forKey: WorkspaceSidebarConfig.visibleKey)
+            }
+            if let originalSidebarWidth {
+                standardDefaults.set(originalSidebarWidth, forKey: WorkspaceSidebarConfig.widthKey)
+            } else {
+                standardDefaults.removeObject(forKey: WorkspaceSidebarConfig.widthKey)
+            }
+        }
         let browserEngine = BrowserEngineContext()
         defer { browserEngine.shutdown() }
         let zoneRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { projectId in
@@ -5323,15 +5552,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: 640))
         sidebar.onSelection = { selection in app.handleWorkspaceSidebarSelection(selection) }
         app.workspaceSidebarView = sidebar
+        let contentView = NSView(frame: NSRect(x: WorkspaceSidebarConfig.defaultWidth + 1, y: 0, width: 860, height: 640))
+        let splitView = NSSplitView(frame: NSRect(x: 0, y: 0, width: 1_160, height: 640))
+        splitView.isVertical = true
+        splitView.dividerStyle = .thin
+        splitView.addArrangedSubview(sidebar)
+        splitView.addArrangedSubview(contentView)
+        splitView.delegate = app
+        app.workspaceSplitView = splitView
+        splitView.layoutSubtreeIfNeeded()
         app.reloadWorkspaceSidebar()
         sidebar.layoutSubtreeIfNeeded()
 
+        WorkspaceSidebarConfig.setWidth(340)
+        app.setWorkspaceSidebarVisible(true)
+        splitView.layoutSubtreeIfNeeded()
+        let visibleAfterShow = !sidebar.isHidden
+        let positionAfterShow = dividerPosition(sidebar)
+        try expect(visibleAfterShow, "sidebar toggle check should show the sidebar")
+        try expect(abs(positionAfterShow - 340.0) <= 1.0, "sidebar toggle check should restore width 340, got \(positionAfterShow)")
+        app.setWorkspaceSidebarVisible(false)
+        splitView.layoutSubtreeIfNeeded()
+        let visibleAfterHide = !sidebar.isHidden
+        let positionAfterHide = dividerPosition(sidebar)
+        let widthAfterHide = WorkspaceSidebarConfig.resolveWidth()
+        try expect(
+            !visibleAfterHide,
+            "sidebar toggle check should hide the sidebar; isHidden=\(sidebar.isHidden) frame=\(sidebar.frame) collapsed=\(splitView.isSubviewCollapsed(sidebar))"
+        )
+        try expect(positionAfterHide <= 1.0, "sidebar toggle check should move hidden divider to 0, got \(positionAfterHide)")
+        try expect(widthAfterHide == 340.0, "hiding sidebar must not corrupt persisted width, got \(widthAfterHide)")
+        WorkspaceSidebarConfig.setWidth(340)
+        app.setWorkspaceSidebarVisible(true)
+        sidebar.setFrameSize(NSSize(width: 360, height: sidebar.frame.height))
+        app.splitViewDidResizeSubviews(Notification(name: NSSplitView.didResizeSubviewsNotification, object: splitView))
+        let widthAfterDividerMove = WorkspaceSidebarConfig.resolveWidth()
+        try expect(widthAfterDividerMove == 360.0, "visible divider move should persist width 360, got \(widthAfterDividerMove)")
+
+        guard let expectedTileAViewport = canvas.framedViewportForTileJump(tileA) else {
+            throw CheckError.failed("tileA must be frameable before sidebar click")
+        }
         let currentTileClickDelivered = sidebar.clickTileRowForQA(workspaceId: workspaceA, zoneId: zoneA, tileId: tileA)
         let currentTileFocusWorked = currentTileClickDelivered
             && app.focusBroker.activeSurface == .tile(tileA)
             && canvas.canvasState.lastActiveTileId == tileA
             && sidebar.selectedTargetForQA == .tile(workspaceId: workspaceA, zoneId: zoneA, tileId: tileA)
-        try expect(currentTileFocusWorked, "current workspace tile row should focus tile and select its row")
+            && viewportsNearlyEqual(canvas.viewport, expectedTileAViewport)
+        let measuredTileAViewport = canvas.viewport
+        try expect(currentTileFocusWorked, "current workspace tile row should pan canvas to tile, focus it, and select its row")
 
         guard let expectedZoneViewport = canvas.fitZoneToViewport(zoneId: zoneB) else {
             throw CheckError.failed("current zone must be frameable before sidebar click")
@@ -5353,13 +5621,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(sidebar.clickWorkspaceRowForQA(workspaceA), "setup: workspace A row should switch back")
         try expect(runtime.workspaceId == workspaceA, "setup: runtime should be back on workspace A")
 
+        try expect(sidebar.clickWorkspaceRowForQA(workspaceB), "setup: workspace B row should switch before cross-workspace tile framing")
+        canvas.layoutSubtreeIfNeeded()
+        guard let expectedTileCViewport = canvas.framedViewportForTileJump(tileC) else {
+            throw CheckError.failed("tileC must be frameable after workspace switch")
+        }
+        try expect(sidebar.clickWorkspaceRowForQA(workspaceA), "setup: workspace A row should switch back before cross-workspace tile click")
+        try expect(runtime.workspaceId == workspaceA, "setup: runtime should be back on workspace A before cross-workspace tile click")
         let crossTileClickDelivered = sidebar.clickTileRowForQA(workspaceId: workspaceB, zoneId: zoneC, tileId: tileC)
         let crossWorkspaceTileFocusWorked = crossTileClickDelivered
             && runtime.workspaceId == workspaceB
             && app.focusBroker.activeSurface == .tile(tileC)
             && canvas.canvasState.lastActiveTileId == tileC
             && sidebar.selectedTargetForQA == .tile(workspaceId: workspaceB, zoneId: zoneC, tileId: tileC)
-        try expect(crossWorkspaceTileFocusWorked, "non-current tile row should switch then focus tile")
+            && viewportsNearlyEqual(canvas.viewport, expectedTileCViewport)
+        let measuredTileCViewport = canvas.viewport
+        try expect(crossWorkspaceTileFocusWorked, "non-current tile row should switch, pan canvas to tile, focus it, and select its row")
 
         try expect(sidebar.clickWorkspaceRowForQA(workspaceA), "setup: workspace A row should switch back before missing-target probe")
         try expect(runtime.workspaceId == workspaceA, "setup: runtime should be back on workspace A before missing-target probe")
@@ -5386,6 +5663,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "currentTileFocusWorked": currentTileFocusWorked,
             "crossWorkspaceTileFocusWorked": crossWorkspaceTileFocusWorked,
             "missingTargetHandled": missingTargetHandled,
+            "visibleAfterShow": visibleAfterShow,
+            "positionAfterShow": positionAfterShow,
+            "visibleAfterHide": visibleAfterHide,
+            "positionAfterHide": positionAfterHide,
+            "widthAfterDividerMove": widthAfterDividerMove,
+            "tileAViewport": ["x": measuredTileAViewport.x, "y": measuredTileAViewport.y, "zoom": measuredTileAViewport.zoom],
+            "expectedTileAViewport": ["x": expectedTileAViewport.x, "y": expectedTileAViewport.y, "zoom": expectedTileAViewport.zoom],
+            "tileCViewport": ["x": measuredTileCViewport.x, "y": measuredTileCViewport.y, "zoom": measuredTileCViewport.zoom],
+            "expectedTileCViewport": ["x": expectedTileCViewport.x, "y": expectedTileCViewport.y, "zoom": expectedTileCViewport.zoom],
             "currentZoneViewport": ["x": measuredZoneViewport.x, "y": measuredZoneViewport.y, "zoom": measuredZoneViewport.zoom],
             "expectedCurrentZoneViewport": ["x": expectedZoneViewport.x, "y": expectedZoneViewport.y, "zoom": expectedZoneViewport.zoom],
             "selectedRowAfterMissingTarget": String(describing: sidebar.selectedTargetForQA),
@@ -10014,6 +10300,189 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             tSec: 1.0,
             success: true
         )
+    }
+
+    @MainActor
+    static func applyTopologyMigrationIfNeeded(
+        projectStore: any ProjectStoring,
+        canvas: CanvasState,
+        workspace: WorkspaceDocument?,
+        defaults: UserDefaults,
+        presentAlert: @MainActor () -> Void = { AppDelegate.presentTopologyMigrationAlert() }
+    ) throws {
+        guard !defaults.bool(forKey: topologyMigrationNoteShownKey) else { return }
+        guard let workspace else {
+            defaults.set(true, forKey: topologyMigrationNoteShownKey)
+            return
+        }
+        let state = DefaultWorkspaceMigration().detectTopologyMigration(
+            descriptors: try projectStore.listSessions(),
+            canvas: canvas,
+            workspace: workspace
+        )
+        guard case let .needed(legacyDescriptorIds) = state else {
+            defaults.set(true, forKey: topologyMigrationNoteShownKey)
+            return
+        }
+
+        defaults.set(true, forKey: topologyMigrationNoteShownKey)
+        presentAlert()
+        for id in legacyDescriptorIds {
+            try projectStore.deleteSession(id: id)
+        }
+    }
+
+    @MainActor
+    static func presentTopologyMigrationAlert() {
+        let alert = NSAlert()
+        alert.messageText = "Session model updated"
+        alert.informativeText = topologyMigrationInformativeText
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    @MainActor
+    static func runTopologyMigrationSelfCheck() throws -> URL {
+        struct SelfCheckError: Error, CustomStringConvertible {
+            let description: String
+            init(_ description: String) { self.description = description }
+        }
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("continuum-topology-migration-check-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let projectId = UUID(uuidString: "26000000-0000-4000-8000-000000000101")!
+        let projectZoneId = UUID(uuidString: "26000000-0000-4000-8000-000000000102")!
+        let ambientZoneId = UUID(uuidString: "26000000-0000-4000-8000-000000000103")!
+        let key = AppDelegate.topologyMigrationNoteShownKey
+
+        func makeTile(_ id: UUID, x: Double, y: Double, zoneId: UUID? = nil) -> Tile {
+            Tile(
+                id: id,
+                kind: .terminal,
+                title: "Shell",
+                frame: TileFrame(x: x, y: y, width: 120, height: 80),
+                zPosition: .fromLegacyRank(1),
+                zoneId: zoneId,
+                runtimeRef: nil,
+                metadata: TileMetadata(launchProfileId: "shell")
+            )
+        }
+
+        func makeDescriptor(_ id: UUID, tileId: UUID) -> TerminalSessionDescriptor {
+            TerminalSessionDescriptor(
+                id: id,
+                tileId: tileId,
+                launchProfileId: "shell",
+                command: "/bin/zsh",
+                args: ["new-session", "-A", "-s", "continuum-\(tileId.uuidString)", "-c", "/tmp/project"],
+                cwd: "/tmp/project",
+                env: [:],
+                title: "Shell",
+                createdAt: now,
+                lastStartedAt: now,
+                lastExit: nil
+            )
+        }
+
+        func workspace(ambientTile: Tile? = nil) -> WorkspaceDocument {
+            WorkspaceDocument(
+                viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                zones: [
+                    ZonePlacement(zoneId: projectZoneId, projectId: projectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 400, height: 300), color: "blue", collapsed: false, hydrationPolicy: .automatic),
+                    ZonePlacement(zoneId: ambientZoneId, projectId: nil, origin: ZonePoint(x: 600, y: 0), size: ZoneSize(width: 300, height: 240), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "Ambient")
+                ],
+                lastActiveZoneId: projectZoneId,
+                ambientTiles: ambientTile.map { [$0] } ?? []
+            )
+        }
+
+        func freshDefaults(_ name: String) throws -> UserDefaults {
+            let suite = "continuum.topology.migration.check.\(name).\(UUID().uuidString)"
+            guard let defaults = UserDefaults(suiteName: suite) else {
+                throw SelfCheckError("could not create defaults suite \(suite)")
+            }
+            defaults.removePersistentDomain(forName: suite)
+            return defaults
+        }
+
+        let deleteRoot = root.appendingPathComponent("delete", isDirectory: true)
+        try fm.createDirectory(at: deleteRoot, withIntermediateDirectories: true)
+        let deleteStore = ProjectStore(projectRoot: deleteRoot)
+        let projectTileA = makeTile(UUID(uuidString: "26000000-0000-4000-8000-000000000110")!, x: 20, y: 20)
+        let projectTileB = makeTile(UUID(uuidString: "26000000-0000-4000-8000-000000000111")!, x: 180, y: 40)
+        try deleteStore.saveSession(makeDescriptor(UUID(uuidString: "26000000-0000-4000-8000-000000000120")!, tileId: projectTileA.id))
+        try deleteStore.saveSession(makeDescriptor(UUID(uuidString: "26000000-0000-4000-8000-000000000121")!, tileId: projectTileB.id))
+        let deleteCanvas = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [projectTileA, projectTileB], groups: [], lastActiveTileId: nil)
+        let deleteDefaults = try freshDefaults("delete")
+        var deletePresenterFlags: [Bool] = []
+        try AppDelegate.applyTopologyMigrationIfNeeded(
+            projectStore: deleteStore,
+            canvas: deleteCanvas,
+            workspace: workspace(),
+            defaults: deleteDefaults,
+            presentAlert: { deletePresenterFlags.append(deleteDefaults.bool(forKey: key)) }
+        )
+        let deleteSessions = try deleteStore.listSessions()
+        guard deletePresenterFlags == [true] else { throw SelfCheckError("topology migration presenter flags \(deletePresenterFlags), expected [true]") }
+        guard deleteDefaults.bool(forKey: key) else { throw SelfCheckError("topology migration defaults flag was not set") }
+        guard deleteSessions.isEmpty else { throw SelfCheckError("migrating descriptors survived: \(deleteSessions.map(\.id))") }
+
+        let ambientRoot = root.appendingPathComponent("ambient", isDirectory: true)
+        try fm.createDirectory(at: ambientRoot, withIntermediateDirectories: true)
+        let ambientStore = ProjectStore(projectRoot: ambientRoot)
+        let projectTile = makeTile(UUID(uuidString: "26000000-0000-4000-8000-000000000130")!, x: 30, y: 40)
+        let ambientTile = makeTile(UUID(uuidString: "26000000-0000-4000-8000-000000000131")!, x: 50, y: 50, zoneId: ambientZoneId)
+        try ambientStore.saveSession(makeDescriptor(UUID(uuidString: "26000000-0000-4000-8000-000000000140")!, tileId: projectTile.id))
+        try ambientStore.saveSession(makeDescriptor(UUID(uuidString: "26000000-0000-4000-8000-000000000141")!, tileId: ambientTile.id))
+        let ambientCanvas = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [projectTile, ambientTile], groups: [], lastActiveTileId: nil)
+        let ambientDefaults = try freshDefaults("ambient")
+        var ambientPresenterFlags: [Bool] = []
+        try AppDelegate.applyTopologyMigrationIfNeeded(
+            projectStore: ambientStore,
+            canvas: ambientCanvas,
+            workspace: workspace(ambientTile: ambientTile),
+            defaults: ambientDefaults,
+            presentAlert: { ambientPresenterFlags.append(ambientDefaults.bool(forKey: key)) }
+        )
+        let ambientSessions = try ambientStore.listSessions().sorted { $0.tileId.uuidString < $1.tileId.uuidString }
+        guard ambientPresenterFlags == [true] else { throw SelfCheckError("ambient migration presenter flags \(ambientPresenterFlags), expected [true]") }
+        guard ambientSessions.map(\.tileId) == [ambientTile.id] else { throw SelfCheckError("ambient descriptor was not the sole survivor: \(ambientSessions.map(\.tileId))") }
+
+        let idempotentTileA = makeTile(UUID(uuidString: "26000000-0000-4000-8000-000000000150")!, x: 40, y: 40)
+        let idempotentTileB = makeTile(UUID(uuidString: "26000000-0000-4000-8000-000000000151")!, x: 190, y: 50)
+        try ambientStore.saveSession(makeDescriptor(UUID(uuidString: "26000000-0000-4000-8000-000000000160")!, tileId: idempotentTileA.id))
+        try ambientStore.saveSession(makeDescriptor(UUID(uuidString: "26000000-0000-4000-8000-000000000161")!, tileId: idempotentTileB.id))
+        var idempotentPresenterFlags: [Bool] = []
+        try AppDelegate.applyTopologyMigrationIfNeeded(
+            projectStore: ambientStore,
+            canvas: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [idempotentTileA, idempotentTileB], groups: [], lastActiveTileId: nil),
+            workspace: workspace(),
+            defaults: ambientDefaults,
+            presentAlert: { idempotentPresenterFlags.append(ambientDefaults.bool(forKey: key)) }
+        )
+        let idempotentSessions = try ambientStore.listSessions()
+        guard idempotentPresenterFlags.isEmpty else { throw SelfCheckError("idempotent call presented alert: \(idempotentPresenterFlags)") }
+        guard idempotentSessions.count == 3 else { throw SelfCheckError("idempotent call should leave existing ambient + two new descriptors, got \(idempotentSessions.count)") }
+
+        let artifactDir = root.appendingPathComponent("artifact", isDirectory: true)
+        try fm.createDirectory(at: artifactDir, withIntermediateDirectories: true)
+        let artifact = artifactDir.appendingPathComponent("manifest.json", isDirectory: false)
+        let manifest: [String: Any] = [
+            "check": "ticket26-topology-migration",
+            "presenterFlagAtPresentTime": deletePresenterFlags,
+            "defaultsFlagAfterMigration": deleteDefaults.bool(forKey: key),
+            "deletedMigratingDescriptorCount": 2,
+            "ambientSurvivorTileId": ambientSessions.first?.tileId.uuidString ?? "",
+            "idempotentPresenterCount": idempotentPresenterFlags.count,
+            "idempotentSessionCount": idempotentSessions.count,
+            "visualGate": "visual-gate-owed"
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
     }
 
     static func runBrowserLRUBudgetSelfCheck() throws -> URL {

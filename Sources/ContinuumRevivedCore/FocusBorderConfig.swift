@@ -16,6 +16,12 @@ public enum FocusBorderConfig {
     /// Marching-ants loop duration (s). Lower = faster. Matches the pre-config
     /// constant so behavior is unchanged when no preference is set.
     public static let defaultSpeed: Double = 2.5
+    /// Semantic attention ring color for managed-agent approvals. This is not
+    /// user-configurable: orange means human action is required.
+    public static let attentionColor: String = "Orange"
+    /// Faster than the normal focus march so attention remains distinct when a
+    /// focused tile is also waiting on the human.
+    public static let attentionSpeed: Double = 1.4
 
     /// Named color palette — the single source shared by `SettingsSchema` (the
     /// `.choice` options), the App's name→`NSColor` map, and the round-trip check.

@@ -150,6 +150,7 @@ run_app_check .build/debug/continuum-revived --browser-inspector-network-lite-ch
 run_app_check .build/debug/continuum-revived --browser-inspector-link-lifecycle-check
 run_app_check .build/debug/continuum-revived --browser-inspector-actions-check
 run_app_check .build/debug/continuum-revived --workspace-sidebar-shell-check
+run_app_check .build/debug/continuum-revived --workspace-sidebar-default-visible-check
 run_app_check .build/debug/continuum-revived --workspace-sidebar-actions-check
 run_app_check .build/debug/continuum-revived --workspace-sidebar-live-status-check
 run_app_check .build/debug/continuum-revived --workspace-top-bar-check
@@ -182,7 +183,9 @@ run_app_check .build/debug/continuum-revived --viewport-sanitize-check
 run_app_check .build/debug/continuum-revived --project-lock-check
 run_app_check .build/debug/continuum-revived --project-root-resolution-check
 run_app_check .build/debug/continuum-revived --project-picker-resolution-check
+run_app_check .build/debug/continuum-revived --topology-migration-check
 run_app_check .build/debug/continuum-revived --terminal-tmux-persistence-check
+run_app_check .build/debug/continuum-revived --new-tile-cwd-check
 run_app_check .build/debug/continuum-revived --terminal-tmux-delete-lifecycle-check
 run_app_check .build/debug/continuum-revived --terminal-tmux-ambient-workspace-check
 run_app_check .build/debug/continuum-revived --session-observer-check
