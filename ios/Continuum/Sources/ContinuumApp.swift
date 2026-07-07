@@ -145,11 +145,15 @@ private final class AgentsBoardModel: ObservableObject {
     @Published var rows: [AgentsBoardRow] = []
     @Published var lastApprovalAck: ApprovalResponseAck?
     @Published var apnsDeviceToken: String?
+    @Published var freshnessNow = Date()
 
     // Ticket: docs/38-tickets/61b-canvas-editor.md
     @Published var canvasScene: CanvasScene = CanvasScene(zones: [], tiles: [])
     @Published var canvasFocusRequest: UUID?
     @Published var canvasEditError: String?
+    @Published private var transportAvailability: CompanionTransportAvailability = .connecting
+    @Published private var latestActivityFreshness: CompanionFreshnessSample?
+    @Published private var latestSpatialFreshness: CompanionFreshnessSample?
     var grantedScope: Scope {
         let storedScope = CompanionUICapability(state: pairedSessionState).scope
         #if DEBUG
@@ -172,12 +176,36 @@ private final class AgentsBoardModel: ObservableObject {
     private var receiver: ActivityProjectionReceiver?
     private var spatialReceiver: SpatialOpReceiver?
     private var spatialTask: Task<Void, Never>?
+    private var freshnessTask: Task<Void, Never>?
     private var demux: SyncMessageDemux?
+    private var freshnessSequence: Int64 = 0
     private let pairedSessionStore: any PairedCompanionSessionStoring = KeychainPairedCompanionSessionStore()
+
+    var freshness: CompanionFreshness {
+        CompanionFreshness.derive(
+            CompanionFreshnessInput(
+                sessionState: pairedSessionState,
+                spatialSnapshot: latestSpatialFreshness,
+                activitySnapshot: latestActivityFreshness,
+                transportAvailability: transportAvailability,
+                now: freshnessNow
+            )
+        )
+    }
+
+    var hasCachedAgentData: Bool { !rows.isEmpty }
+    var hasCachedCanvasData: Bool { !canvasScene.zones.isEmpty || !canvasScene.tiles.isEmpty }
+    var canMutateFromFreshness: Bool { freshness.allowsMutations }
+    var isFreshnessLive: Bool {
+        if case .live = freshness.state { return true }
+        return false
+    }
 
     func start() async {
         guard task == nil else { return }
         state = .loading
+        transportAvailability = .connecting
+        startFreshnessTicker()
         pairedSessionState = pairedSessionStore.loadState()
         let capability = CompanionUICapability(state: pairedSessionState)
         guard capability.canStartTransport else {
@@ -189,13 +217,16 @@ private final class AgentsBoardModel: ObservableObject {
         do {
             let status = try await container.accountStatus()
             guard status == .available else {
+                transportAvailability = .accountUnavailable
                 state = .unavailable("Sign in to iCloud in Settings to observe your agents")
                 return
             }
         } catch {
+            transportAvailability = .accountUnavailable
             state = .unavailable("Sign in to iCloud in Settings to observe your agents")
             return
         }
+        transportAvailability = .available
 
         let transport = CloudKitSyncTransport(containerIdentifier: continuumCloudKitContainerIdentifier)
         // ONE transport, ONE demux — the spatial receiver below is a second
@@ -238,6 +269,9 @@ private final class AgentsBoardModel: ObservableObject {
     }
 
     func respondToApproval(tileId: UUID, requestId: String, decision: ApprovalDecision) async throws -> ApprovalResponseOutcome {
+        guard canMutateFromFreshness else {
+            throw ApprovalSendError.freshnessBlocked(freshness.actionBlocker ?? "Reconnect to act")
+        }
         guard let demux else {
             throw ApprovalSendError.unavailable
         }
@@ -281,11 +315,19 @@ private final class AgentsBoardModel: ObservableObject {
             snapshot = AgentsBoardProjection.applyEvent(event, to: snapshot)
         }
         rows = AgentsBoardProjection.rows(from: snapshot)
+        latestActivityFreshness = syntheticFreshnessSample(
+            spatialWatermark: nil,
+            activityWatermark: "activity-\(snapshot.snapshotSequence)"
+        )
         state = .live
     }
 
     private func consumeSpatial(_ materialized: MaterializedState) {
         canvasScene = CanvasSceneProjection.scene(canvasState: materialized.canvasState, workspaceDocument: materialized.workspaceDocument)
+        latestSpatialFreshness = syntheticFreshnessSample(
+            spatialWatermark: "spatial-v\(materialized.canvasState.schemaVersion)-t\(materialized.canvasState.tiles.count)-z\(materialized.workspaceDocument.zones.count)",
+            activityWatermark: nil
+        )
     }
 
     /// "Show on canvas" centers the tile when the canvas already has it;
@@ -301,6 +343,10 @@ private final class AgentsBoardModel: ObservableObject {
     /// `consumeSpatial`, so `canvasScene` snaps back automatically) — this
     /// only surfaces a non-blocking error.
     func emitCanvasOp(_ op: Op) async {
+        guard canMutateFromFreshness else {
+            canvasEditError = freshness.actionBlocker ?? "Reconnect to act"
+            return
+        }
         guard let spatialReceiver else { return }
         do {
             try await spatialReceiver.emit(op)
@@ -314,6 +360,10 @@ private final class AgentsBoardModel: ObservableObject {
     /// at the first failure — surfaces the same non-blocking error `emitCanvasOp`
     /// does, never emits a membership change after a failed move.
     func emitCanvasOps(_ ops: [Op]) async {
+        guard canMutateFromFreshness else {
+            canvasEditError = freshness.actionBlocker ?? "Reconnect to act"
+            return
+        }
         guard let spatialReceiver else { return }
         do {
             try await spatialReceiver.emitAll(ops)
@@ -322,11 +372,48 @@ private final class AgentsBoardModel: ObservableObject {
         }
     }
 
+    private func startFreshnessTicker() {
+        guard freshnessTask == nil else { return }
+        freshnessTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                await MainActor.run {
+                    self?.freshnessNow = Date()
+                }
+            }
+        }
+    }
+
+    private func syntheticFreshnessSample(spatialWatermark: String?, activityWatermark: String?) -> CompanionFreshnessSample {
+        freshnessSequence += 1
+        let receivedAt = Date()
+        freshnessNow = receivedAt
+        let instanceId: UUID
+        if case .paired(let session) = pairedSessionState {
+            instanceId = session.instanceId
+        } else {
+            instanceId = UUID(uuidString: "00000000-0000-4000-8000-000000000080")!
+        }
+        return CompanionFreshnessSample(
+            metadata: CompanionFreshnessMetadata(
+                instanceId: instanceId,
+                desktopReplicaId: "cloudkit-receiver",
+                bootId: "ios-session",
+                sequence: freshnessSequence,
+                publishedAt: receivedAt,
+                receivedAt: receivedAt,
+                powerHint: .unknown,
+                spatialWatermark: spatialWatermark,
+                activityWatermark: activityWatermark
+            )
+        )
+    }
 }
 
 private enum ApprovalSendError: LocalizedError {
     case unavailable
     case ackTimedOut
+    case freshnessBlocked(String)
 
     var errorDescription: String? {
         switch self {
@@ -334,6 +421,8 @@ private enum ApprovalSendError: LocalizedError {
             "Approval channel is not connected."
         case .ackTimedOut:
             "Approval response timed out."
+        case .freshnessBlocked(let message):
+            message
         }
     }
 }
@@ -345,26 +434,28 @@ private struct AgentsBoardView: View {
     var body: some View {
         NavigationStack {
             Group {
-                switch model.state {
-                case .loading:
-                    LoadingBoardView()
+                switch model.freshness.state {
                 case .unpaired:
                     PairingRequiredView()
-                case .unavailable(let message):
-                    ActionableErrorView(message: message)
+                case .syncing:
+                    LoadingBoardView()
                 case .live:
                     if model.rows.isEmpty {
                         EmptyBoardView()
                     } else {
-                        List(model.rows) { row in
-                            NavigationLink(value: row.tileId) {
-                                AgentRowView(row: row)
-                            }
-                            .listRowBackground(row.status == .needsAttention ? Color.orange.opacity(0.12) : Color.clear)
-                        }
-                        .listStyle(.plain)
-                        .scrollContentBackground(.hidden)
+                        agentsList
                     }
+                case .stale, .desktopSleeping, .offline:
+                    if model.hasCachedAgentData {
+                        agentsList
+                    } else {
+                        WaitingForMacView(freshness: model.freshness)
+                    }
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if model.freshness.state != .unpaired {
+                    FreshnessFooter(freshness: model.freshness)
                 }
             }
             .background(AppColors.background.ignoresSafeArea())
@@ -373,6 +464,17 @@ private struct AgentsBoardView: View {
                 AgentDetailView(tileId: tileId, selectedTab: $selectedTab)
             }
         }
+    }
+
+    private var agentsList: some View {
+        List(model.rows) { row in
+            NavigationLink(value: row.tileId) {
+                AgentRowView(row: row)
+            }
+            .listRowBackground(row.status == .needsAttention ? Color.orange.opacity(0.12) : Color.clear)
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
     }
 }
 
@@ -383,12 +485,18 @@ private struct ApprovalsInboxView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if model.approvalRows.isEmpty {
-                    Text("Nothing needs you.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(AppColors.background.ignoresSafeArea())
+                if model.freshness.state == .unpaired {
+                    PairingRequiredView()
+                } else if model.approvalRows.isEmpty {
+                    if model.hasCachedAgentData || model.isFreshnessLive {
+                        Text("Nothing needs you.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(AppColors.background.ignoresSafeArea())
+                    } else {
+                        WaitingForMacView(freshness: model.freshness)
+                    }
                 } else {
                     List(model.approvalRows) { row in
                         NavigationLink(value: row.tileId) {
@@ -399,6 +507,11 @@ private struct ApprovalsInboxView: View {
                     .listStyle(.plain)
                     .scrollContentBackground(.hidden)
                     .background(AppColors.background.ignoresSafeArea())
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if model.freshness.state != .unpaired {
+                    FreshnessFooter(freshness: model.freshness)
                 }
             }
             .navigationTitle("Approvals")
@@ -452,7 +565,7 @@ private struct AgentDetailView: View {
                 if let row, let activity {
                     DetailHeader(row: row)
                     if row.status == .needsAttention {
-                        PendingAttentionCard(activity: activity, grantedScope: model.grantedScope) { target, decision in
+                        PendingAttentionCard(activity: activity, grantedScope: model.grantedScope, freshness: model.freshness) { target, decision in
                             try await model.respondToApproval(
                                 tileId: target.tileId,
                                 requestId: target.approvalRequestId,
@@ -515,6 +628,7 @@ private struct DetailHeader: View {
 private struct PendingAttentionCard: View {
     let activity: TileActivity
     let grantedScope: Scope
+    let freshness: CompanionFreshness
     var onRespond: (ApprovalResponseTarget, ApprovalDecision) async throws -> ApprovalResponseOutcome
 
     @State private var resolving: ApprovalDecision?
@@ -531,6 +645,10 @@ private struct PendingAttentionCard: View {
     }
 
     private var gateHint: String? {
+        if case .live = freshness.state {
+        } else {
+            return freshness.actionBlocker ?? "Reconnect to act"
+        }
         if target == nil {
             return "No approval id synced"
         }
@@ -781,6 +899,67 @@ private struct ActionableErrorView: View {
     }
 }
 
+private struct WaitingForMacView: View {
+    let freshness: CompanionFreshness
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "macbook.and.iphone")
+                .font(.system(size: 30, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text("Waiting for your Mac")
+                .font(.headline)
+            Text(freshness.subtitle)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct FreshnessFooter: View {
+    let freshness: CompanionFreshness
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(dotColor)
+                .frame(width: 8, height: 8)
+            Text(freshness.title)
+                .font(.caption.weight(.semibold))
+            Text(freshness.subtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            if let lastFreshAt = freshness.lastFreshAt {
+                Text(lastFreshAt, style: .time)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(AppColors.panel)
+    }
+
+    private var dotColor: Color {
+        switch freshness.state {
+        case .live:
+            return .green
+        case .syncing:
+            return .blue
+        case .stale:
+            return .orange
+        case .desktopSleeping, .offline:
+            return .gray
+        case .unpaired:
+            return .secondary
+        }
+    }
+}
+
 private struct EmptyBoardView: View {
     var body: some View {
         VStack(spacing: 10) {
@@ -810,7 +989,7 @@ private struct CanvasTabView: View {
     @GestureState private var resizeTranslation: CGSize = .zero
     @State private var hoveredZoneId: UUID?
 
-    private var canEdit: Bool { CanvasEditIntent.isEditingPermitted(scope: model.grantedScope) }
+    private var canEdit: Bool { model.canMutateFromFreshness && CanvasEditIntent.isEditingPermitted(scope: model.grantedScope) }
     // Hard-blocks the camera (pan/zoom) from moving while a tile drag or
     // resize is in progress — the editor contract requires gesture-end edits
     // to be evaluated against a fixed camera, never a camera that shifted
@@ -847,6 +1026,11 @@ private struct CanvasTabView: View {
                     model.canvasFocusRequest = nil
                 }
             }
+            .safeAreaInset(edge: .bottom) {
+                if model.freshness.state != .unpaired {
+                    FreshnessFooter(freshness: model.freshness)
+                }
+            }
             .navigationTitle("Canvas")
         }
     }
@@ -866,7 +1050,7 @@ private struct CanvasTabView: View {
         VStack {
             HStack {
                 if !canEdit {
-                    LockBadge()
+                    LockBadge(text: model.freshness.actionBlocker ?? "Read only")
                 }
                 Spacer()
                 Button {
@@ -1113,8 +1297,10 @@ private func zoneTint(for token: String) -> Color {
 }
 
 private struct LockBadge: View {
+    var text: String = "Read only"
+
     var body: some View {
-        Label("Read only", systemImage: "lock.fill")
+        Label(text, systemImage: "lock.fill")
             .font(.caption.weight(.semibold))
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
