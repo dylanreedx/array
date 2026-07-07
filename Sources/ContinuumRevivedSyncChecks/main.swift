@@ -215,3 +215,6 @@ try await runSpatialSyncChecks()
 
 // Ticket: docs/38-tickets/75-desktop-companion-sync-publisher.md
 try await runDesktopCompanionSyncPublisherChecks()
+
+// Ticket: docs/38-tickets/76-morning-companion-dogfood-kit.md
+try runCompanionDogfoodKitChecks()

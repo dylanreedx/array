@@ -661,6 +661,50 @@ private struct PushPayloadDumpError: Error, CustomStringConvertible {
     let description: String
 }
 
+private struct CompanionSyncHealthCheckError: Error, CustomStringConvertible {
+    let description: String
+}
+
+private func hasMainBundleICloudEntitlement(containerIdentifier: String) -> Bool {
+    guard let entitlements = Bundle.main.object(forInfoDictionaryKey: "com.apple.developer.icloud-container-identifiers") as? [String] else {
+        return false
+    }
+    return entitlements.contains(containerIdentifier)
+}
+
+private func runCompanionSyncHealthCheck() throws {
+    let config = DesktopCompanionSyncConfiguration(
+        containerIdentifier: CompanionSyncConfig.cloudKitContainerIdentifier,
+        desktopBundleIdentifier: Bundle.main.bundleIdentifier ?? "com.continuum.revived",
+        iosBundleIdentifier: "dev.dylanreedx.continuum",
+        signedWithICloudEntitlement: hasMainBundleICloudEntitlement(containerIdentifier: CompanionSyncConfig.cloudKitContainerIdentifier)
+    )
+    let diagnostics = DesktopCompanionSyncDiagnostics(
+        containerIdentifier: config.containerIdentifier,
+        desktopBundleIdentifier: config.desktopBundleIdentifier,
+        iosBundleIdentifier: config.iosBundleIdentifier,
+        signedWithICloudEntitlement: config.signedWithICloudEntitlement,
+        transportAvailability: .connecting,
+        transportIsPairingProof: false,
+        isPaired: false,
+        pairedDeviceCount: 0,
+        authorizedScope: [],
+        lastError: "Health check only; start the signed app and pair a companion for live publish/fetch timestamps"
+    )
+    let apns = APNSEnvLoader.load()
+    let report = CompanionDogfoodHealthReport(
+        diagnostics: diagnostics,
+        iCloudAccountAvailable: false,
+        apnsTopic: config.iosBundleIdentifier,
+        teamIdentifier: apns?.teamId
+    )
+    let data = try CompanionDogfoodJSON.encoder.encode(report)
+    guard let text = String(data: data, encoding: .utf8) else {
+        throw CompanionSyncHealthCheckError(description: "failed to encode companion sync health JSON")
+    }
+    print(text)
+}
+
 private func writePushPayloadDump(to directory: URL) throws {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     for category in PushCategory.allCases {
@@ -723,6 +767,16 @@ enum ContinuumApp {
 
     @MainActor
     static func main() {
+        if CommandLine.arguments.contains("--companion-sync-health-check") {
+            do {
+                try runCompanionSyncHealthCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--push-payload-dump") {
             do {
                 try runPushPayloadDump(arguments: CommandLine.arguments)
