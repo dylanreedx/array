@@ -1,10 +1,23 @@
 import AppKit
 import ContinuumRevivedCore
+import ContinuumRevivedSync
 import Foundation
 import GhosttyKit
 import os
 import Security
 import WebKit
+
+private actor DesktopCompanionLogFreshnessPublisher: CompanionLifecycleHintPublishing {
+    private let logger = Logger(subsystem: "continuum.companion", category: "freshness")
+
+    func publishHeartbeat(_ metadata: CompanionFreshnessMetadata) async throws {
+        logger.notice("heartbeat instance=\(metadata.instanceId.uuidString, privacy: .public) replica=\(metadata.desktopReplicaId, privacy: .public) sequence=\(metadata.sequence, privacy: .public) spatial=\(String(describing: metadata.spatialWatermark), privacy: .public) activity=\(String(describing: metadata.activityWatermark), privacy: .public)")
+    }
+
+    func publishPowerHint(_ hint: CompanionDesktopPowerHint, metadata: CompanionFreshnessMetadata) async throws {
+        logger.notice("power-hint hint=\(hint.rawValue, privacy: .public) instance=\(metadata.instanceId.uuidString, privacy: .public) sequence=\(metadata.sequence, privacy: .public)")
+    }
+}
 
 private func runChromeIntegrationGuardrailsSelfCheck() throws -> URL {
     let fm = FileManager.default
@@ -2336,6 +2349,12 @@ enum ContinuumApp {
         authMenu.addItem(NSMenuItem(title: "Issue Pairing Token (Observer)", action: #selector(AppDelegate.issueObserverPairingTokenFromMenu(_:)), keyEquivalent: ""))
         authItem.submenu = authMenu
         debugMenu.addItem(authItem)
+        let companionItem = NSMenuItem(title: "Companion Sync", action: nil, keyEquivalent: "")
+        let companionMenu = NSMenu(title: "Companion Sync")
+        companionMenu.addItem(NSMenuItem(title: "Publish Now", action: #selector(AppDelegate.publishCompanionSyncNowFromMenu(_:)), keyEquivalent: ""))
+        companionMenu.addItem(NSMenuItem(title: "Fetch Now", action: #selector(AppDelegate.fetchCompanionSyncNowFromMenu(_:)), keyEquivalent: ""))
+        companionItem.submenu = companionMenu
+        debugMenu.addItem(companionItem)
         debugMenuItem.submenu = debugMenu
         mainMenu.addItem(debugMenuItem)
 
@@ -2378,6 +2397,9 @@ enum ContinuumApp {
         guard let debugMenu = mainMenu.item(withTitle: "Debug")?.submenu else { throw SelfCheckError("missing Debug menu") }
         guard let authMenu = debugMenu.item(withTitle: "Auth")?.submenu else { throw SelfCheckError("missing Debug > Auth menu") }
         try expectMenuItem(authMenu, title: "Issue Pairing Token (Observer)", action: #selector(AppDelegate.issueObserverPairingTokenFromMenu(_:)), keyEquivalent: "")
+        guard let companionMenu = debugMenu.item(withTitle: "Companion Sync")?.submenu else { throw SelfCheckError("missing Debug > Companion Sync menu") }
+        try expectMenuItem(companionMenu, title: "Publish Now", action: #selector(AppDelegate.publishCompanionSyncNowFromMenu(_:)), keyEquivalent: "")
+        try expectMenuItem(companionMenu, title: "Fetch Now", action: #selector(AppDelegate.fetchCompanionSyncNowFromMenu(_:)), keyEquivalent: "")
     }
 
     private static func expectMenuItem(
@@ -2526,6 +2548,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var suppressTerminateOnWindowCloseForQA = false
     private let focusBroker = FocusBroker()
     private var companionAuthService: CompanionAuthService?
+    private var companionSyncService: DesktopCompanionSyncService?
     private var navKeymap: NavKeymap = .default {
         didSet { leaderDwell = TimeInterval(navKeymap.leaderDwellMs) / 1000 }
     }
@@ -2844,6 +2867,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 runPreviousFocusNavigationCheck(window: window)
             } else if smokeTestEnabled {
                 runSmokeTest(window: window, runtime: runtimes.first)
+            } else {
+                startDesktopCompanionSyncService()
             }
         } catch {
             presentFatalError(error)
@@ -4747,6 +4772,139 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 Logger(subsystem: "continuum.auth", category: "pairing").error("pairing-url issue failed: \(String(describing: error), privacy: .public)")
             }
         }
+    }
+
+    @objc func publishCompanionSyncNowFromMenu(_ sender: Any?) {
+        Task { @MainActor in
+            do {
+                let service = ensureDesktopCompanionSyncService()
+                try await service.start()
+                try await service.publishCurrentDesktopSnapshot(reason: .manual)
+                await logCompanionSyncDiagnostics(reason: "manual-publish")
+            } catch {
+                Logger(subsystem: "continuum.companion", category: "sync").error("manual publish failed: \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
+    @objc func fetchCompanionSyncNowFromMenu(_ sender: Any?) {
+        Task { @MainActor in
+            do {
+                let service = ensureDesktopCompanionSyncService()
+                try await service.start()
+                try await service.fetchChanges(reason: .manual)
+                await logCompanionSyncDiagnostics(reason: "manual-fetch")
+            } catch {
+                Logger(subsystem: "continuum.companion", category: "sync").error("manual fetch failed: \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
+    private func startDesktopCompanionSyncService() {
+        Task { @MainActor in
+            do {
+                let service = ensureDesktopCompanionSyncService()
+                try await service.start()
+                try await service.fetchChanges(reason: .startup)
+                try await service.publishCurrentDesktopSnapshot(reason: .startup)
+                await logCompanionSyncDiagnostics(reason: "startup")
+            } catch {
+                Logger(subsystem: "continuum.companion", category: "sync").error("startup failed: \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
+    private func ensureDesktopCompanionSyncService() -> DesktopCompanionSyncService {
+        if let companionSyncService { return companionSyncService }
+        let transport = CloudKitSyncTransport(containerIdentifier: CompanionSyncConfig.cloudKitContainerIdentifier)
+        let service = DesktopCompanionSyncService(
+            configuration: DesktopCompanionSyncConfiguration(
+                containerIdentifier: CompanionSyncConfig.cloudKitContainerIdentifier,
+                signedWithICloudEntitlement: Self.hasICloudEntitlement(containerIdentifier: CompanionSyncConfig.cloudKitContainerIdentifier)
+            ),
+            transport: transport,
+            pairingSnapshot: { [weak self] in
+                guard let self else {
+                    return DesktopCompanionPairingSnapshot.unpaired(instanceId: UUID(uuidString: "00000000-0000-4000-8000-000000000075")!)
+                }
+                return await self.desktopCompanionPairingSnapshot()
+            },
+            canvasSnapshot: { [weak self] in
+                try await MainActor.run {
+                    guard let self, let canvasView = self.canvasView else {
+                        throw CompanionSyncAppError.missingCanvas
+                    }
+                    let workspace = self.workspaceRuntime?.document ?? WorkspaceDocument(
+                        viewport: canvasView.canvasState.viewport,
+                        zones: [],
+                        lastActiveZoneId: nil
+                    )
+                    return (canvasView.canvasState, workspace)
+                }
+            },
+            activitySnapshot: { [weak self] in
+                await MainActor.run {
+                    guard let self else { return ActivityLogSnapshot.empty }
+                    let descriptors = (try? self.projectStore?.listSessions()) ?? []
+                    return DegradedDesktopActivitySnapshotSource.snapshot(
+                        descriptors: descriptors,
+                        liveStatuses: self.currentObservedAgentStatusesByTileId(),
+                        replicaId: UUID(uuidString: "75000000-0000-4000-8000-00000000D35A")!,
+                        now: Date()
+                    )
+                }
+            },
+            freshnessPublisher: DesktopCompanionLogFreshnessPublisher(),
+            fetchChanges: {
+                try await transport.fetchChanges()
+            },
+            ensureSubscription: {
+                try await transport.ensureSubscription()
+            }
+        )
+        companionSyncService = service
+        return service
+    }
+
+    private func desktopCompanionPairingSnapshot() async -> DesktopCompanionPairingSnapshot {
+        do {
+            guard let companionAuthService else {
+                return DesktopCompanionPairingSnapshot.unpaired(instanceId: UUID(uuidString: "00000000-0000-4000-8000-000000000075")!)
+            }
+            let instance = try await companionAuthService.instance()
+            let devices = try await companionAuthService.listDevices().filter { $0.revokedAt == nil }
+            let scope = devices.reduce(Scope()) { partial, device in partial.union(device.scopes) }
+            guard !devices.isEmpty else {
+                return DesktopCompanionPairingSnapshot.unpaired(instanceId: instance.id)
+            }
+            return DesktopCompanionPairingSnapshot(
+                instanceId: instance.id,
+                pairedDeviceCount: devices.count,
+                authorizedScope: scope
+            )
+        } catch {
+            Logger(subsystem: "continuum.companion", category: "sync").error("pairing snapshot failed: \(String(describing: error), privacy: .public)")
+            return DesktopCompanionPairingSnapshot.unpaired(instanceId: UUID(uuidString: "00000000-0000-4000-8000-000000000075")!)
+        }
+    }
+
+    private func logCompanionSyncDiagnostics(reason: String) async {
+        guard let companionSyncService else { return }
+        let diagnostics = await companionSyncService.diagnostics
+        Logger(subsystem: "continuum.companion", category: "sync").notice(
+            "reason=\(reason, privacy: .public) container=\(diagnostics.containerIdentifier, privacy: .public) paired=\(diagnostics.isPaired, privacy: .public) pairedDevices=\(diagnostics.pairedDeviceCount, privacy: .public) signedICloud=\(diagnostics.signedWithICloudEntitlement, privacy: .public) transportIsPairingProof=\(diagnostics.transportIsPairingProof, privacy: .public) lastSpatial=\(String(describing: diagnostics.lastSpatialPublishAt), privacy: .public) lastActivity=\(String(describing: diagnostics.lastActivityPublishAt), privacy: .public) lastFetch=\(String(describing: diagnostics.lastFetchAt), privacy: .public) lastInbound=\(String(describing: diagnostics.lastInboundMessageKind), privacy: .public) lastApproval=\(String(describing: diagnostics.lastApprovalResponseOutcome), privacy: .public) lastError=\(String(describing: diagnostics.lastError), privacy: .public)"
+        )
+    }
+
+    private static func hasICloudEntitlement(containerIdentifier: String) -> Bool {
+        guard let entitlements = Bundle.main.object(forInfoDictionaryKey: "com.apple.developer.icloud-container-identifiers") as? [String] else {
+            return false
+        }
+        return entitlements.contains(containerIdentifier)
+    }
+
+    private enum CompanionSyncAppError: Error {
+        case missingCanvas
     }
 
     private func makeSettingsPanel() -> SettingsPanel {

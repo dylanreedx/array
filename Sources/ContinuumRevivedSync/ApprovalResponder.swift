@@ -15,13 +15,20 @@ public actor ApprovalResponder {
     private let seam: any ApprovalResponding
     private let demux: SyncMessageDemux
     private let authorizedScope: Scope
+    private let onAck: (@Sendable (ApprovalResponseAck) async -> Void)?
     private var loopTask: Task<Void, Never>?
     private var completedRequestIds: Set<String> = []
 
-    public init(seam: any ApprovalResponding, demux: SyncMessageDemux, authorizedScope: Scope) {
+    public init(
+        seam: any ApprovalResponding,
+        demux: SyncMessageDemux,
+        authorizedScope: Scope,
+        onAck: (@Sendable (ApprovalResponseAck) async -> Void)? = nil
+    ) {
         self.seam = seam
         self.demux = demux
         self.authorizedScope = authorizedScope
+        self.onAck = onAck
     }
 
     public func start() async {
@@ -60,7 +67,9 @@ public actor ApprovalResponder {
             } catch {
                 outcome = .unauthorized
             }
-            try? await demux.send(.approvalResponseAck(ApprovalResponseAck(requestId: request.requestId, outcome: outcome)))
+            let ack = ApprovalResponseAck(requestId: request.requestId, outcome: outcome)
+            await onAck?(ack)
+            try? await demux.send(.approvalResponseAck(ack))
         }
     }
 }

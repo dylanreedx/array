@@ -212,3 +212,6 @@ try await runCloudKitSyncTransportChecks()
 
 // Ticket: docs/38-tickets/61b-canvas-editor.md
 try await runSpatialSyncChecks()
+
+// Ticket: docs/38-tickets/75-desktop-companion-sync-publisher.md
+try await runDesktopCompanionSyncPublisherChecks()

@@ -80,6 +80,7 @@ let package = Package(
             dependencies: [
                 "ContinuumRevivedFileTree",
                 "ContinuumRevivedCore",
+                "ContinuumRevivedSync",
                 "GhosttyKit"
             ],
             exclude: [
