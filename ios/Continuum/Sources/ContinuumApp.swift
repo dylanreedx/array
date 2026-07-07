@@ -150,7 +150,9 @@ private final class AgentsBoardModel: ObservableObject {
     // Ticket: docs/38-tickets/61b-canvas-editor.md
     @Published var canvasScene: CanvasScene = CanvasScene(zones: [], tiles: [])
     @Published var canvasFocusRequest: UUID?
+    @Published var canvasHighlightedTileId: UUID?
     @Published var canvasEditError: String?
+    @Published var canvasFocusError: String?
     @Published private var transportAvailability: CompanionTransportAvailability = .connecting
     @Published private var latestActivityFreshness: CompanionFreshnessSample?
     @Published private var latestSpatialFreshness: CompanionFreshnessSample?
@@ -196,6 +198,18 @@ private final class AgentsBoardModel: ObservableObject {
     var hasCachedAgentData: Bool { !rows.isEmpty }
     var hasCachedCanvasData: Bool { !canvasScene.zones.isEmpty || !canvasScene.tiles.isEmpty }
     var canMutateFromFreshness: Bool { freshness.allowsMutations }
+    var canvasFreshnessDisplay: CanvasMirrorFreshnessDisplay {
+        CanvasMirrorPresentation.freshnessDisplay(
+            freshness: freshness,
+            hasCanvasData: hasCachedCanvasData,
+            spatialSample: latestSpatialFreshness,
+            activitySample: latestActivityFreshness,
+            now: freshnessNow
+        )
+    }
+    var canvasStatusOverlays: [UUID: CanvasMirrorTileStatus] {
+        CanvasMirrorPresentation.statusOverlays(scene: canvasScene, rows: rows)
+    }
     var isFreshnessLive: Bool {
         if case .live = freshness.state { return true }
         return false
@@ -330,11 +344,15 @@ private final class AgentsBoardModel: ObservableObject {
         )
     }
 
-    /// "Show on canvas" centers the tile when the canvas already has it;
-    /// otherwise it is a plain tab switch (ticket 61b banner (c).10) — the
-    /// caller always switches tabs, this only arms the centering request.
+    /// "Show on canvas" centers/highlights the tile when the canvas already
+    /// has it; otherwise the caller still switches tabs and the canvas shows
+    /// an explicit not-synced-yet message instead of failing silently.
     func requestCanvasFocus(tileId: UUID) {
-        guard canvasScene.tiles.contains(where: { $0.tileId == tileId }) else { return }
+        guard canvasScene.tiles.contains(where: { $0.tileId == tileId }) else {
+            canvasFocusError = "Tile not synced to canvas yet"
+            return
+        }
+        canvasFocusError = nil
         canvasFocusRequest = tileId
     }
 
@@ -980,6 +998,7 @@ private struct CanvasTabView: View {
 
     @State private var scale: CGFloat = 0.35
     @State private var pan: CGSize = .zero
+    @State private var framingState: CanvasMirrorFramingState = .waitingForFirstSnapshot
     @GestureState private var pinchDelta: CGFloat = 1.0
     @GestureState private var panTranslation: CGSize = .zero
 
@@ -1006,7 +1025,7 @@ private struct CanvasTabView: View {
                 ZStack(alignment: .topLeading) {
                     AppColors.background.ignoresSafeArea()
                     if model.canvasScene.zones.isEmpty && model.canvasScene.tiles.isEmpty {
-                        CanvasEmptyStateView()
+                        CanvasEmptyStateView(display: model.canvasFreshnessDisplay)
                     } else {
                         canvasContent
                             .contentShape(Rectangle())
@@ -1021,9 +1040,33 @@ private struct CanvasTabView: View {
                     overlayChrome(in: geo.size)
                 }
                 .onChange(of: model.canvasFocusRequest) { tileId in
-                    guard let tileId, let tile = model.canvasScene.tiles.first(where: { $0.tileId == tileId }) else { return }
-                    center(on: tile, in: geo.size)
+                    guard let tileId else { return }
+                    let result = CanvasMirrorPresentation.showOnCanvas(
+                        tileId: tileId,
+                        scene: model.canvasScene,
+                        viewportSize: mirrorSize(geo.size),
+                        currentScale: Double(scale)
+                    )
+                    apply(result.viewport)
+                    model.canvasHighlightedTileId = result.highlightedTileId
+                    if let message = result.message {
+                        model.canvasFocusError = message
+                    }
                     model.canvasFocusRequest = nil
+                    Task {
+                        try? await Task.sleep(for: .seconds(2))
+                        await MainActor.run {
+                            if model.canvasHighlightedTileId == tileId {
+                                model.canvasHighlightedTileId = nil
+                            }
+                        }
+                    }
+                }
+                .onChange(of: model.canvasScene) { scene in
+                    applyFirstSnapshotFrame(scene: scene, size: geo.size)
+                }
+                .onAppear {
+                    applyFirstSnapshotFrame(scene: model.canvasScene, size: geo.size)
                 }
             }
             .safeAreaInset(edge: .bottom) {
@@ -1049,8 +1092,22 @@ private struct CanvasTabView: View {
     private func overlayChrome(in size: CGSize) -> some View {
         VStack {
             HStack {
-                if !canEdit {
-                    LockBadge(text: model.freshness.actionBlocker ?? "Read only")
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(CanvasMirrorPresentation.workspaceTitle(nil))
+                        .font(.caption.weight(.semibold))
+                    CanvasMirrorFreshnessBadge(display: model.canvasFreshnessDisplay)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(AppColors.panel)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                if let badge = CanvasMirrorPresentation.scopeBadge(
+                    grantedScope: model.grantedScope,
+                    freshness: model.freshness,
+                    operatorOverrideActive: model.scopeOverrideActive
+                ) {
+                    LockBadge(text: badge.text, systemImage: badge.systemImage)
                 }
                 Spacer()
                 Button {
@@ -1065,8 +1122,8 @@ private struct CanvasTabView: View {
             }
             .padding()
             Spacer()
-            if let editError = model.canvasEditError {
-                Text(editError)
+            if let message = model.canvasFocusError ?? model.canvasEditError {
+                Text(message)
                     .font(.caption)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
@@ -1077,6 +1134,7 @@ private struct CanvasTabView: View {
                     .task {
                         try? await Task.sleep(for: .seconds(3))
                         model.canvasEditError = nil
+                        model.canvasFocusError = nil
                     }
             }
         }
@@ -1112,13 +1170,17 @@ private struct CanvasTabView: View {
         let height = max(30, tile.frame.height * effectiveScale + resizeOffset.height)
         let center = screenPoint(worldX: tile.frame.x + tile.frame.width / 2, worldY: tile.frame.y + tile.frame.height / 2)
         let position = CGPoint(x: center.x + dragOffset.width + resizeOffset.width / 2, y: center.y + dragOffset.height + resizeOffset.height / 2)
+        let isHighlighted = model.canvasHighlightedTileId == tile.tileId
 
         return ZStack(alignment: .bottomTrailing) {
             RoundedRectangle(cornerRadius: 8)
                 .fill(AppColors.panel)
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(activeDragTileId == tile.tileId || activeResizeTileId == tile.tileId ? Color.orange : Color.white.opacity(0.15), lineWidth: activeDragTileId == tile.tileId ? 2 : 1)
+                        .stroke(
+                            isHighlighted ? Color.orange : (activeDragTileId == tile.tileId || activeResizeTileId == tile.tileId ? Color.orange : Color.white.opacity(0.15)),
+                            lineWidth: isHighlighted ? 3 : (activeDragTileId == tile.tileId ? 2 : 1)
+                        )
                 )
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
@@ -1145,11 +1207,13 @@ private struct CanvasTabView: View {
         }
         .frame(width: width, height: height)
         .position(position)
+        .animation(.easeInOut(duration: 0.18), value: tile.frame)
+        .animation(.easeInOut(duration: 0.18), value: isHighlighted)
         .modifier(EditableTileGestures(canEdit: canEdit, tile: tile, dragGesture: tileDragGesture(tile: tile), longPress: bringToFrontAction(tile: tile)))
     }
 
     private func statusDot(for tileId: UUID) -> some View {
-        let token = model.rows.first(where: { $0.tileId == tileId })?.presentation.colorToken
+        let token = model.canvasStatusOverlays[tileId]?.presentation.colorToken
         return Circle().fill(token.map { AppColors.color(for: $0) } ?? Color.gray.opacity(0.4)).frame(width: 7, height: 7)
     }
 
@@ -1172,6 +1236,7 @@ private struct CanvasTabView: View {
                 guard !isEditingTile else { return }
                 pan.width += value.translation.width
                 pan.height += value.translation.height
+                framingState = .userControlled
             }
     }
 
@@ -1184,6 +1249,7 @@ private struct CanvasTabView: View {
             .onEnded { value in
                 guard !isEditingTile else { return }
                 scale = min(3.0, max(0.05, scale * value))
+                framingState = .userControlled
             }
     }
 
@@ -1243,20 +1309,28 @@ private struct CanvasTabView: View {
     }
 
     private func fitAll(in size: CGSize) {
-        let zoneRects = model.canvasScene.zones.map { CGRect(x: $0.origin.x, y: $0.origin.y, width: $0.size.width, height: $0.size.height) }
-        let tileRects = model.canvasScene.tiles.map { CGRect(x: $0.frame.x, y: $0.frame.y, width: $0.frame.width, height: $0.frame.height) }
-        let all = zoneRects + tileRects
-        guard let first = all.first else { return }
-        let union = all.dropFirst().reduce(first) { $0.union($1) }
-        let margin: CGFloat = 40
-        let targetScale = min((size.width - margin * 2) / max(union.width, 1), (size.height - margin * 2) / max(union.height, 1))
-        scale = min(3.0, max(0.05, targetScale))
-        pan = CGSize(width: margin - union.minX * scale, height: margin - union.minY * scale)
+        apply(CanvasMirrorPresentation.fitAllViewport(scene: model.canvasScene, viewportSize: mirrorSize(size)))
+        framingState = .userControlled
     }
 
-    private func center(on tile: CanvasSceneTile, in size: CGSize) {
-        let worldCenter = CGPoint(x: tile.frame.x + tile.frame.width / 2, y: tile.frame.y + tile.frame.height / 2)
-        pan = CGSize(width: size.width / 2 - worldCenter.x * scale, height: size.height / 2 - worldCenter.y * scale)
+    private func applyFirstSnapshotFrame(scene: CanvasScene, size: CGSize) {
+        let result = CanvasMirrorPresentation.firstSnapshotViewport(
+            scene: scene,
+            viewportSize: mirrorSize(size),
+            current: CanvasMirrorViewport(scale: Double(scale), panX: Double(pan.width), panY: Double(pan.height)),
+            framingState: framingState
+        )
+        apply(result.viewport)
+        framingState = result.framingState
+    }
+
+    private func apply(_ viewport: CanvasMirrorViewport) {
+        scale = CGFloat(viewport.scale)
+        pan = CGSize(width: viewport.panX, height: viewport.panY)
+    }
+
+    private func mirrorSize(_ size: CGSize) -> CanvasMirrorViewportSize {
+        CanvasMirrorViewportSize(width: Double(size.width), height: Double(size.height))
     }
 }
 
@@ -1298,9 +1372,10 @@ private func zoneTint(for token: String) -> Color {
 
 private struct LockBadge: View {
     var text: String = "Read only"
+    var systemImage: String = "lock.fill"
 
     var body: some View {
-        Label(text, systemImage: "lock.fill")
+        Label(text, systemImage: systemImage)
             .font(.caption.weight(.semibold))
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -1310,20 +1385,57 @@ private struct LockBadge: View {
 }
 
 private struct CanvasEmptyStateView: View {
+    let display: CanvasMirrorFreshnessDisplay
+
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: "square.grid.2x2")
                 .font(.system(size: 30, weight: .semibold))
                 .foregroundStyle(.secondary)
-            Text("No canvas synced yet")
+            Text(display.title)
                 .font(.headline)
-            Text("The desktop publisher isn't wired up yet — this fills in once it is.")
+            Text(display.detail)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct CanvasMirrorFreshnessBadge: View {
+    let display: CanvasMirrorFreshnessDisplay
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var label: String {
+        guard let asOf = display.asOf else { return display.title }
+        return "\(display.title) · \(asOf.formatted(date: .omitted, time: .shortened))"
+    }
+
+    private var color: Color {
+        switch display.title {
+        case "Live":
+            return .green
+        case "Syncing…":
+            return .blue
+        case "Canvas stale · Agents live", "Stale":
+            return .orange
+        case "Offline", "Mac asleep":
+            return .gray
+        default:
+            return .secondary
+        }
     }
 }
 
