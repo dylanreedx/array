@@ -1,6 +1,6 @@
 # Morning companion dogfood kit — one-command setup, health checks, and artifacts
 
-Status: **deferred / rewrite after 75, 2026-07-06.** Follow-up to ticket 75. Do **not** run this as a same-iCloud-only dogfood kit. After `79-pair-to-instance-auth-boundary.md`, `80-companion-offline-freshness.md`, and the rewritten 75 land, this kit should verify: paired Continuum instance, device/session scope, heartbeat/freshness state, cached stale canvas behavior, and signed/entitled transport.
+Status: **pending after rewritten 75, 2026-07-07.** Follow-up to ticket 75. Do **not** run this as a same-iCloud-only dogfood kit. With `79-pair-to-instance-auth-boundary.md` and `80-companion-offline-freshness.md` landed, this kit should verify: paired Continuum instance, device/session scope, heartbeat/freshness state, cached stale canvas behavior, and signed/entitled transport after the paired publisher lands.
 
 ## Problem statement
 

@@ -175,3 +175,13 @@ Dylan's companion direction now prioritizes explicit pairing to a Continuum inst
 | 18-cwd-inheritance-policy.md | done | 0dae896 | matrix: green (headless) | night3-C gpt-5.5; pending audit; visual-gate-owed |
 | 26-upgrade-migration.md | done | 634a748 | matrix: green (headless) | night3-C gpt-5.5; pending audit; visual-gate-owed |
 | 29-no-mirror-real-path.md | done | f24bf91 | matrix: green (headless) | night3-C gpt-5.5; pending audit; visual-gate-owed |
+
+## Auth/pairing tail queue refresh (2026-07-07)
+
+79 and 80 have landed, so the companion publisher/dogfood/polish tickets are no longer blocked on the auth/freshness substrate. Newest rows below supersede the earlier deferred rows while preserving the paired-instance/freshness reinterpretation. CloudKit remains transport-only, not identity or authorization.
+
+| ticket | status | commit | matrix | note |
+| --- | --- | --- | --- | --- |
+| 75-desktop-companion-sync-publisher.md | pending | - | - | Rewrite is now eligible after 79/80: build paired-instance desktop publisher with session/scope authorization, freshness/heartbeat metadata, sanitized activity/spatial snapshots, honest CloudKit diagnostics, and fake-transport checks; device/visual CloudKit dogfood remains supervised. |
+| 76-morning-companion-dogfood-kit.md | pending-after-75 | - | - | Rewritten dogfood kit should run after 75 and verify paired Continuum instance, device/session scope, freshness states, cached stale canvas behavior, and signed/entitled transport. |
+| 77-canvas-mirror-magic-polish.md | pending-after-75/76 | - | - | Mirror polish waits for the paired publisher/dogfood substrate and must use 80 freshness states for live/syncing/stale/offline/unpaired UI and mutation gates. |

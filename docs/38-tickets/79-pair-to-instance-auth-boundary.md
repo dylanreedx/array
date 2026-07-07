@@ -1,6 +1,6 @@
 # Pair phone to Continuum instance — auth/session boundary
 
-Status: **new / autonomous foundation, 2026-07-06.** First implementation ticket for `_PAIR_TO_INSTANCE_PLAN.md`. It is MVP/personal, not enterprise auth. It does not remove CloudKit; it makes CloudKit stop being identity.
+Status: **done / landed at `cc03cef`, 2026-07-06.** First implementation ticket for `_PAIR_TO_INSTANCE_PLAN.md`. It is MVP/personal, not enterprise auth. It does not remove CloudKit; it makes CloudKit stop being identity.
 
 ## Problem statement
 

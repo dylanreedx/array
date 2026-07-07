@@ -1,6 +1,6 @@
 # Companion offline/freshness model — cached canvas without lying
 
-Status: **new / autonomous foundation + iOS UI wiring, 2026-07-06.** Second implementation ticket for `_PAIR_TO_INSTANCE_PLAN.md`. Build this after 79 and before rewriting ticket 75's publisher path.
+Status: **done / landed at `e8c6841`, 2026-07-06.** Second implementation ticket for `_PAIR_TO_INSTANCE_PLAN.md`. This now unlocks the rewritten ticket 75 publisher path.
 
 ## Product problem
 
