@@ -29,6 +29,8 @@ private func runAuthChecksAsync() async throws {
     try await runPairingTokenTicket60Suite(signingKey: signingKey)
     try await runSessionAuthSuite()
     try await runMessageScopeSuite(signingKey: signingKey)
+    try await runCompanionAuthServiceSuite()
+    try runPairedCompanionSessionSuite()
     try await runAuthRealPathSuite()
     try runSigningKeyRestartSuite()
 
@@ -440,6 +442,107 @@ private func runMessageScopeSuite(signingKey: Data) async throws {
     expectThrowsAuth(.missingScope(.terminalOperate), "Auth MessageScope: observer cannot send keys") {
         try authorize(.sendKeys, session: observer)
     }
+}
+
+private func runCompanionAuthServiceSuite() async throws {
+    let tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("continuum-companion-auth-\(UUID().uuidString)", isDirectory: true)
+    let authDir = tempDir.appendingPathComponent("auth", isDirectory: true)
+    try FileManager.default.createDirectory(at: authDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let clock = FakeClock(start: Date(timeIntervalSince1970: 1_800_800_000))
+    let first = try CompanionAuthService(authDirectory: authDir, clock: clock, instanceDisplayName: "Continuum QA")
+    let firstInstance = try await first.instance()
+    let firstOwner = try await first.owner()
+    expect(!firstInstance.id.uuidString.isEmpty, "Ticket79 CompanionAuthService: instance id is generated")
+    expect(firstInstance.displayName == "Continuum QA", "Ticket79 CompanionAuthService: display name persists from first launch")
+    expect(!firstOwner.id.uuidString.isEmpty, "Ticket79 CompanionAuthService: local owner id is generated")
+
+    let relaunched = try CompanionAuthService(authDirectory: authDir, clock: clock, instanceDisplayName: "Ignored Relaunch Name")
+    let relaunchedInstance = try await relaunched.instance()
+    let relaunchedOwner = try await relaunched.owner()
+    expect(relaunchedInstance.id == firstInstance.id, "Ticket79 CompanionAuthService: instance id is stable across restart")
+    expect(relaunchedInstance.displayName == "Continuum QA", "Ticket79 CompanionAuthService: relaunch does not replace display name")
+    expect(relaunchedOwner.id == firstOwner.id, "Ticket79 CompanionAuthService: owner id is stable across restart")
+
+    let issued = try await relaunched.issuePairingCredential(scopes: .operator, ttl: 300, label: "Dylan iPhone")
+    let exchange = try await relaunched.exchangePairingCredential(
+        issued.credential,
+        requested: .observer,
+        deviceLabel: "Dylan iPhone 15"
+    )
+    expect(exchange.instanceId == firstInstance.id, "Ticket79 CompanionAuthService: exchange payload is bound to instance id")
+    expect(exchange.userId == firstOwner.id, "Ticket79 CompanionAuthService: exchange payload is bound to local owner")
+    expect(exchange.device.label == "Dylan iPhone 15", "Ticket79 CompanionAuthService: device label comes from exchange subject")
+    expect(exchange.session.scopes == .observer, "Ticket79 CompanionAuthService: exchange can down-scope to observer")
+
+    let devices = try await relaunched.listDevices()
+    expect(devices.count == 1, "Ticket79 CompanionAuthService: exactly one persistent device after one exchange, got \(devices.count)")
+    expect(devices[0].id == exchange.device.id && devices[0].sessionId == exchange.session.id,
+           "Ticket79 CompanionAuthService: device row stores session id")
+
+    let verified = try await relaunched.verifySessionToken(exchange.session.token)
+    expect(verified.deviceId == exchange.device.id, "Ticket79 CompanionAuthService: verified payload retains device id")
+    expect(verified.instanceId == firstInstance.id, "Ticket79 CompanionAuthService: verified payload retains instance id")
+    expectThrowsAuth(.missingScope(.orchestrationOperate), "Ticket79 CompanionAuthService: observer session cannot move tile") {
+        try authorize(.moveTile, grantedScopes: verified.scopes)
+    }
+    expectThrowsAuth(.missingScope(.orchestrationOperate), "Ticket79 CompanionAuthService: observer session cannot respond to approval") {
+        try authorize(.respondToApproval, grantedScopes: verified.scopes)
+    }
+
+    let operatorGrant = try await relaunched.issuePairingCredential(scopes: .operator, ttl: 300, label: "Operator iPhone")
+    let operatorExchange = try await relaunched.exchangePairingCredential(
+        operatorGrant.credential,
+        requested: .operator,
+        deviceLabel: "Operator iPhone"
+    )
+    let operatorVerified = try await relaunched.verifySessionToken(operatorExchange.session.token)
+    try authorize(.respondToApproval, grantedScopes: operatorVerified.scopes)
+    expect(true, "Ticket79 CompanionAuthService: operator session can respond to approval")
+
+    await expectAuthError(
+        try await relaunched.exchangePairingCredential(
+            issued.credential,
+            requested: .observer,
+            deviceLabel: "Replay iPhone"
+        ),
+        .alreadyUsed,
+        "Ticket79 CompanionAuthService: pairing credential reuse fails"
+    )
+
+    try await relaunched.revokeDevice(exchange.device.id)
+    await expectAuthError(
+        try await relaunched.verifySessionToken(exchange.session.token),
+        .revoked,
+        "Ticket79 CompanionAuthService: revoked device makes verify fail"
+    )
+}
+
+private func runPairedCompanionSessionSuite() throws {
+    let session = PairedCompanionSession(
+        instanceId: UUID(),
+        userId: UUID(),
+        deviceId: UUID(),
+        sessionId: UUID(),
+        token: "fixture-session-token",
+        scopes: .operator,
+        issuedAt: Date(timeIntervalSince1970: 1_800_900_000),
+        expiresAt: Date(timeIntervalSince1970: 1_808_676_000)
+    )
+    let store = InMemoryPairedCompanionSessionStore()
+    expect(store.loadState() == .unpaired, "Ticket79 PairedSessionStore: empty store is unpaired")
+    try store.save(session)
+    expect(store.loadState() == .paired(session), "Ticket79 PairedSessionStore: saved session loads as paired")
+    let capability = CompanionUICapability(state: store.loadState())
+    expect(capability.canStartTransport, "Ticket79 CompanionUICapability: paired session can start transport")
+    expect(capability.scope == .operator, "Ticket79 CompanionUICapability: scope derives from paired session")
+    expect(capability.canRespondToApproval, "Ticket79 CompanionUICapability: operator paired session can approve")
+    try store.clear()
+    let clearedCapability = CompanionUICapability(state: store.loadState())
+    expect(!clearedCapability.canStartTransport, "Ticket79 CompanionUICapability: unpaired state does not start CloudKit")
+    expect(clearedCapability.scope == [], "Ticket79 CompanionUICapability: unpaired state has no scope")
 }
 
 private func runAuthRealPathSuite() async throws {

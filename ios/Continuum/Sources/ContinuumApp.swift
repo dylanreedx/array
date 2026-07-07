@@ -134,11 +134,13 @@ private final class AgentsBoardModel: ObservableObject {
 
     enum State: Equatable {
         case loading
+        case unpaired
         case unavailable(String)
         case live
     }
 
     @Published var state: State = .loading
+    @Published private(set) var pairedSessionState: PairedCompanionSessionState = .unpaired
     @Published var snapshot: ActivityLogSnapshot = .empty
     @Published var rows: [AgentsBoardRow] = []
     @Published var lastApprovalAck: ApprovalResponseAck?
@@ -148,17 +150,40 @@ private final class AgentsBoardModel: ObservableObject {
     @Published var canvasScene: CanvasScene = CanvasScene(zones: [], tiles: [])
     @Published var canvasFocusRequest: UUID?
     @Published var canvasEditError: String?
-    let grantedScope: Scope = AgentsBoardModel.resolveGrantedScope()
+    var grantedScope: Scope {
+        let storedScope = CompanionUICapability(state: pairedSessionState).scope
+        #if DEBUG
+        if scopeOverrideActive {
+            return .operator
+        }
+        #endif
+        return storedScope
+    }
+
+    var scopeOverrideActive: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["CONTINUUM_SCOPE_OVERRIDE"] == "operator"
+        #else
+        false
+        #endif
+    }
 
     private var task: Task<Void, Never>?
     private var receiver: ActivityProjectionReceiver?
     private var spatialReceiver: SpatialOpReceiver?
     private var spatialTask: Task<Void, Never>?
     private var demux: SyncMessageDemux?
+    private let pairedSessionStore: any PairedCompanionSessionStoring = KeychainPairedCompanionSessionStore()
 
     func start() async {
         guard task == nil else { return }
         state = .loading
+        pairedSessionState = pairedSessionStore.loadState()
+        let capability = CompanionUICapability(state: pairedSessionState)
+        guard capability.canStartTransport else {
+            state = .unpaired
+            return
+        }
 
         let container = CKContainer(identifier: continuumCloudKitContainerIdentifier)
         do {
@@ -179,7 +204,7 @@ private final class AgentsBoardModel: ObservableObject {
         let demux = SyncMessageDemux(transport: transport)
         self.demux = demux
 
-        let receiver = ActivityProjectionReceiver(demux: demux, scope: .observer)
+        let receiver = ActivityProjectionReceiver(demux: demux, scope: capability.scope)
         self.receiver = receiver
         task = Task { [weak self] in
             await receiver.connect(cursor: nil)
@@ -297,17 +322,6 @@ private final class AgentsBoardModel: ObservableObject {
         }
     }
 
-    /// DEBUG-only escape hatch for the morning visual gate (ticket 61b banner
-    /// (c).9): without it the editor is unreachable for dogfooding, since
-    /// pairing (which raises scope beyond `.observer`) hasn't shipped yet.
-    private static func resolveGrantedScope() -> Scope {
-        #if DEBUG
-        if ProcessInfo.processInfo.environment["CONTINUUM_SCOPE_OVERRIDE"] == "operator" {
-            return .operator
-        }
-        #endif
-        return .observer
-    }
 }
 
 private enum ApprovalSendError: LocalizedError {
@@ -334,6 +348,8 @@ private struct AgentsBoardView: View {
                 switch model.state {
                 case .loading:
                     LoadingBoardView()
+                case .unpaired:
+                    PairingRequiredView()
                 case .unavailable(let message):
                     ActionableErrorView(message: message)
                 case .live:
@@ -722,9 +738,27 @@ private struct LoadingBoardView: View {
     var body: some View {
         VStack(spacing: 12) {
             ProgressView()
-            Text("Connecting to iCloud")
+            Text("Checking paired session")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct PairingRequiredView: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "iphone.and.arrow.forward")
+                .font(.system(size: 34, weight: .semibold))
+                .foregroundStyle(.orange)
+            Text("Pair this phone")
+                .font(.headline)
+            Text("Connect to your Continuum instance before CloudKit starts.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -1133,6 +1167,29 @@ private struct SettingsDiagnosticsView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section("Pairing") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Session")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(pairingSummary)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Granted scope")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(scopeSummary)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                    }
+                    if model.scopeOverrideActive {
+                        Label("DEBUG operator scope override active", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.orange)
+                    }
+                }
                 Section("Push Diagnostics") {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("APNS device token")
@@ -1154,6 +1211,26 @@ private struct SettingsDiagnosticsView: View {
             .background(AppColors.background.ignoresSafeArea())
             .navigationTitle("Settings")
         }
+    }
+
+    private var pairingSummary: String {
+        switch model.pairedSessionState {
+        case .unpaired:
+            return "unpaired"
+        case .paired(let session):
+            return "paired instance=\(session.instanceId.uuidString) device=\(session.deviceId.uuidString)"
+        case .expired(let session):
+            return "expired instance=\(session.instanceId.uuidString) device=\(session.deviceId.uuidString)"
+        case .revoked(let session):
+            guard let session else { return "revoked" }
+            return "revoked instance=\(session.instanceId.uuidString) device=\(session.deviceId.uuidString)"
+        case .unavailable(let reason):
+            return "unavailable \(reason)"
+        }
+    }
+
+    private var scopeSummary: String {
+        "raw=\(model.grantedScope.rawValue)"
     }
 }
 

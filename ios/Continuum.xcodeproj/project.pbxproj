@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		0DAC41F5595764185ADF4BC3 /* ContinuumRevivedSync in Frameworks */ = {isa = PBXBuildFile; productRef = 1ECE6B8BCA1DEFB06577A3DC /* ContinuumRevivedSync */; };
+		40A5F44EE38B61E9A6B3436E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = D151728376C3F6ABAC382B04 /* Assets.xcassets */; };
 		B8F41E74F6210DDA33B5453C /* ContinuumRevivedCore in Frameworks */ = {isa = PBXBuildFile; productRef = 9E01D723484B29DA34AEC599 /* ContinuumRevivedCore */; };
 		F74BFE16A57249D36643B577 /* ContinuumApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BA0CBC85274F77D8B8949CD /* ContinuumApp.swift */; };
 /* End PBXBuildFile section */
@@ -15,6 +16,7 @@
 /* Begin PBXFileReference section */
 		67D592583A969FD95A8FA194 /* continuum-overnight */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "continuum-overnight"; path = ..; sourceTree = SOURCE_ROOT; };
 		7BA0CBC85274F77D8B8949CD /* ContinuumApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContinuumApp.swift; sourceTree = "<group>"; };
+		D151728376C3F6ABAC382B04 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		E922ADD36D0C4CD487B3F803 /* Continuum.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Continuum.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -42,6 +44,7 @@
 		0FF4D649B61B386793FEDEEF /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				D151728376C3F6ABAC382B04 /* Assets.xcassets */,
 				7BA0CBC85274F77D8B8949CD /* ContinuumApp.swift */,
 			);
 			path = Sources;
@@ -80,6 +83,7 @@
 			buildConfigurationList = 6F6590764F2EE817C8D74043 /* Build configuration list for PBXNativeTarget "Continuum" */;
 			buildPhases = (
 				A8B6EFD15BCC21A00BABC5DF /* Sources */,
+				B41EDE615A69554B742668A2 /* Resources */,
 				1480881812D80B20565BDBE9 /* Frameworks */,
 			);
 			buildRules = (
@@ -131,6 +135,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		B41EDE615A69554B742668A2 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				40A5F44EE38B61E9A6B3436E /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		A8B6EFD15BCC21A00BABC5DF /* Sources */ = {
@@ -281,6 +296,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Continuum;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -301,6 +318,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Continuum;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

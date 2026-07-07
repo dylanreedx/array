@@ -2487,7 +2487,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var tmuxControlFactory: (String) -> any TmuxControl = { ProcessTmuxControl(tmuxPath: $0) }
     private var suppressTerminateOnWindowCloseForQA = false
     private let focusBroker = FocusBroker()
-    private let authPairingStore = PairingStore()
+    private var companionAuthService: CompanionAuthService?
     private var navKeymap: NavKeymap = .default {
         didSet { leaderDwell = TimeInterval(navKeymap.leaderDwellMs) / 1000 }
     }
@@ -2538,6 +2538,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         do {
             let appSupportDir = Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
             let registryStore = RegistryStore(applicationSupportDirectory: appSupportDir)
+            companionAuthService = try CompanionAuthService(
+                authDirectory: Self.resolveAuthDirectory(applicationSupportDirectory: appSupportDir),
+                instanceDisplayName: Host.current().localizedName ?? "Continuum"
+            )
             let registry = try registryStore.loadOrEmpty()
             let projectRoot = try Self.resolveProjectRoot(smokeTest: smokeTestEnabled, registry: registry)
             let bootController = try presentLockContentionUXIfNeeded(projectRoot: projectRoot, registry: registry)
@@ -4666,8 +4670,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     @objc func issueObserverPairingTokenFromMenu(_ sender: Any?) {
         Task {
             do {
-                let grant = try await authPairingStore.issue(scopes: .observer, ttl: 300, label: "Debug Observer")
-                let url = PairingURL.issue(credential: grant.credential, scopes: grant.scopes)
+                let service = try companionAuthService ?? CompanionAuthService(
+                    authDirectory: Self.resolveAuthDirectory(applicationSupportDirectory: Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)),
+                    instanceDisplayName: Host.current().localizedName ?? "Continuum"
+                )
+                companionAuthService = service
+                let instance = try await service.instance()
+                let grant = try await service.issuePairingCredential(scopes: .observer, ttl: 300, label: "Debug Observer")
+                let url = PairingURL.issue(credential: grant.credential, scopes: grant.scopes, instanceId: instance.id)
                 Logger(subsystem: "continuum.auth", category: "pairing").notice("pairing-url issued: \(url.absoluteString, privacy: .public)")
             } catch {
                 Logger(subsystem: "continuum.auth", category: "pairing").error("pairing-url issue failed: \(String(describing: error), privacy: .public)")
@@ -7577,6 +7587,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return temp
         }
         return nil // Fall through to the canonical Application Support path.
+    }
+
+    private static func resolveAuthDirectory(applicationSupportDirectory: URL?) -> URL {
+        (applicationSupportDirectory ?? RegistryStore.defaultApplicationSupportDirectory())
+            .appendingPathComponent("auth", isDirectory: true)
     }
 
     private static func loadOrCreateProject(in store: ProjectStore, projectRoot: URL) throws -> Project {

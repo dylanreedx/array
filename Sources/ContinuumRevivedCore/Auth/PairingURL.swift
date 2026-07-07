@@ -26,11 +26,20 @@ public enum PairingURL: Sendable {
     public static let scheme = "continuum"
     public static let host = "pair"
 
-    public static func issue(credential: String, scopes: Scope) -> URL {
+    public static func issue(credential: String, scopes: Scope, instanceId: UUID? = nil) -> URL {
         var components = URLComponents()
         components.scheme = scheme
         components.host = host
-        components.fragment = "token=\(credential)&scopes=\(scopes.rawValue)"
+        var fragmentItems = [
+            URLQueryItem(name: "token", value: credential),
+            URLQueryItem(name: "scopes", value: "\(scopes.rawValue)")
+        ]
+        if let instanceId {
+            fragmentItems.append(URLQueryItem(name: "instance", value: instanceId.uuidString))
+        }
+        var fragmentComponents = URLComponents()
+        fragmentComponents.queryItems = fragmentItems
+        components.fragment = String(fragmentComponents.url!.absoluteString.dropFirst())
         assert(components.queryItems == nil)
         return components.url!
     }
