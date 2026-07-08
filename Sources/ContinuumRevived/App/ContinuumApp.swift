@@ -4867,9 +4867,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     instanceId: instance.id,
                     endpoint: listener.endpointURL
                 )
-                copyPairingURLToPasteboard(url)
+                let cameraURL = PairingURL.cameraBootstrapURL(pairingURL: url, endpoint: listener.endpointURL)
+                copyPairingURLToPasteboard(cameraURL)
                 logger.notice("pairing listener ready endpoint=\(listener.endpointURL.absoluteString, privacy: .public) expiresAt=\(expiresAt.ISO8601Format(), privacy: .public) scope=\(grant.scopes.rawValue, privacy: .public)")
-                presentPairingURL(url, listener: listener, expiresAt: expiresAt)
+                presentPairingURL(url, cameraURL: cameraURL, listener: listener, expiresAt: expiresAt)
             } catch {
                 startedListener?.stop()
                 if let startedListener, localPairingListener === startedListener {
@@ -4896,25 +4897,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         NSPasteboard.general.setString(url.absoluteString, forType: .string)
     }
 
-    private func presentPairingURL(_ url: URL, listener: LocalPairingEndpointListener, expiresAt: Date) {
+    private func presentPairingURL(_ url: URL, cameraURL: URL, listener: LocalPairingEndpointListener, expiresAt: Date) {
         let alert = NSAlert()
         alert.messageText = "Continuum LAN Pairing"
         alert.informativeText = """
-        Pairing URL copied to the clipboard. Scan the QR code with your iPhone to open Continuum and pair this phone.
+        Camera-compatible pairing link copied to the clipboard. Scan the QR code with iPhone Camera; it opens a local Mac page that opens Continuum.
+
+        If you are already in Continuum, Pair this phone > Scan Pairing QR also accepts this code.
 
         Status: Listening on \(listener.endpointURL.absoluteString)
         Expires: \(expiresAt.formatted(date: .abbreviated, time: .standard))
         Scope: Observer
 
-        \(url.absoluteString)
+        QR URL: \(cameraURL.absoluteString)
+        Continuum link: \(url.absoluteString)
         """
-        if let qrImage = makePairingQRCode(for: url) {
+        if let qrImage = makePairingQRCode(for: cameraURL) {
             let imageView = NSImageView(image: qrImage)
-            imageView.imageScaling = .scaleProportionallyUpOrDown
+            imageView.imageScaling = .scaleNone
             imageView.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
-                imageView.widthAnchor.constraint(equalToConstant: 220),
-                imageView.heightAnchor.constraint(equalToConstant: 220)
+                imageView.widthAnchor.constraint(equalToConstant: qrImage.size.width),
+                imageView.heightAnchor.constraint(equalToConstant: qrImage.size.height)
             ])
             alert.accessoryView = imageView
         }
@@ -4924,7 +4928,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         alert.addButton(withTitle: "OK")
         let response = alert.runModal()
         if response == .alertFirstButtonReturn {
-            copyPairingURLToPasteboard(url)
+            copyPairingURLToPasteboard(cameraURL)
         } else if response == .alertSecondButtonReturn {
             listener.stop()
             if localPairingListener === listener {
@@ -4940,13 +4944,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         filter.setValue(data, forKey: "inputMessage")
         filter.setValue("M", forKey: "inputCorrectionLevel")
-        guard let outputImage = filter.outputImage else { return nil }
-        let scale = 220 / max(outputImage.extent.width, outputImage.extent.height)
-        let transformed = outputImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        let rep = NSCIImageRep(ciImage: transformed)
-        let image = NSImage(size: rep.size)
-        image.addRepresentation(rep)
-        return image
+        guard let rawOutputImage = filter.outputImage else { return nil }
+        let outputImage = rawOutputImage.cropped(to: rawOutputImage.extent.integral)
+
+        // Render an actual black-on-white bitmap with a quiet zone and integer
+        // module scale. NSCIImageRep can leave the QR transparent/interpolated in
+        // an NSAlert, which makes physical iPhone scanning unreliable.
+        let moduleQuietZone = CGFloat(4)
+        let qrExtent = outputImage.extent.integral
+        let paddedExtent = CGRect(
+            x: 0,
+            y: 0,
+            width: qrExtent.width + moduleQuietZone * 2,
+            height: qrExtent.height + moduleQuietZone * 2
+        )
+        let whiteBackground = CIImage(color: CIColor.white).cropped(to: paddedExtent)
+        let blackOnWhite = outputImage
+            .applyingFilter("CIFalseColor", parameters: [
+                "inputColor0": CIColor.black,
+                "inputColor1": CIColor.white
+            ])
+            .transformed(by: CGAffineTransform(
+                translationX: moduleQuietZone - qrExtent.minX,
+                y: moduleQuietZone - qrExtent.minY
+            ))
+            .composited(over: whiteBackground)
+
+        let targetPixels = CGFloat(360)
+        let scale = max(1, floor(targetPixels / max(paddedExtent.width, paddedExtent.height)))
+        let scaled = blackOnWhite.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let context = CIContext(options: nil)
+        guard let cgImage = context.createCGImage(scaled, from: scaled.extent.integral) else { return nil }
+        return NSImage(cgImage: cgImage, size: NSSize(width: scaled.extent.width, height: scaled.extent.height))
     }
 
     private func presentPairingError() {
@@ -4961,7 +4990,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     @objc func publishCompanionSyncNowFromMenu(_ sender: Any?) {
         Task { @MainActor in
             do {
-                let service = ensureDesktopCompanionSyncService()
+                let service = try ensureDesktopCompanionSyncService()
                 try await service.start()
                 try await service.publishCurrentDesktopSnapshot(reason: .manual)
                 await logCompanionSyncDiagnostics(reason: "manual-publish")
@@ -4974,7 +5003,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     @objc func fetchCompanionSyncNowFromMenu(_ sender: Any?) {
         Task { @MainActor in
             do {
-                let service = ensureDesktopCompanionSyncService()
+                let service = try ensureDesktopCompanionSyncService()
                 try await service.start()
                 try await service.fetchChanges(reason: .manual)
                 await logCompanionSyncDiagnostics(reason: "manual-fetch")
@@ -4987,7 +5016,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func startDesktopCompanionSyncService() {
         Task { @MainActor in
             do {
-                let service = ensureDesktopCompanionSyncService()
+                let service = try ensureDesktopCompanionSyncService()
                 try await service.start()
                 try await service.fetchChanges(reason: .startup)
                 try await service.publishCurrentDesktopSnapshot(reason: .startup)
@@ -4998,13 +5027,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private func ensureDesktopCompanionSyncService() -> DesktopCompanionSyncService {
+    private func ensureDesktopCompanionSyncService() throws -> DesktopCompanionSyncService {
         if let companionSyncService { return companionSyncService }
+        let signedWithICloudEntitlement = Self.hasICloudEntitlement(containerIdentifier: CompanionSyncConfig.cloudKitContainerIdentifier)
+        guard signedWithICloudEntitlement else {
+            throw CompanionSyncAppError.missingICloudEntitlement(containerIdentifier: CompanionSyncConfig.cloudKitContainerIdentifier)
+        }
         let transport = CloudKitSyncTransport(containerIdentifier: CompanionSyncConfig.cloudKitContainerIdentifier)
         let service = DesktopCompanionSyncService(
             configuration: DesktopCompanionSyncConfiguration(
                 containerIdentifier: CompanionSyncConfig.cloudKitContainerIdentifier,
-                signedWithICloudEntitlement: Self.hasICloudEntitlement(containerIdentifier: CompanionSyncConfig.cloudKitContainerIdentifier)
+                signedWithICloudEntitlement: signedWithICloudEntitlement
             ),
             transport: transport,
             pairingSnapshot: { [weak self] in
@@ -5081,14 +5114,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private static func hasICloudEntitlement(containerIdentifier: String) -> Bool {
-        guard let entitlements = Bundle.main.object(forInfoDictionaryKey: "com.apple.developer.icloud-container-identifiers") as? [String] else {
-            return false
-        }
-        return entitlements.contains(containerIdentifier)
+        hasMainBundleICloudEntitlement(containerIdentifier: containerIdentifier)
     }
 
-    private enum CompanionSyncAppError: Error {
+    private enum CompanionSyncAppError: Error, CustomStringConvertible {
         case missingCanvas
+        case missingICloudEntitlement(containerIdentifier: String)
+
+        var description: String {
+            switch self {
+            case .missingCanvas:
+                return "missing canvas"
+            case let .missingICloudEntitlement(containerIdentifier):
+                return "missing CloudKit entitlement for \(containerIdentifier); companion sync is disabled for this launch"
+            }
+        }
     }
 
     private func makeSettingsPanel() -> SettingsPanel {

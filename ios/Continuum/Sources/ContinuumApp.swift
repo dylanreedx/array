@@ -1,3 +1,4 @@
+import AVFoundation
 import CloudKit
 import ContinuumRevivedCore
 import ContinuumRevivedSync
@@ -136,6 +137,7 @@ private struct ContinuumRootView: View {
 @MainActor
 private final class AgentsBoardModel: ObservableObject {
     private static let approvalAckTimeout: Duration = .seconds(5)
+    private static let pairingRetryDelays: [Duration] = [.milliseconds(350), .seconds(1)]
 
     enum State: Equatable {
         case loading
@@ -222,6 +224,11 @@ private final class AgentsBoardModel: ObservableObject {
         return false
     }
 
+    var canUnpairThisPhone: Bool {
+        if case .unpaired = pairedSessionState { return false }
+        return true
+    }
+
     func start() async {
         guard task == nil else { return }
         state = .loading
@@ -274,6 +281,49 @@ private final class AgentsBoardModel: ObservableObject {
             for await materialized in stream {
                 await self?.consumeSpatial(materialized)
             }
+        }
+    }
+
+    func unpairThisPhone() async {
+        do {
+            try pairedSessionStore.clear()
+        } catch {
+            pairingStatusMessage = "Could not clear the saved pairing. Try again."
+            return
+        }
+
+        await tearDownSyncReceivers()
+        pairedSessionState = .unpaired
+        state = .unpaired
+        transportAvailability = .connecting
+        latestActivityFreshness = nil
+        latestSpatialFreshness = nil
+        snapshot = .empty
+        rows = []
+        canvasScene = CanvasScene(zones: [], tiles: [])
+        lastApprovalAck = nil
+        canvasFocusRequest = nil
+        canvasHighlightedTileId = nil
+        canvasEditError = nil
+        canvasFocusError = nil
+        pairingStatusMessage = "Unpaired this phone. Pair again from your Mac to reconnect."
+    }
+
+    private func tearDownSyncReceivers() async {
+        let activityReceiver = receiver
+        let spatial = spatialReceiver
+        task?.cancel()
+        spatialTask?.cancel()
+        task = nil
+        spatialTask = nil
+        receiver = nil
+        self.spatialReceiver = nil
+        demux = nil
+        if let activityReceiver {
+            await activityReceiver.stop()
+        }
+        if let spatial {
+            await spatial.stop()
         }
     }
 
@@ -352,23 +402,7 @@ private final class AgentsBoardModel: ObservableObject {
         pairingStatusMessage = "Pairing with your Mac…"
         defer { pairingInProgress = false }
         do {
-            let requestBody = LocalPairingExchangeRequest(
-                token: payload.token,
-                deviceLabel: UIDevice.current.name,
-                requestedScope: (payload.scopes ?? .observer).rawValue
-            )
-            var request = URLRequest(url: endpoint)
-            request.httpMethod = "POST"
-            request.timeoutInterval = 8
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONEncoder().encode(requestBody)
-            let (data, response) = try await URLSession.shared.data(for: request)
-            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-            guard statusCode == 200 else {
-                let code = (try? JSONDecoder().decode(LocalPairingErrorResponse.self, from: data).error) ?? "HTTP \(statusCode)"
-                throw LocalPairingUIError.exchangeRejected(code)
-            }
-            let sessionResponse = try JSONDecoder().decode(LocalPairingSessionResponse.self, from: data)
+            let sessionResponse = try await exchangeLocalPairing(payload: payload, endpoint: endpoint)
             if let expectedInstanceId = payload.instanceId,
                expectedInstanceId != sessionResponse.instanceId {
                 throw LocalPairingUIError.instanceMismatch
@@ -383,13 +417,71 @@ private final class AgentsBoardModel: ObservableObject {
         }
     }
 
+    private func exchangeLocalPairing(payload: PairingURL.Payload, endpoint: URL) async throws -> LocalPairingSessionResponse {
+        let requestBody = LocalPairingExchangeRequest(
+            token: payload.token,
+            deviceLabel: UIDevice.current.name,
+            requestedScope: (payload.scopes ?? .observer).rawValue
+        )
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 12
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(requestBody)
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = true
+        configuration.timeoutIntervalForRequest = 12
+        configuration.timeoutIntervalForResource = 20
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        let session = URLSession(configuration: configuration)
+        defer { session.finishTasksAndInvalidate() }
+
+        var attempt = 0
+        while true {
+            do {
+                let (data, response) = try await session.data(for: request)
+                let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+                guard statusCode == 200 else {
+                    let code = (try? JSONDecoder().decode(LocalPairingErrorResponse.self, from: data).error) ?? "HTTP \(statusCode)"
+                    throw LocalPairingUIError.exchangeRejected(code)
+                }
+                return try JSONDecoder().decode(LocalPairingSessionResponse.self, from: data)
+            } catch {
+                guard Self.shouldRetryLocalPairing(error), attempt < Self.pairingRetryDelays.count else {
+                    throw error
+                }
+                let delay = Self.pairingRetryDelays[attempt]
+                attempt += 1
+                try? await Task.sleep(for: delay)
+            }
+        }
+    }
+
+    private static func shouldRetryLocalPairing(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        guard nsError.domain == NSURLErrorDomain else { return false }
+        let code = URLError.Code(rawValue: nsError.code)
+        switch code {
+        case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed, .networkConnectionLost, .notConnectedToInternet, .timedOut:
+            return true
+        default:
+            return false
+        }
+    }
+
     private static func pairingMessage(for error: Error) -> String {
         if let error = error as? LocalPairingUIError {
             return error.message
         }
         let nsError = error as NSError
         if nsError.domain == NSURLErrorDomain {
-            return "Could not reach your Mac. Keep both devices on the same Wi-Fi and try a fresh QR code."
+            let code = URLError.Code(rawValue: nsError.code)
+            if code == .appTransportSecurityRequiresSecureConnection {
+                return "iOS blocked the local pairing link. Install the latest TestFlight build and allow Local Network access for Continuum."
+            }
+            return "Could not reach your Mac (network error \(nsError.code)). Keep both devices on the same Wi-Fi, allow Local Network access for Continuum, and try a fresh QR code."
         }
         return "Pairing failed. Generate a fresh QR code from the Mac and try again."
     }
@@ -982,6 +1074,7 @@ private struct LoadingBoardView: View {
 private struct PairingRequiredView: View {
     @EnvironmentObject private var model: AgentsBoardModel
     @State private var pastedPairingURL = ""
+    @State private var showingScanner = false
 
     var body: some View {
         VStack(spacing: 12) {
@@ -996,6 +1089,14 @@ private struct PairingRequiredView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
             VStack(spacing: 8) {
+                Button {
+                    showingScanner = true
+                } label: {
+                    Label("Scan Pairing QR", systemImage: "qrcode.viewfinder")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.pairingInProgress)
+
                 TextField("continuum://pair#…", text: $pastedPairingURL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -1012,7 +1113,7 @@ private struct PairingRequiredView: View {
                         Text("Pair from Link")
                     }
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.bordered)
                 .disabled(model.pairingInProgress || pastedPairingURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .padding(.horizontal)
@@ -1025,6 +1126,172 @@ private struct PairingRequiredView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .sheet(isPresented: $showingScanner) {
+            NavigationStack {
+                PairingQRCodeScannerView { code in
+                    pastedPairingURL = code
+                    showingScanner = false
+                    Task { @MainActor in
+                        await model.pairFromString(code)
+                    }
+                }
+                .ignoresSafeArea(edges: .bottom)
+                .navigationTitle("Scan Pairing QR")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { showingScanner = false }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct PairingQRCodeScannerView: UIViewControllerRepresentable {
+    var onCode: (String) -> Void
+
+    func makeUIViewController(context: Context) -> PairingQRCodeScannerViewController {
+        PairingQRCodeScannerViewController(onCode: onCode)
+    }
+
+    func updateUIViewController(_ uiViewController: PairingQRCodeScannerViewController, context: Context) {}
+}
+
+private final class PairingQRCodeScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+    private let session = AVCaptureSession()
+    private let sessionQueue = DispatchQueue(label: "continuum.pairing.qr-scanner")
+    private let onCode: (String) -> Void
+    private var previewLayer: AVCaptureVideoPreviewLayer?
+    private var didConfigureSession = false
+    private var didEmitCode = false
+
+    init(onCode: @escaping (String) -> Void) {
+        self.onCode = onCode
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        requestCameraAccessAndConfigure()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        previewLayer?.frame = view.bounds
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        startSessionIfConfigured()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        sessionQueue.async { [session] in
+            if session.isRunning { session.stopRunning() }
+        }
+    }
+
+    private func requestCameraAccessAndConfigure() {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            configureSession()
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    granted ? self.configureSession() : self.showScannerMessage("Camera access is required to scan the pairing QR code.")
+                }
+            }
+        default:
+            showScannerMessage("Camera access is required to scan the pairing QR code.")
+        }
+    }
+
+    private func configureSession() {
+        guard let device = AVCaptureDevice.default(for: .video),
+              let input = try? AVCaptureDeviceInput(device: device),
+              session.canAddInput(input) else {
+            showScannerMessage("This device does not have an available camera.")
+            return
+        }
+        session.addInput(input)
+
+        let output = AVCaptureMetadataOutput()
+        guard session.canAddOutput(output) else {
+            showScannerMessage("Could not start the QR scanner.")
+            return
+        }
+        session.addOutput(output)
+        output.setMetadataObjectsDelegate(self, queue: .main)
+        output.metadataObjectTypes = [.qr]
+
+        let preview = AVCaptureVideoPreviewLayer(session: session)
+        preview.videoGravity = .resizeAspectFill
+        preview.frame = view.bounds
+        view.layer.insertSublayer(preview, at: 0)
+        previewLayer = preview
+        didConfigureSession = true
+        addScannerHint()
+        startSessionIfConfigured()
+    }
+
+    private func startSessionIfConfigured() {
+        guard didConfigureSession else { return }
+        sessionQueue.async { [session] in
+            if !session.isRunning { session.startRunning() }
+        }
+    }
+
+    private func addScannerHint() {
+        let label = UILabel()
+        label.text = "Point the camera at the Continuum pairing QR code."
+        label.textColor = .white
+        label.font = .preferredFont(forTextStyle: .subheadline)
+        label.textAlignment = .center
+        label.numberOfLines = 0
+        label.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        label.layer.cornerRadius = 12
+        label.layer.masksToBounds = true
+        label.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+            label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+            label.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24)
+        ])
+    }
+
+    private func showScannerMessage(_ message: String) {
+        let label = UILabel()
+        label.text = message
+        label.textColor = .white
+        label.font = .preferredFont(forTextStyle: .body)
+        label.textAlignment = .center
+        label.numberOfLines = 0
+        label.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+            label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+            label.centerYAnchor.constraint(equalTo: view.centerYAnchor)
+        ])
+    }
+
+    func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
+        guard !didEmitCode,
+              let code = metadataObjects.compactMap({ $0 as? AVMetadataMachineReadableCodeObject }).first(where: { $0.type == .qr })?.stringValue else {
+            return
+        }
+        didEmitCode = true
+        sessionQueue.async { [session] in
+            if session.isRunning { session.stopRunning() }
+        }
+        onCode(code)
     }
 }
 
@@ -1589,6 +1856,7 @@ private struct PlaceholderScreen: View {
 
 private struct SettingsDiagnosticsView: View {
     @EnvironmentObject private var model: AgentsBoardModel
+    @State private var confirmingUnpair = false
 
     var body: some View {
         NavigationStack {
@@ -1615,6 +1883,14 @@ private struct SettingsDiagnosticsView: View {
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.orange)
                     }
+                    if model.canUnpairThisPhone {
+                        Button(role: .destructive) {
+                            confirmingUnpair = true
+                        } label: {
+                            Label("Unpair This Phone", systemImage: "xmark.circle")
+                        }
+                        .disabled(model.pairingInProgress)
+                    }
                 }
                 Section("Push Diagnostics") {
                     VStack(alignment: .leading, spacing: 6) {
@@ -1636,6 +1912,16 @@ private struct SettingsDiagnosticsView: View {
             .scrollContentBackground(.hidden)
             .background(AppColors.background.ignoresSafeArea())
             .navigationTitle("Settings")
+            .alert("Unpair this phone?", isPresented: $confirmingUnpair) {
+                Button("Unpair", role: .destructive) {
+                    Task { @MainActor in
+                        await model.unpairThisPhone()
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This clears the saved pairing token and stops Continuum sync on this phone. Pair again from the Mac to reconnect.")
+            }
         }
     }
 

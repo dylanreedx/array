@@ -27,6 +27,13 @@ private func runPairingURLPayloadCheck() throws {
     expect(payload?.scopes == .observer, "Ticket81 PairingURL: payload scopes round-trip")
     expect(payload?.instanceId == instanceId, "Ticket81 PairingURL: payload instance id round-trips")
 
+    let cameraURL = PairingURL.cameraBootstrapURL(pairingURL: url, endpoint: endpoint)
+    let cameraComponents = URLComponents(url: cameraURL, resolvingAgainstBaseURL: false)
+    expect(cameraURL.scheme == "http" && cameraComponents?.path == "/open-continuum-pairing", "Ticket81 PairingURL: camera bootstrap URL is HTTP and uses landing path")
+    expect(PairingURL.embeddedPairingURL(in: cameraURL) == url, "Ticket81 PairingURL: camera bootstrap embeds exact continuum URL")
+    expect(PairingURL.parse(cameraURL) == credential, "Ticket81 PairingURL: camera bootstrap token is parseable")
+    expect(PairingURL.parsePayload(cameraURL) == payload, "Ticket81 PairingURL: camera bootstrap payload round-trips")
+
     let legacy = URL(string: "continuum://pair#token=LEGACYTOKEN")!
     expect(PairingURL.parse(legacy) == "LEGACYTOKEN", "Ticket81 PairingURL: legacy fragment token remains parseable")
     expect(PairingURL.parsePayload(legacy)?.token == "LEGACYTOKEN", "Ticket81 PairingURL: payload parser accepts legacy token-only URL")
@@ -55,6 +62,18 @@ private func runLocalPairingEndpointContractCheck() async throws {
         deviceLabel: " Dylan's iPhone ",
         requestedScope: Scope.observer.rawValue
     ))
+    let landingURL = PairingURL.cameraBootstrapURL(
+        pairingURL: PairingURL.issue(credential: grant.credential, scopes: grant.scopes, instanceId: instance.id, endpoint: URL(string: "http://127.0.0.1:49152/pair")!),
+        endpoint: URL(string: "http://127.0.0.1:49152/pair")!
+    )
+    let landing = await endpoint.handle(method: "GET", path: httpRequestTarget(for: landingURL), body: Data())
+    expect(landing.statusCode == 200, "Ticket81 endpoint: GET camera landing page succeeds before exchange, got \(landing.statusCode)")
+    expect(String(decoding: landing.body, as: UTF8.self).contains("Open Continuum"), "Ticket81 endpoint: camera landing page is human-readable")
+
+    let invalidLanding = await endpoint.handle(method: "GET", path: "/open-continuum-pairing?link=not-a-pairing-link", body: Data())
+    let invalidLandingError = try errorCode(in: invalidLanding.body)
+    expect(invalidLanding.statusCode == 400 && invalidLandingError == "invalidPairingLink", "Ticket81 endpoint: invalid camera landing link is rejected")
+
     let success = await endpoint.handle(method: "POST", path: "/pair", body: body)
     expect(success.statusCode == 200, "Ticket81 endpoint: valid POST /pair succeeds, got \(success.statusCode)")
     let sessionResponse = try JSONDecoder().decode(LocalPairingSessionResponse.self, from: success.body)
@@ -218,6 +237,17 @@ private func runLocalPairingHTTPListenerSmokeCheck() async throws {
     expect(!listener.status().isListening, "Ticket81 listener: stop updates listener status")
 }
 #endif
+
+private func httpRequestTarget(for url: URL) -> String {
+    guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+        return url.path
+    }
+    var target = components.percentEncodedPath.isEmpty ? "/" : components.percentEncodedPath
+    if let query = components.percentEncodedQuery, !query.isEmpty {
+        target += "?\(query)"
+    }
+    return target
+}
 
 private func errorCode(in data: Data) throws -> String? {
     let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]

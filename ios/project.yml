@@ -9,7 +9,7 @@ settings:
     DEVELOPMENT_TEAM: 46TTB6J9DZ
     SWIFT_VERSION: "5.10"
     CODE_SIGN_STYLE: Automatic
-    CURRENT_PROJECT_VERSION: 1
+    CURRENT_PROJECT_VERSION: 2026070802
     MARKETING_VERSION: 0.1.0
 targets:
   Continuum:
@@ -32,6 +32,10 @@ targets:
           - CFBundleURLName: dev.dylanreedx.continuum.pairing
             CFBundleURLSchemes:
               - continuum
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSCameraUsageDescription: Continuum uses the camera to scan a Mac pairing QR code.
+        NSLocalNetworkUsageDescription: Continuum uses your local network to pair this iPhone with your Mac.
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

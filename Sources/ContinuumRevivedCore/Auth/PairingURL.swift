@@ -62,13 +62,39 @@ public enum PairingURL: Sendable {
         return components.url!
     }
 
+    /// A Camera-compatible LAN URL. iOS Camera reliably recognizes http(s) QR
+    /// payloads, while it may label custom-scheme QR payloads as "No Usable
+    /// Data" even when Continuum is installed. The Mac serves this URL as a
+    /// tiny local landing page that opens the embedded `continuum://pair` link.
+    public static func cameraBootstrapURL(pairingURL: URL, endpoint: URL) -> URL {
+        var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) ?? URLComponents()
+        components.path = "/open-continuum-pairing"
+        components.queryItems = [URLQueryItem(name: "link", value: pairingURL.absoluteString)]
+        components.fragment = nil
+        return components.url!
+    }
+
+    public static func embeddedPairingURL(in url: URL) -> URL? {
+        guard url.scheme == "http" || url.scheme == "https",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.path == "/open-continuum-pairing",
+              let link = components.queryItems?.first(where: { $0.name == "link" })?.value,
+              let embedded = URL(string: link),
+              embedded.scheme == scheme,
+              embedded.host == host else {
+            return nil
+        }
+        return embedded
+    }
+
     public static func parse(_ url: URL) -> String? {
-        fragmentItems(in: url)?
-            .first(where: { $0.name == "token" })?
-            .value
+        parsePayload(url)?.token
     }
 
     public static func parsePayload(_ url: URL) -> Payload? {
+        if let embedded = embeddedPairingURL(in: url) {
+            return parsePayload(embedded)
+        }
         guard let items = fragmentItems(in: url),
               let token = items.first(where: { $0.name == "token" })?.value,
               !token.isEmpty else {

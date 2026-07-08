@@ -161,6 +161,9 @@ public actor LocalPairingEndpoint {
             stopped = true
             return Self.jsonError(statusCode: 410, error: "pairingWindowExpired")
         }
+        if method == "GET", path == "/open-continuum-pairing" || path.hasPrefix("/open-continuum-pairing?") {
+            return Self.openContinuumPairingResponse(path: path)
+        }
         guard method == "POST" else {
             return Self.jsonError(statusCode: 405, error: "invalidMethod")
         }
@@ -237,6 +240,55 @@ public actor LocalPairingEndpoint {
         case .invalidToken, .unknown:
             return jsonError(statusCode: 401, error: "invalidToken")
         }
+    }
+
+    private static func openContinuumPairingResponse(path: String) -> LocalPairingHTTPResponse {
+        guard let components = URLComponents(string: "http://continuum.local\(path)"),
+              let linkValue = components.queryItems?.first(where: { $0.name == "link" })?.value,
+              let link = URL(string: linkValue),
+              PairingURL.parsePayload(link) != nil else {
+            return jsonError(statusCode: 400, error: "invalidPairingLink")
+        }
+        let escapedLink = htmlEscaped(link.absoluteString)
+        let body = """
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <meta http-equiv="refresh" content="0;url=\(escapedLink)">
+          <title>Open Continuum</title>
+          <style>
+            body { font: -apple-system-body; margin: 2rem; line-height: 1.4; }
+            a { display: inline-block; padding: 0.9rem 1rem; border-radius: 12px; background: #ff8a00; color: white; text-decoration: none; font-weight: 700; }
+            code { word-break: break-all; }
+          </style>
+        </head>
+        <body>
+          <h1>Open Continuum</h1>
+          <p>If Continuum does not open automatically, tap the button below.</p>
+          <p><a href="\(escapedLink)">Open Continuum to Pair</a></p>
+          <p><small>This local page expires with the pairing window.</small></p>
+        </body>
+        </html>
+        """
+        return LocalPairingHTTPResponse(
+            statusCode: 200,
+            headers: [
+                "Content-Type": "text/html; charset=utf-8",
+                "Cache-Control": "no-store"
+            ],
+            body: Data(body.utf8)
+        )
+    }
+
+    private static func htmlEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
     }
 
     fileprivate static func jsonError(statusCode: Int, error: String) -> LocalPairingHTTPResponse {
