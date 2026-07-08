@@ -143,7 +143,28 @@ It can run health checks with `--allow-unentitled`, but it is **not** real Cloud
 Real CloudKit dogfood requires one of:
 
 - Xcode macOS app target with iCloud capability for `iCloud.dev.dylanreedx.continuum`, signed with Dylan's Apple Development team; or
-- packaging script that embeds a valid macOS provisioning profile matching the app id + iCloud container and signs with the matching identity.
+- `scripts/provisioned-cloudkit-app.sh`, which embeds a valid macOS provisioning profile matching `com.continuum.revived` + `iCloud.dev.dylanreedx.continuum`, signs with the matching Apple Development identity, verifies entitlements/profile, and runs LaunchServices smoke.
+
+Provisioned script path:
+
+```bash
+CONTINUUM_CODESIGN_IDENTITY="Apple Development: Dylan Reed (...)" \
+CONTINUUM_MACOS_PROVISIONING_PROFILE="$HOME/Downloads/ContinuumRevived.provisionprofile" \
+  scripts/provisioned-cloudkit-app.sh \
+    --configuration release \
+    --output qa-runs/provisioned/ContinuumRevived.app
+```
+
+Then dogfood with:
+
+```bash
+scripts/companion-dogfood-start.sh \
+  --desktop-app qa-runs/provisioned/ContinuumRevived.app \
+  --device "Dylan’s iPhone" \
+  --publish-fixture-if-empty
+```
+
+`--allow-unentitled` remains diagnostics-only and must not be cited as CloudKit proof.
 
 ## Suggested next tickets for agents
 
@@ -170,11 +191,13 @@ Deliver:
 
 ### Ticket C — provisioned macOS CloudKit dogfood build
 
-Deliver:
+Status: implemented locally by ticket 83 scripts/docs. Supervised proof still requires Dylan's real Apple Development identity/profile.
 
-- Repeatable script or Xcode target path to build a signed macOS `.app` with valid iCloud entitlement.
-- `scripts/companion-dogfood-start.sh` should use that path or clearly instruct when provisioning is missing.
-- Health check must report `desktopSignedWithICloudEntitlement=true` and app must launch, not just pass `codesign --verify`.
+Delivered:
+
+- `scripts/provisioned-cloudkit-app.sh` builds/signs/diagnoses a provisioned macOS `.app` with valid iCloud entitlement.
+- `scripts/companion-dogfood-start.sh` uses that path or clearly instructs when identity/profile provisioning is missing.
+- Health check must report `desktopSignedWithICloudEntitlement=true` and app must pass LaunchServices smoke, not just `codesign --verify`.
 
 ## Testing sequence after A+B+C
 

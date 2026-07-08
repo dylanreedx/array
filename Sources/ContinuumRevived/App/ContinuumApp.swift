@@ -666,11 +666,41 @@ private struct CompanionSyncHealthCheckError: Error, CustomStringConvertible {
     let description: String
 }
 
+private func entitlementStringArray(_ value: Any?) -> [String] {
+    if let strings = value as? [String] {
+        return strings
+    }
+    if let array = value as? [Any] {
+        return array.compactMap { $0 as? String }
+    }
+    if let string = value as? String {
+        return [string]
+    }
+    return []
+}
+
 private func hasMainBundleICloudEntitlement(containerIdentifier: String) -> Bool {
-    guard let entitlements = Bundle.main.object(forInfoDictionaryKey: "com.apple.developer.icloud-container-identifiers") as? [String] else {
+    var selfCode: SecCode?
+    guard SecCodeCopySelf([], &selfCode) == errSecSuccess, let selfCode else {
         return false
     }
-    return entitlements.contains(containerIdentifier)
+
+    var staticCode: SecStaticCode?
+    guard SecCodeCopyStaticCode(selfCode, [], &staticCode) == errSecSuccess, let staticCode else {
+        return false
+    }
+
+    var signingInformation: CFDictionary?
+    let flags = SecCSFlags(rawValue: kSecCSSigningInformation)
+    guard SecCodeCopySigningInformation(staticCode, flags, &signingInformation) == errSecSuccess,
+          let info = signingInformation as? [String: Any],
+          let entitlements = info[kSecCodeInfoEntitlementsDict as String] as? [String: Any] else {
+        return false
+    }
+
+    let services = entitlementStringArray(entitlements["com.apple.developer.icloud-services"])
+    let containers = entitlementStringArray(entitlements["com.apple.developer.icloud-container-identifiers"])
+    return services.contains("CloudKit") && containers.contains(containerIdentifier)
 }
 
 private func runCompanionSyncHealthCheck() throws {

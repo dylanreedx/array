@@ -1,17 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!--
-  Ticket: docs/38-tickets/57-cloudkit-transport-impl.md
-
-  This is the entitlements artifact for signed-app packaging, not something
-  the SwiftPM build (`swift build` / `swift run`) references — SwiftPM has no
-  Xcode project/target to attach an entitlements file to, so this file has no
-  effect on the checks-only matrix build. It exists for whichever packaging
-  step produces a signed `ContinuumRevived.app` (Xcode project generation, an
-  xcconfig, or a manual codesign --entitlements invocation) to point at,
-  under both Debug and Release configurations, per the ticket's "Entitlement
-  required".
--->
 <plist version="1.0">
 <dict>
 	<key>com.apple.developer.icloud-services</key>

@@ -78,6 +78,41 @@ private func checkCompanionDogfoodDryRunScript() throws {
     expect(output.contains("\"freshnessRequired\": true"), "ticket76 script: names freshness/heartbeat gate")
     expect(output.contains("\"willLaunchDevices\": false"), "ticket76 script: dry-run does not launch devices")
     expect(output.contains("iCloud.dev.dylanreedx.continuum"), "ticket76 script: prints shared CloudKit container")
+    expect(output.contains("provisioned-cloudkit-app.sh"), "ticket83 script: dry-run points at provisioned app builder")
+    expect(output.contains("manual codesign-only entitlement proof: refused"), "ticket83 script: refuses manual-entitlement fake proof")
+    expect(output.contains("\"requiresProvisionedDesktopApp\": true"), "ticket83 script: real dogfood requires provisioned desktop app")
+
+    let provisionedDryRun = Process()
+    provisionedDryRun.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    provisionedDryRun.arguments = [
+        "bash",
+        "scripts/provisioned-cloudkit-app.sh",
+        "--dry-run",
+        "--configuration",
+        "release",
+        "--output",
+        "/tmp/ContinuumRevived-provisioned.app",
+        "--identity",
+        "Apple Development: Dry Run",
+        "--profile",
+        "/tmp/DryRun.provisionprofile",
+        "--artifacts-dir",
+        "/tmp/continuum-provisioned-dry-run-artifacts"
+    ]
+    let provisionedPipe = Pipe()
+    provisionedDryRun.standardOutput = provisionedPipe
+    provisionedDryRun.standardError = provisionedPipe
+    try provisionedDryRun.run()
+    provisionedDryRun.waitUntilExit()
+    let provisionedOutput = String(decoding: provisionedPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+
+    expect(provisionedDryRun.terminationStatus == 0, "ticket83 script: provisioned builder dry-run exits 0, output=\(provisionedOutput)")
+    expect(provisionedOutput.contains("\"dryRun\": true"), "ticket83 script: provisioned builder dry-run manifest is explicit")
+    expect(provisionedOutput.contains("\"mode\": \"build\""), "ticket83 script: provisioned builder dry-run names build mode")
+    expect(provisionedOutput.contains("\"plannedLaunchSmoke\": true"), "ticket83 script: provisioned builder plans launch smoke without running it")
+    expect(provisionedOutput.contains("\"realCloudKitProof\": false"), "ticket83 script: dry-run does not claim proof")
+    expect(provisionedOutput.contains("embedded.provisionprofile"), "ticket83 script: provisioned builder plans embedded profile")
+    expect(provisionedOutput.contains("manual codesign-only is not CloudKit proof"), "ticket83 script: provisioned builder refuses manual-entitlement fake proof")
 
     let realProof = Process()
     realProof.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -90,12 +125,12 @@ private func checkCompanionDogfoodDryRunScript() throws {
     let realOutput = String(decoding: realPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
 
     expect(realProof.terminationStatus != 0, "ticket76 script: real proof refuses SwiftPM executable without --allow-unentitled")
-    expect(realOutput.contains("Refusing unentitled SwiftPM executable"), "ticket76 script: refusal explains the unentitled path")
+    expect(realOutput.contains("Refusing SwiftPM/raw executable for real CloudKit proof"), "ticket76 script: refusal explains the unentitled path")
 }
 
 func runCompanionDogfoodKitChecks() throws {
     try checkCompanionDogfoodHealthJSONSchema()
     try checkCompanionDogfoodFixtureIsExplicitAndI5Safe()
     try checkCompanionDogfoodDryRunScript()
-    print("companion dogfood kit: health JSON schema, explicit I5-safe fixture, and dry-run script contract all green")
+    print("companion dogfood kit: health JSON schema, explicit I5-safe fixture, provisioned CloudKit dry-run, and dogfood script contract all green")
 }

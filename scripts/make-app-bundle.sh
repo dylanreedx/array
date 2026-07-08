@@ -10,6 +10,8 @@ usage() {
 Usage: scripts/make-app-bundle.sh [--configuration debug|release] --output <path>
 
 Builds the SwiftPM continuum-revived executable and assembles a macOS .app bundle.
+This bundle is unsigned/unprovisioned CloudKit-wise; use
+scripts/provisioned-cloudkit-app.sh for real iCloud/CloudKit proof.
 USAGE
 }
 
@@ -68,3 +70,4 @@ cp "$ICON_SOURCE" "$OUTPUT/Contents/Resources/AppIcon.icns"
 plutil -lint "$OUTPUT/Contents/Info.plist" >/dev/null
 
 printf 'Assembled %s\n' "$OUTPUT"
+printf 'CloudKit proof: no (unsigned/unprovisioned). Use scripts/provisioned-cloudkit-app.sh with a matching identity/profile.\n'
