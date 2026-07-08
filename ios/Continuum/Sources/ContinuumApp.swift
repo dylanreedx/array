@@ -21,6 +21,11 @@ struct ContinuumApp: App {
                     pushDelegate.model = model
                     await model.start()
                 }
+                .onOpenURL { url in
+                    Task { @MainActor in
+                        await model.pairFromURL(url)
+                    }
+                }
         }
     }
 }
@@ -146,6 +151,8 @@ private final class AgentsBoardModel: ObservableObject {
     @Published var lastApprovalAck: ApprovalResponseAck?
     @Published var apnsDeviceToken: String?
     @Published var freshnessNow = Date()
+    @Published var pairingStatusMessage: String?
+    @Published var pairingInProgress = false
 
     // Ticket: docs/38-tickets/61b-canvas-editor.md
     @Published var canvasScene: CanvasScene = CanvasScene(zones: [], tiles: [])
@@ -318,6 +325,96 @@ private final class AgentsBoardModel: ObservableObject {
         } catch {
             ackTask.cancel()
             throw error
+        }
+    }
+
+    func pairFromURL(_ url: URL) async {
+        await pairFromString(url.absoluteString)
+    }
+
+    func pairFromString(_ rawValue: String) async {
+        guard !pairingInProgress else { return }
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed),
+              let payload = PairingURL.parsePayload(url) else {
+            pairingStatusMessage = "That is not a valid Continuum pairing link."
+            return
+        }
+        guard let endpoint = payload.endpoint else {
+            pairingStatusMessage = "Pairing link is missing the Mac endpoint. Generate a new QR code from the Mac."
+            return
+        }
+        guard endpoint.scheme == "http", endpoint.path == "/pair" else {
+            pairingStatusMessage = "Pairing link endpoint is not supported. Generate a new QR code from the Mac."
+            return
+        }
+        pairingInProgress = true
+        pairingStatusMessage = "Pairing with your Mac…"
+        defer { pairingInProgress = false }
+        do {
+            let requestBody = LocalPairingExchangeRequest(
+                token: payload.token,
+                deviceLabel: UIDevice.current.name,
+                requestedScope: (payload.scopes ?? .observer).rawValue
+            )
+            var request = URLRequest(url: endpoint)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 8
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONEncoder().encode(requestBody)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard statusCode == 200 else {
+                let code = (try? JSONDecoder().decode(LocalPairingErrorResponse.self, from: data).error) ?? "HTTP \(statusCode)"
+                throw LocalPairingUIError.exchangeRejected(code)
+            }
+            let sessionResponse = try JSONDecoder().decode(LocalPairingSessionResponse.self, from: data)
+            if let expectedInstanceId = payload.instanceId,
+               expectedInstanceId != sessionResponse.instanceId {
+                throw LocalPairingUIError.instanceMismatch
+            }
+            try pairedSessionStore.save(sessionResponse.pairedSession)
+            pairedSessionState = .paired(sessionResponse.pairedSession)
+            state = .loading
+            pairingStatusMessage = "Paired to your Continuum Mac. Starting sync…"
+            await start()
+        } catch {
+            pairingStatusMessage = Self.pairingMessage(for: error)
+        }
+    }
+
+    private static func pairingMessage(for error: Error) -> String {
+        if let error = error as? LocalPairingUIError {
+            return error.message
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            return "Could not reach your Mac. Keep both devices on the same Wi-Fi and try a fresh QR code."
+        }
+        return "Pairing failed. Generate a fresh QR code from the Mac and try again."
+    }
+
+    private struct LocalPairingErrorResponse: Decodable {
+        var error: String
+    }
+
+    private enum LocalPairingUIError: Error {
+        case exchangeRejected(String)
+        case instanceMismatch
+
+        var message: String {
+            switch self {
+            case .exchangeRejected(let code):
+                switch code {
+                case "alreadyUsed": return "That pairing code was already used. Generate a fresh QR code from the Mac."
+                case "expired", "pairingWindowExpired", "pairingWindowStopped": return "That pairing code expired. Generate a fresh QR code from the Mac."
+                case "scopeNotGranted": return "The Mac rejected the requested pairing scope. Generate a fresh QR code."
+                case "invalidToken": return "The Mac rejected this pairing code. Generate a fresh QR code."
+                default: return "The Mac rejected pairing (\(code)). Generate a fresh QR code and try again."
+                }
+            case .instanceMismatch:
+                return "Pairing response came from a different Continuum instance. Generate a fresh QR code from this Mac."
+            }
         }
     }
 
@@ -883,6 +980,9 @@ private struct LoadingBoardView: View {
 }
 
 private struct PairingRequiredView: View {
+    @EnvironmentObject private var model: AgentsBoardModel
+    @State private var pastedPairingURL = ""
+
     var body: some View {
         VStack(spacing: 12) {
             Image(systemName: "iphone.and.arrow.forward")
@@ -890,11 +990,39 @@ private struct PairingRequiredView: View {
                 .foregroundStyle(.orange)
             Text("Pair this phone")
                 .font(.headline)
-            Text("Connect to your Continuum instance before CloudKit starts.")
+            Text("On your Mac, choose Pair Phone, then scan the QR code. If scanning is unavailable, paste the pairing link below.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
+            VStack(spacing: 8) {
+                TextField("continuum://pair#…", text: $pastedPairingURL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                    .textFieldStyle(.roundedBorder)
+                Button {
+                    Task { @MainActor in
+                        await model.pairFromString(pastedPairingURL)
+                    }
+                } label: {
+                    if model.pairingInProgress {
+                        ProgressView()
+                    } else {
+                        Text("Pair from Link")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.pairingInProgress || pastedPairingURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(.horizontal)
+            if let message = model.pairingStatusMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(message.hasPrefix("Paired") ? .green : .orange)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
