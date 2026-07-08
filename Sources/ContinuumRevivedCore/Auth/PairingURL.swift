@@ -26,14 +26,32 @@ public enum PairingURL: Sendable {
     public static let scheme = "continuum"
     public static let host = "pair"
 
-    public static func issue(credential: String, scopes: Scope, instanceId: UUID? = nil) -> URL {
+    public struct Payload: Equatable, Sendable {
+        public var token: String
+        public var endpoint: URL?
+        public var scopes: Scope?
+        public var instanceId: UUID?
+
+        public init(token: String, endpoint: URL?, scopes: Scope?, instanceId: UUID?) {
+            self.token = token
+            self.endpoint = endpoint
+            self.scopes = scopes
+            self.instanceId = instanceId
+        }
+    }
+
+    public static func issue(credential: String, scopes: Scope, instanceId: UUID? = nil, endpoint: URL? = nil) -> URL {
         var components = URLComponents()
         components.scheme = scheme
         components.host = host
-        var fragmentItems = [
+        var fragmentItems: [URLQueryItem] = []
+        if let endpoint {
+            fragmentItems.append(URLQueryItem(name: "endpoint", value: endpoint.absoluteString))
+        }
+        fragmentItems.append(contentsOf: [
             URLQueryItem(name: "token", value: credential),
             URLQueryItem(name: "scopes", value: "\(scopes.rawValue)")
-        ]
+        ])
         if let instanceId {
             fragmentItems.append(URLQueryItem(name: "instance", value: instanceId.uuidString))
         }
@@ -45,15 +63,35 @@ public enum PairingURL: Sendable {
     }
 
     public static func parse(_ url: URL) -> String? {
+        fragmentItems(in: url)?
+            .first(where: { $0.name == "token" })?
+            .value
+    }
+
+    public static func parsePayload(_ url: URL) -> Payload? {
+        guard let items = fragmentItems(in: url),
+              let token = items.first(where: { $0.name == "token" })?.value,
+              !token.isEmpty else {
+            return nil
+        }
+        let endpoint = items.first(where: { $0.name == "endpoint" })?.value.flatMap(URL.init(string:))
+        let scopes = items.first(where: { $0.name == "scopes" || $0.name == "scope" })?
+            .value
+            .flatMap(Int.init)
+            .map(Scope.init(rawValue:))
+        let instanceId = items.first(where: { $0.name == "instance" || $0.name == "instanceId" })?
+            .value
+            .flatMap(UUID.init(uuidString:))
+        return Payload(token: token, endpoint: endpoint, scopes: scopes, instanceId: instanceId)
+    }
+
+    private static func fragmentItems(in url: URL) -> [URLQueryItem]? {
         guard url.scheme == scheme,
               url.host == host,
               let fragment = url.fragment,
               !fragment.isEmpty else {
             return nil
         }
-        return URLComponents(string: "?\(fragment)")?
-            .queryItems?
-            .first(where: { $0.name == "token" })?
-            .value
+        return URLComponents(string: "?\(fragment)")?.queryItems
     }
 }

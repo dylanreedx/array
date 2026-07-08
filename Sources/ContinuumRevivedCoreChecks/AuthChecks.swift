@@ -30,6 +30,7 @@ private func runAuthChecksAsync() async throws {
     try await runSessionAuthSuite()
     try await runMessageScopeSuite(signingKey: signingKey)
     try await runCompanionAuthServiceSuite()
+    try await runLocalPairingEndpointChecks()
     try runPairedCompanionSessionSuite()
     try await runAuthRealPathSuite()
     try runSigningKeyRestartSuite()

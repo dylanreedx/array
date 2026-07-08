@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import ContinuumRevivedCore
 import ContinuumRevivedSync
 import Foundation
@@ -2602,6 +2603,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var suppressTerminateOnWindowCloseForQA = false
     private let focusBroker = FocusBroker()
     private var companionAuthService: CompanionAuthService?
+    private var localPairingListener: LocalPairingEndpointListener?
     private var companionSyncService: DesktopCompanionSyncService?
     private var navKeymap: NavKeymap = .default {
         didSet { leaderDwell = TimeInterval(navKeymap.leaderDwellMs) / 1000 }
@@ -4811,21 +4813,119 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     @objc func issueObserverPairingTokenFromMenu(_ sender: Any?) {
-        Task {
+        Task { @MainActor in
+            let logger = Logger(subsystem: "continuum.auth", category: "pairing")
+            var startedListener: LocalPairingEndpointListener?
             do {
-                let service = try companionAuthService ?? CompanionAuthService(
-                    authDirectory: Self.resolveAuthDirectory(applicationSupportDirectory: Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)),
-                    instanceDisplayName: Host.current().localizedName ?? "Continuum"
-                )
-                companionAuthService = service
+                let service = try ensureCompanionAuthService()
+                let ttl: TimeInterval = 300
                 let instance = try await service.instance()
-                let grant = try await service.issuePairingCredential(scopes: .observer, ttl: 300, label: "Debug Observer")
-                let url = PairingURL.issue(credential: grant.credential, scopes: grant.scopes, instanceId: instance.id)
-                Logger(subsystem: "continuum.auth", category: "pairing").notice("pairing-url issued: \(url.absoluteString, privacy: .public)")
+                let grant = try await service.issuePairingCredential(scopes: .observer, ttl: ttl, label: "Debug Observer")
+                let expiresAt = grant.expiresAt ?? Date().addingTimeInterval(ttl)
+                localPairingListener?.stop()
+                let listener = try LocalPairingEndpointListener.start(
+                    authService: service,
+                    advertisedHost: LocalPairingEndpointListener.preferredAdvertisedHost(),
+                    expiresAt: expiresAt,
+                    acceptedCredential: grant.credential
+                )
+                startedListener = listener
+                localPairingListener = listener
+                let url = PairingURL.issue(
+                    credential: grant.credential,
+                    scopes: grant.scopes,
+                    instanceId: instance.id,
+                    endpoint: listener.endpointURL
+                )
+                copyPairingURLToPasteboard(url)
+                logger.notice("pairing listener ready endpoint=\(listener.endpointURL.absoluteString, privacy: .public) expiresAt=\(expiresAt.ISO8601Format(), privacy: .public) scope=\(grant.scopes.rawValue, privacy: .public)")
+                presentPairingURL(url, listener: listener, expiresAt: expiresAt)
             } catch {
-                Logger(subsystem: "continuum.auth", category: "pairing").error("pairing-url issue failed: \(String(describing: error), privacy: .public)")
+                startedListener?.stop()
+                if let startedListener, localPairingListener === startedListener {
+                    localPairingListener = nil
+                }
+                logger.error("pairing listener setup failed")
+                presentPairingError()
             }
         }
+    }
+
+    private func ensureCompanionAuthService() throws -> CompanionAuthService {
+        if let companionAuthService { return companionAuthService }
+        let service = try CompanionAuthService(
+            authDirectory: Self.resolveAuthDirectory(applicationSupportDirectory: Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)),
+            instanceDisplayName: Host.current().localizedName ?? "Continuum"
+        )
+        companionAuthService = service
+        return service
+    }
+
+    private func copyPairingURLToPasteboard(_ url: URL) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url.absoluteString, forType: .string)
+    }
+
+    private func presentPairingURL(_ url: URL, listener: LocalPairingEndpointListener, expiresAt: Date) {
+        let alert = NSAlert()
+        alert.messageText = "Continuum LAN Pairing"
+        alert.informativeText = """
+        Pairing URL copied to the clipboard. Scan the QR code with your iPhone to open Continuum and pair this phone.
+
+        Status: Listening on \(listener.endpointURL.absoluteString)
+        Expires: \(expiresAt.formatted(date: .abbreviated, time: .standard))
+        Scope: Observer
+
+        \(url.absoluteString)
+        """
+        if let qrImage = makePairingQRCode(for: url) {
+            let imageView = NSImageView(image: qrImage)
+            imageView.imageScaling = .scaleProportionallyUpOrDown
+            imageView.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                imageView.widthAnchor.constraint(equalToConstant: 220),
+                imageView.heightAnchor.constraint(equalToConstant: 220)
+            ])
+            alert.accessoryView = imageView
+        }
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Copy URL")
+        alert.addButton(withTitle: "Stop Listener")
+        alert.addButton(withTitle: "OK")
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            copyPairingURLToPasteboard(url)
+        } else if response == .alertSecondButtonReturn {
+            listener.stop()
+            if localPairingListener === listener {
+                localPairingListener = nil
+            }
+        }
+    }
+
+    private func makePairingQRCode(for url: URL) -> NSImage? {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator"),
+              let data = url.absoluteString.data(using: .utf8) else {
+            return nil
+        }
+        filter.setValue(data, forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let outputImage = filter.outputImage else { return nil }
+        let scale = 220 / max(outputImage.extent.width, outputImage.extent.height)
+        let transformed = outputImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let rep = NSCIImageRep(ciImage: transformed)
+        let image = NSImage(size: rep.size)
+        image.addRepresentation(rep)
+        return image
+    }
+
+    private func presentPairingError() {
+        let alert = NSAlert()
+        alert.messageText = "Could not start LAN pairing"
+        alert.informativeText = "The pairing listener was not started. Try again from Debug > Auth."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     @objc func publishCompanionSyncNowFromMenu(_ sender: Any?) {
@@ -7835,6 +7935,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         profilePalette = nil
         settingsPanel?.close()
         settingsPanel = nil
+        localPairingListener?.stop()
+        localPairingListener = nil
 
         // Browsers tear down first: WKWebView's process pool teardown is
         // independent of GhosttyKit's. Inverting the order risks WebKit KVO

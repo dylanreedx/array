@@ -34,6 +34,13 @@ func runAsyncCheck(_ body: @escaping @Sendable () async throws -> Void) throws {
     try box.result!.get()
 }
 
+if CommandLine.arguments.contains("--local-pairing-endpoint-check") {
+    try runAsyncCheck {
+        try await runLocalPairingEndpointChecks()
+    }
+    Foundation.exit(0)
+}
+
 try runAsyncCheck {
     try await runConnectionSupervisorChecks()
 }
