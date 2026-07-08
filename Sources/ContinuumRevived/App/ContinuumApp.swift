@@ -2431,7 +2431,7 @@ enum ContinuumApp {
         let debugMenu = NSMenu(title: "Debug")
         let authItem = NSMenuItem(title: "Auth", action: nil, keyEquivalent: "")
         let authMenu = NSMenu(title: "Auth")
-        authMenu.addItem(NSMenuItem(title: "Issue Pairing Token (Observer)", action: #selector(AppDelegate.issueObserverPairingTokenFromMenu(_:)), keyEquivalent: ""))
+        authMenu.addItem(NSMenuItem(title: "Pair Phone…", action: #selector(AppDelegate.issueObserverPairingTokenFromMenu(_:)), keyEquivalent: ""))
         authItem.submenu = authMenu
         debugMenu.addItem(authItem)
         let companionItem = NSMenuItem(title: "Companion Sync", action: nil, keyEquivalent: "")
@@ -2481,7 +2481,7 @@ enum ContinuumApp {
 
         guard let debugMenu = mainMenu.item(withTitle: "Debug")?.submenu else { throw SelfCheckError("missing Debug menu") }
         guard let authMenu = debugMenu.item(withTitle: "Auth")?.submenu else { throw SelfCheckError("missing Debug > Auth menu") }
-        try expectMenuItem(authMenu, title: "Issue Pairing Token (Observer)", action: #selector(AppDelegate.issueObserverPairingTokenFromMenu(_:)), keyEquivalent: "")
+        try expectMenuItem(authMenu, title: "Pair Phone…", action: #selector(AppDelegate.issueObserverPairingTokenFromMenu(_:)), keyEquivalent: "")
         guard let companionMenu = debugMenu.item(withTitle: "Companion Sync")?.submenu else { throw SelfCheckError("missing Debug > Companion Sync menu") }
         try expectMenuItem(companionMenu, title: "Publish Now", action: #selector(AppDelegate.publishCompanionSyncNowFromMenu(_:)), keyEquivalent: "")
         try expectMenuItem(companionMenu, title: "Fetch Now", action: #selector(AppDelegate.fetchCompanionSyncNowFromMenu(_:)), keyEquivalent: "")
