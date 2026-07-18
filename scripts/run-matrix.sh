@@ -77,6 +77,8 @@ run_app_check() {
 run swift build
 run swift run ContinuumRevivedCoreChecks
 run swift run ContinuumRevivedSyncChecks
+# Ticket 86 (D4-R1): relay hub core — auth/scope, lossless catch-up, I5 gate.
+run swift run ContinuumRevivedRelayChecks
 # Ticket 57: gated real-CloudKit backend leg. Skips gracefully (exit 0,
 # cloudkit_available=false in the manifest) unless CLOUDKIT_ENABLED=1 is set
 # — never set in this matrix; the real leg is device-gate-owed. Explicitly
