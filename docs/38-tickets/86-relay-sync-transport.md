@@ -68,6 +68,38 @@ Mac app ──publish──▶ ┌───────────────�
    decide whether CloudKit code is deleted or kept as fallback; APNS wake-on-event
    (D7) integrates with the relay's publish hook.
 
+## Day plan 2026-07-18 (slice 2 execution, owner-approved)
+
+Approved by Dylan midday 2026-07-18: milestones A–E below, phone leg = dev relay
+today (same production client pointed at the dev relay's address), VPS deploy next
+session. Each milestone gates on matrix green + local commit before the next starts.
+
+- **A — `continuum-relay` server executable.** HTTP/1.1 long-poll API over the
+  raw-BSD-socket listener pattern (pairing-endpoint precedent):
+  `POST /v1/hello` (validate + welcome), `GET /v1/poll?after=N&max=&waitMs=`
+  (stateless lossless backlog via the hub's cursor semantics; bounded wait),
+  `POST /v1/publish` (operator only), `POST /v1/tokens` (operator registers the
+  phone's pairing token as a relay credential — D6 auth end-to-end),
+  `GET /v1/health`. Hub gains a `pollEnvelopes(token:afterSeq:maxCount:)` pull API
+  with waiter continuations (cancellation-safe). Adapter checks bind a real
+  loopback socket in `ContinuumRevivedRelayChecks`. Owner checkpoint: curl.
+- **B — `RelaySyncTransport` client.** `SyncTransport` conformance over URLSession
+  long-poll (hello → poll loop → inbound stream; send() → publish; reconnect with
+  backoff; cursor kept by the client). Checked against an in-process server on a
+  loopback port.
+- **C — Mac publish wiring.** Transport selection (relay URL + operator token via
+  config/UserDefaults; CloudKit only as explicit fallback), pairing-exchange hook
+  registers the issued phone token with the relay, `companion-sync.log` rows gain
+  `transport=` and relay report fields. Owner checkpoint: log rows, lastError=nil.
+- **D — iOS wiring + sim proof, zero Apple.** Relay mode drops the
+  `CKAccountStatus` gate (hello success is the gate); bearer = the existing paired
+  session token; verified-fresh sim build via the strings-gated pipeline. Owner
+  test: live board rows on the sim while the Mac publishes; `companion-fetch.log`
+  shows relay reports.
+- **E — phone against the dev relay.** Same client, dev address; Files-app-readable
+  fetch log names any failing gate. VPS deploy (TLS, token persistence, Linux
+  portability decision) is the immediate next session.
+
 ## Checks (slice 1, RED→GREEN)
 
 - bad/unknown token → hello refused; no session.
