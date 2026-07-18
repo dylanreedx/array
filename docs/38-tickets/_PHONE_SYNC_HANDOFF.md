@@ -74,7 +74,11 @@ it is to lose track of which build contains which fix.
   CONTINUUM_CODESIGN_IDENTITY="Apple Development: Dylan Reed (DGJTP684C8)" \
   CONTINUUM_MACOS_PROVISIONING_PROFILE="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles/22fddb00-f227-45fc-a313-c27614122142.provisionprofile" \
   scripts/provisioned-cloudkit-app.sh --configuration release --output qa-runs/provisioned/ContinuumRevived.app
+  rm -rf ~/Applications/ContinuumRevived.app
+  ditto qa-runs/provisioned/ContinuumRevived.app ~/Applications/ContinuumRevived.app
   ```
+  LAUNCH IT FROM `~/Applications/ContinuumRevived.app` — always. Never from a copy
+  inside `~/Documents` (see gotcha 7).
   (That UUID profile = macOS Development, app id `com.continuum.revived`, iCloud container
   granted. If it expires, regenerate by building the dummy project at
   `~/Desktop/test/test.xcodeproj` with `PRODUCT_BUNDLE_IDENTIFIER=com.continuum.revived
@@ -192,9 +196,20 @@ Targets (`Package.swift` + `ios/project.yml`):
 6. `devicectl launch --console` buffers the app's stdout (prints may never appear) and
    the app DIES when the console session ends. Simulator `--console-pty` doesn't have
    these problems.
-7. The Mac app instance matters: `qa-runs/dogfood-20260716/…` (UNSIGNED, cannot publish)
-   vs `qa-runs/provisioned/…` (entitled). Check `ps aux | grep continuum-revived` before
-   trusting a test.
+7. The Mac app instance matters — RESOLVED 2026-07-18 after a TCC prompt storm.
+   Opening the stale ad-hoc bundle (`qa-runs/dogfood-20260716/…`, now deleted; a June
+   copy in `~/Applications` was equally stale) produced an endless loop of
+   "access files in your Documents folder" dialogs: macOS keys folder consent to the
+   app's code signature, that bundle FAILED `codesign --verify`, so no Allow could ever
+   persist — and the app's child processes (1 Hz conductor sqlite3, git, tmux,
+   file-tree scans into the repo under ~/Documents) re-prompted on every touch.
+   32 dead TCC rows had accumulated (`tccutil reset SystemPolicyDocumentsFolder
+   com.continuum.revived` cleared them). Canonical install is now
+   `~/Applications/ContinuumRevived.app` (the entitled build, OUTSIDE ~/Documents so
+   the bundle itself needs no grant; ditto it there after each rebuild). One Allow on
+   first Documents access persists, because the signature verifies and its designated
+   requirement is identity-stable across rebuilds. Check
+   `ps aux | grep continuum-revived` before trusting a test.
 8. TestFlight is NOT needed for self-dogfood — `devicectl`/simulator installs are the
    fast path. The `2026071601` archive in Xcode Organizer is STALE (lacks the fetch fix);
    do not upload it.
