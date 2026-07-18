@@ -2639,6 +2639,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var companionAuthService: CompanionAuthService?
     private var localPairingListener: LocalPairingEndpointListener?
     private var companionSyncService: DesktopCompanionSyncService?
+    /// Set when the service runs in relay mode (D4-R1); used to register
+    /// phone pairing tokens with the relay at exchange time.
+    private var relaySyncTransport: RelaySyncTransport?
     private var companionPublishDebounceWorkItem: DispatchWorkItem?
     private var navKeymap: NavKeymap = .default {
         didSet { leaderDwell = TimeInterval(navKeymap.leaderDwellMs) / 1000 }
@@ -5032,6 +5035,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             listener.stop()
             localPairingListener = nil
         }
+        if let relaySyncTransport {
+            let token = exchange.session.token
+            let scopes = exchange.session.scopes
+            Task {
+                do {
+                    try await relaySyncTransport.registerToken(token, scopes: scopes)
+                    Self.appendCompanionSyncLog("reason=relay-token-registered device=\(exchange.device.id) scopes=\(scopes.rawValue)")
+                } catch {
+                    Self.appendCompanionSyncLog("reason=relay-token-register-FAILED device=\(exchange.device.id) error=\(String(describing: error))")
+                }
+            }
+        }
         scheduleCompanionSyncPublish(reason: .pairing, diagnosticsReason: "pairing", debounce: 0.2)
     }
 
@@ -5109,16 +5124,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func ensureDesktopCompanionSyncService() throws -> DesktopCompanionSyncService {
         if let companionSyncService { return companionSyncService }
+
+        // D4-R1 (ticket 86): a configured relay URL selects the self-owned
+        // relay transport — no iCloud entitlement, no CloudKit. Absent that,
+        // the parked CloudKit path below still works unchanged.
+        if let relayConfig = RelayClientConfig.resolve() {
+            guard let operatorToken = relayConfig.operatorToken, !operatorToken.isEmpty else {
+                throw CompanionSyncAppError.missingRelayOperatorToken
+            }
+            let transport = RelaySyncTransport(
+                baseURL: relayConfig.baseURL,
+                bearerToken: operatorToken,
+                deviceLabel: "mac-desktop",
+                startAtHead: true
+            )
+            transport.start()
+            relaySyncTransport = transport
+            let service = makeDesktopCompanionSyncService(
+                configuration: DesktopCompanionSyncConfiguration(
+                    containerIdentifier: "relay:\(relayConfig.baseURL.absoluteString)",
+                    signedWithICloudEntitlement: false
+                ),
+                transport: transport,
+                fetchChanges: {},        // the relay transport polls continuously
+                ensureSubscription: {}   // no CK subscription in relay mode
+            )
+            companionSyncService = service
+            return service
+        }
+
         let signedWithICloudEntitlement = Self.hasICloudEntitlement(containerIdentifier: CompanionSyncConfig.cloudKitContainerIdentifier)
         guard signedWithICloudEntitlement else {
             throw CompanionSyncAppError.missingICloudEntitlement(containerIdentifier: CompanionSyncConfig.cloudKitContainerIdentifier)
         }
         let transport = CloudKitSyncTransport(containerIdentifier: CompanionSyncConfig.cloudKitContainerIdentifier)
-        let service = DesktopCompanionSyncService(
+        let service = makeDesktopCompanionSyncService(
             configuration: DesktopCompanionSyncConfiguration(
                 containerIdentifier: CompanionSyncConfig.cloudKitContainerIdentifier,
                 signedWithICloudEntitlement: signedWithICloudEntitlement
             ),
+            transport: transport,
+            fetchChanges: {
+                try await transport.fetchChanges()
+            },
+            ensureSubscription: {
+                try await transport.ensureSubscription()
+            }
+        )
+        companionSyncService = service
+        return service
+    }
+
+    private func makeDesktopCompanionSyncService(
+        configuration: DesktopCompanionSyncConfiguration,
+        transport: any ContinuumRevivedSync.SyncTransport,
+        fetchChanges: @escaping @Sendable () async throws -> Void,
+        ensureSubscription: @escaping @Sendable () async throws -> Void
+    ) -> DesktopCompanionSyncService {
+        DesktopCompanionSyncService(
+            configuration: configuration,
             transport: transport,
             pairingSnapshot: { [weak self] in
                 guard let self else {
@@ -5153,15 +5217,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 }
             },
             freshnessPublisher: DesktopCompanionLogFreshnessPublisher(),
-            fetchChanges: {
-                try await transport.fetchChanges()
-            },
-            ensureSubscription: {
-                try await transport.ensureSubscription()
-            }
+            fetchChanges: fetchChanges,
+            ensureSubscription: ensureSubscription
         )
-        companionSyncService = service
-        return service
     }
 
     private func desktopCompanionPairingSnapshot() async -> DesktopCompanionPairingSnapshot {
@@ -5225,7 +5283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "reason=\(reason, privacy: .public) container=\(diagnostics.containerIdentifier, privacy: .public) paired=\(diagnostics.isPaired, privacy: .public) pairedDevices=\(diagnostics.pairedDeviceCount, privacy: .public) signedICloud=\(diagnostics.signedWithICloudEntitlement, privacy: .public) transportIsPairingProof=\(diagnostics.transportIsPairingProof, privacy: .public) registeredObservedAgents=\(registeredObservedAgents, privacy: .public) liveObservedAgents=\(liveObservedAgents, privacy: .public) managedAgentSessions=\(managedAgentSessions, privacy: .public) lastSpatial=\(String(describing: diagnostics.lastSpatialPublishAt), privacy: .public) lastActivity=\(String(describing: diagnostics.lastActivityPublishAt), privacy: .public) lastFetch=\(String(describing: diagnostics.lastFetchAt), privacy: .public) lastInbound=\(String(describing: diagnostics.lastInboundMessageKind), privacy: .public) lastApproval=\(String(describing: diagnostics.lastApprovalResponseOutcome), privacy: .public) lastError=\(String(describing: diagnostics.lastError), privacy: .public)"
         )
         Self.appendCompanionSyncLog(
-            "reason=\(reason) container=\(diagnostics.containerIdentifier) paired=\(diagnostics.isPaired) pairedDevices=\(diagnostics.pairedDeviceCount) signedICloud=\(diagnostics.signedWithICloudEntitlement) registeredObservedAgents=\(registeredObservedAgents) liveObservedAgents=\(liveObservedAgents) managedAgentSessions=\(managedAgentSessions) lastSpatial=\(String(describing: diagnostics.lastSpatialPublishAt)) lastActivity=\(String(describing: diagnostics.lastActivityPublishAt)) lastFetch=\(String(describing: diagnostics.lastFetchAt)) lastError=\(String(describing: diagnostics.lastError))"
+            "reason=\(reason) transport=\(relaySyncTransport != nil ? "relay" : "cloudkit") container=\(diagnostics.containerIdentifier) paired=\(diagnostics.isPaired) pairedDevices=\(diagnostics.pairedDeviceCount) signedICloud=\(diagnostics.signedWithICloudEntitlement) registeredObservedAgents=\(registeredObservedAgents) liveObservedAgents=\(liveObservedAgents) managedAgentSessions=\(managedAgentSessions) lastSpatial=\(String(describing: diagnostics.lastSpatialPublishAt)) lastActivity=\(String(describing: diagnostics.lastActivityPublishAt)) lastFetch=\(String(describing: diagnostics.lastFetchAt)) lastError=\(String(describing: diagnostics.lastError))"
         )
     }
 
@@ -5236,6 +5294,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private enum CompanionSyncAppError: Error, CustomStringConvertible {
         case missingCanvas
         case missingICloudEntitlement(containerIdentifier: String)
+        case missingRelayOperatorToken
 
         var description: String {
             switch self {
@@ -5243,6 +5302,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 return "missing canvas"
             case let .missingICloudEntitlement(containerIdentifier):
                 return "missing CloudKit entitlement for \(containerIdentifier); companion sync is disabled for this launch"
+            case .missingRelayOperatorToken:
+                return "relay URL is configured but no operator token is set (continuum.relay.operatorToken / CONTINUUM_RELAY_OPERATOR_TOKEN)"
             }
         }
     }
