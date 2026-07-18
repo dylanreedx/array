@@ -430,3 +430,225 @@ do {
 }
 
 print("ContinuumRevivedRelayChecks passed: pull API (immediate/suspend/cancel/unrecoverable, waiter hygiene), HTTP adapter on loopback (health, hello auth+version, publish 403/400/200, poll tail+peek DTO round-trip \(httpEnvelopeCount) envelope(s), runtime token registration, 404, 409 cursorUnrecoverable)")
+
+// ── Slice 2, milestone B: RelaySyncTransport client against a live server ──
+// Real loopback HTTP; retry/backoff schedules injected in milliseconds so
+// convergence is fast. Every wait is bounded by a publish that has already
+// happened or a retry loop that provably converges.
+
+final class CursorRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [UInt64] = []
+    func record(_ value: UInt64) {
+        lock.lock()
+        values.append(value)
+        lock.unlock()
+    }
+    var latest: UInt64? {
+        lock.lock()
+        defer { lock.unlock() }
+        return values.last
+    }
+}
+
+func takeMessages(_ count: Int, from stream: AsyncStream<SyncMessage>) async -> [SyncMessage] {
+    var collected: [SyncMessage] = []
+    guard count > 0 else { return collected }
+    for await message in stream {
+        collected.append(message)
+        if collected.count == count { break }
+    }
+    return collected
+}
+
+func takeStates(_ count: Int, from stream: AsyncStream<ContinuumRevivedSync.ConnectionState>) async -> [ContinuumRevivedSync.ConnectionState] {
+    var collected: [ContinuumRevivedSync.ConnectionState] = []
+    guard count > 0 else { return collected }
+    for await state in stream {
+        collected.append(state)
+        if collected.count == count { break }
+    }
+    return collected
+}
+
+// 21. Backlog + live consumption, cursor advance, operator send() round-trip.
+do {
+    let registry = RelayTokenRegistry(seed: [
+        macToken: RelayGrant(scopes: .operator),
+        phoneToken: RelayGrant(scopes: .observer),
+    ])
+    let hub = RelayHub { token in await registry.grant(for: token) }
+    let server = RelayHTTPServer(hub: hub, registry: registry)
+    try server.start()
+    let base = URL(string: "http://127.0.0.1:\(server.port)")!
+
+    for lamport: UInt64 in 1...2 {
+        let body = try JSONEncoder().encode(opMessage(lamport))
+        let published = try await request("POST", "\(base)/v1/publish", token: macToken, body: body)
+        expect(published.status == 200, "assertion 51: seed publish → 200, got \(published.status)")
+    }
+
+    let cursors = CursorRecorder()
+    let observer = RelaySyncTransport(
+        baseURL: base,
+        bearerToken: phoneToken,
+        deviceLabel: "checks-observer",
+        pollWaitMs: 3_000,
+        backoffNanoseconds: [10_000_000],
+        onCursorChange: { cursors.record($0) }
+    )
+    observer.start()
+
+    let backlog = await takeMessages(2, from: observer.inbound)
+    expect(backlog == [opMessage(1), opMessage(2)], "assertion 52: transport consumes the backlog verbatim")
+    expect(cursors.latest == 2, "assertion 53: cursor advanced to 2, got \(String(describing: cursors.latest))")
+
+    let firstState = await takeStates(1, from: observer.connectionState)
+    expect(firstState == [ContinuumRevivedSync.ConnectionState.connected], "assertion 54: first connection state is connected, got \(firstState)")
+
+    // Live delivery through a parked long-poll: publish while the transport waits.
+    let liveBody = try JSONEncoder().encode(opMessage(3))
+    _ = try await request("POST", "\(base)/v1/publish", token: macToken, body: liveBody)
+    let live = await takeMessages(1, from: observer.inbound)
+    expect(live == [opMessage(3)], "assertion 55: live envelope delivered through the parked poll")
+    expect(cursors.latest == 3, "assertion 56: cursor advanced to 3, got \(String(describing: cursors.latest))")
+
+    // send(): the Mac leg publishes through the same transport type.
+    let publisher = RelaySyncTransport(baseURL: base, bearerToken: macToken, deviceLabel: "checks-publisher", backoffNanoseconds: [10_000_000])
+    try await publisher.send(opMessage(4))
+    let sent = await takeMessages(1, from: observer.inbound)
+    expect(sent == [opMessage(4)], "assertion 57: send() lands on the observer's stream")
+
+    do {
+        try await observer.send(opMessage(5))
+        expect(false, "assertion 58: observer-token send must throw")
+    } catch let error as SyncTransportError {
+        expect(error == .sendFailed(reason: "scopeForbidsPublish"), "assertion 58: expected scopeForbidsPublish, got \(error)")
+    }
+
+    // stop(): both streams end.
+    observer.stop()
+    var trailingStates: [ContinuumRevivedSync.ConnectionState] = []
+    for await state in observer.connectionState {
+        trailingStates.append(state)
+    }
+    expect(trailingStates.last == ContinuumRevivedSync.ConnectionState.disconnected(reason: "stopped"), "assertion 59: stop ends the state stream with disconnected, got \(trailingStates)")
+    var trailingMessages = 0
+    for await _ in observer.inbound {
+        trailingMessages += 1
+    }
+    expect(trailingMessages == 0, "assertion 60: inbound finishes empty after stop")
+    publisher.stop()
+    server.stop()
+}
+
+// 22. Bad token: the loop reports reconnecting, never connected.
+do {
+    let registry = RelayTokenRegistry(seed: [macToken: RelayGrant(scopes: .operator)])
+    let hub = RelayHub { token in await registry.grant(for: token) }
+    let server = RelayHTTPServer(hub: hub, registry: registry)
+    try server.start()
+    let transport = RelaySyncTransport(
+        baseURL: URL(string: "http://127.0.0.1:\(server.port)")!,
+        bearerToken: "bogus",
+        deviceLabel: "checks-bad-token",
+        backoffNanoseconds: [10_000_000]
+    )
+    transport.start()
+    let states = await takeStates(1, from: transport.connectionState)
+    expect(states == [ContinuumRevivedSync.ConnectionState.reconnecting], "assertion 61: bad token loops through reconnecting, got \(states)")
+    transport.stop()
+    server.stop()
+}
+
+// 23. cursorUnrecoverable self-heals: reset to 0, then whole again the
+//     moment a bridging snapshot is published.
+do {
+    let registry = RelayTokenRegistry(seed: [
+        macToken: RelayGrant(scopes: .operator),
+        phoneToken: RelayGrant(scopes: .observer),
+    ])
+    let hub = RelayHub(ringCapacity: 2) { token in await registry.grant(for: token) }
+    let server = RelayHTTPServer(hub: hub, registry: registry)
+    try server.start()
+    let base = URL(string: "http://127.0.0.1:\(server.port)")!
+    for lamport: UInt64 in 1...4 {
+        let body = try JSONEncoder().encode(opMessage(lamport))
+        _ = try await request("POST", "\(base)/v1/publish", token: macToken, body: body)
+    }
+
+    let transport = RelaySyncTransport(
+        baseURL: base,
+        bearerToken: phoneToken,
+        deviceLabel: "checks-heal",
+        initialCursor: 1,
+        pollWaitMs: 1_000,
+        backoffNanoseconds: [50_000_000]
+    )
+    transport.start()
+    let firstState = await takeStates(1, from: transport.connectionState)
+    expect(firstState == [ContinuumRevivedSync.ConnectionState.reconnecting], "assertion 62: unrecoverable cursor reports reconnecting, got \(firstState)")
+
+    // Publish the bridging snapshot; the retry loop must converge on it.
+    let snapshotBody = try JSONEncoder().encode(snapshotMessage(through: 4))
+    _ = try await request("POST", "\(base)/v1/publish", token: macToken, body: snapshotBody)
+    let healed = await takeMessages(1, from: transport.inbound)
+    if case .snapshot = healed[0] {} else {
+        expect(false, "assertion 63: healed feed starts with the bridging snapshot, got \(healed)")
+    }
+    transport.stop()
+    server.stop()
+}
+
+print("ContinuumRevivedRelayChecks passed: RelaySyncTransport against live loopback server (backlog+live consumption, cursor advance via onCursorChange, operator send() round-trip, observer send refusal, stop() stream hygiene, bad-token reconnect loop, cursorUnrecoverable self-heal via bridging snapshot)")
+
+// ── Slice 2, milestone C plumbing: registerToken + startAtHead ──
+
+// 24. The Mac leg registers a phone token through the transport; observer
+//     grants may not register; startAtHead skips the backlog so the Mac's
+//     inbound is live-only.
+do {
+    let registry = RelayTokenRegistry(seed: [macToken: RelayGrant(scopes: .operator)])
+    let hub = RelayHub { token in await registry.grant(for: token) }
+    let server = RelayHTTPServer(hub: hub, registry: registry)
+    try server.start()
+    let base = URL(string: "http://127.0.0.1:\(server.port)")!
+
+    let mac = RelaySyncTransport(
+        baseURL: base,
+        bearerToken: macToken,
+        deviceLabel: "checks-mac",
+        startAtHead: true,
+        pollWaitMs: 1_000,
+        backoffNanoseconds: [10_000_000]
+    )
+    try await mac.send(opMessage(1))
+    try await mac.send(opMessage(2))
+
+    try await mac.registerToken("checks-phone-registered", scopes: .observer)
+    let registeredPoll = try await request("GET", "\(base)/v1/poll?after=0&waitMs=0", token: "checks-phone-registered")
+    expect(registeredPoll.status == 200, "assertion 64: transport-registered token polls → 200, got \(registeredPoll.status)")
+
+    let observerTransport = RelaySyncTransport(baseURL: base, bearerToken: "checks-phone-registered", deviceLabel: "checks-registered-observer", backoffNanoseconds: [10_000_000])
+    do {
+        try await observerTransport.registerToken("escalation", scopes: .operator)
+        expect(false, "assertion 65: observer registerToken must be refused")
+    } catch let error as SyncTransportError {
+        expect(error == .sendFailed(reason: "scopeForbidsPublish"), "assertion 65: expected scopeForbidsPublish, got \(error)")
+    }
+    observerTransport.stop()
+
+    // startAtHead: connect AFTER two publishes; the connected signal implies
+    // the hello fast-forward already ran, so the next publish is the first
+    // (and only) inbound message.
+    mac.start()
+    let connected = await takeStates(1, from: mac.connectionState)
+    expect(connected == [ContinuumRevivedSync.ConnectionState.connected], "assertion 66: mac transport connects, got \(connected)")
+    try await mac.send(opMessage(3))
+    let liveOnly = await takeMessages(1, from: mac.inbound)
+    expect(liveOnly == [opMessage(3)], "assertion 67: startAtHead skips the backlog — first inbound is the post-start publish")
+    mac.stop()
+    server.stop()
+}
+
+print("ContinuumRevivedRelayChecks passed: milestone C plumbing (registerToken via transport incl. observer refusal, startAtHead live-only feed)")

@@ -1,0 +1,288 @@
+import Foundation
+import ContinuumRevivedCore
+
+// Ticket: docs/38-tickets/86-relay-sync-transport.md (slice 2, milestone B)
+//
+// The client side of the relay: a `SyncTransport` over the HTTP long-poll
+// surface `RelayHTTPServer` serves. Both apps use it — the Mac publishes
+// through `send(_:)`, the phone consumes `inbound` — and unlike the CloudKit
+// transport there is NO app-owned fetch loop: `start()` owns polling, so the
+// class of bug ticket 85 uncovered (receivers subscribed to a stream nothing
+// feeds) cannot recur here.
+//
+// Lifecycle: `start()` begins hello → long-poll → yield; `stop()` ends both
+// streams. Errors surface on `connectionState` (`.reconnecting` while
+// backing off), and a `cursorUnrecoverable` refusal self-heals: the cursor
+// resets to 0 and polling continues — the feed becomes whole again as soon
+// as the publisher's next snapshot lands (the hub refuses holey feeds, so
+// waiting is the only lossless move).
+//
+// The transport holds no storage: cursor persistence is the caller's job via
+// `onCursorChange` (iOS wires it to UserDefaults), which keeps this file
+// platform-free and the checks hermetic.
+public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
+    // @unchecked: mutable state (loopTask/cursor/stopped) is confined behind
+    // `lock`; everything else is immutable config or thread-safe (URLSession,
+    // AsyncStream continuations).
+
+    public let inbound: AsyncStream<SyncMessage>
+    public let connectionState: AsyncStream<ConnectionState>
+
+    private let inboundContinuation: AsyncStream<SyncMessage>.Continuation
+    private let stateContinuation: AsyncStream<ConnectionState>.Continuation
+    private let baseURL: URL
+    private let bearerToken: String
+    private let deviceLabel: String
+    private let session: URLSession
+    private let pollWaitMs: UInt64
+    /// Reconnect backoff schedule; the last entry repeats. Injected so checks
+    /// run in milliseconds while production waits like an adult.
+    private let backoffNanoseconds: [UInt64]
+    private let onCursorChange: (@Sendable (UInt64) -> Void)?
+
+    /// When true, the first successful hello fast-forwards the cursor to the
+    /// hub's `latestSeq` — a live-only feed. The Mac uses this: its inbound
+    /// leg only cares about messages that arrive while it runs (approval
+    /// responses), and replaying the ring would mostly echo its own past
+    /// publishes back at it.
+    private let startAtHead: Bool
+
+    private let lock = NSLock()
+    private var loopTask: Task<Void, Never>?
+    private var cursor: UInt64
+    private var cursorInitialized = false
+    private var stopped = false
+
+    public init(
+        baseURL: URL,
+        bearerToken: String,
+        deviceLabel: String,
+        initialCursor: UInt64 = 0,
+        startAtHead: Bool = false,
+        pollWaitMs: UInt64 = 25_000,
+        backoffNanoseconds: [UInt64] = [1_000_000_000, 2_000_000_000, 4_000_000_000, 8_000_000_000, 15_000_000_000],
+        session: URLSession = .shared,
+        onCursorChange: (@Sendable (UInt64) -> Void)? = nil
+    ) {
+        precondition(!backoffNanoseconds.isEmpty, "backoff schedule must not be empty")
+        self.baseURL = baseURL
+        self.bearerToken = bearerToken
+        self.deviceLabel = deviceLabel
+        self.startAtHead = startAtHead
+        self.cursor = initialCursor
+        self.pollWaitMs = pollWaitMs
+        self.backoffNanoseconds = backoffNanoseconds
+        self.session = session
+        self.onCursorChange = onCursorChange
+
+        var inboundContinuation: AsyncStream<SyncMessage>.Continuation!
+        self.inbound = AsyncStream { inboundContinuation = $0 }
+        self.inboundContinuation = inboundContinuation
+        var stateContinuation: AsyncStream<ConnectionState>.Continuation!
+        self.connectionState = AsyncStream { stateContinuation = $0 }
+        self.stateContinuation = stateContinuation
+    }
+
+    deinit {
+        stop()
+    }
+
+    // MARK: Lifecycle
+
+    /// Idempotent. Begins the hello → long-poll loop; a stopped transport
+    /// cannot be restarted (make a new one — they're cheap).
+    public func start() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard loopTask == nil, !stopped else { return }
+        loopTask = Task { [weak self] in
+            await self?.runLoop()
+        }
+    }
+
+    public func stop() {
+        lock.lock()
+        if stopped {
+            lock.unlock()
+            return
+        }
+        stopped = true
+        let task = loopTask
+        loopTask = nil
+        lock.unlock()
+        task?.cancel()
+        stateContinuation.yield(.disconnected(reason: "stopped"))
+        stateContinuation.finish()
+        inboundContinuation.finish()
+    }
+
+    // MARK: SyncTransport
+
+    public func send(_ message: SyncMessage) async throws {
+        let body: Data
+        do {
+            body = try JSONEncoder().encode(message)
+        } catch {
+            throw SyncTransportError.sendFailed(reason: "encode: \(String(describing: error))")
+        }
+        let reply: (Data, URLResponse)
+        do {
+            reply = try await session.data(for: makeRequest("POST", path: "/v1/publish", body: body))
+        } catch {
+            throw SyncTransportError.notConnected
+        }
+        let status = (reply.1 as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else {
+            let code = (try? JSONDecoder().decode(RelayErrorBody.self, from: reply.0))?.code ?? "http\(status)"
+            throw SyncTransportError.sendFailed(reason: code)
+        }
+    }
+
+    // MARK: Poll loop
+
+    private func runLoop() async {
+        var backoffIndex = 0
+        var announcedConnected = false
+        while !Task.isCancelled, !isStopped {
+            do {
+                if !announcedConnected {
+                    try await hello()
+                    stateContinuation.yield(.connected)
+                    announcedConnected = true
+                }
+                let envelopes = try await poll(after: currentCursor)
+                backoffIndex = 0
+                for envelope in envelopes {
+                    inboundContinuation.yield(envelope.message)
+                }
+                if let last = envelopes.last?.seq {
+                    advanceCursor(to: last)
+                }
+            } catch let error as RelayClientError where error == .cursorUnrecoverable {
+                // Self-heal: reset and wait for the publisher's next snapshot
+                // (the hub refuses holey feeds; a fresh cursor becomes whole
+                // the moment a bridging snapshot exists).
+                advanceCursor(to: 0)
+                announcedConnected = false
+                stateContinuation.yield(.reconnecting)
+                await sleepBackoff(index: &backoffIndex)
+            } catch is CancellationError {
+                return
+            } catch {
+                announcedConnected = false
+                stateContinuation.yield(.reconnecting)
+                await sleepBackoff(index: &backoffIndex)
+            }
+        }
+    }
+
+    private enum RelayClientError: Error, Equatable {
+        case cursorUnrecoverable
+        case httpStatus(Int, code: String)
+        case malformedResponse
+    }
+
+    private func hello() async throws {
+        let body = try JSONEncoder().encode(RelayHelloRequestBody(deviceLabel: deviceLabel, cursor: currentCursor == 0 ? nil : currentCursor))
+        let (data, response) = try await session.data(for: makeRequest("POST", path: "/v1/hello", body: body))
+        try Self.checkStatus(data: data, response: response)
+        guard let welcome = try? JSONDecoder().decode(RelayHelloResponse.self, from: data) else {
+            throw RelayClientError.malformedResponse
+        }
+        if consumeCursorFastForwardFlag() {
+            advanceCursor(to: welcome.latestSeq)
+        }
+    }
+
+    private func consumeCursorFastForwardFlag() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let shouldFastForward = startAtHead && !cursorInitialized
+        cursorInitialized = true
+        return shouldFastForward
+    }
+
+    /// Operator-only: registers another device's pairing token with the
+    /// relay (the Mac calls this when a phone completes the pairing
+    /// exchange, so the phone's existing bearer works against the relay).
+    public func registerToken(_ token: String, scopes: Scope) async throws {
+        let body: Data
+        do {
+            body = try JSONEncoder().encode(RelayRegisterTokenRequestBody(token: token, scopeRawValue: scopes.rawValue))
+        } catch {
+            throw SyncTransportError.sendFailed(reason: "encode: \(String(describing: error))")
+        }
+        let reply: (Data, URLResponse)
+        do {
+            reply = try await session.data(for: makeRequest("POST", path: "/v1/tokens", body: body))
+        } catch {
+            throw SyncTransportError.notConnected
+        }
+        let status = (reply.1 as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 204 || status == 200 else {
+            let code = (try? JSONDecoder().decode(RelayErrorBody.self, from: reply.0))?.code ?? "http\(status)"
+            throw SyncTransportError.sendFailed(reason: code)
+        }
+    }
+
+    private func poll(after: UInt64) async throws -> [RelayEnvelope] {
+        let path = "/v1/poll?after=\(after)&waitMs=\(pollWaitMs)"
+        let (data, response) = try await session.data(for: makeRequest("GET", path: path, body: nil))
+        try Self.checkStatus(data: data, response: response)
+        guard let decoded = try? JSONDecoder().decode(RelayPollResponse.self, from: data) else {
+            throw RelayClientError.malformedResponse
+        }
+        return decoded.envelopes
+    }
+
+    private static func checkStatus(data: Data, response: URLResponse) throws {
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status != 200 else { return }
+        let code = (try? JSONDecoder().decode(RelayErrorBody.self, from: data))?.code ?? "http\(status)"
+        if status == 409, code == "cursorUnrecoverable" {
+            throw RelayClientError.cursorUnrecoverable
+        }
+        throw RelayClientError.httpStatus(status, code: code)
+    }
+
+    private func makeRequest(_ method: String, path: String, body: Data?) -> URLRequest {
+        var request = URLRequest(url: URL(string: baseURL.absoluteString + path)!)
+        request.httpMethod = method
+        request.httpBody = body
+        // Must outlive the server's bounded long-poll wait (≤30s) or every
+        // quiet poll dies as a client timeout and loops through backoff.
+        request.timeoutInterval = 40
+        request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
+        if body != nil {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        return request
+    }
+
+    private func sleepBackoff(index: inout Int) async {
+        let delay = backoffNanoseconds[min(index, backoffNanoseconds.count - 1)]
+        index += 1
+        try? await Task.sleep(nanoseconds: delay)
+    }
+
+    // MARK: Locked state
+
+    private var isStopped: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopped
+    }
+
+    private var currentCursor: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return cursor
+    }
+
+    private func advanceCursor(to newValue: UInt64) {
+        lock.lock()
+        cursor = newValue
+        lock.unlock()
+        onCursorChange?(newValue)
+    }
+}
