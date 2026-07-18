@@ -283,8 +283,15 @@ Targets (`Package.swift` + `ios/project.yml`):
     (e) `simctl spawn <dev> defaults read` can report "does not exist" for
         keys the app HAS written — read the container's
         `Library/Preferences/<bundle>.plist` with `plutil -p` instead.
-12. Relay dev-loop quickstart (all proven 2026-07-18): start
-    `.build/debug/continuum-relay --host 0.0.0.0 --port 8787 --operator-token <T>`;
+12. Relay dev-loop quickstart (all proven 2026-07-18): run detached —
+    `nohup .build/debug/continuum-relay --host 0.0.0.0 --port 8787
+    --operator-token "$(defaults read com.continuum.revived continuum.relay.operatorToken)"
+    > ~/Library/Logs/continuum-relay.log 2>&1 & disown` — or in any normal
+    terminal. A launchd LaunchAgent attempt FAILED oddly (process runs under
+    launchd but never listens on the port — unresolved; the VPS session's
+    systemd unit supersedes this). Relay restarts are safe: clients detect
+    the hub reset and rejoin, and the Mac re-registers all tokens on every
+    connect (relay-token-sync rows);
     Mac: `defaults write com.continuum.revived continuum.relay.url http://127.0.0.1:8787`
     + `continuum.relay.operatorToken <T>`; sim:
     `simctl spawn <dev> defaults write dev.dylanreedx.continuum continuum.relay.url http://127.0.0.1:8787`.
