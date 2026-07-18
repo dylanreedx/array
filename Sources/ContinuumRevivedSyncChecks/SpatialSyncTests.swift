@@ -26,6 +26,73 @@ private func tickUntil(
     return await condition()
 }
 
+private actor SpatialBlackHoleTransport: ContinuumRevivedSync.SyncTransport {
+    let inbound: AsyncStream<SyncMessage>
+    let connectionState: AsyncStream<ContinuumRevivedSync.ConnectionState>
+    private let inboundContinuation: AsyncStream<SyncMessage>.Continuation
+    private(set) var sentMessages: [SyncMessage] = []
+
+    init() {
+        (inbound, inboundContinuation) = AsyncStream<SyncMessage>.makeStream()
+        let (states, stateContinuation) = AsyncStream<ContinuumRevivedSync.ConnectionState>.makeStream()
+        stateContinuation.yield(.connected)
+        connectionState = states
+    }
+
+    func send(_ message: SyncMessage) async throws {
+        sentMessages.append(message)
+    }
+
+    func push(_ message: SyncMessage) {
+        inboundContinuation.yield(message)
+    }
+}
+
+private actor SpatialMaterializedProbe {
+    private var count = 0
+
+    func record(_ state: MaterializedState) {
+        _ = state
+        count += 1
+    }
+
+    func recordedCount() -> Int { count }
+}
+
+private func checkFreshSpatialSubscribeWaitsForRemoteDesktopState() async {
+    let transport = SpatialBlackHoleTransport()
+    let receiver = SpatialOpReceiver(demux: SyncMessageDemux(transport: transport))
+    await receiver.connect()
+    let stream = await receiver.subscribe()
+    let probe = SpatialMaterializedProbe()
+    let task = Task {
+        for await state in stream {
+            await probe.record(state)
+        }
+    }
+
+    try? await Task.sleep(for: .milliseconds(50))
+    let countBeforeRemote = await probe.recordedCount()
+    let spatialSeenBeforeRemote = await receiver.hasReceivedRemoteSpatial()
+    expect(countBeforeRemote == 0, "ticket85 spatial receiver: subscribe does not emit local empty bootstrap canvas")
+    expect(spatialSeenBeforeRemote == false, "ticket85 spatial receiver: remote flag is false before desktop spatial data")
+
+    let snapshot = compact(log: [], through: 0).snapshot
+    await transport.push(.snapshot(snapshot))
+    let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+    while ContinuousClock.now < deadline {
+        if await probe.recordedCount() > 0 { break }
+        try? await Task.sleep(for: .milliseconds(2))
+    }
+    let countAfterRemote = await probe.recordedCount()
+    let spatialSeenAfterRemote = await receiver.hasReceivedRemoteSpatial()
+    expect(countAfterRemote == 1, "ticket85 spatial receiver: real remote empty canvas snapshot is emitted")
+    expect(spatialSeenAfterRemote == true, "ticket85 spatial receiver: remote flag flips after remote spatial data")
+
+    task.cancel()
+    await receiver.stop()
+}
+
 /// Connect, receive snapshot + tail; phone emits move + membership-change +
 /// bring-to-front at operator scope; ops land in the store; both sides'
 /// `MaterializedState.canonicalEncoded()` byte-identical. Also proves lamport
@@ -481,6 +548,7 @@ private func checkEmitAllStopsAtFirstFailureAndSuccessPathLandsInOrder() async t
 }
 
 func runSpatialSyncChecks() async throws {
+    await checkFreshSpatialSubscribeWaitsForRemoteDesktopState()
     try await checkSpatialOpSyncRealPathAtOperatorScope()
     try await checkObserverScopeEmissionIsDroppedAtTheSender()
     try await checkReceiverRevertsOptimisticApplyOnSendFailure()

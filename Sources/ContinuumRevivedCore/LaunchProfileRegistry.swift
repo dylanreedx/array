@@ -61,16 +61,16 @@ public struct LaunchProfileRegistry: Sendable {
         ),
         LaunchProfileSpec(
             id: "claude",
-            displayName: "New Claude Agent",
+            displayName: "Claude CLI Terminal",
             kind: .tool(executableName: "claude", args: []),
-            title: "Agent · Claude",
+            title: "Claude CLI",
             agentKind: .claude
         ),
         LaunchProfileSpec(
             id: "codex",
-            displayName: "New Codex Agent",
+            displayName: "Codex CLI Terminal",
             kind: .tool(executableName: "codex", args: []),
-            title: "Agent · Codex",
+            title: "Codex CLI",
             agentKind: .codex
         ),
         LaunchProfileSpec(

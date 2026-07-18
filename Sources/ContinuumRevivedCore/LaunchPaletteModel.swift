@@ -1,6 +1,7 @@
 import Foundation
 
 public enum LaunchPaletteAction: Equatable, Sendable {
+    case newManagedAgent
     case newNote
     case newBrowser
     case openFile
@@ -26,6 +27,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
 
     public var displayName: String {
         switch self {
+        case .newManagedAgent:
+            return "New Agent…"
         case .newNote:
             return "New Note"
         case .newBrowser:
@@ -75,6 +78,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
 
     fileprivate var filterTokens: [String] {
         switch self {
+        case .newManagedAgent:
+            return ["new", "agent", "managed", "assistant"]
         case .newNote:
             return ["new", "note"]
         case .newBrowser:

@@ -45,6 +45,8 @@ public enum DesktopCompanionPublishReason: String, Sendable {
     case foreground
     case manual
     case timer
+    case pairing
+    case statusChanged
 }
 
 public enum DesktopCompanionFetchReason: String, Sendable {
@@ -109,10 +111,25 @@ public struct DesktopCompanionSyncDiagnostics: Equatable, Sendable {
     }
 }
 
+public struct DesktopManagedAgentActivity: Equatable, Sendable {
+    public var tileId: UUID
+    public var agentKind: AgentKind
+    public var status: AgentStatus
+    public var updatedAt: Date
+
+    public init(tileId: UUID, agentKind: AgentKind, status: AgentStatus, updatedAt: Date) {
+        self.tileId = tileId
+        self.agentKind = agentKind
+        self.status = status
+        self.updatedAt = updatedAt
+    }
+}
+
 public enum DegradedDesktopActivitySnapshotSource {
     public static func snapshot(
         descriptors: [TerminalSessionDescriptor],
         liveStatuses: [UUID: AgentStatus],
+        managedAgents: [DesktopManagedAgentActivity] = [],
         replicaId: UUID,
         now: Date
     ) -> ActivityLogSnapshot {
@@ -136,6 +153,24 @@ public enum DegradedDesktopActivitySnapshotSource {
                     occurredAt: descriptor.agentDescriptor?.statusUpdatedAt ?? now
                 ),
                 sequence: UInt64(offset + 1),
+                replicaId: replicaId
+            )
+            snapshot = apply(snapshot, event)
+        }
+        let managedStart = sorted.count
+        let sortedManagedAgents = managedAgents.sorted { lhs, rhs in lhs.tileId.uuidString < rhs.tileId.uuidString }
+        for (offset, agent) in sortedManagedAgents.enumerated() {
+            let event = AgentActivityEvent(
+                stamping: AgentActivityEventDraft(
+                    tileId: agent.tileId,
+                    runId: nil,
+                    tone: agent.status == .needsAttention ? .approval : .info,
+                    kind: "desktop.managedStatus",
+                    status: agent.status,
+                    summary: safeSummary(kind: agent.agentKind, status: agent.status),
+                    occurredAt: agent.updatedAt
+                ),
+                sequence: UInt64(managedStart + offset + 1),
                 replicaId: replicaId
             )
             snapshot = apply(snapshot, event)

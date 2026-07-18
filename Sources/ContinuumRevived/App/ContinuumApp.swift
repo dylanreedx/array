@@ -700,6 +700,10 @@ private func hasMainBundleICloudEntitlement(containerIdentifier: String) -> Bool
 
     let services = entitlementStringArray(entitlements["com.apple.developer.icloud-services"])
     let containers = entitlementStringArray(entitlements["com.apple.developer.icloud-container-identifiers"])
+    // Deliberately explicit-only: an app whose signature carries the profile's
+    // wildcard "*" for icloud-services is launch-killed by CKContainer
+    // ("malformed entitlements"), so "*" here means a broken signature, not a
+    // grant. provisioned-cloudkit-app.sh signs the explicit array.
     return services.contains("CloudKit") && containers.contains(containerIdentifier)
 }
 
@@ -2635,6 +2639,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var companionAuthService: CompanionAuthService?
     private var localPairingListener: LocalPairingEndpointListener?
     private var companionSyncService: DesktopCompanionSyncService?
+    private var companionPublishDebounceWorkItem: DispatchWorkItem?
     private var navKeymap: NavKeymap = .default {
         didSet { leaderDwell = TimeInterval(navKeymap.leaderDwellMs) / 1000 }
     }
@@ -2875,6 +2880,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             workspaceRuntime?.activeController?.onAgentStatusWritten = { [weak self] _, _ in
                 guard let self else { return }
                 self.applyObserverStatuses(self.currentObservedAgentStatusesByTileId())
+                self.scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "agent-status", debounce: 1.0)
             }
             workspaceRuntime?.activeController?.onObservedAgentStatusesChanged = { [weak self] statuses in
                 DispatchQueue.main.async {
@@ -3558,7 +3564,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // Run artifact viewer tiles are read-only; retain the run directory.
             break
         case .managedAgent:
-            break
+            try? workspaceRuntime?.activeController?.managedSessionStore.delete(tileId: id)
         }
 
         canvasView.removeTile(id: id)
@@ -3608,6 +3614,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func managedSessionRecord(forTileId tileId: UUID) -> ManagedAgentSessionRecord? {
         try? workspaceRuntime?.activeController?.managedSessionStore.load(tileId: tileId)
+    }
+
+    private func currentManagedAgentActivities() -> [DesktopManagedAgentActivity] {
+        guard let canvasView,
+              let records = try? workspaceRuntime?.activeController?.managedSessionStore.loadAll()
+        else { return [] }
+        let managedTileIds = Set(canvasView.canvasState.tiles.filter { $0.kind == .managedAgent }.map(\.id))
+        return records.compactMap { record in
+            guard managedTileIds.contains(record.tileId) else { return nil }
+            let status = (canvasView.tileView(for: record.tileId) as? ManagedAgentTileNSView)?.currentAgentStatus
+                ?? Self.agentStatus(for: record.status)
+            return DesktopManagedAgentActivity(
+                tileId: record.tileId,
+                agentKind: record.agentKind,
+                status: status,
+                updatedAt: record.lastSeenAt
+            )
+        }
+    }
+
+    private static func agentStatus(for managedStatus: ManagedSessionStatus) -> AgentStatus {
+        switch managedStatus {
+        case .starting: return .configuring
+        case .running: return .working
+        case .stopped: return .idle
+        case .error: return .needsAttention
+        }
     }
 
     /// `TmuxControl` is async throughout (it may shell out to a real `tmux`
@@ -4857,7 +4890,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     authService: service,
                     advertisedHost: LocalPairingEndpointListener.preferredAdvertisedHost(),
                     expiresAt: expiresAt,
-                    acceptedCredential: grant.credential
+                    acceptedCredential: grant.credential,
+                    onExchangeSuccess: { [weak self] exchange in
+                        await self?.localPairingExchangeDidSucceed(exchange)
+                    }
                 )
                 startedListener = listener
                 localPairingListener = listener
@@ -4987,6 +5023,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         alert.runModal()
     }
 
+    @MainActor
+    private func localPairingExchangeDidSucceed(_ exchange: CompanionPairingExchange) {
+        Logger(subsystem: "continuum.auth", category: "pairing").notice(
+            "paired companion device=\(exchange.device.id.uuidString, privacy: .public) scope=\(exchange.device.scopes.rawValue, privacy: .public); scheduling companion publish"
+        )
+        if let listener = localPairingListener {
+            listener.stop()
+            localPairingListener = nil
+        }
+        scheduleCompanionSyncPublish(reason: .pairing, diagnosticsReason: "pairing", debounce: 0.2)
+    }
+
     @objc func publishCompanionSyncNowFromMenu(_ sender: Any?) {
         Task { @MainActor in
             do {
@@ -4996,6 +5044,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 await logCompanionSyncDiagnostics(reason: "manual-publish")
             } catch {
                 Logger(subsystem: "continuum.companion", category: "sync").error("manual publish failed: \(String(describing: error), privacy: .public)")
+                Self.appendCompanionSyncLog("manual publish FAILED: \(String(describing: error))")
             }
         }
     }
@@ -5009,7 +5058,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 await logCompanionSyncDiagnostics(reason: "manual-fetch")
             } catch {
                 Logger(subsystem: "continuum.companion", category: "sync").error("manual fetch failed: \(String(describing: error), privacy: .public)")
+                Self.appendCompanionSyncLog("manual fetch FAILED: \(String(describing: error))")
             }
+        }
+    }
+
+    @MainActor
+    private func scheduleCompanionSyncPublish(
+        reason: DesktopCompanionPublishReason,
+        diagnosticsReason: String,
+        debounce: TimeInterval
+    ) {
+        companionPublishDebounceWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.companionPublishDebounceWorkItem = nil
+                await self.publishCompanionSync(reason: reason, diagnosticsReason: diagnosticsReason)
+            }
+        }
+        companionPublishDebounceWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + debounce, execute: workItem)
+    }
+
+    @MainActor
+    private func publishCompanionSync(reason: DesktopCompanionPublishReason, diagnosticsReason: String) async {
+        do {
+            let service = try ensureDesktopCompanionSyncService()
+            try await service.start()
+            try await service.publishCurrentDesktopSnapshot(reason: reason)
+            await logCompanionSyncDiagnostics(reason: diagnosticsReason)
+        } catch {
+            Logger(subsystem: "continuum.companion", category: "sync").error("scheduled publish failed reason=\(reason.rawValue, privacy: .public): \(String(describing: error), privacy: .public)")
         }
     }
 
@@ -5066,6 +5146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     return DegradedDesktopActivitySnapshotSource.snapshot(
                         descriptors: descriptors,
                         liveStatuses: self.currentObservedAgentStatusesByTileId(),
+                        managedAgents: self.currentManagedAgentActivities(),
                         replicaId: UUID(uuidString: "75000000-0000-4000-8000-00000000D35A")!,
                         now: Date()
                     )
@@ -5105,11 +5186,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    /// Append one diagnostics line to app support (companion-sync.log).
+    /// Unified log proved unreadable on the dogfood host (`log show` returns
+    /// nothing even for a probe process), so the Phase-3 "diagnostic log line"
+    /// contract needs a file the operator can actually read. Same sanitized
+    /// content as the Logger line — counts, timestamps, and error summaries
+    /// only; never transcript/paths/pids.
+    nonisolated static func appendCompanionSyncLog(_ line: String) {
+        let url = RegistryStore.defaultApplicationSupportDirectory()
+            .appendingPathComponent("companion-sync.log", isDirectory: false)
+        let stamped = "\(ISO8601DateFormatter().string(from: Date())) \(line)\n"
+        guard let data = stamped.data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? data.write(to: url)
+        }
+    }
+
     private func logCompanionSyncDiagnostics(reason: String) async {
-        guard let companionSyncService else { return }
+        guard let companionSyncService else {
+            Self.appendCompanionSyncLog("reason=\(reason) service=nil (ensureDesktopCompanionSyncService never succeeded)")
+            return
+        }
         let diagnostics = await companionSyncService.diagnostics
+        let registeredObservedAgents = ((try? projectStore?.listSessions()) ?? [])
+            .filter { $0.agentDescriptor != nil }
+            .count
+        let liveObservedAgents = currentObservedAgentStatusesByTileId().count
+        let managedAgentSessions = ((try? workspaceRuntime?.activeController?.managedSessionStore.loadAll()) ?? [])
+            .filter { $0.agentKind == .managed }
+            .count
         Logger(subsystem: "continuum.companion", category: "sync").notice(
-            "reason=\(reason, privacy: .public) container=\(diagnostics.containerIdentifier, privacy: .public) paired=\(diagnostics.isPaired, privacy: .public) pairedDevices=\(diagnostics.pairedDeviceCount, privacy: .public) signedICloud=\(diagnostics.signedWithICloudEntitlement, privacy: .public) transportIsPairingProof=\(diagnostics.transportIsPairingProof, privacy: .public) lastSpatial=\(String(describing: diagnostics.lastSpatialPublishAt), privacy: .public) lastActivity=\(String(describing: diagnostics.lastActivityPublishAt), privacy: .public) lastFetch=\(String(describing: diagnostics.lastFetchAt), privacy: .public) lastInbound=\(String(describing: diagnostics.lastInboundMessageKind), privacy: .public) lastApproval=\(String(describing: diagnostics.lastApprovalResponseOutcome), privacy: .public) lastError=\(String(describing: diagnostics.lastError), privacy: .public)"
+            "reason=\(reason, privacy: .public) container=\(diagnostics.containerIdentifier, privacy: .public) paired=\(diagnostics.isPaired, privacy: .public) pairedDevices=\(diagnostics.pairedDeviceCount, privacy: .public) signedICloud=\(diagnostics.signedWithICloudEntitlement, privacy: .public) transportIsPairingProof=\(diagnostics.transportIsPairingProof, privacy: .public) registeredObservedAgents=\(registeredObservedAgents, privacy: .public) liveObservedAgents=\(liveObservedAgents, privacy: .public) managedAgentSessions=\(managedAgentSessions, privacy: .public) lastSpatial=\(String(describing: diagnostics.lastSpatialPublishAt), privacy: .public) lastActivity=\(String(describing: diagnostics.lastActivityPublishAt), privacy: .public) lastFetch=\(String(describing: diagnostics.lastFetchAt), privacy: .public) lastInbound=\(String(describing: diagnostics.lastInboundMessageKind), privacy: .public) lastApproval=\(String(describing: diagnostics.lastApprovalResponseOutcome), privacy: .public) lastError=\(String(describing: diagnostics.lastError), privacy: .public)"
+        )
+        Self.appendCompanionSyncLog(
+            "reason=\(reason) container=\(diagnostics.containerIdentifier) paired=\(diagnostics.isPaired) pairedDevices=\(diagnostics.pairedDeviceCount) signedICloud=\(diagnostics.signedWithICloudEntitlement) registeredObservedAgents=\(registeredObservedAgents) liveObservedAgents=\(liveObservedAgents) managedAgentSessions=\(managedAgentSessions) lastSpatial=\(String(describing: diagnostics.lastSpatialPublishAt)) lastActivity=\(String(describing: diagnostics.lastActivityPublishAt)) lastFetch=\(String(describing: diagnostics.lastFetchAt)) lastError=\(String(describing: diagnostics.lastError))"
         )
     }
 
@@ -7081,6 +7197,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    private func spawnManagedAgentFromPalette() {
+        guard let spawner = tileSpawner else { return }
+        switch spawner.spawnManagedAgent() {
+        case let .spawned(tileId):
+            focusSpawnedTile(tileId)
+            scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "managed-agent-spawn", debounce: 0.2)
+        case let .failure(error):
+            fputs("TileSpawner.spawnManagedAgent failed: \(error)\n", stderr)
+        }
+    }
+
     private func spawnBrowserDefault() {
         spawnBrowserFromPalette(url: nil)
     }
@@ -7200,6 +7327,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func performPaletteAction(_ action: LaunchPaletteAction) {
         switch action {
+        case .newManagedAgent:
+            spawnManagedAgentFromPalette()
         case .newNote:
             spawnNoteFromPalette()
         case .newBrowser:

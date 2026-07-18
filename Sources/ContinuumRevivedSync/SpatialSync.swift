@@ -173,8 +173,10 @@ public actor SpatialOpSender {
 }
 
 /// Receives a `SpatialOpLogStore` snapshot-then-tail projection over a shared
-/// sync transport demux and exposes the folded `MaterializedState`. The
-/// phone-role peer — mirrors `ActivityProjectionReceiver`'s shape, but folds
+/// sync transport demux and exposes the folded `MaterializedState`. A fresh
+/// receiver deliberately does not emit its local empty bootstrap canvas until a
+/// remote desktop snapshot/op arrives, keeping phone freshness remote-backed.
+/// The phone-role peer mirrors `ActivityProjectionReceiver`'s shape, but folds
 /// via the EXISTING `materialize(onto:baseOpId:ledger:tail:)` (base snapshot +
 /// re-folded tail list) rather than a bespoke incremental apply.
 public actor SpatialOpReceiver {
@@ -187,6 +189,7 @@ public actor SpatialOpReceiver {
     private let demux: SyncMessageDemux
     private var observers: [UUID: AsyncStream<MaterializedState>.Continuation] = [:]
     private var receiveTask: Task<Void, Never>?
+    private var remoteSpatialSeen = false
 
     public init(demux: SyncMessageDemux, phoneReplicaId: UUID = UUID()) {
         self.demux = demux
@@ -233,6 +236,7 @@ public actor SpatialOpReceiver {
                 baseLedger = incoming.ledger
                 tail = applySnapshot(incoming, ontop: tail)
                 maxSeenLamport = max(maxSeenLamport, incoming.compactionOpId.lamport)
+                remoteSpatialSeen = true
                 fan(currentMaterialized())
             case .op(let logged):
                 // Idempotent under re-delivery (including the sender's own
@@ -241,6 +245,7 @@ public actor SpatialOpReceiver {
                 // greater `OpId`, so folding the same op twice is a no-op.
                 tail.append(logged)
                 maxSeenLamport = max(maxSeenLamport, logged.opId.lamport)
+                remoteSpatialSeen = true
                 fan(currentMaterialized())
             default:
                 continue
@@ -254,8 +259,11 @@ public actor SpatialOpReceiver {
 
     public func subscribe() -> AsyncStream<MaterializedState> {
         let current = currentMaterialized()
+        let shouldYieldCurrent = remoteSpatialSeen
         return AsyncStream { continuation in
-            continuation.yield(current)
+            if shouldYieldCurrent {
+                continuation.yield(current)
+            }
             let id = UUID()
             observers[id] = continuation
             continuation.onTermination = { [weak self] _ in
@@ -263,6 +271,8 @@ public actor SpatialOpReceiver {
             }
         }
     }
+
+    public func hasReceivedRemoteSpatial() -> Bool { remoteSpatialSeen }
 
     public func currentState() -> MaterializedState { currentMaterialized() }
 

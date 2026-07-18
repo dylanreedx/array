@@ -5157,11 +5157,11 @@ do {
     expect(ids == ["shell", "claude", "codex", "nvim", "custom"], "Registry returns 5 built-ins in stable order, got \(ids)")
     expect(registry.spec(for: "shell")?.title == "Shell", "shell spec has title Shell")
     expect(registry.spec(for: "shell")?.agentKind == nil, "shell spec is not an agent")
-    expect(registry.spec(for: "claude")?.displayName == "New Claude Agent", "claude spec has agent palette label")
-    expect(registry.spec(for: "claude")?.title == "Agent · Claude", "claude spec has agent tile title")
+    expect(registry.spec(for: "claude")?.displayName == "Claude CLI Terminal", "claude spec is labeled as an explicit CLI terminal")
+    expect(registry.spec(for: "claude")?.title == "Claude CLI", "claude spec has CLI tile title")
     expect(registry.spec(for: "claude")?.agentKind == .claude, "claude spec carries agent kind")
-    expect(registry.spec(for: "codex")?.displayName == "New Codex Agent", "codex spec has agent palette label")
-    expect(registry.spec(for: "codex")?.title == "Agent · Codex", "codex spec has agent tile title")
+    expect(registry.spec(for: "codex")?.displayName == "Codex CLI Terminal", "codex spec is labeled as an explicit CLI terminal")
+    expect(registry.spec(for: "codex")?.title == "Codex CLI", "codex spec has CLI tile title")
     expect(registry.spec(for: "codex")?.agentKind == .codex, "codex spec carries agent kind")
     expect(registry.spec(for: "nvim")?.agentKind == nil, "nvim spec is not an agent")
     expect(registry.spec(for: "nope") == nil, "Unknown id returns nil")
@@ -5230,7 +5230,7 @@ do {
     if case let .found(profile) = resolution {
         expect(profile.command == "/opt/homebrew/bin/claude", "Tool resolution uses detected path")
         expect(profile.cwd == "/tmp/proj", "Tool resolution preserves cwd")
-        expect(profile.title == "Agent · Claude", "Tool resolution uses spec title")
+        expect(profile.title == "Claude CLI", "Tool resolution uses spec title")
     } else {
         expect(false, "Claude should resolve to .found when detector matches, got \(resolution)")
     }

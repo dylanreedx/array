@@ -2,7 +2,10 @@ import ContinuumRevivedCore
 import Foundation
 
 /// Receives activity projection items over a sync transport demux and exposes
-/// the same snapshot-then-tail shape as `ActivityStoreProtocol.subscribe()`.
+/// the same snapshot-then-tail shape as `ActivityStoreProtocol.subscribe()`
+/// after the first remote item arrives. A fresh receiver deliberately does not
+/// emit its local empty bootstrap snapshot; phone freshness must be backed by
+/// Mac-published activity, not client-local initialization.
 public actor ActivityProjectionReceiver {
     private var snapshot: ActivityLogSnapshot = .empty
     private var appliedSequenceByReplica: [UUID: UInt64] = [:]
@@ -12,6 +15,7 @@ public actor ActivityProjectionReceiver {
     private let gapRetryLimit: Int
     private let gapRetryBackoff: Duration
     private var receiveTask: Task<Void, Never>?
+    private var remoteActivitySeen = false
     private var gapWatchdog: Task<Void, Never>?
     private var gapReplicaId: UUID?
     private var gapTargetSequence: UInt64?
@@ -69,6 +73,7 @@ public actor ActivityProjectionReceiver {
             guard incoming.snapshotSequence >= priorApplied else { return }
             snapshot = incoming
             appliedSequenceByReplica[incoming.snapshotReplicaId] = incoming.snapshotSequence
+            remoteActivitySeen = true
             cancelGapWatchdog()
             fan(item)
 
@@ -93,6 +98,7 @@ public actor ActivityProjectionReceiver {
 
             snapshot = apply(snapshot, event)
             appliedSequenceByReplica[event.replicaId] = event.sequence
+            remoteActivitySeen = true
             if gapReplicaId == event.replicaId {
                 if let target = gapTargetSequence, event.sequence < target {
                     // Keep retrying until the widest known gap is closed.
@@ -131,14 +137,21 @@ public actor ActivityProjectionReceiver {
 
     public func subscribe() -> AsyncStream<ActivityStreamItem> {
         let current = snapshot
+        let shouldYieldCurrent = remoteActivitySeen
         let (stream, continuation) = AsyncStream<ActivityStreamItem>.makeStream()
-        continuation.yield(.snapshot(current))
+        if shouldYieldCurrent {
+            continuation.yield(.snapshot(current))
+        }
         let id = UUID()
         observers[id] = continuation
         continuation.onTermination = { [weak self] _ in
             Task { await self?.removeObserver(id) }
         }
         return stream
+    }
+
+    public func hasReceivedRemoteActivity() -> Bool {
+        remoteActivitySeen
     }
 
     public func agentStatusesByTileId() -> [UUID: AgentStatus] {

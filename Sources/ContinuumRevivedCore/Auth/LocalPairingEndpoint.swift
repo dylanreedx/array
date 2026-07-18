@@ -124,11 +124,14 @@ public struct LocalPairingHTTPResponse: Equatable, Sendable {
 }
 
 public actor LocalPairingEndpoint {
+    public typealias PairingExchangeHandler = @Sendable (CompanionPairingExchange) async -> Void
+
     private let authService: CompanionAuthService
     private let clock: any Clock
     private let expiresAt: Date
     private let acceptedCredential: String?
     private let maxBodyBytes: Int
+    private let onExchangeSuccess: PairingExchangeHandler?
     private var stopped = false
 
     public init(
@@ -136,13 +139,15 @@ public actor LocalPairingEndpoint {
         expiresAt: Date,
         acceptedCredential: String? = nil,
         clock: any Clock = SystemClock(),
-        maxBodyBytes: Int = 8_192
+        maxBodyBytes: Int = 8_192,
+        onExchangeSuccess: PairingExchangeHandler? = nil
     ) {
         self.authService = authService
         self.expiresAt = expiresAt
         self.acceptedCredential = acceptedCredential
         self.clock = clock
         self.maxBodyBytes = max(1, maxBodyBytes)
+        self.onExchangeSuccess = onExchangeSuccess
     }
 
     public func status() -> LocalPairingEndpointStatus {
@@ -206,6 +211,9 @@ public actor LocalPairingEndpoint {
                 deviceLabel: trimmedLabel
             )
             let data = try JSONEncoder().encode(LocalPairingSessionResponse(exchange: exchange))
+            if let onExchangeSuccess {
+                Task { await onExchangeSuccess(exchange) }
+            }
             return LocalPairingHTTPResponse(
                 statusCode: 200,
                 headers: ["Content-Type": "application/json"],
@@ -356,7 +364,8 @@ public final class LocalPairingEndpointListener: @unchecked Sendable {
         port: UInt16 = 0,
         expiresAt: Date,
         acceptedCredential: String? = nil,
-        clock: any Clock = SystemClock()
+        clock: any Clock = SystemClock(),
+        onExchangeSuccess: LocalPairingEndpoint.PairingExchangeHandler? = nil
     ) throws -> LocalPairingEndpointListener {
         try LocalPairingEndpointListener(
             authService: authService,
@@ -365,7 +374,8 @@ public final class LocalPairingEndpointListener: @unchecked Sendable {
             port: port,
             expiresAt: expiresAt,
             acceptedCredential: acceptedCredential,
-            clock: clock
+            clock: clock,
+            onExchangeSuccess: onExchangeSuccess
         )
     }
 
@@ -413,7 +423,8 @@ public final class LocalPairingEndpointListener: @unchecked Sendable {
         port: UInt16,
         expiresAt: Date,
         acceptedCredential: String?,
-        clock: any Clock
+        clock: any Clock,
+        onExchangeSuccess: LocalPairingEndpoint.PairingExchangeHandler?
     ) throws {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw LocalPairingListenerError.socketFailed(errno) }
@@ -468,7 +479,8 @@ public final class LocalPairingEndpointListener: @unchecked Sendable {
             authService: authService,
             expiresAt: expiresAt,
             acceptedCredential: acceptedCredential,
-            clock: clock
+            clock: clock,
+            onExchangeSuccess: onExchangeSuccess
         )
 
         source.setEventHandler { [weak self] in

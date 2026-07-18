@@ -93,6 +93,17 @@ private actor BlackHoleTransport: ContinuumRevivedSync.SyncTransport {
     func allSentMessages() -> [SyncMessage] { sentMessages }
 }
 
+private actor ActivityItemProbe {
+    private var items: [ActivityStreamItem] = []
+
+    func record(_ item: ActivityStreamItem) {
+        items.append(item)
+    }
+
+    func count() -> Int { items.count }
+    func first() -> ActivityStreamItem? { items.first }
+}
+
 // Not `private` — ticket 61b's SpatialSyncTests.swift reuses this exact
 // adapter (the "61a adapter precedent") to drive the SpatialOpSender/Receiver
 // real-path check over the same FakeSyncTransport substrate.
@@ -193,6 +204,44 @@ private func waitForConvergence(
         try? await Task.sleep(for: .milliseconds(2))
     }
     return await receiver.currentSnapshot().snapshotSequence == expectedSequence
+}
+
+private func checkFreshReceiverSubscribeWaitsForRemoteActivity() async {
+    let transport = BlackHoleTransport()
+    let receiver = ActivityProjectionReceiver(demux: SyncMessageDemux(transport: transport), scope: .observer)
+    await receiver.connect()
+    let stream = await receiver.subscribe()
+    let probe = ActivityItemProbe()
+    let task = Task {
+        for await item in stream {
+            await probe.record(item)
+        }
+    }
+
+    try? await Task.sleep(for: .milliseconds(50))
+    let countBeforeRemote = await probe.count()
+    let activitySeenBeforeRemote = await receiver.hasReceivedRemoteActivity()
+    expect(countBeforeRemote == 0, "ticket85 activity receiver: subscribe does not emit local empty bootstrap snapshot")
+    expect(activitySeenBeforeRemote == false, "ticket85 activity receiver: remote flag is false before CloudKit activity")
+
+    await transport.push(.activity(.snapshot(.empty)))
+    let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+    while ContinuousClock.now < deadline {
+        if await probe.count() > 0 { break }
+        try? await Task.sleep(for: .milliseconds(2))
+    }
+    let countAfterRemote = await probe.count()
+    let activitySeenAfterRemote = await receiver.hasReceivedRemoteActivity()
+    expect(countAfterRemote == 1, "ticket85 activity receiver: real remote empty snapshot is emitted")
+    expect(activitySeenAfterRemote == true, "ticket85 activity receiver: remote flag flips after remote activity")
+    if case .snapshot(let snapshot)? = await probe.first() {
+        expect(snapshot == .empty, "ticket85 activity receiver: remote empty snapshot stays empty")
+    } else {
+        expect(false, "ticket85 activity receiver: first emitted item is a snapshot")
+    }
+
+    task.cancel()
+    await receiver.stop()
 }
 
 private func checkSnapshotThenTailIsGapFree() async {
@@ -720,6 +769,7 @@ private func checkApprovalResponderOverFakeSyncTransportRealPath() async {
 }
 
 func runActivityProjectionChecks() async throws {
+    await checkFreshReceiverSubscribeWaitsForRemoteActivity()
     await checkSnapshotThenTailIsGapFree()
     await checkGapDetectionTriggersReplay()
     await checkFreshReceiverResumeFromPersistedCursorIsIncremental()

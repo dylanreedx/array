@@ -613,6 +613,11 @@ final class TileSpawner {
         case failure(Error)
     }
 
+    enum ManagedAgentOutcome {
+        case spawned(tileId: UUID)
+        case failure(Error)
+    }
+
     enum FileOutcome {
         case spawned(tileId: UUID)
         case invalidPath
@@ -1286,6 +1291,54 @@ final class TileSpawner {
         oldRuntime?.terminate(policy: .requestClose)
         runtime.loadURL(urlString)
         return .switched(oldRuntimeId: oldRuntime?.id, newRuntime: runtime)
+    }
+
+    // MARK: - Managed agent tiles
+
+    /// Spawns the product-managed agent surface. This path deliberately does
+    /// not create a terminal session descriptor; raw CLI terminals remain the
+    /// explicit fallback profiles in `LaunchProfileRegistry`.
+    func spawnManagedAgent(agentKind: AgentKind = .managed, at worldPoint: CGPoint? = nil) -> ManagedAgentOutcome {
+        guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        let now = Date()
+        let tileId = UUID()
+        let threadId = "managed-\(tileId.uuidString)"
+        let frame = makePlacement(
+            worldPoint: worldPoint,
+            size: CanvasEngine.defaultFrame(for: .managedAgent),
+            in: canvasView
+        )
+        let nextZ = CanvasEngine.zPositionAbove(canvasView.canvasState.tiles)
+        let tile = Tile(
+            id: tileId,
+            kind: .managedAgent,
+            title: "Agent",
+            frame: frame,
+            zPosition: nextZ,
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed-agent", projectRelativeCwd: ".")
+        )
+        let descriptor = AgentDescriptor(agentKind: agentKind, worktreePath: nil, status: .configuring, statusUpdatedAt: now)
+        let view = ManagedAgentTileNSView(tile: tile, threadId: threadId, descriptor: descriptor)
+        view.ingest(.sessionStateChanged(.ready))
+        view.ingest(.contentDelta(threadId: threadId, turnId: "bootstrap", streamKind: .assistant, delta: "Managed agent tile ready. Provider adapter connection is pending."))
+        canvasView.install(tileView: view, for: tile)
+
+        do {
+            try managedSessionStore.upsert(ManagedAgentSessionRecord(
+                tileId: tileId,
+                agentKind: agentKind,
+                status: .starting,
+                lastSeenAt: now,
+                resumeCursor: nil,
+                runtimePayload: nil
+            ))
+            try projectStore.saveCanvas(canvasView.canvasState)
+        } catch {
+            try? managedSessionStore.delete(tileId: tileId)
+            return .failure(error)
+        }
+        return .spawned(tileId: tileId)
     }
 
     // MARK: - Note tiles

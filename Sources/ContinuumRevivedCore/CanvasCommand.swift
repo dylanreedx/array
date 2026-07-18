@@ -27,6 +27,7 @@ public struct CanvasCommand: Equatable, Sendable {
 public enum CommandRegistry {
     public static func all() -> [CanvasCommand] {
         [
+            CanvasCommand(id: "agent.newManaged", action: .newManagedAgent),
             CanvasCommand(id: "tile.newNote", action: .newNote),
             CanvasCommand(id: "tile.newBrowser", action: .newBrowser),
             CanvasCommand(id: "tile.openFile", action: .openFile),

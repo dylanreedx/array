@@ -1,6 +1,27 @@
 import Foundation
 import ContinuumRevivedCore
 
+private actor PairingExchangeHookRecorder {
+    private(set) var exchanges: [CompanionPairingExchange] = []
+
+    func record(_ exchange: CompanionPairingExchange) {
+        exchanges.append(exchange)
+    }
+
+    func count() -> Int { exchanges.count }
+    func first() -> CompanionPairingExchange? { exchanges.first }
+}
+
+private func waitForPairingHook(_ recorder: PairingExchangeHookRecorder, expectedCount: Int, timeoutSeconds: Double = 1) async -> Int {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(timeoutSeconds))
+    while ContinuousClock.now < deadline {
+        let count = await recorder.count()
+        if count >= expectedCount { return count }
+        try? await Task.sleep(for: .milliseconds(2))
+    }
+    return await recorder.count()
+}
+
 func runLocalPairingEndpointChecks() async throws {
     try runPairingURLPayloadCheck()
     try await runLocalPairingEndpointContractCheck()
@@ -50,10 +71,14 @@ private func runLocalPairingEndpointContractCheck() async throws {
     let service = try CompanionAuthService(authDirectory: authDir, clock: clock, instanceDisplayName: "Pairing QA")
     let instance = try await service.instance()
     let owner = try await service.owner()
+    let hookRecorder = PairingExchangeHookRecorder()
     let endpoint = LocalPairingEndpoint(
         authService: service,
         expiresAt: clock.now().addingTimeInterval(300),
-        clock: clock
+        clock: clock,
+        onExchangeSuccess: { exchange in
+            await hookRecorder.record(exchange)
+        }
     )
 
     let grant = try await service.issuePairingCredential(scopes: .operator, ttl: 300, label: "Endpoint QA")
@@ -84,6 +109,10 @@ private func runLocalPairingEndpointContractCheck() async throws {
     expect(pairedSession == sessionResponse.pairedSession, "Ticket81 endpoint: response decodes into PairedCompanionSession fields")
     let devices = try await service.listDevices()
     expect(!devices.isEmpty, "Ticket81 endpoint: successful exchange persists a paired device")
+    let hookCountAfterSuccess = await waitForPairingHook(hookRecorder, expectedCount: 1)
+    let hookDeviceId = await hookRecorder.first()?.device.id
+    expect(hookCountAfterSuccess == 1, "Ticket85 endpoint: successful exchange fires exactly one post-pair hook")
+    expect(hookDeviceId == sessionResponse.deviceId, "Ticket85 endpoint: post-pair hook receives paired device")
 
     try assertNoUnrelatedLocalState(in: success.body, authDir: authDir, pairingCredential: grant.credential)
 
@@ -92,6 +121,8 @@ private func runLocalPairingEndpointContractCheck() async throws {
     expect(replay.statusCode == 409, "Ticket81 endpoint: replayed token is rejected as conflict, got \(replay.statusCode)")
     expect(replayError == "alreadyUsed", "Ticket81 endpoint: replay error is alreadyUsed")
     expect(!String(decoding: replay.body, as: UTF8.self).contains(grant.credential), "Ticket81 endpoint: replay response does not echo pairing credential")
+    let hookCountAfterReplay = await hookRecorder.count()
+    expect(hookCountAfterReplay == 1, "Ticket85 endpoint: rejected replay does not fire post-pair hook")
 
     let invalidMethod = await endpoint.handle(method: "GET", path: "/pair", body: Data())
     expect(invalidMethod.statusCode == 405, "Ticket81 endpoint: invalid method is rejected")

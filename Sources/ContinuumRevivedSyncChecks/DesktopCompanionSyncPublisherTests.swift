@@ -150,15 +150,19 @@ private func checkDesktopActivitySnapshotIsSanitized() throws {
         scrollback: "transcript body /Users/dylan secret raw-apns-token"
     )
 
+    let managedTileId = UUID(uuidString: "75000000-0000-4000-8000-0000000000E4")!
     let snapshot = DegradedDesktopActivitySnapshotSource.snapshot(
         descriptors: [descriptor],
         liveStatuses: [tileId: .needsAttention],
+        managedAgents: [DesktopManagedAgentActivity(tileId: managedTileId, agentKind: .managed, status: .idle, updatedAt: now)],
         replicaId: UUID(uuidString: "75000000-0000-4000-8000-0000000000E3")!,
         now: now
     )
 
     expect(snapshot.byTile[tileId]?.status == .needsAttention, "ticket75 activity: live status overrides persisted degraded descriptor status")
     expect(snapshot.byTile[tileId]?.lastSummary == "Claude needs attention", "ticket75 activity: summary is short safe status copy")
+    expect(snapshot.byTile[managedTileId]?.status == .idle, "ticket85 activity: managed-agent rows are included in the sanitized desktop snapshot")
+    expect(snapshot.byTile[managedTileId]?.lastSummary == "Managed agent idle", "ticket85 activity: managed-agent summary is short safe status copy")
 
     let json = String(decoding: try JSONEncoder().encode(snapshot), as: UTF8.self)
     for forbidden in ["/Users/", "private/repo", "SECRET_TOKEN", "raw-apns-token", "transcript body", "pane", "pid", "local-run-id"] {

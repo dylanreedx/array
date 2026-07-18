@@ -430,7 +430,8 @@ final class ZoneRuntimeController {
         guard Self.shouldAttemptLazyRecovery(for: reason) else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
-            guard (try? self.managedSessionStore.load(tileId: tileId)) != nil else { return }
+            guard let record = try? self.managedSessionStore.load(tileId: tileId) else { return }
+            guard record.agentKind != .managed else { return }
             guard let tmuxPath = TmuxLocator.resolve() else {
                 self.postSessionError(.windowRebindFailed(underlying: TmuxControlError.paneNotFound(target: "tmux-not-found")), forTile: tileId)
                 return
