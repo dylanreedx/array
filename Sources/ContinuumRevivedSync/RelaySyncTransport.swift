@@ -157,12 +157,21 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
                     stateContinuation.yield(.connected)
                     announcedConnected = true
                 }
-                let envelopes = try await poll(after: currentCursor)
+                let response = try await poll(after: currentCursor)
                 backoffIndex = 0
-                for envelope in envelopes {
+                // Hub reset can also happen BETWEEN polls with no connection
+                // error (fast restart on the same port): hello never re-runs,
+                // so the stale-cursor detection must live here too — every
+                // poll response carries the hub's latestSeq.
+                if response.latestSeq < currentCursor {
+                    onDiagnostic?("relay poll: hub reset detected (latestSeq \(response.latestSeq) < cursor \(currentCursor)) — cursor reset to 0")
+                    advanceCursor(to: 0)
+                    continue
+                }
+                for envelope in response.envelopes {
                     inboundContinuation.yield(envelope.message)
                 }
-                if let last = envelopes.last?.seq {
+                if let last = response.envelopes.last?.seq {
                     advanceCursor(to: last)
                 }
             } catch let error as RelayClientError where error == .cursorUnrecoverable {
@@ -201,6 +210,15 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
         if consumeCursorFastForwardFlag() {
             advanceCursor(to: welcome.latestSeq)
         }
+        // A cursor AHEAD of the hub proves the hub restarted (seq is
+        // hub-lifetime-scoped and a cursor only advances by consuming) —
+        // without this reset the client silently sees nothing until the new
+        // hub's seq passes the stale cursor. Fresh feed + the publisher's
+        // next snapshot make it whole, same as any fresh subscriber.
+        if welcome.latestSeq < currentCursor {
+            onDiagnostic?("relay hello: hub reset detected (latestSeq \(welcome.latestSeq) < cursor \(currentCursor)) — cursor reset to 0")
+            advanceCursor(to: 0)
+        }
     }
 
     private func consumeCursorFastForwardFlag() -> Bool {
@@ -234,14 +252,14 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
         }
     }
 
-    private func poll(after: UInt64) async throws -> [RelayEnvelope] {
+    private func poll(after: UInt64) async throws -> RelayPollResponse {
         let path = "/v1/poll?after=\(after)&waitMs=\(pollWaitMs)"
         let (data, response) = try await session.data(for: makeRequest("GET", path: path, body: nil))
         try Self.checkStatus(data: data, response: response)
         guard let decoded = try? JSONDecoder().decode(RelayPollResponse.self, from: data) else {
             throw RelayClientError.malformedResponse
         }
-        return decoded.envelopes
+        return decoded
     }
 
     private static func checkStatus(data: Data, response: URLResponse) throws {

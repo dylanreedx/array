@@ -652,3 +652,64 @@ do {
 }
 
 print("ContinuumRevivedRelayChecks passed: milestone C plumbing (registerToken via transport incl. observer refusal, startAtHead live-only feed)")
+
+// ── Hub-restart resilience: a cursor ahead of a fresh hub resets at hello ──
+
+// 25. Consume to cursor 3, kill the server, bring up a FRESH hub on the same
+//     port: the client must detect the reset (latestSeq < cursor), rejoin at
+//     0, and receive the new hub's feed instead of going silently blind.
+do {
+    let seed: [String: RelayGrant] = [
+        macToken: RelayGrant(scopes: .operator),
+        phoneToken: RelayGrant(scopes: .observer),
+    ]
+    let registryA = RelayTokenRegistry(seed: seed)
+    let hubA = RelayHub { token in await registryA.grant(for: token) }
+    let serverA = RelayHTTPServer(hub: hubA, registry: registryA)
+    try serverA.start()
+    let port = serverA.port
+    let base = URL(string: "http://127.0.0.1:\(port)")!
+    for lamport: UInt64 in 1...3 {
+        let body = try JSONEncoder().encode(opMessage(lamport))
+        _ = try await request("POST", "\(base)/v1/publish", token: macToken, body: body)
+    }
+
+    let cursors = CursorRecorder()
+    let transport = RelaySyncTransport(
+        baseURL: base,
+        bearerToken: phoneToken,
+        deviceLabel: "checks-hub-reset",
+        pollWaitMs: 1_000,
+        backoffNanoseconds: [20_000_000],
+        onCursorChange: { cursors.record($0) }
+    )
+    transport.start()
+    let beforeRestart = await takeMessages(3, from: transport.inbound)
+    expect(beforeRestart.count == 3 && cursors.latest == 3, "assertion 68: consumed to cursor 3 before restart, got \(String(describing: cursors.latest))")
+
+    serverA.stop()
+    let registryB = RelayTokenRegistry(seed: seed)
+    let hubB = RelayHub { token in await registryB.grant(for: token) }
+    var serverB: RelayHTTPServer?
+    for _ in 0..<10 {
+        let candidate = RelayHTTPServer(hub: hubB, registry: registryB, port: port)
+        if (try? candidate.start()) != nil {
+            serverB = candidate
+            break
+        }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+    }
+    guard let serverB else {
+        fputs("FAIL: assertion 69: could not rebind port \(port) for the fresh hub\n", stderr)
+        exit(1)
+    }
+    let freshBody = try JSONEncoder().encode(opMessage(9))
+    _ = try await request("POST", "\(base)/v1/publish", token: macToken, body: freshBody)
+    let afterRestart = await takeMessages(1, from: transport.inbound)
+    expect(afterRestart == [opMessage(9)], "assertion 69: fresh hub's feed delivered after reset")
+    expect(cursors.latest == 1, "assertion 70: cursor reset to the fresh hub's seq, got \(String(describing: cursors.latest))")
+    transport.stop()
+    serverB.stop()
+}
+
+print("ContinuumRevivedRelayChecks passed: hub-restart resilience (stale cursor detected at hello, client rejoins fresh)")
