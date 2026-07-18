@@ -58,6 +58,14 @@ private func runPairingURLPayloadCheck() throws {
     let legacy = URL(string: "continuum://pair#token=LEGACYTOKEN")!
     expect(PairingURL.parse(legacy) == "LEGACYTOKEN", "Ticket81 PairingURL: legacy fragment token remains parseable")
     expect(PairingURL.parsePayload(legacy)?.token == "LEGACYTOKEN", "Ticket81 PairingURL: payload parser accepts legacy token-only URL")
+
+    // Ticket 86: the pairing link may carry the relay URL (the phone's
+    // transport configuration handoff) — round-trips, and stays optional.
+    let relay = URL(string: "http://192.168.1.23:8787")!
+    let relayLink = PairingURL.issue(credential: credential, scopes: .observer, instanceId: instanceId, endpoint: endpoint, relay: relay)
+    expect(PairingURL.parsePayload(relayLink)?.relay == relay, "Ticket86 PairingURL: relay URL round-trips through the fragment")
+    expect(payload?.relay == nil, "Ticket86 PairingURL: relay stays nil when not issued")
+    expect(PairingURL.parsePayload(PairingURL.cameraBootstrapURL(pairingURL: relayLink, endpoint: endpoint))?.relay == relay, "Ticket86 PairingURL: relay survives the camera bootstrap embed")
 }
 
 private func runLocalPairingEndpointContractCheck() async throws {

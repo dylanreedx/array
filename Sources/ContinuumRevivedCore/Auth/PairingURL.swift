@@ -31,16 +31,21 @@ public enum PairingURL: Sendable {
         public var endpoint: URL?
         public var scopes: Scope?
         public var instanceId: UUID?
+        /// Ticket 86 (D4-R1): the relay the phone should sync against,
+        /// advertised in a form reachable from the phone. Pairing is the
+        /// configuration handoff — the phone never types a URL.
+        public var relay: URL?
 
-        public init(token: String, endpoint: URL?, scopes: Scope?, instanceId: UUID?) {
+        public init(token: String, endpoint: URL?, scopes: Scope?, instanceId: UUID?, relay: URL? = nil) {
             self.token = token
             self.endpoint = endpoint
             self.scopes = scopes
             self.instanceId = instanceId
+            self.relay = relay
         }
     }
 
-    public static func issue(credential: String, scopes: Scope, instanceId: UUID? = nil, endpoint: URL? = nil) -> URL {
+    public static func issue(credential: String, scopes: Scope, instanceId: UUID? = nil, endpoint: URL? = nil, relay: URL? = nil) -> URL {
         var components = URLComponents()
         components.scheme = scheme
         components.host = host
@@ -54,6 +59,9 @@ public enum PairingURL: Sendable {
         ])
         if let instanceId {
             fragmentItems.append(URLQueryItem(name: "instance", value: instanceId.uuidString))
+        }
+        if let relay {
+            fragmentItems.append(URLQueryItem(name: "relay", value: relay.absoluteString))
         }
         var fragmentComponents = URLComponents()
         fragmentComponents.queryItems = fragmentItems
@@ -108,7 +116,8 @@ public enum PairingURL: Sendable {
         let instanceId = items.first(where: { $0.name == "instance" || $0.name == "instanceId" })?
             .value
             .flatMap(UUID.init(uuidString:))
-        return Payload(token: token, endpoint: endpoint, scopes: scopes, instanceId: instanceId)
+        let relay = items.first(where: { $0.name == "relay" })?.value.flatMap(URL.init(string:))
+        return Payload(token: token, endpoint: endpoint, scopes: scopes, instanceId: instanceId, relay: relay)
     }
 
     private static func fragmentItems(in url: URL) -> [URLQueryItem]? {

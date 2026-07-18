@@ -4904,7 +4904,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     credential: grant.credential,
                     scopes: grant.scopes,
                     instanceId: instance.id,
-                    endpoint: listener.endpointURL
+                    endpoint: listener.endpointURL,
+                    relay: Self.advertisedRelayURL(advertisedHost: LocalPairingEndpointListener.preferredAdvertisedHost())
                 )
                 let cameraURL = PairingURL.cameraBootstrapURL(pairingURL: url, endpoint: listener.endpointURL)
                 copyPairingURLToPasteboard(cameraURL)
@@ -4929,6 +4930,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         )
         companionAuthService = service
         return service
+    }
+
+    /// The relay URL to advertise in a pairing link: the configured relay,
+    /// with a loopback host rewritten to the LAN-reachable one (a phone
+    /// can't dial the Mac's 127.0.0.1). A non-loopback URL (the VPS later)
+    /// passes through untouched. Nil when not in relay mode.
+    private static func advertisedRelayURL(advertisedHost: String) -> URL? {
+        guard let config = RelayClientConfig.resolve() else { return nil }
+        guard let host = config.baseURL.host, host == "127.0.0.1" || host == "localhost" else {
+            return config.baseURL
+        }
+        var components = URLComponents(url: config.baseURL, resolvingAgainstBaseURL: false)
+        components?.host = advertisedHost
+        return components?.url
     }
 
     private func copyPairingURLToPasteboard(_ url: URL) {

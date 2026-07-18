@@ -555,6 +555,14 @@ private final class AgentsBoardModel: ObservableObject {
             pairedSessionState = .paired(sessionResponse.pairedSession)
             state = .loading
             pairingStatusMessage = "Paired to your Continuum Mac. Starting sync…"
+            // Ticket 86: pairing is the configuration handoff — adopt the
+            // relay URL the Mac advertised, unless one is already set (the
+            // sim keeps its loopback override).
+            if let relay = payload.relay,
+               UserDefaults.standard.string(forKey: RelayClientConfig.urlDefaultsKey) == nil {
+                UserDefaults.standard.set(relay.absoluteString, forKey: RelayClientConfig.urlDefaultsKey)
+                Self.appendFetchLog("pairing: adopted relay URL from link — \(relay.absoluteString)")
+            }
             Self.appendFetchLog("pairing: SUCCESS — session saved, restarting sync")
             // A re-pair while a transport is already running must not no-op
             // on start()'s task-guard: tear down so the fresh token is used.
