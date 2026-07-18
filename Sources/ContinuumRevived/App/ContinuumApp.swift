@@ -2642,6 +2642,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Set when the service runs in relay mode (D4-R1); used to register
     /// phone pairing tokens with the relay at exchange time.
     private var relaySyncTransport: RelaySyncTransport?
+    /// Re-registers every active companion token with the relay on each
+    /// connect — the relay's registry is in-memory, so a relay restart
+    /// would otherwise 401 every phone until it re-paired.
+    private var relayTokenSyncTask: Task<Void, Never>?
     private var companionPublishDebounceWorkItem: DispatchWorkItem?
     private var navKeymap: NavKeymap = .default {
         didSet { leaderDwell = TimeInterval(navKeymap.leaderDwellMs) / 1000 }
@@ -4932,6 +4936,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return service
     }
 
+    private func registerActiveSessionTokensWithRelay(_ transport: RelaySyncTransport) async {
+        do {
+            let service = try ensureCompanionAuthService()
+            let tokens = await service.activeSessionTokens()
+            var registered = 0
+            for entry in tokens {
+                do {
+                    try await transport.registerToken(entry.token, scopes: entry.scopes)
+                    registered += 1
+                } catch {
+                    Self.appendCompanionSyncLog("reason=relay-token-sync-FAILED error=\(String(describing: error))")
+                }
+            }
+            Self.appendCompanionSyncLog("reason=relay-token-sync registered=\(registered)/\(tokens.count)")
+        } catch {
+            Self.appendCompanionSyncLog("reason=relay-token-sync-FAILED auth-service error=\(String(describing: error))")
+        }
+    }
+
     /// The relay URL to advertise in a pairing link: the configured relay,
     /// with a loopback host rewritten to the LAN-reachable one (a phone
     /// can't dial the Mac's 127.0.0.1). A non-loopback URL (the VPS later)
@@ -5155,6 +5178,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             )
             transport.start()
             relaySyncTransport = transport
+            relayTokenSyncTask?.cancel()
+            relayTokenSyncTask = Task { @MainActor [weak self] in
+                for await state in transport.connectionState {
+                    guard case .connected = state else { continue }
+                    guard let self else { return }
+                    await self.registerActiveSessionTokensWithRelay(transport)
+                }
+            }
             let service = makeDesktopCompanionSyncService(
                 configuration: DesktopCompanionSyncConfiguration(
                     containerIdentifier: "relay:\(relayConfig.baseURL.absoluteString)",

@@ -280,6 +280,13 @@ public actor CompanionAuthService {
         }
     }
 
+    /// Ticket 86: token+scope pairs for every active session, for relay
+    /// registry re-registration. Tokens never leave the machine except to
+    /// the owner's own relay.
+    public func activeSessionTokens() async -> [(token: String, scopes: Scope)] {
+        await sessionStore.activeSessions().map { ($0.token, $0.scopes) }
+    }
+
     public func listSessions() throws -> [CompanionSessionRecord] {
         try dbQueue.read { db in
             try Row.fetchAll(db, sql: "SELECT * FROM companion_sessions ORDER BY issued_at, session_id")

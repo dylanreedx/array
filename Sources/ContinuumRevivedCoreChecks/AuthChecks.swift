@@ -108,6 +108,14 @@ private func runBootstrapAuthSuite(clock: FakeClock, signingKey: Data) async thr
     expect(first.scopes == .admin && second.scopes == .admin, "Auth BootstrapGrant: repeated exchanges preserve admin scope")
     expect(first.id != second.id && first.token != second.token, "Auth BootstrapGrant: re-exchange creates a fresh session")
 
+    // Ticket 86: the relay's in-memory token registry is refilled from
+    // activeSessions on every desktop relay connect — revoked sessions must
+    // drop out, live ones must carry their raw token.
+    await sessions.revoke(id: first.id)
+    let active = await sessions.activeSessions()
+    expect(active.map(\.id) == [second.id], "Ticket86 SessionStore: activeSessions excludes revoked sessions")
+    expect(active.first?.token == second.token, "Ticket86 SessionStore: activeSessions carries the raw token")
+
     let expiredGrant = BootstrapGrant(
         credential: "expired-bootstrap",
         scopes: .admin,

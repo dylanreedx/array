@@ -135,6 +135,20 @@ public actor SessionStore {
         return try Self.session(from: row)
     }
 
+    /// Every unrevoked, unexpired session, tokens included. Ticket 86: the
+    /// relay's token registry is in-memory, so the desktop re-registers all
+    /// active companion tokens on every relay connect — this is that feed.
+    public func activeSessions() -> [AuthSession] {
+        let now = clock.now().timeIntervalSince1970
+        return (try? dbQueue.read { db in
+            try Row.fetchAll(
+                db,
+                sql: "SELECT * FROM auth_sessions WHERE revoked_at IS NULL AND expires_at > ? ORDER BY issued_at",
+                arguments: [now]
+            ).compactMap { try? Self.session(from: $0) }
+        }) ?? []
+    }
+
     public func revoke(id: UUID) {
         let now = clock.now()
         try? dbQueue.write { db in
