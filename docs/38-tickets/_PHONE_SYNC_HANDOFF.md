@@ -263,6 +263,33 @@ Targets (`Package.swift` + `ios/project.yml`):
     `xcrun simctl get_app_container <dev> dev.dylanreedx.continuum data` then read
     `Documents/companion-fetch.log`. Physical phone: Files app → On My iPhone →
     Continuum (UIFileSharingEnabled is on in dev builds).
+11. Sim relay-dogfood landmines found 2026-07-18 (each cost real time):
+    (a) `simctl openurl` for a custom scheme pops an "Open in Continuum?"
+        confirmation INSIDE the sim — nothing happens until it's tapped
+        (`cliclick` at the Open button works; sim reboot clears a stale
+        dialog backlog). The sim's own unified log WORKS
+        (`simctl spawn <dev> log show --predicate …`) and is what exposed this.
+    (b) A second app claiming the same URL scheme (stale
+        `dev.dylanreed.continuum`, no "x") silently eats every link —
+        `simctl listapps` and uninstall it.
+    (c) An orphaned Xcode `debugserver` kept a zombie app process alive
+        across sim reboots (unkillable SXs state) — kill the debugserver,
+        not the app.
+    (d) The macOS FIREWALL blocks the pairing listener on LAN interfaces for
+        newly-signed binaries (loopback is exempt). Sim workaround: rewrite
+        the pairing link's endpoint host to 127.0.0.1 (the sim shares the
+        Mac's loopback). The PHONE needs a real firewall allowance for both
+        the pairing listener and the relay port.
+    (e) `simctl spawn <dev> defaults read` can report "does not exist" for
+        keys the app HAS written — read the container's
+        `Library/Preferences/<bundle>.plist` with `plutil -p` instead.
+12. Relay dev-loop quickstart (all proven 2026-07-18): start
+    `.build/debug/continuum-relay --host 0.0.0.0 --port 8787 --operator-token <T>`;
+    Mac: `defaults write com.continuum.revived continuum.relay.url http://127.0.0.1:8787`
+    + `continuum.relay.operatorToken <T>`; sim:
+    `simctl spawn <dev> defaults write dev.dylanreedx.continuum continuum.relay.url http://127.0.0.1:8787`.
+    Pairing auto-registers phone tokens with the relay; existing tokens can be
+    migrated with sqlite3 on `…/continuum-revived/auth/auth.db` + POST /v1/tokens.
 
 ## Open items beyond the sync bug
 

@@ -39,6 +39,11 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
     /// run in milliseconds while production waits like an adult.
     private let backoffNanoseconds: [UInt64]
     private let onCursorChange: (@Sendable (UInt64) -> Void)?
+    /// Called with a human-readable line for every loop failure —
+    /// `connectionState` deliberately stays coarse, but the app's file-sink
+    /// diagnostics need the underlying error or reconnect loops are
+    /// undebuggable (learned 2026-07-18, the hard way, twice).
+    private let onDiagnostic: (@Sendable (String) -> Void)?
 
     /// When true, the first successful hello fast-forwards the cursor to the
     /// hub's `latestSeq` — a live-only feed. The Mac uses this: its inbound
@@ -62,7 +67,8 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
         pollWaitMs: UInt64 = 25_000,
         backoffNanoseconds: [UInt64] = [1_000_000_000, 2_000_000_000, 4_000_000_000, 8_000_000_000, 15_000_000_000],
         session: URLSession = .shared,
-        onCursorChange: (@Sendable (UInt64) -> Void)? = nil
+        onCursorChange: (@Sendable (UInt64) -> Void)? = nil,
+        onDiagnostic: (@Sendable (String) -> Void)? = nil
     ) {
         precondition(!backoffNanoseconds.isEmpty, "backoff schedule must not be empty")
         self.baseURL = baseURL
@@ -74,6 +80,7 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
         self.backoffNanoseconds = backoffNanoseconds
         self.session = session
         self.onCursorChange = onCursorChange
+        self.onDiagnostic = onDiagnostic
 
         var inboundContinuation: AsyncStream<SyncMessage>.Continuation!
         self.inbound = AsyncStream { inboundContinuation = $0 }
@@ -162,6 +169,7 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
                 // Self-heal: reset and wait for the publisher's next snapshot
                 // (the hub refuses holey feeds; a fresh cursor becomes whole
                 // the moment a bridging snapshot exists).
+                onDiagnostic?("relay loop: cursorUnrecoverable — resetting cursor to 0")
                 advanceCursor(to: 0)
                 announcedConnected = false
                 stateContinuation.yield(.reconnecting)
@@ -169,6 +177,7 @@ public final class RelaySyncTransport: SyncTransport, @unchecked Sendable {
             } catch is CancellationError {
                 return
             } catch {
+                onDiagnostic?("relay loop: \(String(describing: error))")
                 announcedConnected = false
                 stateContinuation.yield(.reconnecting)
                 await sleepBackoff(index: &backoffIndex)

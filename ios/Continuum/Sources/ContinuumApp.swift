@@ -192,6 +192,10 @@ private final class AgentsBoardModel: ObservableObject {
     private var demux: SyncMessageDemux?
     private var syncTransport: CloudKitSyncTransport?
     private var fetchTask: Task<Void, Never>?
+    /// Set in relay mode (D4-R1, ticket 86); the transport owns its poll loop.
+    private var relayTransport: RelaySyncTransport?
+    private var relayStateTask: Task<Void, Never>?
+    private static let relayCursorDefaultsKey = "continuum.relay.cursor"
     private var freshnessSequence: Int64 = 0
     private let pairedSessionStore: any PairedCompanionSessionStoring = KeychainPairedCompanionSessionStore()
 
@@ -228,6 +232,9 @@ private final class AgentsBoardModel: ObservableObject {
     }
 
     var diagnosticsTransportSummary: String { transportAvailability.rawValue }
+    var transportModeSummary: String {
+        RelayClientConfig.resolve().map { "relay \($0.baseURL.absoluteString)" } ?? "cloudkit"
+    }
     var diagnosticsRemoteBackedLiveSummary: String { isFreshnessLive ? "yes" : "no" }
     var diagnosticsActivitySummary: String { Self.diagnosticsSummary(for: latestActivityFreshness, fallback: "no remote activity snapshot") }
     var diagnosticsSpatialSummary: String { Self.diagnosticsSummary(for: latestSpatialFreshness, fallback: "no remote spatial snapshot") }
@@ -252,25 +259,72 @@ private final class AgentsBoardModel: ObservableObject {
             return
         }
 
-        let container = CKContainer(identifier: continuumCloudKitContainerIdentifier)
-        do {
-            let status = try await container.accountStatus()
-            guard status == .available else {
-                transportAvailability = .accountUnavailable
-                state = .unavailable("Sign in to iCloud in Settings to observe your agents")
-                Self.appendFetchLog("start: iCloud account unavailable (CKAccountStatus=\(status.rawValue)) — transport not started")
+        // D4-R1 (ticket 86): a configured relay URL selects the self-owned
+        // relay — no iCloud account gate, and the transport owns its own
+        // poll loop. Without a relay URL the parked CloudKit path below runs
+        // unchanged.
+        let transport: any ContinuumRevivedSync.SyncTransport
+        if let relayConfig = RelayClientConfig.resolve() {
+            guard case .paired(let pairedSession) = pairedSessionState else {
+                state = .unpaired
+                Self.appendFetchLog("start: relay configured but no paired session token — pair first")
                 return
             }
-        } catch {
-            transportAvailability = .accountUnavailable
-            state = .unavailable("Sign in to iCloud in Settings to observe your agents")
-            Self.appendFetchLog("start: accountStatus FAILED: \(String(describing: error)) — transport not started")
-            return
+            let storedCursor = (UserDefaults.standard.object(forKey: Self.relayCursorDefaultsKey) as? NSNumber)?.uint64Value ?? 0
+            let relay = RelaySyncTransport(
+                baseURL: relayConfig.baseURL,
+                bearerToken: pairedSession.token,
+                deviceLabel: UIDevice.current.name,
+                initialCursor: storedCursor,
+                onCursorChange: { cursor in
+                    UserDefaults.standard.set(NSNumber(value: cursor), forKey: Self.relayCursorDefaultsKey)
+                },
+                onDiagnostic: { line in
+                    Self.appendFetchLog(line)
+                }
+            )
+            relayTransport = relay
+            relay.start()
+            transportAvailability = .available
+            lastFetchReport = "relay: connecting to \(relayConfig.baseURL.absoluteString)"
+            Self.appendFetchLog("start: relay mode url=\(relayConfig.baseURL.absoluteString) cursor=\(storedCursor) — transport polling; CloudKit unused")
+            relayStateTask = Task { [weak self] in
+                for await connection in relay.connectionState {
+                    let report: String
+                    switch connection {
+                    case .connected: report = "relay connected (\(relayConfig.baseURL.absoluteString))"
+                    case .reconnecting: report = "relay reconnecting"
+                    case .disconnected(let reason): report = "relay disconnected: \(reason)"
+                    }
+                    print("[companion-fetch] \(report)")
+                    Self.appendFetchLog(report)
+                    guard let self else { return }
+                    await MainActor.run { self.lastFetchReport = report }
+                }
+            }
+            transport = relay
+        } else {
+            let container = CKContainer(identifier: continuumCloudKitContainerIdentifier)
+            do {
+                let status = try await container.accountStatus()
+                guard status == .available else {
+                    transportAvailability = .accountUnavailable
+                    state = .unavailable("Sign in to iCloud in Settings to observe your agents")
+                    Self.appendFetchLog("start: iCloud account unavailable (CKAccountStatus=\(status.rawValue)) — transport not started")
+                    return
+                }
+            } catch {
+                transportAvailability = .accountUnavailable
+                state = .unavailable("Sign in to iCloud in Settings to observe your agents")
+                Self.appendFetchLog("start: accountStatus FAILED: \(String(describing: error)) — transport not started")
+                return
+            }
+            transportAvailability = .available
+            Self.appendFetchLog("start: paired + iCloud available — starting receivers and fetch loop")
+            let cloudKit = CloudKitSyncTransport(containerIdentifier: continuumCloudKitContainerIdentifier)
+            self.syncTransport = cloudKit
+            transport = cloudKit
         }
-        transportAvailability = .available
-        Self.appendFetchLog("start: paired + iCloud available — starting receivers and fetch loop")
-
-        let transport = CloudKitSyncTransport(containerIdentifier: continuumCloudKitContainerIdentifier)
         // ONE transport, ONE demux — the spatial receiver below is a second
         // independent subscriber over the SAME demux the activity receiver
         // uses (ticket 61b banner (c).7), never a second transport.
@@ -297,33 +351,37 @@ private final class AgentsBoardModel: ObservableObject {
             }
         }
 
-        // The transport's inbound stream is fed ONLY by fetchChanges() — the
-        // transport doc makes the app-lifecycle layer responsible for calling
-        // it. Without this loop the receivers above subscribe to a stream
-        // nothing ever writes to, and the phone can never leave
-        // "Waiting for your Mac" (the pre-ticket-85 false-Live masked this).
-        // Initial backfill immediately, then a foreground poll; push-triggered
-        // fetch can replace the poll once the CK subscription bridge lands.
-        self.syncTransport = transport
-        fetchTask = Task { [weak self] in
-            while !Task.isCancelled {
-                var report: String
-                do {
-                    report = try await transport.fetchChangesWithReport()
-                } catch {
-                    report = "FAILED: \(String(describing: error))"
+        // CloudKit mode only: that transport's inbound stream is fed ONLY by
+        // fetchChanges() — the app-lifecycle layer owns the poll. Without
+        // this loop the receivers above subscribe to a stream nothing ever
+        // writes to (the pre-ticket-85 false-Live masked this). The relay
+        // transport polls itself, so no loop exists to forget there.
+        if let cloudKit = syncTransport {
+            fetchTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    var report: String
+                    do {
+                        report = try await cloudKit.fetchChangesWithReport()
+                    } catch {
+                        report = "FAILED: \(String(describing: error))"
+                    }
+                    print("[companion-fetch] \(report)")
+                    Self.appendFetchLog(report)
+                    guard let self else { return }
+                    await MainActor.run { self.lastFetchReport = report }
+                    try? await Task.sleep(nanoseconds: 20_000_000_000)
                 }
-                print("[companion-fetch] \(report)")
-                Self.appendFetchLog(report)
-                guard let self else { return }
-                await MainActor.run { self.lastFetchReport = report }
-                try? await Task.sleep(nanoseconds: 20_000_000_000)
             }
         }
     }
 
     /// Foreground/manual refresh: one immediate fetch pass.
     func refreshNow() async {
+        if relayTransport != nil {
+            print("[companion-fetch] manual refresh: relay polls continuously")
+            Self.appendFetchLog("manual refresh: relay polls continuously")
+            return
+        }
         guard let syncTransport else { return }
         var report: String
         do {
@@ -340,7 +398,7 @@ private final class AgentsBoardModel: ObservableObject {
     // _PHONE_SYNC_HANDOFF.md gotchas), so fetch reports also land in
     // <container>/Documents/companion-fetch.log — read it on the simulator via
     // `xcrun simctl get_app_container <device> dev.dylanreedx.continuum data`.
-    private static func appendFetchLog(_ line: String) {
+    nonisolated private static func appendFetchLog(_ line: String) {
         guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
         let url = docs.appendingPathComponent("companion-fetch.log")
         let stamped = "\(ISO8601DateFormatter().string(from: Date())) \(line)\n"
@@ -363,6 +421,7 @@ private final class AgentsBoardModel: ObservableObject {
         }
 
         await tearDownSyncReceivers()
+        UserDefaults.standard.removeObject(forKey: Self.relayCursorDefaultsKey)
         pairedSessionState = .unpaired
         state = .unpaired
         transportAvailability = .connecting
@@ -385,9 +444,13 @@ private final class AgentsBoardModel: ObservableObject {
         task?.cancel()
         spatialTask?.cancel()
         fetchTask?.cancel()
+        relayStateTask?.cancel()
+        relayTransport?.stop()
         task = nil
         spatialTask = nil
         fetchTask = nil
+        relayStateTask = nil
+        relayTransport = nil
         receiver = nil
         self.spatialReceiver = nil
         demux = nil
@@ -456,25 +519,33 @@ private final class AgentsBoardModel: ObservableObject {
     }
 
     func pairFromString(_ rawValue: String) async {
-        guard !pairingInProgress else { return }
+        guard !pairingInProgress else {
+            Self.appendFetchLog("pairing: skipped — another pairing in progress")
+            return
+        }
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        Self.appendFetchLog("pairing: received link (\(trimmed.prefix(28))…)")
         guard let url = URL(string: trimmed),
               let payload = PairingURL.parsePayload(url) else {
             pairingStatusMessage = "That is not a valid Continuum pairing link."
+            Self.appendFetchLog("pairing: FAILED — link did not parse")
             return
         }
         guard let endpoint = payload.endpoint else {
             pairingStatusMessage = "Pairing link is missing the Mac endpoint. Generate a new QR code from the Mac."
+            Self.appendFetchLog("pairing: FAILED — no endpoint in link")
             return
         }
         guard endpoint.scheme == "http", endpoint.path == "/pair" else {
             pairingStatusMessage = "Pairing link endpoint is not supported. Generate a new QR code from the Mac."
+            Self.appendFetchLog("pairing: FAILED — unsupported endpoint \(endpoint.absoluteString)")
             return
         }
         pairingInProgress = true
         pairingStatusMessage = "Pairing with your Mac…"
         defer { pairingInProgress = false }
         do {
+            Self.appendFetchLog("pairing: exchanging with \(endpoint.absoluteString)")
             let sessionResponse = try await exchangeLocalPairing(payload: payload, endpoint: endpoint)
             if let expectedInstanceId = payload.instanceId,
                expectedInstanceId != sessionResponse.instanceId {
@@ -484,9 +555,14 @@ private final class AgentsBoardModel: ObservableObject {
             pairedSessionState = .paired(sessionResponse.pairedSession)
             state = .loading
             pairingStatusMessage = "Paired to your Continuum Mac. Starting sync…"
+            Self.appendFetchLog("pairing: SUCCESS — session saved, restarting sync")
+            // A re-pair while a transport is already running must not no-op
+            // on start()'s task-guard: tear down so the fresh token is used.
+            await tearDownSyncReceivers()
             await start()
         } catch {
             pairingStatusMessage = Self.pairingMessage(for: error)
+            Self.appendFetchLog("pairing: FAILED — \(String(describing: error))")
         }
     }
 
@@ -1986,6 +2062,7 @@ private struct SettingsDiagnosticsView: View {
                 Section("Sync Diagnostics") {
                     diagnosticRow("Transport", model.diagnosticsTransportSummary)
                     diagnosticRow("Remote-backed live", model.diagnosticsRemoteBackedLiveSummary)
+                    diagnosticRow("Transport mode", model.transportModeSummary)
                     diagnosticRow("Last fetch", model.lastFetchReport)
                     diagnosticRow("Latest activity", model.diagnosticsActivitySummary)
                     diagnosticRow("Latest spatial", model.diagnosticsSpatialSummary)
