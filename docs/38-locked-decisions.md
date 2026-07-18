@@ -166,6 +166,21 @@ comparison (incl. why Ably/Pusher/Liveblocks are wrong-fit): `38-cloud-devops...
 editing); OR you add a **non-Apple client**; OR you want the op-log authoritative +
 replayable on a server you control. Then build the relay on the VPS you already pay for.
 
+**REVISED 2026-07-18 (D4-R1) — relay promoted to the active transport.** The third
+trigger fired, by owner decision: Dylan wants the op-log authoritative on a server he
+controls and explicitly does NOT want device sync to require iCloud sign-in (raised
+during phone-sync dogfood; see `_PHONE_SYNC_HANDOFF.md`). The deciding operational
+evidence: an entire week of dogfood time went to Apple-stack friction — provisioning
+profiles, entitlement wildcards, TCC, `CKAccountStatus` gating, and the private-DB
+same-Apple-ID requirement — before our sync code ever executed end-to-end on a phone.
+New shape: **self-owned relay** (D4's own documented upgrade path) becomes phase-1;
+develop against localhost first (also fixes the simulator loop: no iCloud sign-in
+anywhere), deploy to the §1 VPS once proven. Auth = the already-built pairing-token +
+`Scope` model (the D6 control-leg machinery). APNS remains the urgent-signal channel
+per D7 (no user sign-in involved). **CloudKit transport is PARKED, not deleted**: code
+and checks stay behind the seam as the documented fallback; no further investment.
+Plan and slices: `38-tickets/86-relay-sync-transport.md`.
+
 ### D5 — iOS client scope = **observer + approvals only** (never a spatial writer)
 
 **Decision.** The iOS app is a **thin observer** over the synced spatial + activity

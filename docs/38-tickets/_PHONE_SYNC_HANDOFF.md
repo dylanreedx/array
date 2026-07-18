@@ -127,7 +127,18 @@ the 16th. Never install without the strings gate (see loop below). The physical-
 retest with a verified binary is still owed; the new gate logging + Files-app-readable
 `companion-fetch.log` will name the failing gate in one line.
 
-## Next step (agreed with Dylan): iterate on the iOS SIMULATOR
+## DIRECTION CHANGE 2026-07-18 (supersedes the CloudKit validation plan below)
+
+Dylan rejected the iCloud-sign-in requirement outright and chose the self-owned relay
+(D4-R1 in `38-locked-decisions.md`, plan in `86-relay-sync-transport.md`). Consequences:
+- The sim does NOT get signed into iCloud; the CloudKit end-to-end validation below is
+  CANCELLED. CloudKit transport code is parked behind the seam, not deleted.
+- The sim loop below stays valid for BUILD/INSTALL mechanics (strings gate, file-sink
+  log); the transport under test becomes the relay on localhost.
+- The phone retest with a verified binary is still owed — but against the relay
+  (slice 2 of ticket 86), which also removes the same-Apple-ID variable entirely.
+
+## Superseded: iterate CloudKit on the iOS SIMULATOR
 
 The simulator removes every observability problem (console visible, no reinstall dance).
 An `iPhone 17 Pro` sim (A5593A9C-A811-4EA4-BEEE-D5084F7CDD3C) was already booted.
