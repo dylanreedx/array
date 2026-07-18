@@ -230,14 +230,23 @@ plist_print() {
 
 profile_contains_cloudkit() {
   local decoded="$1"
-  plist_print "$decoded" ':Entitlements:com.apple.developer.icloud-services' | grep -Fq 'CloudKit' && \
+  # Xcode-managed team profiles grant the wildcard '*' for icloud-services,
+  # which authorizes every iCloud service including CloudKit; portal-created
+  # profiles list 'CloudKit' explicitly. Accept either — the container check
+  # below is the specific authorization that matters.
+  plist_print "$decoded" ':Entitlements:com.apple.developer.icloud-services' | grep -Eq 'CloudKit|^\*$' && \
     plist_print "$decoded" ':Entitlements:com.apple.developer.icloud-container-identifiers' | grep -Fq "$cloudkit_container"
 }
 
 signed_entitlements_contain_cloudkit() {
   local entitlements="$1"
+  # The SIGNED app must claim an explicit CloudKit services array: CKContainer
+  # throws "malformed entitlements" at launch when the app is signed with the
+  # profile's wildcard '*' value. (The PROFILE may say '*' — see
+  # profile_contains_cloudkit — but the signature must not.)
   grep -Fq 'com.apple.developer.icloud-services' "$entitlements" && \
     grep -Fq 'CloudKit' "$entitlements" && \
+    ! grep -Fq '<key>com.apple.developer.icloud-services</key><string>*</string>' "$entitlements" && \
     grep -Fq 'com.apple.developer.icloud-container-identifiers' "$entitlements" && \
     grep -Fq "$cloudkit_container" "$entitlements"
 }
@@ -419,7 +428,29 @@ if [[ "$mode" == "build" ]]; then
   cp "$PROFILE" "$OUTPUT/Contents/embedded.provisionprofile"
 
   set +e
-  codesign --force --timestamp=none --sign "$IDENTITY" --entitlements "$PROFILE_ENTITLEMENTS" "$OUTPUT" >"$CODESIGN_SIGN_LOG" 2>&1
+  # Derive the app-signing entitlements from the profile's grants. An
+  # Xcode-managed profile authorizes icloud-services as the wildcard '*';
+  # the app signature must instead claim the explicit array (CKContainer
+  # launch-kills on a '*' value in the signed entitlements).
+  SIGNING_ENTITLEMENTS="$ARTIFACT_DIR/signing-entitlements.plist"
+  cp "$PROFILE_ENTITLEMENTS" "$SIGNING_ENTITLEMENTS"
+  if /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.icloud-services' "$SIGNING_ENTITLEMENTS" 2>/dev/null | grep -qx '\*'; then
+    /usr/libexec/PlistBuddy -c 'Delete :com.apple.developer.icloud-services' "$SIGNING_ENTITLEMENTS"
+    /usr/libexec/PlistBuddy -c 'Add :com.apple.developer.icloud-services array' "$SIGNING_ENTITLEMENTS"
+    /usr/libexec/PlistBuddy -c 'Add :com.apple.developer.icloud-services:0 string CloudKit' "$SIGNING_ENTITLEMENTS"
+  fi
+  # The profile grants icloud-container-environment as an array of allowed
+  # values; CKContainer requires the signature to pick exactly ONE string.
+  # Default Production: the paired iPhone runs a TestFlight build, and
+  # TestFlight/App Store builds always use the CloudKit Production
+  # environment — a Development-environment Mac would publish records the
+  # phone can never see. Override with CONTINUUM_CLOUDKIT_ENVIRONMENT.
+  cloudkit_environment="${CONTINUUM_CLOUDKIT_ENVIRONMENT:-Production}"
+  if /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.icloud-container-environment' "$SIGNING_ENTITLEMENTS" 2>/dev/null | grep -q 'Array'; then
+    /usr/libexec/PlistBuddy -c 'Delete :com.apple.developer.icloud-container-environment' "$SIGNING_ENTITLEMENTS"
+    /usr/libexec/PlistBuddy -c "Add :com.apple.developer.icloud-container-environment string $cloudkit_environment" "$SIGNING_ENTITLEMENTS"
+  fi
+  codesign --force --timestamp=none --sign "$IDENTITY" --entitlements "$SIGNING_ENTITLEMENTS" "$OUTPUT" >"$CODESIGN_SIGN_LOG" 2>&1
   sign_status=$?
   set -e
   if [[ "$sign_status" -ne 0 ]]; then
