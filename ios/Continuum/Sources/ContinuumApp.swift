@@ -165,6 +165,7 @@ private final class AgentsBoardModel: ObservableObject {
     @Published private var transportAvailability: CompanionTransportAvailability = .connecting
     @Published private var latestActivityFreshness: CompanionFreshnessSample?
     @Published private var latestSpatialFreshness: CompanionFreshnessSample?
+    @Published private(set) var lastFetchReport: String = "never ran"
     var grantedScope: Scope {
         let storedScope = CompanionUICapability(state: pairedSessionState).scope
         #if DEBUG
@@ -189,6 +190,8 @@ private final class AgentsBoardModel: ObservableObject {
     private var spatialTask: Task<Void, Never>?
     private var freshnessTask: Task<Void, Never>?
     private var demux: SyncMessageDemux?
+    private var syncTransport: CloudKitSyncTransport?
+    private var fetchTask: Task<Void, Never>?
     private var freshnessSequence: Int64 = 0
     private let pairedSessionStore: any PairedCompanionSessionStoring = KeychainPairedCompanionSessionStore()
 
@@ -223,6 +226,13 @@ private final class AgentsBoardModel: ObservableObject {
         if case .live = freshness.state { return true }
         return false
     }
+
+    var diagnosticsTransportSummary: String { transportAvailability.rawValue }
+    var diagnosticsRemoteBackedLiveSummary: String { isFreshnessLive ? "yes" : "no" }
+    var diagnosticsActivitySummary: String { Self.diagnosticsSummary(for: latestActivityFreshness, fallback: "no remote activity snapshot") }
+    var diagnosticsSpatialSummary: String { Self.diagnosticsSummary(for: latestSpatialFreshness, fallback: "no remote spatial snapshot") }
+    var diagnosticsAgentRowCount: Int { rows.count }
+    var diagnosticsCanvasTileCount: Int { canvasScene.tiles.count }
 
     var canUnpairThisPhone: Bool {
         if case .unpaired = pairedSessionState { return false }
@@ -282,6 +292,35 @@ private final class AgentsBoardModel: ObservableObject {
                 await self?.consumeSpatial(materialized)
             }
         }
+
+        // The transport's inbound stream is fed ONLY by fetchChanges() — the
+        // transport doc makes the app-lifecycle layer responsible for calling
+        // it. Without this loop the receivers above subscribe to a stream
+        // nothing ever writes to, and the phone can never leave
+        // "Waiting for your Mac" (the pre-ticket-85 false-Live masked this).
+        // Initial backfill immediately, then a foreground poll; push-triggered
+        // fetch can replace the poll once the CK subscription bridge lands.
+        self.syncTransport = transport
+        fetchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                var report: String
+                do {
+                    report = try await transport.fetchChangesWithReport()
+                } catch {
+                    report = "FAILED: \(String(describing: error))"
+                }
+                print("[companion-fetch] \(report)")
+                guard let self else { return }
+                await MainActor.run { self.lastFetchReport = report }
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+            }
+        }
+    }
+
+    /// Foreground/manual refresh: one immediate fetch pass.
+    func refreshNow() async {
+        guard let syncTransport else { return }
+        try? await syncTransport.fetchChanges()
     }
 
     func unpairThisPhone() async {
@@ -314,11 +353,14 @@ private final class AgentsBoardModel: ObservableObject {
         let spatial = spatialReceiver
         task?.cancel()
         spatialTask?.cancel()
+        fetchTask?.cancel()
         task = nil
         spatialTask = nil
+        fetchTask = nil
         receiver = nil
         self.spatialReceiver = nil
         demux = nil
+        syncTransport = nil
         if let activityReceiver {
             await activityReceiver.stop()
         }
@@ -614,6 +656,14 @@ private final class AgentsBoardModel: ObservableObject {
                 activityWatermark: activityWatermark
             )
         )
+    }
+
+    private static func diagnosticsSummary(for sample: CompanionFreshnessSample?, fallback: String) -> String {
+        guard let sample else { return fallback }
+        let metadata = sample.metadata
+        let spatial = metadata.spatialWatermark ?? "-"
+        let activity = metadata.activityWatermark ?? "-"
+        return "seq=\(metadata.sequence) published=\(metadata.publishedAt.ISO8601Format()) spatial=\(spatial) activity=\(activity)"
     }
 }
 
@@ -1060,10 +1110,20 @@ private struct StatusPill: View {
 }
 
 private struct LoadingBoardView: View {
+    @EnvironmentObject private var model: AgentsBoardModel
+
+    // The local pairing check resolves in milliseconds; if we are still here
+    // with a paired session, the honest description of the wait is the remote
+    // one — the Mac hasn't published (or the phone hasn't fetched) yet.
+    private var message: String {
+        if case .unpaired = model.pairedSessionState { return "Checking paired session" }
+        return "Waiting for your Mac to publish…"
+    }
+
     var body: some View {
         VStack(spacing: 12) {
             ProgressView()
-            Text("Checking paired session")
+            Text(message)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
@@ -1892,6 +1952,14 @@ private struct SettingsDiagnosticsView: View {
                         .disabled(model.pairingInProgress)
                     }
                 }
+                Section("Sync Diagnostics") {
+                    diagnosticRow("Transport", model.diagnosticsTransportSummary)
+                    diagnosticRow("Remote-backed live", model.diagnosticsRemoteBackedLiveSummary)
+                    diagnosticRow("Last fetch", model.lastFetchReport)
+                    diagnosticRow("Latest activity", model.diagnosticsActivitySummary)
+                    diagnosticRow("Latest spatial", model.diagnosticsSpatialSummary)
+                    diagnosticRow("Rows / canvas tiles", "agents=\(model.diagnosticsAgentRowCount) canvasTiles=\(model.diagnosticsCanvasTileCount)")
+                }
                 Section("Push Diagnostics") {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("APNS device token")
@@ -1903,10 +1971,6 @@ private struct SettingsDiagnosticsView: View {
                             .lineLimit(nil)
                     }
                     .padding(.vertical, 4)
-                }
-                Section {
-                    Text("Settings land with ticket B8.")
-                        .foregroundStyle(.secondary)
                 }
             }
             .scrollContentBackground(.hidden)
@@ -1923,6 +1987,20 @@ private struct SettingsDiagnosticsView: View {
                 Text("This clears the saved pairing token and stops Continuum sync on this phone. Pair again from the Mac to reconnect.")
             }
         }
+    }
+
+    @ViewBuilder
+    private func diagnosticRow(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+                .lineLimit(nil)
+        }
+        .padding(.vertical, 4)
     }
 
     private var pairingSummary: String {

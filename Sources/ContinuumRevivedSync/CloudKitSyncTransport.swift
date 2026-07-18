@@ -597,25 +597,41 @@ public struct CloudKitSyncTransport: SyncTransport, Sendable {
     /// push/foreground (per the ruling; the transport itself has no notion
     /// of "foreground").
     public func fetchChanges() async throws {
+        _ = try await fetchChangesWithReport()
+    }
+
+    /// `fetchChanges()` plus a one-line human-readable outcome for dogfood
+    /// diagnostics. `zoneNotFound` matters operationally: on a paired phone it
+    /// means this iCloud account's private database has no ContinuumSyncZone —
+    /// i.e. no Mac on THIS account has ever published (the classic
+    /// wrong-iCloud-account symptom) — which the silent-swallow behavior of
+    /// `fetchChanges()` otherwise makes indistinguishable from "no new data".
+    @discardableResult
+    public func fetchChangesWithReport() async throws -> String {
         var moreComing = true
+        var forwarded = 0
+        var batches = 0
         while moreComing {
             let sinceToken = await changeTokenStore.token
             do {
                 let result = try await CloudKitRetry.withRetry {
                     try await self.db.recordZoneChanges(inZoneWith: cloudKitSyncZoneID, since: sinceToken)
                 }
+                batches += 1
                 for modificationResult in result.modificationResultsByID.values {
                     guard case .success(let modification) = modificationResult else { continue }
                     forwardChangedRecord(modification.record)
+                    forwarded += 1
                 }
                 await changeTokenStore.update(result.changeToken)
                 moreComing = result.moreComing
             } catch let error as CKError where error.code == .zoneNotFound {
                 // Nothing has ever been pushed yet — the zone doesn't exist.
                 // Not an error condition; there is simply no tail yet.
-                return
+                return "zoneNotFound (no ContinuumSyncZone in this account's private DB)"
             }
         }
+        return "ok records=\(forwarded) batches=\(batches)"
     }
 
     private func forwardChangedRecord(_ record: CKRecord) {
