@@ -36,6 +36,8 @@ targets:
           NSAllowsLocalNetworking: true
         NSCameraUsageDescription: Continuum uses the camera to scan a Mac pairing QR code.
         NSLocalNetworkUsageDescription: Continuum uses your local network to pair this iPhone with your Mac.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

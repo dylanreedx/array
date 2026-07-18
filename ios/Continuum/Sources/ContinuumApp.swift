@@ -248,6 +248,7 @@ private final class AgentsBoardModel: ObservableObject {
         let capability = CompanionUICapability(state: pairedSessionState)
         guard capability.canStartTransport else {
             state = .unpaired
+            Self.appendFetchLog("start: unpaired — transport not started")
             return
         }
 
@@ -257,14 +258,17 @@ private final class AgentsBoardModel: ObservableObject {
             guard status == .available else {
                 transportAvailability = .accountUnavailable
                 state = .unavailable("Sign in to iCloud in Settings to observe your agents")
+                Self.appendFetchLog("start: iCloud account unavailable (CKAccountStatus=\(status.rawValue)) — transport not started")
                 return
             }
         } catch {
             transportAvailability = .accountUnavailable
             state = .unavailable("Sign in to iCloud in Settings to observe your agents")
+            Self.appendFetchLog("start: accountStatus FAILED: \(String(describing: error)) — transport not started")
             return
         }
         transportAvailability = .available
+        Self.appendFetchLog("start: paired + iCloud available — starting receivers and fetch loop")
 
         let transport = CloudKitSyncTransport(containerIdentifier: continuumCloudKitContainerIdentifier)
         // ONE transport, ONE demux — the spatial receiver below is a second
@@ -310,6 +314,7 @@ private final class AgentsBoardModel: ObservableObject {
                     report = "FAILED: \(String(describing: error))"
                 }
                 print("[companion-fetch] \(report)")
+                Self.appendFetchLog(report)
                 guard let self else { return }
                 await MainActor.run { self.lastFetchReport = report }
                 try? await Task.sleep(nanoseconds: 20_000_000_000)
@@ -320,7 +325,33 @@ private final class AgentsBoardModel: ObservableObject {
     /// Foreground/manual refresh: one immediate fetch pass.
     func refreshNow() async {
         guard let syncTransport else { return }
-        try? await syncTransport.fetchChanges()
+        var report: String
+        do {
+            report = try await syncTransport.fetchChangesWithReport()
+        } catch {
+            report = "FAILED: \(String(describing: error))"
+        }
+        print("[companion-fetch] manual \(report)")
+        Self.appendFetchLog("manual \(report)")
+        lastFetchReport = report
+    }
+
+    // stdout/os_log are unreadable in this dev environment (see
+    // _PHONE_SYNC_HANDOFF.md gotchas), so fetch reports also land in
+    // <container>/Documents/companion-fetch.log — read it on the simulator via
+    // `xcrun simctl get_app_container <device> dev.dylanreedx.continuum data`.
+    private static func appendFetchLog(_ line: String) {
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        let url = docs.appendingPathComponent("companion-fetch.log")
+        let stamped = "\(ISO8601DateFormatter().string(from: Date())) \(line)\n"
+        guard let data = stamped.data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: url, options: .atomic)
+        }
     }
 
     func unpairThisPhone() async {
