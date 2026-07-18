@@ -40,6 +40,11 @@ public actor RelayHub {
         let continuation: AsyncStream<RelayEnvelope>.Continuation
     }
 
+    /// Long-poll waiters (the HTTP adapter's primitive). Resumed en masse on
+    /// every admit; each waiter recomputes its backlog. Thundering herd is a
+    /// non-issue at this hub's scale (a desktop and a phone).
+    private var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+
     public init(ringCapacity: Int = 512, validator: @escaping TokenValidator) {
         precondition(ringCapacity > 0, "ring must hold at least one envelope")
         self.ringCapacity = ringCapacity
@@ -79,6 +84,64 @@ public actor RelayHub {
     }
 
     public var subscriberCount: Int { subscribers.count }
+
+    /// The newest seq the hub has assigned (0 = nothing published yet).
+    public var latestSeq: UInt64 { nextSeq - 1 }
+
+    /// Registered long-poll waiters — exposed so checks can prove
+    /// cancellation does not leak continuations.
+    public var waiterCount: Int { waiters.count }
+
+    // MARK: Stateless pull (HTTP long-poll adapter)
+
+    /// Validates the token and the cursor without waiting or subscribing:
+    /// the HTTP hello. Throws the same refusals `pollEnvelopes` would, so a
+    /// client learns about an unrecoverable cursor before it starts polling.
+    /// Returns `latestSeq`.
+    public func validateCursor(token: String, afterSeq: UInt64) async throws -> UInt64 {
+        guard await validator(token) != nil else {
+            throw RelayHelloError.unauthorized
+        }
+        _ = try backlog(for: afterSeq)
+        return latestSeq
+    }
+
+    /// Stateless pull: the lossless backlog after `afterSeq` (identical
+    /// cursor semantics to `subscribe`; `afterSeq` 0 = "I have nothing"),
+    /// suspending until at least one envelope exists when the backlog is
+    /// empty. The HTTP adapter bounds the wait with its own timeout race and
+    /// treats "nothing yet" as an empty batch; a cancelled waiter is removed
+    /// without leaking and returns [].
+    public func pollEnvelopes(token: String, afterSeq: UInt64, maxCount: Int = 256) async throws -> [RelayEnvelope] {
+        guard maxCount > 0 else { return [] }
+        guard await validator(token) != nil else {
+            throw RelayHelloError.unauthorized
+        }
+        let backlog = try backlog(for: afterSeq)
+        if !backlog.isEmpty {
+            return Array(backlog.prefix(maxCount))
+        }
+        let waiterId = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                if Task.isCancelled {
+                    continuation.resume()
+                    return
+                }
+                waiters[waiterId] = continuation
+            }
+        } onCancel: {
+            Task { await self.removeWaiter(waiterId) }
+        }
+        if Task.isCancelled {
+            return []
+        }
+        return try Array(self.backlog(for: afterSeq).prefix(maxCount))
+    }
+
+    private func removeWaiter(_ waiterId: UUID) {
+        waiters.removeValue(forKey: waiterId)?.resume()
+    }
 
     // MARK: Publish
 
@@ -140,6 +203,11 @@ public actor RelayHub {
         }
         for subscriber in subscribers.values {
             subscriber.continuation.yield(envelope)
+        }
+        let resumed = waiters
+        waiters.removeAll()
+        for continuation in resumed.values {
+            continuation.resume()
         }
         return envelope.seq
     }

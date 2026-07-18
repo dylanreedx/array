@@ -114,6 +114,10 @@ let package = Package(
             dependencies: ["ContinuumRevivedSync", "ContinuumRevivedCore"]
         ),
         .executableTarget(
+            name: "continuum-relay",
+            dependencies: ["ContinuumRevivedSync", "ContinuumRevivedCore"]
+        ),
+        .executableTarget(
             name: "ContinuumRevivedPaletteChecks",
             dependencies: ["ContinuumRevivedCore"]
         ),

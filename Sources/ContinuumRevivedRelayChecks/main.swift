@@ -247,3 +247,186 @@ do {
 }
 
 print("ContinuumRevivedRelayChecks passed: auth/scope refusals, seq order \(measuredSeqs) via publish, 2-subscriber fan-out, lossless catch-up (in-ring tail, snapshot bridge, unrecoverable refusals), no-dedupe doctrine, I5 gate on publish path (\(scannedBytes) bytes scanned via taintScannedByteCount), disconnect semantics")
+
+// ── Slice 2, milestone A: stateless pull API (the HTTP adapter's primitive) ──
+
+// 10. Pull with backlog available returns immediately; maxCount truncates;
+//     cursor semantics identical to subscribe.
+do {
+    let hub = RelayHub(validator: validator)
+    for lamport: UInt64 in 1...5 {
+        try await hub.publish(token: macToken, message: opMessage(lamport))
+    }
+    let tail = try await hub.pollEnvelopes(token: phoneToken, afterSeq: 2)
+    expect(tail.map(\.seq) == [3, 4, 5], "assertion 26: poll after 2 → [3,4,5], got \(tail.map(\.seq))")
+    let truncated = try await hub.pollEnvelopes(token: phoneToken, afterSeq: 0, maxCount: 3)
+    expect(truncated.map(\.seq) == [1, 2, 3], "assertion 27: maxCount 3 truncates, got \(truncated.map(\.seq))")
+    do {
+        _ = try await hub.pollEnvelopes(token: "bogus", afterSeq: 0)
+        expect(false, "assertion 28: unknown token must not poll")
+    } catch let error as RelayHelloError {
+        expect(error == .unauthorized, "assertion 28: expected unauthorized, got \(error)")
+    }
+    let latest = try await hub.validateCursor(token: phoneToken, afterSeq: 2)
+    expect(latest == 5, "assertion 29: validateCursor reports latestSeq 5, got \(latest)")
+}
+
+// 11. Pull on an empty hub suspends until a publish lands (either
+//     interleaving of registration vs publish is correct).
+do {
+    let hub = RelayHub(validator: validator)
+    let pollTask = Task { try await hub.pollEnvelopes(token: phoneToken, afterSeq: 0) }
+    await Task.yield()
+    try await hub.publish(token: macToken, message: opMessage(1))
+    let got = try await pollTask.value
+    expect(got.map(\.seq) == [1], "assertion 30: suspended poll resumes with [1], got \(got.map(\.seq))")
+    let waiters = await hub.waiterCount
+    expect(waiters == 0, "assertion 31: no waiters left after resume, got \(waiters)")
+}
+
+// 12. A cancelled waiter returns [] and leaks nothing.
+do {
+    let hub = RelayHub(validator: validator)
+    let pollTask = Task { try await hub.pollEnvelopes(token: phoneToken, afterSeq: 0) }
+    for _ in 0..<5 { await Task.yield() }
+    pollTask.cancel()
+    let got = try await pollTask.value
+    expect(got.isEmpty, "assertion 32: cancelled poll returns [], got \(got.map(\.seq))")
+    let waiters = await hub.waiterCount
+    expect(waiters == 0, "assertion 33: cancelled waiter removed, got \(waiters)")
+}
+
+// 13. Unrecoverable cursors refuse through the pull API too.
+do {
+    let hub = RelayHub(ringCapacity: 2, validator: validator)
+    for lamport: UInt64 in 1...4 {
+        try await hub.publish(token: macToken, message: opMessage(lamport))
+    }
+    do {
+        _ = try await hub.pollEnvelopes(token: phoneToken, afterSeq: 1)
+        expect(false, "assertion 34: evicted cursor with no snapshot must refuse via poll")
+    } catch let error as RelayHelloError {
+        expect(error == .cursorUnrecoverable(cursor: 1, ringStart: 3), "assertion 34: expected cursorUnrecoverable(1,3), got \(error)")
+    }
+}
+
+// ── Slice 2, milestone A: HTTP adapter on a real loopback socket ──
+// (Socket-binding precedent: LocalPairingEndpointChecks. Correctness of hub
+// semantics is proven above in-process; these assertions prove ROUTING —
+// auth extraction, DTO round-trips, status-code mapping — with no sleeps:
+// every long-poll below has its data published first.)
+
+struct HTTPReply {
+    var status: Int
+    var body: Data
+}
+
+func request(_ method: String, _ url: String, token: String? = nil, body: Data? = nil) async throws -> HTTPReply {
+    var request = URLRequest(url: URL(string: url)!)
+    request.httpMethod = method
+    request.timeoutInterval = 10
+    if let token {
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    }
+    request.httpBody = body
+    let (data, response) = try await URLSession.shared.data(for: request)
+    return HTTPReply(status: (response as! HTTPURLResponse).statusCode, body: data)
+}
+
+func decode<T: Decodable>(_ type: T.Type, _ reply: HTTPReply, _ label: String) -> T {
+    guard let decoded = try? JSONDecoder().decode(type, from: reply.body) else {
+        fputs("FAIL: \(label): body did not decode as \(type): \(String(decoding: reply.body, as: UTF8.self))\n", stderr)
+        exit(1)
+    }
+    return decoded
+}
+
+var httpEnvelopeCount = 0
+do {
+    let registry = RelayTokenRegistry(seed: [
+        macToken: RelayGrant(scopes: .operator),
+        phoneToken: RelayGrant(scopes: .observer),
+    ])
+    let hub = RelayHub { token in await registry.grant(for: token) }
+    let server = RelayHTTPServer(hub: hub, registry: registry)
+    try server.start()
+    let base = "http://127.0.0.1:\(server.port)"
+
+    // 14. Health, no auth needed.
+    let health = try await request("GET", "\(base)/v1/health")
+    expect(health.status == 200, "assertion 35: health 200, got \(health.status)")
+    expect(decode(RelayHealthResponse.self, health, "assertion 35b").latestSeq == 0, "assertion 35b: latestSeq 0")
+
+    // 15. Hello: 401 without/with bad token; 426 wrong version; 200 with cursor validation.
+    let helloBody = try JSONEncoder().encode(RelayHelloRequestBody(deviceLabel: "checks", cursor: nil))
+    let helloNoToken = try await request("POST", "\(base)/v1/hello", body: helloBody)
+    expect(helloNoToken.status == 401, "assertion 36: hello without token → 401, got \(helloNoToken.status)")
+    let helloBadToken = try await request("POST", "\(base)/v1/hello", token: "bogus", body: helloBody)
+    expect(helloBadToken.status == 401, "assertion 37: hello bad token → 401, got \(helloBadToken.status)")
+    let wrongVersion = try JSONEncoder().encode(RelayHelloRequestBody(protocolVersion: 99, deviceLabel: "checks", cursor: nil))
+    let helloWrongVersion = try await request("POST", "\(base)/v1/hello", token: phoneToken, body: wrongVersion)
+    expect(helloWrongVersion.status == 426, "assertion 38: wrong protocol → 426, got \(helloWrongVersion.status)")
+    let hello = try await request("POST", "\(base)/v1/hello", token: phoneToken, body: helloBody)
+    expect(hello.status == 200, "assertion 39: hello → 200, got \(hello.status) \(String(decoding: hello.body, as: UTF8.self))")
+
+    // 16. Publish: 403 for observer, 400 for garbage, 200 with seq for operator.
+    let opBody = try JSONEncoder().encode(opMessage(1))
+    let observerPublish = try await request("POST", "\(base)/v1/publish", token: phoneToken, body: opBody)
+    expect(observerPublish.status == 403, "assertion 40: observer publish → 403, got \(observerPublish.status)")
+    let garbagePublish = try await request("POST", "\(base)/v1/publish", token: macToken, body: Data("junk".utf8))
+    expect(garbagePublish.status == 400, "assertion 41: garbage body → 400, got \(garbagePublish.status)")
+    let published = try await request("POST", "\(base)/v1/publish", token: macToken, body: opBody)
+    expect(published.status == 200, "assertion 42: operator publish → 200, got \(published.status)")
+    expect(decode(RelayPublishResponse.self, published, "assertion 42b").seq == 1, "assertion 42b: first seq is 1")
+
+    // 17. Poll: data already present → long-poll returns immediately with the
+    //     tail; peek path (waitMs=0) at the head returns empty; DTO carries latestSeq.
+    let poll = try await request("GET", "\(base)/v1/poll?after=0&waitMs=5000", token: phoneToken)
+    expect(poll.status == 200, "assertion 43: poll → 200, got \(poll.status)")
+    let pollDecoded = decode(RelayPollResponse.self, poll, "assertion 43b")
+    httpEnvelopeCount = pollDecoded.envelopes.count
+    expect(pollDecoded.envelopes.map(\.seq) == [1] && pollDecoded.latestSeq == 1, "assertion 43b: envelopes [1] latestSeq 1, got \(pollDecoded.envelopes.map(\.seq)) \(pollDecoded.latestSeq)")
+    let drained = try await request("GET", "\(base)/v1/poll?after=1&waitMs=0", token: phoneToken)
+    let drainedDecoded = decode(RelayPollResponse.self, drained, "assertion 44")
+    expect(drained.status == 200 && drainedDecoded.envelopes.isEmpty, "assertion 44: peek at head → empty 200")
+
+    // 18. Token registration: operator registers a new observer token → it
+    //     can poll; observer may not register.
+    let newToken = "check-registered-token"
+    let registerBody = try JSONEncoder().encode(RelayRegisterTokenRequestBody(token: newToken, scopeRawValue: Scope.observer.rawValue))
+    let observerRegister = try await request("POST", "\(base)/v1/tokens", token: phoneToken, body: registerBody)
+    expect(observerRegister.status == 403, "assertion 45: observer register → 403, got \(observerRegister.status)")
+    let operatorRegister = try await request("POST", "\(base)/v1/tokens", token: macToken, body: registerBody)
+    expect(operatorRegister.status == 204, "assertion 46: operator register → 204, got \(operatorRegister.status)")
+    let registeredPoll = try await request("GET", "\(base)/v1/poll?after=0&waitMs=0", token: newToken)
+    expect(registeredPoll.status == 200, "assertion 47: registered token polls → 200, got \(registeredPoll.status)")
+
+    // 19. Unknown route → 404.
+    let unknownRoute = try await request("GET", "\(base)/v1/nope", token: phoneToken)
+    expect(unknownRoute.status == 404, "assertion 48: unknown route → 404, got \(unknownRoute.status)")
+
+    server.stop()
+}
+
+// 20. Unrecoverable cursor surfaces as HTTP 409 with machine-readable body.
+do {
+    let registry = RelayTokenRegistry(seed: [
+        macToken: RelayGrant(scopes: .operator),
+        phoneToken: RelayGrant(scopes: .observer),
+    ])
+    let hub = RelayHub(ringCapacity: 2) { token in await registry.grant(for: token) }
+    let server = RelayHTTPServer(hub: hub, registry: registry)
+    try server.start()
+    let base = "http://127.0.0.1:\(server.port)"
+    for lamport: UInt64 in 1...4 {
+        let body = try JSONEncoder().encode(opMessage(lamport))
+        _ = try await request("POST", "\(base)/v1/publish", token: macToken, body: body)
+    }
+    let conflict = try await request("GET", "\(base)/v1/poll?after=1&waitMs=0", token: phoneToken)
+    expect(conflict.status == 409, "assertion 49: evicted cursor → 409, got \(conflict.status)")
+    let errorBody = decode(RelayErrorBody.self, conflict, "assertion 50")
+    expect(errorBody.code == "cursorUnrecoverable" && errorBody.ringStart == 3, "assertion 50: error body names cursorUnrecoverable ringStart 3, got \(errorBody)")
+    server.stop()
+}
+
+print("ContinuumRevivedRelayChecks passed: pull API (immediate/suspend/cancel/unrecoverable, waiter hygiene), HTTP adapter on loopback (health, hello auth+version, publish 403/400/200, poll tail+peek DTO round-trip \(httpEnvelopeCount) envelope(s), runtime token registration, 404, 409 cursorUnrecoverable)")

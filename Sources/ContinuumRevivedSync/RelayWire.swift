@@ -92,3 +92,84 @@ public enum RelayPublishError: Error, Sendable, Equatable {
     case taintViolation(patterns: [String])
     case encodingFailed(reason: String)
 }
+
+// MARK: - HTTP adapter DTOs (ticket 86 slice 2)
+//
+// Bodies for the long-poll HTTP surface. The bearer token rides the
+// Authorization header, never a body. Shared by `RelayHTTPServer` and
+// `RelaySyncTransport` so both sides decode the same shapes.
+
+public struct RelayHelloRequestBody: Codable, Sendable, Equatable {
+    public var protocolVersion: Int
+    public var deviceLabel: String
+    public var cursor: UInt64?
+
+    public init(protocolVersion: Int = RelayProtocol.version, deviceLabel: String, cursor: UInt64?) {
+        self.protocolVersion = protocolVersion
+        self.deviceLabel = deviceLabel
+        self.cursor = cursor
+    }
+}
+
+public struct RelayHelloResponse: Codable, Sendable, Equatable {
+    public var sessionId: UUID
+    public var latestSeq: UInt64
+
+    public init(sessionId: UUID, latestSeq: UInt64) {
+        self.sessionId = sessionId
+        self.latestSeq = latestSeq
+    }
+}
+
+public struct RelayPollResponse: Codable, Sendable, Equatable {
+    public var envelopes: [RelayEnvelope]
+    public var latestSeq: UInt64
+
+    public init(envelopes: [RelayEnvelope], latestSeq: UInt64) {
+        self.envelopes = envelopes
+        self.latestSeq = latestSeq
+    }
+}
+
+public struct RelayPublishResponse: Codable, Sendable, Equatable {
+    public var seq: UInt64
+
+    public init(seq: UInt64) {
+        self.seq = seq
+    }
+}
+
+public struct RelayRegisterTokenRequestBody: Codable, Sendable, Equatable {
+    public var token: String
+    public var scopeRawValue: Int
+
+    public init(token: String, scopeRawValue: Int) {
+        self.token = token
+        self.scopeRawValue = scopeRawValue
+    }
+}
+
+public struct RelayHealthResponse: Codable, Sendable, Equatable {
+    public var latestSeq: UInt64
+    public var subscribers: Int
+
+    public init(latestSeq: UInt64, subscribers: Int) {
+        self.latestSeq = latestSeq
+        self.subscribers = subscribers
+    }
+}
+
+/// Machine-readable refusal body. `code` mirrors the thrown error case.
+public struct RelayErrorBody: Codable, Sendable, Equatable {
+    public var code: String
+    public var cursor: UInt64?
+    public var ringStart: UInt64?
+    public var patterns: [String]?
+
+    public init(code: String, cursor: UInt64? = nil, ringStart: UInt64? = nil, patterns: [String]? = nil) {
+        self.code = code
+        self.cursor = cursor
+        self.ringStart = ringStart
+        self.patterns = patterns
+    }
+}
