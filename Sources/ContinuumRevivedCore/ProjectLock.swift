@@ -26,7 +26,15 @@ public final class ProjectLock {
         guard fd == -1 else { return }
         let lockDir = lockFile.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: lockDir, withIntermediateDirectories: true)
-        let opened = Darwin.open(lockFile.path, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        // EINTR retry is mandatory here: the boot-restore fan-out spawns
+        // child processes (git/tmux/sqlite) concurrently with this acquire,
+        // and a SIGCHLD landing mid-syscall interrupts it. Without the retry
+        // the app dies at launch with openFailed(errno: 4) — seen in the
+        // wild 2026-07-20.
+        var opened: CInt = -1
+        repeat {
+            opened = Darwin.open(lockFile.path, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        } while opened < 0 && errno == EINTR
         guard opened >= 0 else {
             throw ProjectLockError.openFailed(lockFile, errno: errno)
         }
@@ -35,7 +43,11 @@ public final class ProjectLock {
             Darwin.close(opened)
             throw ProjectLockError.openFailed(lockFile, errno: captured)
         }
-        if flock(opened, LOCK_EX | LOCK_NB) != 0 {
+        var flocked: CInt = -1
+        repeat {
+            flocked = flock(opened, LOCK_EX | LOCK_NB)
+        } while flocked != 0 && errno == EINTR
+        if flocked != 0 {
             let captured = errno
             Darwin.close(opened)
             if captured == EWOULDBLOCK || captured == EAGAIN {
