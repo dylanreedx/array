@@ -2889,6 +2889,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 self.applyObserverStatuses(self.currentObservedAgentStatusesByTileId())
                 self.scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "agent-status", debounce: 1.0)
             }
+            // Ticket 86: canvas mutations publish too — the relay delivers
+            // in ~1s, but only if the desktop sends. The controller's
+            // debounced autosave is the funnel every canvas change passes
+            // through, so the phone tracks moves/adds/deletes live.
+            workspaceRuntime?.activeController?.onCanvasStatePersisted = { [weak self] in
+                self?.scheduleCompanionSyncPublish(reason: .canvasChanged, diagnosticsReason: "canvas-changed", debounce: 1.0)
+            }
             workspaceRuntime?.activeController?.onObservedAgentStatusesChanged = { [weak self] statuses in
                 DispatchQueue.main.async {
                     guard let self else { return }

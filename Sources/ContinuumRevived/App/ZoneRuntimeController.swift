@@ -30,6 +30,11 @@ final class ZoneRuntimeController {
     /// be the one path that leaves the dock badge/sidebar stale).
     var onAgentStatusWritten: ((UUID, AgentStatus) -> Void)?
     var onObservedAgentStatusesChanged: (([UUID: AgentStatus]) -> Void)?
+    /// Fired after the debounced canvas autosave actually persists — the
+    /// single funnel every canvas mutation passes through. Ticket 86: the
+    /// companion publish hangs off this so the phone tracks canvas changes
+    /// without manual publishes.
+    var onCanvasStatePersisted: (() -> Void)?
     /// Test-only override for the observer's readers, bypassing the default
     /// `ClaudeAgentStateReader()`/`CodexAgentStateReader()`/`PiAgentStateReader()`
     /// construction in `startSessionObserver()`. `NSHomeDirectory()` does not
@@ -620,6 +625,7 @@ final class ZoneRuntimeController {
         guard isCanvasDirty, let canvasView else { return }
         try? projectStore.saveCanvas(canvasView.canvasState)
         isCanvasDirty = false
+        onCanvasStatePersisted?()
     }
 
     func flushBrowserSave() {

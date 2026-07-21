@@ -47,6 +47,7 @@ public enum DesktopCompanionPublishReason: String, Sendable {
     case timer
     case pairing
     case statusChanged
+    case canvasChanged
 }
 
 public enum DesktopCompanionFetchReason: String, Sendable {
