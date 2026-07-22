@@ -9893,4 +9893,7 @@ runCanvasMirrorShowOnCanvasChecks()
 // Ticket: docs/38-tickets/87-agent-ui-component-framework.md
 runStatusChipChecks()
 
+// Ticket: docs/38-tickets/88-provider-adapter-pi-gpt.md
+runPiEventTranslatorChecks()
+
 print("ContinuumRevivedCoreChecks passed")
