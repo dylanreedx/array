@@ -121,18 +121,22 @@ waits for a live GPT-5.6 reply to stream into the tile. **PASS**: the reply stre
    control produced 8 events fine, proving the runner works; only the main-hop delivery
    was starved). Fixed by polling via `asyncAfter` so the normal NSApp loop drains
    ingests — i.e. it works for a real click; only the artificial harness was wrong.
-2. **UX defect (open): transcript cards concatenate.** Bootstrap + prompt-echo + the
-   model reply all pile into ONE assistant card, because `ManagedAgentTranscriptModel`
-   only resets `lastAssistantCardId` on `turnCompleted`, not `turnStarted`. Result reads
-   as one blob ("Ready…▶ prompt…replyreply"). Needs a fix (new card per turn / per
-   role) before the tile is genuinely presentable. Tracked for a follow-up slice.
+2. **UX defects (FIXED, commit ffcf223).** Two bugs made the tile show nothing / one
+   blob when dogfooded: (a) the transcript rendered BLANK — the `cardStack` was the
+   scroll view's documentView with no autolayout pinning, so it had no resolved size and
+   cards never laid out; fixed by pinning it to the clip view + a flipped stack (top-down).
+   (b) cards concatenated across turns — `ManagedAgentTranscriptModel` only reset the
+   active assistant card on `turnCompleted`; now also on `turnStarted` (88.4d), pinned by
+   a multi-turn CoreCheck. Managed-agent headless snapshot now shows distinct cards.
 
 ## Next slices
 
 - **88.4c Events → relay**: wire the tile's ingested events into the activity projection
   → relay so they reach the phone (I5 filtering stays at the publish/taint gate).
-- **88.4d Transcript card boundaries**: reset the assistant card per turn (and give the
-  bootstrap/echo their own cards) so the tile doesn't render one concatenated blob.
+- **88.5 Session continuity + interaction**: the runner spawns each prompt with
+  `--no-session`, so prompts are independent — NO memory across turns, and the approval
+  dock isn't wired to the live runner. Real conversational interaction needs session
+  persistence (drop `--no-session` / `--session-dir`) and rpc mode for input + approvals.
 - **88.5** rpc mode for input/approvals from the phone (uses the existing approval
   round-trip).
 - **89** Claude Code as provider #2 behind the same seam (stream-json / session `.jsonl`).
