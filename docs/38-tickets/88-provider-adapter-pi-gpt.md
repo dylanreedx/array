@@ -109,10 +109,30 @@ ingested on the main actor. Pieces:
   under an `env -i` thin PATH streamed 8 real GPT-5.6 events ("hello from continuum").
   Both helpers matrix-pinned (`runPiExecutableResolutionChecks`).
 
+### In-app sanity check (2026-07-22)
+
+`--managed-agent-live-check` drives the REAL launched window through the exact click
+path (palette spawn → `wireManagedAgentTile` → tile Run action → `PiAgentRunner`) and
+waits for a live GPT-5.6 reply to stream into the tile. **PASS**: the reply streamed in
+(sentinel appeared twice — echo + model reply). Two findings while getting there:
+
+1. **Harness must not block the main thread.** A `RunLoop`-spin wait did NOT drain the
+   `DispatchQueue.main.async` ingests the tile relies on (a direct in-process runner
+   control produced 8 events fine, proving the runner works; only the main-hop delivery
+   was starved). Fixed by polling via `asyncAfter` so the normal NSApp loop drains
+   ingests — i.e. it works for a real click; only the artificial harness was wrong.
+2. **UX defect (open): transcript cards concatenate.** Bootstrap + prompt-echo + the
+   model reply all pile into ONE assistant card, because `ManagedAgentTranscriptModel`
+   only resets `lastAssistantCardId` on `turnCompleted`, not `turnStarted`. Result reads
+   as one blob ("Ready…▶ prompt…replyreply"). Needs a fix (new card per turn / per
+   role) before the tile is genuinely presentable. Tracked for a follow-up slice.
+
 ## Next slices
 
 - **88.4c Events → relay**: wire the tile's ingested events into the activity projection
   → relay so they reach the phone (I5 filtering stays at the publish/taint gate).
+- **88.4d Transcript card boundaries**: reset the assistant card per turn (and give the
+  bootstrap/echo their own cards) so the tile doesn't render one concatenated blob.
 - **88.5** rpc mode for input/approvals from the phone (uses the existing approval
   round-trip).
 - **89** Claude Code as provider #2 behind the same seam (stream-json / session `.jsonl`).

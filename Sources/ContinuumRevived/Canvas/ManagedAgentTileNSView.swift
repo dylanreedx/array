@@ -323,4 +323,7 @@ final class ManagedAgentTileNSView: TileNSView {
         composeField.stringValue = prompt
         submitPrompt()
     }
+    var qaTranscriptText: String {
+        model.cards.map { "[\($0.title)] \($0.body)" }.joined(separator: "\n")
+    }
 }

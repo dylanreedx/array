@@ -2978,7 +2978,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // a non-nil ghostty to forward set_focus into the surface.
             NSApp.activate(ignoringOtherApps: true)
 
-            if CommandLine.arguments.contains("--palette-captures-keys-over-browser-check") {
+            if CommandLine.arguments.contains("--managed-agent-live-check") {
+                runManagedAgentLiveCheck(window: window)
+            } else if CommandLine.arguments.contains("--palette-captures-keys-over-browser-check") {
                 runPaletteCapturesKeysOverBrowserCheck(window: window)
             } else if CommandLine.arguments.contains("--terminal-scroll-ergonomics-check") {
                 runTerminalScrollErgonomicsCheck(window: window, runtime: runtimes.first)
@@ -2991,6 +2993,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         } catch {
             presentFatalError(error)
+        }
+    }
+
+    /// End-to-end sanity check for the managed-agent tile (88.4b): spawn a tile
+    /// through the real palette path, submit a prompt through the tile's real
+    /// Run action, and wait for a live GPT-5.6 reply to stream into the tile.
+    /// Exercises the exact click path in-process. Prints the transcript and
+    /// exits 0 on success, non-zero otherwise. Gated on `--managed-agent-live-check`.
+    private func runManagedAgentLiveCheck(window: NSWindow) {
+        func report(_ line: String) { FileHandle.standardError.write(Data("[managed-agent-live] \(line)\n".utf8)) }
+        // The tile receives runner events via DispatchQueue.main.async, so this
+        // check must NOT block the main thread — it polls via asyncAfter and
+        // lets the normal NSApp event loop drain those ingests between polls
+        // (exactly as it does when a user clicks Run).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self, let spawner = self.tileSpawner, let canvasView = self.canvasView else {
+                report("FAIL: no spawner/canvas"); Foundation.exit(2)
+            }
+            // Same path a palette click takes: spawn → wire → focus.
+            guard case let .spawned(tileId) = spawner.spawnManagedAgent() else {
+                report("FAIL: spawnManagedAgent did not spawn"); Foundation.exit(2)
+            }
+            self.wireManagedAgentTile(tileId)
+            self.focusSpawnedTile(tileId)
+            guard let view = canvasView.tileView(for: tileId) as? ManagedAgentTileNSView else {
+                report("FAIL: spawned tile is not a ManagedAgentTileNSView"); Foundation.exit(2)
+            }
+            report("spawned tile \(tileId); compose enabled=\(view.qaComposeEnabled)")
+
+            // A sentinel the model echoes back: the prompt-echo card contains it
+            // once, the assistant reply adds a second occurrence — so >=2 proves
+            // a real reply streamed in, not just our echo.
+            let sentinel = "PONGLIVE"
+            view.qaSubmitPrompt("Reply with exactly this token and nothing else: \(sentinel)")
+            report("submitted prompt; waiting for live GPT-5.6 reply…")
+
+            let deadline = Date().addingTimeInterval(90)
+            @MainActor func poll() {
+                let count = view.qaTranscriptText.components(separatedBy: sentinel).count - 1
+                if count >= 2 {
+                    report("final status=\(view.currentAgentStatus) cards=\(view.transcriptCardCount)")
+                    report("transcript:\n\(view.qaTranscriptText)")
+                    report("PASS: live GPT-5.6 reply streamed into the tile")
+                    Foundation.exit(0)
+                }
+                if Date() >= deadline {
+                    report("final status=\(view.currentAgentStatus) cards=\(view.transcriptCardCount)")
+                    report("transcript:\n\(view.qaTranscriptText)")
+                    report("FAIL: no live reply within timeout")
+                    Foundation.exit(1)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    MainActor.assumeIsolated { poll() }
+                }
+            }
+            poll()
         }
     }
 
@@ -7359,6 +7417,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     }
                 } catch {
                     let message = String(describing: error)
+                    fputs("PiAgentRunner failed for tile \(tileId): \(message)\n", stderr)
                     DispatchQueue.main.async {
                         view.ingest(.runtimeError(threadId: threadId, message: message))
                     }
