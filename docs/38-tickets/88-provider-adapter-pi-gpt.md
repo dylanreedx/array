@@ -71,12 +71,27 @@ captured schema (exact sequence, turn-id synthesis, I5-safety). Matrix-gated.
 6. **Reasoning is encrypted** on gpt-5.6-codex (thinking content came back empty/signed) —
    don't expect reasoning text; the reasoning stream may be markers only.
 
+## Slice 88.4 (runner done) — the impure process engine
+
+`Core/AgentProviders/PiAgentRunner.swift`: spawns `pi -p --mode json --model
+openai-codex/gpt-5.6` via `/usr/bin/env`, streams stdout through the translator on a
+serial queue, emits `AgentRuntimeEvent`s to a `@Sendable` callback as they arrive,
+handles teardown + nonzero exit. Proven LIVE 2026-07-22 via the `continuum-pi-smoke`
+harness: a real GPT-5.6 run produced 12 normalized events end-to-end (session→running,
+a `read` tool round-trip in turn 1, assistant content streamed `"hello"/" from"/"
+continuum"` in turn 2, completed→ready), with the file path/body correctly absent.
+
+Watch-out (GUI): `/usr/bin/env pi` resolves on the shell PATH; a GUI-launched app must
+inject a PATH including the pi install (nvm bin) or resolve pi's absolute path — the
+shell-launched smoke inherits PATH so it "just works" there but the app won't.
+
 ## Next slices
 
-- **88.4 PiAgentRunner** (impure): spawn `pi -p --mode json --model openai-codex/gpt-5.6`,
-  read stdout lines, feed the translator, emit events to the managed tile + activity
-  projection; wire to the relay (I5 filtering stays at the publish/taint gate). Live
-  dogfood: spawn a GPT-5.6 agent, watch turns/tools appear on Mac + phone.
+- **88.4b Tile wiring**: `spawnManagedAgent(prompt:)` starts a `PiAgentRunner` feeding
+  `ManagedAgentTileNSView.ingest`, so a spawned agent runs GPT-5.6 live in the tile.
+  Needs a prompt-entry affordance (minimal now; the framework ComposeBox later) and
+  the app PATH fix above. Then wire the same events into the activity projection →
+  relay so they reach the phone (I5 filtering stays at the publish/taint gate).
 - **88.5** rpc mode for input/approvals from the phone (uses the existing approval
   round-trip).
 - **89** Claude Code as provider #2 behind the same seam (stream-json / session `.jsonl`).

@@ -118,6 +118,10 @@ let package = Package(
             dependencies: ["ContinuumRevivedSync", "ContinuumRevivedCore"]
         ),
         .executableTarget(
+            name: "continuum-pi-smoke",
+            dependencies: ["ContinuumRevivedCore"]
+        ),
+        .executableTarget(
             name: "ContinuumRevivedPaletteChecks",
             dependencies: ["ContinuumRevivedCore"]
         ),
