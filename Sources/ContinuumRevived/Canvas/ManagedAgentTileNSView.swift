@@ -2,6 +2,14 @@ import AppKit
 import ContinuumRevivedCore
 import Foundation
 
+/// A stack view with top-left origin so a transcript inside an NSScrollView
+/// starts at the top and grows downward (AppKit document coords are otherwise
+/// bottom-left, which parks a short transcript at the bottom of the clip view).
+@MainActor
+final class FlippedStackView: NSStackView {
+    override var isFlipped: Bool { true }
+}
+
 @MainActor
 final class ManagedAgentTileNSView: TileNSView {
     private let header = NSStackView()
@@ -9,7 +17,7 @@ final class ManagedAgentTileNSView: TileNSView {
     private let nameLabel = NSTextField(labelWithString: "")
     private let phaseLabel = NSTextField(labelWithString: "")
     private let elapsedLabel = NSTextField(labelWithString: "0s")
-    private let cardStack = NSStackView()
+    private let cardStack = FlippedStackView()
     private let approvalDock = ApprovalDockView()
     private let composeField = NSTextField()
     private let runButton = NSButton()
@@ -81,10 +89,21 @@ final class ManagedAgentTileNSView: TileNSView {
         cardStack.alignment = .leading
         cardStack.spacing = 8
         cardStack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        cardStack.translatesAutoresizingMaskIntoConstraints = false
         let scrollView = NSScrollView()
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
         scrollView.documentView = cardStack
+        // Pin the document stack to the clip view: full width, top-anchored,
+        // free to grow downward (vertical scroll). Without this the stack has
+        // no resolved size and its cards never lay out — the transcript renders
+        // blank even though the model has cards.
+        NSLayoutConstraint.activate([
+            cardStack.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            cardStack.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
+            cardStack.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            cardStack.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor)
+        ])
 
         approvalDock.setContentCompressionResistancePriority(.required, for: .vertical)
         approvalDock.onDecision = { [weak self] decision in
@@ -107,8 +126,7 @@ final class ManagedAgentTileNSView: TileNSView {
             layout.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             header.heightAnchor.constraint(equalToConstant: 52),
             approvalDock.heightAnchor.constraint(equalToConstant: 92),
-            composeRow.heightAnchor.constraint(equalToConstant: 44),
-            cardStack.widthAnchor.constraint(greaterThanOrEqualToConstant: 420)
+            composeRow.heightAnchor.constraint(equalToConstant: 44)
         ])
         return root
     }

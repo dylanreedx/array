@@ -53,6 +53,11 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
         currentStatus = deriveAgentStatus(signals: deriveStatusSignals(from: events, threadId: threadId, engineStatus: .idle))
 
         switch event {
+        case .turnStarted(let tid, _) where tid == threadId:
+            // Each turn's assistant text is its own card. Without this reset,
+            // a new turn's deltas append to the previous turn's card and the
+            // whole conversation renders as one concatenated blob.
+            lastAssistantCardId = nil
         case .contentDelta(let tid, _, let streamKind, let delta) where tid == threadId:
             ingestContentDelta(streamKind: streamKind, delta: delta)
         case .itemStarted(let tid, let itemId, let kind, let title) where tid == threadId:

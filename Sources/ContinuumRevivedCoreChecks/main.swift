@@ -119,6 +119,24 @@ do {
     expect(model.currentStatus == .needsAttention, "pending approval must flip managed transcript status to needsAttention")
 }
 
+// 88.4d: each turn's assistant text is its own card (no cross-turn concatenation).
+do {
+    let threadId = "managed-multiturn"
+    var model = ManagedAgentTranscriptModel(threadId: threadId)
+    // Bootstrap + prompt echo (no turn boundary) then two real turns.
+    model.ingest(.contentDelta(threadId: threadId, turnId: "bootstrap", streamKind: .assistant, delta: "Ready."))
+    model.ingest(.contentDelta(threadId: threadId, turnId: "user", streamKind: .assistant, delta: " ▶ hi"))
+    model.ingest(.turnStarted(threadId: threadId, turnId: "t1"))
+    model.ingest(.contentDelta(threadId: threadId, turnId: "t1", streamKind: .assistant, delta: "first"))
+    model.ingest(.contentDelta(threadId: threadId, turnId: "t1", streamKind: .assistant, delta: " reply"))
+    model.ingest(.turnCompleted(threadId: threadId, turnId: "t1", outcome: .completed, errorMessage: nil))
+    model.ingest(.turnStarted(threadId: threadId, turnId: "t2"))
+    model.ingest(.contentDelta(threadId: threadId, turnId: "t2", streamKind: .assistant, delta: "second"))
+    let bodies = model.cards.filter { $0.title == "assistant" }.map(\.body)
+    expect(bodies == ["Ready. ▶ hi", "first reply", "second"],
+           "88.4d: assistant cards must split per turn, not concatenate — got \(bodies)")
+}
+
 // MARK: - Focus history previous navigation
 
 do {
