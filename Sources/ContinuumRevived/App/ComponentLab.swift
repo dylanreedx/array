@@ -378,7 +378,7 @@ enum LabCatalog {
     static func entries(env: LabEnvironment) -> [LabEntry] {
         [
             tileSandbox, sidebarCard, observerSidebarCard, topBarCard, pairingTokenCard, agentKindCard,
-            observerRollupCard, agentsBoardCard, approvalsInboxCard, canvasSceneCard, pushSmokeCard,
+            observerRollupCard, statusChipsCard, agentsBoardCard, approvalsInboxCard, canvasSceneCard, pushSmokeCard,
             notifyCategoriesCard, agentAdapterProjectionCard, managedSessionRecordCard,
             sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher,
             sidebarLiveCard, activityDockCard, sidebarSelectedCard, managedAgentCard,
@@ -486,6 +486,43 @@ enum LabCatalog {
         ])
         canvas.layoutSubtreeIfNeeded()
         return canvas
+    }
+
+    // Ticket 87: first agent-UI building block. Renders every AgentStatus
+    // through the shared StatusChipPresenter so the Layer-2 vision-QA pass
+    // sees exactly what production paints, across all states at once.
+    static var statusChipsCard: LabEntry {
+        LabEntry(
+            id: "agent.statusChip",
+            category: "Agent UI",
+            title: "Status Chip",
+            summary: "Every AgentStatus via the shared StatusChipPresenter — contrast owned + tested (ticket 87).",
+            content: .staticCard(preferredSize: NSSize(width: 360, height: 260)) {
+                makeStatusChipGalleryView()
+            }
+        )
+    }
+
+    static func makeStatusChipGalleryView() -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+
+        let title = NSTextField(labelWithString: "Status Chips")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.textColor = .labelColor
+        stack.addArrangedSubview(title)
+
+        for status in AgentStatus.allCases {
+            let chip = StatusChipNSView(status: status)
+            chip.identifier = NSUserInterfaceItemIdentifier("statusChip.\(status.rawValue)")
+            let row = NSStackView(views: [chip, NSView()])
+            row.orientation = .horizontal
+            stack.addArrangedSubview(row)
+        }
+        return stack
     }
 
     static var agentsBoardCard: LabEntry {

@@ -2694,6 +2694,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     """
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Ticket 87: headless component snapshot for Layer-2 vision QA. Renders
+        // a Component Lab gallery to a PNG and exits, with zero project/boot
+        // machinery — the reusable primitive for automated visual review.
+        //   CONTINUUM_COMPONENT_SNAPSHOT=<name> CONTINUUM_SNAPSHOT_OUT=<path> continuum-revived
+        if let snapshot = ProcessInfo.processInfo.environment["CONTINUUM_COMPONENT_SNAPSHOT"] {
+            let out = ProcessInfo.processInfo.environment["CONTINUUM_SNAPSHOT_OUT"] ?? "component-snapshot.png"
+            let ok = Self.renderComponentSnapshot(named: snapshot, to: out)
+            NSApp.setActivationPolicy(.prohibited)
+            exit(ok ? 0 : 1)
+        }
         launchStartTime = QAPerf.timestamp()
         qaPerf = QAPerf()
         navKeymap = NavKeymap.resolve()
@@ -8397,6 +8407,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return .openAnyway
         default:
             return .quit
+        }
+    }
+
+    /// Ticket 87: render a Component Lab gallery view offscreen to a PNG.
+    /// Dark backing to match the agent-tile context the chips render against.
+    private static func renderComponentSnapshot(named name: String, to path: String) -> Bool {
+        let content: NSView
+        switch name {
+        case "status-chips": content = LabCatalog.makeStatusChipGalleryView()
+        default:
+            FileHandle.standardError.write(Data("unknown component snapshot: \(name)\n".utf8))
+            return false
+        }
+        content.translatesAutoresizingMaskIntoConstraints = false
+        let backing = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 280))
+        backing.wantsLayer = true
+        backing.layer?.backgroundColor = NSColor(srgbRed: 0.08, green: 0.10, blue: 0.13, alpha: 1).cgColor
+        backing.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: backing.leadingAnchor),
+            content.topAnchor.constraint(equalTo: backing.topAnchor),
+        ])
+        backing.layoutSubtreeIfNeeded()
+        guard let rep = backing.bitmapImageRepForCachingDisplay(in: backing.bounds) else { return false }
+        backing.cacheDisplay(in: backing.bounds, to: rep)
+        guard let data = rep.representation(using: .png, properties: [:]) else { return false }
+        do {
+            try data.write(to: URL(fileURLWithPath: path))
+            return true
+        } catch {
+            FileHandle.standardError.write(Data("snapshot write failed: \(error)\n".utf8))
+            return false
         }
     }
 
