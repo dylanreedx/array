@@ -2621,6 +2621,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var activeProject: Project? { workspaceRuntime?.activeController?.project }
     private var registryStore: RegistryStore?
     private var tileSpawner: TileSpawner?
+    /// Live provider runners, one per managed-agent tile (ticket 88.4b). Held
+    /// so a running Pi process isn't torn down by ARC and can be stopped.
+    private var managedAgentRunners: [UUID: PiAgentRunner] = [:]
     private var profilePalette: LaunchProfilePalette?
     private var paletteContextTileId: UUID?
     private var settingsPanel: SettingsPanel?
@@ -3852,6 +3855,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func installInitialManagedAgentTile(_ tile: Tile, in canvasView: CanvasNSView) {
         canvasView.install(tileView: ManagedAgentTileNSView(tile: tile), for: tile)
+        wireManagedAgentTile(tile.id)
     }
 
     private func dispatchAgent(for row: LinearTicketQueueRow) {
@@ -7325,10 +7329,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let spawner = tileSpawner else { return }
         switch spawner.spawnManagedAgent() {
         case let .spawned(tileId):
+            wireManagedAgentTile(tileId)
             focusSpawnedTile(tileId)
             scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "managed-agent-spawn", debounce: 0.2)
         case let .failure(error):
             fputs("TileSpawner.spawnManagedAgent failed: \(error)\n", stderr)
+        }
+    }
+
+    /// Connects a managed-agent tile's compose row to a live Pi provider
+    /// runner (ticket 88.4b). Submitting a prompt spawns GPT-5.6 via Pi off
+    /// the main thread; each normalized event is rebound to the tile's thread
+    /// and ingested on the main actor so the tile updates turn-by-turn.
+    private func wireManagedAgentTile(_ tileId: UUID) {
+        guard let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
+        let threadId = view.wiringThreadId
+        let cwd = URL(fileURLWithPath: activeProject?.rootPath ?? FileManager.default.currentDirectoryPath, isDirectory: true)
+        view.onSubmitPrompt = { [weak self, weak view] prompt in
+            guard let self, let view else { return }
+            // Reflect the user's prompt in the transcript, then hand off to Pi.
+            view.ingest(.contentDelta(threadId: threadId, turnId: "user", streamKind: .assistant, delta: "▶ \(prompt)"))
+            let runner = PiAgentRunner(config: .init(cwd: cwd))
+            self.managedAgentRunners[tileId] = runner
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    try runner.run(prompt: prompt) { event in
+                        let bound = event.withThreadId(threadId)
+                        DispatchQueue.main.async { view.ingest(bound) }
+                    }
+                } catch {
+                    let message = String(describing: error)
+                    DispatchQueue.main.async {
+                        view.ingest(.runtimeError(threadId: threadId, message: message))
+                    }
+                }
+                DispatchQueue.main.async { [weak self] in
+                    self?.managedAgentRunners.removeValue(forKey: tileId)
+                }
+            }
         }
     }
 
@@ -8414,20 +8452,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Dark backing to match the agent-tile context the chips render against.
     private static func renderComponentSnapshot(named name: String, to path: String) -> Bool {
         let content: NSView
+        let backingSize: NSSize
         switch name {
-        case "status-chips": content = LabCatalog.makeStatusChipGalleryView()
+        case "status-chips":
+            content = LabCatalog.makeStatusChipGalleryView()
+            backingSize = NSSize(width: 360, height: 280)
+        case "managed-agent":
+            let tile = LabCatalog.makeManagedAgentFixtureView(includeApproval: false)
+            tile.frame = NSRect(x: 0, y: 0, width: 460, height: 520)
+            content = tile
+            backingSize = NSSize(width: 460, height: 520)
         default:
             FileHandle.standardError.write(Data("unknown component snapshot: \(name)\n".utf8))
             return false
         }
         content.translatesAutoresizingMaskIntoConstraints = false
-        let backing = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 280))
+        let backing = NSView(frame: NSRect(x: 0, y: 0, width: backingSize.width, height: backingSize.height))
         backing.wantsLayer = true
         backing.layer?.backgroundColor = NSColor(srgbRed: 0.08, green: 0.10, blue: 0.13, alpha: 1).cgColor
         backing.addSubview(content)
         NSLayoutConstraint.activate([
             content.leadingAnchor.constraint(equalTo: backing.leadingAnchor),
             content.topAnchor.constraint(equalTo: backing.topAnchor),
+            content.trailingAnchor.constraint(equalTo: backing.trailingAnchor),
+            content.bottomAnchor.constraint(equalTo: backing.bottomAnchor),
         ])
         backing.layoutSubtreeIfNeeded()
         guard let rep = backing.bitmapImageRepForCachingDisplay(in: backing.bounds) else { return false }

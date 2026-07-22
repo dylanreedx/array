@@ -9895,5 +9895,7 @@ runStatusChipChecks()
 
 // Ticket: docs/38-tickets/88-provider-adapter-pi-gpt.md
 runPiEventTranslatorChecks()
+runPiExecutableResolutionChecks()
+runAgentRuntimeEventRemapChecks()
 
 print("ContinuumRevivedCoreChecks passed")

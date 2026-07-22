@@ -1321,7 +1321,7 @@ final class TileSpawner {
         let descriptor = AgentDescriptor(agentKind: agentKind, worktreePath: nil, status: .configuring, statusUpdatedAt: now)
         let view = ManagedAgentTileNSView(tile: tile, threadId: threadId, descriptor: descriptor)
         view.ingest(.sessionStateChanged(.ready))
-        view.ingest(.contentDelta(threadId: threadId, turnId: "bootstrap", streamKind: .assistant, delta: "Managed agent tile ready. Provider adapter connection is pending."))
+        view.ingest(.contentDelta(threadId: threadId, turnId: "bootstrap", streamKind: .assistant, delta: "Ready. Type a prompt below to run GPT-5.6 in this tile."))
         canvasView.install(tileView: view, for: tile)
 
         do {

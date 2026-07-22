@@ -11,6 +11,8 @@ final class ManagedAgentTileNSView: TileNSView {
     private let elapsedLabel = NSTextField(labelWithString: "0s")
     private let cardStack = NSStackView()
     private let approvalDock = ApprovalDockView()
+    private let composeField = NSTextField()
+    private let runButton = NSButton()
     private var cardViewsById: [String: TranscriptCardView] = [:]
     private var inputCardViewsByRequestId: [String: UserInputCardView] = [:]
     private var pendingApprovals: [String: ApprovalDockRequest] = [:]
@@ -21,6 +23,10 @@ final class ManagedAgentTileNSView: TileNSView {
     private let threadId: String
     var onApprovalDecision: ((String, ApprovalDecision) -> Void)?
     var onUserInputSubmit: ((String, UserInputAnswers) -> Void)?
+    /// Fired when the user submits a prompt from the tile's compose row.
+    /// The app wires this to a PiAgentRunner (ticket 88.4b). Minimal now; the
+    /// framework ComposeBox component supersedes it later.
+    var onSubmitPrompt: ((String) -> Void)?
 
     init(tile: Tile, threadId: String = "thread-main", descriptor: AgentDescriptor? = nil) {
         self.threadId = threadId
@@ -34,12 +40,16 @@ final class ManagedAgentTileNSView: TileNSView {
         super.init(tile: tile)
         setContentView(makeContentView())
         applyHeader(status: self.descriptor.status)
+        applyComposeAvailability()
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
     }
 
+    /// The thread this tile's transcript filters on. The app rebinds incoming
+    /// provider events to this before ingest (ticket 88.4b).
+    var wiringThreadId: String { threadId }
     var transcriptCardCount: Int { model.cards.count }
     var activeToolCount: Int { model.activeToolCount }
     var currentAgentStatus: AgentStatus { descriptor.status }
@@ -55,6 +65,7 @@ final class ManagedAgentTileNSView: TileNSView {
         descriptor.statusUpdatedAt = Date()
         agentStatus = model.currentStatus
         applyHeader(status: model.currentStatus)
+        applyComposeAvailability()
         approvalDock.pendingRequest = pendingApprovals.values.sorted { $0.requestId < $1.requestId }.first
         reconcileCards()
     }
@@ -82,7 +93,9 @@ final class ManagedAgentTileNSView: TileNSView {
             self.ingest(.requestResolved(threadId: self.threadId, requestId: request.requestId, decision: decision.rawValue))
         }
 
-        let layout = NSStackView(views: [header, scrollView, approvalDock])
+        let composeRow = makeComposeRow()
+
+        let layout = NSStackView(views: [header, scrollView, approvalDock, composeRow])
         layout.orientation = .vertical
         layout.spacing = 0
         layout.translatesAutoresizingMaskIntoConstraints = false
@@ -94,6 +107,7 @@ final class ManagedAgentTileNSView: TileNSView {
             layout.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             header.heightAnchor.constraint(equalToConstant: 52),
             approvalDock.heightAnchor.constraint(equalToConstant: 92),
+            composeRow.heightAnchor.constraint(equalToConstant: 44),
             cardStack.widthAnchor.constraint(greaterThanOrEqualToConstant: 420)
         ])
         return root
@@ -152,6 +166,53 @@ final class ManagedAgentTileNSView: TileNSView {
         header.addArrangedSubview(textStack)
         header.addArrangedSubview(NSView())
         header.addArrangedSubview(elapsedLabel)
+    }
+
+    private func makeComposeRow() -> NSView {
+        let row = NSView()
+        row.wantsLayer = true
+        row.layer?.backgroundColor = NSColor(red: 0.11, green: 0.13, blue: 0.16, alpha: 1).cgColor
+
+        composeField.placeholderString = "Send a prompt to the agent…"
+        composeField.font = .systemFont(ofSize: 12)
+        composeField.bezelStyle = .roundedBezel
+        composeField.target = self
+        composeField.action = #selector(submitPrompt)
+        composeField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        runButton.title = "Run"
+        runButton.bezelStyle = .rounded
+        runButton.keyEquivalent = "\r"
+        runButton.target = self
+        runButton.action = #selector(submitPrompt)
+
+        let stack = NSStackView(views: [composeField, runButton])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 6, right: 12)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            stack.centerYAnchor.constraint(equalTo: row.centerYAnchor)
+        ])
+        return row
+    }
+
+    @objc private func submitPrompt() {
+        let prompt = composeField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty, !composeIsBusy else { return }
+        composeField.stringValue = ""
+        onSubmitPrompt?(prompt)
+    }
+
+    private var composeIsBusy: Bool { descriptor.status == .working }
+
+    private func applyComposeAvailability() {
+        composeField.isEnabled = !composeIsBusy
+        runButton.isEnabled = !composeIsBusy
     }
 
     private func applyHeader(status: AgentStatus) {
@@ -255,5 +316,11 @@ final class ManagedAgentTileNSView: TileNSView {
     }
     func qaSubmitUserInput(requestId: String, answer: String) {
         inputCardViewsByRequestId[requestId]?.qaSubmit(answer)
+    }
+
+    var qaComposeEnabled: Bool { composeField.isEnabled }
+    func qaSubmitPrompt(_ prompt: String) {
+        composeField.stringValue = prompt
+        submitPrompt()
     }
 }

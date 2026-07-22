@@ -85,13 +85,34 @@ Watch-out (GUI): `/usr/bin/env pi` resolves on the shell PATH; a GUI-launched ap
 inject a PATH including the pi install (nvm bin) or resolve pi's absolute path — the
 shell-launched smoke inherits PATH so it "just works" there but the app won't.
 
+## Slice 88.4b (done) — tile wiring
+
+A managed-agent tile now runs GPT-5.6 live. `wireManagedAgentTile(tileId)` (spawn AND
+restore paths) sets `ManagedAgentTileNSView.onSubmitPrompt`; submitting starts a
+`PiAgentRunner` off the main thread, and each event is rebound to the tile's thread and
+ingested on the main actor. Pieces:
+
+- **Compose affordance** — a minimal compose row on the tile (`NSTextField` + Run,
+  Return submits), gated: disabled while `.working`. QA'd via the `managed-agent`
+  headless component snapshot (compose row renders, correctly disabled while working,
+  dark-consistent with the header). The framework ComposeBox supersedes it later.
+- **Thread rebinding** — a tile is keyed by a stable `managed-<uuid>` thread, but the
+  adapter synthesises threadId from Pi's session id, so the tile's threadId filter would
+  drop every event. `AgentRuntimeEvent.withThreadId(_:)` (pure, total) rebinds every
+  thread-bearing case at the wiring boundary; matrix-pinned incl. a control proving
+  un-remapped events DON'T land.
+- **GUI PATH fix (deeper than expected)** — resolving `pi` absolutely is NOT enough: pi
+  is a node script whose `#!/usr/bin/env node` shebang needs **node** on PATH too, and a
+  GUI-thin PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) has neither. `PiAgentRunner.run` now
+  augments the child's PATH (`augmentedPath` + `liveExtraDirs` — nvm bins newest-first,
+  homebrew, ~/.local/bin), fixing both lookups. **Proven live**: `continuum-pi-smoke`
+  under an `env -i` thin PATH streamed 8 real GPT-5.6 events ("hello from continuum").
+  Both helpers matrix-pinned (`runPiExecutableResolutionChecks`).
+
 ## Next slices
 
-- **88.4b Tile wiring**: `spawnManagedAgent(prompt:)` starts a `PiAgentRunner` feeding
-  `ManagedAgentTileNSView.ingest`, so a spawned agent runs GPT-5.6 live in the tile.
-  Needs a prompt-entry affordance (minimal now; the framework ComposeBox later) and
-  the app PATH fix above. Then wire the same events into the activity projection →
-  relay so they reach the phone (I5 filtering stays at the publish/taint gate).
+- **88.4c Events → relay**: wire the tile's ingested events into the activity projection
+  → relay so they reach the phone (I5 filtering stays at the publish/taint gate).
 - **88.5** rpc mode for input/approvals from the phone (uses the existing approval
   round-trip).
 - **89** Claude Code as provider #2 behind the same seam (stream-json / session `.jsonl`).

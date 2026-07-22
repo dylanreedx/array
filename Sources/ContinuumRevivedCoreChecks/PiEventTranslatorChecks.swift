@@ -69,3 +69,61 @@ func runPiEventTranslatorChecks() {
 
     print("PiEventTranslator checks passed: \(events.count) events from the real GPT-5.6 json schema map exactly, turn ids synthesised (\(turnIds)), I5-safe by construction (cwd/path/file-body dropped, tool name kept)")
 }
+
+// The 88.4b wiring boundary: a tile keyed by `managed-<uuid>` ingests events
+// whose threadId the adapter synthesised from Pi's session id. withThreadId
+// must rebind EVERY thread-bearing case to the tile's thread (so the tile's
+// threadId filter matches) while leaving session-level events untouched.
+func runAgentRuntimeEventRemapChecks() {
+    let tileThread = "managed-TILE"
+    let piThread = "SID-abc"
+
+    // 1. Thread-bearing cases are all rebound to the tile thread. Build one of
+    //    every case that carries a threadId, remap, and assert.
+    let bearing: [AgentRuntimeEvent] = [
+        .turnStarted(threadId: piThread, turnId: "\(piThread)#t1"),
+        .turnCompleted(threadId: piThread, turnId: "\(piThread)#t1", outcome: .completed, errorMessage: nil),
+        .itemStarted(threadId: piThread, itemId: "call_1", kind: .commandExecution, title: "read"),
+        .itemCompleted(threadId: piThread, itemId: "call_1", kind: .commandExecution, status: .completed),
+        .contentDelta(threadId: piThread, turnId: "\(piThread)#t1", streamKind: .assistant, delta: "hi"),
+        .requestOpened(threadId: piThread, requestId: "r1", kind: .commandExecutionApproval),
+        .requestResolved(threadId: piThread, requestId: "r1", decision: "approve"),
+        .userInputResolved(threadId: piThread, requestId: "r1"),
+        .runtimeError(threadId: piThread, message: "boom"),
+    ]
+    for event in bearing {
+        let remapped = event.withThreadId(tileThread)
+        let encoded = String(decoding: try! JSONEncoder().encode(remapped), as: UTF8.self)
+        // Check the threadId FIELD precisely — turnId legitimately embeds the
+        // old session id (e.g. "SID-abc#t1"), so a whole-string search would
+        // false-positive on it.
+        expect(encoded.contains(#""threadId":"\#(tileThread)""#)
+                && !encoded.contains(#""threadId":"\#(piThread)""#),
+               "withThreadId: \(event) must rebind threadId to \(tileThread), got \(encoded)")
+    }
+
+    // 2. Feeding a remapped Pi stream into the tile's transcript model (keyed
+    //    by the tile thread) actually lands cards — proving the filter matches.
+    var translator = PiEventTranslator()
+    let raw = translator.translate(stream: [
+        #"{"type":"session","version":3,"id":"SID-abc","timestamp":"t","cwd":"/x"}"#,
+        #"{"type":"agent_start"}"#,
+        #"{"type":"turn_start"}"#,
+        #"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"hello"}}"#,
+        #"{"type":"turn_end","message":{"role":"assistant"}}"#,
+        #"{"type":"agent_settled"}"#,
+    ])
+    var model = ManagedAgentTranscriptModel(threadId: tileThread)
+    for event in raw { model.ingest(event.withThreadId(tileThread)) }
+    expect(model.cards.contains { $0.body.contains("hello") },
+           "withThreadId: remapped stream must produce a tile card; got \(model.cards)")
+
+    // 3. Sanity: WITHOUT remap, the mismatched threadId means no card lands —
+    //    this is exactly the bug the remap fixes.
+    var unmatched = ManagedAgentTranscriptModel(threadId: tileThread)
+    for event in raw { unmatched.ingest(event) }
+    expect(!unmatched.cards.contains { $0.body.contains("hello") },
+           "control: un-remapped Pi-thread events must NOT land in a tile-thread model")
+
+    print("AgentRuntimeEvent remap checks passed: all thread-bearing cases rebind, remapped stream lands cards, un-remapped control drops them")
+}
