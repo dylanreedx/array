@@ -28,6 +28,7 @@ final class ManagedAgentTileNSView: TileNSView {
     private var model: ManagedAgentTranscriptModel
     private var descriptor: AgentDescriptor
     private var startedAt: Date?
+    private var promptInFlight = false
     private let threadId: String
     var onApprovalDecision: ((String, ApprovalDecision) -> Void)?
     var onUserInputSubmit: ((String, UserInputAnswers) -> Void)?
@@ -65,6 +66,15 @@ final class ManagedAgentTileNSView: TileNSView {
     func ingest(_ event: AgentRuntimeEvent) {
         if startedAt == nil {
             if case .turnStarted = event { startedAt = Date() }
+        }
+        // A prompt is done once the agent settles or a turn ends. Clearing the
+        // in-flight latch here re-enables the compose row (see submitPrompt).
+        switch event {
+        case .turnCompleted, .runtimeError,
+             .sessionStateChanged(.ready), .sessionStateChanged(.stopped), .sessionStateChanged(.error):
+            promptInFlight = false
+        default:
+            break
         }
         model.ingest(event)
         updatePendingApproval(from: event)
@@ -222,11 +232,16 @@ final class ManagedAgentTileNSView: TileNSView {
     @objc private func submitPrompt() {
         let prompt = composeField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty, !composeIsBusy else { return }
+        // Latch immediately: status may not read .working until the first event
+        // streams back, and without this a fast second Enter/click would submit
+        // a duplicate prompt in that window. Cleared when the turn settles.
+        promptInFlight = true
         composeField.stringValue = ""
+        applyComposeAvailability()
         onSubmitPrompt?(prompt)
     }
 
-    private var composeIsBusy: Bool { descriptor.status == .working }
+    private var composeIsBusy: Bool { promptInFlight || descriptor.status == .working }
 
     private func applyComposeAvailability() {
         composeField.isEnabled = !composeIsBusy

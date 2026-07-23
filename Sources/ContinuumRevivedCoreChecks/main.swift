@@ -137,6 +137,22 @@ do {
            "88.4d: assistant cards must split per turn, not concatenate — got \(bodies)")
 }
 
+// Review fix: assistant narration after an interleaved tool call must form a
+// NEW card BELOW the tool (not append to the pre-tool card and render above it).
+do {
+    let threadId = "managed-interleave"
+    var model = ManagedAgentTranscriptModel(threadId: threadId)
+    model.ingest(.turnStarted(threadId: threadId, turnId: "t1"))
+    model.ingest(.contentDelta(threadId: threadId, turnId: "t1", streamKind: .assistant, delta: "let me check"))
+    model.ingest(.itemStarted(threadId: threadId, itemId: "c1", kind: .commandExecution, title: "read"))
+    model.ingest(.contentDelta(threadId: threadId, turnId: "t1", streamKind: .assistant, delta: "found it"))
+    model.ingest(.itemCompleted(threadId: threadId, itemId: "c1", kind: .commandExecution, status: .completed))
+    model.ingest(.turnCompleted(threadId: threadId, turnId: "t1", outcome: .completed, errorMessage: nil))
+    let ordered = model.cards.map { "\($0.title):\($0.body)" }
+    expect(ordered == ["assistant:let me check", "read:", "assistant:found it"],
+           "review: post-tool narration is a new card in order, not appended above the tool — got \(ordered)")
+}
+
 // MARK: - Focus history previous navigation
 
 do {

@@ -41,6 +41,11 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
 
     private var activeToolCardIdsByItemId: [String: String] = [:]
     private var lastAssistantCardId: String?
+    private var lastReasoningCardId: String?
+    /// Bound on retained raw events. Status is derived from recent activity, so
+    /// a window is sufficient — without this, a long-lived agent grows the
+    /// array without limit and re-scans all of it on every ingest.
+    private static let eventWindow = 400
 
     public init(threadId: String) {
         self.threadId = threadId
@@ -50,6 +55,7 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
 
     public mutating func ingest(_ event: AgentRuntimeEvent) {
         events.append(event)
+        if events.count > Self.eventWindow { events.removeFirst(events.count - Self.eventWindow) }
         currentStatus = deriveAgentStatus(signals: deriveStatusSignals(from: events, threadId: threadId, engineStatus: .idle))
 
         switch event {
@@ -57,7 +63,7 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
             // Each turn's assistant text is its own card. Without this reset,
             // a new turn's deltas append to the previous turn's card and the
             // whole conversation renders as one concatenated blob.
-            lastAssistantCardId = nil
+            endStreamingRuns()
         case .contentDelta(let tid, _, let streamKind, let delta) where tid == threadId:
             ingestContentDelta(streamKind: streamKind, delta: delta)
         case .itemStarted(let tid, let itemId, let kind, let title) where tid == threadId:
@@ -65,15 +71,25 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
         case .itemCompleted(let tid, let itemId, let kind, let status) where tid == threadId:
             ingestItemCompleted(itemId: itemId, kind: kind, status: status)
         case .turnCompleted(let tid, _, _, _) where tid == threadId:
-            lastAssistantCardId = nil
+            endStreamingRuns()
         default:
             break
         }
     }
 
+    /// End any open assistant/reasoning card run so the NEXT delta starts a new
+    /// card. Called at turn boundaries and whenever a different card kind is
+    /// inserted — otherwise post-tool narration would append to the pre-tool
+    /// assistant card and render above the tool call (out of order).
+    private mutating func endStreamingRuns() {
+        lastAssistantCardId = nil
+        lastReasoningCardId = nil
+    }
+
     private mutating func ingestContentDelta(streamKind: ContentStreamKind, delta: String) {
         switch streamKind {
         case .assistant:
+            lastReasoningCardId = nil
             if let index = indexOfCard(id: lastAssistantCardId) {
                 cards[index].body += delta
             } else {
@@ -82,15 +98,25 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
                 lastAssistantCardId = id
             }
         case .reasoning:
-            let id = "reasoning-\(cards.count + 1)"
-            cards.append(ManagedTranscriptCard(id: id, kind: .message, title: "reasoning", body: delta))
+            lastAssistantCardId = nil
+            if let index = indexOfCard(id: lastReasoningCardId) {
+                cards[index].body += delta
+            } else {
+                let id = "reasoning-\(cards.count + 1)"
+                cards.append(ManagedTranscriptCard(id: id, kind: .message, title: "reasoning", body: delta))
+                lastReasoningCardId = id
+            }
         case .commandOutput:
+            endStreamingRuns()
             let id = "output-\(cards.count + 1)"
             cards.append(ManagedTranscriptCard(id: id, kind: .toolCall, title: "command output", body: delta, itemKind: .commandExecution, status: .inProgress))
         }
     }
 
     private mutating func ingestItemStarted(itemId: String, kind: ItemKind, title: String?) {
+        // A tool/diff/plan/error card breaks any open assistant/reasoning run,
+        // so subsequent narration forms a NEW card below this one.
+        endStreamingRuns()
         let cardKind: ManagedTranscriptCardKind
         switch kind {
         case .plan:
