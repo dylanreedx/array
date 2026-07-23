@@ -168,6 +168,38 @@ private func checkDesktopActivitySnapshotIsSanitized() throws {
     for forbidden in ["/Users/", "private/repo", "SECRET_TOKEN", "raw-apns-token", "transcript body", "pane", "pid", "local-run-id"] {
         expect(!json.contains(forbidden), "ticket75 activity I5: degraded snapshot must not leak \(forbidden)")
     }
+
+    // 88.4c: a managed agent's REAL timeline — built via ManagedAgentActivityBridge
+    // from the runtime event stream — folds into the published snapshot's `recent`
+    // (in canonical order), so the phone shows what the agent is doing, not just a
+    // status badge. Content deltas are dropped and the payload stays I5-clean.
+    let timelineTile = UUID(uuidString: "75000000-0000-4000-8000-0000000000E5")!
+    let events: [AgentRuntimeEvent] = [
+        .turnStarted(threadId: "t", turnId: "t1"),
+        .itemStarted(threadId: "t", itemId: "c1", kind: .commandExecution, title: "read"),
+        .itemCompleted(threadId: "t", itemId: "c1", kind: .commandExecution, status: .completed),
+        .contentDelta(threadId: "t", turnId: "t1", streamKind: .assistant, delta: "SECRET assistant body /Users/dylan"),
+        .turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil),
+    ]
+    let drafts = events.compactMap {
+        ManagedAgentActivityBridge.draft(for: $0, tileId: timelineTile, status: .working, now: now)
+    }
+    let timelineSnapshot = DegradedDesktopActivitySnapshotSource.snapshot(
+        descriptors: [],
+        liveStatuses: [:],
+        managedAgents: [DesktopManagedAgentActivity(
+            tileId: timelineTile, agentKind: .managed, status: .working, updatedAt: now, recentEvents: drafts)],
+        replicaId: UUID(uuidString: "75000000-0000-4000-8000-0000000000E6")!,
+        now: now
+    )
+    let recentKinds = timelineSnapshot.byTile[timelineTile]?.recent.map(\.kind) ?? []
+    expect(recentKinds == ["turn.started", "tool.read", "tool.completed", "turn.completed"],
+           "88.4c: managed timeline folds into snapshot.recent in order, content delta dropped — got \(recentKinds)")
+    let timelineJson = String(decoding: try JSONEncoder().encode(SyncMessage.activity(.snapshot(timelineSnapshot))), as: UTF8.self)
+    expect(SyncPayloadTaint.violations(inEncodedJSON: timelineJson).isEmpty,
+           "88.4c I5: managed timeline crossing the wire is taint-clean")
+    expect(!timelineJson.contains("SECRET assistant body") && !timelineJson.contains("/Users/dylan"),
+           "88.4c I5: assistant/content text never rides the activity timeline")
 }
 
 private func checkDesktopSpatialBootstrapDeterminism() throws {

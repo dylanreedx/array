@@ -112,17 +112,25 @@ public struct DesktopCompanionSyncDiagnostics: Equatable, Sendable {
     }
 }
 
-public struct DesktopManagedAgentActivity: Equatable, Sendable {
+public struct DesktopManagedAgentActivity: Sendable {
     public var tileId: UUID
     public var agentKind: AgentKind
     public var status: AgentStatus
     public var updatedAt: Date
+    /// The tile's real activity timeline (turn/tool/approval/error events),
+    /// built from the runtime event stream (ticket 88.4c). When present, these
+    /// are folded into the snapshot's `recent` so the phone shows what the
+    /// agent is doing — not just a status badge. Empty falls back to a single
+    /// synthetic status event.
+    public var recentEvents: [AgentActivityEventDraft]
 
-    public init(tileId: UUID, agentKind: AgentKind, status: AgentStatus, updatedAt: Date) {
+    public init(tileId: UUID, agentKind: AgentKind, status: AgentStatus, updatedAt: Date,
+                recentEvents: [AgentActivityEventDraft] = []) {
         self.tileId = tileId
         self.agentKind = agentKind
         self.status = status
         self.updatedAt = updatedAt
+        self.recentEvents = recentEvents
     }
 }
 
@@ -158,23 +166,23 @@ public enum DegradedDesktopActivitySnapshotSource {
             )
             snapshot = apply(snapshot, event)
         }
-        let managedStart = sorted.count
+        var sequence = UInt64(sorted.count)
         let sortedManagedAgents = managedAgents.sorted { lhs, rhs in lhs.tileId.uuidString < rhs.tileId.uuidString }
-        for (offset, agent) in sortedManagedAgents.enumerated() {
-            let event = AgentActivityEvent(
-                stamping: AgentActivityEventDraft(
-                    tileId: agent.tileId,
-                    runId: nil,
+        for agent in sortedManagedAgents {
+            // Prefer the tile's real timeline; fall back to a single synthetic
+            // status event when no events have been recorded yet.
+            let drafts: [AgentActivityEventDraft] = agent.recentEvents.isEmpty
+                ? [AgentActivityEventDraft(
+                    tileId: agent.tileId, runId: nil,
                     tone: agent.status == .needsAttention ? .approval : .info,
-                    kind: "desktop.managedStatus",
-                    status: agent.status,
+                    kind: "desktop.managedStatus", status: agent.status,
                     summary: safeSummary(kind: agent.agentKind, status: agent.status),
-                    occurredAt: agent.updatedAt
-                ),
-                sequence: UInt64(managedStart + offset + 1),
-                replicaId: replicaId
-            )
-            snapshot = apply(snapshot, event)
+                    occurredAt: agent.updatedAt)]
+                : agent.recentEvents
+            for draft in drafts {
+                sequence += 1
+                snapshot = apply(snapshot, AgentActivityEvent(stamping: draft, sequence: sequence, replicaId: replicaId))
+            }
         }
         return snapshot
     }

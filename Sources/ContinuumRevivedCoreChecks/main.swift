@@ -9916,5 +9916,6 @@ runPiEventTranslatorChecks()
 runPiExecutableResolutionChecks()
 runPiSessionArgsChecks()
 runAgentRuntimeEventRemapChecks()
+runManagedAgentActivityBridgeChecks()
 
 print("ContinuumRevivedCoreChecks passed")

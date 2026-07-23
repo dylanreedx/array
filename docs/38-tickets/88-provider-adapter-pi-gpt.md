@@ -145,10 +145,32 @@ same session) recalled `BANANA73` — with each turn its own transcript card.
 Still open for real interaction: the approval dock isn't wired to the live runner (needs
 Pi `--mode rpc`), and there's no stop/interrupt or mid-turn input.
 
+## Slice 88.4c (desktop side done) — events → companion activity → phone
+
+The tile's runtime events now also flow to the phone's activity timeline. Pipeline:
+`AgentRuntimeEvent` → `ManagedAgentActivityBridge.draft` (pure, I5-safe: surfaces
+turn/tool/approval/error, DROPS content deltas + token usage, truncates error text) →
+per-tile buffer in the app → `DesktopManagedAgentActivity.recentEvents` →
+`DegradedDesktopActivitySnapshotSource` folds them into the published snapshot's
+`byTile[...].recent` → existing `SyncMessage.activity` → phone's existing `TimelineView`.
+No new payload type, taint rule, or iOS view — the phone already renders `recent`.
+
+Chose the SNAPSHOT path (fold into each publish) over live-tailing the service's
+`ActivityStore`, because `publishCurrentDesktopSnapshot` sends a full activity snapshot
+each time and would otherwise clobber a tailed timeline. Single source of truth; reuses
+the debounced `scheduleCompanionSyncPublish` (now also nudged per activity event).
+
+Verified: `runManagedAgentActivityBridgeChecks` (Core) pins the mapping + I5; the Sync
+publisher check folds a runtime sequence and asserts `recent == [turn.started, tool.read,
+tool.completed, turn.completed]`, taint-clean, no assistant text on the wire. In-app, the
+two-turn `--managed-agent-live-check` reported the recorded timeline populated.
+
+**Still owed for the phone to actually show it: task E** — a device paired to the relay
+(this slice proves the desktop produces + publishes a clean timeline; end-to-end phone
+render is unverified until a phone is on the relay).
+
 ## Next slices
 
-- **88.4c Events → relay**: wire the tile's ingested events into the activity projection
-  → relay so they reach the phone (I5 filtering stays at the publish/taint gate).
 - **88.6 rpc mode**: `--mode rpc` for approvals + mid-turn input from desktop and phone.
 - **88.5** rpc mode for input/approvals from the phone (uses the existing approval
   round-trip).

@@ -2624,6 +2624,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Live provider runners, one per managed-agent tile (ticket 88.4b). Held
     /// so a running Pi process isn't torn down by ARC and can be stopped.
     private var managedAgentRunners: [UUID: PiAgentRunner] = [:]
+    /// Per-tile activity timeline (I5-safe drafts) built from the runner event
+    /// stream, folded into the companion snapshot so the phone sees what each
+    /// agent is doing (ticket 88.4c). Capped per tile.
+    private var managedAgentActivityByTile: [UUID: [AgentActivityEventDraft]] = [:]
     private var profilePalette: LaunchProfilePalette?
     private var paletteContextTileId: UUID?
     private var settingsPanel: SettingsPanel?
@@ -3050,6 +3054,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     if let last = view.qaLastAssistantCardBody, last.contains(codeword),
                        view.currentAgentStatus != .working {
                         report("transcript:\n\(view.qaTranscriptText)")
+                        // 88.4c: confirm the syncable activity timeline (what the
+                        // phone would receive) was populated in-app by the runner.
+                        let kinds = self.managedAgentActivityByTile[tileId]?.map(\.kind) ?? []
+                        report("sync activity timeline recorded (88.4c): \(kinds)")
                         report("PASS: turn 2 recalled '\(codeword)' — session continuity works in-app")
                         Foundation.exit(0)
                     }
@@ -3724,7 +3732,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 tileId: record.tileId,
                 agentKind: record.agentKind,
                 status: status,
-                updatedAt: record.lastSeenAt
+                updatedAt: record.lastSeenAt,
+                recentEvents: managedAgentActivityByTile[record.tileId] ?? []
             )
         }
     }
@@ -7427,13 +7436,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 do {
                     try runner.run(prompt: prompt) { event in
                         let bound = event.withThreadId(threadId)
-                        DispatchQueue.main.async { view.ingest(bound) }
+                        DispatchQueue.main.async {
+                            view.ingest(bound)
+                            // Mirror the event onto the syncable activity timeline
+                            // so the phone sees it (88.4c). Status comes from the
+                            // tile's derived status after ingest.
+                            self.recordManagedActivity(tileId: tileId, event: bound, status: view.currentAgentStatus)
+                        }
                     }
                 } catch {
                     let message = String(describing: error)
                     fputs("PiAgentRunner failed for tile \(tileId): \(message)\n", stderr)
                     DispatchQueue.main.async {
-                        view.ingest(.runtimeError(threadId: threadId, message: message))
+                        let error = AgentRuntimeEvent.runtimeError(threadId: threadId, message: message)
+                        view.ingest(error)
+                        self.recordManagedActivity(tileId: tileId, event: error, status: view.currentAgentStatus)
                     }
                 }
                 DispatchQueue.main.async { [weak self] in
@@ -7441,6 +7458,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 }
             }
         }
+    }
+
+    /// Records a managed-agent runtime event onto the per-tile syncable
+    /// timeline and nudges a companion publish so the phone updates (88.4c).
+    private func recordManagedActivity(tileId: UUID, event: AgentRuntimeEvent, status: AgentStatus) {
+        guard let draft = ManagedAgentActivityBridge.draft(for: event, tileId: tileId, status: status, now: Date()) else { return }
+        var buffer = managedAgentActivityByTile[tileId] ?? []
+        buffer.append(draft)
+        if buffer.count > ManagedAgentActivityBridge.recentCap {
+            buffer.removeFirst(buffer.count - ManagedAgentActivityBridge.recentCap)
+        }
+        managedAgentActivityByTile[tileId] = buffer
+        scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "managed-agent-activity", debounce: 0.5)
     }
 
     private func spawnBrowserDefault() {
