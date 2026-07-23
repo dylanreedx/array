@@ -33,16 +33,30 @@ func runManagedAgentActivityBridgeChecks() {
            "bridge: content deltas must NOT become activity (I5 + noise)")
     expect(draft(.sessionStateChanged(.running)) == nil, "bridge: session state changes ride on other events' status")
 
-    // 3. I5: no transcript/secret can ride a summary. Feed a runtimeError whose
-    //    message contains a secret + is very long; assert the summary is bounded
-    //    and, once stamped+encoded as the wire event, nothing unbounded leaks.
-    let longSecret = "SECRET-" + String(repeating: "x", count: 5000)
-    let errDraft = draft(.runtimeError(threadId: thread, message: longSecret))
-    expect(errDraft != nil && (errDraft!.summary.count <= 200), "bridge: error summary is truncated (<=200), got \(errDraft?.summary.count ?? -1)")
-    let stamped = AgentActivityEvent(stamping: errDraft!, sequence: 1, replicaId: UUID())
-    let json = String(decoding: try! JSONEncoder().encode(stamped), as: UTF8.self)
-    expect(!json.contains(String(repeating: "x", count: 300)),
-           "bridge I5: no unbounded transcript body may appear in the encoded activity event")
+    // 3. I5: raw error text must NEVER cross — it carries provider stderr
+    //    (paths, secrets). The synced summary is generic; the secret is absent
+    //    entirely, not merely truncated.
+    let secretErr = "pi failed: /Users/dylan/secret/path SECRET-TOKEN-42 " + String(repeating: "x", count: 5000)
+    let errDraft = draft(.runtimeError(threadId: thread, message: secretErr))
+    expect(errDraft?.summary == "Runtime error", "bridge I5: runtimeError summary is generic, got \(String(describing: errDraft?.summary))")
+    let failDraft = draft(.turnCompleted(threadId: thread, turnId: "t1", outcome: .failed, errorMessage: secretErr))
+    expect(failDraft?.summary == "Turn failed", "bridge I5: failed-turn summary is generic, got \(String(describing: failDraft?.summary))")
+    for d in [errDraft, failDraft] {
+        let json = String(decoding: try! JSONEncoder().encode(AgentActivityEvent(stamping: d!, sequence: 1, replicaId: UUID())), as: UTF8.self)
+        expect(!json.contains("SECRET-TOKEN-42") && !json.contains("/Users/dylan"),
+               "bridge I5: no secret/path from error text may appear in the wire event")
+    }
 
-    print("ManagedAgentActivityBridge checks passed: turn/tool/approval/error surface, deltas/token-usage dropped, error summary bounded (I5)")
+    // 4. I5 defense-in-depth: a tool title carrying a path/args collapses to a
+    //    generic token — no path component or secret word survives.
+    let pathTitle = draft(.itemStarted(threadId: thread, itemId: "c1", kind: .commandExecution, title: "read /Users/dylan/SECRET.txt --flag"))!
+    let blob = pathTitle.kind + " " + pathTitle.summary
+    expect(pathTitle.kind == "tool.tool", "bridge I5: path-like tool title collapses to generic, got kind=\(pathTitle.kind)")
+    expect(!blob.contains("SECRET") && !blob.contains("Users") && !blob.contains("/"),
+           "bridge I5: no path component / secret survives a path-like tool title — got \(blob)")
+    // A legitimate bare tool name is preserved.
+    let bare = draft(.itemStarted(threadId: thread, itemId: "c2", kind: .webSearch, title: "web_search"))!
+    expect(bare.kind == "tool.web_search", "bridge: a bare tool name is preserved, got \(bare.kind)")
+
+    print("ManagedAgentActivityBridge checks passed: surface set correct, deltas/token-usage dropped, error text NEVER crosses (generic), tool title sanitized (I5)")
 }

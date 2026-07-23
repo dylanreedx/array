@@ -33,12 +33,19 @@ public enum ManagedAgentActivityBridge {
             case .completed:
                 return make(tileId, .info, "turn.completed", status, "Turn complete", now)
             case .failed:
-                return make(tileId, .error, "turn.failed", status, short(errorMessage ?? "Turn failed"), now)
+                // I5: NEVER forward the raw error text — it carries the
+                // provider's stderr (file paths, cwd, secrets). Truncation is
+                // not sanitization. The local tile shows the detail; the synced
+                // summary stays generic.
+                return make(tileId, .error, "turn.failed", status, "Turn failed", now)
             case .interrupted, .cancelled:
                 return make(tileId, .info, "turn.\(outcome.rawValue)", status, "Turn \(outcome.rawValue)", now)
             }
         case .itemStarted(_, _, let kind, let title):
-            let name = title ?? kind.rawValue
+            // I5 defense-in-depth: the title is a tool NAME by the Pi adapter's
+            // construction, but the bridge is provider-agnostic — sanitize to a
+            // conservative token so no upstream can smuggle a path/arg through.
+            let name = safeToolToken(title ?? kind.rawValue)
             return make(tileId, tone(for: kind), "tool.\(name)", status, "Started \(name)", now)
         case .itemCompleted(_, _, let kind, let itemStatus):
             let tone: ActivityEventTone = (itemStatus == .failed) ? .error : .tool
@@ -47,8 +54,10 @@ public enum ManagedAgentActivityBridge {
             return make(tileId, .approval, "approval.\(kind.rawValue)", status, "Needs approval", now, approvalRequestId: requestId)
         case .requestResolved(_, let requestId, let decision):
             return make(tileId, .approval, "approval.resolved", status, "Approval \(decision)", now, approvalRequestId: requestId)
-        case .runtimeError(_, let message):
-            return make(tileId, .error, "error", status, short(message), now)
+        case .runtimeError:
+            // I5: drop the raw message (provider stderr → paths/secrets). Local
+            // tile keeps the detail; the phone gets only that an error occurred.
+            return make(tileId, .error, "error", status, "Runtime error", now)
         case .sessionStateChanged, .contentDelta, .userInputRequested, .userInputResolved, .tokenUsageUpdated:
             // Status changes ride on the other events' `status` field; content
             // deltas / token usage never cross (I5 + noise).
@@ -63,8 +72,16 @@ public enum ManagedAgentActivityBridge {
         }
     }
 
-    private static func short(_ s: String) -> String {
-        s.count <= 200 ? s : String(s.prefix(200))
+    /// A tool label must be a bare identifier-ish token (a tool NAME). If it
+    /// contains anything else — a path separator, whitespace, arguments — we do
+    /// NOT try to salvage it (salvaging concatenates surviving path components
+    /// / secret words); we collapse to a generic token so nothing rides along.
+    /// Belt-and-suspenders for I5 — the current Pi adapter already passes only a
+    /// tool name.
+    private static func safeToolToken(_ s: String) -> String {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.")
+        if s.isEmpty || s.contains(where: { !allowed.contains($0) }) { return "tool" }
+        return String(s.prefix(40))
     }
 
     private static func make(
