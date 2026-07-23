@@ -125,7 +125,8 @@ public final class PiAgentRunner: @unchecked Sendable {
     private let queue = DispatchQueue(label: "continuum.pi-agent-runner")
     private var translator = PiEventTranslator()
     private var buffer = Data()
-    private var process: Process?
+    private var stderrBuffer = Data()   // queue-confined
+    private var process: Process?       // queue-confined (set in run, read in stop)
 
     public init(config: Config) {
         self.config = config
@@ -160,13 +161,23 @@ public final class PiAgentRunner: @unchecked Sendable {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
+        queue.sync { buffer.removeAll(); stderrBuffer.removeAll() }
+
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty else { return }
             self?.queue.sync { self?.consume(chunk, onEvent: onEvent) }
         }
+        // Drain stderr CONCURRENTLY. Reading it only after waitUntilExit() lets
+        // a chatty child fill its stderr pipe (~64KB) and block forever while
+        // we block in waitUntilExit — a deadlock. Accumulate on the queue.
+        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else { return }
+            self?.queue.sync { self?.stderrBuffer.append(chunk) }
+        }
 
-        self.process = process
+        queue.sync { self.process = process }
         do {
             try process.run()
         } catch {
@@ -174,22 +185,27 @@ public final class PiAgentRunner: @unchecked Sendable {
         }
         process.waitUntilExit()
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
+        stderrPipe.fileHandleForReading.readabilityHandler = nil
 
-        // Flush any trailing partial line + drain whatever the handler missed.
+        // Flush any trailing partial line + drain whatever the handlers missed.
         let remainder = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        queue.sync {
+        let stderrRemainder = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        let errText: String = queue.sync {
             if !remainder.isEmpty { consume(remainder, onEvent: onEvent) }
             flushBuffer(onEvent: onEvent)
+            stderrBuffer.append(stderrRemainder)
+            let text = String(decoding: stderrBuffer, as: UTF8.self)
+            self.process = nil
+            return text
         }
 
         if process.terminationStatus != 0 {
-            let errText = String(decoding: stderrPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
             throw RunError.piFailed(exitCode: process.terminationStatus, stderr: errText)
         }
     }
 
     public func stop() {
-        process?.terminate()
+        queue.sync { process?.terminate() }
     }
 
     // MARK: - queue-confined line assembly
