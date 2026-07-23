@@ -133,10 +133,23 @@ waits for a live GPT-5.6 reply to stream into the tile. **PASS**: the reply stre
 
 - **88.4c Events → relay**: wire the tile's ingested events into the activity projection
   → relay so they reach the phone (I5 filtering stays at the publish/taint gate).
-- **88.5 Session continuity + interaction**: the runner spawns each prompt with
-  `--no-session`, so prompts are independent — NO memory across turns, and the approval
-  dock isn't wired to the live runner. Real conversational interaction needs session
-  persistence (drop `--no-session` / `--session-dir`) and rpc mode for input + approvals.
+## Slice 88.5 (done) — session continuity
+
+Prompts now CONTINUE the same conversation. `PiAgentRunner.Config.sessionId` (a stable
+per-tile `continuum-<tileId>`) makes every prompt run `--session-id <id>` so Pi resumes
+the tile's history; `nil` still runs `--no-session` (the smoke harness stays ephemeral).
+Pure `processArguments()` is matrix-pinned. **Proven live in-app**: the two-turn
+`--managed-agent-live-check` planted a codeword in turn 1 and turn 2 (a fresh Pi process,
+same session) recalled `BANANA73` — with each turn its own transcript card.
+
+Still open for real interaction: the approval dock isn't wired to the live runner (needs
+Pi `--mode rpc`), and there's no stop/interrupt or mid-turn input.
+
+## Next slices
+
+- **88.4c Events → relay**: wire the tile's ingested events into the activity projection
+  → relay so they reach the phone (I5 filtering stays at the publish/taint gate).
+- **88.6 rpc mode**: `--mode rpc` for approvals + mid-turn input from desktop and phone.
 - **88.5** rpc mode for input/approvals from the phone (uses the existing approval
   round-trip).
 - **89** Claude Code as provider #2 behind the same seam (stream-json / session `.jsonl`).

@@ -15,15 +15,29 @@ public final class PiAgentRunner: @unchecked Sendable {
     public struct Config: Sendable {
         public var model: String
         public var cwd: URL
-        /// Extra args before the prompt (e.g. session control). The runner
-        /// always adds `-p --mode json <model>`.
+        /// Stable Pi session id. When set, every prompt runs `--session-id <id>`
+        /// so turns CONTINUE the same conversation (memory across prompts); Pi
+        /// creates the session on first use and resumes it after. `nil` runs
+        /// `--no-session` (ephemeral, one-shot) — used by the smoke harness.
+        public var sessionId: String?
+        /// Extra args before the prompt. The runner always adds
+        /// `-p --mode json <model>` and the session flag.
         public var extraArgs: [String]
 
-        public init(model: String = "openai-codex/gpt-5.6", cwd: URL, extraArgs: [String] = ["--no-session"]) {
+        public init(model: String = "openai-codex/gpt-5.6", cwd: URL, sessionId: String? = nil, extraArgs: [String] = []) {
             self.model = model
             self.cwd = cwd
+            self.sessionId = sessionId
             self.extraArgs = extraArgs
         }
+    }
+
+    /// The Pi args after the executable (and any `/usr/bin/env` prefix): the
+    /// json/model flags, the session flag, extras, then the prompt. Pure so it
+    /// can be pinned in the matrix.
+    public static func processArguments(model: String, sessionId: String?, extraArgs: [String], prompt: String) -> [String] {
+        let sessionArgs = sessionId.map { ["--session-id", $0] } ?? ["--no-session"]
+        return ["-p", "--mode", "json", "--model", model] + sessionArgs + extraArgs + [prompt]
     }
 
     public enum RunError: Error {
@@ -127,7 +141,12 @@ public final class PiAgentRunner: @unchecked Sendable {
         // the ticket GUI watch-out.
         let command = Self.liveResolvedCommand()
         process.executableURL = URL(fileURLWithPath: command.executable)
-        process.arguments = command.prefixArgs + ["-p", "--mode", "json", "--model", config.model] + config.extraArgs + [prompt]
+        process.arguments = command.prefixArgs + Self.processArguments(
+            model: config.model,
+            sessionId: config.sessionId,
+            extraArgs: config.extraArgs,
+            prompt: prompt
+        )
         process.currentDirectoryURL = config.cwd
 
         // Augment PATH so the child finds both `pi` and the `node` its shebang

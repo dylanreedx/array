@@ -344,4 +344,7 @@ final class ManagedAgentTileNSView: TileNSView {
     var qaTranscriptText: String {
         model.cards.map { "[\($0.title)] \($0.body)" }.joined(separator: "\n")
     }
+    var qaLastAssistantCardBody: String? {
+        model.cards.last { $0.title == "assistant" }?.body
+    }
 }

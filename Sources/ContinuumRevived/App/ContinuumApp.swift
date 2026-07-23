@@ -2996,22 +2996,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    /// End-to-end sanity check for the managed-agent tile (88.4b): spawn a tile
-    /// through the real palette path, submit a prompt through the tile's real
-    /// Run action, and wait for a live GPT-5.6 reply to stream into the tile.
-    /// Exercises the exact click path in-process. Prints the transcript and
-    /// exits 0 on success, non-zero otherwise. Gated on `--managed-agent-live-check`.
+    /// End-to-end sanity check for the managed-agent tile (88.4b/88.5): spawn a
+    /// tile through the real palette path, then drive TWO prompts through the
+    /// tile's real Run action — turn 1 plants a codeword, turn 2 asks for it
+    /// back. Passing proves the click path streams live GPT-5.6 into the tile
+    /// AND that the session continues across prompts (memory). Exercises the
+    /// exact path in-process; polls via asyncAfter so the normal event loop
+    /// drains the tile's main-queue ingests. Gated on `--managed-agent-live-check`.
     private func runManagedAgentLiveCheck(window: NSWindow) {
         func report(_ line: String) { FileHandle.standardError.write(Data("[managed-agent-live] \(line)\n".utf8)) }
-        // The tile receives runner events via DispatchQueue.main.async, so this
-        // check must NOT block the main thread — it polls via asyncAfter and
-        // lets the normal NSApp event loop drain those ingests between polls
-        // (exactly as it does when a user clicks Run).
+        let codeword = "BANANA73"
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self, let spawner = self.tileSpawner, let canvasView = self.canvasView else {
                 report("FAIL: no spawner/canvas"); Foundation.exit(2)
             }
-            // Same path a palette click takes: spawn → wire → focus.
             guard case let .spawned(tileId) = spawner.spawnManagedAgent() else {
                 report("FAIL: spawnManagedAgent did not spawn"); Foundation.exit(2)
             }
@@ -3020,29 +3018,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let view = canvasView.tileView(for: tileId) as? ManagedAgentTileNSView else {
                 report("FAIL: spawned tile is not a ManagedAgentTileNSView"); Foundation.exit(2)
             }
-            report("spawned tile \(tileId); compose enabled=\(view.qaComposeEnabled)")
+            report("spawned tile \(tileId)")
 
-            // A sentinel the model echoes back: the prompt-echo card contains it
-            // once, the assistant reply adds a second occurrence — so >=2 proves
-            // a real reply streamed in, not just our echo.
-            let sentinel = "PONGLIVE"
-            view.qaSubmitPrompt("Reply with exactly this token and nothing else: \(sentinel)")
-            report("submitted prompt; waiting for live GPT-5.6 reply…")
+            let deadline = Date().addingTimeInterval(180)
+            var submittedTurn2 = false
+            view.qaSubmitPrompt("Remember this codeword: \(codeword). Reply with just: OK")
+            // Cards present right after the (synchronous) prompt echo — turn 1's
+            // reply is done once a NEW card appears beyond this and it settles.
+            let cardsAfterTurn1Submit = view.transcriptCardCount
+            report("turn 1 submitted (plant codeword); baseCards=\(cardsAfterTurn1Submit)…")
 
-            let deadline = Date().addingTimeInterval(90)
             @MainActor func poll() {
-                let count = view.qaTranscriptText.components(separatedBy: sentinel).count - 1
-                if count >= 2 {
-                    report("final status=\(view.currentAgentStatus) cards=\(view.transcriptCardCount)")
-                    report("transcript:\n\(view.qaTranscriptText)")
-                    report("PASS: live GPT-5.6 reply streamed into the tile")
-                    Foundation.exit(0)
-                }
                 if Date() >= deadline {
-                    report("final status=\(view.currentAgentStatus) cards=\(view.transcriptCardCount)")
                     report("transcript:\n\(view.qaTranscriptText)")
-                    report("FAIL: no live reply within timeout")
+                    report("FAIL: timed out (submittedTurn2=\(submittedTurn2))")
                     Foundation.exit(1)
+                }
+                if !submittedTurn2 {
+                    // Turn 1 done: a reply card appeared past the echo and the
+                    // agent settled (not working). Then ask for recall.
+                    if view.transcriptCardCount > cardsAfterTurn1Submit,
+                       view.qaComposeEnabled, view.currentAgentStatus != .working {
+                        submittedTurn2 = true
+                        report("turn 1 done; submitting turn 2 (recall) in a fresh Pi process, same session")
+                        view.qaSubmitPrompt("What was the codeword? Reply with only the codeword.")
+                    }
+                } else {
+                    // Continuity proof: turn 2's reply (a NEW assistant card,
+                    // since 88.5 splits per turn) recalls the codeword planted
+                    // in turn 1 — impossible without a continued session.
+                    if let last = view.qaLastAssistantCardBody, last.contains(codeword),
+                       view.currentAgentStatus != .working {
+                        report("transcript:\n\(view.qaTranscriptText)")
+                        report("PASS: turn 2 recalled '\(codeword)' — session continuity works in-app")
+                        Foundation.exit(0)
+                    }
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     MainActor.assumeIsolated { poll() }
@@ -7403,11 +7413,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
         let threadId = view.wiringThreadId
         let cwd = URL(fileURLWithPath: activeProject?.rootPath ?? FileManager.default.currentDirectoryPath, isDirectory: true)
+        // Stable per-tile Pi session so prompts continue the same conversation
+        // (ticket 88.5). Each prompt spawns a fresh runner, but the shared
+        // session id makes Pi resume the tile's history.
+        let sessionId = "continuum-\(tileId.uuidString)"
         view.onSubmitPrompt = { [weak self, weak view] prompt in
             guard let self, let view else { return }
             // Reflect the user's prompt in the transcript, then hand off to Pi.
             view.ingest(.contentDelta(threadId: threadId, turnId: "user", streamKind: .assistant, delta: "▶ \(prompt)"))
-            let runner = PiAgentRunner(config: .init(cwd: cwd))
+            let runner = PiAgentRunner(config: .init(cwd: cwd, sessionId: sessionId))
             self.managedAgentRunners[tileId] = runner
             DispatchQueue.global(qos: .userInitiated).async {
                 do {

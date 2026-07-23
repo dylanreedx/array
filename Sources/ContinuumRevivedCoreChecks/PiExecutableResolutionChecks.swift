@@ -59,3 +59,30 @@ func runPiExecutableResolutionChecks() {
 
     print("PiAgentRunner executable-resolution checks passed: GUI absolute resolve, PATH precedence, env fallback, PATH augmentation (pi+node)")
 }
+
+// 88.5: a stable sessionId makes prompts continue the same conversation
+// (--session-id); nil is ephemeral (--no-session).
+func runPiSessionArgsChecks() {
+    typealias Runner = PiAgentRunner
+
+    let withSession = Runner.processArguments(
+        model: "openai-codex/gpt-5.6", sessionId: "continuum-TILE", extraArgs: [], prompt: "hi")
+    expect(withSession == ["-p", "--mode", "json", "--model", "openai-codex/gpt-5.6",
+                           "--session-id", "continuum-TILE", "hi"],
+           "processArguments(session): must pass --session-id for continuity, got \(withSession)")
+
+    let ephemeral = Runner.processArguments(
+        model: "openai-codex/gpt-5.6", sessionId: nil, extraArgs: [], prompt: "hi")
+    expect(ephemeral == ["-p", "--mode", "json", "--model", "openai-codex/gpt-5.6",
+                         "--no-session", "hi"],
+           "processArguments(nil): must be ephemeral --no-session, got \(ephemeral)")
+
+    // Prompt is always last (Pi treats the trailing positional as the prompt);
+    // extras slot between the session flag and the prompt.
+    let withExtras = Runner.processArguments(
+        model: "m", sessionId: "s", extraArgs: ["--tools", "read"], prompt: "do it")
+    expect(withExtras.last == "do it" && withExtras.contains("--tools"),
+           "processArguments(extras): prompt stays last, extras included, got \(withExtras)")
+
+    print("PiAgentRunner session-args checks passed: --session-id for continuity, --no-session ephemeral, prompt last")
+}
