@@ -71,3 +71,19 @@ The supervising session shares the working tree with a live worker. Two collisio
 Consequence when it happens: the worker's index vanishes underneath it, so it can neither commit nor
 report. Recovery = terminate that child, verify the swept code against its packet, re-run the matrix,
 record the ticket honestly with an ATTRIBUTION ERROR note, and relaunch the driver.
+
+### Do NOT use a separate index to "safely" commit (tried 2026-07-25 07:40)
+
+Tempting idea: `GIT_INDEX_FILE=/tmp/idx git read-tree HEAD && git add <mine> && git commit-tree`,
+so the worker's shared index is never touched. It commits fine — and then breaks things.
+
+Advancing `HEAD` invalidates the worker's **stale** index: files that exist in the new HEAD but not in
+that index read as `D` (deleted). The worker's next commit would then *delete* them. (Observed: 14
+freshly-committed packets flipped to `D` in the shared index.)
+
+Repair, if it happens: `git add <the affected paths>` in the shared index so it matches HEAD again,
+then confirm `git status --short | grep '^D'` is empty and the worker's own staged files are intact.
+
+**The rule that actually works:** commit only when `pgrep -f "claude -p"` finds nothing. Untracked
+packet files are perfectly safe left on disk between wakes — the loop reads them from the filesystem,
+not from git. Patience beats plumbing here.

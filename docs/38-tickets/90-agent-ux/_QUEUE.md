@@ -21,7 +21,7 @@ All Phase 0 tickets are tagged `autonomous`.
 | 9 | `P0.6-png-baselines.md` | P0.2 |
 | 10 | `P0.9-ui-tour-check.md` | P0.2 |
 | 11 | `P0.7-retire-isblank-gate.md` | P0.3, P0.5, P0.6, **P1.6** |
-| 12 | `P1.1-agentui-module.md` | P0.7 |
+| 12 | `P1.1-agentui-module.md` | — |
 | 13 | `P1.2-tokencolor-light-dark.md` | P1.1 |
 | 14 | `P1.4-type-scale.md` | P1.1 |
 | 15 | `P1.5-spacing-radius-scale.md` | P1.1 |
@@ -88,3 +88,14 @@ asked for a green gate before the tokens existed. Resolution: `P0.4`'s enablemen
 `P1.6` (which now also depends on the adoption tickets `P1.10`/`P1.11`), and `P0.7` now waits on
 `P1.6` instead of `P0.4`. `P0.5`, `P0.6` and `P0.9` are unaffected and proceed. The four colour
 decisions are ruled at the end of `P1.3`.
+
+## Cycle fix 2026-07-25T08:05Z (supervisor)
+
+The loop correctly halted with `dependencies-blocked`: my 06:50 re-sequencing pointed `P0.7` at
+`P1.6` while `P1.1` still pointed at `P0.7`, closing
+`P0.7→P1.6→P1.11→P1.10→P1.3→P1.2→P1.1→P0.7`.
+
+Broken at the wrong link: **`P1.1` no longer depends on `P0.7`.** Standing up the AgentUI module
+and moving StatusChip needs nothing from retiring the `isBlank` gate — that dependency was lazy
+"previous phase" sequencing on my part. `P0.7` keeps waiting on `P1.6` (retire the weak gate only
+once contrast + baselines are real), which is the ordering that matters.
