@@ -973,6 +973,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--ui-contrast-check") {
+            do {
+                _ = NSApplication.shared
+                try UIProbeContrast.runContrastChecks()
+                print("ContinuumRevivedUIContrastChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--ui-test-support-check") {
             _ = NSApplication.shared
             Task { @MainActor in
