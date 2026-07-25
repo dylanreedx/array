@@ -1,0 +1,248 @@
+check --add-zone-check
+check --agent-input-check
+check --agent-message-bus-check
+check --agent-status-check
+check --bring-to-front-focus-check
+check --browser-auth-challenge-check
+check --browser-download-check
+check --browser-element-context-check
+check --browser-inspector-actions-check
+check --browser-inspector-console-check
+check --browser-inspector-dom-tree-check
+check --browser-inspector-link-lifecycle-check
+check --browser-inspector-network-lite-check
+check --browser-inspector-styles-check
+check --browser-inspector-tile-shell-check
+check --browser-lru-budget-check
+check --browser-note-action-check
+check --browser-profile-persistence-check
+check --browser-restore-state-check
+check --browser-target-blank-check
+check --browser-ui-delegate-check
+check --browser-url-focus-check
+check --companion-sync-health-check
+check --component-lab-check
+check --conductor-queue-tile-check
+check --diff-tile-check
+check --drag-magnetize-check
+check --file-tree-boot-persistence-check
+check --file-tree-hardening-check
+check --focus-border-check
+check --focus-broker-activation-check
+check --focus-mode-check
+check --focus-scope-dispatch-check
+check --input-gate-check
+check --keybind-edit-check
+check --leader-activation-check
+check --leader-jump-check
+check --leader-snap-check
+check --leader-zone-jump-check
+check --multi-zone-render-check
+check --nav-mode-check
+check --new-tile-cwd-check
+check --note-click-focus-check
+check --note-file-tile-spawn-check
+check --palette-browser-spawn-check
+check --palette-captures-keys-over-browser-check
+check --palette-duplicate-root-check
+check --palette-first-responder-restore-check
+check --palette-jump-check
+check --palette-zone-check
+check --persistence-crash-safe-check
+check --project-lock-check
+check --project-picker-resolution-check
+check --project-root-resolution-check
+check --push-payload-dump-check
+check --reserved-dispatch-check
+check --resize-dimensions-hud-check
+check --resize-snap-check
+check --run-artifacts-tile-check
+check --session-observer-check
+check --session-resume-check
+check --settings-panel-check
+check --single-zone-compat-check
+check --spawn-focus-policy-check
+check --spawn-placement-check
+check --spawn-rate-limit-check
+check --stray-window-audit-check
+check --terminal-fills-tile-check
+check --terminal-snapshot-tier-check
+check --terminal-theme-fidelity-check
+check --terminal-tmux-ambient-workspace-check
+check --terminal-tmux-delete-lifecycle-check
+check --terminal-tmux-live-integration-check
+check --terminal-tmux-observer-check
+check --terminal-tmux-observer-wiring-check
+check --terminal-tmux-persistence-check
+check --ticket-queue-tile-check
+check --tile-action-check
+check --tile-chrome-scale-check
+check --tile-drag-grab-check
+check --tile-world-bounds-check
+check --topology-migration-check
+check --ui-probe-check
+check --ui-test-support-check
+check --unified-model-boot-check
+check --viewport-sanitize-check
+check --workspace-boot-persistence-check
+check --workspace-profile-check
+check --workspace-runtime-install-check
+check --workspace-sidebar-actions-check
+check --workspace-sidebar-default-visible-check
+check --workspace-sidebar-live-status-check
+check --workspace-sidebar-shell-check
+check --workspace-switch-check
+check --workspace-top-bar-check
+check --zindex-relaunch-hit-test-check
+check --zone-adaptive-bounds-check
+check --zone-autoname-check
+check --zone-breakout-check
+check --zone-chrome-zorder-check
+check --zone-close-keep-delete-check
+check --zone-create-encloses-check
+check --zone-create-gesture-check
+check --zone-hydration-lifecycle-check
+check --zone-lazy-resume-check
+check --zone-move-unified-check
+check --zone-project-session-naming-check
+check --zone-registry-refcount-check
+check --zone-rename-inline-check
+check --zone-resize-check
+check --zone-save-isolation-check
+check --zone-tier-transition-check
+leg run git diff --check
+leg run scripts/check-app-bundle.sh --configuration debug
+leg run scripts/check-matrix-inventory.sh
+leg run scripts/check-root-docs.sh
+leg run swift build
+leg run swift run ContinuumRevivedCoreChecks
+leg run swift run ContinuumRevivedFileTreeChecks
+leg run swift run ContinuumRevivedPaletteChecks
+leg run swift run ContinuumRevivedPerfChecks
+leg run swift run ContinuumRevivedRelayChecks
+leg run swift run ContinuumRevivedSyncChecks
+leg run swift run ContinuumRevivedSyncIntegrationChecks
+leg run_app_check .build/debug/continuum-revived --add-zone-check
+leg run_app_check .build/debug/continuum-revived --agent-input-check
+leg run_app_check .build/debug/continuum-revived --agent-message-bus-check
+leg run_app_check .build/debug/continuum-revived --agent-status-check
+leg run_app_check .build/debug/continuum-revived --bring-to-front-focus-check
+leg run_app_check .build/debug/continuum-revived --browser-auth-challenge-check
+leg run_app_check .build/debug/continuum-revived --browser-download-check
+leg run_app_check .build/debug/continuum-revived --browser-element-context-check
+leg run_app_check .build/debug/continuum-revived --browser-inspector-actions-check
+leg run_app_check .build/debug/continuum-revived --browser-inspector-console-check
+leg run_app_check .build/debug/continuum-revived --browser-inspector-dom-tree-check
+leg run_app_check .build/debug/continuum-revived --browser-inspector-link-lifecycle-check
+leg run_app_check .build/debug/continuum-revived --browser-inspector-network-lite-check
+leg run_app_check .build/debug/continuum-revived --browser-inspector-styles-check
+leg run_app_check .build/debug/continuum-revived --browser-inspector-tile-shell-check
+leg run_app_check .build/debug/continuum-revived --browser-lru-budget-check
+leg run_app_check .build/debug/continuum-revived --browser-note-action-check
+leg run_app_check .build/debug/continuum-revived --browser-profile-persistence-check
+leg run_app_check .build/debug/continuum-revived --browser-restore-state-check
+leg run_app_check .build/debug/continuum-revived --browser-target-blank-check
+leg run_app_check .build/debug/continuum-revived --browser-ui-delegate-check
+leg run_app_check .build/debug/continuum-revived --browser-url-focus-check
+leg run_app_check .build/debug/continuum-revived --companion-sync-health-check
+leg run_app_check .build/debug/continuum-revived --component-lab-check
+leg run_app_check .build/debug/continuum-revived --conductor-queue-tile-check
+leg run_app_check .build/debug/continuum-revived --diff-tile-check
+leg run_app_check .build/debug/continuum-revived --drag-magnetize-check
+leg run_app_check .build/debug/continuum-revived --file-tree-boot-persistence-check
+leg run_app_check .build/debug/continuum-revived --file-tree-hardening-check
+leg run_app_check .build/debug/continuum-revived --focus-border-check
+leg run_app_check .build/debug/continuum-revived --focus-broker-activation-check
+leg run_app_check .build/debug/continuum-revived --focus-mode-check
+leg run_app_check .build/debug/continuum-revived --focus-scope-dispatch-check
+leg run_app_check .build/debug/continuum-revived --input-gate-check
+leg run_app_check .build/debug/continuum-revived --keybind-edit-check
+leg run_app_check .build/debug/continuum-revived --leader-activation-check
+leg run_app_check .build/debug/continuum-revived --leader-jump-check
+leg run_app_check .build/debug/continuum-revived --leader-snap-check
+leg run_app_check .build/debug/continuum-revived --leader-zone-jump-check
+leg run_app_check .build/debug/continuum-revived --multi-zone-render-check
+leg run_app_check .build/debug/continuum-revived --nav-mode-check
+leg run_app_check .build/debug/continuum-revived --new-tile-cwd-check
+leg run_app_check .build/debug/continuum-revived --note-click-focus-check
+leg run_app_check .build/debug/continuum-revived --note-file-tile-spawn-check
+leg run_app_check .build/debug/continuum-revived --palette-browser-spawn-check
+leg run_app_check .build/debug/continuum-revived --palette-captures-keys-over-browser-check
+leg run_app_check .build/debug/continuum-revived --palette-duplicate-root-check
+leg run_app_check .build/debug/continuum-revived --palette-first-responder-restore-check
+leg run_app_check .build/debug/continuum-revived --palette-jump-check
+leg run_app_check .build/debug/continuum-revived --palette-zone-check
+leg run_app_check .build/debug/continuum-revived --persistence-crash-safe-check
+leg run_app_check .build/debug/continuum-revived --project-lock-check
+leg run_app_check .build/debug/continuum-revived --project-picker-resolution-check
+leg run_app_check .build/debug/continuum-revived --project-root-resolution-check
+leg run_app_check .build/debug/continuum-revived --push-payload-dump-check
+leg run_app_check .build/debug/continuum-revived --reserved-dispatch-check
+leg run_app_check .build/debug/continuum-revived --resize-dimensions-hud-check
+leg run_app_check .build/debug/continuum-revived --resize-snap-check
+leg run_app_check .build/debug/continuum-revived --run-artifacts-tile-check
+leg run_app_check .build/debug/continuum-revived --session-observer-check
+leg run_app_check .build/debug/continuum-revived --session-resume-check
+leg run_app_check .build/debug/continuum-revived --settings-panel-check
+leg run_app_check .build/debug/continuum-revived --single-zone-compat-check
+leg run_app_check .build/debug/continuum-revived --spawn-focus-policy-check
+leg run_app_check .build/debug/continuum-revived --spawn-placement-check
+leg run_app_check .build/debug/continuum-revived --spawn-rate-limit-check
+leg run_app_check .build/debug/continuum-revived --stray-window-audit-check
+leg run_app_check .build/debug/continuum-revived --terminal-fills-tile-check
+leg run_app_check .build/debug/continuum-revived --terminal-snapshot-tier-check
+leg run_app_check .build/debug/continuum-revived --terminal-theme-fidelity-check
+leg run_app_check .build/debug/continuum-revived --terminal-tmux-ambient-workspace-check
+leg run_app_check .build/debug/continuum-revived --terminal-tmux-delete-lifecycle-check
+leg run_app_check .build/debug/continuum-revived --terminal-tmux-live-integration-check
+leg run_app_check .build/debug/continuum-revived --terminal-tmux-observer-check
+leg run_app_check .build/debug/continuum-revived --terminal-tmux-observer-wiring-check
+leg run_app_check .build/debug/continuum-revived --terminal-tmux-persistence-check
+leg run_app_check .build/debug/continuum-revived --ticket-queue-tile-check
+leg run_app_check .build/debug/continuum-revived --tile-action-check
+leg run_app_check .build/debug/continuum-revived --tile-chrome-scale-check
+leg run_app_check .build/debug/continuum-revived --tile-drag-grab-check
+leg run_app_check .build/debug/continuum-revived --tile-world-bounds-check
+leg run_app_check .build/debug/continuum-revived --topology-migration-check
+leg run_app_check .build/debug/continuum-revived --ui-probe-check
+leg run_app_check .build/debug/continuum-revived --ui-test-support-check
+leg run_app_check .build/debug/continuum-revived --unified-model-boot-check
+leg run_app_check .build/debug/continuum-revived --viewport-sanitize-check
+leg run_app_check .build/debug/continuum-revived --workspace-boot-persistence-check
+leg run_app_check .build/debug/continuum-revived --workspace-profile-check
+leg run_app_check .build/debug/continuum-revived --workspace-runtime-install-check
+leg run_app_check .build/debug/continuum-revived --workspace-sidebar-actions-check
+leg run_app_check .build/debug/continuum-revived --workspace-sidebar-default-visible-check
+leg run_app_check .build/debug/continuum-revived --workspace-sidebar-live-status-check
+leg run_app_check .build/debug/continuum-revived --workspace-sidebar-shell-check
+leg run_app_check .build/debug/continuum-revived --workspace-switch-check
+leg run_app_check .build/debug/continuum-revived --workspace-top-bar-check
+leg run_app_check .build/debug/continuum-revived --zindex-relaunch-hit-test-check
+leg run_app_check .build/debug/continuum-revived --zone-adaptive-bounds-check
+leg run_app_check .build/debug/continuum-revived --zone-autoname-check
+leg run_app_check .build/debug/continuum-revived --zone-breakout-check
+leg run_app_check .build/debug/continuum-revived --zone-chrome-zorder-check
+leg run_app_check .build/debug/continuum-revived --zone-close-keep-delete-check
+leg run_app_check .build/debug/continuum-revived --zone-create-encloses-check
+leg run_app_check .build/debug/continuum-revived --zone-create-gesture-check
+leg run_app_check .build/debug/continuum-revived --zone-hydration-lifecycle-check
+leg run_app_check .build/debug/continuum-revived --zone-lazy-resume-check
+leg run_app_check .build/debug/continuum-revived --zone-move-unified-check
+leg run_app_check .build/debug/continuum-revived --zone-project-session-naming-check
+leg run_app_check .build/debug/continuum-revived --zone-registry-refcount-check
+leg run_app_check .build/debug/continuum-revived --zone-rename-inline-check
+leg run_app_check .build/debug/continuum-revived --zone-resize-check
+leg run_app_check .build/debug/continuum-revived --zone-save-isolation-check
+leg run_app_check .build/debug/continuum-revived --zone-tier-transition-check
+leg run_ios_build
+bundle-check --delete-confirm-policy-defaults-check
+bundle-check --file-tree-boot-persistence-check
+bundle-check --menu-contract-check
+bundle-check --palette-duplicate-root-check
+count ContinuumRevivedCoreChecks 21
+count ContinuumRevivedFileTreeChecks 0
+count ContinuumRevivedPaletteChecks 0
+count ContinuumRevivedPerfChecks 0
+count ContinuumRevivedRelayChecks 0
+count ContinuumRevivedSyncChecks 9
+count ContinuumRevivedSyncIntegrationChecks 1

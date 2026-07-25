@@ -118,6 +118,10 @@ run_ios_build() {
   return 0
 }
 
+# Ticket P0.11: first leg, so a matrix that lost a check goes red before it
+# spends minutes building. The guard is a normal leg, so deleting it removes its
+# own inventory record and trips the same gate.
+run scripts/check-matrix-inventory.sh
 run swift build
 run_ios_build
 run swift run ContinuumRevivedCoreChecks
