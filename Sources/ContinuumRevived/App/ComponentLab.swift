@@ -393,6 +393,22 @@ enum LabCatalog {
         ]
     }
 
+    /// Muted body/metadata text on a lab card (P1.6).
+    ///
+    /// These cards used Apple's `secondaryLabelColor` (#808080 → 3.95:1 on white)
+    /// and `tertiaryLabelColor` (#BDBDBD → 1.88:1), which P1.3's ruling 1 replaced
+    /// with a house colour precisely because neither clears AA by construction.
+    /// The lab cards ARE the surfaces `--ui-contrast-check` measures headlessly,
+    /// so leaving them on the AppKit greys would mean the gate can only ever be
+    /// green with an exemption — and an exemption is what the packet forbids.
+    ///
+    /// Dynamic rather than resolved-at-build: a lab card is a plain factory-built
+    /// `NSTextField` with no `applyTokens()` hook, so the appearance has to be
+    /// AppKit's to resolve. `dynamicNSColor` is P1.8's existing bridge.
+    static var mutedLabelColor: NSColor {
+        StatusChipNSView.dynamicNSColor(TextToken.textSecondary.color)
+    }
+
     /// Fixed UUID used by the "session naming" panel — see docs/38-tickets/14-project-session-naming.md.
     static let sessionNamingFixtureId = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
 
@@ -583,7 +599,7 @@ enum LabCatalog {
             )
         }
         let outcome = label("pushSmoke.outcome", "firing: fire -> dedup-suppressed -> refire on phase change")
-        outcome.textColor = .secondaryLabelColor
+        outcome.textColor = mutedLabelColor
         let stack = NSStackView(views: [label("pushSmoke.title", "Push Smoke", size: 13)] + rows + [outcome])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -773,7 +789,7 @@ enum LabCatalog {
         let scope = NSTextField(labelWithString: "\(observerGate) \(operatorGate)")
         scope.identifier = NSUserInterfaceItemIdentifier("approvalsInbox.scope")
         scope.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
-        scope.textColor = .secondaryLabelColor
+        scope.textColor = mutedLabelColor
         stack.addArrangedSubview(scope)
 
         return stack
@@ -1026,7 +1042,11 @@ enum LabCatalog {
         let credentialLabel = NSTextField(labelWithString: credential)
         credentialLabel.identifier = NSUserInterfaceItemIdentifier("pairingToken.credential")
         credentialLabel.font = .monospacedDigitSystemFont(ofSize: 22, weight: .semibold)
-        credentialLabel.textColor = .controlAccentColor
+        // Emphasis, not the system accent: `controlAccentColor` defaults to
+        // `#007AFF`, which is 4.02:1 on this card's white — root cause 3 of
+        // P0.4's 177 (an undarkened accent used as TEXT). `accentWorking` is the
+        // same blue with a darkened light-appearance variant.
+        credentialLabel.textColor = StatusChipNSView.dynamicNSColor(AccentToken.accentWorking.color)
 
         let stack = NSStackView(views: [title, urlLabel, credentialLabel])
         stack.orientation = .vertical
@@ -1281,7 +1301,7 @@ enum LabCatalog {
         let body = NSTextField(wrappingLabelWithString: AppDelegate.topologyMigrationInformativeText)
         body.identifier = NSUserInterfaceItemIdentifier("topologyMigration.body")
         body.font = .systemFont(ofSize: 13)
-        body.textColor = .secondaryLabelColor
+        body.textColor = mutedLabelColor
         body.preferredMaxLayoutWidth = 460
         root.addArrangedSubview(body)
 
@@ -1315,14 +1335,18 @@ enum LabCatalog {
             let field = NSTextField(labelWithString: "\(fixture.0.rawValue) -> \(fixture.1)")
             field.identifier = NSUserInterfaceItemIdentifier("newTileCwd.policy.\(index)")
             field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-            field.textColor = .secondaryLabelColor
+            field.textColor = mutedLabelColor
             root.addArrangedSubview(field)
         }
 
         let key = NSTextField(labelWithString: NewTileCwdConfig.userDefaultsKey)
         key.identifier = NSUserInterfaceItemIdentifier("newTileCwd.defaultsKey")
         key.font = .systemFont(ofSize: 11, weight: .regular)
-        key.textColor = .tertiaryLabelColor
+        // Was `tertiaryLabelColor` — 1.88:1 on white, the single worst pair the
+        // real-tree audit found. There is no third text tier in the palette by
+        // design, so the hierarchy is carried by size and weight, not by fading
+        // the text below AA.
+        key.textColor = mutedLabelColor
         root.addArrangedSubview(key)
         return root
     }
@@ -1361,7 +1385,16 @@ enum LabCatalog {
             view.widthAnchor.constraint(equalToConstant: 520).isActive = true
             view.heightAnchor.constraint(equalToConstant: 210).isActive = true
             if pending {
-                view.layer?.borderColor = NSColor.systemOrange.withAlphaComponent(0.9).cgColor
+                // The card stands in for the canvas's marching-ants attention
+                // ring, so it must be painted from the same source: P1.8's one
+                // status→appearance mapping, solid, exactly as
+                // `CanvasNSView.attentionAccent` now paints it. It was
+                // `systemOrange@0.9`, which `--ui-contrast-check` measured at
+                // 2.07:1 against the light tile body — and the real overlay had
+                // the same defect, by copy. A fixture that depicts a colour the
+                // app no longer paints is a gate reading the wrong thing.
+                view.layer?.borderColor = StatusChipNSView
+                    .dynamicNSColor(StatusChipPresenter.display(for: .needsAttention).accent).cgColor
                 view.layer?.borderWidth = 2
             }
             return view

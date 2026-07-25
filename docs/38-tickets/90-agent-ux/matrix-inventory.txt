@@ -81,6 +81,7 @@ check --tile-drag-grab-check
 check --tile-world-bounds-check
 check --topology-migration-check
 check --ui-baseline-check
+check --ui-contrast-check
 check --ui-geometry-check
 check --ui-pixel-check
 check --ui-probe-check
@@ -211,6 +212,7 @@ leg run_app_check .build/debug/continuum-revived --tile-drag-grab-check
 leg run_app_check .build/debug/continuum-revived --tile-world-bounds-check
 leg run_app_check .build/debug/continuum-revived --topology-migration-check
 leg run_app_check .build/debug/continuum-revived --ui-baseline-check
+leg run_app_check .build/debug/continuum-revived --ui-contrast-check
 leg run_app_check .build/debug/continuum-revived --ui-geometry-check
 leg run_app_check .build/debug/continuum-revived --ui-pixel-check
 leg run_app_check .build/debug/continuum-revived --ui-probe-check
@@ -249,7 +251,7 @@ bundle-check --delete-confirm-policy-defaults-check
 bundle-check --file-tree-boot-persistence-check
 bundle-check --menu-contract-check
 bundle-check --palette-duplicate-root-check
-count ContinuumRevivedAgentUIChecks 5
+count ContinuumRevivedAgentUIChecks 6
 count ContinuumRevivedCoreChecks 21
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0

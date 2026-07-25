@@ -23,6 +23,9 @@ runStatusChipChecks()
 // Ticket: docs/38-tickets/90-agent-ux/P1.2-tokencolor-light-dark.md
 runTokenColorChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P1.6-token-contrast-gate.md
+runTokenContrastChecks()
+
 // Ticket: docs/38-tickets/90-agent-ux/P1.3-surface-text-border-tokens.md
 runDesignTokenChecks()
 

@@ -165,6 +165,13 @@ run_app_check .build/debug/continuum-revived --ui-probe-check
 # card/model parity, no zero-size or ambiguous views, no clipping at the tile minimum
 # width, and a non-vacuous scrolled-to-bottom assertion, in both appearances.
 run_app_check .build/debug/continuum-revived --ui-geometry-check
+# Ticket P0.4, wired by P1.6: WCAG contrast over the REAL view tree in both
+# appearances — every text/background and border/fill pair the lab surfaces render.
+# Built in P0.4 and deliberately left unwired: it was red on 177 of 446 pairs while
+# the app still painted literals. P1.10/P1.11 adopted the tokens (177 -> 78 -> 11)
+# and P1.6 closed the last 11, so it is a gate now. There is no allowlist and no
+# exemption: a failing pair means the colour is wrong.
+run_app_check .build/debug/continuum-revived --ui-contrast-check
 # Ticket P0.5: numeric pixel probes over the probed managed-agent tile — a label's
 # rect must be modulated (text that never drew is flat) and a border band must
 # differ from the fill inside it, in both appearances. Flatness only; WCAG ratios

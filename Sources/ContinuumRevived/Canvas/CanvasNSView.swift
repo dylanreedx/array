@@ -770,6 +770,10 @@ final class CanvasNSView: NSView, TokenThemed {
             zoneRenameField.textColor = TextToken.textPrimary.color.nsColor(in: self)
             zoneRenameField.backgroundColor = SurfaceToken.overlay.color.nsColor(in: self)
         }
+        // The attention rings hold a RESOLVED colour (the overlay draws a stroke,
+        // not a layer fill), so they have to be re-struck when the appearance
+        // flips. No-op when nothing needs attention.
+        if !attentionTileIds.isEmpty { applyAttentionBorders() }
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -845,8 +849,53 @@ final class CanvasNSView: NSView, TokenThemed {
         applyFocusBorder()
     }
 
+    /// The attention ring's hue, taken from P1.8's one status→appearance mapping
+    /// rather than from the user's focus-border palette (P1.6).
+    ///
+    /// It used to be `focusBorderColor(named: FocusBorderConfig.attentionColor)`,
+    /// i.e. the same name→`NSColor` map that serves the user's Settings choice,
+    /// resolving "Orange" to `systemOrange`. `--ui-contrast-check` measured the
+    /// result at **2.07:1** on a light tile, and no alpha fixes it: solid
+    /// `systemOrange` on white is 2.31:1, because orange-on-white cannot clear
+    /// 3:1 at all. The ring is not decorative — it is the app telling you a tile
+    /// needs you — so WCAG 1.4.11's 3:1 applies and an exemption was not on the
+    /// table.
+    ///
+    /// This is NOT the user-configuration carve-out `applyTokens()` documents:
+    /// `FocusBorderConfig.attentionColor` was explicitly "not user-configurable"
+    /// ("orange means human action is required"), so nothing the user picked is
+    /// being overridden. The semantic is unchanged and the hue is still amber —
+    /// `accentApproval` is 36°/35° across themes — but it now carries a darkened
+    /// light-appearance variant, which is exactly what the old spelling lacked.
+    /// Reading it off `StatusChipPresenter` also makes the ring, the approval
+    /// dock's outline and the tile header's glyph one colour by construction.
+    ///
+    /// The 0.8 alpha is GONE, and that is the load-bearing half. A stroke at some
+    /// alpha over an unknown backdrop is not a documented pair, so no gate can
+    /// hold it to 3:1 — the same reason P1.11 dropped the sidebar's translucency
+    /// when it adopted `panel`. Solid, the ring is exactly `accentApproval` on
+    /// `canvas`/`tileBody`, two of P1.3's 104 documented pairs (5.90:1 and 5.62:1
+    /// in light), asserted every run by `runTokenContrastChecks` — and named
+    /// there explicitly as the attention ring, so it cannot be tuned out from
+    /// under this call site.
+    ///
+    /// HONEST LIMIT: `--ui-contrast-check` does NOT see this ring. The overlay
+    /// strokes its dashes in `draw(_:)`, so it is neither a layer border nor a
+    /// `textColor` — the two things `UIProbeContrast.foregroundSlots` can read.
+    /// What that gate measured at 2.07:1 was the LAB CARD's hand-painted stand-in
+    /// (`makeManagedAgentApprovalDockPreview`), which had the same colour by copy.
+    /// So the ratio is gated at the palette level (above) and the *pixels* by the
+    /// committed `observer.rollup` baselines: reverting this line to
+    /// `systemOrange` turns `--ui-baseline-check` red on both appearances (847 /
+    /// 752 pixels, worst channel delta 105). Neither alone is sufficient — a
+    /// baseline can be re-blessed, and the palette cannot know what this line
+    /// paints — which is why both are recorded.
+    private static var attentionAccent: TokenColor {
+        StatusChipPresenter.display(for: .needsAttention).accent
+    }
+
     private func applyAttentionBorders() {
-        let color = Self.focusBorderColor(named: FocusBorderConfig.attentionColor).withAlphaComponent(0.8)
+        let color = Self.attentionAccent.nsColor(in: self)
         let gap = CGFloat(FocusBorderConfig.defaultGap)
         for tileId in Array(attentionBorderOverlays.keys) where !attentionTileIds.contains(tileId) {
             attentionBorderOverlays[tileId]?.removeFromSuperview()

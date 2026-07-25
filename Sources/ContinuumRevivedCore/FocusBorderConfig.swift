@@ -16,9 +16,14 @@ public enum FocusBorderConfig {
     /// Marching-ants loop duration (s). Lower = faster. Matches the pre-config
     /// constant so behavior is unchanged when no preference is set.
     public static let defaultSpeed: Double = 2.5
-    /// Semantic attention ring color for managed-agent approvals. This is not
-    /// user-configurable: orange means human action is required.
-    public static let attentionColor: String = "Orange"
+    // The attention ring's COLOR no longer lives here (P1.6). It used to be
+    // `attentionColor = "Orange"`, resolved through the App layer's user-palette
+    // map to `systemOrange`, which `--ui-contrast-check` measured at 2.07:1 on a
+    // light tile. The semantic ("orange means human action is required") is
+    // unchanged but now carried by `StatusChipPresenter.display(for:
+    // .needsAttention).accent` — P1.8's single status→appearance mapping, whose
+    // amber has a darkened light-appearance variant. Its SPEED is still a
+    // canvas-behaviour constant, so it stays.
     /// Faster than the normal focus march so attention remains distinct when a
     /// focused tile is also waiting on the human.
     public static let attentionSpeed: Double = 1.4
