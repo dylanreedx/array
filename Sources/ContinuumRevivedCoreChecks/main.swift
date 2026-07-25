@@ -9968,4 +9968,8 @@ runAgentRecordChecks()
 // across every project, out of application support rather than a project root.
 runAgentStoreChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P2B.1-agent-inventory.md — the union of
+// terminal sessions and agents (tiled or headless) as one value.
+runAgentInventoryChecks()
+
 print("ContinuumRevivedCoreChecks passed")

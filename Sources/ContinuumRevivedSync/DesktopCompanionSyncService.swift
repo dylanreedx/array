@@ -139,6 +139,15 @@ public struct DesktopManagedAgentActivity: Sendable {
     }
 }
 
+/// The companion path's entry point into `AgentInventory` (P2B.1).
+///
+/// This used to BE the fold. It is now a thin caller: the union of terminal
+/// sessions and agents lives in `AgentInventory` in Core, so the desktop reads
+/// the same derivation the phone is published from instead of a fifth one of
+/// its own. Behaviour here is unchanged on everything
+/// `DesktopCompanionSyncPublisherTests` pins (keys, statuses, summaries, tile
+/// hints, timeline order, the I5 sweep); that file was deliberately not touched,
+/// so it is a regression witness rather than a test rewritten to match.
 public enum DegradedDesktopActivitySnapshotSource {
     public static func snapshot(
         descriptors: [TerminalSessionDescriptor],
@@ -147,80 +156,41 @@ public enum DegradedDesktopActivitySnapshotSource {
         replicaId: UUID,
         now: Date
     ) -> ActivityLogSnapshot {
-        var snapshot = ActivityLogSnapshot.empty
-        let sorted = descriptors.sorted { lhs, rhs in
-            lhs.tileId.uuidString == rhs.tileId.uuidString
-                ? lhs.id.uuidString < rhs.id.uuidString
-                : lhs.tileId.uuidString < rhs.tileId.uuidString
+        // `DesktopManagedAgentActivity` is this module's transport shape: a
+        // status + kind + timeline, with no `AgentRecord` behind it (a managed
+        // session the supervisor has not claimed has none — P2A.8). Project it
+        // onto the record shape `AgentInventory` folds, carrying ONLY what the
+        // synthetic fallback event reads: id, display label, tile hint and
+        // timestamp. The host-bound fields stay empty, and must: this value is
+        // one step from the sync boundary (I5).
+        var statuses = liveStatuses
+        var records: [AgentRecord] = []
+        var activityByAgent: [AgentID: [AgentActivityEventDraft]] = [:]
+        for agent in managedAgents {
+            let id = AgentID(rawValue: agent.agentId)
+            statuses[agent.agentId] = agent.status
+            records.append(AgentRecord(
+                id: id,
+                // The kind's label, so the synthesised summary is the same
+                // "Managed agent idle" string this fold has always published.
+                displayName: AgentInventory.displayName(for: agent.agentKind),
+                model: "",
+                thinking: "",
+                cwd: "",
+                createdAt: agent.updatedAt,
+                lastActivityAt: agent.updatedAt,
+                tileId: agent.tileId
+            ))
+            activityByAgent[id, default: []].append(contentsOf: agent.recentEvents)
         }
-        for (offset, descriptor) in sorted.enumerated() {
-            let kind = descriptor.agentDescriptor?.agentKind ?? .shell
-            let status = liveStatuses[descriptor.tileId] ?? descriptor.agentDescriptor?.status ?? .idle
-            let event = AgentActivityEvent(
-                stamping: AgentActivityEventDraft(
-                    // A terminal session has no AgentRecord, so its tile id IS its
-                    // agent identity here — the same equality P2A.8's legacy decode
-                    // relies on. The tile hint is that same id, so "Show on canvas"
-                    // keeps working for these rows.
-                    agentId: descriptor.tileId,
-                    tileId: descriptor.tileId,
-                    runId: nil,
-                    tone: status == .needsAttention ? .approval : .info,
-                    kind: "desktop.degradedStatus",
-                    status: status,
-                    summary: safeSummary(kind: kind, status: status),
-                    occurredAt: descriptor.agentDescriptor?.statusUpdatedAt ?? now
-                ),
-                sequence: UInt64(offset + 1),
-                replicaId: replicaId
-            )
-            snapshot = apply(snapshot, event)
-        }
-        var sequence = UInt64(sorted.count)
-        let sortedManagedAgents = managedAgents.sorted { lhs, rhs in lhs.agentId.uuidString < rhs.agentId.uuidString }
-        for agent in sortedManagedAgents {
-            // Prefer the agent's real timeline; fall back to a single synthetic
-            // status event when no events have been recorded yet.
-            let drafts: [AgentActivityEventDraft] = agent.recentEvents.isEmpty
-                ? [AgentActivityEventDraft(
-                    agentId: agent.agentId, tileId: agent.tileId, runId: nil,
-                    tone: agent.status == .needsAttention ? .approval : .info,
-                    kind: "desktop.managedStatus", status: agent.status,
-                    summary: safeSummary(kind: agent.agentKind, status: agent.status),
-                    occurredAt: agent.updatedAt)]
-                : agent.recentEvents
-            for draft in drafts {
-                sequence += 1
-                snapshot = apply(snapshot, AgentActivityEvent(stamping: draft, sequence: sequence, replicaId: replicaId))
-            }
-        }
-        return snapshot
-    }
-
-    private static func safeSummary(kind: AgentKind, status: AgentStatus) -> String {
-        "\(displayName(for: kind)) \(displayName(for: status))"
-    }
-
-    private static func displayName(for kind: AgentKind) -> String {
-        switch kind {
-        case .shell: "Shell"
-        case .claude: "Claude"
-        case .codex: "Codex"
-        case .pi: "Pi"
-        case .managed: "Managed agent"
-        case .unknown: "Agent"
-        }
-    }
-
-    private static func displayName(for status: AgentStatus) -> String {
-        switch status {
-        case .configuring: "configuring"
-        case .working: "working"
-        case .idle: "idle"
-        case .needsAttention: "needs attention"
-        case .done: "done"
-        case .stale: "stale"
-        }
+        return AgentInventory.snapshot(
+            terminalDescriptors: descriptors,
+            liveStatuses: statuses,
+            agents: records,
+            activityByAgent: activityByAgent,
+            replicaId: replicaId,
+            now: now
+        )
     }
 }
 
