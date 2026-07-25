@@ -3025,8 +3025,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// tile's real Run action — turn 1 plants a codeword, turn 2 asks for it
     /// back. Passing proves the click path streams live GPT-5.6 into the tile
     /// AND that the session continues across prompts (memory). Exercises the
-    /// exact path in-process; polls via asyncAfter so the normal event loop
-    /// drains the tile's main-queue ingests. Gated on `--managed-agent-live-check`.
+    /// exact path in-process; waits via the shared `waitUntil` (UITestSupport),
+    /// which suspends rather than spinning a nested RunLoop, so the normal event
+    /// loop drains the tile's main-queue ingests. Gated on
+    /// `--managed-agent-live-check`.
     private func runManagedAgentLiveCheck(window: NSWindow) {
         func report(_ line: String) { FileHandle.standardError.write(Data("[managed-agent-live] \(line)\n".utf8)) }
         let codeword = "BANANA73"
@@ -3044,49 +3046,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             report("spawned tile \(tileId)")
 
+            // One budget for both turns, as before: each wait gets whatever is
+            // left of the original 180s.
             let deadline = Date().addingTimeInterval(180)
-            var submittedTurn2 = false
             view.qaSubmitPrompt("Remember this codeword: \(codeword). Reply with just: OK")
             // Cards present right after the (synchronous) prompt echo — turn 1's
             // reply is done once a NEW card appears beyond this and it settles.
             let cardsAfterTurn1Submit = view.transcriptCardCount
             report("turn 1 submitted (plant codeword); baseCards=\(cardsAfterTurn1Submit)…")
 
-            @MainActor func poll() {
-                if Date() >= deadline {
+            Task { @MainActor in
+                @MainActor func timedOut(_ stage: String) -> Never {
                     report("transcript:\n\(view.qaTranscriptText)")
-                    report("FAIL: timed out (submittedTurn2=\(submittedTurn2))")
+                    report("FAIL: timed out (\(stage))")
                     Foundation.exit(1)
                 }
-                if !submittedTurn2 {
-                    // Turn 1 done: a reply card appeared past the echo and the
-                    // agent settled (not working). Then ask for recall.
-                    if view.transcriptCardCount > cardsAfterTurn1Submit,
-                       view.qaComposeEnabled, view.currentAgentStatus != .working {
-                        submittedTurn2 = true
-                        report("turn 1 done; submitting turn 2 (recall) in a fresh Pi process, same session")
-                        view.qaSubmitPrompt("What was the codeword? Reply with only the codeword.")
-                    }
-                } else {
-                    // Continuity proof: turn 2's reply (a NEW assistant card,
-                    // since 88.5 splits per turn) recalls the codeword planted
-                    // in turn 1 — impossible without a continued session.
-                    if let last = view.qaLastAssistantCardBody, last.contains(codeword),
-                       view.currentAgentStatus != .working {
-                        report("transcript:\n\(view.qaTranscriptText)")
-                        // 88.4c: confirm the syncable activity timeline (what the
-                        // phone would receive) was populated in-app by the runner.
-                        let kinds = self.managedAgentActivityByTile[tileId]?.map(\.kind) ?? []
-                        report("sync activity timeline recorded (88.4c): \(kinds)")
-                        report("PASS: turn 2 recalled '\(codeword)' — session continuity works in-app")
-                        Foundation.exit(0)
-                    }
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    MainActor.assumeIsolated { poll() }
-                }
+
+                // Turn 1 done: a reply card appeared past the echo and the agent
+                // settled (not working). Then ask for recall.
+                guard await waitUntil(timeout: deadline.timeIntervalSinceNow, {
+                    view.transcriptCardCount > cardsAfterTurn1Submit
+                        && view.qaComposeEnabled && view.currentAgentStatus != .working
+                }) else { timedOut("waiting for turn 1 reply") }
+
+                report("turn 1 done; submitting turn 2 (recall) in a fresh Pi process, same session")
+                view.qaSubmitPrompt("What was the codeword? Reply with only the codeword.")
+
+                // Continuity proof: turn 2's reply (a NEW assistant card, since
+                // 88.5 splits per turn) recalls the codeword planted in turn 1 —
+                // impossible without a continued session.
+                guard await waitUntil(timeout: deadline.timeIntervalSinceNow, {
+                    view.qaLastAssistantCardBody?.contains(codeword) == true
+                        && view.currentAgentStatus != .working
+                }) else { timedOut("waiting for turn 2 recall") }
+
+                report("transcript:\n\(view.qaTranscriptText)")
+                // 88.4c: confirm the syncable activity timeline (what the phone
+                // would receive) was populated in-app by the runner.
+                let kinds = self.managedAgentActivityByTile[tileId]?.map(\.kind) ?? []
+                report("sync activity timeline recorded (88.4c): \(kinds)")
+                report("PASS: turn 2 recalled '\(codeword)' — session continuity works in-app")
+                Foundation.exit(0)
             }
-            poll()
         }
     }
 

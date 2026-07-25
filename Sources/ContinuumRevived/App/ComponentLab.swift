@@ -2437,15 +2437,3 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
     }
 }
-
-private extension NSView {
-    func descendant(withIdentifier rawValue: String) -> NSView? {
-        if identifier?.rawValue == rawValue { return self }
-        for subview in subviews {
-            if let match = subview.descendant(withIdentifier: rawValue) {
-                return match
-            }
-        }
-        return nil
-    }
-}

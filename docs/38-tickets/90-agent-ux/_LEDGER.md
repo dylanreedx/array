@@ -3,7 +3,7 @@
 Durable state. The conversation is NOT the source of truth: this file + `git log` are.
 
 ## heartbeat
-last-touch 2026-07-25T05:00:00Z · ticket P0.2-uiprobe-harness · attempt 1 · pid loop · status committed
+last-touch 2026-07-25T05:04:00Z · ticket P0.8-shared-selector-and-wait · attempt 1 · pid loop · status implementing
 
 ## tickets
 

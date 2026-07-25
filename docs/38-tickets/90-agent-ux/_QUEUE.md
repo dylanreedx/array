@@ -21,6 +21,18 @@ All Phase 0 tickets are tagged `autonomous`.
 | 9 | `P0.6-png-baselines.md` | P0.2 |
 | 10 | `P0.9-ui-tour-check.md` | P0.2 |
 | 11 | `P0.7-retire-isblank-gate.md` | P0.3, P0.4, P0.5, P0.6 |
+| 12 | `P1.1-agentui-module.md` | P0.7 |
+| 13 | `P1.2-tokencolor-light-dark.md` | P1.1 |
+| 14 | `P1.4-type-scale.md` | P1.1 |
+| 15 | `P1.5-spacing-radius-scale.md` | P1.1 |
+| 16 | `P1.3-surface-text-border-tokens.md` | P1.2 |
+| 17 | `P1.6-token-contrast-gate.md` | P1.3 |
+| 18 | `P1.7-raw-color-lint.md` | P1.3 |
+| 19 | `P1.8-one-status-presenter.md` | P1.3 |
+| 20 | `P1.9-live-appearance-switching.md` | P1.3 |
+| 21 | `P1.10-adopt-tokens-tile.md` | P1.3, P1.4, P1.5, P1.9 |
+| 22 | `P1.11-adopt-tokens-chrome.md` | P1.10 |
+| 23 | `P1.12-ios-consumes-tokens.md` | P1.3, P1.8 |
 
-Phases 1–9 are authored during the run and appended here as they land. Full backlog shape lives in
+Phase 1 is authored (tokens, light+dark). Phases 2–9 are authored during the run and appended here as they land. Full backlog shape lives in
 the session plan; see `_RUNBOOK.md` for the operating contract.
