@@ -74,8 +74,33 @@ All Phase 0 tickets are tagged `autonomous`.
 | 62 | `P3.12-row-context-menu.md` | P3.11 |
 | 63 | `P3.13-inline-rename.md` | P3.6 |
 | 64 | `P3.14-preserve-workspace-management.md` | P3.8 |
+| 65 | `P4.1-lifecycle-state.md` | P2A.2, P3.1 |
+| 66 | `P4.2-effective-settled.md` | P4.1 |
+| 67 | `P4.3-auto-settle-inactivity.md` | P4.2 |
+| 68 | `P4.4-auto-unsettle.md` | P4.2 |
+| 69 | `P4.5-snooze-presets.md` | P4.1 |
+| 70 | `P4.6-snooze-raised-hand.md` | P4.5, P4.2 |
+| 71 | `P4.7-snoozed-shelf.md` | P4.6, P3.7 |
+| 72 | `P4.8-settled-tail-paging.md` | P4.7 |
+| 73 | `P4.9-reading-is-free.md` | P4.4, P3.9 |
+| 74 | `P4.10-post-action-advance.md` | P4.2, P3.11 |
+| 75 | `P4.11-undo-toast.md` | P4.10 |
+| 76 | `P4.12-crossfade-in-place.md` | P3.7, P4.7 |
+| 77 | `P4.13-precedence-matrix.md` | P4.2, P4.3, P4.4, P4.6, P2D.5 |
+| 78 | `P5.1-pi-rpc-client.md` | P2A.3 |
+| 79 | `P5.2-persistent-session.md` | P5.1 |
+| 80 | `P5.3-abort-stop-button.md` | P5.2 |
+| 81 | `P5.4-set-model.md` | P5.2 |
+| 82 | `P5.5-set-thinking-level.md` | P5.4 |
+| 83 | `P5.6-compact.md` | P5.2 |
+| 84 | `P5.7-steer-follow-up.md` | P5.2 |
+| 85 | `P5.8-session-stats-cost.md` | P5.2 |
+| 86 | `P5.9-real-approvals.md` | P5.2 |
+| 87 | `P5.10-agent-settled-signal.md` | P5.2 |
 
-Phases 0, 1, 2A, 2B and 2C are authored. 2C (worktrees) MUST precede 2D (orchestration): parallel agents without isolation corrupt each other. Phases 2D and 3 are authored. Phases 4–9 are authored during the run.
+Phases 0, 1, 2A, 2B and 2C are authored. 2C (worktrees) MUST precede 2D (orchestration): parallel agents without isolation corrupt each other. Phases 2D, 3, 4 and 5 are authored. Phases 6–9 are authored during the run.
+
+Phase 5 note: live rpc behaviour cannot be verified headlessly, so every Phase-5 packet specifies a deterministic fixture/fake-client check for the matrix PLUS a separate supervised manual step. A worker must not claim live coverage from the matrix.
 
 Note: P2D.4/P2D.5 depend on Phase 3 (inbox rows) and Phase 4 (blocker precedence), so the loop will correctly skip them until those land — that is intended, not a stall. and appended here as they land. Full backlog shape lives in
 the session plan; see `_RUNBOOK.md` for the operating contract.
