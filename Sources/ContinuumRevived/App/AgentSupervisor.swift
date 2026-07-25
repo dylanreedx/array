@@ -27,9 +27,9 @@ import Foundation
 // NOT here, deliberately:
 // · `PiAgentRunner` is untouched — Phase 5 replaces it with the RPC client, and a
 //   rewrite here would collide with that.
-// · Nothing is restored at init. The store may already hold records from a previous
-//   launch; adopting them is P2A.7 (`restore-on-relaunch`), so within one session
-//   `agent(forTile:)` dedupes and across launches it does not.
+// · Nothing is restored at INIT. `restore()` (P2A.7) is an explicit call the app
+//   makes at boot, before it walks the canvas, so a test can construct a supervisor
+//   over a populated store and still observe the pre-restore state.
 // · Attach / detach as an operation is P2A.5. This file only gets the ownership out
 //   of the view so that ticket has something to move.
 
@@ -109,6 +109,95 @@ final class AgentSupervisor {
             cwd: URL(fileURLWithPath: record.cwd, isDirectory: true),
             sessionId: sessionId(for: record.id)
         ))
+    }
+
+    // MARK: - Restore (P2A.7)
+
+    /// What one `restore()` adopted, so the caller reports numbers instead of
+    /// guessing at them.
+    struct RestoreReport {
+        /// Adopted into `records`, in `AgentStore.loadAll()` order.
+        var restored: [AgentID] = []
+        /// Records whose `cwd` no longer exists on disk. Marked, not adopted, and
+        /// never deleted — the directory may be a detached worktree that comes back,
+        /// and throwing away a user's agent because a path moved is not this call's
+        /// decision to make.
+        var stale: [AgentID] = []
+        /// Already live in this session, so the in-memory copy was left alone.
+        var skipped: [AgentID] = []
+    }
+
+    /// The agents this supervisor adopted from a previous launch. Read by
+    /// `wireManagedAgentTile`, which shows a "previous session" notice for them: the
+    /// desktop transcript lives only in the view, so a restored agent's tile is empty
+    /// even though its conversation is not.
+    private(set) var restoredIDs: Set<AgentID> = []
+    /// Records `restore()` refused to adopt because their project root is gone. Kept
+    /// so the Phase 3 inbox can surface them rather than have them silently missing.
+    private(set) var staleIDs: Set<AgentID> = []
+
+    /// Adopts every record `AgentStore` holds into `records`.
+    ///
+    /// NO PROVIDER PROCESS IS STARTED, which is the whole shape of this method: a
+    /// relaunched agent is idle until the user sends a prompt, and auto-resuming N
+    /// processes at launch is both surprising and expensive. Nothing is lost by
+    /// waiting — Pi's `--session-id` is derived from the agent id (`sessionId(for:)`),
+    /// so the next prompt continues the same conversation.
+    ///
+    /// A record whose `cwd` no longer exists is MARKED AND SKIPPED (the packet's
+    /// watch-out): adopting it would put an agent in the inbox whose every `send`
+    /// spawns a process into a missing directory.
+    @discardableResult
+    func restore(fileManager: FileManager = .default) -> RestoreReport {
+        var report = RestoreReport()
+        let stored: [AgentRecord]
+        do {
+            stored = try store.loadAll()
+        } catch {
+            warn("AgentSupervisor.restore: could not read the agent store: \(error)")
+            return report
+        }
+        for record in stored {
+            // An agent this session already owns wins over the stored copy: `records`
+            // is the live one and the store trails it by at most one persist. This is
+            // also what makes `restore()` safe to call twice.
+            if records[record.id] != nil {
+                report.skipped.append(record.id)
+                continue
+            }
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: record.cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
+                staleIDs.insert(record.id)
+                report.stale.append(record.id)
+                warn("AgentSupervisor.restore: skipping agent \(record.id.rawValue.uuidString) — its project root \(record.cwd) no longer exists")
+                continue
+            }
+            records[record.id] = record
+            // A root that came back stops being stale. Without this an agent marked
+            // on an earlier sweep would read as both stale and live to the Phase 3
+            // inbox (from the cross-review).
+            staleIDs.remove(record.id)
+            restoredIDs.insert(record.id)
+            report.restored.append(record.id)
+        }
+        return report
+    }
+
+    /// True for an agent that came back from a previous launch rather than being
+    /// spawned in this one. A durable fact about the agent: it stays true once the
+    /// agent runs again.
+    func wasRestored(_ id: AgentID) -> Bool { restoredIDs.contains(id) }
+
+    /// Whether a view attaching to this agent should show the "previous session"
+    /// placeholder: it came back from a previous launch AND has produced nothing
+    /// since, so the replay it is about to receive is empty.
+    ///
+    /// Narrower than `wasRestored` on purpose (from the cross-review). A restored
+    /// agent that has since been prompted has a real transcript to replay, and a tile
+    /// re-wired to it — P2A.5's re-attach, Phase 3's "open in tile" — would otherwise
+    /// print the placeholder underneath it.
+    func needsPreviousSessionNotice(_ id: AgentID) -> Bool {
+        restoredIDs.contains(id) && (history[id]?.isEmpty ?? true)
     }
 
     // MARK: - Lifecycle
@@ -258,9 +347,10 @@ final class AgentSupervisor {
         persist(record)
     }
 
-    /// The agent bound to a tile, if this session spawned one. In-memory only —
-    /// nothing is loaded from the store at init, so this dedupes a re-wire within a
-    /// launch and NOT across launches (P2A.7).
+    /// The agent bound to a tile. Reads `records`, which `restore()` (P2A.7)
+    /// repopulates from the store at boot — so this dedupes a re-wire within a launch
+    /// AND across launches, and a restored tile finds its own agent instead of
+    /// spawning a second one over the top of it.
     func agent(forTile tileId: UUID) -> AgentID? {
         records.values.first(where: { $0.tileId == tileId })?.id
     }
@@ -654,6 +744,364 @@ func runAgentSupervisorChecks() async throws {
 
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
     print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport)")
+}
+
+/// Gated on `--agent-restore-check` (P2A.7).
+///
+/// The records are written straight to an `AgentStore` in a temp root — nothing in
+/// this process ever held them — so `restore()` is observed adopting state it did not
+/// create, which is exactly what a relaunch is. The provider is a
+/// `ScriptedAgentRunner` behind `ScriptedRunnerQueue`, so "no agent auto-started"
+/// is asserted as ZERO RUNNERS EVER CONSTRUCTED rather than as a nil dictionary
+/// entry.
+///
+/// What stays a source scan, and why: the two production sites are the boot walk in
+/// `startWorkspace` and `wireManagedAgentTile`, both `AppDelegate` methods over a
+/// live canvas, window and workspace runtime — the same reason
+/// `managedAgentCloseBranchSource` and `paletteAgentSpawnBranch` are scans. The
+/// ORDERING is the load-bearing half there (restore must precede the tile walk, or
+/// the walk spawns a fresh agent over a surviving record), so it is asserted as a
+/// line ordering, not read off the diff.
+@MainActor
+func runAgentRestoreChecks() async throws {
+    struct CheckError: Error, CustomStringConvertible {
+        let description: String
+    }
+    func fail(_ message: String) -> CheckError { CheckError(description: message) }
+
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-agent-restore-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = AgentStore(applicationSupportDirectory: root)
+    let config = AgentModelConfig.resolvedFromDefaults()
+    let liveCwd = FileManager.default.currentDirectoryPath
+    // Never created, so the stale-record branch is about a genuinely missing
+    // directory and not about permissions.
+    let missingCwd = root.appendingPathComponent("gone-project-root", isDirectory: true).path
+
+    // MARK: 1 · the previous launch's records, written by nothing in this process
+
+    let createdAt = Date(timeIntervalSinceReferenceDate: 700_000_000)
+    let tileId = UUID()
+    let projectId = UUID()
+    let tiled = AgentRecord(
+        id: AgentID(rawValue: UUID()),
+        displayName: "reviewer",
+        role: "reviewer",
+        model: config.model,
+        thinking: config.thinking,
+        cwd: liveCwd,
+        projectId: projectId,
+        createdAt: createdAt,
+        lastActivityAt: createdAt.addingTimeInterval(30),
+        tileId: tileId
+    )
+    let headless = AgentRecord(
+        id: AgentID(rawValue: UUID()),
+        displayName: config.model,
+        model: config.model,
+        thinking: config.thinking,
+        cwd: liveCwd,
+        createdAt: createdAt.addingTimeInterval(1),
+        lastActivityAt: createdAt.addingTimeInterval(2)
+    )
+    let orphaned = AgentRecord(
+        id: AgentID(rawValue: UUID()),
+        displayName: "orphan",
+        model: config.model,
+        thinking: config.thinking,
+        cwd: missingCwd,
+        createdAt: createdAt.addingTimeInterval(3),
+        lastActivityAt: createdAt.addingTimeInterval(4),
+        tileId: UUID()
+    )
+    for record in [tiled, headless, orphaned] { try store.upsert(record) }
+
+    let turn: [AgentRuntimeEvent] = [
+        .sessionStateChanged(.running),
+        .contentDelta(threadId: "provider-thread", turnId: "t1", streamKind: .assistant, delta: "resumed"),
+        .turnCompleted(threadId: "provider-thread", turnId: "t1", outcome: .completed, errorMessage: nil)
+    ]
+    let queue = ScriptedRunnerQueue([ScriptedAgentRunner(script: turn)])
+    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0) })
+    // Vacuity guard: if a supervisor adopted the store at init, everything below
+    // would pass while saying nothing about `restore()`.
+    guard supervisor.records.isEmpty else {
+        throw fail("a fresh supervisor already holds \(supervisor.records.count) record(s), so restore() is not what adopts them")
+    }
+
+    // MARK: 2 · restore adopts the live records and MARKS the stale one
+
+    let report = supervisor.restore()
+    guard report.restored.count == 2, Set(report.restored) == Set([tiled.id, headless.id]) else {
+        throw fail("restore adopted \(report.restored.map { $0.rawValue.uuidString }), expected exactly the tiled and headless agents")
+    }
+    guard report.stale == [orphaned.id] else {
+        throw fail("restore did not skip the agent whose project root is gone: stale \(report.stale.map { $0.rawValue.uuidString })")
+    }
+    guard report.skipped.isEmpty else {
+        throw fail("restore skipped \(report.skipped.count) record(s) as already-live on a supervisor that held none")
+    }
+    guard supervisor.records[orphaned.id] == nil, supervisor.staleIDs.contains(orphaned.id) else {
+        throw fail("the stale agent was adopted rather than marked and skipped")
+    }
+    // Marked, not destroyed: the directory may be a worktree that comes back.
+    guard try store.load(id: orphaned.id) != nil else {
+        throw fail("restore deleted the stale agent's record; skipping is not removing")
+    }
+
+    // Identity, model and role come back intact — the point of restoring at all.
+    guard let restoredTiled = supervisor.records[tiled.id] else {
+        throw fail("the tiled agent is not in supervisor.records after restore")
+    }
+    guard restoredTiled.displayName == "reviewer",
+          restoredTiled.role == "reviewer",
+          restoredTiled.model == config.model,
+          restoredTiled.thinking == config.thinking,
+          restoredTiled.cwd == liveCwd,
+          restoredTiled.projectId == projectId,
+          restoredTiled.createdAt == createdAt,
+          restoredTiled.tileId == tileId else {
+        throw fail("the restored record lost its identity: \(restoredTiled)")
+    }
+    guard supervisor.records[headless.id]?.tileId == nil else {
+        throw fail("the headless agent came back with a tile binding: \(String(describing: supervisor.records[headless.id]?.tileId))")
+    }
+    // The conversation is continuable because the Pi session id is derived from the
+    // agent id, which is what survived. Asserted, since "history is not lost"
+    // depends on it entirely.
+    guard AgentSupervisor.sessionId(for: tiled.id) == "continuum-agent-\(tiled.id.rawValue.uuidString)" else {
+        throw fail("the restored agent's Pi session id is not derived from its id: \(AgentSupervisor.sessionId(for: tiled.id))")
+    }
+    // THE REASON THE BOOT WALK NEEDS THIS: the tile finds its own agent instead of
+    // spawning a second one over the top of a surviving record.
+    guard supervisor.agent(forTile: tileId) == tiled.id else {
+        throw fail("a restored tile does not resolve to its agent, so wiring it would spawn a duplicate")
+    }
+
+    // MARK: 3 · nothing auto-started
+
+    guard queue.handedOut.isEmpty else {
+        throw fail("restore constructed \(queue.handedOut.count) runner(s) — a relaunched agent must be idle until prompted")
+    }
+    for (label, id) in [("tiled", tiled.id), ("headless", headless.id)] {
+        guard supervisor.isRunning(id) == false else {
+            throw fail("the restored \(label) agent has a live runner")
+        }
+    }
+
+    // MARK: 4 · the tiled one gets a view, and it says where it stands
+
+    let tile = ManagedAgentTileNSView(tile: Tile(
+        id: tileId,
+        kind: .managedAgent,
+        title: "agent",
+        frame: TileFrame(x: 0, y: 0, width: 520, height: 320),
+        zPosition: .fromLegacyRank(1),
+        runtimeRef: nil,
+        metadata: TileMetadata(launchProfileId: "managed")
+    ))
+    tile.frame = NSRect(x: 0, y: 0, width: 520, height: 320)
+    tile.attach(agentID: tiled.id, supervisor: supervisor)
+    guard tile.attachedAgentID == tiled.id else {
+        throw fail("the restored agent's tile is not attached to it: \(String(describing: tile.attachedAgentID))")
+    }
+    guard supervisor.wasRestored(tiled.id) else {
+        throw fail("the restored agent does not report as restored, so the tile cannot know to place the notice")
+    }
+    // The replay is empty by construction — the supervisor's history buffer is
+    // in-memory and this process never ran a turn for this agent — which is exactly
+    // why the notice exists. Asserted so "the placeholder stands in for a transcript
+    // that is genuinely absent" is a measurement rather than a claim.
+    guard tile.ingestedEvents.isEmpty, tile.transcriptCardCount == 0 else {
+        throw fail("a restored agent replayed \(tile.ingestedEvents.count) event(s) into \(tile.transcriptCardCount) card(s); the notice would be covering for nothing")
+    }
+    guard supervisor.needsPreviousSessionNotice(tiled.id) else {
+        throw fail("a restored agent with no history does not ask for the previous-session notice")
+    }
+    // The status a fresh tile starts at, and the one it must NOT keep for a restored
+    // agent: `configuring` reads as "still starting up" for something that is simply
+    // idle. The pre-assertion is the vacuity guard for the post-assertion below.
+    guard tile.currentAgentStatus == .configuring else {
+        throw fail("a just-built tile is \(tile.currentAgentStatus), so the status assertion below proves nothing")
+    }
+    tile.showPreviousSessionNotice()
+    guard tile.currentAgentStatus == .idle else {
+        throw fail("a restored agent's tile shows \(tile.currentAgentStatus) — a relaunched agent is idle until it is prompted")
+    }
+    guard tile.qaTranscriptText.contains(ManagedAgentTileNSView.previousSessionNoticeText) else {
+        throw fail("the previous-session notice did not reach the transcript: \(tile.qaTranscriptText)")
+    }
+    guard tile.qaRenderedCardCount == tile.transcriptCardCount, tile.transcriptCardCount == 1 else {
+        throw fail("the notice rendered \(tile.qaRenderedCardCount) view(s) for \(tile.transcriptCardCount) card(s)")
+    }
+    // Re-wiring the same tile happens (three call sites), so the notice must not stack.
+    tile.showPreviousSessionNotice()
+    guard tile.transcriptCardCount == 1 else {
+        throw fail("a second notice stacked up: \(tile.transcriptCardCount) cards")
+    }
+    // Vacuity guard on `wasRestored`: an agent spawned in THIS session must not get
+    // the notice, or every tile would carry it.
+    let freshId = supervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: URL(fileURLWithPath: liveCwd, isDirectory: true),
+        model: config.model,
+        thinking: config.thinking
+    )
+    guard supervisor.wasRestored(freshId) == false else {
+        throw fail("an agent spawned in this session reports as restored")
+    }
+
+    // MARK: 5 · a prompt starts it, and the conversation continues from there
+
+    let inbox = EventInbox()
+    let stream = supervisor.events(for: headless.id)
+    let task = Task { @MainActor in for await event in stream { inbox.append(event) } }
+    defer { task.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { supervisor.subscriberCount(for: headless.id) == 1 }) else {
+        throw fail("the subscriber did not register on the restored agent")
+    }
+    supervisor.send("continue please", to: headless.id)
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { inbox.events.count == turn.count }) else {
+        throw fail("a prompt to a restored agent did not run: \(inbox.events.count) of \(turn.count) events")
+    }
+    guard queue.handedOut.count == 1, queue.handedOut[0].prompts == ["continue please"] else {
+        throw fail("the restored agent's prompt did not reach a runner: \(queue.handedOut.map(\.prompts))")
+    }
+    guard try store.load(id: headless.id)?.lastActivityAt ?? .distantPast > headless.lastActivityAt else {
+        throw fail("running a restored agent did not move its stored lastActivityAt")
+    }
+    // Having run, it no longer wants the placeholder — but it is still a restored
+    // agent. The two answers are deliberately different (see
+    // `needsPreviousSessionNotice`).
+    guard supervisor.wasRestored(headless.id), supervisor.needsPreviousSessionNotice(headless.id) == false else {
+        throw fail("a restored agent that has produced a transcript still asks for the previous-session placeholder")
+    }
+    // Continuity is only real if the resumed prompt carries the SAME Pi session id,
+    // and that id survives because it is derived from the agent id. Asserted on the
+    // production argument builder, not on a string this check formats.
+    let resumeArgs = PiAgentRunner.processArguments(
+        model: config.model,
+        thinking: config.thinking,
+        sessionId: AgentSupervisor.sessionId(for: headless.id),
+        extraArgs: [],
+        prompt: "continue please"
+    )
+    guard resumeArgs.contains("--session-id"),
+          resumeArgs.contains(AgentSupervisor.sessionId(for: headless.id)),
+          !resumeArgs.contains("--no-session") else {
+        throw fail("a restored agent's prompt would not resume its Pi session: \(resumeArgs)")
+    }
+    // HONEST LIMIT: this shows the flag and the id the production path composes. That
+    // Pi then RESUMES that conversation is the provider's behaviour and needs the
+    // supervised `--managed-agent-live-check`, not this leg.
+
+    // MARK: 6 · restoring twice does not clobber the live copy
+
+    // A doctored copy back to disk stands in for "the store is behind memory". The
+    // live record must win, or a second restore would undo work this session did.
+    var doctored = headless
+    doctored.displayName = "stale name from disk"
+    try store.upsert(doctored)
+    let second = supervisor.restore()
+    guard Set(second.skipped) == Set([tiled.id, headless.id, freshId]) else {
+        throw fail("a second restore did not treat the live records as already-owned: skipped \(second.skipped.count)")
+    }
+    guard second.restored.isEmpty else {
+        throw fail("a second restore re-adopted \(second.restored.count) record(s)")
+    }
+    guard supervisor.records[headless.id]?.displayName == config.model else {
+        throw fail("a second restore clobbered the live record with the stored copy: \(String(describing: supervisor.records[headless.id]?.displayName))")
+    }
+    guard supervisor.records.count == 3 else {
+        throw fail("restoring twice duplicated records: \(supervisor.records.count)")
+    }
+
+    // MARK: 7 · no double-restore out of the OTHER store (the packet's watch-out)
+
+    // `ManagedAgentSessionRecord` still exists for terminal/tmux agents. A record
+    // there must not conjure a supervised agent, or a tmux agent would come back
+    // twice — once as a pane and once as a Pi agent.
+    let projectRoot = root.appendingPathComponent("project", isDirectory: true)
+    let managedSessionStore = ManagedAgentSessionStore(projectRoot: projectRoot)
+    let tmuxTileId = UUID()
+    try managedSessionStore.upsert(ManagedAgentSessionRecord(
+        tileId: tmuxTileId,
+        agentKind: .managed,
+        lastSeenAt: Date()
+    ))
+    guard try managedSessionStore.load(tileId: tmuxTileId) != nil else {
+        throw fail("the managed-session record did not persist, so the double-restore assertion proves nothing")
+    }
+    let beforeThirdRestore = supervisor.records.count
+    _ = supervisor.restore()
+    guard supervisor.records.count == beforeThirdRestore else {
+        throw fail("a restore adopted records from outside AgentStore: \(supervisor.records.count) vs \(beforeThirdRestore)")
+    }
+    guard supervisor.agent(forTile: tmuxTileId) == nil else {
+        throw fail("a ManagedAgentSessionRecord produced a supervised agent — an agent must not be restored from both stores")
+    }
+    tile.detach()
+
+    // MARK: 8 · a project root that comes back stops being stale
+
+    // The stale mark is not a tombstone: a detached worktree can be re-created, and
+    // the agent must then come back like any other. Found by the cross-review, which
+    // caught `staleIDs` never being cleared.
+    try FileManager.default.createDirectory(
+        at: URL(fileURLWithPath: missingCwd, isDirectory: true),
+        withIntermediateDirectories: true
+    )
+    let recovered = supervisor.restore()
+    guard recovered.restored == [orphaned.id] else {
+        throw fail("an agent whose project root came back was not adopted: restored \(recovered.restored.count), stale \(recovered.stale.count)")
+    }
+    guard supervisor.records[orphaned.id] != nil, supervisor.staleIDs.contains(orphaned.id) == false else {
+        throw fail("the recovered agent is still marked stale, so the inbox would show it as both live and gone")
+    }
+
+    // MARK: 9 · the production wiring: restore runs BEFORE the tile walk…
+
+    let bootLines = try continuumAppLineIndices([
+        "let agentRestore = agentSupervisor.restore()",
+        "for tile in canvasState.tiles {",
+        "installInitialManagedAgentTile(tile, in: canvasView)"
+    ])
+    guard bootLines[0] < bootLines[1], bootLines[1] < bootLines[2] else {
+        throw fail("restore() does not run before the boot tile walk (lines \(bootLines)) — the walk would spawn a fresh agent over each surviving record")
+    }
+
+    // …and a restored agent's tile is told to say so.
+    let wiring = try paletteAgentSpawnBranch("private func wireManagedAgentTile(_ tileId: UUID) {")
+    guard wiring.contains("needsPreviousSessionNotice("), wiring.contains("showPreviousSessionNotice()") else {
+        throw fail("wireManagedAgentTile does not place the previous-session notice, so a restored agent renders as a blank tile:\n\(wiring)")
+    }
+
+    print("AgentRestore: 2 of 3 stored agents adopted with no runner (1 marked stale for a missing project root, adopted once that root came back), the tiled one re-resolved from its tileId and took a view showing idle plus a previous-session notice, a prompt then started it with --session-id and retired its placeholder, and restoring four times neither duplicated, clobbered, nor pulled from ManagedAgentSessionStore")
+}
+
+/// The line index of each of `needles` in `ContinuumApp.swift`, in the order given.
+/// Used to assert an ORDERING between two production statements — a scan, for the
+/// same reason `paletteAgentSpawnBranch` is one, and an ordering is the one property
+/// a body-contains scan cannot see.
+private func continuumAppLineIndices(_ needles: [String]) throws -> [Int] {
+    struct ScanError: Error, CustomStringConvertible { let description: String }
+    let path = "Sources/ContinuumRevived/App/ContinuumApp.swift"
+    let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        .appendingPathComponent(path)
+    guard let source = try? String(contentsOf: url, encoding: .utf8) else {
+        throw ScanError(description: "could not read \(path) — run this check from the repo root")
+    }
+    let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map {
+        $0.trimmingCharacters(in: .whitespaces)
+    }
+    return try needles.map { needle in
+        guard let index = lines.firstIndex(of: needle) else {
+            throw ScanError(description: "no line `\(needle)` in \(path) — it moved or was renamed, and this scan is now blind")
+        }
+        return index
+    }
 }
 
 /// A runner factory that hands out one scripted runner per `send`, in order. The

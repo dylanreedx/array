@@ -1058,6 +1058,24 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--agent-restore-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runAgentRestoreChecks()
+                    print("ContinuumRevivedAgentRestoreChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            // Same reason as `--agent-supervisor-check`: the restored agent's prompt
+            // delivers events via `DispatchQueue.main.async`, and only a live main run
+            // loop drains them.
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--settings-panel-check") {
             do {
                 _ = NSApplication.shared
@@ -3044,6 +3062,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             installHotkeyMonitor()
             installTileFocusMonitor()
             installCanvasGestureMonitors()
+
+            // P2A.7: adopt the agents a previous launch persisted BEFORE the tile
+            // walk below. `installInitialManagedAgentTile` → `wireManagedAgentTile`
+            // re-finds an agent by its `tileId`, so without this a restored tile
+            // spawns a brand-new agent over the top of a record that survived, and
+            // the old one's identity, model and role are lost. No provider process is
+            // started here — see `AgentSupervisor.restore`.
+            let agentRestore = agentSupervisor.restore()
+            if !agentRestore.restored.isEmpty || !agentRestore.stale.isEmpty {
+                fputs("AgentSupervisor: restored \(agentRestore.restored.count) agent(s) idle from the previous launch, skipped \(agentRestore.stale.count) whose project root is gone\n", stderr)
+            }
 
             // Walk every tile in the canvas, spawn a runtime for each terminal
             // tile (or install a Restart placeholder if the profile fails to
@@ -7632,6 +7661,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // tile to the same agent is a no-op inside `attach`, so none of the three
         // call sites can double-ingest.
         view.attach(agentID: agentId, supervisor: supervisor)
+
+        // P2A.7: an agent restored from the previous launch has a real conversation
+        // and an empty desktop transcript (that transcript lives only in the view,
+        // and this one was just built). The replay above therefore renders nothing,
+        // so the tile says where it stands instead of looking like a fresh agent.
+        // Idempotent inside the model, so a re-wire cannot stack notices, and
+        // narrowed to an agent that has produced nothing since the relaunch — one
+        // that HAS been prompted replays a real transcript, and the placeholder would
+        // land underneath it.
+        if supervisor.needsPreviousSessionNotice(agentId) {
+            view.showPreviousSessionNotice()
+        }
     }
 
     /// Records a managed-agent runtime event onto the per-tile syncable

@@ -92,6 +92,18 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
         endStreamingRuns()
     }
 
+    /// Appends a locally-authored note — text no provider emitted, so it must not
+    /// ride the provider channel either (same reasoning as `appendUserPrompt`).
+    /// P2A.7's "previous session" placeholder is the one caller. Idempotent on `id`,
+    /// because the tile can be re-wired to the same agent and a placeholder that
+    /// stacks up would be its own bug.
+    public mutating func appendNotice(id: String, title: String, text: String) {
+        guard !cards.contains(where: { $0.id == id }) else { return }
+        endStreamingRuns()
+        cards.append(ManagedTranscriptCard(id: id, kind: .message, title: title, body: text))
+        endStreamingRuns()
+    }
+
     /// End any open assistant/reasoning card run so the NEXT delta starts a new
     /// card. Called at turn boundaries and whenever a different card kind is
     /// inserted — otherwise post-tool narration would append to the pre-tool

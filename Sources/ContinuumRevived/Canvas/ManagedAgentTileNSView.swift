@@ -175,6 +175,40 @@ final class ManagedAgentTileNSView: TileNSView {
         applyComposeAvailability()
     }
 
+    /// P2A.7: says that this agent came back from a previous launch.
+    ///
+    /// The record survived, and so did the Pi conversation (`--session-id` is derived
+    /// from the agent id), but the desktop transcript lives only in this view — which
+    /// was just constructed. Without the notice a restored agent renders as a blank
+    /// tile indistinguishable from a fresh one. Re-deriving the real transcript from
+    /// Pi's session JSONL is a bigger feature and a ticket of its own; this is the
+    /// packet's option (b).
+    static let previousSessionNoticeText = "Previous session — send a prompt to continue."
+
+    func showPreviousSessionNotice() {
+        model.appendNotice(
+            id: "notice-previous-session",
+            title: "previous session",
+            text: Self.previousSessionNoticeText
+        )
+        // A restored agent is IDLE, not `configuring` — it exists, it is not running,
+        // and it is waiting for a prompt. A fresh tile starts at `configuring`
+        // (nothing has happened yet), which for a relaunched agent reads as "still
+        // starting up" and contradicts the packet's "idle/stopped until the user
+        // sends a prompt". Set directly, the way `resetProjection` does, rather than
+        // by ingesting a synthetic `.sessionStateChanged`: that would put an event no
+        // provider produced onto the tile's stream and from there onto the syncable
+        // activity timeline. The first real event re-derives the status from the
+        // model as usual.
+        descriptor.status = .idle
+        descriptor.statusUpdatedAt = Date()
+        agentStatus = .idle
+        applyHeader(status: .idle)
+        applyComposeAvailability()
+        reconcileCards()
+        scrollTranscriptToBottom()
+    }
+
     /// Shows the prompt the user just submitted as its own "you" card.
     func appendUserPrompt(_ text: String) {
         model.appendUserPrompt(text)
