@@ -3,7 +3,7 @@
 Durable state. The conversation is NOT the source of truth: this file + `git log` are.
 
 ## heartbeat
-last-touch 2026-07-25T08:47:00Z · ticket P0.9-ui-tour-check · attempt 1 · pid loop · status committed af4ad3d
+last-touch 2026-07-25T08:55:00Z · ticket (none eligible) · attempt 0 · pid loop · status STOP dependencies-blocked — `_QUEUE.md` cycle P0.7→P1.6→P1.11→P1.10→P1.3→P1.2→P1.1→P0.7; see `_MORNING_REPORT.md`
 
 ## tickets
 
