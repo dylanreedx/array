@@ -2,6 +2,9 @@ import Foundation
 
 public enum LaunchPaletteAction: Equatable, Sendable {
     case newManagedAgent
+    /// An agent with no tile at all (P2A.6): it runs, persists and appears in the
+    /// supervisor's records without any canvas layout.
+    case newHeadlessAgent
     case newNote
     case newBrowser
     case openFile
@@ -29,6 +32,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
         switch self {
         case .newManagedAgent:
             return "New Agent…"
+        case .newHeadlessAgent:
+            return "New Agent Without a Tile…"
         case .newNote:
             return "New Note"
         case .newBrowser:
@@ -80,6 +85,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
         switch self {
         case .newManagedAgent:
             return ["new", "agent", "managed", "assistant"]
+        case .newHeadlessAgent:
+            return ["new", "agent", "headless", "tileless"]
         case .newNote:
             return ["new", "note"]
         case .newBrowser:

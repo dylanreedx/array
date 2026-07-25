@@ -7548,6 +7548,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    /// ⌘K `agent.newHeadless` (P2A.6) — an agent with NO tile. `agent.newManaged`
+    /// above is spawn + attach a tile; this is the spawn alone, so nothing here
+    /// touches `tileSpawner` or the canvas, and the record's `tileId` stays nil.
+    ///
+    /// This is what lets more than a handful of agents run at once (the zone
+    /// hydration budget caps live ZONES, so tile-bound agents beyond it freeze) and
+    /// what the orchestrator will use to start workers without doing layout.
+    /// Until the Phase 3 inbox lands a headless agent has no surface at all, so the
+    /// id is named on stderr; it is not lost — it is in `supervisor.records` and on
+    /// disk in `AgentStore`.
+    private func spawnHeadlessAgentFromPalette() {
+        // The first prompt is collected HERE because a headless agent has no compose
+        // row to type it into: `spawn` runs it immediately, which is what makes this a
+        // RUNNING agent rather than an inert record nothing can reach until Phase 3.
+        // Same modal, and the same reason for it, as `spawnHarnessRoleFromPalette`.
+        guard let prompt = promptForAgentTask(
+            title: "New Agent Without a Tile",
+            informativeText: "The agent runs with no tile on the canvas. Enter its first prompt."
+        ) else { return }
+        let agentId = spawnSupervisedAgent(tileId: nil, prompt: prompt)
+        fputs("Spawned headless agent \(agentId.rawValue.uuidString) (no tile; visible in the inbox from Phase 3, stopped on quit)\n", stderr)
+    }
+
+    /// The one place the app's spawn parameters are resolved — the active project's
+    /// root and id, and the configured model/thinking level. `tileId` is a view
+    /// binding, not identity, so `nil` is a headless agent; a non-nil `prompt` runs
+    /// on spawn (`AgentSupervisor.spawn`'s own parameter).
+    private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil) -> AgentID {
+        let cwd = URL(fileURLWithPath: activeProject?.rootPath ?? FileManager.default.currentDirectoryPath, isDirectory: true)
+        let model = AgentModelConfig.resolvedFromDefaults()
+        return agentSupervisor.spawn(
+            role: nil,
+            prompt: prompt,
+            cwd: cwd,
+            model: model.model,
+            thinking: model.thinking,
+            projectId: activeProject?.id,
+            tileId: tileId
+        )
+    }
+
     /// Binds a managed-agent tile to the agent the supervisor owns (P2A.3).
     ///
     /// This used to construct a `PiAgentRunner` inside the tile's own submit
@@ -7563,17 +7604,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let existing = supervisor.agent(forTile: tileId) {
             agentId = existing
         } else {
-            let cwd = URL(fileURLWithPath: activeProject?.rootPath ?? FileManager.default.currentDirectoryPath, isDirectory: true)
-            let model = AgentModelConfig.resolvedFromDefaults()
-            agentId = supervisor.spawn(
-                role: nil,
-                prompt: nil,
-                cwd: cwd,
-                model: model.model,
-                thinking: model.thinking,
-                projectId: activeProject?.id,
-                tileId: tileId
-            )
+            agentId = spawnSupervisedAgent(tileId: tileId)
         }
         // The view binding lives in one place (P2A.5), so this is the site that
         // records it whichever branch above ran — and the site Phase 3's "open in
@@ -7737,6 +7768,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         switch action {
         case .newManagedAgent:
             spawnManagedAgentFromPalette()
+        case .newHeadlessAgent:
+            spawnHeadlessAgentFromPalette()
         case .newNote:
             spawnNoteFromPalette()
         case .newBrowser:
@@ -8110,9 +8143,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func promptForHarnessRoleTask(role: HarnessRole) -> String? {
+        promptForAgentTask(
+            title: "Run \(role.displayName) Agent",
+            informativeText: "Enter the prompt for the .pi/agents/\(role.id).md role."
+        )
+    }
+
+    /// The task prompt for a spawn-and-run agent action, or nil if the user cancels
+    /// or leaves it empty. Was `promptForHarnessRoleTask`'s body; a headless agent
+    /// (P2A.6) needs the same modal for the same reason — the run starts at spawn, so
+    /// there is nowhere else to type the first prompt.
+    private func promptForAgentTask(title: String, informativeText: String) -> String? {
         let alert = NSAlert()
-        alert.messageText = "Run \(role.displayName) Agent"
-        alert.informativeText = "Enter the prompt for the .pi/agents/\(role.id).md role."
+        alert.messageText = title
+        alert.informativeText = informativeText
         alert.addButton(withTitle: "Run")
         alert.addButton(withTitle: "Cancel")
         let field = NSTextField(string: "")
@@ -8503,6 +8547,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         alert.runModal()
+    }
+
+    /// P2A.6: a headless agent has no tile to close, so nothing in the UI can reach
+    /// its process until the Phase 3 inbox. Quitting must therefore end the work it
+    /// started, or the run leaks past the session.
+    func applicationWillTerminate(_ notification: Notification) {
+        agentSupervisor.stopAll()
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {

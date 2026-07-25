@@ -205,6 +205,15 @@ final class AgentSupervisor {
         deliver(.sessionStateChanged(.stopped), to: id)
     }
 
+    /// Stops every agent with a prompt in flight. The app calls this when it quits
+    /// (`applicationWillTerminate`), which is P2A.6's watch-out: a headless agent has
+    /// no tile to close and no surface to stop it from until the Phase 3 inbox, so
+    /// without this its Pi process outlives the session that started it. Iterates a
+    /// snapshot because `stop` mutates `runners`.
+    func stopAll() {
+        for id in Array(runners.keys) { stop(id) }
+    }
+
     // MARK: - View binding (P2A.5)
 
     /// Binds an agent to a tile. `AgentRecord.tileId` is WHERE THE AGENT IS BEING
@@ -639,8 +648,12 @@ func runAgentSupervisorChecks() async throws {
 
     let detachReport = try await checkDetachOutlivesItsTile(store: store, config: config, cwd: cwd, fail: fail)
 
+    // MARK: 9 · an agent exists and runs with no tile at all (P2A.6)
+
+    let headlessReport = try await checkHeadlessAgents(store: store, config: config, cwd: cwd, fail: fail)
+
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport)")
 }
 
 /// A runner factory that hands out one scripted runner per `send`, in order. The
@@ -1172,6 +1185,281 @@ private func checkDetachOutlivesItsTile(
     }
 
     return "a tile closed on an in-flight turn without stopping it (record kept, tileId cleared, events still delivered, an idle sweep could not reach it), the agent re-attached to a new tile and was displaced from it by a second agent, and only stop() ended the turn"
+}
+
+/// P2A.6: an agent exists and RUNS with no tile at all.
+///
+/// The count is DERIVED from `ZoneHydrationBudgetConfig.defaultMaxLiveZones`, not
+/// picked: the packet's reason for headless agents is that the hydration budget caps
+/// live zones, so this runs two more agents than that budget allows and each one is
+/// provably mid-turn at the same time.
+///
+/// What "no tile exists in `CanvasState`" is asserted as: a real `CanvasState` is
+/// carried alongside the supervisor and the invariant NO RECORD CLAIMS A TILE THE
+/// CANVAS DOES NOT HAVE is checked both while every agent is headless and after one
+/// of them is bound to a tile that IS on the canvas. A headless spawn that quietly
+/// invented a `tileId` is red on it. The production palette branch is source-scanned
+/// separately (`paletteAgentSpawnBranch`), because the only way a tile reaches
+/// `CanvasState` in this app is `TileSpawner`, which needs a live `CanvasNSView` —
+/// the same reason `managedAgentCloseBranchSource` below is a scan.
+///
+/// Negative tests observed red at exit 1 with the final code, production edits except
+/// where noted:
+/// · `spawnHeadlessAgentFromPalette` calling `spawnSupervisedAgent(tileId: UUID())` →
+///   `FAIL: the headless spawn branch does not pass `tileId: nil` …`
+/// · `spawnHeadlessAgentFromPalette` calling `spawnManagedAgentFromPalette()` as well →
+///   `FAIL: the headless spawn branch reaches the tile spawner …`. This one PASSED
+///   against the first draft of `tileMakers` and is why `spawnManagedAgent` is in the
+///   pattern: delegating to the managed path creates a tile without naming the spawner.
+/// · the `case .newHeadlessAgent:` dispatch deleted from `performPaletteAction` →
+///   a compile error (the switch is exhaustive), so the reachability assertion below
+///   is about the REGISTRY and the palette rows, which are what ⌘K reads
+/// · the `agent.newHeadless` `CanvasCommand` removed →
+///   `FAIL: ⌘K cannot reach a headless spawn: no agent.newHeadless in CommandRegistry`
+/// · `spawnHeadlessAgentFromPalette` spawning with no prompt (the first draft, which
+///   the cross-review caught: a record nothing can reach and nothing running) →
+///   `FAIL: the headless spawn branch does not collect and pass a first prompt …`
+/// · `spawnSupervisedAgent` passing `prompt: nil` through to the supervisor →
+///   `FAIL: the app's spawn helper drops the prompt …`
+/// · `applicationWillTerminate` not calling `stopAll` →
+///   `FAIL: quitting does not stop the agents …`
+/// · `stopAll` iterating no runners (`for id in [] `, check-local mutation) →
+///   `FAIL: stopAll did not make the headless agents' blocked run()s return: 0 of 6`
+/// · a headless record's `tileId` set by hand to a tile the canvas does not hold
+///   (check-local vacuity witness for the invariant) →
+///   `FAIL: a record claims tile … which is not on the canvas`
+@MainActor
+private func checkHeadlessAgents(
+    store: AgentStore,
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Error
+) async throws -> String {
+    let provider = "provider-thread"
+    let headlessCount = ZoneHydrationBudgetConfig.defaultMaxLiveZones + 2
+
+    // ⌘K reachability, executed rather than scanned: the palette builds its static
+    // rows from `CommandRegistry`, so these two assertions are the whole path from
+    // the command id to a row a user can pick.
+    guard CommandRegistry.all().contains(where: { $0.id == "agent.newHeadless" && $0.action == .newHeadlessAgent }) else {
+        throw fail("⌘K cannot reach a headless spawn: no agent.newHeadless in CommandRegistry: \(CommandRegistry.all().map(\.id))")
+    }
+    guard LaunchPaletteModel.makeRows(profiles: []).contains(.action(.newHeadlessAgent)) else {
+        throw fail("the headless spawn command is not a palette row")
+    }
+
+    // Each agent gets its own blocking runner, so "six agents are running at once" is
+    // observed on six live turns rather than inferred from six records.
+    let scripted = (0 ..< headlessCount).map { _ in
+        ScriptedAgentRunner(script: [.turnStarted(threadId: provider, turnId: "t1")], holdUntilStopped: true)
+    }
+    let queue = ScriptedRunnerQueue(scripted)
+    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0) })
+
+    // A canvas with NO tiles on it, carried through the whole section.
+    var canvasState = CanvasState(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        tiles: [],
+        groups: [],
+        lastActiveTileId: nil
+    )
+    func expectNoRecordClaimsAMissingTile(_ stage: String) throws {
+        for record in supervisor.records.values {
+            guard let claimed = record.tileId else { continue }
+            guard canvasState.tiles.contains(where: { $0.id == claimed }) else {
+                throw fail("\(stage): a record claims tile \(claimed) which is not on the canvas (\(canvasState.tiles.count) tile(s)) — an agent must not invent a view binding")
+            }
+        }
+    }
+
+    var headless: [AgentID] = []
+    var inboxes: [AgentID: EventInbox] = [:]
+    var tasks: [Task<Void, Never>] = []
+    defer { for task in tasks { task.cancel() } }
+    for index in 0 ..< headlessCount {
+        // Spawned WITH its first prompt, which is what the ⌘K branch does (a headless
+        // agent has no compose row, so the run has to start at spawn) — not
+        // spawn-then-send, which would leave "the production path never runs anything"
+        // green. Found by the cross-review.
+        let id = supervisor.spawn(
+            role: nil,
+            prompt: "work \(index)",
+            cwd: cwd,
+            model: config.model,
+            thinking: config.thinking
+        )
+        headless.append(id)
+        let inbox = EventInbox()
+        inboxes[id] = inbox
+        // Attaches after the prompt, so the event is seen through the replay — the
+        // headless agent's history exists whether or not anything is listening.
+        let stream = supervisor.events(for: id)
+        tasks.append(Task { @MainActor in for await event in stream { inbox.append(event) } })
+        guard await waitUntil(timeout: 5, pollInterval: 0.02, { supervisor.subscriberCount(for: id) == 1 }) else {
+            throw fail("headless agent \(index) has no subscriber")
+        }
+    }
+
+    // Running, tile-less, and persisted that way.
+    for (index, id) in headless.enumerated() {
+        guard await waitUntil(timeout: 10, pollInterval: 0.02, { supervisor.isRunning(id) }) else {
+            throw fail("headless agent \(index) is not running — a tile-less agent must still run")
+        }
+        guard supervisor.records[id]?.tileId == nil else {
+            throw fail("headless agent \(index) has a tile binding: \(String(describing: supervisor.records[id]?.tileId))")
+        }
+        guard let persisted = try store.load(id: id) else {
+            throw fail("headless agent \(index) was not persisted — it must survive without a tile")
+        }
+        guard persisted.tileId == nil else {
+            throw fail("headless agent \(index) persisted a tile binding: \(String(describing: persisted.tileId))")
+        }
+        // Events flow with nothing rendering them.
+        guard await waitUntil(timeout: 10, pollInterval: 0.02, { inboxes[id]?.events.count == 1 }) else {
+            throw fail("headless agent \(index) delivered no events: \(inboxes[id]?.events.count ?? -1)")
+        }
+        guard inboxes[id]?.events.first == .turnStarted(threadId: AgentSupervisor.threadId(for: id), turnId: "t1") else {
+            throw fail("headless agent \(index)'s event arrived wrong: \(String(describing: inboxes[id]?.events.first))")
+        }
+    }
+    guard canvasState.tiles.isEmpty else {
+        throw fail("the canvas gained a tile from \(headlessCount) headless spawns: \(canvasState.tiles.count)")
+    }
+    try expectNoRecordClaimsAMissingTile("all headless")
+    guard queue.handedOut.count == headlessCount, scripted.allSatisfy({ $0.runCount == 1 }) else {
+        throw fail("not every headless agent got its own runner: \(queue.handedOut.count) handed out, runCounts \(scripted.map(\.runCount))")
+    }
+
+    // ATTACH A TILE to one of them (the P2A.4 path): the tile replays the history the
+    // agent accumulated while it had no view.
+    let subject = headless[0]
+    // The queue hands runners out in `send` order, which is the spawn order above, so
+    // the first one belongs to `headless[0]` — asserted by the runCount check above.
+    let subjectRunner = queue.handedOut[0]
+    guard subjectRunner.emit(.contentDelta(threadId: provider, turnId: "t1", streamKind: .assistant, delta: "headless work")) else {
+        throw fail("the subject agent's runner is not in flight, so its history cannot grow before the tile attaches")
+    }
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { inboxes[subject]?.events.count == 2 }) else {
+        throw fail("the headless agent's second event never arrived: \(inboxes[subject]?.events.count ?? -1)")
+    }
+    let tileId = UUID()
+    let tile = Tile(
+        id: tileId,
+        kind: .managedAgent,
+        title: "agent",
+        frame: TileFrame(x: 0, y: 0, width: 520, height: 320),
+        zPosition: .fromLegacyRank(1),
+        runtimeRef: nil,
+        metadata: TileMetadata(launchProfileId: "managed")
+    )
+    canvasState.tiles.append(tile)
+    let view = ManagedAgentTileNSView(tile: tile)
+    view.frame = NSRect(x: 0, y: 0, width: 520, height: 320)
+    supervisor.attach(agentID: subject, to: tileId)
+    view.attach(agentID: subject, supervisor: supervisor)
+    let historyCount = inboxes[subject]?.events.count ?? 0
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { view.ingestedEvents.count == historyCount }) else {
+        throw fail("attaching a tile to a headless agent did not replay its history: the tile holds \(view.ingestedEvents.count) of \(historyCount)")
+    }
+    guard view.qaTranscriptText.contains("headless work") else {
+        throw fail("the work the agent did while headless did not reach the transcript: \(view.qaTranscriptText)")
+    }
+    guard try store.load(id: subject)?.tileId == tileId else {
+        throw fail("attaching a tile to a headless agent did not persist the binding")
+    }
+    try expectNoRecordClaimsAMissingTile("one attached")
+    guard canvasState.tiles.count == 1, supervisor.records.count >= headlessCount else {
+        throw fail("\(supervisor.records.count) agent(s) against \(canvasState.tiles.count) tile(s) — the point of a headless agent is that those two numbers are independent")
+    }
+    view.detach()
+
+    // STOPPABILITY (the packet's watch-out): a headless agent has no tile to close,
+    // so `stopAll` — which the app runs on quit — is the only thing that can reach
+    // its process. Asserted on the runners' own post-return counter, so it proves the
+    // blocked `run()`s exited rather than that a dictionary was emptied.
+    supervisor.stopAll()
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { scripted.allSatisfy { $0.completedRuns == 1 } }) else {
+        throw fail("stopAll did not make the headless agents' blocked run()s return: \(scripted.filter { $0.completedRuns == 1 }.count) of \(headlessCount)")
+    }
+    guard scripted.allSatisfy({ $0.stopCount == 1 }) else {
+        throw fail("stopAll did not reach every runner: \(scripted.map(\.stopCount))")
+    }
+    guard headless.allSatisfy({ supervisor.isRunning($0) == false }) else {
+        throw fail("the supervisor still holds a runner after stopAll")
+    }
+    for (index, id) in headless.enumerated() {
+        guard try store.load(id: id) != nil else {
+            throw fail("stopAll deleted headless agent \(index)'s record; stopped is a state, not a removal")
+        }
+    }
+
+    // The production wiring: the palette branch spawns WITHOUT a tile, the managed
+    // branch (the vacuity guard for the same patterns) spawns WITH one, and quitting
+    // stops the agents.
+    let headlessBranch = try paletteAgentSpawnBranch("private func spawnHeadlessAgentFromPalette() {")
+    let managedBranch = try paletteAgentSpawnBranch("private func spawnManagedAgentFromPalette() {")
+    // `spawnManagedAgent` is in the pattern because of the negative test: a headless
+    // branch that simply CALLS the managed one creates a tile without naming the
+    // spawner, and the first draft of this pattern passed that mutation.
+    let tileMakers = try NSRegularExpression(pattern: "tileSpawner|spawner\\.|spawnManagedAgent|wireManagedAgentTile|install\\(tileView")
+    func makesATile(_ body: String) -> Bool {
+        tileMakers.firstMatch(in: body, range: NSRange(body.startIndex..., in: body)) != nil
+    }
+    guard makesATile(managedBranch) else {
+        throw fail("the managed spawn branch matches none of the tile-creating patterns, so the check below proves nothing:\n\(managedBranch)")
+    }
+    guard !makesATile(headlessBranch) else {
+        throw fail("the headless spawn branch reaches the tile spawner — a headless agent is one with no tile:\n\(headlessBranch)")
+    }
+    guard headlessBranch.contains("tileId: nil") else {
+        throw fail("the headless spawn branch does not pass `tileId: nil`:\n\(headlessBranch)")
+    }
+    // …and it must actually RUN. `spawn` only starts a runner for a non-empty prompt,
+    // so a branch that spawns with `prompt: nil` would leave a record no surface can
+    // reach and nothing running — the done-criterion is "a RUNNING agent with no
+    // tile". The cross-review caught exactly that in the first draft.
+    guard headlessBranch.contains("promptForAgentTask("), headlessBranch.contains("prompt: prompt") else {
+        throw fail("the headless spawn branch does not collect and pass a first prompt, so it spawns an agent that never runs:\n\(headlessBranch)")
+    }
+    let spawnHelper = try paletteAgentSpawnBranch("private func spawnSupervisedAgent(tileId: UUID?, prompt: String? = nil) -> AgentID {")
+    guard spawnHelper.contains("prompt: prompt") else {
+        throw fail("the app's spawn helper drops the prompt, so the headless agent would not run:\n\(spawnHelper)")
+    }
+    let terminate = try paletteAgentSpawnBranch("func applicationWillTerminate(_ notification: Notification) {")
+    guard terminate.contains("stopAll()") else {
+        throw fail("quitting does not stop the agents, so a headless agent's process outlives the session:\n\(terminate)")
+    }
+
+    return "\(headlessCount) agents ran concurrently with no tile (two past the \(ZoneHydrationBudgetConfig.defaultMaxLiveZones)-zone hydration budget), each persisted with tileId nil and delivering events, one then took a tile and replayed the work it did headless, and stopAll made every blocked run() return"
+}
+
+/// The body of one `AppDelegate` method, comments stripped. Bounded by the closing
+/// brace at the method's own four-space indentation. Same precedent, and same reason,
+/// as `managedAgentCloseBranchSource` below: these methods need a live canvas and a
+/// running app to execute.
+private func paletteAgentSpawnBranch(_ signature: String) throws -> String {
+    struct ScanError: Error, CustomStringConvertible { let description: String }
+    let path = "Sources/ContinuumRevived/App/ContinuumApp.swift"
+    let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        .appendingPathComponent(path)
+    guard let source = try? String(contentsOf: url, encoding: .utf8) else {
+        throw ScanError(description: "could not read \(path) — run this check from the repo root")
+    }
+    let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    guard let start = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == signature }) else {
+        throw ScanError(description: "no `\(signature)` in \(path) — it was renamed or removed, and this scan is now blind")
+    }
+    var body: [String] = []
+    for line in lines[(start + 1)...] {
+        if line == "    }" { break }
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("//") { continue }
+        body.append(line)
+    }
+    guard !body.isEmpty else {
+        throw ScanError(description: "`\(signature)` scanned as an empty body")
+    }
+    return body.joined(separator: "\n")
 }
 
 /// The lines of `AppDelegate.deleteTile`'s `case .managedAgent:` branch, comments

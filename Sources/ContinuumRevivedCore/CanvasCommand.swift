@@ -28,6 +28,10 @@ public enum CommandRegistry {
     public static func all() -> [CanvasCommand] {
         [
             CanvasCommand(id: "agent.newManaged", action: .newManagedAgent),
+            // A tile-less agent (P2A.6). `agent.newManaged` is spawn + attach a
+            // tile; this one is the spawn alone, so an agent can exist and run
+            // without any canvas layout.
+            CanvasCommand(id: "agent.newHeadless", action: .newHeadlessAgent),
             CanvasCommand(id: "tile.newNote", action: .newNote),
             CanvasCommand(id: "tile.newBrowser", action: .newBrowser),
             CanvasCommand(id: "tile.openFile", action: .openFile),

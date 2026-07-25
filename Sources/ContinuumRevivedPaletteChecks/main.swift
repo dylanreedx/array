@@ -45,9 +45,9 @@ let rows = LaunchPaletteModel.makeRows(profiles: [
     profile(id: "shell", displayName: "Shell"),
     profile(id: "claude", displayName: "Claude CLI Terminal")
 ])
-expect(rows.map(\.displayName) == ["Shell", "Claude CLI Terminal", "New Agent…", "New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "Back to Previous View", "Go to Previous Tile", "Go to Previous Zone", "Toggle Workspace Sidebar", "New Workspace…", "Create Zone…"], "palette appends note/browser/file/file-tree/diff/fit/workspace actions after profiles, then Create Zone")
+expect(rows.map(\.displayName) == ["Shell", "Claude CLI Terminal", "New Agent…", "New Agent Without a Tile…", "New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "Back to Previous View", "Go to Previous Tile", "Go to Previous Zone", "Toggle Workspace Sidebar", "New Workspace…", "Create Zone…"], "palette appends note/browser/file/file-tree/diff/fit/workspace actions after profiles, then Create Zone")
 expect(LaunchPaletteModel.filterRows(rows, query: "note").map(\.displayName) == ["New Note"], "note query matches New Note")
-expect(LaunchPaletteModel.filterRows(rows, query: "new").map(\.displayName) == ["New Agent…", "New Note", "New Browser", "New Diff Review", "New Workspace…", "Create Zone…"], "new query matches New actions including Create Zone (has 'new' token)")
+expect(LaunchPaletteModel.filterRows(rows, query: "new").map(\.displayName) == ["New Agent…", "New Agent Without a Tile…", "New Note", "New Browser", "New Diff Review", "New Workspace…", "Create Zone…"], "new query matches New actions including Create Zone (has 'new' token)")
 expect(LaunchPaletteModel.filterRows(rows, query: "fit all").map(\.displayName) == ["Fit Canvas to All"], "fit all query matches Fit Canvas to All")
 expect(LaunchPaletteModel.filterRows(rows, query: "browser").map(\.displayName) == ["New Browser"], "browser query matches New Browser")
 let focusedBrowserRows = LaunchPaletteModel.makeRows(profiles: [], contextualActions: [.openInspectorForFocusedBrowser])
@@ -59,7 +59,8 @@ expect(LaunchPaletteModel.filterRows(rows, query: "tree").map(\.displayName) == 
 expect(LaunchPaletteModel.filterRows(rows, query: "file tree").map(\.displayName) == ["Open File Tree..."], "file tree query matches Open File Tree")
 expect(LaunchPaletteModel.filterRows(rows, query: "open file tree").map(\.displayName) == ["Open File Tree..."], "open file tree query matches Open File Tree")
 expect(LaunchPaletteModel.filterRows(rows, query: "diff").map(\.displayName) == ["New Diff Review"], "diff query matches New Diff Review")
-expect(LaunchPaletteModel.filterRows(rows, query: "agent").map(\.displayName) == ["New Agent…"], "agent query defaults to the managed-agent action, not raw CLI profiles")
+expect(LaunchPaletteModel.filterRows(rows, query: "agent").map(\.displayName) == ["New Agent…", "New Agent Without a Tile…"], "agent query matches the two agent actions in declared order (tile-bound first), not raw CLI profiles")
+expect(LaunchPaletteModel.filterRows(rows, query: "headless").map(\.displayName) == ["New Agent Without a Tile…"], "headless query matches only the tile-less agent action (P2A.6)")
 expect(LaunchPaletteModel.filterRows(rows, query: "claude").map(\.displayName) == ["Claude CLI Terminal"], "profile query still matches explicit CLI profiles")
 expect(LaunchPaletteModel.filterRows(rows, query: "example.com").map(\.displayName) == ["Open \"https://example.com\"…"], "url-ish query shows normalized Open URL row")
 expect(LaunchPaletteModel.filterRows(rows, query: "web.dev").first?.displayName == "Open \"https://web.dev\"…", "URL row is default before fuzzy browser matches")
@@ -70,7 +71,7 @@ let harnessRows = LaunchPaletteModel.makeRows(
     profiles: [],
     harnessRoles: [HarnessRole(id: "qa-reviewer", displayName: "QA Reviewer", promptPath: "/repo/.pi/agents/qa-reviewer.md")]
 )
-expect(harnessRows.map(\.displayName) == ["New Agent…", "New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "Back to Previous View", "Go to Previous Tile", "Go to Previous Zone", "Toggle Workspace Sidebar", "New Workspace…", "Run QA Reviewer Agent…", "Create Zone…"], "palette appends harness role actions after built-in actions, then Create Zone")
+expect(harnessRows.map(\.displayName) == ["New Agent…", "New Agent Without a Tile…", "New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "Back to Previous View", "Go to Previous Tile", "Go to Previous Zone", "Toggle Workspace Sidebar", "New Workspace…", "Run QA Reviewer Agent…", "Create Zone…"], "palette appends harness role actions after built-in actions, then Create Zone")
 expect(LaunchPaletteModel.filterRows(harnessRows, query: "run qa").map(\.displayName) == ["Run QA Reviewer Agent…"], "harness role row filters by run and role name")
 expect(harnessRows.last?.isSelectable == true, "Create Zone action row is selectable (last row in harnessRows)")
 
@@ -81,7 +82,7 @@ let jumpRows = LaunchPaletteModel.makeRows(
     profiles: [],
     jumpTiles: [JumpTileRow(id: jumpTileA, title: "API Server"), JumpTileRow(id: jumpTileB, title: "Notes")]
 )
-expect(jumpRows.map(\.displayName) == ["New Agent…", "New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "Back to Previous View", "Go to Previous Tile", "Go to Previous Zone", "Toggle Workspace Sidebar", "New Workspace…", "Jump to API Server", "Jump to Notes", "Create Zone…"], "palette appends Jump-to-tile rows after the built-in actions, then Create Zone")
+expect(jumpRows.map(\.displayName) == ["New Agent…", "New Agent Without a Tile…", "New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "Back to Previous View", "Go to Previous Tile", "Go to Previous Zone", "Toggle Workspace Sidebar", "New Workspace…", "Jump to API Server", "Jump to Notes", "Create Zone…"], "palette appends Jump-to-tile rows after the built-in actions, then Create Zone")
 expect(LaunchPaletteModel.filterRows(jumpRows, query: "jump notes").map(\.displayName) == ["Jump to Notes"], "jump row filters by 'jump' + title")
 expect(LaunchPaletteModel.filterRows(jumpRows, query: "api").map(\.displayName) == ["Jump to API Server"], "jump row filters by title alone")
 expect(jumpRows.last?.isSelectable == true, "Create Zone action row is selectable (last row in jumpRows)")
@@ -94,7 +95,7 @@ let jumpZoneRows = LaunchPaletteModel.makeRows(
     jumpZones: [JumpZoneRow(id: zA, title: "API"), JumpZoneRow(id: zB, title: "Scratch")]
 )
 // Assertion 1: order — 11 built-ins + zone rows + Create Zone.
-let builtIns7 = ["New Agent…", "New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "Back to Previous View", "Go to Previous Tile", "Go to Previous Zone", "Toggle Workspace Sidebar", "New Workspace…"]
+let builtIns7 = ["New Agent…", "New Agent Without a Tile…", "New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "Back to Previous View", "Go to Previous Tile", "Go to Previous Zone", "Toggle Workspace Sidebar", "New Workspace…"]
 expect(jumpZoneRows.map(\.displayName) == builtIns7 + ["Jump to API", "Jump to Scratch", "Create Zone…"], "palette appends jump-zone rows then Create Zone action after built-in actions")
 // Assertion 2: filter by "jump scratch".
 expect(LaunchPaletteModel.filterRows(jumpZoneRows, query: "jump scratch").map(\.displayName) == ["Jump to Scratch"], "jump zone row filters by 'jump' + title")
@@ -132,7 +133,7 @@ let projectRows = LaunchPaletteModel.makeRows(
         availability: .available
     )]
 )
-expect(projectRows.map(\.displayName) == ["New Agent…", "New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "Back to Previous View", "Go to Previous Tile", "Go to Previous Zone", "Toggle Workspace Sidebar", "New Workspace…", "Create Zone…", "Add Work Project to Canvas"], "palette appends Create Zone then add-project rows")
+expect(projectRows.map(\.displayName) == ["New Agent…", "New Agent Without a Tile…", "New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "Back to Previous View", "Go to Previous Tile", "Go to Previous Zone", "Toggle Workspace Sidebar", "New Workspace…", "Create Zone…", "Add Work Project to Canvas"], "palette appends Create Zone then add-project rows")
 expect(LaunchPaletteModel.filterRows(projectRows, query: "add work").map(\.displayName) == ["Add Work Project to Canvas"], "add-project row filters by add token and project name")
 expect(projectRows.last?.isSelectable == true, "available add-project row is selectable")
 
@@ -164,7 +165,7 @@ let workspaceRows = LaunchPaletteModel.makeRows(
         updatedAt: Date(timeIntervalSince1970: 2_000)
     )]
 )
-expect(workspaceRows.map(\.displayName) == ["New Agent…", "New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "Back to Previous View", "Go to Previous Tile", "Go to Previous Zone", "Toggle Workspace Sidebar", "New Workspace…", "Create Zone…", "Switch to Client Work Workspace", "Rename Client Work Workspace…", "Delete Client Work Workspace…"], "palette appends Create Zone then workspace rows")
+expect(workspaceRows.map(\.displayName) == ["New Agent…", "New Agent Without a Tile…", "New Note", "New Browser", "Open File...", "Open File Tree...", "New Diff Review", "Fit Canvas to All", "Back to Previous View", "Go to Previous Tile", "Go to Previous Zone", "Toggle Workspace Sidebar", "New Workspace…", "Create Zone…", "Switch to Client Work Workspace", "Rename Client Work Workspace…", "Delete Client Work Workspace…"], "palette appends Create Zone then workspace rows")
 expect(LaunchPaletteModel.filterRows(workspaceRows, query: "switch client").map(\.displayName) == ["Switch to Client Work Workspace"], "workspace row filters by switch token and workspace name")
 expect(LaunchPaletteModel.filterRows(workspaceRows, query: "new workspace").map(\.displayName) == ["New Workspace…"], "new-workspace action filters by workspace tokens")
 expect(LaunchPaletteModel.filterRows(workspaceRows, query: "workspace sidebar").map(\.displayName) == ["Toggle Workspace Sidebar"], "workspace-sidebar action filters by workspace/sidebar tokens")
@@ -178,9 +179,9 @@ let emptyWorkspaceRows = LaunchPaletteModel.makeRows(
         updatedAt: Date(timeIntervalSince1970: 2_100)
     )]
 )
-// Index [12] = Create Zone… (selectable), [13] = Switch to Empty Workspace (not selectable because empty).
-expect(emptyWorkspaceRows[12].isSelectable == true, "Create Zone action row at index 12 is selectable")
-expect(emptyWorkspaceRows[13].isSelectable == false, "empty workspace switch rows are not selectable")
+// Index [13] = Create Zone… (selectable), [14] = Switch to Empty Workspace (not selectable because empty).
+expect(emptyWorkspaceRows[13].isSelectable == true, "Create Zone action row at index 13 is selectable")
+expect(emptyWorkspaceRows[14].isSelectable == false, "empty workspace switch rows are not selectable")
 
 let missingRows = LaunchPaletteModel.makeRows(profiles: [
     profile(id: "shell", displayName: "Shell", detail: "zsh not found", isSelectable: false),
@@ -189,17 +190,18 @@ let missingRows = LaunchPaletteModel.makeRows(profiles: [
 expect(!missingRows[0].isSelectable, "missing profile rows are not selectable")
 expect(!missingRows[1].isSelectable, "not-configured profile rows are not selectable")
 expect(missingRows[2].isSelectable, "New Agent action row is selectable")
-expect(missingRows[3].isSelectable, "New Note action row is selectable")
-expect(missingRows[4].isSelectable, "New Browser action row is selectable")
-expect(missingRows[5].isSelectable, "Open File action row is selectable")
-expect(missingRows[6].isSelectable, "Open File Tree action row is selectable")
-expect(missingRows[7].isSelectable, "New Diff Review action row is selectable")
-expect(missingRows[8].isSelectable, "Fit Canvas to All action row is selectable")
-expect(missingRows[9].isSelectable, "Back to Previous View action row is selectable")
-expect(missingRows[10].isSelectable, "Go to Previous Tile action row is selectable")
-expect(missingRows[11].isSelectable, "Go to Previous Zone action row is selectable")
-expect(missingRows[12].isSelectable, "Toggle Workspace Sidebar action row is selectable")
-expect(missingRows[13].isSelectable, "New Workspace action row is selectable")
+expect(missingRows[3].isSelectable, "New Agent Without a Tile action row is selectable")
+expect(missingRows[4].isSelectable, "New Note action row is selectable")
+expect(missingRows[5].isSelectable, "New Browser action row is selectable")
+expect(missingRows[6].isSelectable, "Open File action row is selectable")
+expect(missingRows[7].isSelectable, "Open File Tree action row is selectable")
+expect(missingRows[8].isSelectable, "New Diff Review action row is selectable")
+expect(missingRows[9].isSelectable, "Fit Canvas to All action row is selectable")
+expect(missingRows[10].isSelectable, "Back to Previous View action row is selectable")
+expect(missingRows[11].isSelectable, "Go to Previous Tile action row is selectable")
+expect(missingRows[12].isSelectable, "Go to Previous Zone action row is selectable")
+expect(missingRows[13].isSelectable, "Toggle Workspace Sidebar action row is selectable")
+expect(missingRows[14].isSelectable, "New Workspace action row is selectable")
 
 expect(LaunchPaletteModel.urlCandidate(from: "example.com") == "https://example.com", "bare domain defaults to https")
 expect(LaunchPaletteModel.urlCandidate(from: "localhost:3000") == "http://localhost:3000", "localhost defaults to http")
