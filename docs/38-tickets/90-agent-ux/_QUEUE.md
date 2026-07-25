@@ -33,6 +33,14 @@ All Phase 0 tickets are tagged `autonomous`.
 | 21 | `P1.10-adopt-tokens-tile.md` | P1.3, P1.4, P1.5, P1.9 |
 | 22 | `P1.11-adopt-tokens-chrome.md` | P1.10 |
 | 23 | `P1.12-ios-consumes-tokens.md` | P1.3, P1.8 |
+| 24 | `P2A.1-agent-record.md` | P1.12 |
+| 25 | `P2A.2-agent-store.md` | P2A.1 |
+| 26 | `P2A.3-agent-supervisor.md` | P2A.2 |
+| 27 | `P2A.4-tile-as-subscriber.md` | P2A.3 |
+| 28 | `P2A.5-attach-detach-lifecycle.md` | P2A.4 |
+| 29 | `P2A.6-headless-agents.md` | P2A.5 |
+| 30 | `P2A.7-restore-on-relaunch.md` | P2A.6 |
+| 31 | `P2A.8-sync-key-migration.md` | P2A.7 |
 
-Phase 1 is authored (tokens, light+dark). Phases 2–9 are authored during the run and appended here as they land. Full backlog shape lives in
+Phases 0, 1 and 2A are authored. Phases 2B/2C/2D and 3–9 are authored during the run and appended here as they land. Full backlog shape lives in
 the session plan; see `_RUNBOOK.md` for the operating contract.
