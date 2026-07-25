@@ -9948,4 +9948,8 @@ runAgentModelConfigChecks()
 runAgentRuntimeEventRemapChecks()
 runManagedAgentActivityBridgeChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P1.4-type-scale.md — the type scale held
+// against the REAL ReadabilityPolicy band boundary (AgentUIChecks cannot see Core).
+runTypographyReadabilityChecks()
+
 print("ContinuumRevivedCoreChecks passed")

@@ -23,4 +23,7 @@ runStatusChipChecks()
 // Ticket: docs/38-tickets/90-agent-ux/P1.2-tokencolor-light-dark.md
 runTokenColorChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P1.4-type-scale.md
+runTypographyChecks()
+
 print("ContinuumRevivedAgentUIChecks passed")
