@@ -141,6 +141,10 @@ run_app_check .build/debug/continuum-revived --palette-duplicate-root-check
 run_app_check .build/debug/continuum-revived --palette-first-responder-restore-check
 run_app_check .build/debug/continuum-revived --settings-panel-check
 run_app_check .build/debug/continuum-revived --component-lab-check
+# Ticket P0.2: the UIProbe substrate every later phase-0 gate layers on — asserts a
+# component really renders at the requested size in the requested NSAppearance, and
+# that .aqua vs .darkAqua produce different pixels.
+run_app_check .build/debug/continuum-revived --ui-probe-check
 run_app_check .build/debug/continuum-revived --keybind-edit-check
 run_app_check .build/debug/continuum-revived --browser-url-focus-check
 run_app_check .build/debug/continuum-revived --browser-ui-delegate-check

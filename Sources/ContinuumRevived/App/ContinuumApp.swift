@@ -949,6 +949,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--ui-probe-check") {
+            do {
+                _ = NSApplication.shared
+                try UIProbe.runUIProbeChecks()
+                print("ContinuumRevivedUIProbeChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--settings-panel-check") {
             do {
                 _ = NSApplication.shared
