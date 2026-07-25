@@ -11,6 +11,15 @@ import Foundation
 // the translator + line buffer are confined to `queue`, so translation stays
 // serial and the caller only ever sees events (which it hops to the main
 // actor itself).
+//
+// macOS-only: `Process` does not exist on iOS, and spawning a provider is
+// inherently a desktop job — the phone OBSERVES agents (via the synced activity
+// timeline) and never runs one. Same guard convention as the other
+// Process-using Core types (RemoteSession, GitDiffEngine, ProcessTmuxControl).
+// The pure halves of the adapter (PiEventTranslator,
+// ManagedAgentActivityBridge) stay cross-platform.
+#if os(macOS)
+
 public final class PiAgentRunner: @unchecked Sendable {
     public struct Config: Sendable {
         public var model: String
@@ -232,3 +241,5 @@ public final class PiAgentRunner: @unchecked Sendable {
         }
     }
 }
+
+#endif  // os(macOS)
