@@ -9952,4 +9952,8 @@ runManagedAgentActivityBridgeChecks()
 // against the REAL ReadabilityPolicy band boundary (AgentUIChecks cannot see Core).
 runTypographyReadabilityChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P2A.1-agent-record.md — the agent as an
+// entity, with the tile demoted to an optional view binding.
+runAgentRecordChecks()
+
 print("ContinuumRevivedCoreChecks passed")

@@ -252,7 +252,7 @@ bundle-check --file-tree-boot-persistence-check
 bundle-check --menu-contract-check
 bundle-check --palette-duplicate-root-check
 count ContinuumRevivedAgentUIChecks 6
-count ContinuumRevivedCoreChecks 21
+count ContinuumRevivedCoreChecks 22
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

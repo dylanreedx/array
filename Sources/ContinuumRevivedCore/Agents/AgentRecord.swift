@@ -1,0 +1,164 @@
+import Foundation
+
+// Ticket: docs/38-tickets/90-agent-ux/P2A.1-agent-record.md
+//
+// THE AGENT IS THE ENTITY; A TILE IS ONE VIEW OF IT (locked decision, _RUNBOOK.md).
+//
+// Today an agent's identity *is* its `tileId`, which already costs three real
+// failures in this codebase:
+//   · `ZoneHydrationBudgetConfig` (max 4 live zones) is a CANVAS LAYOUT budget,
+//     so an agent past it silently freezes;
+//   · `ZoneRuntimeBudgetConfig.closeOnZero` tears observers down for
+//     non-current workspaces;
+//   · relaunch rebuilds an empty tile, because the tile is the agent's only home.
+// `AgentRecord` is the home that outlives the view. `tileId` moves from being
+// identity to being a nullable VIEW BINDING (`nil` == headless).
+//
+// I5 (sync-boundary purity, locked-decisions D3): this record is HOST-BOUND and
+// MUST NOT cross the sync boundary. `cwd` and `worktreeBranch` are host paths /
+// host git state. It is the sibling of `ManagedAgentSessionRecord`, which the I5
+// comment in `AgentActivityEvent.swift` names as the correct home for
+// host-bound fields. `AgentRecordChecks` proves the taint scanner flags an
+// encoded record for every host-path prefix the scanner knows. Stated precisely,
+// because the weaker version of this claim is a trap: the scanner recognises a
+// host path by PREFIX, so it is a BACKSTOP for the common case, not a proof that
+// no `AgentRecord` can ever cross. The guarantee is that nothing publishes this
+// type — P2A.2 owns the store that must keep it that way.
+
+/// Stable identity of an agent, independent of any tile that happens to render it.
+///
+/// Encoded as a bare UUID (single-value container), not as `{"rawValue": …}`:
+/// the wire form of an id should be the id, so an `AgentID` key is readable in
+/// a persisted record and re-typing a `UUID` field as `AgentID` later is not a
+/// format break.
+public struct AgentID: Hashable, Codable, Sendable {
+    public let rawValue: UUID
+
+    public init(rawValue: UUID) {
+        self.rawValue = rawValue
+    }
+
+    public init(from decoder: Decoder) throws {
+        rawValue = try decoder.singleValueContainer().decode(UUID.self)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
+public struct AgentRecord: Codable, Equatable, Sendable {
+    public static let currentSchemaVersion = 1
+
+    /// Decode-forward version marker, per `TerminalSessionDescriptor`'s precedent.
+    public let schemaVersion: Int
+    public let id: AgentID
+    /// User-facing and renameable. NOT an identifier — see `role`.
+    public var displayName: String
+    /// Id matching a `.pi/agents/<role>.md`. An id, never shown as a title.
+    public var role: String?
+    /// Fully-qualified model id — the exact catalogue entry, per P0.10's
+    /// `AgentModelConfig` (a prefix lets Pi's fuzzy matcher choose silently).
+    public var model: String
+    public var thinking: String
+    /// Host path. May be a per-agent worktree path (P2C). Host-bound: I5.
+    public var cwd: String
+    /// Branch checked out in that worktree, when the agent owns one (P2C).
+    public var worktreeBranch: String?
+    public var projectId: UUID?
+    /// Set by the orchestrator when this agent was spawned by another (P2D).
+    public var parentAgentID: AgentID?
+    public var createdAt: Date
+    public var lastActivityAt: Date
+    /// VIEW BINDING, NOT IDENTITY. `nil` means the agent is headless — running
+    /// with no tile rendering it. Closing a tile clears this; it never ends an
+    /// agent. Anything that treats this as the agent's key reintroduces the
+    /// three failures documented at the head of this file.
+    public var tileId: UUID?
+
+    public init(
+        schemaVersion: Int = AgentRecord.currentSchemaVersion,
+        id: AgentID,
+        displayName: String,
+        role: String? = nil,
+        model: String,
+        thinking: String,
+        cwd: String,
+        worktreeBranch: String? = nil,
+        projectId: UUID? = nil,
+        parentAgentID: AgentID? = nil,
+        createdAt: Date,
+        lastActivityAt: Date,
+        tileId: UUID? = nil
+    ) {
+        self.schemaVersion = schemaVersion
+        self.id = id
+        self.displayName = displayName
+        self.role = role
+        self.model = model
+        self.thinking = thinking
+        self.cwd = cwd
+        self.worktreeBranch = worktreeBranch
+        self.projectId = projectId
+        self.parentAgentID = parentAgentID
+        self.createdAt = createdAt
+        self.lastActivityAt = lastActivityAt
+        self.tileId = tileId
+    }
+
+    // Dates are encoded as `timeIntervalSinceReferenceDate` Doubles, following
+    // `AgentActivityEvent`'s precedent and for the same two reasons recorded
+    // there: `JSONCodec.makeEncoder` uses `.iso8601` with no fractional-second
+    // component, which truncates a real `Date()`; and `timeIntervalSince1970`
+    // is itself lossy on round-trip (it adds then re-subtracts 978307200, and
+    // that does not always invert exactly in floating point).
+    // `timeIntervalSinceReferenceDate` IS Date's storage, so no arithmetic
+    // conversion happens and the round-trip is exact.
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, id, displayName, role, model, thinking, cwd
+        case worktreeBranch, projectId, parentAgentID
+        case createdAtReferenceInterval, lastActivityAtReferenceInterval
+        case tileId
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        id = try container.decode(AgentID.self, forKey: .id)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        role = try container.decodeIfPresent(String.self, forKey: .role)
+        model = try container.decode(String.self, forKey: .model)
+        thinking = try container.decode(String.self, forKey: .thinking)
+        cwd = try container.decode(String.self, forKey: .cwd)
+        worktreeBranch = try container.decodeIfPresent(String.self, forKey: .worktreeBranch)
+        projectId = try container.decodeIfPresent(UUID.self, forKey: .projectId)
+        parentAgentID = try container.decodeIfPresent(AgentID.self, forKey: .parentAgentID)
+        createdAt = Date(timeIntervalSinceReferenceDate:
+            try container.decode(Double.self, forKey: .createdAtReferenceInterval))
+        lastActivityAt = Date(timeIntervalSinceReferenceDate:
+            try container.decode(Double.self, forKey: .lastActivityAtReferenceInterval))
+        tileId = try container.decodeIfPresent(UUID.self, forKey: .tileId)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(id, forKey: .id)
+        try container.encode(displayName, forKey: .displayName)
+        try container.encodeIfPresent(role, forKey: .role)
+        try container.encode(model, forKey: .model)
+        try container.encode(thinking, forKey: .thinking)
+        try container.encode(cwd, forKey: .cwd)
+        try container.encodeIfPresent(worktreeBranch, forKey: .worktreeBranch)
+        try container.encodeIfPresent(projectId, forKey: .projectId)
+        try container.encodeIfPresent(parentAgentID, forKey: .parentAgentID)
+        try container.encode(createdAt.timeIntervalSinceReferenceDate, forKey: .createdAtReferenceInterval)
+        try container.encode(lastActivityAt.timeIntervalSinceReferenceDate, forKey: .lastActivityAtReferenceInterval)
+        try container.encodeIfPresent(tileId, forKey: .tileId)
+    }
+
+    // Lifecycle (settle / snooze) deliberately does NOT live here — that is
+    // Phase 4's `settledOverride`. Neither does anything runtime-shaped: a pid,
+    // a pane target, or a resume cursor belongs in `ManagedAgentSessionRecord`.
+}
