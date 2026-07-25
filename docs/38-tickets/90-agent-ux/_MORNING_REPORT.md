@@ -158,7 +158,37 @@ Owed for five wakes; paid at 09:15Z on a clean tree. Independently confirmed:
 The one red leg is `--ui-pixel-check` → `witness.visibleBorder`, luminance delta **0.000**. Not a
 colour regression — see below.
 
-## THE ONE THING WAITING ON YOU — the display, not the code
+## STOPPED AGAIN 2026-07-25 — same substrate, different half of it
+
+The loop stopped a second time, mid-`P1.12`, and again on the environment rather than
+on a ticket. Full measurements: `_ENV-BLOCKER-2-text-antialiasing.md`.
+
+Short version: `5080adc` pinned the probe's SCALE, which fixed the 1x/2x blocker below.
+It did **not** pin glyph rasterisation. With the tree clean at `881a458`,
+`--ui-baseline-check` is red on **24 of 46** baselines — deterministic across runs,
+identical with and without P1.12's diff, and the diff images are magenta **only on
+letterforms** (layout unmoved, fills unmoved, text-free renders still match). The same
+tree ran this leg green earlier today, under the display configuration described below;
+the built-in Retina panel is now the only display.
+
+The worker again refused to bless (the forbidden move), parked its complete P1.12
+implementation in `git stash@{0}` (`2c7cc86`), and stopped rather than burning the rest
+of the queue on a leg no ticket can fix.
+
+**Your call, and I recommend the first:**
+
+1. **Pin the probe's font rendering** in `UIProbe.render` (own `CGContext`, explicit
+   smoothing/antialiasing rather than inheriting the window's), then one deliberate
+   46-baseline bless commit. This makes the gate host-independent and ends this class.
+2. **Re-bless on this host** and do not change displays for the rest of the run. One
+   commit, but it will recur.
+
+P1.12 itself is done and verified as far as it can be here: `swift build` green, the iOS
+`xcodebuild` leg green, colour hygiene green with 7 negative tests observed red. Still
+owed once the substrate works: the full matrix, codex cross-review, and the simulator
+confirmation. The ledger row has the whole diff described.
+
+## The FIRST display blocker (2026-07-25 09:14) — resolved, kept for the record
 
 The loop **stopped itself** at 09:14 (`a44c0cf`) mid-P0.7 and it was right to. Your 1920×1080
 external became **Main Display**, so the window backing scale flipped 2x → 1x. Every visual baseline
