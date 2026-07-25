@@ -162,6 +162,22 @@ run_app_check .build/debug/continuum-revived --ui-pixel-check
 # appearances. Catches regressions nobody wrote an assertion for; blessing is
 # explicit (CONTINUUM_UPDATE_BASELINES=1 ./scripts/run-matrix.sh) and never implicit.
 run_app_check .build/debug/continuum-revived --ui-baseline-check
+# Ticket P0.9: the advisory tour — a labelled contact sheet of the agent surfaces
+# (managed-agent tile in four states x three widths, transcript cards at three
+# widths, status chips, sidebar, settings) in both appearances, written to
+# qa-runs/<ts>/tour/ with an index.md.
+#
+# NOT a gate, by packet instruction: its exit status is captured and reported, never
+# propagated, so it can never fail the matrix. The check itself contains no visual
+# assertion either, so the only thing it can complain about is mechanical (a surface
+# fixture vanished, a render threw, artifacts unwritable) — which is why the warning
+# below is loud rather than silent. If it fails the build on aesthetics, workers
+# start "fixing" screenshots instead of bugs.
+ui_tour_status=0
+run_app_check .build/debug/continuum-revived --ui-tour-check || ui_tour_status=$?
+if [[ "$ui_tour_status" -ne 0 ]]; then
+  printf '\nrun-matrix: WARNING — the advisory UI tour exited %d (see above). It does NOT gate the matrix; the deterministic UI gates are --ui-probe/geometry/pixel/baseline-check.\n' "$ui_tour_status"
+fi
 run_app_check .build/debug/continuum-revived --ui-test-support-check
 run_app_check .build/debug/continuum-revived --keybind-edit-check
 run_app_check .build/debug/continuum-revived --browser-url-focus-check

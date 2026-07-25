@@ -85,6 +85,7 @@ check --ui-geometry-check
 check --ui-pixel-check
 check --ui-probe-check
 check --ui-test-support-check
+check --ui-tour-check
 check --unified-model-boot-check
 check --viewport-sanitize-check
 check --workspace-boot-persistence-check
@@ -212,6 +213,7 @@ leg run_app_check .build/debug/continuum-revived --ui-geometry-check
 leg run_app_check .build/debug/continuum-revived --ui-pixel-check
 leg run_app_check .build/debug/continuum-revived --ui-probe-check
 leg run_app_check .build/debug/continuum-revived --ui-test-support-check
+leg run_app_check .build/debug/continuum-revived --ui-tour-check || ui_tour_status=$?
 leg run_app_check .build/debug/continuum-revived --unified-model-boot-check
 leg run_app_check .build/debug/continuum-revived --viewport-sanitize-check
 leg run_app_check .build/debug/continuum-revived --workspace-boot-persistence-check
