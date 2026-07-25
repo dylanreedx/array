@@ -1088,6 +1088,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--observer-sweep-badge-check") {
+            do {
+                _ = NSApplication.shared
+                try AppDelegate.runObserverSweepBadgeChecks()
+                print("ContinuumRevivedObserverSweepBadgeChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--agent-inventory-wiring-check") {
             do {
                 _ = NSApplication.shared
@@ -4971,7 +4983,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let canvasView else { return }
         let statuses = agentStatusesByTileId()
         for tile in canvasView.canvasState.tiles {
-            canvasView.tileView(for: tile.id)?.agentStatus = Self.canvasBadgeStatus(statuses[tile.id])
+            // P2B.6: NO ENTRY is not an entry saying "no agent". This sweep used to
+            // assign `canvasBadgeStatus(statuses[tile.id])` unconditionally, so a
+            // tile the inventory has nothing to say about — a managed tile whose
+            // record has not been written yet, and which set its own badge from its
+            // own ingest — had that badge erased by the next sweep for any unrelated
+            // agent. Absence of information is not information.
+            //
+            // An entry that EXISTS still clears the badge when it is idle or
+            // configuring (`canvasBadgeStatus` returns nil for those), so a terminal
+            // that genuinely went idle can still go dark. That is the distinction
+            // this guard is drawing: "no entry" vs "entry says no badge".
+            guard let status = statuses[tile.id] else { continue }
+            canvasView.tileView(for: tile.id)?.agentStatus = Self.canvasBadgeStatus(status)
         }
 
         let rollupsByZone = Self.canvasRollupsByZone(statuses: statuses, canvas: canvasView)
@@ -9767,7 +9791,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let observedRollupText = productionCanvas.zoneChromeSnapshot(for: zoneId)?.agentRollupText
         try expect(observedWorkingStatus == .working, "observer path should push .working into the working tile view")
         try expect(observedNeedsAttentionStatus == .needsAttention, "observer path should push .needsAttention into the needs-attention tile view")
-        try expect(observedPlainStatus == nil, "observer path should clear a plain tile absent from the status snapshot")
+        // P2B.6 REVERSES THIS ASSERTION, deliberately. It used to read "observer path
+        // should clear a plain tile absent from the status snapshot" — the sweep wrote
+        // `nil` over every tile it had no entry for, which is exactly what erased a
+        // managed tile's self-computed badge. Absence of an entry is now not
+        // information, so a badge the sweep knows nothing about is left as it was:
+        // here, the `.stale` this fixture stained the shell tile with at line ~9754.
+        // The vacuity guard is the second assertion — "unchanged" says nothing unless
+        // the tile really is absent from the snapshot. A tile the snapshot DOES have
+        // an entry for is still driven by it (the two assertions above, and
+        // `--observer-sweep-badge-check`, which holds both directions).
+        try expect(delegate.agentStatusesByTileId()[plainTileId] == nil,
+                   "the shell tile must be absent from the snapshot, or the assertion below is vacuous")
+        try expect(observedPlainStatus == .stale, "observer path must not erase a badge it has no entry for — got \(String(describing: observedPlainStatus))")
         try expect(observedRollupText == "1 working · 1 needs you", "observer path should update zone chrome rollup text from the live snapshot")
         delegate.refreshAgentSurfaces(notify: false)
         try expect(NSApplication.shared.dockTile.badgeLabel == "1", "production refresh should count current needs-attention agent tiles")
@@ -18626,5 +18662,164 @@ extension AppDelegate {
 
     NSApplication.shared.dockTile.badgeLabel = nil
     print("AgentInventoryWiring: 5 agents (2 projects, 1 managed, 1 headless, 1 shell excluded) agreed across sidebar/badge/dock/companion from one rebuild; a flipped status moved all four")
+    }
+}
+
+/// P2B.6 — an observer sweep must not erase a badge it knows nothing about.
+///
+/// `applyAgentStatusesToCanvas` walks EVERY tile on the canvas on every refresh.
+/// It used to assign `canvasBadgeStatus(statuses[tile.id])` unconditionally, so a
+/// tile the inventory has no entry for got `nil` written over whatever it had —
+/// including a managed tile that had just computed its own status from its own
+/// ingest. The fix is one `guard`; this is its regression witness.
+///
+/// The fixture is the case the inventory cannot see: a managed-agent tile with a
+/// LIVE `ManagedAgentTileNSView` and no `ManagedAgentSessionRecord` on disk and no
+/// supervised `AgentRecord`. A vacuity guard asserts the inventory really has no
+/// entry for it, or the assertion would be about nothing.
+///
+/// HONEST LIMIT, from the cross-review: the view is constructed and ingested into
+/// DIRECTLY, not through `wireManagedAgentTile` — which always resolves or spawns a
+/// supervised agent before the tile subscribes, so a tile wired that way does have
+/// an entry. What is proven here is therefore the RULE ("a badge the sweep has no
+/// entry for survives it"), not a claim about which production lifecycle window
+/// reaches it. The production shape that does reach it is a tile that CARRIES a
+/// badge while the inventory has nothing to say about it, which is now asserted on
+/// the real production path in `--agent-status-check` (the shell tile there, whose
+/// previously-`nil`-ed badge is the assertion this ticket reverses).
+///
+/// Both directions are asserted, because the packet's trap is over-correcting:
+///   - NO ENTRY  → the badge is left alone (the bug);
+///   - ENTRY that maps to no badge (`idle`) → the badge is still cleared, so a
+///     terminal agent that genuinely went idle can still go dark.
+///
+/// TWO NEGATIVE TESTS OBSERVED RED at exit 1 with the final code:
+///   1. the `guard` reverted to the unconditional assignment → `an observer sweep
+///      with no entry for a managed tile must not erase its badge — got nil`.
+///   2. the guard widened to also skip an entry whose badge is nil
+///      (`guard let badge = statuses[tile.id].flatMap(Self.canvasBadgeStatus)`) →
+///      `a terminal agent that went idle must still be able to clear its badge —
+///      got Optional(ContinuumRevivedAgentUI.AgentStatus.working)`.
+///
+/// Gated on `--observer-sweep-badge-check`.
+extension AppDelegate {
+    static func runObserverSweepBadgeChecks() throws {
+    enum CheckError: Error, CustomStringConvertible {
+        case failed(String)
+        var description: String { switch self { case let .failed(message): return message } }
+    }
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+        if !condition() { throw CheckError.failed(message) }
+    }
+
+    let fm = FileManager.default
+    let tempRoot = fm.temporaryDirectory
+        .appendingPathComponent("continuum-observer-sweep-badge-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: tempRoot) }
+    let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+    let agentsSupport = tempRoot.appendingPathComponent("Agents", isDirectory: true)
+    let projectRoot = tempRoot.appendingPathComponent("Project", isDirectory: true)
+    for dir in [appSupport, agentsSupport, projectRoot] {
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+
+    let now = Date(timeIntervalSince1970: 1_900_400_000)
+    let workspaceId = UUID(uuidString: "2B600000-0000-4000-8000-0000000000A1")!
+    let projectId = UUID(uuidString: "2B600000-0000-4000-8000-0000000000D1")!
+    let zoneId = UUID(uuidString: "2B600000-0000-4000-8000-0000000000C1")!
+    let terminalAgentTile = UUID(uuidString: "2B600000-0000-4000-8000-0000000000E1")!
+    let managedAgentTile = UUID(uuidString: "2B600000-0000-4000-8000-0000000000E2")!
+
+    let placement = ZonePlacement(zoneId: zoneId, projectId: projectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 600, height: 400), color: "blue", collapsed: false, hydrationPolicy: .automatic)
+    var registry = Registry.empty()
+    registry.lastActiveWorkspaceId = workspaceId
+    registry.workspaces = [WorkspaceEntry(id: workspaceId, name: "Default", projectIds: [projectId], createdAt: now, updatedAt: now)]
+    registry.projects = [
+        ProjectEntry(id: projectId, name: "Project", rootPath: projectRoot.path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false)
+    ]
+    let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+    try registryStore.save(registry)
+    try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport).save(
+        WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [placement],
+            zoneZOrder: [zoneId],
+            lastActiveZoneId: zoneId
+        )
+    )
+
+    let store = ProjectStore(projectRoot: projectRoot)
+    let canvasState = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [
+        Tile(id: terminalAgentTile, kind: .terminal, title: "Agent · Claude", frame: TileFrame(x: 0, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata()),
+        Tile(id: managedAgentTile, kind: .managedAgent, title: "Managed", frame: TileFrame(x: 220, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata()),
+    ], groups: [], lastActiveTileId: terminalAgentTile)
+    try store.saveCanvas(canvasState)
+    // The terminal agent is the one the inventory DOES have an entry for: a
+    // persisted session carrying an `AgentDescriptor`, whose live status arrives
+    // through `applyObserverStatuses` (a persisted status always reads `.stale`
+    // after `restoredForBoot()` — see `--agent-inventory-wiring-check`).
+    try store.saveSession(TerminalSessionDescriptor(
+        id: UUID(uuidString: "2B600000-0000-4000-8000-0000000000F1")!,
+        tileId: terminalAgentTile, launchProfileId: "shell", command: "/bin/zsh", args: [],
+        cwd: projectRoot.path, env: [:], title: "session", createdAt: now, lastStartedAt: now, lastExit: nil,
+        agentDescriptor: AgentDescriptor(agentKind: .claude, worktreePath: projectRoot.path, status: .working, statusUpdatedAt: now)
+    ))
+    // …and the managed tile deliberately has NOTHING on disk: no managed-session
+    // record, no supervised agent record.
+
+    let app = AppDelegate()
+    app.registryStore = registryStore
+    app.agentSupervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: agentsSupport), makeRunner: { _ in
+        ScriptedAgentRunner(script: [])
+    })
+
+    let canvas = CanvasNSView(
+        canvasState: canvasState,
+        activeZone: placement,
+        zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: placement, displayName: "Project")]
+    )
+    canvas.install(tileView: TileNSView(tile: canvasState.tiles[0]), for: canvasState.tiles[0])
+    let managedView = ManagedAgentTileNSView(tile: canvasState.tiles[1])
+    canvas.install(tileView: managedView, for: canvasState.tiles[1])
+    app.canvasView = canvas
+
+    // MARK: 1 · the managed tile computes its own status, through its own ingest
+
+    managedView.ingest(.requestOpened(
+        threadId: managedView.wiringThreadId,
+        requestId: "req-1",
+        kind: .commandExecutionApproval
+    ))
+    try expect(managedView.currentAgentStatus == .needsAttention,
+               "the managed tile's own ingest must raise its hand, or this check is not about a badge the tile set — got \(managedView.currentAgentStatus)")
+    try expect(canvas.agentStatus(for: managedAgentTile) == .needsAttention,
+               "the managed tile must be showing the badge its ingest set — got \(String(describing: canvas.agentStatus(for: managedAgentTile)))")
+
+    // MARK: 2 · THE WITNESS. An observer sweep for an unrelated agent leaves it alone.
+
+    app.applyObserverStatuses([terminalAgentTile: .working])
+
+    // Vacuity guard: the assertion below says nothing unless the sweep genuinely
+    // had no entry for this tile.
+    try expect(app.agentStatusesByTileId()[managedAgentTile] == nil,
+               "the fixture must give the inventory NO entry for the managed tile — got \(String(describing: app.agentStatusesByTileId()[managedAgentTile]))")
+    try expect(canvas.agentStatus(for: managedAgentTile) == .needsAttention,
+               "an observer sweep with no entry for a managed tile must not erase its badge — got \(String(describing: canvas.agentStatus(for: managedAgentTile)))")
+    // The sweep still did its job for the tile it DOES know about.
+    try expect(canvas.agentStatus(for: terminalAgentTile) == .working,
+               "the sweep must still drive the tile it has an entry for — got \(String(describing: canvas.agentStatus(for: terminalAgentTile)))")
+
+    // MARK: 3 · the other direction. An entry that says idle still clears a badge.
+
+    app.applyObserverStatuses([terminalAgentTile: .idle])
+    try expect(app.agentStatusesByTileId()[terminalAgentTile] == .idle,
+               "the idle flip must reach the inventory, or the assertion below is vacuous — got \(String(describing: app.agentStatusesByTileId()[terminalAgentTile]))")
+    try expect(canvas.agentStatus(for: terminalAgentTile) == nil,
+               "a terminal agent that went idle must still be able to clear its badge — got \(String(describing: canvas.agentStatus(for: terminalAgentTile)))")
+    try expect(canvas.agentStatus(for: managedAgentTile) == .needsAttention,
+               "and the managed tile's badge survives a second sweep too — got \(String(describing: canvas.agentStatus(for: managedAgentTile)))")
+
+    NSApplication.shared.dockTile.badgeLabel = nil
+    print("ObserverSweepBadge: a managed tile's self-computed badge survived two observer sweeps that had no entry for it; an entry that says idle still cleared a terminal agent's badge")
     }
 }

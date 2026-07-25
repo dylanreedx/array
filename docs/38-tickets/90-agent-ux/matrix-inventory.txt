@@ -46,6 +46,7 @@ check --nav-mode-check
 check --new-tile-cwd-check
 check --note-click-focus-check
 check --note-file-tile-spawn-check
+check --observer-sweep-badge-check
 check --palette-browser-spawn-check
 check --palette-captures-keys-over-browser-check
 check --palette-duplicate-root-check
@@ -181,6 +182,7 @@ leg run_app_check .build/debug/continuum-revived --nav-mode-check
 leg run_app_check .build/debug/continuum-revived --new-tile-cwd-check
 leg run_app_check .build/debug/continuum-revived --note-click-focus-check
 leg run_app_check .build/debug/continuum-revived --note-file-tile-spawn-check
+leg run_app_check .build/debug/continuum-revived --observer-sweep-badge-check
 leg run_app_check .build/debug/continuum-revived --palette-browser-spawn-check
 leg run_app_check .build/debug/continuum-revived --palette-captures-keys-over-browser-check
 leg run_app_check .build/debug/continuum-revived --palette-duplicate-root-check

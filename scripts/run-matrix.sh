@@ -218,6 +218,10 @@ run_app_check .build/debug/continuum-revived --cross-project-agents-check
 # across two projects (one managed, one headless, one shell that is not an agent)
 # agree after a single `applyObserverStatuses`, and a flipped status moves all four.
 run_app_check .build/debug/continuum-revived --agent-inventory-wiring-check
+# P2B.6: the canvas sweep never erases a badge it has no entry for. A managed tile
+# with a live view and nothing on disk keeps the status its own ingest set across
+# two observer sweeps; an entry that says `idle` still clears a terminal's badge.
+run_app_check .build/debug/continuum-revived --observer-sweep-badge-check
 run_app_check .build/debug/continuum-revived --keybind-edit-check
 run_app_check .build/debug/continuum-revived --browser-url-focus-check
 run_app_check .build/debug/continuum-revived --browser-ui-delegate-check
