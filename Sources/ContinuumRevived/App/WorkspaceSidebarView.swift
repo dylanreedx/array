@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
@@ -581,24 +582,34 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         }
     }
 
-    private func glyph(for kind: SidebarAgentStatusKind) -> String {
+    /// `SidebarAgentStatusKind` is a domain collapse — it folds `configuring` and
+    /// `idle` into `.unknown` — so it needs mapping back to the `AgentStatus`
+    /// whose appearance stands for the kind before the shared presenter can be
+    /// asked. `.unknown` → `.idle`, whose accent is the muted text token: the
+    /// same muted read `tertiaryLabelColor` gave it. The collapse itself is NOT
+    /// changed here, and `text(for:)` still says "unknown" (P1.8 "Watch out").
+    private func representativeStatus(for kind: SidebarAgentStatusKind) -> AgentStatus {
         switch kind {
-        case .working: return "●"
-        case .needsAttention: return "◆"
-        case .done: return "✓"
-        case .stale: return "◌"
-        case .unknown: return "○"
+        case .working: return .working
+        case .needsAttention: return .needsAttention
+        case .done: return .done
+        case .stale: return .stale
+        case .unknown: return .idle
         }
     }
 
+    // P1.8: the sidebar's private glyph and colour maps are gone — they were the
+    // third disagreeing glyph set and the reason `configuring` read as
+    // invisible-grey here while the tile painted it purple.
+    private func glyph(for kind: SidebarAgentStatusKind) -> String {
+        StatusChipPresenter.display(for: representativeStatus(for: kind)).glyph
+    }
+
+    /// The sidebar follows the system appearance (unlike the tile chrome, which
+    /// paints its own dark-only literals and therefore resolves `.dark`), so the
+    /// accent goes through the appearance-resolving bridge.
     private func color(for kind: SidebarAgentStatusKind) -> NSColor {
-        switch kind {
-        case .working: return .systemBlue
-        case .needsAttention: return .systemOrange
-        case .done: return .systemGreen
-        case .stale: return .systemGray
-        case .unknown: return .tertiaryLabelColor
-        }
+        StatusChipNSView.dynamicNSColor(StatusChipPresenter.display(for: representativeStatus(for: kind)).accent)
     }
 
     private func accessibilityIdentifier(for item: SidebarItem) -> String {

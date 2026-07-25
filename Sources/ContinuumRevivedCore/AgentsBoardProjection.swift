@@ -1,16 +1,13 @@
 import ContinuumRevivedAgentUI
 import Foundation
 
-public struct AgentStatusPresentation: Equatable, Sendable {
-    public let glyph: String
-    public let colorToken: String
-
-    public init(glyph: String, colorToken: String) {
-        self.glyph = glyph
-        self.colorToken = colorToken
-    }
-}
-
+// Ticket P1.8 removed `AgentStatusPresentation` and the `presentation` field
+// that rode on this row. It carried a stringly-typed `colorToken` ("blue",
+// "teal", "tertiaryLabel") that each consumer re-interpreted in its own private
+// switch — which is precisely how `configuring` ended up teal on the board and
+// purple in the tile. A row's appearance is a pure function of its `status`, so
+// consumers now call `StatusChipPresenter.display(for: row.status)` and the
+// second channel that could disagree with the first no longer exists.
 public struct AgentsBoardRow: Equatable, Sendable, Identifiable {
     public var id: UUID { tileId }
     public let tileId: UUID
@@ -18,22 +15,19 @@ public struct AgentsBoardRow: Equatable, Sendable, Identifiable {
     public let lastSummary: String
     public let recent: [AgentActivityEvent]
     public let updatedAt: Date
-    public let presentation: AgentStatusPresentation
 
     public init(
         tileId: UUID,
         status: AgentStatus,
         lastSummary: String,
         recent: [AgentActivityEvent],
-        updatedAt: Date,
-        presentation: AgentStatusPresentation
+        updatedAt: Date
     ) {
         self.tileId = tileId
         self.status = status
         self.lastSummary = lastSummary
         self.recent = recent
         self.updatedAt = updatedAt
-        self.presentation = presentation
     }
 }
 
@@ -55,8 +49,7 @@ public enum AgentsBoardProjection {
                 status: activity.status,
                 lastSummary: activity.lastSummary,
                 recent: activity.recent,
-                updatedAt: activity.updatedAt,
-                presentation: presentation(for: activity.status)
+                updatedAt: activity.updatedAt
             )
         }
         .sorted(by: attentionFirst)
@@ -89,23 +82,6 @@ public enum AgentsBoardProjection {
             return nil
         }
         return ApprovalResponseTarget(tileId: event.tileId, approvalRequestId: approvalRequestId)
-    }
-
-    public static func presentation(for status: AgentStatus) -> AgentStatusPresentation {
-        switch status {
-        case .working:
-            AgentStatusPresentation(glyph: "●", colorToken: "blue")
-        case .needsAttention:
-            AgentStatusPresentation(glyph: "◆", colorToken: "orange")
-        case .done:
-            AgentStatusPresentation(glyph: "✓", colorToken: "green")
-        case .stale:
-            AgentStatusPresentation(glyph: "◌", colorToken: "gray")
-        case .configuring:
-            AgentStatusPresentation(glyph: "◍", colorToken: "teal")
-        case .idle:
-            AgentStatusPresentation(glyph: "○", colorToken: "tertiaryLabel")
-        }
     }
 
     public static func priority(for status: AgentStatus) -> Int {

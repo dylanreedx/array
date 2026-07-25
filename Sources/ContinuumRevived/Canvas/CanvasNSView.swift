@@ -3314,9 +3314,11 @@ final class CanvasNSView: NSView {
         let plainChrome = canvas.tileChromeSnapshot(for: plainTileId)
         let zoneChrome = canvas.zoneChromeSnapshot(for: zoneId)
         try expect(workingChrome?.agentStatus == .working, "working agent tile should expose working badge state")
-        try expect(workingChrome?.agentStatusLabel == "working", "working agent tile should expose working label")
+        // P1.8: the title bar's private lowercase label map is gone; the label
+        // is `StatusChipPresenter`'s, shared with the sidebar, board and phone.
+        try expect(workingChrome?.agentStatusLabel == "Working", "working agent tile should expose working label")
         try expect(needsChrome?.agentStatus == .needsAttention, "needs-attention agent tile should expose needs-attention badge state")
-        try expect(needsChrome?.agentStatusLabel == "needs you", "needs-attention agent tile should expose needs-you label")
+        try expect(needsChrome?.agentStatusLabel == "Needs attention", "needs-attention agent tile should expose needs-you label")
         try expect(plainChrome?.agentStatus == nil, "non-agent terminal should not expose an agent badge")
         try expect(zoneChrome?.agentRollupText == "1 working · 1 needs you", "zone header should expose aggregate agent counts")
         try expect(canvas.hitTest(CGPoint(x: 10, y: 10)) === canvas, "zone chrome remains pass-through")

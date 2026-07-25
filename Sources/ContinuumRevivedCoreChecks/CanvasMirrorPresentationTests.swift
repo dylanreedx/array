@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
@@ -197,21 +198,31 @@ func runCanvasMirrorStatusJoinChecks() {
             status: .needsAttention,
             lastSummary: "Needs approval",
             recent: [],
-            updatedAt: Date(timeIntervalSinceReferenceDate: 1),
-            presentation: AgentsBoardProjection.presentation(for: .needsAttention)
+            updatedAt: Date(timeIntervalSinceReferenceDate: 1)
         ),
         AgentsBoardRow(
             tileId: external,
             status: .working,
             lastSummary: "Not on canvas",
             recent: [],
-            updatedAt: Date(timeIntervalSinceReferenceDate: 2),
-            presentation: AgentsBoardProjection.presentation(for: .working)
+            updatedAt: Date(timeIntervalSinceReferenceDate: 2)
         )
     ]
 
     let joined = CanvasMirrorPresentation.statusOverlays(scene: scene, rows: rows)
-    expect(joined[tileA]?.presentation.colorToken == "orange", "Canvas mirror status join: tile activity uses AgentsBoard color token")
+    // P1.8: the overlay no longer carries a colorToken (that string channel was
+    // how `configuring` became teal on the phone and purple on the desktop). The
+    // phone derives the hue from `status` through the one shared presenter, so
+    // that is what is asserted — the accent is the gated approval token.
+    // Derived from the JOINED overlay's own status, so the assertion is tied to
+    // the migrated data path rather than restating the presenter to itself.
+    let joinedDisplay = joined[tileA].map { StatusChipPresenter.display(for: $0.status) }
+    expect(joinedDisplay?.glyph == "◆", "Canvas mirror status join: the joined overlay's glyph is the presenter's")
+    expect(
+        joinedDisplay?.accent.resolved(for: .dark).hexKey
+            == AccentToken.accentApproval.color.resolved(for: .dark).hexKey,
+        "Canvas mirror status join: needs-attention hue is AccentToken.accentApproval, via StatusChipPresenter"
+    )
     expect(joined[tileA]?.status == .needsAttention, "Canvas mirror status join: tile activity keeps status")
     expect(joined[tileB]?.status == .stale, "Canvas mirror status join: missing activity gets neutral stale status")
     expect(joined[external] == nil, "Canvas mirror status join: non-spatial activity is not projected onto canvas")

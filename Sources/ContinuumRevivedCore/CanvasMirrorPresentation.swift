@@ -94,20 +94,19 @@ public struct CanvasMirrorFreshnessDisplay: Equatable, Sendable {
 public struct CanvasMirrorTileStatus: Equatable, Sendable {
     public var tileId: UUID
     public var status: AgentStatus
-    public var presentation: AgentStatusPresentation
     public var summary: String?
     public var updatedAt: Date?
 
+    // P1.8: `presentation` removed with `AgentStatusPresentation` — the phone
+    // derives glyph and hue from `status` through `StatusChipPresenter`.
     public init(
         tileId: UUID,
         status: AgentStatus,
-        presentation: AgentStatusPresentation,
         summary: String?,
         updatedAt: Date?
     ) {
         self.tileId = tileId
         self.status = status
-        self.presentation = presentation
         self.summary = summary
         self.updatedAt = updatedAt
     }
@@ -299,7 +298,6 @@ public enum CanvasMirrorPresentation {
                 return (tile.tileId, CanvasMirrorTileStatus(
                     tileId: tile.tileId,
                     status: row.status,
-                    presentation: row.presentation,
                     summary: row.lastSummary,
                     updatedAt: row.updatedAt
                 ))
@@ -307,7 +305,6 @@ public enum CanvasMirrorPresentation {
             return (tile.tileId, CanvasMirrorTileStatus(
                 tileId: tile.tileId,
                 status: .stale,
-                presentation: AgentsBoardProjection.presentation(for: .stale),
                 summary: nil,
                 updatedAt: nil
             ))

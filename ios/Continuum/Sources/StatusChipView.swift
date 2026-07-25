@@ -26,7 +26,10 @@ struct StatusChipView: View {
     }
 }
 
-private extension Color {
+// Internal rather than private since P1.8: the agents board and the canvas
+// mirror paint a `StatusChipDisplay.accent` too, and a second copy of this
+// conversion is a second place for the sRGB bridge to drift.
+extension Color {
     init(chip: ChipColor) {
         self.init(.sRGB, red: chip.r, green: chip.g, blue: chip.b, opacity: 1)
     }

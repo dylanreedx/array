@@ -268,9 +268,13 @@ final class ManagedAgentTileNSView: TileNSView {
 
     private func applyHeader(status: AgentStatus) {
         nameLabel.stringValue = tile.title
-        glyphLabel.stringValue = Self.glyph(for: status)
-        glyphLabel.textColor = Self.color(for: status)
-        phaseLabel.stringValue = Self.phase(for: status)
+        let display = StatusChipPresenter.display(for: status)
+        glyphLabel.stringValue = display.glyph
+        // The bare glyph shape, so the accent — and `.dark` because this header
+        // paints its own dark-only literal fill (allowlisted, owner P1.10; when
+        // that adopts `SurfaceToken.tileChrome` the theme comes with it).
+        glyphLabel.textColor = StatusChipNSView.nsColor(display.accent.resolved(for: .dark))
+        phaseLabel.stringValue = display.label
         if let startedAt, status == .working || status == .needsAttention {
             elapsedLabel.stringValue = "\(max(0, Int(Date().timeIntervalSince(startedAt))))s"
         }
@@ -325,38 +329,10 @@ final class ManagedAgentTileNSView: TileNSView {
         ingest(.userInputResolved(threadId: threadId, requestId: requestId))
     }
 
-    private static func glyph(for status: AgentStatus) -> String {
-        switch status {
-        case .needsAttention: return "◆"
-        case .working: return "●"
-        case .done: return "✓"
-        case .stale: return "!"
-        case .idle: return "○"
-        case .configuring: return "◌"
-        }
-    }
-
-    private static func phase(for status: AgentStatus) -> String {
-        switch status {
-        case .needsAttention: return "needs you"
-        case .working: return "working"
-        case .done: return "done"
-        case .stale: return "stale"
-        case .idle: return "idle"
-        case .configuring: return "configuring"
-        }
-    }
-
-    private static func color(for status: AgentStatus) -> NSColor {
-        switch status {
-        case .needsAttention: return .systemOrange
-        case .working: return .systemBlue
-        case .done: return .systemGreen
-        case .stale: return .systemGray
-        case .idle: return .systemTeal
-        case .configuring: return .systemPurple
-        }
-    }
+    // P1.8 deleted this view's private glyph/phase/colour maps. They were one of
+    // the three disagreeing glyph sets (`◌` here meant *configuring*, in the
+    // sidebar it meant *stale*) and they had drifted from the board's hues.
+    // Everything now comes from `StatusChipPresenter`.
 
     func setPendingApprovalForQA(kind: ApprovalKind, requestId: String, detail: String) {
         let request = ApprovalDockRequest(requestId: requestId, kind: kind, detail: detail)

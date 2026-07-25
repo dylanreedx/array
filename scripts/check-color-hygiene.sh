@@ -268,10 +268,76 @@ while IFS= read -r problem || [[ -n "$problem" ]]; do
   fail "$problem"
 done < "$COMPARISON"
 
+# ---------------------------------------------------------------------------
+# Rule 3 (P1.8): exactly ONE status→appearance mapping.
+#
+# `StatusChipPresenter` is it. Before P1.8 there were six, with three
+# disagreeing glyph sets: `configuring` was purple in the tile, teal on the
+# board and invisible-grey in the sidebar, and `◌` meant *stale* in the sidebar
+# but *configuring* in the tile. Nothing about the allowlist above could have
+# caught that — `.systemPurple` is not a raw colour construction — so this rule
+# is the one that keeps the duplicates from growing back.
+#
+# NO allowlist, deliberately: the ticket's done-criterion is one mapping, so
+# there is no legitimate second one to excuse. Scope is the whole of Sources and
+# ios (the board map lived in Core, outside SCAN_DIRS above), minus the presenter
+# itself and the *Checks suites, which enumerate statuses to assert against.
+#
+# Honest limit: this catches a status→COLOUR line and a status→GLYPH line, which
+# is what all six duplicates were. A status→label map has no distinguishable
+# greppable signature (`case .done: return "done"` is indistinguishable from any
+# other string switch), so `runStatusChipChecks` totality plus review covers it.
+# No `\b` and no multibyte bracket expression in these three: they are handed to
+# awk, whose POSIX ERE reads `\b` as a backspace (so the pattern would match
+# nothing at all and the rule would be silently inert — it was, for one revision)
+# and whose bracket expressions are byte-oriented. Word boundary is spelled as an
+# explicit character class, and the glyph set as alternation.
+STATUS_CASE_RE='case[[:space:]]+\.(configuring|working|idle|needsAttention|done|stale)([^A-Za-z0-9_]|$)'
+STATUS_COLOUR_RE='system[A-Z]|(NS|UI)?Color|colorToken|[Ll]abelColor|textColor|\.tint'
+STATUS_GLYPH_RE='"(◆|●|✓|◌|○|◍|◐)'
+PRESENTER=Sources/ContinuumRevivedAgentUI/StatusChip.swift
+
+if [[ ! -f "$PRESENTER" ]]; then
+  fail "missing $PRESENTER — the single status→appearance mapping cannot be verified"
+else
+  # A WINDOW, not a single line: `case .working:` with `return .systemBlue` on
+  # the next line is the same duplicate map, and a one-line grep walks straight
+  # past it. Each status case carries its following two lines with it, so both
+  # the inline and the broken-over-lines spelling are caught. (Two lines is the
+  # observed shape of every map this ticket deleted; a switch case whose colour
+  # is four lines down is beyond grep and belongs to review.)
+  duplicate_maps=$(
+    find Sources ios -name '*.swift' \
+      | { grep -vE "StatusChip\.swift$|Checks\.swift$" || true; } \
+      | LC_ALL=C sort \
+      | while IFS= read -r file; do
+          [[ -n "$file" ]] || continue
+          awk -v f="$file" -v caseRe="$STATUS_CASE_RE" -v hitRe="$STATUS_COLOUR_RE|$STATUS_GLYPH_RE" '
+            { line[NR] = $0 }
+            END {
+              for (i = 1; i <= NR; i++) {
+                if (line[i] !~ caseRe) continue
+                window = line[i]
+                for (j = i + 1; j <= i + 2 && j <= NR; j++) window = window " ⏎ " line[j]
+                if (window ~ hitRe) printf "%s:%d:%s\n", f, i, window
+              }
+            }
+          ' "$file"
+        done
+  )
+  if [[ -n "$duplicate_maps" ]]; then
+    while IFS= read -r hit; do
+      [[ -n "$hit" ]] || continue
+      fail "second status→appearance mapping (only $PRESENTER may map AgentStatus to a glyph or a colour): $hit"
+    done <<<"$duplicate_maps"
+  fi
+fi
+
 if (( failures > 0 )); then
   printf 'Colour hygiene failed with %d problem(s). Fix the colour (adopt a DesignTokens value) — do not widen the allowlist.\n' \
     "$failures" >&2
   exit 1
 fi
 
-printf 'Colour hygiene passed: %d allowlisted violation line(s), 0 new.\n' "$(wc -l < "$ALLOWED" | tr -d ' ')"
+printf 'Colour hygiene passed: %d allowlisted violation line(s), 0 new; 1 status→appearance mapping.\n' \
+  "$(wc -l < "$ALLOWED" | tr -d ' ')"

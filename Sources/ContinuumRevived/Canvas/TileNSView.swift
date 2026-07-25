@@ -666,7 +666,7 @@ private final class TitleBarView: NSView {
         TileNSView.ChromeSnapshot(
             title: "\(tile.kind.displayName) · \(tile.title)",
             agentStatus: agentStatus,
-            agentStatusLabel: agentStatus.map(Self.label(for:)),
+            agentStatusLabel: agentStatus.map { StatusChipPresenter.display(for: $0).label },
             agentStatusErrorMessage: agentStatusErrorMessage
         )
     }
@@ -876,8 +876,11 @@ private final class TitleBarView: NSView {
     }
 
     private func drawAgentStatus(_ status: AgentStatus) {
-        let label = Self.label(for: status)
-        let color = Self.color(for: status)
+        let display = StatusChipPresenter.display(for: status)
+        let label = display.label
+        // The dot-and-tint shape, so the accent. `.dark` because the title bar
+        // paints its own white:0.16 literal (allowlisted, owner P1.10).
+        let color = StatusChipNSView.nsColor(display.accent.resolved(for: .dark))
         let textAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
             .foregroundColor: NSColor.white.withAlphaComponent(0.82)
@@ -892,27 +895,9 @@ private final class TitleBarView: NSView {
         label.draw(at: NSPoint(x: pillRect.minX + 15, y: pillRect.minY + 2), withAttributes: textAttributes)
     }
 
-    private static func label(for status: AgentStatus) -> String {
-        switch status {
-        case .configuring: return "configuring"
-        case .working: return "working"
-        case .idle: return "idle"
-        case .needsAttention: return "needs you"
-        case .done: return "done"
-        case .stale: return "stale"
-        }
-    }
-
-    private static func color(for status: AgentStatus) -> NSColor {
-        switch status {
-        case .needsAttention: return .systemOrange
-        case .working: return .systemBlue
-        case .done: return .systemGreen
-        case .stale: return .systemGray
-        case .idle: return .systemTeal
-        case .configuring: return .systemPurple
-        }
-    }
+    // P1.8 deleted this bar's private label/colour maps outright — see
+    // `StatusChipPresenter`, now the only status→appearance mapping. Not even a
+    // wrapper is left behind: both former callers ask the presenter directly.
 }
 
 /// Transparent overlay that draws four corner L-brackets. Each corner has its

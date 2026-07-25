@@ -17,8 +17,10 @@ import Foundation
 // reducing coverage in silence.
 
 /// Hue in degrees, for the "an accent keeps its identity across themes"
-/// assertion. Verification-only, hence here and not in the module.
-private func hueDegrees(_ color: ChipColor) -> Double {
+/// assertion. Verification-only, hence here and not in the module. Internal
+/// rather than file-private since P1.8, which reuses it to assert that a
+/// status's accent and its pill agree in hue.
+func hueDegrees(_ color: ChipColor) -> Double {
     let maxC = max(color.r, color.g, color.b)
     let minC = min(color.r, color.g, color.b)
     let delta = maxC - minC

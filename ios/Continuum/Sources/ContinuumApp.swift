@@ -900,10 +900,10 @@ private struct AgentRowView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            StatusGlyphView(status: row.status, presentation: row.presentation)
+            StatusGlyphView(status: row.status)
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    StatusPill(status: row.status, presentation: row.presentation)
+                    StatusPill(status: row.status)
                     Spacer(minLength: 8)
                     Text(row.updatedAt, style: .relative)
                         .font(.caption.monospacedDigit())
@@ -978,7 +978,7 @@ private struct DetailHeader: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                StatusPill(status: row.status, presentation: row.presentation)
+                StatusPill(status: row.status)
                 Spacer()
                 Text(row.updatedAt, style: .relative)
                     .font(.caption.monospacedDigit())
@@ -1195,32 +1195,39 @@ private struct TimelineEventRow: View {
     }
 }
 
+// P1.8: both of these took an `AgentStatusPresentation` and re-decoded its
+// `colorToken` string through `AppColors`. The row's appearance is a pure
+// function of its status, so they take the status and read the one shared
+// presenter — the same one the desktop tile, title bar and sidebar now read.
 private struct StatusGlyphView: View {
     let status: AgentStatus
-    let presentation: AgentStatusPresentation
 
     var body: some View {
-        Text(presentation.glyph)
+        Text(StatusChipPresenter.display(for: status).glyph)
             .font(.title3.weight(.bold))
-            .foregroundStyle(AppColors.color(for: presentation.colorToken))
+            .foregroundStyle(Color(chip: AppColors.statusAccent(for: status)))
             .accessibilityLabel(status.rawValue)
     }
 }
 
 private struct StatusPill: View {
     let status: AgentStatus
-    let presentation: AgentStatusPresentation
 
     var body: some View {
+        let display = StatusChipPresenter.display(for: status)
+        let accent = Color(chip: AppColors.statusAccent(for: status))
         HStack(spacing: 5) {
-            Text(presentation.glyph)
-            Text(status.rawValue)
+            Text(display.glyph)
+            // The presenter's label, not `status.rawValue`: this pill sat next to
+            // `StatusChipView` saying "Needs attention" while it said
+            // "needsAttention".
+            Text(display.label)
         }
         .font(.caption.weight(.semibold))
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
-        .foregroundStyle(AppColors.color(for: presentation.colorToken))
-        .background(AppColors.color(for: presentation.colorToken).opacity(0.16))
+        .foregroundStyle(accent)
+        .background(accent.opacity(0.16))
         .clipShape(Capsule())
     }
 }
@@ -1784,8 +1791,9 @@ private struct CanvasTabView: View {
     }
 
     private func statusDot(for tileId: UUID) -> some View {
-        let token = model.canvasStatusOverlays[tileId]?.presentation.colorToken
-        return Circle().fill(token.map { AppColors.color(for: $0) } ?? Color.gray.opacity(0.4)).frame(width: 7, height: 7)
+        let status = model.canvasStatusOverlays[tileId]?.status
+        let fill = status.map { Color(chip: AppColors.statusAccent(for: $0)) } ?? Color.gray.opacity(0.4)
+        return Circle().fill(fill).frame(width: 7, height: 7)
     }
 
     private func bringToFrontAction(tile: CanvasSceneTile) -> () -> Void {
@@ -2145,15 +2153,16 @@ private enum AppColors {
     static let background = Color(red: 0.05, green: 0.06, blue: 0.08)
     static let panel = Color(red: 0.10, green: 0.11, blue: 0.14)
 
-    static func color(for token: String) -> Color {
-        switch token {
-        case "blue": .blue
-        case "orange": .orange
-        case "green": .green
-        case "gray": .gray
-        case "teal": .teal
-        case "tertiaryLabel": Color(.tertiaryLabel)
-        default: .secondary
-        }
+    /// P1.8 replaced `color(for token: String)` — the fourth interpretation of
+    /// `AgentStatusPresentation.colorToken`, and the one that painted
+    /// `configuring` teal while the desktop tile painted it purple.
+    ///
+    /// Resolved for `.dark` because this app paints its own dark-only literals
+    /// (`background`/`panel` above) whatever the system appearance is: handing
+    /// back a light-appearance accent here would put a dark hue on a dark fill.
+    /// TODO(P1.12): iOS consumes `DesignTokens` surfaces and this becomes the
+    /// real appearance.
+    static func statusAccent(for status: AgentStatus) -> ChipColor {
+        StatusChipPresenter.display(for: status).accent.resolved(for: .dark)
     }
 }

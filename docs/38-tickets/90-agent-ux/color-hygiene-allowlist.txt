@@ -292,11 +292,10 @@ ios/Continuum/Sources/ContinuumApp.swift:24:.foregroundStyle(.secondary)
 # Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.12
 ios/Continuum/Sources/ContinuumApp.swift:1:.foregroundStyle(isError ? .red : .secondary)
 
-# Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.12
-ios/Continuum/Sources/ContinuumApp.swift:1:case "tertiaryLabel": Color(.tertiaryLabel)
-
-# Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.12
-ios/Continuum/Sources/ContinuumApp.swift:1:default: .secondary
+# P1.8 deleted `AppColors.color(for token:)` — the iOS decoder for
+# `AgentStatusPresentation.colorToken` — so the two entries that excused its
+# `Color(.tertiaryLabel)` and `default: .secondary` arms are gone with it. The
+# list shrank by 2, which is the only direction it moves.
 
 # Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.12
 ios/Continuum/Sources/ContinuumApp.swift:2:return .secondary

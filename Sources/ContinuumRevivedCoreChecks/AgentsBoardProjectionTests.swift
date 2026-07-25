@@ -89,20 +89,32 @@ func runAgentsBoardProjectionChecks() {
     )
     print("AgentsBoardProjection detailTimeline measured=\(AgentsBoardProjection.timelineEvents(for: skewedTimeline).map(\.summary).joined(separator: ","))")
 
-    let expectedPresentation: [(AgentStatus, String, String)] = [
-        (.working, "●", "blue"),
-        (.needsAttention, "◆", "orange"),
-        (.done, "✓", "green"),
-        (.stale, "◌", "gray"),
-        (.configuring, "◍", "teal"),
-        (.idle, "○", "tertiaryLabel"),
+    // P1.8: this block used to pin `AgentsBoardProjection.presentation(for:)`'s
+    // own glyph/colorToken map, which was one of the six duplicates — and its
+    // `◍`/"teal" for `configuring` is exactly the drift the ticket removed. The
+    // row no longer carries a presentation at all, so what there is to assert is
+    // that a row's appearance is reachable ONLY through the shared presenter and
+    // agrees with it for every status.
+    let expectedGlyphs: [(AgentStatus, String)] = [
+        (.working, "●"),
+        (.needsAttention, "◆"),
+        (.done, "✓"),
+        (.stale, "◌"),
+        (.configuring, "◐"),
+        (.idle, "○"),
     ]
-    for (status, glyph, token) in expectedPresentation {
-        let presentation = AgentsBoardProjection.presentation(for: status)
-        expect(presentation.glyph == glyph, "AgentsBoardProjection presentation glyph for \(status.rawValue)")
-        expect(presentation.colorToken == token, "AgentsBoardProjection presentation color token for \(status.rawValue)")
+    for (status, glyph) in expectedGlyphs {
+        expect(StatusChipPresenter.display(for: status).glyph == glyph,
+               "AgentsBoard row glyph for \(status.rawValue) comes from StatusChipPresenter")
     }
-    print("AgentsBoardProjection presentation measured=\(expectedPresentation.map { "\($0.0.rawValue):\($0.1):\($0.2)" }.joined(separator: ","))")
+    let boardRow = AgentsBoardProjection.rows(from: snapshot).first { $0.status == .needsAttention }
+    expect(boardRow != nil, "AgentsBoardProjection: a needs-attention row is projected")
+    if let boardRow {
+        let display = StatusChipPresenter.display(for: boardRow.status)
+        expect(display.glyph == "◆" && display.accent.resolved(for: .dark).hexKey == AccentToken.accentApproval.color.resolved(for: .dark).hexKey,
+               "AgentsBoard row presentation is the presenter's, accent sourced from AccentToken")
+    }
+    print("AgentsBoardProjection presentation measured=\(expectedGlyphs.map { "\($0.0.rawValue):\($0.1)" }.joined(separator: ","))")
 
     let approvalWithId = boardEvent(
         tileId: tileA,

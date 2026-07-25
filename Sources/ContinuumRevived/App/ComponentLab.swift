@@ -711,10 +711,11 @@ enum LabCatalog {
         stack.addArrangedSubview(title)
 
         for (index, row) in rows.enumerated() {
-            let label = NSTextField(labelWithString: "\(row.presentation.glyph) \(row.status.rawValue) [\(row.presentation.colorToken)] \(row.lastSummary)")
+            let display = StatusChipPresenter.display(for: row.status)
+            let label = NSTextField(labelWithString: "\(display.glyph) \(row.status.rawValue) \(row.lastSummary)")
             label.identifier = NSUserInterfaceItemIdentifier("agentsBoard.row.\(index + 1)")
             label.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-            label.textColor = color(forToken: row.presentation.colorToken)
+            label.textColor = statusColor(for: row.status)
             stack.addArrangedSubview(label)
         }
         return stack
@@ -736,10 +737,10 @@ enum LabCatalog {
         for (index, row) in rows.enumerated() {
             let target = snapshot.byTile[row.tileId].flatMap { AgentsBoardProjection.respondableRequest(in: $0) }
             let request = target?.approvalRequestId ?? "no-id"
-            let label = NSTextField(labelWithString: "\(row.presentation.glyph) \(row.lastSummary) request=\(request)")
+            let label = NSTextField(labelWithString: "\(StatusChipPresenter.display(for: row.status).glyph) \(row.lastSummary) request=\(request)")
             label.identifier = NSUserInterfaceItemIdentifier("approvalsInbox.row.\(index + 1)")
             label.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-            label.textColor = color(forToken: row.presentation.colorToken)
+            label.textColor = statusColor(for: row.status)
             stack.addArrangedSubview(label)
         }
 
@@ -920,7 +921,7 @@ enum LabCatalog {
             let field = NSTextField(labelWithString: "\(row.0) -> \(row.1.rawValue)")
             field.identifier = NSUserInterfaceItemIdentifier("agentAdapterProjection.row.\(index + 1)")
             field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-            field.textColor = color(for: row.1)
+            field.textColor = statusColor(for: row.1)
             stack.addArrangedSubview(field)
         }
         return stack
@@ -943,27 +944,12 @@ enum LabCatalog {
         }
     }
 
-    private static func color(for status: AgentStatus) -> NSColor {
-        switch status {
-        case .needsAttention: return .systemOrange
-        case .working: return .systemBlue
-        case .done: return .systemGreen
-        case .stale: return .systemGray
-        case .idle: return .systemTeal
-        case .configuring: return .systemPurple
-        }
-    }
-
-    private static func color(forToken token: String) -> NSColor {
-        switch token {
-        case "blue": return .systemBlue
-        case "orange": return .systemOrange
-        case "green": return .systemGreen
-        case "gray": return .systemGray
-        case "teal": return .systemTeal
-        case "tertiaryLabel": return .tertiaryLabelColor
-        default: return .secondaryLabelColor
-        }
+    // P1.8: the Lab's own `color(for:)` and its `color(forToken:)` decoder for
+    // `AgentStatusPresentation.colorToken` are both gone — a catalogue that
+    // paints its own hues is a catalogue that cannot show what production
+    // paints. Every Lab card now reads the shared presenter.
+    private static func statusColor(for status: AgentStatus) -> NSColor {
+        StatusChipNSView.dynamicNSColor(StatusChipPresenter.display(for: status).accent)
     }
 
     static var managedSessionRecordCard: LabEntry {
@@ -1787,17 +1773,95 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         let agentsBoardRow2 = try agentsBoardText(2)
         let agentsBoardRow3 = try agentsBoardText(3)
         let agentsBoardRow4 = try agentsBoardText(4)
-        guard agentsBoardRow1.contains("◆ needsAttention [orange] alpha needs approval") else {
+        // P1.8: the `[orange]`/`[blue]` field was `AgentStatusPresentation.colorToken`,
+        // the stringly-typed channel this ticket deleted. The glyph is unchanged
+        // and now comes from the shared presenter — and the row's COLOUR, which
+        // no assertion could reach while it was a string, is asserted below.
+        guard agentsBoardRow1.contains("◆ needsAttention alpha needs approval") else {
             throw fail("agents board row 1 rendered '\(agentsBoardRow1)'")
         }
-        guard agentsBoardRow2.contains("◆ needsAttention [orange] beta needs input") else {
+        guard agentsBoardRow2.contains("◆ needsAttention beta needs input") else {
             throw fail("agents board row 2 rendered '\(agentsBoardRow2)'")
         }
-        guard agentsBoardRow3.contains("● working [blue] delta is running checks") else {
+        guard agentsBoardRow3.contains("● working delta is running checks") else {
             throw fail("agents board row 3 rendered '\(agentsBoardRow3)'")
         }
-        guard agentsBoardRow4.contains("✓ done [green] gamma finished cleanly") else {
+        guard agentsBoardRow4.contains("✓ done gamma finished cleanly") else {
             throw fail("agents board row 4 rendered '\(agentsBoardRow4)'")
+        }
+
+        // The packet's verification: what a migrated call site RENDERS is the
+        // presenter's own value, in both appearances. Reading the field's
+        // textColor back per appearance is what makes this a statement about the
+        // pixels rather than about the code path — a hardcoded `.systemOrange`
+        // here would land on 0xFF9F0A/0xFF9500, not on `accentApproval`.
+        func renderedHexKey(_ field: NSTextField, _ appearance: NSAppearance) throws -> String {
+            guard let color = field.textColor else { throw fail("agents board row has no textColor") }
+            var key = ""
+            appearance.performAsCurrentDrawingAppearance {
+                if let srgb = color.usingColorSpace(.sRGB) {
+                    key = ChipColor(
+                        r: Double(srgb.redComponent),
+                        g: Double(srgb.greenComponent),
+                        b: Double(srgb.blueComponent)).hexKey
+                }
+            }
+            return key
+        }
+        let appearancesByTheme: [(TokenTheme, NSAppearance)] = [
+            (.light, NSAppearance(named: .aqua)!),
+            (.dark, NSAppearance(named: .darkAqua)!),
+        ]
+        // EVERY status, not just the three the canned board fixture happens to
+        // carry — otherwise `configuring` (the status that was purple here and
+        // teal on the board) would have no rendered witness at all. Built from a
+        // synthetic row per status through the real `makeAgentsBoardView(rows:)`,
+        // so this needs no fixture change and moves no baseline.
+        let everyStatusRows = AgentStatus.allCases.enumerated().map { index, status in
+            AgentsBoardRow(
+                tileId: UUID(uuidString: "88000000-0000-4000-8000-0000000001\(String(format: "%02d", index))")!,
+                status: status,
+                lastSummary: "row for \(status.rawValue)",
+                recent: [],
+                updatedAt: Date(timeIntervalSinceReferenceDate: Double(index))
+            )
+        }
+        // Qualified: `makeAgentsBoardView` is shadowed above by the card's own
+        // no-argument closure binding.
+        let everyStatusBoard = LabCatalog.makeAgentsBoardView(rows: everyStatusRows)
+        for (index, row) in everyStatusRows.enumerated() {
+            guard let field = everyStatusBoard.descendant(withIdentifier: "agentsBoard.row.\(index + 1)") as? NSTextField else {
+                throw fail("all-status agents board missing row \(index + 1)")
+            }
+            let display = StatusChipPresenter.display(for: row.status)
+            guard field.stringValue.hasPrefix(display.glyph) else {
+                throw fail("all-status agents board row for \(row.status.rawValue) rendered "
+                           + "'\(field.stringValue)', presenter glyph is '\(display.glyph)'")
+            }
+            for (theme, appearance) in appearancesByTheme {
+                let rendered = try renderedHexKey(field, appearance)
+                let expected = display.accent.resolved(for: theme).hexKey
+                guard rendered == expected else {
+                    throw fail("all-status agents board row for \(row.status.rawValue) rendered #\(rendered) "
+                               + "in \(theme.rawValue), presenter says #\(expected)")
+                }
+            }
+        }
+        // …and the canned fixture rows the baselines are taken from, so the
+        // pinned board card is covered by the same assertion.
+        for (rowIndex, status) in [(1, AgentStatus.needsAttention), (3, .working), (4, .done)] {
+            guard let field = agentsBoardView.descendant(withIdentifier: "agentsBoard.row.\(rowIndex)") as? NSTextField else {
+                throw fail("agents board card missing row \(rowIndex)")
+            }
+            let accent = StatusChipPresenter.display(for: status).accent
+            for (theme, appearance) in appearancesByTheme {
+                let rendered = try renderedHexKey(field, appearance)
+                let expected = accent.resolved(for: theme).hexKey
+                guard rendered == expected else {
+                    throw fail("agents board row \(rowIndex) (\(status.rawValue)) rendered #\(rendered) in "
+                               + "\(theme.rawValue), presenter says #\(expected)")
+                }
+            }
         }
         guard let approvalsInboxEntry = entries.first(where: { $0.id == "approvals.inbox" }),
               case let .staticCard(_, makeApprovalsInboxView) = approvalsInboxEntry.content else {

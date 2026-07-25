@@ -51,7 +51,24 @@ final class StatusChipNSView: NSView {
         toolTip = display.label
     }
 
-    private static func nsColor(_ color: ChipColor) -> NSColor {
+    /// A `TokenColor` as an NSColor that resolves itself per appearance — for a
+    /// caller painting into a surface that follows the system appearance (the
+    /// Component Lab, the sidebar). A caller sitting on a hardcoded dark-only
+    /// fill must NOT use this: under Aqua it would hand back the light variant
+    /// and reproduce the black-on-dark bug, so those resolve `.dark` explicitly.
+    static func dynamicNSColor(_ token: TokenColor) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let theme: TokenTheme = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .dark : .light
+            return nsColor(token.resolved(for: theme))
+        }
+    }
+
+    /// The one ChipColor→NSColor bridge on this side. Internal rather than
+    /// private since P1.8: the title bar, the managed-tile header and the
+    /// sidebar all paint a `StatusChipDisplay.accent`, and a second copy of this
+    /// conversion would be a second raw-colour construction for the P1.7 gate to
+    /// carry.
+    static func nsColor(_ color: ChipColor) -> NSColor {
         NSColor(srgbRed: color.r, green: color.g, blue: color.b, alpha: 1)
     }
 }
