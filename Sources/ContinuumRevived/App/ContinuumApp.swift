@@ -1040,6 +1040,24 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--agent-supervisor-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runAgentSupervisorChecks()
+                    print("ContinuumRevivedAgentSupervisorChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            // Same reason as `--ui-test-support-check`: the supervisor delivers
+            // events via `DispatchQueue.main.async` and the check waits on them with
+            // `waitUntil`, so a live main run loop is what drains both.
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--settings-panel-check") {
             do {
                 _ = NSApplication.shared
@@ -2712,9 +2730,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var activeProject: Project? { workspaceRuntime?.activeController?.project }
     private var registryStore: RegistryStore?
     private var tileSpawner: TileSpawner?
-    /// Live provider runners, one per managed-agent tile (ticket 88.4b). Held
-    /// so a running Pi process isn't torn down by ARC and can be stopped.
-    private var managedAgentRunners: [UUID: PiAgentRunner] = [:]
+    /// The app-lifetime owner of every agent (P2A.3). Replaces the per-tile
+    /// `managedAgentRunners` dictionary this view used to hold: the supervisor owns
+    /// the runner and the record, and a tile is one subscriber to its event stream.
+    private lazy var agentSupervisor = AgentSupervisor(store: AgentStore(smokeTest: smokeTestEnabled))
+    /// One subscription task per managed-agent tile, so re-wiring a tile replaces
+    /// its subscriber instead of stacking a second one.
+    private var managedAgentTileSubscriptions: [UUID: Task<Void, Never>] = [:]
     /// Per-tile activity timeline (I5-safe drafts) built from the runner event
     /// stream, folded into the companion snapshot so the phone sees what each
     /// agent is doing (ticket 88.4c). Capped per tile.
@@ -3768,6 +3790,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             break
         case .managedAgent:
             try? workspaceRuntime?.activeController?.managedSessionStore.delete(tileId: id)
+            // The tile's subscription is this file's to clean up (P2A.3): without
+            // this the `for await` loop outlives the view and only notices it is
+            // gone on the next event. Deliberately NOT stopping the agent or
+            // clearing `AgentRecord.tileId` — closing a tile must not kill an agent
+            // (locked decision), and detach as an operation is P2A.5's.
+            managedAgentTileSubscriptions.removeValue(forKey: id)?.cancel()
         }
 
         canvasView.removeTile(id: id)
@@ -7514,48 +7542,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    /// Connects a managed-agent tile's compose row to a live Pi provider
-    /// runner (ticket 88.4b). Submitting a prompt spawns GPT-5.6 via Pi off
-    /// the main thread; each normalized event is rebound to the tile's thread
-    /// and ingested on the main actor so the tile updates turn-by-turn.
+    /// Binds a managed-agent tile to the agent the supervisor owns (P2A.3).
+    ///
+    /// This used to construct a `PiAgentRunner` inside the tile's own submit
+    /// closure, which made the view the runner's owner. Now the supervisor owns it:
+    /// this method spawns (or re-finds) the agent bound to this tile, routes the
+    /// compose row to `supervisor.send`, and SUBSCRIBES to
+    /// `supervisor.events(for:)` — one consumer among however many, which is what
+    /// makes the tile a view rather than the agent's home.
     private func wireManagedAgentTile(_ tileId: UUID) {
         guard let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
+        let supervisor = agentSupervisor
+        let agentId: AgentID
+        if let existing = supervisor.agent(forTile: tileId) {
+            agentId = existing
+        } else {
+            let cwd = URL(fileURLWithPath: activeProject?.rootPath ?? FileManager.default.currentDirectoryPath, isDirectory: true)
+            let model = AgentModelConfig.resolvedFromDefaults()
+            agentId = supervisor.spawn(
+                role: nil,
+                prompt: nil,
+                cwd: cwd,
+                model: model.model,
+                thinking: model.thinking,
+                projectId: activeProject?.id,
+                tileId: tileId
+            )
+        }
+
         let threadId = view.wiringThreadId
-        let cwd = URL(fileURLWithPath: activeProject?.rootPath ?? FileManager.default.currentDirectoryPath, isDirectory: true)
-        // Stable per-tile Pi session so prompts continue the same conversation
-        // (ticket 88.5). Each prompt spawns a fresh runner, but the shared
-        // session id makes Pi resume the tile's history.
-        let sessionId = "continuum-\(tileId.uuidString)"
-        view.onSubmitPrompt = { [weak self, weak view] prompt in
-            guard let self, let view else { return }
-            // Reflect the user's prompt in the transcript, then hand off to Pi.
+        view.onSubmitPrompt = { [weak view] prompt in
+            guard let view else { return }
+            // Reflect the user's prompt in the transcript, then hand off to the
+            // supervisor. The reply comes back through the subscription below.
             view.appendUserPrompt(prompt)
-            let runner = PiAgentRunner(config: .init(cwd: cwd, sessionId: sessionId))
-            self.managedAgentRunners[tileId] = runner
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    try runner.run(prompt: prompt) { event in
-                        let bound = event.withThreadId(threadId)
-                        DispatchQueue.main.async {
-                            view.ingest(bound)
-                            // Mirror the event onto the syncable activity timeline
-                            // so the phone sees it (88.4c). Status comes from the
-                            // tile's derived status after ingest.
-                            self.recordManagedActivity(tileId: tileId, event: bound, status: view.currentAgentStatus)
-                        }
-                    }
-                } catch {
-                    let message = String(describing: error)
-                    fputs("PiAgentRunner failed for tile \(tileId): \(message)\n", stderr)
-                    DispatchQueue.main.async {
-                        let error = AgentRuntimeEvent.runtimeError(threadId: threadId, message: message)
-                        view.ingest(error)
-                        self.recordManagedActivity(tileId: tileId, event: error, status: view.currentAgentStatus)
-                    }
-                }
-                DispatchQueue.main.async { [weak self] in
-                    self?.managedAgentRunners.removeValue(forKey: tileId)
-                }
+            supervisor.send(prompt, to: agentId)
+        }
+
+        // Re-wiring the same tile replaces its subscriber; two live ones would
+        // double-ingest every event. LIMIT, from the cross-review: the replacement
+        // subscriber replays the agent's history, which is right for a FRESH view
+        // (P2A.5's re-attach) and would duplicate cards in a view that already
+        // ingested them. No call site re-wires a live view today — the three are a
+        // palette spawn, the initial install, and the live check, each on a
+        // just-constructed tile — and making re-attach idempotent is P2A.5's.
+        managedAgentTileSubscriptions[tileId]?.cancel()
+        managedAgentTileSubscriptions[tileId] = Task { @MainActor [weak self, weak view] in
+            for await event in supervisor.events(for: agentId) {
+                guard let view else { break }
+                // The tile's transcript filters on its own thread id, so events
+                // stamped with the AGENT's thread are rebound on the way in — the
+                // same rebinding the pre-supervisor wiring did at this boundary.
+                let bound = event.withThreadId(threadId)
+                view.ingest(bound)
+                // Mirror the event onto the syncable activity timeline so the phone
+                // sees it (88.4c). Status comes from the tile's derived status
+                // after ingest.
+                self?.recordManagedActivity(tileId: tileId, event: bound, status: view.currentAgentStatus)
             }
         }
     }

@@ -198,6 +198,12 @@ if [[ "$ui_tour_status" -ne 0 ]]; then
   printf '\nrun-matrix: WARNING — the advisory UI tour exited %d (see above). It does NOT gate the matrix; the deterministic UI gates are --ui-probe/geometry/pixel/baseline-check.\n' "$ui_tour_status"
 fi
 run_app_check .build/debug/continuum-revived --ui-test-support-check
+# Ticket P2A.3: the supervisor owns the runners, not the tile — a scripted runner
+# (no Pi, no network) fans one agent's event sequence out to two live subscribers
+# and one late one, stop terminates a blocked runner, and the record persists.
+# Also source-scans Sources/ContinuumRevived so no view can construct its own
+# PiAgentRunner and become a second owner.
+run_app_check .build/debug/continuum-revived --agent-supervisor-check
 run_app_check .build/debug/continuum-revived --keybind-edit-check
 run_app_check .build/debug/continuum-revived --browser-url-focus-check
 run_app_check .build/debug/continuum-revived --browser-ui-delegate-check
