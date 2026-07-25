@@ -74,7 +74,52 @@ run_app_check() {
   return "$status"
 }
 
+# Ticket P0.1: compile the iOS app, not just the macOS package. Core is shared
+# with the phone, so an iOS-only break (e.g. `Process`, which does not exist on
+# iOS) has to turn the matrix red here instead of reaching the owner. xcodebuild
+# is chatty, so capture the log and print it only when the build fails — the
+# same shape as every other leg's failure output. Skips loudly (never silently)
+# on a machine with no Xcode; that is the only condition it is gated on.
+run_ios_build() {
+  local log status
+  local cmd=(
+    xcodebuild
+    -project ios/Continuum.xcodeproj
+    -scheme Continuum
+    -sdk iphonesimulator
+    -destination 'generic/platform=iOS Simulator'
+    build
+  )
+
+  if ! command -v xcodebuild >/dev/null 2>&1; then
+    printf '\n==> SKIPPED (no xcodebuild on PATH): iOS app build — install Xcode to cover the shared-Core-on-iOS gate.\n'
+    return 0
+  fi
+
+  # Print the exact argv that runs, so the log can never drift from the command.
+  printf '\n==>'
+  printf ' %q' "${cmd[@]}"
+  printf '\n'
+  log=$(mktemp "${TMPDIR:-/tmp}/continuum-matrix-ios.XXXXXX")
+
+  set +e
+  "${cmd[@]}" >"$log" 2>&1
+  status=$?
+  set -e
+
+  if [[ "$status" -ne 0 ]]; then
+    printf 'iOS build FAILED (exit %d). Full log: %s\n' "$status" "$log"
+    cat "$log"
+    return "$status"
+  fi
+
+  printf 'iOS build succeeded.\n'
+  rm -f "$log"
+  return 0
+}
+
 run swift build
+run_ios_build
 run swift run ContinuumRevivedCoreChecks
 run swift run ContinuumRevivedSyncChecks
 # Ticket 86 (D4-R1): relay hub core — auth/scope, lossless catch-up, I5 gate.
