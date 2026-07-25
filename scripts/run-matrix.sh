@@ -158,6 +158,10 @@ run_app_check .build/debug/continuum-revived --ui-geometry-check
 # differ from the fill inside it, in both appearances. Flatness only; WCAG ratios
 # are --ui-contrast-check's business.
 run_app_check .build/debug/continuum-revived --ui-pixel-check
+# Ticket P0.6: committed PNG baselines for every static Component Lab card in both
+# appearances. Catches regressions nobody wrote an assertion for; blessing is
+# explicit (CONTINUUM_UPDATE_BASELINES=1 ./scripts/run-matrix.sh) and never implicit.
+run_app_check .build/debug/continuum-revived --ui-baseline-check
 run_app_check .build/debug/continuum-revived --ui-test-support-check
 run_app_check .build/debug/continuum-revived --keybind-edit-check
 run_app_check .build/debug/continuum-revived --browser-url-focus-check

@@ -53,6 +53,9 @@ enum LabFixtures {
     static let selectedZoneId = UUID(uuidString: "00000000-0000-0000-0000-0000000000B1")!
     static let selectedTileId = UUID(uuidString: "00000000-0000-0000-0000-0000000000C1")!
     static let epoch = Date(timeIntervalSince1970: 1_700_000_000)
+    /// 12 characters from `PairingAlphabet.symbols`, so the pairing card renders
+    /// realistic — and identical — data on every draw.
+    static let pairingCredential = "K7M2QRTX9BDH"
 
     static func tile(kind: TileKind, title: String) -> Tile {
         Tile(
@@ -1015,7 +1018,12 @@ enum LabCatalog {
     }
 
     static func makePairingTokenView() -> NSView {
-        let credential = (try? PairingAlphabet.credential()) ?? "credential-generation-failed"
+        // Canned, like every other Lab fixture: a freshly generated credential made
+        // this the one card whose render differed on every draw, so it could not
+        // carry a committed PNG baseline (P0.6). The generator's real properties —
+        // length, crowd-safe alphabet, and distribution bias over 5k draws — are
+        // gated directly in `AuthChecks.runPairingAlphabetBiasCheck`, not here.
+        let credential = LabFixtures.pairingCredential
         let url = PairingURL.issue(credential: credential, scopes: .observer)
 
         let title = NSTextField(labelWithString: "Pairing Token")

@@ -80,6 +80,7 @@ check --tile-chrome-scale-check
 check --tile-drag-grab-check
 check --tile-world-bounds-check
 check --topology-migration-check
+check --ui-baseline-check
 check --ui-geometry-check
 check --ui-pixel-check
 check --ui-probe-check
@@ -206,6 +207,7 @@ leg run_app_check .build/debug/continuum-revived --tile-chrome-scale-check
 leg run_app_check .build/debug/continuum-revived --tile-drag-grab-check
 leg run_app_check .build/debug/continuum-revived --tile-world-bounds-check
 leg run_app_check .build/debug/continuum-revived --topology-migration-check
+leg run_app_check .build/debug/continuum-revived --ui-baseline-check
 leg run_app_check .build/debug/continuum-revived --ui-geometry-check
 leg run_app_check .build/debug/continuum-revived --ui-pixel-check
 leg run_app_check .build/debug/continuum-revived --ui-probe-check
