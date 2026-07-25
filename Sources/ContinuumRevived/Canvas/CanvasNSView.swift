@@ -652,8 +652,16 @@ final class CanvasNSView: NSView, TokenThemed {
         if canvasState.lastActiveTileId == id {
             canvasState.lastActiveTileId = nil
         }
+        // Clearing the ID is not enough: the overlay is a real subview that keeps
+        // drawing (and animating) wherever it was last shown. Assigning
+        // `borderedTileId = nil` directly left a marching-ants rectangle stranded at
+        // the deleted tile's frame — visible, un-selectable, and un-deletable, since
+        // there is no tile under it any more. Reported from the canvas as a "dead
+        // zone I can see but can't delete"; it appeared to jump and then vanish
+        // because focusing any other tile re-applies the overlay and MOVES it.
+        // Route through `updateFocusBorder` so `applyFocusBorder` hides it.
         if borderedTileId == id {
-            borderedTileId = nil
+            updateFocusBorder(borderedTileId: nil)
         }
         attentionTileIds.remove(id)
         attentionBorderOverlays[id]?.removeFromSuperview()
@@ -961,9 +969,17 @@ final class CanvasNSView: NSView, TokenThemed {
         return overlay.frame == view.frame.insetBy(dx: -overlay.gap, dy: -overlay.gap)
     }
 
-    /// QA: the overlay's current frame (or nil when no tile is bordered).
+    /// QA: the frame the overlay is ACTUALLY painting, or nil if it is not on screen.
+    ///
+    /// Deliberately does **not** consult `borderedTileId`. It used to, and that is
+    /// why a stranded overlay went unseen for so long: with the ID cleared but the
+    /// view still visible, this reported `nil` while a marching-ants rectangle sat on
+    /// the canvas. An accessor that asks the bookkeeping instead of the screen cannot
+    /// witness the bookkeeping being wrong. Every existing caller is unaffected —
+    /// when scope legitimately leaves all tiles, `applyFocusBorder` hides the overlay,
+    /// so `isHidden` already answers nil.
     var qaFocusBorderFrame: CGRect? {
-        guard borderedTileId != nil, let overlay = focusBorderOverlay, !overlay.isHidden else { return nil }
+        guard let overlay = focusBorderOverlay, !overlay.isHidden else { return nil }
         return overlay.frame
     }
 
@@ -4386,6 +4402,30 @@ final class CanvasNSView: NSView, TokenThemed {
         try expect(canvas.qaFocusBorderActive, "re-enabling with a custom config shows the overlay live")
         let expectedCustomFrame = viewA.frame.insetBy(dx: -customGap, dy: -customGap)
         try expect(canvas.qaFocusBorderFrame == expectedCustomFrame, "custom gap \(customGap) should outset the overlay by \(customGap); expected \(expectedCustomFrame), got \(String(describing: canvas.qaFocusBorderFrame))")
+
+        // 7) Deleting the BORDERED tile must take its overlay with it. Last, because
+        //    it destroys A.
+        //
+        //    Reported from the real canvas as a "dead zone I can see but can't
+        //    delete": `removeTile` cleared `borderedTileId` but never re-applied, so
+        //    the marching-ants overlay stayed on screen at the deleted tile's frame
+        //    with no tile under it to select or remove. It appeared to jump and then
+        //    vanish because focusing any other tile re-applies the overlay and MOVES
+        //    it. Pre-existing since the feature landed (3647acf).
+        //
+        //    Asserted through `qaFocusBorderFrame`, which now reads the overlay's real
+        //    visibility instead of `borderedTileId` — the old accessor consulted the
+        //    very bookkeeping that was wrong, so it reported nil while the rectangle
+        //    was plainly on screen. That is why no gate caught this.
+        try expect(canvas.qaFocusBorderActive, "precondition: A is bordered before it is deleted")
+        let frameBeforeDelete = canvas.qaFocusBorderFrame
+        canvas.removeTile(id: tileAId)
+        try expect(canvas.borderedTileId == nil, "removing the bordered tile must clear borderedTileId")
+        try expect(
+            canvas.qaFocusBorderFrame == nil,
+            "removing the bordered tile must HIDE its overlay, not just forget the id — it is stranded at \(String(describing: canvas.qaFocusBorderFrame)) (bordered \(String(describing: frameBeforeDelete)) before the delete), un-selectable because no tile is under it"
+        )
+        try expect(!canvas.qaFocusBorderActive, "no overlay is active once the bordered tile is gone")
 
         let fm = FileManager.default
         let root = URL(fileURLWithPath: fm.currentDirectoryPath)

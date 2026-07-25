@@ -538,8 +538,19 @@ enum LabCatalog {
         for status in AgentStatus.allCases {
             let chip = StatusChipNSView(status: status)
             chip.identifier = NSUserInterfaceItemIdentifier("statusChip.\(status.rawValue)")
-            let row = NSStackView(views: [chip, NSView()])
+            // The trailing spacer keeps the chip hugging its own width instead of
+            // stretching to the row. It MUST be height-constrained: a bare `NSView()`
+            // has no intrinsic size and no constraints, so the row's height was
+            // ambiguous and the solver settled on the chip's height or a stretched one
+            // NONDETERMINISTICALLY — the same card rendered with two different vertical
+            // spacings between runs, which made `--ui-baseline-check` coin-flip on
+            // `agent.statusChip` and made blessing it whack-a-mole.
+            let spacer = NSView()
+            spacer.translatesAutoresizingMaskIntoConstraints = false
+            spacer.heightAnchor.constraint(equalToConstant: 0).isActive = true
+            let row = NSStackView(views: [chip, spacer])
             row.orientation = .horizontal
+            row.alignment = .centerY
             stack.addArrangedSubview(row)
         }
         return stack
