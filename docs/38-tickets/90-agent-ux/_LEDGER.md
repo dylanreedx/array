@@ -3,13 +3,13 @@
 Durable state. The conversation is NOT the source of truth: this file + `git log` are.
 
 ## heartbeat
-last-touch 2026-07-25T04:36:51Z · ticket P0.1-ios-target-in-matrix · attempt 1 · pid loop · status implementing
+last-touch 2026-07-25T04:43:14Z · ticket P0.1-ios-target-in-matrix · attempt 1 · pid loop · status committed
 
 ## tickets
 
 | ticket | state | commit | at | note |
 |---|---|---|---|---|
-| P0.1-ios-target-in-matrix | in-progress | | 2026-07-25T04:36:51Z | attempt 1 |
+| P0.1-ios-target-in-matrix | done | f61aff0 | 2026-07-25T04:43:14Z | iOS xcodebuild leg after `swift build`; negative test (`_ = Process()` in Core) turns the matrix red at exit 65 while `swift build` stays green; no-Xcode path prints SKIPPED and returns 0 |
 | P0.2-uiprobe-harness | pending | | | |
 | P0.8-shared-selector-and-wait | pending | | | |
 | P0.10-explicit-model-id | pending | | | |
