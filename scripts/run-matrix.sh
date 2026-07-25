@@ -145,6 +145,7 @@ run_app_check .build/debug/continuum-revived --component-lab-check
 # component really renders at the requested size in the requested NSAppearance, and
 # that .aqua vs .darkAqua produce different pixels.
 run_app_check .build/debug/continuum-revived --ui-probe-check
+run_app_check .build/debug/continuum-revived --ui-test-support-check
 run_app_check .build/debug/continuum-revived --keybind-edit-check
 run_app_check .build/debug/continuum-revived --browser-url-focus-check
 run_app_check .build/debug/continuum-revived --browser-ui-delegate-check

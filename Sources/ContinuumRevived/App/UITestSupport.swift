@@ -71,3 +71,85 @@ private func sleepOnMainQueue(_ interval: TimeInterval) async {
         }
     }
 }
+
+// MARK: - Self-check
+
+/// Flipped from a main-*queue* hop by the self-check below. A global because the
+/// flipping closure is `@Sendable`: the point is that the delivery path is
+/// `DispatchQueue.main.async`, which is exactly what a nested-RunLoop wait starves.
+@MainActor private var mainQueueHopWitness = false
+
+/// Proves both helpers, deterministically, with no network and no window: the
+/// lookups find/miss what they should, and `waitUntil` both observes a
+/// main-queue-delivered change and reports a timeout.
+///
+/// This exists because the ticket's own verification — the managed-agent live
+/// check — needs Pi auth, network, and a *supervised* GUI session (unattended it
+/// blocks in the folder-access `NSAlert`), so it cannot gate the helper headlessly.
+@MainActor
+func runUITestSupportChecks() async throws {
+    struct CheckError: Error, CustomStringConvertible {
+        let description: String
+    }
+    func fail(_ message: String) -> CheckError { CheckError(description: message) }
+
+    let root = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
+    root.identifier = NSUserInterfaceItemIdentifier("list")
+    let container = NSView(frame: root.bounds)
+    root.addSubview(container)
+    var rows: [NSView] = []
+    for index in 0..<3 {
+        let row = NSView(frame: NSRect(x: 0, y: index * 20, width: 200, height: 20))
+        row.identifier = NSUserInterfaceItemIdentifier("list.row.\(index)")
+        container.addSubview(row)
+        rows.append(row)
+    }
+    let decoy = NSView(frame: .zero)
+    decoy.identifier = NSUserInterfaceItemIdentifier("list.footer")
+    container.addSubview(decoy)
+
+    guard root.descendant(withIdentifier: "list.row.1") === rows[1] else {
+        throw fail("descendant(withIdentifier:) did not find the nested row 'list.row.1'")
+    }
+    guard root.descendant(withIdentifier: "list") === root else {
+        throw fail("descendant(withIdentifier:) did not match the receiver itself")
+    }
+    guard root.descendant(withIdentifier: "list.row.9") == nil else {
+        throw fail("descendant(withIdentifier:) matched an identifier that does not exist")
+    }
+    let prefixed = root.descendants(withPrefix: "list.row.").map { $0.identifier?.rawValue ?? "" }
+    guard prefixed == ["list.row.0", "list.row.1", "list.row.2"] else {
+        throw fail("descendants(withPrefix:) returned \(prefixed), expected the three rows in subview order")
+    }
+
+    // The regression this whole helper exists for: the condition becomes true
+    // only when a main-QUEUE block runs. A `RunLoop.current.run(mode:before:)`
+    // spin does not drain those, so a wait built that way hangs here.
+    mainQueueHopWitness = false
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+        MainActor.assumeIsolated { mainQueueHopWitness = true }
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.05, { mainQueueHopWitness }) else {
+        throw fail("waitUntil did not observe a change delivered via DispatchQueue.main (the main queue was starved)")
+    }
+
+    let startedTimeout = Date()
+    guard await waitUntil(timeout: 0.4, pollInterval: 0.05, { false }) == false else {
+        throw fail("waitUntil reported success for a condition that is never true")
+    }
+    let timeoutElapsed = Date().timeIntervalSince(startedTimeout)
+    guard timeoutElapsed >= 0.4 else {
+        throw fail("waitUntil gave up after \(timeoutElapsed)s, before its 0.4s timeout")
+    }
+    // And it returns immediately when the condition already holds.
+    let startedImmediate = Date()
+    guard await waitUntil(timeout: 5, { true }) else {
+        throw fail("waitUntil failed on an already-true condition")
+    }
+    let immediateElapsed = Date().timeIntervalSince(startedImmediate)
+    guard immediateElapsed < 0.4 else {
+        throw fail("waitUntil slept \(immediateElapsed)s before checking an already-true condition")
+    }
+
+    print("UITestSupport: 3 rows found by prefix, main-queue hop observed, timeout after \(String(format: "%.2f", timeoutElapsed))s")
+}

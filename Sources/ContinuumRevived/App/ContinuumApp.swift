@@ -961,6 +961,24 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--ui-test-support-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runUITestSupportChecks()
+                    print("ContinuumRevivedUITestSupportChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            // `waitUntil` needs a live main run loop to drain its main-queue hops —
+            // that is the property under test. No delegate is installed yet, so this
+            // runs the loop without booting a workspace.
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--settings-panel-check") {
             do {
                 _ = NSApplication.shared
