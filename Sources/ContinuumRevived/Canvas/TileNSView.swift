@@ -663,7 +663,7 @@ private final class TitleBarView: NSView {
 
     var snapshot: TileNSView.ChromeSnapshot {
         TileNSView.ChromeSnapshot(
-            title: "\(tile.kind.rawValue.capitalized) · \(tile.title)",
+            title: "\(tile.kind.displayName) · \(tile.title)",
             agentStatus: agentStatus,
             agentStatusLabel: agentStatus.map(Self.label(for:)),
             agentStatusErrorMessage: agentStatusErrorMessage
@@ -845,7 +845,7 @@ private final class TitleBarView: NSView {
             .font: NSFont.systemFont(ofSize: titleFontWorldSize, weight: .medium),
             .foregroundColor: NSColor.lightGray
         ]
-        let title = "\(tile.kind.rawValue.capitalized) · \(tile.title)" as NSString
+        let title = "\(tile.kind.displayName) · \(tile.title)" as NSString
         // Vertically center in the (variable-height) bar; inset scales too.
         let titleSize = title.size(withAttributes: attrs)
         title.draw(at: NSPoint(x: 8 * scale, y: max(0, (bounds.height - titleSize.height) / 2)), withAttributes: attrs)

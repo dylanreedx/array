@@ -63,6 +63,13 @@ final class ManagedAgentTileNSView: TileNSView {
     var activeToolCount: Int { model.activeToolCount }
     var currentAgentStatus: AgentStatus { descriptor.status }
 
+    /// Shows the prompt the user just submitted as its own "you" card.
+    func appendUserPrompt(_ text: String) {
+        model.appendUserPrompt(text)
+        reconcileCards()
+        scrollTranscriptToBottom()
+    }
+
     func ingest(_ event: AgentRuntimeEvent) {
         if startedAt == nil {
             if case .turnStarted = event { startedAt = Date() }
@@ -86,6 +93,7 @@ final class ManagedAgentTileNSView: TileNSView {
         applyComposeAvailability()
         approvalDock.pendingRequest = pendingApprovals.values.sorted { $0.requestId < $1.requestId }.first
         reconcileCards()
+        scrollTranscriptToBottom()
     }
 
     private func makeContentView() -> NSView {
@@ -136,7 +144,16 @@ final class ManagedAgentTileNSView: TileNSView {
             layout.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             header.heightAnchor.constraint(equalToConstant: 52),
             approvalDock.heightAnchor.constraint(equalToConstant: 92),
-            composeRow.heightAnchor.constraint(equalToConstant: 44)
+            composeRow.heightAnchor.constraint(equalToConstant: 44),
+            // A vertical NSStackView centers rows at their FITTING width unless
+            // pinned, so the transcript column was sizing itself to the longest
+            // message's single-line width and floating in the middle of the
+            // tile (with the scroller stranded mid-tile). Pin every row to the
+            // stack's width.
+            header.widthAnchor.constraint(equalTo: layout.widthAnchor),
+            scrollView.widthAnchor.constraint(equalTo: layout.widthAnchor),
+            approvalDock.widthAnchor.constraint(equalTo: layout.widthAnchor),
+            composeRow.widthAnchor.constraint(equalTo: layout.widthAnchor)
         ])
         return root
     }
@@ -178,7 +195,7 @@ final class ManagedAgentTileNSView: TileNSView {
         phaseLabel.font = .systemFont(ofSize: 12, weight: .medium)
         phaseLabel.textColor = .secondaryLabelColor
         elapsedLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        elapsedLabel.textColor = .tertiaryLabelColor
+        elapsedLabel.textColor = .secondaryLabelColor  // tertiary = 2.26:1, fails AA
 
         let textStack = NSStackView(views: [nameLabel, phaseLabel])
         textStack.orientation = .vertical
@@ -256,6 +273,16 @@ final class ManagedAgentTileNSView: TileNSView {
         if let startedAt, status == .working || status == .needsAttention {
             elapsedLabel.stringValue = "\(max(0, Int(Date().timeIntervalSince(startedAt))))s"
         }
+    }
+
+    /// Keeps the newest output visible. Without this the clip view stays pinned
+    /// at the top and the reply to the prompt you just sent lands off-screen.
+    private func scrollTranscriptToBottom() {
+        guard let scrollView = cardStack.enclosingScrollView else { return }
+        cardStack.layoutSubtreeIfNeeded()
+        let maxY = max(0, cardStack.bounds.height - scrollView.contentView.bounds.height)
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: maxY))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
     private func reconcileCards() {

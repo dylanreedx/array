@@ -13,16 +13,21 @@ final class TranscriptCardView: NSView {
         wantsLayer = true
         layer?.cornerRadius = 8
         layer?.borderWidth = 1
-        layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.45).cgColor
+        // separatorColor@0.45 rendered at ~1.1:1 on these fills — invisible.
+        layer?.borderColor = NSColor(white: 1, alpha: 0.14).cgColor
         layer?.backgroundColor = Self.background(for: card.kind).cgColor
 
         titleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
         titleLabel.textColor = .labelColor
         titleLabel.lineBreakMode = .byTruncatingTail
-        bodyLabel.font = .systemFont(ofSize: 12)
-        bodyLabel.textColor = .secondaryLabelColor
+        // The body IS the content of the tile — it gets primary text, not the
+        // secondary grey it had. Metadata sits one step down, but never
+        // tertiary (2.25:1 on every card fill, fails AA outright).
+        bodyLabel.font = .systemFont(ofSize: 13)
+        bodyLabel.textColor = .labelColor
+        bodyLabel.isSelectable = true
         statusLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-        statusLabel.textColor = .tertiaryLabelColor
+        statusLabel.textColor = .secondaryLabelColor
 
         let header = NSStackView(views: [titleLabel, NSView(), statusLabel])
         header.orientation = .horizontal
@@ -58,7 +63,7 @@ final class TranscriptCardView: NSView {
 
     private static func title(for card: ManagedTranscriptCard) -> String {
         switch card.kind {
-        case .message: return card.title
+        case .message, .userMessage: return card.title
         case .toolCall: return "tool · \(card.title)"
         case .plan: return "plan · \(card.title)"
         case .diff: return "diff · \(card.title)"
@@ -68,7 +73,7 @@ final class TranscriptCardView: NSView {
 
     private static func bodyFallback(for card: ManagedTranscriptCard) -> String {
         switch card.kind {
-        case .message: return ""
+        case .message, .userMessage: return ""
         case .toolCall: return card.itemKind?.rawValue ?? "tool call"
         case .plan: return "Plan is updating"
         case .diff: return "File changes pending"
@@ -89,6 +94,8 @@ final class TranscriptCardView: NSView {
     private static func background(for kind: ManagedTranscriptCardKind) -> NSColor {
         switch kind {
         case .message: return NSColor(red: 0.13, green: 0.15, blue: 0.18, alpha: 1)
+        // Your own messages read as a distinct, slightly blue surface.
+        case .userMessage: return NSColor(red: 0.15, green: 0.19, blue: 0.26, alpha: 1)
         case .toolCall: return NSColor(red: 0.12, green: 0.16, blue: 0.18, alpha: 1)
         case .plan: return NSColor(red: 0.15, green: 0.14, blue: 0.18, alpha: 1)
         case .diff: return NSColor(red: 0.12, green: 0.17, blue: 0.14, alpha: 1)

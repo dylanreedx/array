@@ -172,6 +172,25 @@ public enum TileKind: String, Codable, Equatable, Sendable, CaseIterable {
     case diffReview
     case runArtifacts
     case managedAgent
+
+    /// Human label for chrome. `rawValue.capitalized` produced "Managedagent",
+    /// "Filetree", "Browserinspector" — camelCase gets lowercased after the
+    /// first letter.
+    public var displayName: String {
+        switch self {
+        case .terminal: return "Terminal"
+        case .browser: return "Browser"
+        case .browserInspector: return "Inspector"
+        case .note: return "Note"
+        case .file: return "File"
+        case .fileTree: return "File Tree"
+        case .ticketQueue: return "Tickets"
+        case .conductorQueue: return "Queue"
+        case .diffReview: return "Diff"
+        case .runArtifacts: return "Artifacts"
+        case .managedAgent: return "Agent"
+        }
+    }
 }
 
 public struct TileFrame: Codable, Equatable, Sendable {

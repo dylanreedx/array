@@ -2701,6 +2701,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     """
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Continuum's canvas is a dark surface: every tile/card fill is a dark
+        // literal. The text, however, used dynamic system colors, which resolve
+        // to BLACK under light appearance — that is the "black text on dark
+        // blue" bug. Pin dark so the whole app matches its own surfaces
+        // regardless of the user's system setting. Measured: labelColor goes
+        // black@85% in Aqua, white@85% in DarkAqua.
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+
         // Ticket 87: headless component snapshot for Layer-2 vision QA. Renders
         // a Component Lab gallery to a PNG and exits, with zero project/boot
         // machinery — the reusable primitive for automated visual review.
@@ -7429,7 +7437,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         view.onSubmitPrompt = { [weak self, weak view] prompt in
             guard let self, let view else { return }
             // Reflect the user's prompt in the transcript, then hand off to Pi.
-            view.ingest(.contentDelta(threadId: threadId, turnId: "user", streamKind: .assistant, delta: "▶ \(prompt)"))
+            view.appendUserPrompt(prompt)
             let runner = PiAgentRunner(config: .init(cwd: cwd, sessionId: sessionId))
             self.managedAgentRunners[tileId] = runner
             DispatchQueue.global(qos: .userInitiated).async {

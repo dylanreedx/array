@@ -1312,7 +1312,7 @@ final class TileSpawner {
         let tile = Tile(
             id: tileId,
             kind: .managedAgent,
-            title: "Agent",
+            title: "GPT-5.6",
             frame: frame,
             zPosition: nextZ,
             runtimeRef: nil,

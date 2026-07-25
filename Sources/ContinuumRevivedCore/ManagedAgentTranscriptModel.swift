@@ -2,6 +2,9 @@ import Foundation
 
 public enum ManagedTranscriptCardKind: String, Codable, Equatable, Sendable {
     case message
+    /// What YOU sent. Previously user prompts were faked as assistant content
+    /// deltas, so they rendered in a card titled "assistant".
+    case userMessage
     case toolCall
     case plan
     case diff
@@ -75,6 +78,17 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
         default:
             break
         }
+    }
+
+    /// Appends the prompt the USER just submitted as its own card. Not an
+    /// AgentRuntimeEvent: providers never emit user text, so a local echo must
+    /// not ride the provider channel. Ends any open run so the agent's reply
+    /// starts a fresh card below.
+    public mutating func appendUserPrompt(_ text: String) {
+        endStreamingRuns()
+        cards.append(ManagedTranscriptCard(
+            id: "user-\(cards.count + 1)", kind: .userMessage, title: "you", body: text))
+        endStreamingRuns()
     }
 
     /// End any open assistant/reasoning card run so the NEXT delta starts a new
