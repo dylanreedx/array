@@ -50,3 +50,24 @@ phases depend on those gates being real.
 Queue drained · usage exhausted · too many consecutive failures · `touch STOP` in the repo root.
 On stop, write `docs/38-tickets/90-agent-ux/_MORNING_REPORT.md`: done / blocked / commits / what
 needs the owner's decision.
+
+## Supervisor rules (learned the hard way, 2026-07-25 ~06:30)
+
+The supervising session shares the working tree with a live worker. Two collisions happened:
+
+1. **Never edit `_LEDGER.md` while a worker is running.** The worker owns it. (Near-miss at 05:10.)
+2. **`git add <paths>` does NOT scope a commit.** A bare `git commit` commits the *entire index*,
+   including files the worker had already staged. This swept an in-progress ticket's implementation
+   into a docs commit twice (`6ccad1e` took P0.8's files, `4bda832` took P0.3's 408-line
+   implementation mid-flight), corrupting commit attribution and destroying the worker's index.
+
+   **Required procedure for the supervisor:**
+   - Run `git diff --cached --name-only` FIRST. If anything you do not own is staged, stop —
+     a worker is mid-commit. Wait for the next wake.
+   - Commit with an explicit pathspec: `git commit -- <paths>` (or `git commit --only <paths>`),
+     never a bare `git commit`.
+   - Prefer committing supervisor work when no `claude -p` child is alive.
+
+Consequence when it happens: the worker's index vanishes underneath it, so it can neither commit nor
+report. Recovery = terminate that child, verify the swept code against its packet, re-run the matrix,
+record the ticket honestly with an ATTRIBUTION ERROR note, and relaunch the driver.
