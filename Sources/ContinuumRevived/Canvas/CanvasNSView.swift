@@ -14,7 +14,7 @@ extension Notification.Name {
 /// gestures to the underlying viewport. Flipped so the y-axis matches the
 /// world-space convention (positive y = down).
 @MainActor
-final class CanvasNSView: NSView {
+final class CanvasNSView: NSView, TokenThemed {
     weak var delegate: CanvasNSViewDelegate?
     var onFileURLDrop: ((String, CGPoint) -> Void)?
     /// Single-point hook for the app's tile-delete orchestrator. The canvas
@@ -225,7 +225,7 @@ final class CanvasNSView: NSView {
         }
         super.init(frame: NSRect(x: 0, y: 0, width: 1000, height: 700))
         wantsLayer = true
-        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.92).cgColor
+        applyTokens()
         registerForDraggedTypes([.fileURL])
         // zone-unify P0: seed the unified live model from the boot zone set.
         // `liveZones` is the authoritative placement; display metadata is kept
@@ -742,6 +742,41 @@ final class CanvasNSView: NSView {
     var qaResizeHUDVisible: Bool { resizeDimensionsOverlay?.qaVisible ?? false }
     var qaResizeHUDText: String { resizeDimensionsOverlay?.qaText ?? "" }
 
+    /// P1.11: the canvas IS `SurfaceToken.canvas` — the extreme end of the surface
+    /// ladder, which is what makes a tile read as an object sitting ON something.
+    /// `borderStrong`-on-`canvas` is the pair the ticket's Goal names, measured at
+    /// 6.91:1 light / 6.09:1 dark, replacing white@0.25-on-white@0.10 at 1.68:1.
+    ///
+    /// WHAT THIS FILE DELIBERATELY DOES NOT ADOPT, each with the reason:
+    ///
+    ///  * `ZoneChromeNSView.color(named:)` and `focusBorderColor(named:)` are USER
+    ///    configuration — a zone's colour and the focus-border colour are picked in
+    ///    Settings from seven named hues. The palette declares five *semantic status*
+    ///    accents; mapping the user's "mint" onto `accentDone` would silently change
+    ///    what they chose. These are not literals standing in for a token.
+    ///  * `NSColor.controlAccentColor` (selection ring, marquee, jump badges) is the
+    ///    system accent the user set in System Settings, already appearance-resolved
+    ///    through `appResolvedCGColor`. Replacing it with a token would be a
+    ///    regression dressed as an adoption.
+    ///  * The nav-mode and workspace-transition HUDs draw white text on a black
+    ///    SCRIM over a dimmed canvas. That is legible in both appearances by
+    ///    construction, and doing it properly needs a `scrim` surface plus an
+    ///    on-scrim text token, neither of which P1.3 declared. Left for whoever
+    ///    declares them; `runCanvasScrimInventoryCheck` pins the exact set so it
+    ///    cannot quietly grow.
+    func applyTokens() {
+        layer?.backgroundColor = SurfaceToken.canvas.color.cgColor(in: self)
+        if let zoneRenameField {
+            zoneRenameField.textColor = TextToken.textPrimary.color.nsColor(in: self)
+            zoneRenameField.backgroundColor = SurfaceToken.overlay.color.nsColor(in: self)
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
+    }
+
     /// Map a `FocusBorderConfig` color name to an `NSColor` (App layer — Core
     /// stays AppKit-free). Unknown names fall back to the system accent.
     private static func focusBorderColor(named name: String) -> NSColor {
@@ -1030,8 +1065,12 @@ final class CanvasNSView: NSView {
         ))
         field.stringValue = zoneDisplayByZoneId[zoneId]?.displayName ?? placement.name
         field.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        field.textColor = NSColor.white.withAlphaComponent(0.95)
-        field.backgroundColor = NSColor.black.withAlphaComponent(0.6)
+        // P1.11: an editable field floating over the zone chrome is an `overlay`
+        // surface carrying `textPrimary`, which is a documented pair. The old
+        // white@0.95 on black@0.6 was a composite over whatever the zone's accent
+        // wash happened to be — unpredictable, and white-on-light under Aqua.
+        field.textColor = TextToken.textPrimary.color.nsColor(in: self)
+        field.backgroundColor = SurfaceToken.overlay.color.nsColor(in: self)
         field.drawsBackground = true
         field.isBezeled = false
         field.isBordered = false

@@ -79,6 +79,19 @@ extension TokenColor {
     /// The same, resolved in the theme `view` is drawing in — the form
     /// `applyTokens()` implementations use.
     func cgColor(in view: NSView) -> CGColor { cgColor(for: view.effectiveTokenTheme) }
+
+    /// This token as an `NSColor`, for the AppKit properties that are not layer
+    /// colours: `NSTextField.textColor`, `NSTextView.backgroundColor`,
+    /// `NSButton.contentTintColor`, and `setFill()`/`setStroke()` inside `draw(_:)`.
+    ///
+    /// P1.11 added this because those properties are the majority of what the
+    /// chrome and the content tiles paint, and every one of them was reaching for
+    /// `StatusChipNSView.nsColor(token.resolved(for:))` by hand. One bridge, beside
+    /// the `cgColor` ones, so a call site never spells the resolution itself.
+    func nsColor(for theme: TokenTheme) -> NSColor { StatusChipNSView.nsColor(resolved(for: theme)) }
+
+    /// The same, resolved in the theme `view` is drawing in.
+    func nsColor(in view: NSView) -> NSColor { nsColor(for: view.effectiveTokenTheme) }
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P1.10-adopt-tokens-tile.md

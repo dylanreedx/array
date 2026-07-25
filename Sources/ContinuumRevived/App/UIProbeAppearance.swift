@@ -1,6 +1,7 @@
 import AppKit
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
+import ContinuumRevivedFileTree
 
 // Ticket: docs/38-tickets/90-agent-ux/P1.9-live-appearance-switching.md
 //
@@ -27,6 +28,14 @@ import ContinuumRevivedCore
 //      leaf after the flip; an otherwise identical fixture that snapshots its
 //      `.cgColor` in `init` (the pre-ticket pattern) must FAIL the same assertion.
 //      The witness runs every time rather than living in a comment.
+//  4 · Token VALUES over the real tree (P1.10, widened by P1.11 to every adopted
+//      surface and to the AppKit colour properties that are not layer colours).
+//  5 · The Goal, as a number (P1.11): the rendered tile's outline measured against
+//      the rendered canvas in both appearances, with the 1.68:1 defect as a witness.
+//  5b· The descriptor tile's eleven retired fills — the ticket's one deviation, with
+//      its evidence pinned rather than argued in prose.
+//  6 · The title bar's status pill clears the drag handle AND the tile title, driven
+//      through a real canvas at real viewport zooms.
 @MainActor
 enum UIProbeAppearance {
     struct AppearanceError: Error, CustomStringConvertible {
@@ -177,8 +186,8 @@ enum UIProbeAppearance {
     /// tile's own backdrop subviews (see `extraSlots`). Floors rather than
     /// equalities, so a new themed view or an extra card is not a failure — but a
     /// view or a whole surface silently dropping out of the sweep is.
-    private static let minimumThemedViews = 10
-    private static let minimumSentineledSlots = 26
+    private static let minimumThemedViews = 11
+    private static let minimumSentineledSlots = 23
 
     /// P1.10: the tile paints three plain `NSView` container fills, which
     /// `ownedLayers(of:)` cannot attribute to it (a view never answers for a
@@ -186,10 +195,20 @@ enum UIProbeAppearance {
     /// tile hands them over so the three surfaces it just adopted are swept rather
     /// than sitting in that blind spot.
     private static func extraSlots(in root: NSView) -> [ColorSlot] {
-        guard let tile = firstDescendant(ManagedAgentTileNSView.self, in: root) else { return [] }
-        return tile.qaTokenPaintedLayers.map {
-            ColorSlot(ownerLabel: "ManagedAgentTileNSView.\($0.label)", layer: $0.layer, kind: .background)
+        var slots: [ColorSlot] = []
+        if let tile = firstDescendant(ManagedAgentTileNSView.self, in: root) {
+            slots += tile.qaTokenPaintedLayers.map {
+                ColorSlot(ownerLabel: "ManagedAgentTileNSView.\($0.label)", layer: $0.layer, kind: .background)
+            }
         }
+        // P1.11: same blind spot, same hand-off — the descriptor tile's body is a
+        // plain `NSView` it fills itself.
+        if let tile = firstDescendant(DescriptorTileNSView.self, in: root) {
+            slots += tile.qaTokenPaintedLayers.map {
+                ColorSlot(ownerLabel: "DescriptorTileNSView.\($0.label)", layer: $0.layer, kind: .background)
+            }
+        }
+        return slots
     }
 
     /// A user-input card only exists once the agent asks a question, and the Lab
@@ -218,7 +237,15 @@ enum UIProbeAppearance {
         let surfaces: [(id: String, size: NSSize, make: () -> NSView)] = [
             ("appearance.managedAgentTile", NSSize(width: 640, height: 560), makeTile),
             ("appearance.sidebar", NSSize(width: 280, height: 520), { WorkspaceSidebarView(frame: .zero) }),
-            ("appearance.topBar", NSSize(width: 900, height: 44), { WorkspaceTopBarView(frame: .zero) })
+            ("appearance.topBar", NSSize(width: 900, height: 44), { WorkspaceTopBarView(frame: .zero) }),
+            // P1.11 made the canvas a `TokenThemed` conformer, so `declaredConformers()`
+            // requires it here — and the canvas fill is the background half of the
+            // `borderStrong`-on-`canvas` pair this ticket's Goal names.
+            ("appearance.canvas", NSSize(width: 700, height: 480), {
+                CanvasNSView(canvasState: CanvasState(
+                    viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                    tiles: [], groups: [], lastActiveTileId: nil))
+            })
         ]
         // Read out of the source, not typed here: every declared conformer must show
         // up in this sweep, so a conformance quietly dropped is red AND a new
@@ -227,8 +254,10 @@ enum UIProbeAppearance {
         var totalViews = 0
         var totalSlots = 0
         var totalChanged = 0
-        // The two views whose fill is a system colour: their resolved value has to
-        // MOVE with the appearance, not merely be re-assigned.
+        // Fills whose resolved value has to MOVE with the appearance, not merely be
+        // re-assigned. Before P1.11 these were `windowBackgroundColor`; they are now
+        // `SurfaceToken.panel`, whose two leaves differ, so the assertion still bites
+        // — what it catches is a fill pinned to one theme.
         var appearanceDependent: [String: (before: String, after: String)] = [:]
 
         for surface in surfaces {
@@ -366,7 +395,17 @@ enum UIProbeAppearance {
     /// them. What covers token consumers instead is check 4, which asserts the exact
     /// per-theme leaf on the real tree.
     private static func runHostileCurrentAppearanceCheck() throws -> Int {
+        // P1.11 moved the sidebar and the top bar off `windowBackgroundColor` onto
+        // `SurfaceToken.panel`, which takes the theme as an argument and therefore
+        // cannot read `NSAppearance.current` at all — so on those two this check
+        // would now pass trivially, exactly as it does on the tile. Rather than let
+        // it decay into a tautology, the SYSTEM-colour subject is a fixture that
+        // paints `appResolvedCGColor` the way production still does in
+        // `CanvasNSView`'s focus border and selection chrome. Both spellings of the
+        // bug (`.cgColor`, and `withAlphaComponent(_:).appResolvedCGColor`) are
+        // still red against it — see negative test 4.
         let subjects: [(id: String, size: NSSize, make: () -> NSView)] = [
+            ("appearance.systemFill.hostile", NSSize(width: 200, height: 80), { SystemFillFixtureView() }),
             ("appearance.sidebar.hostile", NSSize(width: 280, height: 520), { WorkspaceSidebarView(frame: .zero) }),
             ("appearance.topBar.hostile", NSSize(width: 900, height: 44), { WorkspaceTopBarView(frame: .zero) })
         ]
@@ -397,6 +436,29 @@ enum UIProbeAppearance {
     }
 
     // MARK: - 3 · Token fixture and its regression witness
+
+    /// P1.11: a view whose fill is a genuine system colour routed through
+    /// `appResolvedCGColor`, so check 2b keeps a subject the check can actually fail.
+    /// This is the shape the app still uses wherever the colour is the USER's — the
+    /// focus border, the selection ring, the marquee.
+    private final class SystemFillFixtureView: NSView, TokenThemed {
+        init() {
+            super.init(frame: .zero)
+            wantsLayer = true
+            applyTokens()
+        }
+
+        required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+        func applyTokens() {
+            layer?.backgroundColor = NSColor.windowBackgroundColor.appResolvedCGColor
+        }
+
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            applyTokens()
+        }
+    }
 
     /// A token-consuming view, built the way P1.10/P1.11 will build theirs.
     private final class TokenFixtureView: NSView, TokenThemed {
@@ -490,24 +552,41 @@ enum UIProbeAppearance {
     // that is neither adopted nor listed is a failure, so the hole is visible and can
     // only shrink.
 
-    /// The views this ticket put on tokens.
+    /// The views P1.10 and P1.11 put on tokens.
     private static let tokenAdoptedOwners: Set<String> = [
         "ManagedAgentTileNSView.contentBackdrop",
         "ManagedAgentTileNSView.header",
         "ManagedAgentTileNSView.composeBackdrop",
         "TranscriptCardView",
         "ApprovalDockView",
-        "UserInputCardView"
+        "UserInputCardView",
+        // P1.11. `ManagedAgentTileNSView`'s own layer is `TileNSView`'s fill and
+        // outline, inherited through `super.applyTokens()` — so listing it here is
+        // what puts the tile's `tileBody` fill and its `borderStrong` edge under
+        // this gate. `TitleBarView` and `CornerOverlayView` are the tile's two
+        // private chrome views.
+        "ManagedAgentTileNSView",
+        "TitleBarView",
+        "CornerOverlayView",
+        "DescriptorTileNSView",
+        "DescriptorTileNSView.body",
+        "NoteTileNSView",
+        "FileTileNSView",
+        "RunArtifactsTileNSView",
+        "DiffReviewTileNSView",
+        "FileTreeTileNSView",
+        "CanvasNSView",
+        "WorkspaceSidebarView",
+        "WorkspaceTopBarView"
     ]
 
-    /// Still painting literals, each with the ticket that retires them. Keyed by view
-    /// type; `ManagedAgentTileNSView`'s own layer is `TileNSView`'s fill and outline,
-    /// inherited through `super.applyTokens()`.
-    private static let literalOwnersPendingAdoption: [String: String] = [
-        "ManagedAgentTileNSView": "P1.11 — inherited TileNSView fill/outline",
-        "TitleBarView": "P1.11",
-        "CornerOverlayView": "P1.11"
-    ]
+    /// Still painting literals, each with the ticket that retires them.
+    ///
+    /// EMPTY since P1.11 — every layer colour painted anywhere this gate renders is
+    /// now a `DesignTokens` value. Kept as a declared (empty) escape hatch rather
+    /// than deleted, because the failure message below is what tells a future
+    /// adopter what to do; an owner that is neither adopted nor listed is red.
+    private static let literalOwnersPendingAdoption: [String: String] = [:]
 
     /// The values legal for a given KIND of layer colour in `theme`, in this gate's
     /// hex spelling. Scoped by kind rather than "any token", which says more: a fill
@@ -534,13 +613,150 @@ enum UIProbeAppearance {
         return values
     }
 
-    private static func runAdoptedTokenValueCheck() throws -> (assertions: Int, owners: Int) {
-        let entries = LabCatalog.entries(env: LabEnvironment(ghostty: nil, browserEngine: nil))
-        guard let entry = entries.first(where: { $0.id == "tiles.managedAgent" }),
-              case let .staticCard(_, makeTile) = entry.content else {
-            throw fail("missing tiles.managedAgent card")
-        }
+    /// The values legal for a foreground colour — a `textColor`, a `contentTintColor`,
+    /// a glyph tint. Text tokens plus accents: a status glyph is an accent by design
+    /// (P1.3 holds accents to the 4.5 text floor for exactly that reason), so both
+    /// families are legal, but a SURFACE as a text colour is not.
+    ///
+    /// P1.11 needs this because most of what the chrome and the content tiles paint
+    /// is not a layer colour: `NSTextView.textColor`, `NSOutlineView.backgroundColor`,
+    /// `NSTextField.textColor`, `NSButton.contentTintColor`. Check 4 could not see
+    /// any of them, which was its recorded honest limit.
+    private static func legalForegroundValues(theme: TokenTheme) -> Set<String> {
+        var values: Set<String> = []
+        for token in TextToken.allCases { values.insert(hex(token.color.cgColor(for: theme))) }
+        for token in AccentToken.allCases { values.insert(hex(token.color.cgColor(for: theme))) }
+        return values
+    }
 
+    /// One non-layer AppKit colour, with which family it has to come from.
+    private struct ForegroundSlot {
+        let label: String
+        let color: NSColor?
+        /// `true` for a fill-ish property (`NSTextView.backgroundColor`), which must
+        /// be a surface rather than a foreground.
+        let isSurface: Bool
+        /// The view the slot belongs to, so a fully transparent FILL can be checked
+        /// against whatever surface shows through it.
+        let view: NSView
+    }
+
+    /// A transparent fill is the absence of a colour, not a wrong one — the sidebar's
+    /// outline view is `.clear` on purpose so the panel shows through. But waving
+    /// alpha 0 past the gate would let a surface be hidden rather than fixed, so it
+    /// is only legal when the nearest ancestor that DOES paint a fill paints a token
+    /// surface for this theme. Transparency then means "inherits the palette", which
+    /// is the only reason to use it.
+    private static func inheritedSurfaceIsLegal(from view: NSView, theme: TokenTheme) -> String? {
+        let legal = legalValues(for: .background, theme: theme)
+        var current: NSView? = view.superview
+        while let node = current {
+            if let fill = node.layer?.backgroundColor, (NSColor(cgColor: fill)?.alphaComponent ?? 0) > 0 {
+                let value = hex(fill)
+                return legal.contains(value) ? nil
+                    : "shows through to \(describe(node))'s \(value), which is not a DesignTokens surface for \(theme.rawValue)"
+            }
+            current = node.superview
+        }
+        return "has no ancestor painting a fill, so nothing defines what shows through it"
+    }
+
+    /// Every non-layer colour the P1.11 surfaces paint, discovered by walking the
+    /// tree rather than listed here — so a new label in an adopted view is covered
+    /// the moment it exists, and a label that stops being painted cannot hide.
+    ///
+    /// HONEST LIMIT, and it is a scoping decision rather than an omission:
+    /// `NSTextField.textColor` is non-nil on every label AppKit builds, so a naive
+    /// walk sweeps up the internals of a bezelled control. An `NSSearchField`, an
+    /// `NSPopUpButton` and a bezelled `NSButton` draw their whole chrome — bezel,
+    /// focus ring, text — from AppKit's own internally-consistent, appearance-correct
+    /// palette. Overriding just the text on one of those IS the black-on-dark trap in
+    /// miniature, so P1.3 declares no token for it and this check does not demand
+    /// one. What IS read on a control is a tint we assigned ourselves
+    /// (`contentTintColor` is nil until somebody sets it).
+    ///
+    /// Concretely: a control's own default colours are skipped; everything we build
+    /// and paint — labels, text views, outline/table fills — is read.
+    private static func foregroundSlots(in root: NSView) -> [ForegroundSlot] {
+        var slots: [ForegroundSlot] = []
+        /// The bezelled controls whose text belongs to AppKit, self included.
+        func isAppKitControlChrome(_ view: NSView) -> Bool {
+            var current: NSView? = view
+            while let node = current {
+                if node is NSSearchField || node is NSPopUpButton
+                    || node is NSProgressIndicator || node is NSScroller { return true }
+                current = node.superview
+            }
+            // A button's own tint is ours; the cell views inside it are not.
+            var parent = view.superview
+            while let node = parent {
+                if node is NSButton { return true }
+                parent = node.superview
+            }
+            return false
+        }
+        func visit(_ view: NSView) {
+            // A hidden view paints nothing, so it has no colour to be right or wrong
+            // about — and its whole subtree is hidden with it. Found by the negative
+            // test: a file-tree row with no git status hides its badge and leaves the
+            // label `.clear`, which is correct and which the gate would have called a
+            // non-token colour.
+            guard !view.isHidden else { return }
+            defer { view.subviews.forEach(visit) }
+            guard !isAppKitControlChrome(view) else { return }
+            let owner = describe(view)
+            switch view {
+            case let textView as NSTextView:
+                slots.append(ForegroundSlot(label: "\(owner).textColor", color: textView.textColor, isSurface: false, view: view))
+                if textView.drawsBackground {
+                    slots.append(ForegroundSlot(label: "\(owner).backgroundColor", color: textView.backgroundColor, isSurface: true, view: view))
+                }
+                // Every DISTINCT `.foregroundColor` in the text storage. Found by the
+                // negative test: the diff renderer's six accents live in attributed
+                // runs, not in `textColor`, so putting `NSColor.systemGreen` back on
+                // additions left the gate green. `.backgroundColor` attributes are
+                // deliberately NOT read — the 10% wash behind a changed line is an
+                // alpha composite over an already-gated surface, which is the same
+                // reasoning the status pill's tint gets.
+                if let storage = textView.textStorage, storage.length > 0 {
+                    var seen: Set<String> = []
+                    storage.enumerateAttribute(
+                        .foregroundColor, in: NSRange(location: 0, length: storage.length)
+                    ) { value, range, _ in
+                        guard let color = value as? NSColor else { return }
+                        let key = color.description
+                        guard seen.insert(key).inserted else { return }
+                        slots.append(ForegroundSlot(
+                            label: "\(owner).attributedRun@\(range.location)",
+                            color: color, isSurface: false, view: view))
+                    }
+                }
+            case let outline as NSTableView:
+                slots.append(ForegroundSlot(label: "\(owner).backgroundColor", color: outline.backgroundColor, isSurface: true, view: view))
+            case let button as NSButton:
+                // Only the tint we assign; a nil tint is AppKit's own and not ours.
+                if let tint = button.contentTintColor {
+                    slots.append(ForegroundSlot(label: "\(owner).contentTintColor", color: tint, isSurface: false, view: view))
+                }
+            case let field as NSTextField:
+                slots.append(ForegroundSlot(label: "\(owner).textColor", color: field.textColor, isSurface: false, view: view))
+                // A BEZELLED field's fill comes with its bezel — one AppKit unit, in
+                // AppKit's own `textBackgroundColor`, exactly like the search field
+                // above. Its `textColor` is still ours and still checked. A label
+                // (`isBezeled == false`) that draws a background painted it itself, so
+                // that fill IS ours.
+                if field.drawsBackground, !field.isBezeled {
+                    slots.append(ForegroundSlot(label: "\(owner).backgroundColor", color: field.backgroundColor, isSurface: true, view: view))
+                }
+            default:
+                break
+            }
+        }
+        visit(root)
+        return slots
+    }
+
+    private static func runAdoptedTokenValueCheck() throws -> (assertions: Int, owners: Int, foregrounds: Int) {
         // What makes this gate catch a token pinned to the WRONG theme: within one
         // kind, no value legal in light is also legal in dark. True of today's tokens
         // but not guaranteed by construction, so it is asserted every run rather than
@@ -554,57 +770,549 @@ enum UIProbeAppearance {
             }
         }
 
+        // P1.11: the same disjointness, on the foreground families. Without it a
+        // `textPrimary` pinned to `.dark` (`#F2F4F8`) could coincide with some light
+        // accent and the wrong-theme detection would stop working for text.
+        let foregroundOverlap = legalForegroundValues(theme: .light)
+            .intersection(legalForegroundValues(theme: .dark))
+        guard foregroundOverlap.isEmpty else {
+            throw fail("the light and dark palettes share \(foregroundOverlap.count) legal foreground value(s) (\(foregroundOverlap.sorted().joined(separator: ", "))) — a text token resolved for the wrong theme would pass this gate")
+        }
+
         var asserted = 0
+        var foregroundsAsserted = 0
         var seenAdopted: Set<String> = []
         for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
             let theme: TokenTheme = appearanceName == .darkAqua ? .dark : .light
-            let probe = try UIProbe.render(
-                UIProbe.Spec(
-                    id: "appearance.tokenValues.\(appearanceName.rawValue)",
-                    size: NSSize(width: 640, height: 560), appearance: appearanceName
-                ),
-                make: makeTile
-            )
-            openUserInputRequest(in: probe.view)
-            // A detail, so the dock is in the state a user actually sees.
-            if let tile = firstDescendant(ManagedAgentTileNSView.self, in: probe.view) {
-                tile.setPendingApprovalForQA(
-                    kind: .commandExecutionApproval, requestId: "token-values", detail: "swift build"
+            for surface in try adoptedSurfaces() {
+                let probe = try UIProbe.render(
+                    UIProbe.Spec(
+                        id: "appearance.tokenValues.\(surface.id).\(appearanceName.rawValue)",
+                        size: surface.size, appearance: appearanceName
+                    ),
+                    make: surface.make
                 )
-                tile.layoutSubtreeIfNeeded()
-            }
-            guard probe.view.effectiveTokenTheme == theme else {
-                throw fail("appearance.tokenValues: probe hosted in '\(appearanceName.rawValue)' resolves to \(probe.view.effectiveTokenTheme.rawValue)")
-            }
+                surface.prepare(probe.view)
+                probe.host.layoutSubtreeIfNeeded()
+                guard probe.view.effectiveTokenTheme == theme else {
+                    throw fail("appearance.tokenValues.\(surface.id): probe hosted in '\(appearanceName.rawValue)' resolves to \(probe.view.effectiveTokenTheme.rawValue)")
+                }
 
-            let slots = tokenThemedViews(in: probe.view).flatMap(ownedColorSlots(of:)) + extraSlots(in: probe.view)
-            guard !slots.isEmpty else { throw fail("appearance.tokenValues: no painted layer colours to check") }
-            for slot in slots {
-                // `ownerLabel` carries the view's identifier for a transcript card
-                // (`TranscriptCardView#managedAgent.card.assistant-1`); the whitelist
-                // is by type, so compare on the type half.
-                let owner = slot.ownerLabel.split(separator: "#").first.map(String.init) ?? slot.ownerLabel
-                guard tokenAdoptedOwners.contains(owner) else {
-                    guard literalOwnersPendingAdoption[owner] != nil else {
-                        throw fail("\(slot.label) paints a layer colour in \(theme.rawValue) but is neither in tokenAdoptedOwners nor recorded in literalOwnersPendingAdoption — name it and its owning ticket, or put it on DesignTokens")
+                let slots = tokenThemedViews(in: probe.view).flatMap(ownedColorSlots(of:)) + extraSlots(in: probe.view)
+                guard !slots.isEmpty else { throw fail("appearance.tokenValues.\(surface.id): no painted layer colours to check") }
+                for slot in slots {
+                    // `ownerLabel` carries the view's identifier for a transcript card
+                    // (`TranscriptCardView#managedAgent.card.assistant-1`); the whitelist
+                    // is by type, so compare on the type half.
+                    let owner = slot.ownerLabel.split(separator: "#").first.map(String.init) ?? slot.ownerLabel
+                    guard tokenAdoptedOwners.contains(owner) else {
+                        guard literalOwnersPendingAdoption[owner] != nil else {
+                            throw fail("\(slot.label) paints a layer colour in \(theme.rawValue) but is neither in tokenAdoptedOwners nor recorded in literalOwnersPendingAdoption — name it and its owning ticket, or put it on DesignTokens")
+                        }
+                        continue
                     }
-                    continue
+                    seenAdopted.insert(owner)
+                    let value = hex(slot.color)
+                    guard legalValues(for: slot.kind, theme: theme).contains(value) else {
+                        throw fail("\(slot.label) painted \(value) in \(theme.rawValue), which is not a DesignTokens \(slot.kind.rawValue) value for that theme — an adopted surface is back on a literal, or on a token resolved for the wrong appearance")
+                    }
+                    asserted += 1
                 }
-                seenAdopted.insert(owner)
-                let value = hex(slot.color)
-                guard legalValues(for: slot.kind, theme: theme).contains(value) else {
-                    throw fail("\(slot.label) painted \(value) in \(theme.rawValue), which is not a DesignTokens \(slot.kind.rawValue) value for that theme — an adopted surface is back on a literal, or on a token resolved for the wrong appearance")
+
+                // P1.11's own half: the colours that are not layer colours.
+                //
+                // Read INSIDE the probe's drawing appearance, which is what AppKit
+                // does at draw time. This gate's first run found why that matters:
+                // `StatusChipNSView.dynamicNSColor` hands a label a genuinely dynamic
+                // `NSColor`, and `.cgColor` on a dynamic colour resolves against
+                // `NSAppearance.current` — the SYSTEM appearance outside a draw cycle.
+                // So a correct dark-leaf-in-dark label read back as `#FFB347` while
+                // hosted in `.aqua`. Measuring outside the drawing appearance would
+                // have failed every dynamic colour in the app and passed a snapshotted
+                // one, which is the assertion inverted.
+                let drawingAppearance = probe.view.effectiveAppearance
+                for slot in foregroundSlots(in: probe.view) {
+                    var value = "nil"
+                    var alpha: CGFloat = 1
+                    drawingAppearance.performAsCurrentDrawingAppearance {
+                        value = hex(slot.color?.cgColor)
+                        alpha = slot.color?.usingColorSpace(.sRGB)?.alphaComponent ?? 1
+                    }
+                    if slot.isSurface, alpha == 0 {
+                        if let problem = inheritedSurfaceIsLegal(from: slot.view, theme: theme) {
+                            throw fail("\(surface.id): \(slot.label) is transparent and \(problem)")
+                        }
+                        foregroundsAsserted += 1
+                        continue
+                    }
+                    let legal = slot.isSurface
+                        ? legalValues(for: .background, theme: theme)
+                        : legalForegroundValues(theme: theme)
+                    guard legal.contains(value) else {
+                        throw fail("\(surface.id): \(slot.label) is \(value) in \(theme.rawValue), which is not a DesignTokens \(slot.isSurface ? "surface" : "text/accent") value for that theme — an AppKit colour property still holds a literal, an Apple semantic colour, or a token resolved for the wrong appearance")
+                    }
+                    foregroundsAsserted += 1
                 }
-                asserted += 1
+                restoreAppPin()
             }
-            restoreAppPin()
         }
 
         let missing = tokenAdoptedOwners.subtracting(seenAdopted)
         guard missing.isEmpty else {
-            throw fail("adopted owners that painted nothing in the probed tile: \(missing.sorted().joined(separator: ", ")) — either the surface stopped painting or it left the tree, and this gate would silently cover less")
+            throw fail("adopted owners that painted nothing in the probed surfaces: \(missing.sorted().joined(separator: ", ")) — either the surface stopped painting or it left the tree, and this gate would silently cover less")
         }
-        return (asserted, seenAdopted.count)
+        guard foregroundsAsserted >= minimumForegroundSlots else {
+            throw fail("read back \(foregroundsAsserted) non-layer colours across both appearances, floor is \(minimumForegroundSlots) — a text colour dropped out of the walk")
+        }
+        return (asserted, seenAdopted.count, foregroundsAsserted)
+    }
+
+    // MARK: - The surfaces P1.10 and P1.11 adopted
+    //
+    // Every one is rendered in BOTH appearances by check 4. The content tiles have
+    // no Lab card of their own (the Lab hosts them through a live canvas sandbox),
+    // so they are constructed here from canned state — deliberately through the
+    // constructors that touch no filesystem and no git, so the check is offline.
+
+    /// Floor for the non-layer colours check 4 reads back, across both appearances.
+    /// Measured on this tree and printed every run; a floor rather than an equality
+    /// so an extra label is not a failure, but a whole surface dropping out is.
+    private static let minimumForegroundSlots = 168
+
+    private struct AdoptedSurface {
+        let id: String
+        let size: NSSize
+        let make: () -> NSView
+        /// Put the surface into the state a user actually sees (open a request, show
+        /// a diff). Runs after `UIProbe.render` so the view is already hosted.
+        var prepare: (NSView) -> Void = { _ in }
+    }
+
+    private static func canned(kind: TileKind, title: String, metadata: TileMetadata = TileMetadata()) -> Tile {
+        Tile(
+            id: UUID(uuidString: "00000000-0000-0000-0000-0000000011\(String(format: "%02d", abs(kind.rawValue.hashValue % 100)))")
+                ?? UUID(uuidString: "00000000-0000-0000-0000-000000001100")!,
+            kind: kind, title: title,
+            frame: TileFrame(x: 0, y: 0, width: 480, height: 320),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: metadata
+        )
+    }
+
+    /// A flat tree covering EVERY `FileTreeGitStatus` plus an ignored path, so every
+    /// badge accent and both row-text tokens are painted and read back.
+    private static func cannedFileTree() -> FileTreeSnapshot {
+        func node(_ name: String, _ status: FileTreeGitStatus?, ignored: Bool = false) -> FileTreeNode {
+            FileTreeNode(
+                relativePath: name, displayName: name, isDirectory: false,
+                childCount: 0, isIgnored: ignored, gitStatus: status)
+        }
+        // `FileTreeGitStatus` is not `CaseIterable`, so the six are listed. Making it
+        // conform is a Core change this packet does not own; the badge switch in
+        // `FileTreeTileNSView` is exhaustive, so a seventh status would fail to
+        // compile there before it could go unrendered here.
+        let statuses: [FileTreeGitStatus] = [.untracked, .modified, .added, .deleted, .renamed, .conflicted]
+        var nodes = statuses.map { node("\($0.rawValue).swift", $0) }
+        nodes.append(node("node_modules", nil, ignored: true))
+        nodes.append(node("README.md", nil))
+        return FileTreeSnapshot(root: URL(fileURLWithPath: "/nonexistent-p111-probe-root"), nodes: nodes)
+    }
+
+    /// A two-file diff covering EVERY `GitDiffLine.Kind` plus a binary file, so all
+    /// six of the renderer's colours are actually painted and read back.
+    private static func cannedDiff() -> GitDiffModel {
+        GitDiffModel(files: [
+            GitDiffFile(
+                oldPath: "Sources/A.swift", newPath: "Sources/A.swift", change: .modified,
+                hunks: [GitDiffHunk(
+                    oldStart: 1, oldCount: 3, newStart: 1, newCount: 3,
+                    header: "@@ -1,3 +1,3 @@ func a()",
+                    lines: [
+                        GitDiffLine(kind: .context, text: "let x = 1", oldLine: 1, newLine: 1),
+                        GitDiffLine(kind: .deletion, text: "let y = 2", oldLine: 2, newLine: nil),
+                        GitDiffLine(kind: .addition, text: "let y = 3", oldLine: nil, newLine: 2),
+                        GitDiffLine(kind: .metadata, text: "\\ No newline at end of file", oldLine: nil, newLine: nil)
+                    ]
+                )]
+            ),
+            GitDiffFile(oldPath: nil, newPath: "Assets/icon.png", change: .added, hunks: [], isBinary: true)
+        ])
+    }
+
+    private static func adoptedSurfaces() throws -> [AdoptedSurface] {
+        let entries = LabCatalog.entries(env: LabEnvironment(ghostty: nil, browserEngine: nil))
+        guard let entry = entries.first(where: { $0.id == "tiles.managedAgent" }),
+              case let .staticCard(_, makeTile) = entry.content else {
+            throw fail("missing tiles.managedAgent card")
+        }
+        let treeState = FileTreeTile(
+            tileId: UUID(uuidString: "00000000-0000-0000-0000-000000001199")!,
+            rootPath: "/nonexistent-p111-probe-root", expandedPaths: [], selectedPath: nil,
+            searchQuery: "", ignoredNames: [], gitBadges: .off
+        )
+        return [
+            AdoptedSurface(
+                id: "managedAgentTile", size: NSSize(width: 640, height: 560), make: makeTile,
+                prepare: { root in
+                    openUserInputRequest(in: root)
+                    // A detail, so the dock is in the state a user actually sees.
+                    guard let tile = firstDescendant(ManagedAgentTileNSView.self, in: root) else { return }
+                    tile.setPendingApprovalForQA(
+                        kind: .commandExecutionApproval, requestId: "token-values", detail: "swift build")
+                    tile.layoutSubtreeIfNeeded()
+                }
+            ),
+            AdoptedSurface(id: "descriptorTile", size: NSSize(width: 480, height: 320), make: {
+                DescriptorTileNSView(tile: canned(kind: .browser, title: "example.com"))
+            }),
+            AdoptedSurface(id: "noteTile", size: NSSize(width: 480, height: 320), make: {
+                NoteTileNSView(
+                    tile: canned(kind: .note, title: "release notes"),
+                    noteId: UUID(uuidString: "00000000-0000-0000-0000-0000000011A1")!,
+                    initialBody: "ship the palette")
+            }),
+            // No `filePath`, so `loadFile` takes the unavailable branch and the
+            // lazily-built placeholder is in the tree — the one surface a token
+            // adoption is easiest to forget.
+            AdoptedSurface(id: "fileTile", size: NSSize(width: 480, height: 320), make: {
+                FileTileNSView(tile: canned(kind: .file, title: "Package.swift"))
+            }),
+            AdoptedSurface(id: "runArtifactsTile", size: NSSize(width: 480, height: 320), make: {
+                RunArtifactsTileNSView(tile: canned(kind: .runArtifacts, title: "run-1"))
+            }),
+            AdoptedSurface(id: "diffReviewTile", size: NSSize(width: 640, height: 360), make: {
+                DiffReviewTileNSView(tile: canned(kind: .diffReview, title: "working tree"), model: cannedDiff())
+            }),
+            // The `recoverableErrorMessage` constructor: builds the whole tree
+            // (search field, banner, outline, state container) and starts no
+            // filesystem watcher.
+            // Real ROWS, one per `FileTreeGitStatus` plus an ignored path, so
+            // `outlineView(_:viewFor:)`'s row text and all six badge accents are
+            // actually painted. The negative test proved this matters: with the
+            // error-state fixture alone, putting the row text back on
+            // `secondaryLabelColor` did not turn the gate red.
+            AdoptedSurface(id: "fileTreeTile", size: NSSize(width: 480, height: 420), make: {
+                let view = FileTreeTileNSView(
+                    tile: canned(kind: .fileTree, title: "continuum"), fileTreeTile: treeState,
+                    recoverableErrorMessage: "root is not readable")
+                view.applySnapshotForQA(cannedFileTree())
+                return view
+            }),
+            AdoptedSurface(id: "canvas", size: NSSize(width: 700, height: 480), make: {
+                CanvasNSView(canvasState: CanvasState(
+                    viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                    tiles: [], groups: [], lastActiveTileId: nil))
+            }),
+            AdoptedSurface(id: "sidebar", size: NSSize(width: 280, height: 520), make: {
+                let view = WorkspaceSidebarView(frame: .zero)
+                view.reload(tree: LabFixtures.sidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
+                return view
+            }),
+            AdoptedSurface(id: "topBar", size: NSSize(width: 900, height: 44), make: {
+                let view = WorkspaceTopBarView(frame: .zero)
+                view.reload(LabFixtures.topBarModel(save: .saveFailed, message: "disk full"))
+                return view
+            })
+        ]
+    }
+
+    // MARK: - 5 · The ticket's Goal, as a number
+    //
+    // "Tile edges are visibly distinct from the canvas (≥3:1, asserted)."
+    //
+    // Measured off the REAL rendered views — the tile's `layer.borderColor` and the
+    // canvas's `layer.backgroundColor` — not off the token declarations, which
+    // `DesignTokenChecks` already covers. That distinction is the point: this is
+    // what catches the edge being painted from somewhere other than the palette,
+    // or the canvas and the tile disagreeing about which theme they are in.
+    //
+    // The witness is the defect itself: white@0.25 on white@0.10, the pair the
+    // ticket opens with, must FAIL the same assertion at the 1.68:1 it was measured
+    // at. So the assertion cannot rot into something the old code would have passed.
+    private static func runTileEdgeContrastCheck() throws -> [String] {
+        func chip(_ color: CGColor?) throws -> ChipColor {
+            guard let color, let srgb = NSColor(cgColor: color)?.usingColorSpace(.sRGB) else {
+                throw fail("tile-edge contrast: a probed layer colour was nil or not convertible to sRGB")
+            }
+            return ChipColor(r: srgb.redComponent, g: srgb.greenComponent, b: srgb.blueComponent)
+        }
+
+        var measurements: [String] = []
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            let theme: TokenTheme = appearanceName == .darkAqua ? .dark : .light
+            let tile = canned(kind: .note, title: "edge contrast")
+            let probe = try UIProbe.render(
+                UIProbe.Spec(
+                    id: "appearance.tileEdge.\(appearanceName.rawValue)",
+                    size: NSSize(width: 700, height: 480), appearance: appearanceName
+                ),
+                make: {
+                    let canvas = CanvasNSView(canvasState: CanvasState(
+                        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+                        tiles: [tile], groups: [], lastActiveTileId: nil))
+                    canvas.install(
+                        tileView: NoteTileNSView(
+                            tile: tile,
+                            noteId: UUID(uuidString: "00000000-0000-0000-0000-0000000011B1")!,
+                            initialBody: "body"),
+                        for: tile)
+                    return canvas
+                }
+            )
+            probe.host.layoutSubtreeIfNeeded()
+            guard let tileView = firstDescendant(NoteTileNSView.self, in: probe.view) else {
+                throw fail("tile-edge contrast: the installed tile is not in the rendered canvas")
+            }
+            guard (tileView.layer?.borderWidth ?? 0) > 0 else {
+                throw fail("tile-edge contrast: the tile's borderWidth is 0, so it paints no edge at all — the 1.68:1 defect became a 0-pixel one")
+            }
+            let edge = try chip(tileView.layer?.borderColor)
+            let canvasFill = try chip(probe.view.layer?.backgroundColor)
+            let ratio = WCAGContrast.ratio(edge, canvasFill)
+            guard ratio >= DesignTokens.lineFloor else {
+                throw fail(String(format: "tile-edge contrast: the tile's outline measures %.2f:1 against the canvas in %@, floor is %.2f — this IS the \"canvas looks like mush\" defect", ratio, theme.rawValue, DesignTokens.lineFloor))
+            }
+            // The edge must be the palette's, not merely contrasty.
+            let want = hex(LineToken.borderStrong.color.cgColor(for: theme))
+            let got = hex(tileView.layer?.borderColor)
+            guard got == want else {
+                throw fail("tile-edge contrast: the tile's outline is \(got) in \(theme.rawValue), borderStrong's leaf is \(want)")
+            }
+            measurements.append(String(format: "%@ %.2f:1", theme.rawValue, ratio))
+            restoreAppPin()
+        }
+
+        // The witness, executed rather than described.
+        let shippedEdge = ChipColor(r: 0.25, g: 0.25, b: 0.25)
+        let shippedBody = ChipColor(r: 0.10, g: 0.10, b: 0.10)
+        let shippedRatio = WCAGContrast.ratio(shippedEdge, shippedBody)
+        guard shippedRatio < DesignTokens.lineFloor else {
+            throw fail(String(format: "the pre-ticket white@0.25-on-white@0.10 edge measures %.2f:1, which clears the %.2f floor — the assertion above cannot be discriminating", shippedRatio, DesignTokens.lineFloor))
+        }
+        guard shippedRatio > 1.60, shippedRatio < 1.75 else {
+            throw fail(String(format: "the pre-ticket edge pair measures %.2f:1; the ticket and P1.3's provenance both record 1.68:1 — one of them is now wrong", shippedRatio))
+        }
+        measurements.append(String(format: "witness (pre-ticket white@0.25 on white@0.10) %.2f:1 < %.2f", shippedRatio, DesignTokens.lineFloor))
+        return measurements
+    }
+
+    // MARK: - 5b · The descriptor tile's eleven fills (P1.11's one deviation)
+    //
+    // The packet asked to "keep the eleven descriptor fills semantically distinct but
+    // derive them from the token set". Those two cannot both hold: the palette
+    // declares eleven surfaces, but only `tileBody`/`tileChrome` are legal as a tile
+    // BODY, and painting a tile in `canvas` or in a transcript-card tint gives it a
+    // fill whose documented pairs it does not honour. So the fill became `tileBody`
+    // for every kind and the per-kind distinction moved onto TYPE.
+    //
+    // The cross-review's objection is fair — a specified channel was removed — so it
+    // is not left to prose. This check asserts, every run:
+    //
+    //   a · The evidence that the fill channel was never carrying the distinction:
+    //       the WIDEST of the 55 pairwise ratios among the eleven retired literals is
+    //       1.13:1, and 46 of the 55 are under 1.10:1. (1.13:1 is roughly the
+    //       difference between two shades of the same near-black; 3.0 is the floor
+    //       the palette holds a mere OUTLINE to.)
+    //   b · The reason they could not simply be tokenised in place: every one of the
+    //       eleven has a relative luminance under 0.2, i.e. they are dark-only, so
+    //       under Aqua all eleven were the black-on-dark defect.
+    //   c · That the channel the distinction moved TO actually carries it: the eleven
+    //       `TileKind.displayName`s are pairwise distinct, and the title bar gives
+    //       that text real room at a normal tile width.
+    //   d · That all ELEVEN kinds — not one sampled kind — paint a legal token fill
+    //       in both appearances.
+    //
+    // If a future palette grows a family of legal tile-body tints, (a) and (b) are
+    // the measurements that say what the replacement has to beat.
+
+    /// The eleven retired per-`TileKind` literals, in the order they were declared.
+    /// Raw on purpose: this is a witness surface, and a value here is diffable
+    /// against the deleted line it came from.
+    private static let retiredDescriptorFills: [(kind: TileKind, color: ChipColor)] = [
+        (.terminal, ChipColor(r: 0.10, g: 0.13, b: 0.18)),
+        (.browser, ChipColor(r: 0.13, g: 0.17, b: 0.20)),
+        (.browserInspector, ChipColor(r: 0.10, g: 0.16, b: 0.19)),
+        (.note, ChipColor(r: 0.18, g: 0.16, b: 0.10)),
+        (.file, ChipColor(r: 0.12, g: 0.18, b: 0.13)),
+        (.fileTree, ChipColor(r: 0.15, g: 0.13, b: 0.20)),
+        (.ticketQueue, ChipColor(r: 0.11, g: 0.15, b: 0.22)),
+        (.conductorQueue, ChipColor(r: 0.10, g: 0.14, b: 0.18)),
+        (.diffReview, ChipColor(r: 0.16, g: 0.12, b: 0.18)),
+        (.runArtifacts, ChipColor(r: 0.12, g: 0.15, b: 0.18)),
+        (.managedAgent, ChipColor(r: 0.10, g: 0.13, b: 0.17))
+    ]
+
+    private static func runDescriptorTileFillCheck() throws -> String {
+        // Every kind must be accounted for, so shrinking `TileKind` cannot leave the
+        // evidence table silently partial.
+        let covered = Set(retiredDescriptorFills.map(\.kind))
+        guard covered == Set(TileKind.allCases) else {
+            throw fail("the retired-descriptor-fill table covers \(covered.count) of \(TileKind.allCases.count) TileKinds — add the missing kind(s) with the literal that was deleted, or this evidence is partial")
+        }
+
+        // a · the fill channel was never distinguishing anything.
+        var ratios: [Double] = []
+        for i in retiredDescriptorFills.indices {
+            for j in retiredDescriptorFills.indices where j > i {
+                ratios.append(WCAGContrast.ratio(retiredDescriptorFills[i].color, retiredDescriptorFills[j].color))
+            }
+        }
+        guard ratios.count == 55 else { throw fail("expected 55 pairwise ratios over 11 fills, computed \(ratios.count)") }
+        guard let worst = ratios.max(), worst < 1.20 else {
+            throw fail(String(format: "the widest pairwise ratio among the retired descriptor fills is %.2f:1, which is at or above 1.20 — the fills WERE distinguishable and collapsing them onto one surface lost real information", ratios.max() ?? 0))
+        }
+        _ = worst
+        let nearIdentical = ratios.filter { $0 < 1.10 }.count
+        guard nearIdentical >= 46 else {
+            throw fail("only \(nearIdentical) of 55 retired-fill pairs are under 1.10:1; the measurement recorded with this ticket is 46 — re-measure before trusting the deviation")
+        }
+
+        // b · and they were dark-only, so they could not be kept as-is.
+        for entry in retiredDescriptorFills {
+            let luminance = WCAGContrast.relativeLuminance(entry.color)
+            guard luminance < 0.2 else {
+                throw fail(String(format: "retired fill for '%@' has luminance %.3f — it is not dark-only, so 'all eleven were black-on-dark under Aqua' is no longer true", entry.kind.rawValue, luminance))
+            }
+        }
+
+        // c · the channel the distinction moved to.
+        let names = TileKind.allCases.map(\.displayName)
+        guard Set(names).count == names.count else {
+            throw fail("TileKind.displayName is not pairwise distinct (\(names.joined(separator: ", "))) — the descriptor tile now carries its kind in TEXT, so two kinds sharing a name means the distinction is gone for real")
+        }
+
+        // d · all eleven kinds paint a legal token fill, both appearances.
+        var fills = 0
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            let theme: TokenTheme = appearanceName == .darkAqua ? .dark : .light
+            let legal = legalValues(for: .background, theme: theme)
+            for kind in TileKind.allCases {
+                let probe = try UIProbe.render(
+                    UIProbe.Spec(
+                        id: "appearance.descriptorFill.\(kind.rawValue).\(appearanceName.rawValue)",
+                        size: NSSize(width: 420, height: 260), appearance: appearanceName
+                    ),
+                    make: { DescriptorTileNSView(tile: canned(kind: kind, title: "placeholder")) }
+                )
+                probe.host.layoutSubtreeIfNeeded()
+                guard let tile = firstDescendant(DescriptorTileNSView.self, in: probe.view) else {
+                    throw fail("descriptor fill: the tile for '\(kind.rawValue)' is not in the rendered tree")
+                }
+                guard let body = tile.qaTokenPaintedLayers.first else {
+                    throw fail("descriptor fill: the tile for '\(kind.rawValue)' hands over no painted layer")
+                }
+                let value = hex(body.layer.backgroundColor)
+                guard legal.contains(value) else {
+                    throw fail("descriptor fill: '\(kind.rawValue)' painted \(value) in \(theme.rawValue), which is not a DesignTokens surface for that theme")
+                }
+                // The kind still has somewhere to be read from.
+                guard let title = tile.qaTitleRect, title.width > 0 else {
+                    throw fail("descriptor fill: '\(kind.rawValue)' has no room for its title, which is now the ONLY channel carrying the kind")
+                }
+                fills += 1
+                restoreAppPin()
+            }
+        }
+        return String(format: "11 descriptor kinds x 2 appearances = %d token fills; retired literals' widest pairwise ratio %.2f:1 (%d of 55 under 1.10:1), all 11 dark-only", fills, ratios.max() ?? 0, nearIdentical)
+    }
+
+    // MARK: - 6 · The title bar's status pill must clear the drag handle
+    //
+    // The `-58` this ticket replaced was an undocumented dependency on the close
+    // button plus the drag-dot cluster: a static inset against two values that both
+    // scale with zoom. P1.10 recorded the visible consequence (the pill overlapping
+    // at 320pt). Now that the inset is DERIVED from both live terms, this asserts the
+    // property the derivation exists for, across the widths and chrome scales a tile
+    // really reaches — including the `TileGeometry` minimum and a zoomed-out bar.
+    /// Driven through a real `CanvasNSView` at a real viewport zoom rather than by
+    /// resizing the bar by hand — the close button's world size AND the bar's height
+    /// are both `max(constant, screenFloor / zoom)` read off `canvas?.viewport.zoom`,
+    /// so only the production path produces the low-zoom geometry the derivation
+    /// exists for. The first version of this check set the bar's frame directly; at
+    /// chrome scale 1 the old literal `58` still cleared the dots, so it could not
+    /// tell the derived inset from the magic number. At zoom 0.35 it can.
+    private static func runTitleBarPillLayoutCheck() throws -> (asserted: Int, suppressed: Int) {
+        var asserted = 0
+        var suppressed = 0
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            // 1.0 is the identity case; 0.35 is the low end of the zoom range, where
+            // the close button's 22px screen floor makes it 63 world points wide and
+            // the drag-dot cluster moves a long way left.
+            for zoom in [1.0, 0.6, 0.35] {
+                // 180 is the width of the descriptor tiles inside a zone card — the
+                // ones whose baseline showed the pill printed over the title. It is
+                // narrower than any `TileGeometry` minimum, so it has to be listed.
+                for width in [180.0, Double(TileGeometry.minimumSize(for: .managedAgent).width), 480, 900] {
+                    let tile = Tile(
+                        id: UUID(uuidString: "00000000-0000-0000-0000-0000000011C1")!,
+                        kind: .managedAgent, title: "a fairly long agent tile title",
+                        frame: TileFrame(x: 0, y: 0, width: width, height: 320),
+                        zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata()
+                    )
+                    let tileView = DescriptorTileNSView(tile: tile)
+                    let probe = try UIProbe.render(
+                        UIProbe.Spec(
+                            id: "appearance.pillLayout.\(Int(width)).z\(Int(zoom * 100)).\(appearanceName.rawValue)",
+                            size: NSSize(width: 1000, height: 700), appearance: appearanceName
+                        ),
+                        make: {
+                            let canvas = CanvasNSView(canvasState: CanvasState(
+                                viewport: CanvasViewport(x: 0, y: 0, zoom: zoom),
+                                tiles: [tile], groups: [], lastActiveTileId: nil))
+                            canvas.install(tileView: tileView, for: tile)
+                            return canvas
+                        }
+                    )
+                    for status in AgentStatus.allCases {
+                        // Set the status BEFORE laying out: the title's available width
+                        // is a function of where the pill lands.
+                        tileView.agentStatus = status
+                        probe.host.layoutSubtreeIfNeeded()
+                        tileView.layoutSubtreeIfNeeded()
+                        guard let dots = tileView.qaDragHandleLeadingX,
+                              let title = tileView.qaTitleRect else {
+                            throw fail("pill layout: the tile has no title bar")
+                        }
+                        // `nil` means the pill was SUPPRESSED because it could not fit
+                        // — the intended low-zoom outcome. Assert that the title then
+                        // gets the room instead, so suppression cannot become a way to
+                        // pass this check by drawing nothing at all.
+                        guard let pill = tileView.qaStatusPillRect(for: status) else {
+                            suppressed += 1
+                            guard title.maxX <= dots else {
+                                throw fail("pill layout: at width \(Int(width)), zoom \(zoom), status '\(status.rawValue)' the pill is suppressed but the title still runs to x=\(String(format: "%.1f", title.maxX)) past the drag dots at x=\(String(format: "%.1f", dots))")
+                            }
+                            continue
+                        }
+                        let context = String(format: "width %.0f, zoom %.2f, status '%@'", width, zoom, status.rawValue)
+                        guard pill.maxX <= dots else {
+                            throw fail("pill layout: at \(context) the pill ends at x=\(String(format: "%.1f", pill.maxX)) but the drag dots start at x=\(String(format: "%.1f", dots)) — the pill is under the handle")
+                        }
+                        guard pill.minX >= 0, pill.minY >= 0 else {
+                            throw fail("pill layout: at \(context) the pill rect \(pill) leaves the bar")
+                        }
+                        // The defect the P0.6 baselines caught on the ~180pt tiles
+                        // inside a zone card: the title drew straight under the pill.
+                        //
+                        // A ZERO-width title rect is exempt because it paints no
+                        // glyphs. That case is real and is the intended outcome: on a
+                        // 180pt tile at zoom 0.6 the pill alone needs ~96 world points
+                        // and clamps to the leading inset, so there is no room for a
+                        // name at all. The status wins there — which is right, and is
+                        // strictly better than the two overprinting each other.
+                        guard title.width == 0 || title.maxX <= pill.minX else {
+                            throw fail("pill layout: at \(context) the title runs to x=\(String(format: "%.1f", title.maxX)) but the pill starts at x=\(String(format: "%.1f", pill.minX)) — the pill is drawn over the tile title")
+                        }
+                        asserted += 1
+                    }
+                    restoreAppPin()
+                }
+            }
+        }
+        // Both outcomes have to actually occur, or one branch is untested.
+        guard asserted > 0, suppressed > 0 else {
+            throw fail("pill layout: \(asserted) drawn and \(suppressed) suppressed placements — both branches must be exercised, so the width/zoom sweep no longer covers one of them")
+        }
+        return (asserted, suppressed)
     }
 
     // MARK: - Entry point
@@ -615,7 +1323,13 @@ enum UIProbeAppearance {
         let hostile = try runHostileCurrentAppearanceCheck()
         let witness = try runTokenFixtureCheck()
         let adoption = try runAdoptedTokenValueCheck()
-        print("UIProbeAppearance: \(adoption.assertions) layer colours across \(adoption.owners) adopted owners hold a DesignTokens value in both appearances (P1.10)")
+        print("UIProbeAppearance: \(adoption.assertions) layer colours + \(adoption.foregrounds) non-layer colours across \(adoption.owners) adopted owners hold a DesignTokens value in both appearances (P1.10/P1.11)")
+        let edges = try runTileEdgeContrastCheck()
+        print("UIProbeAppearance: tile outline vs canvas — \(edges.joined(separator: "; ")) (P1.11 goal)")
+        let descriptorFills = try runDescriptorTileFillCheck()
+        print("UIProbeAppearance: \(descriptorFills) (P1.11 deviation, evidence pinned)")
+        let pills = try runTitleBarPillLayoutCheck()
+        print("UIProbeAppearance: \(pills.asserted) title-bar status-pill placements clear the drag handle and the tile title; \(pills.suppressed) suppressed for want of room, title given the space instead (P1.11)")
         guard NSApp?.appearance?.name == .darkAqua else {
             throw fail("appearance checks leaked '\(NSApp?.appearance?.name.rawValue ?? "nil")' onto NSApp")
         }
@@ -677,11 +1391,73 @@ enum UIProbeAppearance {
     //        UserInputCardView — either the surface stopped painting or it left the
     //        tree, and this gate would silently cover less".
     //
-    // HONEST LIMIT of check 4: it gates layer colours, so a TEXT colour reverting to
-    // `.labelColor` is `check-color-hygiene.sh`'s catch (rule 2) plus
-    // `--ui-contrast-check`'s, not this gate's. Sizes and paddings are not covered
-    // here either — the committed PNG baselines are what make a re-hardcoded padding
-    // or height red, which is exactly how P1.10's own six baseline moves were found.
+    // P1.10's HONEST LIMIT — "it gates layer colours, so a TEXT colour reverting to
+    // `.labelColor` is `check-color-hygiene.sh`'s catch, not this gate's" — is CLOSED
+    // by P1.11: `foregroundSlots(in:)` reads `NSTextView`/`NSTextField.textColor`,
+    // `NSTableView.backgroundColor`, `NSButton.contentTintColor` and every distinct
+    // `.foregroundColor` in a text storage, and holds each to the palette.
+
+    // MARK: - Negative tests observed red with this code (P1.11)
+    //
+    // Every one was run against the FINAL code, reverted, and the tree left green.
+    //
+    //  1 · The tile edge back to the shipped literal. `TileNSView.applyTokens()`:
+    //      `layer?.borderColor = NSColor(white: 0.25, alpha: 1.0).cgColor`
+    //      → "ManagedAgentTileNSView.border painted #404040FF in light, which is not a
+    //         DesignTokens border value for that theme"
+    //  2 · File-tree row text back to Apple's semantic colour:
+    //      `view.textField?.textColor = NSColor.secondaryLabelColor`
+    //      → "fileTreeTile: NSTextField.textColor is #0000007F in light, which is not a
+    //         DesignTokens text/accent value for that theme"
+    //      This one is why the file-tree fixture ingests a canned SNAPSHOT: with the
+    //      recoverable-error fixture alone the outline has no rows, `viewFor` never
+    //      runs, and this edit left the gate GREEN.
+    //  3 · A git badge back to its `calibratedRed:` literal
+    //      → "… NSTextField.textColor is #5FCE86FF in light …" (and note the value:
+    //         calibrated 0.32/0.78/0.45 renders as sRGB #5FCE86, which is the drift
+    //         the packet's watch-out #1 is about).
+    //  4 · Sidebar tile rows back to `tertiaryLabelColor`
+    //      → "sidebar: NSTextField.textColor is #00000042 in light …"
+    //  5 · The diff renderer back to `NSColor.systemGreen` for additions
+    //      → "diffReviewTile: NSTextView.attributedRun@82 is #34C759FF in light …"
+    //      Also a coverage fix found by running it: the diff's six accents live in
+    //      ATTRIBUTED RUNS, not in `textColor`, so before the storage walk existed
+    //      this edit left the gate green.
+    //  6 · The canvas back to `black@0.92`
+    //      → "CanvasNSView.background painted #000000EB in light …"
+    //  7 · Drop the title's truncation bound (`blockedFrom = bounds.width`)
+    //      → "pill layout: at width 180, zoom 0.60, status 'needsAttention' the title
+    //         runs to x=176.0 but the pill starts at x=61.0 — the pill is drawn over
+    //         the tile title"
+    //  8 · `statusPillTrailingInset` back to the bare literal `58`
+    //      → "pill layout: at width 180, zoom 0.60, status 'configuring' the pill ends
+    //         at x=122.0 but the drag dots start at x=99.3"
+    //      Recorded because the FIRST version of the check could not catch this: it
+    //      set the bar's frame by hand, and at chrome scale 1 `58` is larger than the
+    //      derived inset, so it still cleared. Only driving a real `CanvasNSView` at
+    //      zoom 0.6/0.35 — where the close button's 22px screen floor makes it 37/63
+    //      world points wide — makes the two distinguishable.
+    //  9 · The title bar's fill back to `white:0.16`
+    //      → "TitleBarView.background painted #292929FF in light …"
+    // 10 · Corner brackets pinned to `.dark` (`cgColor(for: .dark)`)
+    //      → "CornerOverlayView.stroke painted #A8B0BDFF in light …"
+    // 11 · Drop one `TileKind` from the retired-fill evidence table
+    //      → "the retired-descriptor-fill table covers 10 of 11 TileKinds …"
+    // 12 · The descriptor body back to a per-kind dark literal
+    //      → "DescriptorTileNSView.body.background painted #212B33FF in light …"
+    // 13 · The sidebar panel back to `windowBackgroundColor@0.92`
+    //      → "WorkspaceSidebarView.background painted #FFFFFFEB in light …"
+    //
+    // NOT DISCRIMINATING, and recorded so nobody mistakes them for coverage: swapping
+    // one legal token for another legal token of the same FAMILY (`accentDone` →
+    // `textSecondary` on a git badge) passes. This gate answers "is every painted
+    // colour in the palette, resolved for the right theme?" — not "is it the right
+    // token?". The latter is what the committed PNG baselines and a human's eye are
+    // for, and it is why P1.11's 18 baseline moves were all inspected before blessing.
+    //
+    // Sizes and paddings are still not covered here — the baselines are what make a
+    // re-hardcoded padding or height red, which is exactly how the title-overprint
+    // defect in test 7 was found in the first place.
 }
 
 private extension UIProbeAppearance.ColorSlot.Kind {

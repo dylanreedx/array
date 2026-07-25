@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import ContinuumRevivedFileTree
 import Foundation
@@ -63,6 +64,27 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
+    /// P1.11. Four surfaces the tile used to paint as four independent `white:0.10`
+    /// literals plus a `white:0.16` banner, now one `tileBody` and one
+    /// `tileChrome`. `NSOutlineView.backgroundColor` and the two `NSTextField`
+    /// colours are not layer colours, so they are read back per appearance by
+    /// `runDocumentTileTokenCheck` rather than by the sentinel sweep.
+    ///
+    /// Row text is re-asserted by reloading: `outlineView(_:viewFor:)` resolves the
+    /// row's token when the cell is built, so the visible rows have to be rebuilt
+    /// for a flip to reach them.
+    override func applyTokens() {
+        super.applyTokens()
+        let body = SurfaceToken.tileBody.color
+        rootStack.layer?.backgroundColor = body.cgColor(in: self)
+        stateContainer.layer?.backgroundColor = body.cgColor(in: self)
+        outlineView.backgroundColor = body.nsColor(in: self)
+        stateLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        truncationBanner.backgroundColor = SurfaceToken.tileChrome.color.nsColor(in: self)
+        truncationBanner.textColor = AccentToken.accentApproval.color.nsColor(in: self)
+        if outlineView.numberOfRows > 0 { outlineView.reloadData() }
+    }
+
     override func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)
         window?.makeFirstResponder(searchField)
@@ -95,9 +117,11 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         let view = outlineView.makeView(withIdentifier: Self.rowIdentifier, owner: self) as? NSTableCellView
             ?? makeCellView()
         view.textField?.stringValue = rowTitle(for: item)
-        view.textField?.textColor = item.node.isIgnored
-            ? NSColor.secondaryLabelColor
-            : NSColor(white: 0.88, alpha: 1.0)
+        // P1.11: an ignored path is de-emphasised metadata, so `textSecondary` —
+        // Apple's `secondaryLabelColor` measures 2.07:1 on a card and 3.95:1 on
+        // white and cannot clear AA by construction (P0.4 root cause 1).
+        view.textField?.textColor = (item.node.isIgnored ? TextToken.textSecondary : TextToken.textPrimary)
+            .color.nsColor(in: self)
         if let badge = view.viewWithTag(1) as? NSTextField {
             badge.stringValue = badgeTitle(for: item.node)
             badge.textColor = badgeColor(for: item.node.gitStatus)
@@ -195,16 +219,13 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         rootStack.spacing = 0
         rootStack.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 8, right: 8)
         rootStack.wantsLayer = true
-        rootStack.layer?.backgroundColor = NSColor(white: 0.10, alpha: 1.0).cgColor
 
-        searchField.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        searchField.font = NSFont.token(.bodyMono)
         searchField.placeholderString = "Search files"
         searchField.delegate = self
         searchField.translatesAutoresizingMaskIntoConstraints = false
 
         truncationBanner.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        truncationBanner.textColor = NSColor(calibratedRed: 0.96, green: 0.80, blue: 0.45, alpha: 1.0)
-        truncationBanner.backgroundColor = NSColor(white: 0.16, alpha: 1.0)
         truncationBanner.drawsBackground = true
         truncationBanner.isBezeled = false
         truncationBanner.isEditable = false
@@ -219,7 +240,6 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         outlineView.headerView = nil
         outlineView.rowHeight = 22
         outlineView.intercellSpacing = NSSize(width: 0, height: 2)
-        outlineView.backgroundColor = NSColor(white: 0.10, alpha: 1.0)
         outlineView.selectionHighlightStyle = .regular
         outlineView.dataSource = self
         outlineView.delegate = self
@@ -245,9 +265,7 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         scrollView.documentView = outlineView
 
         stateContainer.wantsLayer = true
-        stateContainer.layer?.backgroundColor = NSColor(white: 0.10, alpha: 1.0).cgColor
         stateLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        stateLabel.textColor = NSColor(white: 0.82, alpha: 1.0)
         stateLabel.alignment = .center
         stateLabel.maximumNumberOfLines = 0
         stateLabel.lineBreakMode = .byWordWrapping
@@ -272,6 +290,9 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         rootStack.addArrangedSubview(truncationBanner)
         rootStack.addArrangedSubview(scrollView)
         setContentView(rootStack)
+        // `super.init` already ran `applyTokens()`, but the surfaces it paints only
+        // gained `wantsLayer` here — so this is the first call that reaches them.
+        applyTokens()
     }
 
     private func configureViewModel() {
@@ -308,6 +329,15 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         if let latestSnapshot {
             apply(latestSnapshot)
         }
+    }
+
+    /// QA (P1.11): ingest a canned snapshot so a check can render real ROWS without a
+    /// filesystem. Added because the negative test showed the gate could not see
+    /// `outlineView(_:viewFor:)`'s row and badge colours at all — the only fixture
+    /// available took the recoverable-error branch, which draws no rows.
+    func applySnapshotForQA(_ snapshot: FileTreeSnapshot) {
+        apply(snapshot)
+        outlineView.layoutSubtreeIfNeeded()
     }
 
     private func apply(_ snapshot: FileTreeSnapshot) {
@@ -494,31 +524,38 @@ final class FileTreeTileNSView: TileNSView, NSOutlineViewDataSource, NSOutlineVi
         }
     }
 
-    private func badgeColor(for gitStatus: FileTreeGitStatus?) -> NSColor {
-        guard let gitStatus else {
-            return .clear
-        }
+    /// P1.11: the six git-status badges are `AccentToken`s, matching the diff
+    /// renderer's mapping so a modified file reads the same in the tree as in the
+    /// diff. Two defects went with the literals: they were `calibratedRed:`, whose
+    /// generic RGB space renders OFF the sRGB luminance every gate measures
+    /// (ticket 87 watch-out #1), and `untracked` was `secondaryLabelColor`, which
+    /// cannot clear AA on any surface.
+    private func badgeToken(for gitStatus: FileTreeGitStatus) -> AccentToken? {
         switch gitStatus {
-        case .modified:
-            return NSColor(calibratedRed: 0.95, green: 0.68, blue: 0.28, alpha: 1.0)
-        case .added:
-            return NSColor(calibratedRed: 0.32, green: 0.78, blue: 0.45, alpha: 1.0)
-        case .deleted:
-            return NSColor(calibratedRed: 0.90, green: 0.34, blue: 0.34, alpha: 1.0)
-        case .renamed:
-            return NSColor(calibratedRed: 0.36, green: 0.62, blue: 0.96, alpha: 1.0)
-        case .untracked:
-            return NSColor.secondaryLabelColor
-        case .conflicted:
-            return NSColor(calibratedRed: 0.72, green: 0.44, blue: 0.95, alpha: 1.0)
+        case .modified: return .accentApproval
+        case .added: return .accentDone
+        case .deleted: return .accentFailed
+        case .renamed: return .accentWorking
+        case .conflicted: return .accentInput
+        // Untracked is the one status that asks nothing of you, which is the same
+        // read `StatusChipPresenter` gives idle — muted, not an accent.
+        case .untracked: return nil
         }
+    }
+
+    private func badgeColor(for gitStatus: FileTreeGitStatus?) -> NSColor {
+        guard let gitStatus else { return .clear }
+        guard let token = badgeToken(for: gitStatus) else {
+            return TextToken.textSecondary.color.nsColor(in: self)
+        }
+        return token.color.nsColor(in: self)
     }
 
     private func makeCellView() -> NSTableCellView {
         let cell = NSTableCellView()
         cell.identifier = Self.rowIdentifier
         let text = NSTextField(labelWithString: "")
-        text.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        text.font = NSFont.token(.bodyMono)
         text.lineBreakMode = .byTruncatingTail
         text.translatesAutoresizingMaskIntoConstraints = false
         text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)

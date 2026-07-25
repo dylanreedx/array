@@ -128,7 +128,10 @@ class TileNSView: NSView, TokenThemed {
         wantsLayer = true
         applyTokens()
         layer?.borderWidth = 1
-        layer?.cornerRadius = 6
+        // P1.11: `Radius.container`, per Metrics' own mapping table (6 → 10). The
+        // tile CONTAINS cards, and P1.10 moved those to `Radius.card` (6) — this is
+        // the other half of righting the inverted nesting.
+        layer?.cornerRadius = Radius.container
         layer?.masksToBounds = true
 
         let bar = TitleBarView(tile: tile, agentStatus: agentStatus)
@@ -157,17 +160,42 @@ class TileNSView: NSView, TokenThemed {
     /// somewhere else (the terminal's theme background) must re-assert it here or
     /// the next appearance change puts this default back.
     ///
-    /// The values are still the shipped dark-only literals: adopting `DesignTokens`
-    /// is P1.10's job (they are the P1.7 allowlist entries it owns). What changes
-    /// here is only WHEN they are assigned.
+    /// P1.11: the values are `DesignTokens`. The outline is `borderStrong`, not
+    /// `border`: this edge is the whole "canvas looks like mush" defect —
+    /// white@0.25 on white@0.10 measured **1.68:1**, so a tile had no visible
+    /// boundary at all. `borderStrong` on `canvas` measures 6.91:1 light / 6.09:1
+    /// dark (P1.3's provenance table), and `--ui-contrast-check` asserts it.
     func applyTokens() {
-        layer?.backgroundColor = NSColor(white: 0.10, alpha: 1.0).cgColor
-        layer?.borderColor = NSColor(white: 0.25, alpha: 1.0).cgColor
+        layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(in: self)
+        layer?.borderColor = LineToken.borderStrong.color.cgColor(in: self)
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyTokens()
+    }
+
+    /// P1.11: the token application shared by every content tile whose body is a
+    /// mono `NSTextView` on the tile surface — note, file, run artifacts, diff.
+    /// Each of those five files had independently re-declared the same
+    /// `white:0.10` fill and `white:0.90` text; this is the one place that pair
+    /// now lives, so they cannot drift apart again.
+    ///
+    /// `NSTextView.backgroundColor`/`.textColor` are `NSColor` properties rather
+    /// than layer colours, so they are invisible to `UIProbeAppearance`'s sentinel
+    /// sweep — `runDocumentTileTokenCheck` reads them back per appearance instead.
+    /// QA (P1.11): the status pill's laid-out rect and the leading edge of the drag
+    /// handle, forwarded from the private title bar so `runTitleBarPillLayoutCheck`
+    /// can assert the pill clears the dots. `nil` if the bar is gone.
+    func qaStatusPillRect(for status: AgentStatus) -> NSRect? { titleBar?.qaStatusPillRect(for: status) }
+    var qaDragHandleLeadingX: CGFloat? { titleBar?.qaDragHandleLeadingX }
+    /// The rect the tile title is really drawn into. `agentStatus` has to be set on
+    /// the bar first — the title's available width depends on the pill.
+    var qaTitleRect: NSRect? { titleBar?.qaTitleRect() }
+    func applyDocumentTokens(to textView: NSTextView) {
+        textView.backgroundColor = SurfaceToken.tileBody.color.nsColor(in: self)
+        textView.textColor = TextToken.textPrimary.color.nsColor(in: self)
+        textView.insertionPointColor = TextToken.textPrimary.color.nsColor(in: self)
     }
 
     private func installCornerOverlay() {
@@ -714,7 +742,6 @@ private final class TitleBarView: NSView, TokenThemed {
         btn.imageScaling = .scaleProportionallyDown
         btn.isBordered = false
         btn.bezelStyle = .smallSquare
-        btn.contentTintColor = NSColor(white: 0.55, alpha: 1.0)
         btn.translatesAutoresizingMaskIntoConstraints = false
         btn.setButtonType(.momentaryChange)
         self.closeButton = btn
@@ -730,8 +757,19 @@ private final class TitleBarView: NSView, TokenThemed {
         addSubview(btn)
     }
 
+    /// P1.11. The bar's fill is `tileChrome` — one step off the body's `tileBody`,
+    /// which is what makes a header read as a header instead of as part of the
+    /// content. `contentTintColor` is not a layer colour, but it is a resolved
+    /// `NSColor` all the same, so it belongs here for the same reason: nothing else
+    /// re-assigns it when the appearance moves.
+    ///
+    /// `needsDisplay` because this bar draws its title, its drag dots and its
+    /// bottom hairline in `draw(_:)` from `effectiveTokenTheme` — re-applying the
+    /// layer fill without re-drawing would leave a dark title on a light bar.
     func applyTokens() {
-        layer?.backgroundColor = NSColor(white: 0.16, alpha: 1.0).cgColor
+        layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(in: self)
+        closeButton.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
+        needsDisplay = true
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -866,16 +904,43 @@ private final class TitleBarView: NSView, TokenThemed {
     /// screen it renders at `* zoom`. Exposed for the chrome-scale check.
     var titleFontWorldSize: CGFloat { 12 * chromeScale }
 
+    /// The attributes the title is drawn with. Truncating-tail, which is the fix for
+    /// a real defect the P0.6 baselines caught: the title was drawn at an origin with
+    /// no width bound, so on a narrow tile (the ~180pt tiles inside a zone card) the
+    /// status pill rendered straight over it. See `qaTitleRect`.
+    private func titleAttributes(theme: TokenTheme) -> [NSAttributedString.Key: Any] {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        return [
+            .font: NSFont.systemFont(ofSize: titleFontWorldSize, weight: .medium),
+            // P1.11: was `.lightGray` — a fixed light grey, so under Aqua the tile
+            // title was near-invisible on its own bar.
+            .foregroundColor: TextToken.textPrimary.color.nsColor(for: theme),
+            .paragraphStyle: paragraph
+        ]
+    }
+
+    /// The rect the title is drawn into: from the leading inset to whatever comes
+    /// next on the right — the status pill if there is one, otherwise the drag dots —
+    /// less one `Space.s` gap. Never negative-width.
+    private func titleRect(theme: TokenTheme) -> NSRect {
+        let scale = chromeScale
+        let leading = CGFloat(Space.m) * scale
+        let blockedFrom = agentStatus.flatMap { statusPillRect(for: $0, theme: theme)?.minX }
+            ?? qaDragHandleLeadingX
+        let available = max(0, blockedFrom - CGFloat(Space.s) * scale - leading)
+        let height = ("X" as NSString).size(withAttributes: titleAttributes(theme: theme)).height
+        return NSRect(
+            x: leading, y: max(0, (bounds.height - height) / 2),
+            width: available, height: height)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         let scale = chromeScale
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: titleFontWorldSize, weight: .medium),
-            .foregroundColor: NSColor.lightGray
-        ]
+        let theme = effectiveTokenTheme
+        let attrs = titleAttributes(theme: theme)
         let title = "\(tile.kind.displayName) · \(tile.title)" as NSString
-        // Vertically center in the (variable-height) bar; inset scales too.
-        let titleSize = title.size(withAttributes: attrs)
-        title.draw(at: NSPoint(x: 8 * scale, y: max(0, (bounds.height - titleSize.height) / 2)), withAttributes: attrs)
+        title.draw(in: titleRect(theme: theme), withAttributes: attrs)
 
         if let agentStatus {
             drawAgentStatus(agentStatus)
@@ -883,42 +948,145 @@ private final class TitleBarView: NSView, TokenThemed {
 
         // Three-dot drag handle indicator, left of the × close button. Sizes +
         // gap scale with the chrome; positioned relative to the floored button.
-        let dot = NSColor(white: 0.55, alpha: 1.0)
-        let radius: CGFloat = 1.5 * scale
-        let spacing: CGFloat = 4 * scale
+        let radius: CGFloat = Self.dragDotRadius * scale
+        let spacing: CGFloat = Self.dragDotSpacing * scale
         let cy = bounds.midY
-        var cx = bounds.width - Self.closeButtonTrailingInset - closeButtonWorldSize - 10 * scale
-        dot.setFill()
-        for _ in 0..<3 {
+        var cx = bounds.width - Self.closeButtonTrailingInset - closeButtonWorldSize - Self.dragDotGap * scale
+        TextToken.textSecondary.color.nsColor(for: theme).setFill()
+        for _ in 0..<Self.dragDotCount {
             let rect = NSRect(x: cx - radius, y: cy - radius, width: radius * 2, height: radius * 2)
             NSBezierPath(ovalIn: rect).fill()
             cx -= spacing
         }
 
         // 1px hairline along the bottom edge of the title bar — separates
-        // chrome from body and reinforces the "this is a header" read.
-        NSColor(white: 0.28, alpha: 1.0).setFill()
+        // chrome from body and reinforces the "this is a header" read. `separator`
+        // is the palette's one gated-exempt line for exactly this: it divides
+        // content inside a surface `borderStrong` has already delineated.
+        LineToken.separator.color.nsColor(for: theme).setFill()
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+    }
+
+    // MARK: - Status pill geometry (P1.11)
+    //
+    // These replace the seven unnamed offsets `drawAgentStatus` used to carry
+    // (`+18`, `-58`, `y: 4`, `+6`, `-3`, `+15`, `+2`). Each is now either a
+    // `Space` rung or DERIVED from one — and the `-58` in particular was an
+    // undocumented dependency on the close button plus the drag-dot cluster, so
+    // moving either silently slid the pill under the dots. It is now that sum,
+    // which is what `runTitleBarPillLayoutCheck` asserts.
+
+    /// Drag-handle dot geometry. 1.5pt radius is off-grid on purpose: it is a
+    /// 3pt-diameter dot, and 3 is `Space.s - 1`; the GRID governs gaps, not the
+    /// size of a 3px indicator glyph. The gap and count are named so the
+    /// cluster's width is computable rather than eyeballed.
+    private static let dragDotRadius: CGFloat = 1.5
+    private static let dragDotCount = 3
+    /// Gap from the close button's leading edge to the first dot's centre.
+    private static let dragDotGap = CGFloat(Space.m)
+    /// Gap between adjacent dot centres.
+    private static let dragDotSpacing = CGFloat(Space.s)
+    /// World width the dot cluster occupies at chrome scale 1, from the close
+    /// button's leading edge to the outer edge of the leftmost dot.
+    private static var dragHandleWidth: CGFloat {
+        dragDotGap + CGFloat(dragDotCount - 1) * dragDotSpacing + dragDotRadius
+    }
+    /// The pill's height and its inner rhythm. Height is one rendered line of
+    /// `.caption` plus `Space.s` of vertical padding — a function of the type in
+    /// it, per `Metrics`, rather than the old flat 16.
+    private static var statusPillHeight: CGFloat { CGFloat(Metrics.lineHeight(for: .caption)) + CGFloat(Space.s) }
+    private static let statusPillDotDiameter = CGFloat(Space.m - Space.xs)
+    /// Leading pad before the dot, and the gap between dot and label — both
+    /// `Space.s`, so the old `+6` / `+15` / `+18` trio collapses into one rung.
+    private static let statusPillPad = CGFloat(Space.s)
+
+    /// Right edge of the status pill, measured from the bar's trailing edge: past
+    /// the close button, past the drag dots, plus one gap so the pill does not
+    /// touch them. Was the bare literal `58`.
+    ///
+    /// Deliberately an INSTANCE value: the dot cluster scales with `chromeScale`
+    /// and the close button carries its own zoom-floored world size, so a static
+    /// 58 slid the pill under the dots at low zoom. Both live terms are read here.
+    private var statusPillTrailingInset: CGFloat {
+        Self.closeButtonTrailingInset + closeButtonWorldSize
+            + Self.dragHandleWidth * chromeScale + CGFloat(Space.m)
+    }
+
+    /// The pill's text attributes and laid-out rect — one computation, used by
+    /// `draw`, by `titleRect` and by the QA accessor, so the three cannot disagree.
+    private func statusPillTextAttributes(theme: TokenTheme) -> [NSAttributedString.Key: Any] {
+        [
+            .font: NSFont.token(.caption),
+            .foregroundColor: TextToken.textPrimary.color.nsColor(for: theme)
+        ]
+    }
+
+    /// `nil` when the pill cannot fit without being clamped on top of something.
+    ///
+    /// The old code clamped its x to a minimum and drew regardless, which at low zoom
+    /// printed the pill over the drag handle AND over the title — the chrome floors
+    /// mean a zoomed-out tile's close button and dot cluster take ~135 world points,
+    /// so on a 180pt tile at zoom 0.35 there is nothing left. Suppressing beats
+    /// overprinting, and costs nothing readable: `Typography.minimumLegibleZoom(for:
+    /// .caption)` is 1.0, so a 9pt pill label is already illegible at that zoom.
+    private func statusPillRect(for status: AgentStatus, theme: TokenTheme) -> NSRect? {
+        let label = StatusChipPresenter.display(for: status).label as NSString
+        let textSize = label.size(withAttributes: statusPillTextAttributes(theme: theme))
+        let dot = Self.statusPillDotDiameter
+        let pillWidth = textSize.width + dot + 3 * Self.statusPillPad
+        let pillHeight = Self.statusPillHeight
+        let x = bounds.width - statusPillTrailingInset - pillWidth
+        guard x >= CGFloat(Space.m) * chromeScale else { return nil }
+        return NSRect(
+            x: x, y: (bounds.height - pillHeight) / 2,
+            width: pillWidth, height: pillHeight)
     }
 
     private func drawAgentStatus(_ status: AgentStatus) {
         let display = StatusChipPresenter.display(for: status)
         let label = display.label
-        // The dot-and-tint shape, so the accent. `.dark` because the title bar
-        // paints its own white:0.16 literal (allowlisted, owner P1.10).
-        let color = StatusChipNSView.nsColor(display.accent.resolved(for: .dark))
-        let textAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
-            .foregroundColor: NSColor.white.withAlphaComponent(0.82)
-        ]
+        // The dot-and-tint shape, so the accent — now resolved in the bar's OWN
+        // theme. It was pinned `.dark` because this bar painted a dark-only
+        // white:0.16 literal; P1.11 put the bar on `tileChrome`, which carries a
+        // light leaf, so the pin would have been the black-on-dark bug inverted.
+        let theme = effectiveTokenTheme
+        let color = display.accent.nsColor(for: theme)
+        let textAttributes = statusPillTextAttributes(theme: theme)
         let textSize = (label as NSString).size(withAttributes: textAttributes)
-        let pillWidth = textSize.width + 18
-        let pillRect = NSRect(x: max(8, bounds.width - 58 - pillWidth), y: 4, width: pillWidth, height: 16)
+        let dot = Self.statusPillDotDiameter
+        let pillHeight = Self.statusPillHeight
+        guard let pillRect = statusPillRect(for: status, theme: theme) else { return }
+        // The tinted pill body. Kept as an alpha wash over the bar rather than a
+        // solid accent fill: `accent`-on-`tileChrome` IS one of P1.3's 104
+        // documented pairs, whereas an accent at 16% over a surface is a composite
+        // no gate can predict — so the READ comes from the dot and the outline.
         color.withAlphaComponent(0.16).setFill()
-        NSBezierPath(roundedRect: pillRect, xRadius: 8, yRadius: 8).fill()
+        NSBezierPath(roundedRect: pillRect, xRadius: pillHeight / 2, yRadius: pillHeight / 2).fill()
         color.setFill()
-        NSBezierPath(ovalIn: NSRect(x: pillRect.minX + 6, y: pillRect.midY - 3, width: 6, height: 6)).fill()
-        label.draw(at: NSPoint(x: pillRect.minX + 15, y: pillRect.minY + 2), withAttributes: textAttributes)
+        NSBezierPath(ovalIn: NSRect(
+            x: pillRect.minX + Self.statusPillPad, y: pillRect.midY - dot / 2,
+            width: dot, height: dot)).fill()
+        label.draw(
+            at: NSPoint(
+                x: pillRect.minX + Self.statusPillPad + dot + Self.statusPillPad,
+                y: pillRect.midY - textSize.height / 2),
+            withAttributes: textAttributes)
+    }
+
+    /// QA: the pill's laid-out rect at the current bounds, so the parent's check
+    /// can assert it clears the drag dots instead of sliding under them.
+    func qaStatusPillRect(for status: AgentStatus) -> NSRect? {
+        statusPillRect(for: status, theme: effectiveTokenTheme)
+    }
+
+    /// QA: the rect the title is really drawn into, for the assertion that it never
+    /// runs under the pill.
+    func qaTitleRect() -> NSRect { titleRect(theme: effectiveTokenTheme) }
+
+    /// QA: the world x of the leftmost drag dot's outer edge — the thing the pill
+    /// must not cross.
+    var qaDragHandleLeadingX: CGFloat {
+        bounds.width - Self.closeButtonTrailingInset - closeButtonWorldSize - Self.dragHandleWidth * chromeScale
     }
 
     // P1.8 deleted this bar's private label/colour maps outright — see
@@ -956,10 +1124,17 @@ private final class CornerOverlayView: NSView, TokenThemed {
 
     /// The bracket colours live on sublayers, not on `layer` — same rule: they are
     /// resolved CGColors and nothing else re-assigns them.
+    /// P1.11: `borderStrong`. A resize bracket is a focus/affordance indicator, so
+    /// it is exactly what that token is for — and the old fixed white@0.85 was
+    /// invisible against a light tile body under Aqua.
     func applyTokens() {
         for shape in cornerLayers.values {
-            shape.strokeColor = NSColor(white: 0.85, alpha: 1.0).cgColor
-            shape.fillColor = NSColor.clear.cgColor
+            shape.strokeColor = LineToken.borderStrong.color.cgColor(in: self)
+            // `nil`, not `.clear`: a bracket is stroke-only, and an explicitly
+            // transparent fill is still a fill slot the appearance gate would have
+            // to hold an opinion about. Absence is the honest spelling — it drops
+            // 4 fill slots from the sweep, which the floor below records.
+            shape.fillColor = nil
         }
     }
 

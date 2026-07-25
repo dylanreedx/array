@@ -74,7 +74,6 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     override init(frame frameRect: NSRect) {
         titleLabel = NSTextField(labelWithString: "Workspaces")
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        titleLabel.textColor = .secondaryLabelColor
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
         createButton = NSButton(title: "New", target: nil, action: nil)
@@ -97,7 +96,6 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
 
         managementMessageLabel = NSTextField(labelWithString: "")
         managementMessageLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        managementMessageLabel.textColor = .systemOrange
         managementMessageLabel.lineBreakMode = .byTruncatingTail
         managementMessageLabel.translatesAutoresizingMaskIntoConstraints = false
         managementMessageLabel.isHidden = true
@@ -175,11 +173,21 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         return nil
     }
 
-    /// P1.9: the panel fill is a system colour, so its resolved value genuinely
-    /// differs per appearance — assigning it once at `init` is what left the
-    /// sidebar light while the text went white. Re-applied on every flip.
+    /// P1.11: the sidebar IS `SurfaceToken.panel` — the token declared for "the
+    /// sidebar and Settings" — rather than `windowBackgroundColor` at 92%. The
+    /// alpha went with the literal: a translucent panel makes whatever is behind it
+    /// part of every text pair, which is not something P1.6 can gate, and `panel`
+    /// is already one step off `canvas` so the separation it bought is in the token.
+    ///
+    /// The two label colours live here for the same reason they do in the tile
+    /// chrome: `NSTextField.textColor` is a resolved `NSColor`, so nothing else
+    /// re-assigns it when the appearance moves. Row cells are rebuilt by
+    /// `reloadData()`, which is why the outline is reloaded too.
     func applyTokens() {
-        layer?.backgroundColor = NSColor.windowBackgroundColor.appResolvedCGColor(alpha: 0.92)
+        layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self)
+        titleLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        managementMessageLabel.textColor = AccentToken.accentApproval.color.nsColor(in: self)
+        if outlineView.numberOfRows > 0 { outlineView.reloadData() }
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -237,7 +245,9 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
             let statusField = NSTextField(labelWithString: status.text)
             statusField.translatesAutoresizingMaskIntoConstraints = false
             statusField.font = .systemFont(ofSize: 10, weight: .regular)
-            statusField.textColor = status.color.withAlphaComponent(0.82)
+            // Full-strength accent, not 82%: an alpha over the panel is a composite
+            // no documented pair covers, and the accent-on-`panel` pair is gated.
+            statusField.textColor = status.color
             statusField.lineBreakMode = .byTruncatingTail
             statusField.setContentCompressionResistancePriority(.required, for: .horizontal)
 
@@ -541,17 +551,24 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         }
     }
 
+    /// P1.11: two tokens, not four Apple semantic labels. The hierarchy the four
+    /// were reaching for is preserved — the current workspace and a zone are
+    /// primary, an inactive workspace and a tile row are secondary — but
+    /// `tertiaryLabelColor` measured 2.07:1 on a card (P0.4 root cause 1) and could
+    /// not carry a tile title at all.
     private func textColor(for item: SidebarItem) -> NSColor {
+        let token: TextToken
         switch item.kind {
         case let .workspace(workspace) where workspace.workspaceId == currentWorkspaceId:
-            return .labelColor
+            token = .textPrimary
         case .workspace:
-            return .secondaryLabelColor
+            token = .textSecondary
         case .zone:
-            return .labelColor
+            token = .textPrimary
         case .tile:
-            return .tertiaryLabelColor
+            token = .textSecondary
         }
+        return token.color.nsColor(in: self)
     }
 
     private struct StatusPresentation {
@@ -617,11 +634,11 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         StatusChipPresenter.display(for: representativeStatus(for: kind)).glyph
     }
 
-    /// The sidebar follows the system appearance (unlike the tile chrome, which
-    /// paints its own dark-only literals and therefore resolves `.dark`), so the
-    /// accent goes through the appearance-resolving bridge.
+    /// The sidebar follows the system appearance, so the accent resolves in this
+    /// view's own theme. (P1.11 replaced `StatusChipNSView.dynamicNSColor`, which
+    /// built a dynamic `NSColor` for callers that had no view to ask.)
     private func color(for kind: SidebarAgentStatusKind) -> NSColor {
-        StatusChipNSView.dynamicNSColor(StatusChipPresenter.display(for: representativeStatus(for: kind)).accent)
+        StatusChipPresenter.display(for: representativeStatus(for: kind)).accent.nsColor(in: self)
     }
 
     private func accessibilityIdentifier(for item: SidebarItem) -> String {

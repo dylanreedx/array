@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
@@ -18,9 +19,7 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         let tv = NSTextView()
         tv.isEditable = true
         tv.isRichText = false
-        tv.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        tv.backgroundColor = NSColor(white: 0.10, alpha: 1.0)
-        tv.textColor = NSColor(white: 0.90, alpha: 1.0)
+        tv.font = NSFont.token(.bodyMono)
         tv.isAutomaticQuoteSubstitutionEnabled = false
         tv.isAutomaticDashSubstitutionEnabled = false
         tv.isAutomaticSpellingCorrectionEnabled = false
@@ -53,6 +52,11 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func applyTokens() {
+        super.applyTokens()
+        applyDocumentTokens(to: textView)
+    }
 
     override func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)

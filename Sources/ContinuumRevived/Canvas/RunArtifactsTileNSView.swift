@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
@@ -16,9 +17,7 @@ final class RunArtifactsTileNSView: TileNSView {
         tv.isEditable = false
         tv.isSelectable = true
         tv.isRichText = false
-        tv.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        tv.backgroundColor = NSColor(white: 0.10, alpha: 1.0)
-        tv.textColor = NSColor(white: 0.90, alpha: 1.0)
+        tv.font = NSFont.token(.bodyMono)
         tv.isAutomaticQuoteSubstitutionEnabled = false
         tv.isAutomaticDashSubstitutionEnabled = false
         tv.isAutomaticSpellingCorrectionEnabled = false
@@ -43,11 +42,18 @@ final class RunArtifactsTileNSView: TileNSView {
 
         super.init(tile: tile)
 
+        // No explicit `applyTokens()` here: `super.init` already ran it, and
+        // `textView` was assigned before that call, so the override saw it.
         setContentView(sv)
         loadRunArtifacts()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func applyTokens() {
+        super.applyTokens()
+        applyDocumentTokens(to: textView)
+    }
 
     override func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)

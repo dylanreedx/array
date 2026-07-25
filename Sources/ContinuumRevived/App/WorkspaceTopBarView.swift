@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
@@ -26,6 +27,9 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     private let toggleSidebarButton: NSButton
 
     private var currentWorkspaceId: UUID?
+    /// The save state the label is currently showing, so `applyTokens()` can
+    /// re-resolve its token on an appearance flip without waiting for a `reload`.
+    private var currentSaveState: WorkspaceDocumentSaveState = .saved
 
     var onSwitchWorkspace: ((UUID) -> Void)?
     var onCreateWorkspace: (() -> Void)?
@@ -36,23 +40,19 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
     override init(frame frameRect: NSRect) {
         nameLabel = NSTextField(labelWithString: "Workspace")
         nameLabel.font = .systemFont(ofSize: 14, weight: .semibold)
-        nameLabel.textColor = .labelColor
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         countsLabel = NSTextField(labelWithString: "0 projects · 0 zones")
         countsLabel.font = .systemFont(ofSize: 12, weight: .regular)
-        countsLabel.textColor = .secondaryLabelColor
         countsLabel.lineBreakMode = .byTruncatingTail
 
         saveStateLabel = NSTextField(labelWithString: WorkspaceDocumentSaveState.saved.displayTitle)
         saveStateLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        saveStateLabel.textColor = .secondaryLabelColor
         saveStateLabel.lineBreakMode = .byTruncatingTail
 
         managementMessageLabel = NSTextField(labelWithString: "")
         managementMessageLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        managementMessageLabel.textColor = .systemOrange
         managementMessageLabel.lineBreakMode = .byTruncatingTail
         managementMessageLabel.isHidden = true
 
@@ -143,10 +143,20 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         nil
     }
 
-    /// P1.9: see `WorkspaceSidebarView.applyTokens()` — same system fill, same
-    /// reason it has to be re-assigned rather than snapshotted at `init`.
+    /// P1.11: `SurfaceToken.panel`, the same token the sidebar uses — the two are
+    /// one piece of chrome around the canvas and had no reason to be 92% and 96% of
+    /// the same system colour. See `WorkspaceSidebarView.applyTokens()` for why the
+    /// alpha went with the literal.
+    ///
+    /// `saveStateLabel` is deliberately NOT reset here: its colour is state-carrying
+    /// and `reload(_:)` owns it. `applyTokens()` re-derives it from the last model
+    /// instead, so a flip cannot revert a "save failed" label to neutral.
     func applyTokens() {
-        layer?.backgroundColor = NSColor.windowBackgroundColor.appResolvedCGColor(alpha: 0.96)
+        layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self)
+        nameLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
+        countsLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        managementMessageLabel.textColor = AccentToken.accentApproval.color.nsColor(in: self)
+        saveStateLabel.textColor = Self.color(for: currentSaveState).nsColor(in: self)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -159,7 +169,8 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         nameLabel.stringValue = model.currentWorkspaceName
         countsLabel.stringValue = Self.countsText(projectCount: model.projectCount, zoneCount: model.zoneCount)
         saveStateLabel.stringValue = model.saveState.displayTitle
-        saveStateLabel.textColor = Self.color(for: model.saveState)
+        currentSaveState = model.saveState
+        saveStateLabel.textColor = Self.color(for: model.saveState).nsColor(in: self)
         setManagementMessage(model.managementMessage)
 
         switchWorkspaceButton.removeAllItems()
@@ -257,16 +268,16 @@ final class WorkspaceTopBarView: NSView, TokenThemed {
         return zoneCount == 0 ? "\(base) · empty workspace" : base
     }
 
-    private static func color(for state: WorkspaceDocumentSaveState) -> NSColor {
+    /// P1.11: four tokens for four states. `secondaryLabelColor` and
+    /// `systemOrange` were both P0.4 failures on a light panel (3.95:1 and 2.31:1);
+    /// the accents here are the same ones `StatusChipPresenter` uses for the
+    /// equivalent agent states, so "saving" reads like "working" everywhere.
+    static func color(for state: WorkspaceDocumentSaveState) -> TokenColor {
         switch state {
-        case .saved:
-            return .secondaryLabelColor
-        case .saving:
-            return .controlAccentColor
-        case .unsavedChanges:
-            return .systemOrange
-        case .saveFailed:
-            return .systemRed
+        case .saved: return TextToken.textSecondary.color
+        case .saving: return AccentToken.accentWorking.color
+        case .unsavedChanges: return AccentToken.accentApproval.color
+        case .saveFailed: return AccentToken.accentFailed.color
         }
     }
 }
