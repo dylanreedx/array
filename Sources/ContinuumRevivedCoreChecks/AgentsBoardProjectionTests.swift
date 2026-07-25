@@ -71,6 +71,151 @@ func runAgentsBoardProjectionChecks() {
     expect(AgentsBoardProjection.rows(from: incremental).map(\.agentId) == [agentB, agentC, agentA], "AgentsBoardProjection incremental rows sort from folded snapshot")
     print("AgentsBoardProjection incremental measuredSequence=\(incremental.snapshotSequence) rowCount=\(AgentsBoardProjection.rows(from: incremental).count)")
 
+    // MARK: P2B.7 — incremental refresh: the fold stays equal, and the change-set
+    // names exactly what moved.
+    //
+    // Ticket: docs/38-tickets/90-agent-ux/P2B.7-incremental-refresh.md
+
+    // Fold equality under a REVERSED arrival order, not just the sorted one above:
+    // the desktop now folds an event the moment it observes it, so "incrementally
+    // equals from scratch" has to hold for an arrival order that is not canonical
+    // order. (The fold is a merge on `(sequence, replicaId)` — see `apply`.)
+    var reversedFold = ActivityLogSnapshot.empty
+    for event in events.reversed() {
+        reversedFold = AgentsBoardProjection.applyEvent(event, to: reversedFold)
+    }
+    expect(reversedFold == refolded, "P2B.7: folding the same events in reverse arrival order must equal the from-scratch fold")
+    expect(
+        AgentsBoardProjection.changeSet(from: .empty, to: reversedFold)
+            == AgentsBoardProjection.changeSet(from: .empty, to: refolded),
+        "P2B.7: the change-set is a function of the snapshots, so arrival order cannot change it"
+    )
+
+    // ONE agent's event, and the change-set names ONE agent. This is the assertion
+    // the ticket exists for: a list view diffing on this must not be told to
+    // re-render agents that did not move.
+    let oneAgentDraft = AgentActivityEventDraft(
+        agentId: agentB,
+        tileId: nil,
+        runId: nil,
+        tone: .approval,
+        kind: "approval.requested",
+        status: .needsAttention,
+        summary: "b raised its hand",
+        occurredAt: base.addingTimeInterval(40)
+    )
+    let afterOne = AgentsBoardProjection.appendLocal(oneAgentDraft, to: incremental, replicaId: agentsBoardReplica)
+    let oneChange = AgentsBoardProjection.changeSet(from: incremental, to: afterOne)
+    expect(oneChange.updated == [agentB], "P2B.7: one agent's event updates exactly that agent — got \(oneChange.updated.count) updated")
+    expect(oneChange.added.isEmpty && oneChange.removed.isEmpty, "P2B.7: an event on a known agent adds and removes nobody")
+    expect(oneChange.touched == [agentB], "P2B.7: touched is the union and names only the agent that moved")
+    // …and the fold actually took it: a change-set over a snapshot that ignored the
+    // event would be empty, which would satisfy "only that agent" vacuously.
+    expect(afterOne.byAgent[agentB]?.status == .needsAttention, "P2B.7: appendLocal must move the agent's status — got \(String(describing: afterOne.byAgent[agentB]?.status))")
+    expect(afterOne.byAgent[agentB]?.lastSummary == "b raised its hand", "P2B.7: appendLocal must move the agent's summary")
+
+    // THE SEQUENCE RULE. `appendLocal` must sort after everything already folded,
+    // or the fold would ingest the event and then keep deriving from the older one.
+    // Witnessed by stamping the same draft with a LOW sequence, the way a naive
+    // "just use 1" would: the status does not move.
+    expect(afterOne.snapshotSequence == incremental.snapshotSequence + 1, "P2B.7: appendLocal stamps one past the snapshot's sequence — got \(afterOne.snapshotSequence)")
+    let stale = AgentsBoardProjection.applyEvent(
+        AgentActivityEvent(stamping: oneAgentDraft, sequence: 1, replicaId: agentsBoardReplica),
+        to: incremental
+    )
+    expect(
+        stale.byAgent[agentB]?.lastSummary == "b needs",
+        "P2B.7: a low-sequence stamp must NOT become the agent's current state — that is why appendLocal stamps snapshotSequence + 1 — got \(stale.byAgent[agentB]?.lastSummary ?? "nil")"
+    )
+    print("P2B.7 lowSequenceStamp measuredSummary=\(stale.byAgent[agentB]?.lastSummary ?? "nil") appendLocalSummary=\(afterOne.byAgent[agentB]?.lastSummary ?? "nil")")
+
+    // ADDED and REMOVED, both directions, on the same pair of snapshots.
+    let newcomer = UUID(uuidString: "61000000-0000-4000-8000-00000000000E")!
+    let withNewcomer = AgentsBoardProjection.appendLocal(
+        AgentActivityEventDraft(
+            agentId: newcomer, tileId: nil, runId: nil, tone: .info, kind: "agent.created",
+            status: .configuring, summary: "e configuring", occurredAt: base.addingTimeInterval(50)
+        ),
+        to: afterOne,
+        replicaId: agentsBoardReplica
+    )
+    let addChange = AgentsBoardProjection.changeSet(from: afterOne, to: withNewcomer)
+    expect(addChange.added == [newcomer] && addChange.updated.isEmpty && addChange.removed.isEmpty,
+           "P2B.7: an agent with no row before is ADDED, and nobody else moves — got added \(addChange.added.count) updated \(addChange.updated.count)")
+    let removeChange = AgentsBoardProjection.changeSet(from: withNewcomer, to: afterOne)
+    expect(removeChange.removed == [newcomer] && removeChange.added.isEmpty && removeChange.updated.isEmpty,
+           "P2B.7: an agent whose row is gone is REMOVED — got removed \(removeChange.removed.count)")
+
+    // NOTHING moved → nothing is reported. A change-set that reported the whole
+    // board on every rebuild would be the full reload it replaces.
+    expect(AgentsBoardProjection.changeSet(from: withNewcomer, to: withNewcomer).isEmpty,
+           "P2B.7: identical snapshots produce an empty change-set")
+    // …including across the POSITIONAL RENUMBERING a full rebuild does. Same three
+    // agents, same statuses/summaries/clocks, sequence numbers shifted by 100 —
+    // which is what `AgentInventory.snapshot` does to every later-sorting agent when
+    // one agent is created. `AgentActivity` equality would call all of them updated.
+    func renumbered(_ snapshot: ActivityLogSnapshot, by offset: UInt64) -> ActivityLogSnapshot {
+        var next = ActivityLogSnapshot.empty
+        for event in snapshot.byAgent.values.flatMap(\.recent).sorted(by: { $0.sequence < $1.sequence }) {
+            next = apply(next, AgentActivityEvent(
+                stamping: AgentActivityEventDraft(
+                    agentId: event.agentId, tileId: event.tileId, runId: event.runId, tone: event.tone,
+                    kind: event.kind, status: event.status, summary: event.summary,
+                    occurredAt: event.occurredAt, approvalRequestId: event.approvalRequestId
+                ),
+                sequence: event.sequence + offset,
+                replicaId: event.replicaId
+            ))
+        }
+        return next
+    }
+    let shifted = renumbered(withNewcomer, by: 100)
+    expect(shifted.byAgent.count == withNewcomer.byAgent.count && shifted != withNewcomer,
+           "P2B.7: the renumbering fixture must really shift sequences, or the assertion below is vacuous")
+    expect(AgentsBoardProjection.changeSet(from: withNewcomer, to: shifted).isEmpty,
+           "P2B.7: positional renumbering alone must NOT report a row as changed — got \(AgentsBoardProjection.changeSet(from: withNewcomer, to: shifted).touched.count) touched")
+    print("P2B.7 changeSet measured one=\(oneChange.touched.count) added=\(addChange.added.count) removed=\(removeChange.removed.count) renumbered=\(AgentsBoardProjection.changeSet(from: withNewcomer, to: shifted).touched.count)")
+
+    // AT THE 200-EVENT CAP (from the cross-review): a new event EVICTS the oldest,
+    // so `recent.count` stops moving. An event whose status, summary, clock and tile
+    // hint all match the one it follows would then be invisible to a count-only
+    // witness, while the row's timeline really did change. The oldest survivor's
+    // clock is what still moves, and renumbering cannot touch it.
+    let capped = UUID(uuidString: "61000000-0000-4000-8000-00000000000F")!
+    var atCap = ActivityLogSnapshot.empty
+    for index in 1...200 {
+        atCap = AgentsBoardProjection.applyEvent(
+            boardEvent(
+                agentId: capped, sequence: UInt64(index), status: .working,
+                summary: "same summary", occurredAt: base.addingTimeInterval(Double(index))
+            ),
+            to: atCap
+        )
+    }
+    expect(atCap.byAgent[capped]?.recent.count == 200, "P2B.7: the cap fixture must sit exactly at the ring cap — got \(String(describing: atCap.byAgent[capped]?.recent.count))")
+    // Identical in every derived field: same status, same summary, same clock as the
+    // event it follows, same (nil) tile hint.
+    let atCapPlusOne = AgentsBoardProjection.appendLocal(
+        AgentActivityEventDraft(
+            agentId: capped, tileId: nil, runId: nil, tone: .info, kind: "status.working",
+            status: .working, summary: "same summary", occurredAt: base.addingTimeInterval(200)
+        ),
+        to: atCap,
+        replicaId: agentsBoardReplica
+    )
+    expect(atCapPlusOne.byAgent[capped]?.recent.count == 200, "P2B.7: at the cap the count must NOT move, or this case is not the one being tested — got \(String(describing: atCapPlusOne.byAgent[capped]?.recent.count))")
+    expect(
+        atCapPlusOne.byAgent[capped]?.status == atCap.byAgent[capped]?.status
+            && atCapPlusOne.byAgent[capped]?.lastSummary == atCap.byAgent[capped]?.lastSummary
+            && atCapPlusOne.byAgent[capped]?.updatedAt == atCap.byAgent[capped]?.updatedAt,
+        "P2B.7: the cap fixture's new event must be indistinguishable in the derived fields, or the witness below is not about the ring"
+    )
+    expect(
+        AgentsBoardProjection.changeSet(from: atCap, to: atCapPlusOne).updated == [capped],
+        "P2B.7: an event that evicts the oldest at the cap must still report the row as updated — got \(AgentsBoardProjection.changeSet(from: atCap, to: atCapPlusOne).updated.count)"
+    )
+    print("P2B.7 ringCap measuredCount=\(atCapPlusOne.byAgent[capped]?.recent.count ?? -1) oldestBefore=\(atCap.byAgent[capped]?.recent.first?.occurredAt.timeIntervalSinceReferenceDate ?? 0) oldestAfter=\(atCapPlusOne.byAgent[capped]?.recent.first?.occurredAt.timeIntervalSinceReferenceDate ?? 0)")
+
     let skewedTimeline = AgentActivity(
         status: .needsAttention,
         lastSummary: "last in ring order",

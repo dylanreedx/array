@@ -222,6 +222,10 @@ run_app_check .build/debug/continuum-revived --agent-inventory-wiring-check
 # with a live view and nothing on disk keeps the status its own ingest set across
 # two observer sweeps; an entry that says `idle` still clears a terminal's badge.
 run_app_check .build/debug/continuum-revived --observer-sweep-badge-check
+# P2B.7: an agent's own event folds into the held snapshot with no disk read — the
+# fixture is DELETED from disk before the event is fed, and the bystander agent
+# survives untouched — while the change-set names exactly the agents that moved.
+run_app_check .build/debug/continuum-revived --agent-incremental-refresh-check
 run_app_check .build/debug/continuum-revived --keybind-edit-check
 run_app_check .build/debug/continuum-revived --browser-url-focus-check
 run_app_check .build/debug/continuum-revived --browser-ui-delegate-check

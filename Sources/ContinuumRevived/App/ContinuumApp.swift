@@ -1112,6 +1112,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--agent-incremental-refresh-check") {
+            do {
+                _ = NSApplication.shared
+                try AppDelegate.runAgentIncrementalRefreshChecks()
+                print("ContinuumRevivedAgentIncrementalRefreshChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--settings-panel-check") {
             do {
                 _ = NSApplication.shared
@@ -2804,10 +2816,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// because each read a different subset through a different filter. They now
     /// all read this one value, rebuilt by `rebuildAgentActivitySnapshot()`.
     private var agentActivity = AgentActivitySurface()
-    /// Coalesces rebuilds on the runner event path. `recordManagedActivity` is
-    /// called per streamed token, and a rebuild walks every project's store —
-    /// debounced exactly like `scheduleCompanionSyncPublish`.
+    /// Coalesces surface pushes on the runner event path. `recordManagedActivity` is
+    /// called per streamed token, and a push reloads the sidebar and sweeps the
+    /// canvas — debounced exactly like `scheduleCompanionSyncPublish`.
     private var agentSurfaceRefreshDebounceWorkItem: DispatchWorkItem?
+    /// P2B.7: the snapshot as the surfaces last SAW it. `pushAgentSurfaces` diffs
+    /// against this to publish `agentActivity.lastChange`, so a push that coalesced
+    /// several incremental events reports all of them and not just the last one.
+    /// A snapshot, rather than a merged change-set, because merge algebra for
+    /// added-then-removed is a second definition of what changed and this is exact.
+    private var agentActivityChangeBase = ActivityLogSnapshot.empty
     private var profilePalette: LaunchProfilePalette?
     private var paletteContextTileId: UUID?
     private var settingsPanel: SettingsPanel?
@@ -4062,6 +4080,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         /// Agent identities the desktop shows a status for: every managed/supervised
         /// agent, plus terminal sessions that actually carry an `AgentDescriptor`.
         var agentIdentities: Set<UUID> = []
+        /// P2B.7: which agents moved since the surfaces were last PUSHED — whatever
+        /// advanced the snapshot in between, an incremental event or a reader's
+        /// rebuild. Deliberately "since the surfaces last saw it" and not "the last
+        /// event": a rebuild that a reader (`currentAgentTileIds`, the companion
+        /// closure) triggered has found real changes the list has not rendered yet,
+        /// and they must not be dropped on the floor. A reader rebuild that finds
+        /// NOTHING new reports nothing, which is witnessed in
+        /// `--agent-incremental-refresh-check`.
+        ///
+        /// Published by `pushAgentSurfaces` for the list view P3.6 builds, which
+        /// diffs rows instead of reloading them. `WorkspaceSidebarView` still reloads
+        /// whole — rewriting it is Phase 3's ticket, not this one.
+        var lastChange: AgentsBoardChangeSet = .empty
     }
 
     /// The replica the desktop stamps its own inventory with. Was a literal inside
@@ -4168,21 +4199,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     /// Rebuild once, then push that one value to all four surfaces.
+    ///
+    /// P2B.7: the FULL recomputation — every project's registry, canvas and session
+    /// store read from disk. Reserved for a STRUCTURAL change, i.e. one this process
+    /// cannot describe as an event on a known agent: a workspace switch, a project
+    /// open, a tile added or deleted, an observer sweep, app activation. An agent's
+    /// own activity takes the incremental path below instead.
     private func refreshAgentSurfaces(notify: Bool = true) {
         rebuildAgentActivitySnapshot()
+        pushAgentSurfaces(notify: notify)
+    }
+
+    /// Push whatever `agentActivity` currently holds at all four surfaces, and
+    /// publish the change-set that got it there. Split out of
+    /// `refreshAgentSurfaces` by P2B.7 so the agent-event path can reach the
+    /// surfaces without the disk read.
+    private func pushAgentSurfaces(notify: Bool = true) {
+        agentActivity.lastChange = AgentsBoardProjection.changeSet(
+            from: agentActivityChangeBase, to: agentActivity.snapshot
+        )
+        agentActivityChangeBase = agentActivity.snapshot
         applyAgentStatusesToCanvas()
         updateAgentAttentionSurface(notify: notify)
         reloadWorkspaceSidebar(rebuildAgentActivity: false)
     }
 
-    /// Debounced `refreshAgentSurfaces`, for the runner event stream: a rebuild per
-    /// streamed token would walk every project's store per token.
-    private func scheduleAgentSurfaceRefresh(debounce: TimeInterval) {
+    /// P2B.7: an agent's own event folds straight into the snapshot the desktop is
+    /// already holding — no registry load, no canvas read, no `listSessions()` per
+    /// project. The draft is already on `managedAgentActivityByAgent`, so the next
+    /// full rebuild reproduces the same state from disk; this is the same fold,
+    /// arriving earlier.
+    ///
+    /// `agentIdentities` gains the agent because a supervised agent IS an agent on
+    /// the desktop by definition (P2A.6) — an agent whose first event arrives before
+    /// any structural rebuild has listed it would otherwise be filtered out of every
+    /// surface until something unrelated moved.
+    private func ingestAgentActivityIncrementally(draft: AgentActivityEventDraft) {
+        agentActivity.snapshot = AgentsBoardProjection.appendLocal(
+            draft, to: agentActivity.snapshot, replicaId: Self.agentActivityReplicaId
+        )
+        agentActivity.agentIdentities.insert(draft.agentId)
+    }
+
+    /// Debounced `pushAgentSurfaces`, for the runner event stream: a sidebar reload
+    /// plus a canvas sweep per streamed token is the jumpiness this ticket removes.
+    /// It pushes; it does NOT rebuild — the snapshot was already advanced
+    /// incrementally by the time this fires.
+    private func scheduleAgentSurfacePush(debounce: TimeInterval) {
         agentSurfaceRefreshDebounceWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.agentSurfaceRefreshDebounceWorkItem = nil
-            self.refreshAgentSurfaces()
+            self.pushAgentSurfaces()
         }
         agentSurfaceRefreshDebounceWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + debounce, execute: workItem)
@@ -8024,9 +8092,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "managed-agent-activity", debounce: 0.5)
         // P2B.4: and the DESKTOP surfaces, which this path used to reach not at all —
         // a managed agent raising its hand moved the phone and left the dock badge and
-        // the sidebar row where they were. Debounced on the same 0.5s as the publish,
-        // because this is called per streamed token.
-        scheduleAgentSurfaceRefresh(debounce: 0.5)
+        // the sidebar row where they were.
+        // P2B.7: the snapshot advances HERE, synchronously, by folding this one draft —
+        // it used to schedule a full rebuild that re-read every project's store per
+        // streamed token. Only the PUSH at the surfaces is debounced, on the same 0.5s
+        // as the publish.
+        ingestAgentActivityIncrementally(draft: draft)
+        scheduleAgentSurfacePush(debounce: 0.5)
     }
 
     private func spawnBrowserDefault() {
@@ -18821,5 +18893,283 @@ extension AppDelegate {
 
     NSApplication.shared.dockTile.badgeLabel = nil
     print("ObserverSweepBadge: a managed tile's self-computed badge survived two observer sweeps that had no entry for it; an entry that says idle still cleared a terminal agent's badge")
+    }
+}
+
+/// Ticket: docs/38-tickets/90-agent-ux/P2B.7-incremental-refresh.md
+/// Gated on `--agent-incremental-refresh-check`.
+///
+/// AN AGENT EVENT MUST NOT RE-READ THE DISK. `recordManagedActivity` is called per
+/// streamed runtime event; it used to schedule a full `refreshAgentSurfaces()`,
+/// which loads the registry, every project's canvas and every project's session
+/// store. It now folds the one draft it already has into the snapshot the desktop is
+/// holding (`AgentsBoardProjection.appendLocal`) and only debounces the PUSH.
+///
+/// HOW "WITHOUT A DISK READ" IS MEASURED, rather than asserted by inspection: the
+/// whole fixture is DELETED from disk before the event is fed. A path that re-read
+/// the disk would lose the terminal agent, because there is no longer a registry, a
+/// canvas or a session file to find it in. That the deletion is real, and that the
+/// retention therefore means something, is proven at the end by calling the
+/// structural path (`refreshAgentSurfaces`) and watching that same agent VANISH —
+/// the vacuity guard this check would otherwise be missing.
+///
+/// FIVE NEGATIVE TESTS OBSERVED RED at exit 1 with the final code, quoted verbatim:
+///   1. the incremental ingest dropped, the debounced push kept (so the event only
+///      ever reaches the surfaces later) → `the agent's own event must reach the
+///      snapshot with no disk read — got Optional(…AgentStatus.idle)`.
+///   2. the pre-ticket body in its place — a full `refreshAgentSurfaces()` on the
+///      event path → `an unrelated agent must survive an agent event untouched —
+///      the terminal agent is nil`. That is the disk read, caught.
+///   3. `AgentsBoardProjection.appendLocal` stamping `sequence: 1` instead of
+///      `snapshotSequence + 1` → the same assertion as 1 (`got
+///      Optional(…AgentStatus.idle)`): the event is folded in and then ignored,
+///      because the fold derives from the canonically-last event. Also red in
+///      `ContinuumRevivedCoreChecks`: `P2B.7: appendLocal must move the agent's
+///      summary`.
+///   4. `pushAgentSurfaces` diffing against `agentActivity.snapshot` itself instead
+///      of `agentActivityChangeBase` → `the first push reports every agent as ADDED
+///      — got 0`.
+///   5. `ingestAgentActivityIncrementally` not inserting into `agentIdentities` →
+///      `a supervised agent's event must make it an agent on the desktop`.
+///
+///   6. the change base advanced inside `rebuildAgentActivitySnapshot` instead of on
+///      the push (so what a reader's rebuild found is never reported) → `the first
+///      push reports every agent as ADDED — got 0`.
+///
+/// TWO MORE in `ContinuumRevivedCoreChecks`, defending the two design choices in
+/// `changeSet(from:to:)`:
+///   7. comparing whole `AgentActivity` values instead of the row fields → `P2B.7:
+///      positional renumbering alone must NOT report a row as changed — got 4
+///      touched`, i.e. the whole board reported as moved because one agent was
+///      created.
+///   8. the oldest-event timestamp dropped from the ring witness → `P2B.7: an event
+///      that evicts the oldest at the cap must still report the row as updated — got
+///      0` (the cross-review's 200-cap case).
+extension AppDelegate {
+    static func runAgentIncrementalRefreshChecks() throws {
+    enum CheckError: Error, CustomStringConvertible {
+        case failed(String)
+        var description: String { switch self { case let .failed(message): return message } }
+    }
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+        if !condition() { throw CheckError.failed(message) }
+    }
+
+    let fm = FileManager.default
+    let tempRoot = fm.temporaryDirectory
+        .appendingPathComponent("continuum-agent-incremental-refresh-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: tempRoot) }
+    let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+    let agentsSupport = tempRoot.appendingPathComponent("Agents", isDirectory: true)
+    let projectRoot = tempRoot.appendingPathComponent("Project", isDirectory: true)
+    for dir in [appSupport, agentsSupport, projectRoot] {
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+
+    let now = Date(timeIntervalSince1970: 1_900_500_000)
+    let workspaceId = UUID(uuidString: "2B700000-0000-4000-8000-0000000000A1")!
+    let projectId = UUID(uuidString: "2B700000-0000-4000-8000-0000000000D1")!
+    let zoneId = UUID(uuidString: "2B700000-0000-4000-8000-0000000000C1")!
+    // The BYSTANDER: a terminal agent that exists only on disk. Nothing in this
+    // check ever sends it an event, so it is the thing a disk read would drop.
+    let terminalAgentTile = UUID(uuidString: "2B700000-0000-4000-8000-0000000000E1")!
+
+    let placement = ZonePlacement(zoneId: zoneId, projectId: projectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 600, height: 400), color: "blue", collapsed: false, hydrationPolicy: .automatic)
+    var registry = Registry.empty()
+    registry.lastActiveWorkspaceId = workspaceId
+    registry.workspaces = [WorkspaceEntry(id: workspaceId, name: "Default", projectIds: [projectId], createdAt: now, updatedAt: now)]
+    registry.projects = [
+        ProjectEntry(id: projectId, name: "Project", rootPath: projectRoot.path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false)
+    ]
+    let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+    try registryStore.save(registry)
+    try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport).save(
+        WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [placement],
+            zoneZOrder: [zoneId],
+            lastActiveZoneId: zoneId
+        )
+    )
+
+    let store = ProjectStore(projectRoot: projectRoot)
+    let canvasState = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [
+        Tile(id: terminalAgentTile, kind: .terminal, title: "Agent · Claude", frame: TileFrame(x: 0, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata()),
+    ], groups: [], lastActiveTileId: terminalAgentTile)
+    try store.saveCanvas(canvasState)
+    try store.saveSession(TerminalSessionDescriptor(
+        id: UUID(uuidString: "2B700000-0000-4000-8000-0000000000F1")!,
+        tileId: terminalAgentTile, launchProfileId: "shell", command: "/bin/zsh", args: [],
+        cwd: projectRoot.path, env: [:], title: "session", createdAt: now, lastStartedAt: now, lastExit: nil,
+        agentDescriptor: AgentDescriptor(agentKind: .claude, worktreePath: projectRoot.path, status: .working, statusUpdatedAt: now)
+    ))
+
+    // Two HEADLESS supervised agents (P2A.6). They live in `AgentStore`, which the
+    // supervisor holds in memory once restored — so they are the ones whose events
+    // this check feeds, and they survive the disk deletion for a reason that is
+    // stated rather than incidental (the supervisor's records, not a file).
+    let agentOne = AgentID(rawValue: UUID(uuidString: "2B700000-0000-4000-8000-0000000000B1")!)
+    let agentTwo = AgentID(rawValue: UUID(uuidString: "2B700000-0000-4000-8000-0000000000B2")!)
+    let agentStore = AgentStore(applicationSupportDirectory: agentsSupport)
+    for (agent, name) in [(agentOne, "builder"), (agentTwo, "reviewer")] {
+        try agentStore.upsert(AgentRecord(
+            id: agent, displayName: name, role: name, model: "openai-codex/gpt-5.6-sol",
+            thinking: "medium", cwd: projectRoot.path, projectId: projectId,
+            createdAt: now, lastActivityAt: now
+        ))
+    }
+
+    let app = AppDelegate()
+    app.registryStore = registryStore
+    app.agentSupervisor = AgentSupervisor(store: agentStore, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    app.agentSupervisor.restore()
+    try expect(app.agentSupervisor.records[agentOne] != nil && app.agentSupervisor.records[agentTwo] != nil,
+               "both supervised agents must be adopted, or the assertions below say nothing about them")
+
+    let canvas = CanvasNSView(
+        canvasState: canvasState,
+        activeZone: placement,
+        zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: placement, displayName: "Project")]
+    )
+    canvas.install(tileView: TileNSView(tile: canvasState.tiles[0]), for: canvasState.tiles[0])
+    app.canvasView = canvas
+
+    // MARK: 1 · ONE structural rebuild, from disk. Every agent is added.
+
+    app.refreshAgentSurfaces(notify: false)
+    let seeded = app.agentActivity.snapshot
+    try expect(seeded.byAgent[terminalAgentTile] != nil,
+               "the structural rebuild must find the terminal agent on disk, or nothing below is about losing it")
+    try expect(Set(app.agentActivity.lastChange.added) == Set([terminalAgentTile, agentOne.rawValue, agentTwo.rawValue]),
+               "the first push reports every agent as ADDED — got \(app.agentActivity.lastChange.added.count)")
+    try expect(app.agentActivity.lastChange.updated.isEmpty && app.agentActivity.lastChange.removed.isEmpty,
+               "nothing was there before, so nothing is updated or removed")
+    try expect(app.agentActivity.snapshot.byAgent[agentOne.rawValue]?.status == .idle,
+               "a supervised agent with no recorded activity starts idle — got \(String(describing: app.agentActivity.snapshot.byAgent[agentOne.rawValue]?.status))")
+
+    // MARK: 1b · what a READER rebuild between two pushes reports. From the
+    // cross-review, which asked whether a rebuild that does not push leaves the
+    // change base stale and fabricates changes.
+    //
+    // `currentAgentTileIds` recomputes the snapshot and does not push (a keystroke
+    // reads fresh), and the base only advances on a push — so the next push reports
+    // whatever that recomputation moved. MEASURED, and it is not nothing: a
+    // PERSISTED TERMINAL agent moves on every single read, because
+    // `AgentDescriptor.restoredForBoot` stamps `statusUpdatedAt = now` and
+    // `ProjectStore.listSessions()` returns everything through it. That is a property
+    // of the data source, not of this ticket — its `updatedAt` really did change, and
+    // a row showing a relative time really does need re-rendering.
+    //
+    // What must NOT move is a supervised agent, whose activity is folded from records
+    // and drafts this process holds: if a plain re-read renumbered or re-clocked
+    // those, every rebuild would report the whole board and a diffing list would
+    // reload exactly as it does today.
+    _ = app.currentAgentTileIds(status: nil)
+    app.pushAgentSurfaces(notify: false)
+    let readerChange = app.agentActivity.lastChange
+    try expect(readerChange.updated == Set([terminalAgentTile]),
+               "a reader's rebuild must report only the agent whose timestamp the boot-restore stamp moves — got \(readerChange.updated.count) updated")
+    try expect(readerChange.added.isEmpty && readerChange.removed.isEmpty,
+               "a reader's rebuild must not add or remove anybody — got added \(readerChange.added.count) removed \(readerChange.removed.count)")
+    try expect(readerChange.touched.contains(agentOne.rawValue) == false && readerChange.touched.contains(agentTwo.rawValue) == false,
+               "a supervised agent must be STABLE across a plain re-read — otherwise every rebuild reports the whole board")
+
+    // MARK: 2 · THE DISK GOES AWAY, and then an agent event arrives.
+
+    // The bystander as it stands after the last read of the disk — section 1b's
+    // reader rebuild re-stamped its `updatedAt`, so this is the value that must
+    // survive, not `seeded`'s.
+    let bystanderBeforeEvent = app.agentActivity.snapshot.byAgent[terminalAgentTile]
+    try fm.removeItem(at: tempRoot)
+    let sequenceBeforeEvent = app.agentActivity.snapshot.snapshotSequence
+    app.recordManagedActivity(
+        agentId: agentOne,
+        tileId: nil,
+        event: .requestOpened(threadId: "thread-1", requestId: "req-1", kind: .commandExecutionApproval),
+        status: .needsAttention
+    )
+
+    let afterEvent = app.agentActivity.snapshot
+    try expect(afterEvent.byAgent[agentOne.rawValue]?.status == .needsAttention,
+               "the agent's own event must reach the snapshot with no disk read — got \(String(describing: afterEvent.byAgent[agentOne.rawValue]?.status))")
+    try expect(afterEvent.byAgent[agentOne.rawValue]?.lastSummary == "Needs approval",
+               "the event must become the agent's current state — got \(String(describing: afterEvent.byAgent[agentOne.rawValue]?.lastSummary))")
+    // THE HEADLINE PROPERTY, asserted before the mechanism below it: byte-for-byte
+    // the activity the disk rebuild produced. The bystander must not merely still be
+    // there, it must be UNTOUCHED. (Its status reads `.stale`, not the `.working` on
+    // the descriptor, because `listSessions()` returns everything through
+    // `restoredForBoot()` — see `--agent-inventory-wiring-check`.)
+    try expect(afterEvent.byAgent[terminalAgentTile] == bystanderBeforeEvent,
+               "an unrelated agent must survive an agent event untouched — the terminal agent is \(String(describing: afterEvent.byAgent[terminalAgentTile]?.status))")
+    try expect(bystanderBeforeEvent?.status == .stale,
+               "…and that survival is of a real entry, not of two nils — got \(String(describing: seeded.byAgent[terminalAgentTile]?.status))")
+    try expect(afterEvent.snapshotSequence == sequenceBeforeEvent + 1,
+               "the local event is stamped one past the snapshot, so the fold derives from it — got \(afterEvent.snapshotSequence) after \(sequenceBeforeEvent)")
+    try expect(afterEvent.byAgent[agentTwo.rawValue] != nil,
+               "and so must the other supervised agent")
+    try expect(app.agentActivity.agentIdentities.contains(agentOne.rawValue),
+               "a supervised agent's event must make it an agent on the desktop")
+
+    // MARK: 3 · the PUSH reports exactly what moved — and coalesces.
+
+    app.recordManagedActivity(
+        agentId: agentTwo,
+        tileId: nil,
+        event: .turnStarted(threadId: "thread-2", turnId: "turn-1"),
+        status: .working
+    )
+    // A THIRD agent, spawned after the last structural rebuild: its first event
+    // arrives before anything has listed it, which is the case
+    // `ingestAgentActivityIncrementally` inserts into `agentIdentities` for. Without
+    // that insert it would be filtered out of the sidebar and the badge sweep until
+    // something unrelated moved.
+    let agentThree = app.agentSupervisor.spawn(
+        role: "scout", prompt: nil, cwd: projectRoot, model: "openai-codex/gpt-5.6-sol",
+        thinking: "medium", projectId: projectId
+    )
+    try expect(app.agentActivity.snapshot.byAgent[agentThree.rawValue] == nil,
+               "spawning must not itself put the agent in the snapshot, or the ADDED assertion below is vacuous")
+    app.recordManagedActivity(
+        agentId: agentThree,
+        tileId: nil,
+        event: .turnStarted(threadId: "thread-3", turnId: "turn-1"),
+        status: .working
+    )
+    let sequenceAfterEvents = app.agentActivity.snapshot.snapshotSequence
+    app.pushAgentSurfaces(notify: false)
+    let change = app.agentActivity.lastChange
+    try expect(change.touched == Set([agentOne.rawValue, agentTwo.rawValue, agentThree.rawValue]),
+               "three coalesced events must all be reported — got added \(change.added.count) updated \(change.updated.count)")
+    try expect(change.updated == Set([agentOne.rawValue, agentTwo.rawValue]),
+               "the two agents that already had rows are UPDATED — got \(change.updated.count)")
+    try expect(change.added == Set([agentThree.rawValue]),
+               "the agent whose first event this was is ADDED — got \(change.added.count)")
+    try expect(app.agentActivity.agentIdentities.contains(agentThree.rawValue),
+               "a supervised agent's event must make it an agent on the desktop")
+    try expect(change.removed.isEmpty,
+               "no agent disappeared — got removed \(change.removed.count)")
+    try expect(change.touched.contains(terminalAgentTile) == false,
+               "the agent that did not move must NOT be in the change-set — that is what a diffing list consumes")
+    // A real surface moved off the incremental snapshot: the dock badge counts the
+    // raised hand that arrived after the disk was gone.
+    try expect(NSApplication.shared.dockTile.badgeLabel == "1",
+               "the dock badge must reflect the incrementally folded event — got \(String(describing: NSApplication.shared.dockTile.badgeLabel))")
+    // A push with nothing new reports nothing — the base advanced with the push.
+    app.pushAgentSurfaces(notify: false)
+    try expect(app.agentActivity.lastChange.isEmpty,
+               "a push with no new events reports an empty change-set — got \(app.agentActivity.lastChange.touched.count) touched")
+
+    // MARK: 4 · VACUITY GUARD. The disk really is gone: the structural path loses
+    // the terminal agent, which is exactly what sections 2 and 3 proved the event
+    // path does not do.
+
+    app.refreshAgentSurfaces(notify: false)
+    try expect(app.agentActivity.snapshot.byAgent[terminalAgentTile] == nil,
+               "the structural rebuild reads the disk, so with the fixture deleted the terminal agent must be GONE — otherwise 'without a disk read' was never tested")
+    try expect(app.agentActivity.lastChange.removed == Set([terminalAgentTile]),
+               "and that loss is reported as REMOVED — got \(app.agentActivity.lastChange.removed.count)")
+
+    NSApplication.shared.dockTile.badgeLabel = nil
+    print("AgentIncrementalRefresh: with the fixture deleted from disk, 3 agent events folded into the held snapshot (sequence \(sequenceBeforeEvent) → \(sequenceAfterEvents)), the bystander terminal agent survived all of them untouched, one coalesced push reported exactly the 3 agents that moved (2 updated, 1 added), and the structural rebuild then dropped the bystander")
     }
 }

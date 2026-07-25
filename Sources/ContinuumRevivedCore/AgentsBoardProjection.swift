@@ -56,6 +56,34 @@ public struct ApprovalResponseTarget: Equatable, Sendable {
     }
 }
 
+// Ticket: docs/38-tickets/90-agent-ux/P2B.7-incremental-refresh.md
+//
+// WHAT MOVED, so a list can update the rows that moved instead of reloading all
+// of them. Named by AGENT identity, the key a row is identified by
+// (`AgentsBoardRow.id == agentId`).
+public struct AgentsBoardChangeSet: Equatable, Sendable {
+    /// Agents with no row before and a row now.
+    public let added: Set<UUID>
+    /// Agents whose row is different — see `AgentsBoardProjection.changeSet(from:to:)`
+    /// for what "different" means, which is narrower than `AgentActivity` equality.
+    public let updated: Set<UUID>
+    /// Agents that had a row and have none now.
+    public let removed: Set<UUID>
+
+    public static let empty = AgentsBoardChangeSet(added: [], updated: [], removed: [])
+
+    public init(added: Set<UUID>, updated: Set<UUID>, removed: Set<UUID>) {
+        self.added = added
+        self.updated = updated
+        self.removed = removed
+    }
+
+    public var isEmpty: Bool { added.isEmpty && updated.isEmpty && removed.isEmpty }
+
+    /// Every agent named, whichever way it moved.
+    public var touched: Set<UUID> { added.union(updated).union(removed) }
+}
+
 public enum AgentsBoardProjection {
     /// `context` is keyed by agent identity, the same key `snapshot.byAgent` uses
     /// (see `AgentContextIndex.build`). Defaulted to empty so a caller with no
@@ -80,6 +108,78 @@ public enum AgentsBoardProjection {
 
     public static func applyEvent(_ event: AgentActivityEvent, to snapshot: ActivityLogSnapshot) -> ActivityLogSnapshot {
         apply(snapshot, event)
+    }
+
+    /// P2B.7: fold a locally-produced draft into a snapshot the host is already
+    /// holding, WITHOUT rebuilding that snapshot from disk.
+    ///
+    /// The sequence is `snapshot.snapshotSequence + 1`, which is the whole
+    /// correctness argument: the fold derives an agent's status / summary /
+    /// updatedAt / tile hint from its canonically-LAST event, so a locally
+    /// observed event has to sort after everything already folded or it would be
+    /// ingested and then ignored. `AgentInventory.snapshot` numbers events
+    /// positionally from a total order over its whole input, so a draft stamped
+    /// with "one more than the highest sequence in the snapshot" cannot collide
+    /// with a number that fold has used, and a later full rebuild renumbers
+    /// everything anyway.
+    ///
+    /// Still ORDER-INDEPENDENT in the sense that matters: `apply` is a merge on
+    /// `(sequence, replicaId)`, not an overwrite, so folding a foreign event that
+    /// arrives afterwards with a HIGHER sequence still wins.
+    public static func appendLocal(
+        _ draft: AgentActivityEventDraft,
+        to snapshot: ActivityLogSnapshot,
+        replicaId: UUID
+    ) -> ActivityLogSnapshot {
+        apply(snapshot, AgentActivityEvent(
+            stamping: draft,
+            sequence: snapshot.snapshotSequence + 1,
+            replicaId: replicaId
+        ))
+    }
+
+    /// P2B.7: which agents' rows differ between two snapshots.
+    ///
+    /// "Differ" is the fields a ROW carries out of `AgentActivity` — status,
+    /// summary, updatedAt, tile hint — plus a renumbering-invariant witness of its
+    /// event ring, and deliberately NOT `AgentActivity` equality. Sequence numbers
+    /// are assigned POSITIONALLY by `AgentInventory.snapshot`, so one agent
+    /// appearing shifts every later-sorting agent's numbers: an equality diff would
+    /// report the entire board as updated every time a single agent was created,
+    /// which is precisely the "reload everything" this ticket removes. Context
+    /// (P2B.3) is joined after the snapshot and is therefore not visible here.
+    ///
+    /// The ring witness is count + newest kind + OLDEST timestamp, from the
+    /// cross-review: `recent` is capped at 200, so at the cap a new event evicts the
+    /// oldest one and the count stops moving. The oldest survivor's clock is what
+    /// still moves there, and neither it nor the kind is touched by renumbering.
+    public static func changeSet(
+        from old: ActivityLogSnapshot,
+        to new: ActivityLogSnapshot
+    ) -> AgentsBoardChangeSet {
+        func rowFields(_ activity: AgentActivity) -> [String] {
+            [
+                activity.status.rawValue,
+                activity.lastSummary,
+                String(activity.updatedAt.timeIntervalSinceReferenceDate),
+                activity.tileId?.uuidString ?? "-",
+                String(activity.recent.count),
+                activity.recent.last?.kind ?? "-",
+                activity.recent.first.map { String($0.occurredAt.timeIntervalSinceReferenceDate) } ?? "-",
+            ]
+        }
+
+        var added: Set<UUID> = []
+        var updated: Set<UUID> = []
+        for (agentId, activity) in new.byAgent {
+            guard let before = old.byAgent[agentId] else {
+                added.insert(agentId)
+                continue
+            }
+            if rowFields(before) != rowFields(activity) { updated.insert(agentId) }
+        }
+        let removed = Set(old.byAgent.keys).subtracting(new.byAgent.keys)
+        return AgentsBoardChangeSet(added: added, updated: updated, removed: removed)
     }
 
     public static func timelineEvents(for activity: AgentActivity) -> [AgentActivityEvent] {
