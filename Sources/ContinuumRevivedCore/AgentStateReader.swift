@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentUI
 import Foundation
 
 public struct AgentSnapshot: Codable, Equatable, Sendable {

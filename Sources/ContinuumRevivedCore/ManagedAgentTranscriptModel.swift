@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentUI
 import Foundation
 
 public enum ManagedTranscriptCardKind: String, Codable, Equatable, Sendable {

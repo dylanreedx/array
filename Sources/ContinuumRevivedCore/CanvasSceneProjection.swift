@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentUI
 import Foundation
 
 // Ticket: docs/38-tickets/61b-canvas-editor.md

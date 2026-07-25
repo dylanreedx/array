@@ -1,10 +1,11 @@
-import ContinuumRevivedCore
+import ContinuumRevivedAgentUI
 import Foundation
 
 // Ticket: docs/38-tickets/87-agent-ui-component-framework.md
 //
 // Per-component Layer-1 check suite for the StatusChip — the first agent-UI
-// building block. These are the DETERMINISTIC tests (mapping totality,
+// building block. Moved from ContinuumRevivedCoreChecks by ticket P1.1 with the
+// assertions unchanged. These are the DETERMINISTIC tests (mapping totality,
 // label/glyph presence, WCAG contrast, distinctness). Pixel appearance is a
 // separate Layer-2 vision-QA gate in the Component Lab, not tested here.
 //

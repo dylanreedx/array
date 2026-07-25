@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentUI
 import Foundation
 
 // Ticket: docs/38-tickets/08-sync-observation-type-split.md

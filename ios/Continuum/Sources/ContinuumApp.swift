@@ -1,5 +1,6 @@
 import AVFoundation
 import CloudKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import ContinuumRevivedSync
 import SwiftUI

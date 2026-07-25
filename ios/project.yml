@@ -18,6 +18,8 @@ targets:
     sources: [Continuum/Sources]
     dependencies:
       - package: continuum-revived
+        product: ContinuumRevivedAgentUI
+      - package: continuum-revived
         product: ContinuumRevivedCore
       - package: continuum-revived
         product: ContinuumRevivedSync

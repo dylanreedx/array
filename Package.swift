@@ -10,6 +10,7 @@ let package = Package(
     products: [
         .executable(name: "continuum-revived", targets: ["ContinuumRevived"]),
         .executable(name: "ContinuumRevivedPaletteChecks", targets: ["ContinuumRevivedPaletteChecks"]),
+        .library(name: "ContinuumRevivedAgentUI", targets: ["ContinuumRevivedAgentUI"]),
         .library(name: "ContinuumRevivedCore", targets: ["ContinuumRevivedCore"]),
         .library(name: "ContinuumRevivedSync", targets: ["ContinuumRevivedSync"])
     ],
@@ -21,9 +22,18 @@ let package = Package(
             name: "GhosttyKit",
             path: "ThirdParty/GhosttyKit.xcframework"
         ),
+        // Ticket P1.1: the shared agent-UI module both platforms consume —
+        // presentation models and (from P1.2 on) the visual token system.
+        // Foundation only, and deliberately NO dependencies: the direction is
+        // Core → AgentUI, never the reverse, so visual tokens can never end up
+        // coupled to storage/sync/registry logic.
+        .target(
+            name: "ContinuumRevivedAgentUI"
+        ),
         .target(
             name: "ContinuumRevivedCore",
             dependencies: [
+                "ContinuumRevivedAgentUI",
                 .product(name: "GRDB", package: "GRDB.swift")
             ]
         ),
@@ -34,7 +44,7 @@ let package = Package(
         // explicit link since it doesn't inherit the app target's link phase.
         .target(
             name: "ContinuumRevivedSync",
-            dependencies: ["ContinuumRevivedCore"],
+            dependencies: ["ContinuumRevivedAgentUI", "ContinuumRevivedCore"],
             linkerSettings: [
                 .linkedFramework("CloudKit")
             ]
@@ -78,6 +88,7 @@ let package = Package(
         .executableTarget(
             name: "ContinuumRevived",
             dependencies: [
+                "ContinuumRevivedAgentUI",
                 "ContinuumRevivedFileTree",
                 "ContinuumRevivedCore",
                 "ContinuumRevivedSync",
@@ -103,11 +114,17 @@ let package = Package(
             name: "ContinuumRevivedCoreChecks",
             // Ticket 07 (convergence fuzz) drives materialize/compact/applySnapshot
             // from the op-log core, which lives in ContinuumRevivedSync.
-            dependencies: ["ContinuumRevivedCore", "ContinuumRevivedSync"]
+            dependencies: ["ContinuumRevivedAgentUI", "ContinuumRevivedCore", "ContinuumRevivedSync"]
+        ),
+        // Ticket P1.1: depends on AgentUI ALONE, so a token reaching back into
+        // Core fails to compile here rather than being caught in review.
+        .executableTarget(
+            name: "ContinuumRevivedAgentUIChecks",
+            dependencies: ["ContinuumRevivedAgentUI"]
         ),
         .executableTarget(
             name: "ContinuumRevivedSyncChecks",
-            dependencies: ["ContinuumRevivedSync", "ContinuumRevivedCore"]
+            dependencies: ["ContinuumRevivedAgentUI", "ContinuumRevivedSync", "ContinuumRevivedCore"]
         ),
         .executableTarget(
             name: "ContinuumRevivedRelayChecks",

@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentUI
 import Foundation
 
 public struct TerminalSessionDescriptor: Codable, Equatable, Sendable {
@@ -101,14 +102,9 @@ public enum AgentKind: String, Codable, Equatable, Sendable, CaseIterable {
     }
 }
 
-public enum AgentStatus: String, Codable, Equatable, Sendable, CaseIterable {
-    case configuring
-    case working
-    case idle
-    case needsAttention
-    case done
-    case stale
-}
+// `AgentStatus` used to live here. Ticket P1.1 moved it to
+// ContinuumRevivedAgentUI/AgentStatus.swift: it is the vocabulary the shared
+// agent-UI module presents, and that module may not depend on Core.
 
 public struct AgentDescriptor: Codable, Equatable, Sendable {
     public var agentKind: AgentKind

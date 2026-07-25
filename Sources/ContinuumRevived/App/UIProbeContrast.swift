@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
 /// Contrast assertions read off a `UIProbe`-rendered view tree, in **both**

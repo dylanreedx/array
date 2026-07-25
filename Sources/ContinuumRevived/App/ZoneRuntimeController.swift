@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 

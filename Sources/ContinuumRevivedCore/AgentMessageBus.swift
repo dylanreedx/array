@@ -1,4 +1,5 @@
 import Combine
+import ContinuumRevivedAgentUI
 import Foundation
 
 /// Decision F seam: the app-level agent-to-agent message bus. No real

@@ -125,6 +125,11 @@ run scripts/check-matrix-inventory.sh
 run swift build
 run_ios_build
 run swift run ContinuumRevivedCoreChecks
+# Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so
+# it also proves the dependency direction — a token that reaches back into Core
+# cannot compile here. StatusChip's assertions moved here from
+# ContinuumRevivedCoreChecks unchanged.
+run swift run ContinuumRevivedAgentUIChecks
 run swift run ContinuumRevivedSyncChecks
 # Ticket 86 (D4-R1): relay hub core — auth/scope, lossless catch-up, I5 gate.
 run swift run ContinuumRevivedRelayChecks

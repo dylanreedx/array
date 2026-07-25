@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentUI
 import Foundation
 
 // Ticket: docs/38-tickets/88-provider-adapter-pi-gpt.md (slice 88.4c)

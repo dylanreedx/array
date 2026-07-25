@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import ContinuumRevivedSync
 import CoreGraphics
@@ -7461,10 +7462,18 @@ do {
 }
 
 // Mechanical CI guard: ContinuumRevivedCore's target declaration in
-// Package.swift may only carry the GRDB dependency required by ticket 54.
-// The op-log layer remains pure Swift; the allowed dependency belongs to the
-// auth store and is kept explicit here so arbitrary Core dependencies do not
-// creep in silently.
+// Package.swift may only carry the GRDB dependency required by ticket 54 and
+// the ContinuumRevivedAgentUI dependency required by ticket P1.1.
+// The op-log layer remains pure Swift; the GRDB dependency belongs to the auth
+// store, and AgentUI is a first-party Foundation-only target (the shared
+// agent-UI/token module), so Core stays pure Swift either way. Both are kept
+// explicit here so arbitrary Core dependencies do not creep in silently.
+//
+// P1.1 note: the direction is Core → AgentUI, never the reverse — AgentUI owns
+// `AgentStatus` and the presenters keyed on it, and importing Core from there is
+// a hard compile error (SwiftPM: "circular dependency between modules"). This
+// assertion is still exact string equality over the whole dependency list, so
+// adding a third dependency turns it red exactly as before.
 do {
     let path = "Package.swift"
     guard let source = try? String(contentsOfFile: path, encoding: .utf8) else {
@@ -7478,10 +7487,10 @@ do {
     }
     let declaration = String(source[targetStart.lowerBound..<syncComment.lowerBound])
     let compactDeclaration = declaration.filter { !$0.isWhitespace }
-    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:[.product(name:"GRDB",package:"GRDB.swift")]),"#
+    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:["ContinuumRevivedAgentUI",.product(name:"GRDB",package:"GRDB.swift")]),"#
     expect(compactDeclaration == expectedDeclaration,
-           "dependencies guard: ContinuumRevivedCore target must include exactly the GRDB product dependency, found: \(declaration)")
-    print("dependencies guard: ContinuumRevivedCore target has only GRDB dependency")
+           "dependencies guard: ContinuumRevivedCore target must include exactly ContinuumRevivedAgentUI and the GRDB product dependency, found: \(declaration)")
+    print("dependencies guard: ContinuumRevivedCore target has only the AgentUI + GRDB dependencies")
 }
 
 // MARK: - Ticket 08: Sync/observation type split (ActivityStore)
@@ -9926,8 +9935,8 @@ runCanvasMirrorFreshnessLabelChecks()
 runCanvasMirrorStatusJoinChecks()
 runCanvasMirrorShowOnCanvasChecks()
 
-// Ticket: docs/38-tickets/87-agent-ui-component-framework.md
-runStatusChipChecks()
+// Ticket 87's StatusChip checks moved to ContinuumRevivedAgentUIChecks (P1.1),
+// which is its own matrix leg.
 
 // Ticket: docs/38-tickets/88-provider-adapter-pi-gpt.md
 runPiEventTranslatorChecks()

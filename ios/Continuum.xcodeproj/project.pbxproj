@@ -7,11 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		0DAC41F5595764185ADF4BC3 /* ContinuumRevivedSync in Frameworks */ = {isa = PBXBuildFile; productRef = 1ECE6B8BCA1DEFB06577A3DC /* ContinuumRevivedSync */; };
+		0DAC41F5595764185ADF4BC3 /* ContinuumRevivedCore in Frameworks */ = {isa = PBXBuildFile; productRef = 9E01D723484B29DA34AEC599 /* ContinuumRevivedCore */; };
 		40A5F44EE38B61E9A6B3436E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = D151728376C3F6ABAC382B04 /* Assets.xcassets */; };
-		B8F41E74F6210DDA33B5453C /* ContinuumRevivedCore in Frameworks */ = {isa = PBXBuildFile; productRef = 9E01D723484B29DA34AEC599 /* ContinuumRevivedCore */; };
+		B8F41E74F6210DDA33B5453C /* ContinuumRevivedAgentUI in Frameworks */ = {isa = PBXBuildFile; productRef = 39D7F461DCC18697C1F6311A /* ContinuumRevivedAgentUI */; };
 		DDA99CDC2BE1065699F09C7A /* StatusChipView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E7C049C56FC6DF9E1EE68BE /* StatusChipView.swift */; };
 		F74BFE16A57249D36643B577 /* ContinuumApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BA0CBC85274F77D8B8949CD /* ContinuumApp.swift */; };
+		FE1AA906A27AD9F986780217 /* ContinuumRevivedSync in Frameworks */ = {isa = PBXBuildFile; productRef = 1ECE6B8BCA1DEFB06577A3DC /* ContinuumRevivedSync */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -27,8 +28,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				B8F41E74F6210DDA33B5453C /* ContinuumRevivedCore in Frameworks */,
-				0DAC41F5595764185ADF4BC3 /* ContinuumRevivedSync in Frameworks */,
+				B8F41E74F6210DDA33B5453C /* ContinuumRevivedAgentUI in Frameworks */,
+				0DAC41F5595764185ADF4BC3 /* ContinuumRevivedCore in Frameworks */,
+				FE1AA906A27AD9F986780217 /* ContinuumRevivedSync in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -95,6 +97,7 @@
 			);
 			name = Continuum;
 			packageProductDependencies = (
+				39D7F461DCC18697C1F6311A /* ContinuumRevivedAgentUI */,
 				9E01D723484B29DA34AEC599 /* ContinuumRevivedCore */,
 				1ECE6B8BCA1DEFB06577A3DC /* ContinuumRevivedSync */,
 			);
@@ -358,6 +361,10 @@
 		1ECE6B8BCA1DEFB06577A3DC /* ContinuumRevivedSync */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = ContinuumRevivedSync;
+		};
+		39D7F461DCC18697C1F6311A /* ContinuumRevivedAgentUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ContinuumRevivedAgentUI;
 		};
 		9E01D723484B29DA34AEC599 /* ContinuumRevivedCore */ = {
 			isa = XCSwiftPackageProductDependency;

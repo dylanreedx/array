@@ -1,4 +1,5 @@
 import SwiftUI
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
 // Ticket: docs/38-tickets/87-agent-ui-component-framework.md

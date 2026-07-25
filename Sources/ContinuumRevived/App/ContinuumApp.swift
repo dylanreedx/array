@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import CoreImage
 import ContinuumRevivedCore
 import ContinuumRevivedSync

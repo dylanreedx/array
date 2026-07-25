@@ -5,15 +5,15 @@ import Foundation
 // First agent-UI building block, shared across macOS and iOS. This file is
 // the PRESENTATION MODEL only — a pure (status → display) mapping with NO
 // AppKit/UIKit import, so it compiles into both apps through
-// ContinuumRevivedCore and is tested once in the matrix
-// (ContinuumRevivedCoreChecks → runStatusChipChecks). Each platform ships a
+// ContinuumRevivedAgentUI and is tested once in the matrix
+// (ContinuumRevivedAgentUIChecks → runStatusChipChecks). Each platform ships a
 // thin view that only paints a StatusChipDisplay; the view holds no logic.
 //
-// Placement note: presentation lives in Core for this first slice to avoid
-// standing up a new SPM target + iOS project.yml dependency before the loop
-// is proven. Once there are ~3+ shared components, extract this AgentUI
-// folder into a dedicated ContinuumRevivedAgentUI module (see the framework
-// notes ticket).
+// Placement note: this started out in ContinuumRevivedCore to avoid standing up
+// an SPM target + iOS project.yml dependency before the pattern was proven.
+// Ticket P1.1 (docs/38-tickets/90-agent-ux/P1.1-agentui-module.md) moved it,
+// behaviour unchanged, into the dedicated ContinuumRevivedAgentUI module that
+// the Phase-1 token system also lives in.
 
 /// A platform-neutral sRGB colour, components in 0…1. Views convert it to
 /// NSColor / SwiftUI Color. Opaque by design — chip translucency is a view

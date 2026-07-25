@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentUI
 import Foundation
 
 public enum SidebarAgentStatusKind: String, Codable, Equatable, Sendable {
