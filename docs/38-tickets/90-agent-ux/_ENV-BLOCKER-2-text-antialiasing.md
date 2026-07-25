@@ -86,3 +86,47 @@ clean apart from the ledger. What is verified: `swift build` green, the iOS
 green with 7 negative tests observed red. What is NOT verified: the full matrix, and
 specifically the baseline and component-lab legs, both of which are red at HEAD for
 the reason above.
+
+---
+
+## RESOLVED 2026-07-25 ~11:20Z — by the supervising session
+
+The worker's diagnosis was exactly right, including that it was pre-existing at HEAD and
+not caused by `P1.12`. This was **my** deferred debt: `5080adc` pinned the SIZE half of
+display independence and I explicitly recorded glyph rasterisation as "a known
+limitation, deliberately not fixed here… Nothing in the current work needs that." That
+was wrong within three hours — every remaining ticket runs this leg.
+
+**Root cause.** `view.cacheDisplay(in:to:)` renders through a context AppKit configures
+from the host, so font smoothing, stem dilation and subpixel positioning/quantization all
+followed whichever display was Main. Moving the Retina panel back to primary reddened 24
+of 46 baselines on a clean tree, letterforms only, channel deltas to 183.
+
+**Fix.** `UIProbe.bitmap(of:)` now owns its context: `NSGraphicsContext(bitmapImageRep:)`
+plus `view.displayIgnoringOpacity(_:in:)`, with all four text knobs pinned off —
+`setAllowsFontSmoothing`, `setShouldSmoothFonts`, `setAllowsFontSubpixelPositioning`,
+`setShouldSubpixelPositionFonts`, `setAllowsFontSubpixelQuantization`,
+`setShouldSubpixelQuantizeFonts`. Same principle as the scale fix: an offscreen probe
+DECLARES what it renders with instead of inheriting it. Smoothing-off is the right leaf to
+pin because it is the one that does not vary with hardware.
+
+**Verification.** All 46 baselines re-blessed once under the pinned path. Four consecutive
+`--ui-baseline-check` runs green (alternating with and without the matrix's
+`CONTINUUM_PROJECT_ROOT`/`CONTINUUM_APP_SUPPORT` temp dirs), and two consecutive full
+matrix runs green. Four surfaces opened and read by eye before accepting the bless — the
+managed-agent tile, the top bar, the live sidebar in dark, and the three-state approval
+dock: correct orientation, layout, colour and legibility, text now unsmoothed but clean.
+
+**A correction to `_ENV-BLOCKER-1x-display.md`.** That file records `.calibratedRGB` as
+"tried and rejected — made it worse (24 → 37 failures)". That experiment was invalid: it
+rendered in `calibratedRGB` and compared against baselines blessed in `deviceRGB`, so a
+larger diff proved nothing. The colour space is still `.deviceRGB` and may yet prove
+host-dependent; it simply is not what caused THIS blocker, and the rejection recorded
+there should not be trusted as evidence.
+
+**Still unproven, and it needs the owner.** Determinism is established on this host in
+this display configuration. The claim that actually matters — that a *display change* no
+longer moves the bytes — can only be proved by changing displays. Ask the owner to make
+the external primary once and re-run `--ui-baseline-check`; green across that flip is the
+proof. Until then this is "pinned by construction and stable in place", not "proven
+host-independent".

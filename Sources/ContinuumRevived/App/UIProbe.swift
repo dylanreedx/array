@@ -152,12 +152,41 @@ struct UIProbe {
         ) else {
             throw fail("\(id): could not allocate a \(pixelsWide)x\(pixelsHigh)px bitmap")
         }
-        // POINTS, not pixels. This is the whole mechanism: `cacheDisplay` derives the
-        // scale it draws at from the ratio of the rep's pixel dimensions to its
-        // `size`, so setting `size` in points pins the render at `renderScale`
-        // instead of the window's backing scale.
+        // POINTS, not pixels: the context below derives the scale it draws at from
+        // the ratio of the rep's pixel dimensions to its `size`, so setting `size` in
+        // points pins the render at `renderScale` instead of the window's backing
+        // scale.
         rep.size = points
-        view.cacheDisplay(in: view.bounds, to: rep)
+
+        // Ticket: docs/38-tickets/90-agent-ux/_ENV-BLOCKER-2-text-antialiasing.md
+        //
+        // `renderScale` pinned the SIZE half of display independence and left the
+        // TEXT half ambient. `view.cacheDisplay(in:to:)` — what this used to call —
+        // renders through a context AppKit configures from the host, so glyph
+        // smoothing, dilation and subpixel positioning followed whichever display was
+        // Main. Measured: moving the owner's Retina panel back to primary reddened 24
+        // of 46 committed baselines on a clean tree, magenta on letterforms ONLY, with
+        // channel deltas up to 183 — layout, fills, and every text-free render
+        // byte-identical. Deterministic on each host, different between them.
+        //
+        // So the probe owns its context and pins all four text knobs. This is the same
+        // principle as the scale fix: an offscreen probe must DECLARE what it renders
+        // with rather than inherit it. Font smoothing off is the right leaf to pin
+        // because it is the one that does not vary with hardware.
+        guard let context = NSGraphicsContext(bitmapImageRep: rep) else {
+            throw fail("\(id): could not make a drawing context for a \(pixelsWide)x\(pixelsHigh)px bitmap")
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        let cg = context.cgContext
+        cg.setAllowsFontSmoothing(false)
+        cg.setShouldSmoothFonts(false)
+        cg.setAllowsFontSubpixelPositioning(false)
+        cg.setShouldSubpixelPositionFonts(false)
+        cg.setAllowsFontSubpixelQuantization(false)
+        cg.setShouldSubpixelQuantizeFonts(false)
+        view.displayIgnoringOpacity(view.bounds, in: context)
+        NSGraphicsContext.restoreGraphicsState()
         return rep
     }
 
