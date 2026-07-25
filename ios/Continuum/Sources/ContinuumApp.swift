@@ -831,7 +831,7 @@ private struct AgentsBoardView: View {
                     FreshnessFooter(freshness: model.freshness)
                 }
             }
-            .background(AppColors.background.ignoresSafeArea())
+            .tokenBackground(.canvas, ignoringSafeArea: true)
             .navigationTitle("Agents")
             .navigationDestination(for: UUID.self) { tileId in
                 AgentDetailView(tileId: tileId, selectedTab: $selectedTab)
@@ -866,7 +866,7 @@ private struct ApprovalsInboxView: View {
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .background(AppColors.background.ignoresSafeArea())
+                            .tokenBackground(.canvas, ignoringSafeArea: true)
                     } else {
                         WaitingForMacView(freshness: model.freshness)
                     }
@@ -879,7 +879,7 @@ private struct ApprovalsInboxView: View {
                     }
                     .listStyle(.plain)
                     .scrollContentBackground(.hidden)
-                    .background(AppColors.background.ignoresSafeArea())
+                    .tokenBackground(.canvas, ignoringSafeArea: true)
                 }
             }
             .safeAreaInset(edge: .bottom) {
@@ -903,7 +903,7 @@ private struct AgentRowView: View {
             StatusGlyphView(status: row.status)
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    StatusPill(status: row.status)
+                    StatusChipView(status: row.status)
                     Spacer(minLength: 8)
                     Text(row.updatedAt, style: .relative)
                         .font(.caption.monospacedDigit())
@@ -966,7 +966,7 @@ private struct AgentDetailView: View {
             }
             .padding()
         }
-        .background(AppColors.background.ignoresSafeArea())
+        .tokenBackground(.canvas, ignoringSafeArea: true)
         .navigationTitle("Agent")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -978,7 +978,7 @@ private struct DetailHeader: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                StatusPill(status: row.status)
+                StatusChipView(status: row.status)
                 Spacer()
                 Text(row.updatedAt, style: .relative)
                     .font(.caption.monospacedDigit())
@@ -993,7 +993,7 @@ private struct DetailHeader: View {
                 .lineLimit(1)
         }
         .padding()
-        .background(AppColors.panel)
+        .tokenBackground(.panel)
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
@@ -1145,7 +1145,7 @@ private struct TimelineView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding()
-                    .background(AppColors.panel)
+                    .tokenBackground(.panel)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
             } else {
                 ForEach(events, id: \.compositeId) { event in
@@ -1195,40 +1195,24 @@ private struct TimelineEventRow: View {
     }
 }
 
-// P1.8: both of these took an `AgentStatusPresentation` and re-decoded its
-// `colorToken` string through `AppColors`. The row's appearance is a pure
-// function of its status, so they take the status and read the one shared
-// presenter — the same one the desktop tile, title bar and sidebar now read.
+// P1.8: this took an `AgentStatusPresentation` and re-decoded its `colorToken`
+// string through `AppColors`. The row's appearance is a pure function of its
+// status, so it takes the status and reads the one shared presenter — the same
+// one the desktop tile, title bar and sidebar now read.
+//
+// P1.12: the accent is the presenter's `TokenColor`, resolved for the phone's
+// live appearance instead of pinned to `.dark`. `StatusPill` is gone: it was a
+// second pill next to `StatusChipView`, which was compiled and referenced
+// nowhere, so the shared component is now the one the app actually ships.
 private struct StatusGlyphView: View {
     let status: AgentStatus
 
     var body: some View {
-        Text(StatusChipPresenter.display(for: status).glyph)
-            .font(.title3.weight(.bold))
-            .foregroundStyle(Color(chip: AppColors.statusAccent(for: status)))
-            .accessibilityLabel(status.rawValue)
-    }
-}
-
-private struct StatusPill: View {
-    let status: AgentStatus
-
-    var body: some View {
         let display = StatusChipPresenter.display(for: status)
-        let accent = Color(chip: AppColors.statusAccent(for: status))
-        HStack(spacing: 5) {
-            Text(display.glyph)
-            // The presenter's label, not `status.rawValue`: this pill sat next to
-            // `StatusChipView` saying "Needs attention" while it said
-            // "needsAttention".
-            Text(display.label)
-        }
-        .font(.caption.weight(.semibold))
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
-        .foregroundStyle(accent)
-        .background(accent.opacity(0.16))
-        .clipShape(Capsule())
+        Text(display.glyph)
+            .font(Font(role: .titleL))
+            .tokenForeground(display.accent)
+            .accessibilityLabel(status.rawValue)
     }
 }
 
@@ -1537,7 +1521,7 @@ private struct FreshnessFooter: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(AppColors.panel)
+        .tokenBackground(.panel)
     }
 
     private var dotColor: Color {
@@ -1573,6 +1557,12 @@ private struct EmptyBoardView: View {
 
 private struct CanvasTabView: View {
     @EnvironmentObject private var model: AgentsBoardModel
+    // The mirror paints shapes (`Shape.fill`, a `ZStack` backdrop) rather than
+    // views, so it needs token COLOURS, not the modifiers. One palette resolved
+    // from this view's own colour scheme, which is the bridge's single
+    // theme-resolution point (hygiene rule 4).
+    @Environment(\.colorScheme) private var colorScheme
+    private var palette: TokenPalette { TokenPalette(colorScheme) }
 
     @State private var scale: CGFloat = 0.35
     @State private var pan: CGSize = .zero
@@ -1601,7 +1591,7 @@ private struct CanvasTabView: View {
         NavigationStack {
             GeometryReader { geo in
                 ZStack(alignment: .topLeading) {
-                    AppColors.background.ignoresSafeArea()
+                    palette.color(SurfaceToken.canvas).ignoresSafeArea()
                     if model.canvasScene.zones.isEmpty && model.canvasScene.tiles.isEmpty {
                         CanvasEmptyStateView(display: model.canvasFreshnessDisplay)
                     } else {
@@ -1677,7 +1667,7 @@ private struct CanvasTabView: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
-                .background(AppColors.panel)
+                .tokenBackground(.panel)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
 
                 if let badge = CanvasMirrorPresentation.scopeBadge(
@@ -1693,7 +1683,7 @@ private struct CanvasTabView: View {
                 } label: {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                         .padding(10)
-                        .background(AppColors.panel)
+                        .tokenBackground(.panel)
                         .clipShape(Circle())
                         .foregroundStyle(.primary)
                 }
@@ -1752,11 +1742,26 @@ private struct CanvasTabView: View {
 
         return ZStack(alignment: .bottomTrailing) {
             RoundedRectangle(cornerRadius: 8)
-                .fill(AppColors.panel)
+                .fill(palette.color(SurfaceToken.panel))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
+                        // The resting outline is `LineToken.border` — the token
+                        // for "the outline of an object", which is what a mirror
+                        // tile is. It was `white@0.15`, which was fine while the
+                        // phone only ever painted a dark panel and is invisible
+                        // now that this ticket gives iOS a real light appearance:
+                        // the same defect (a white hairline on a light surface)
+                        // P1.11 measured at 1.68:1 and fixed on the desktop.
+                        //
+                        // The highlight/drag arm stays `Color.orange`: it is a
+                        // selection AFFORDANCE, the class P1.11 deliberately left
+                        // off tokens (the desktop paints selection in the user's
+                        // own `controlAccentColor`). The two platforms disagree
+                        // about it today — flagged for Phase 8, since making them
+                        // agree is a decision about which one is right, not a
+                        // token lookup.
                         .stroke(
-                            isHighlighted ? Color.orange : (activeDragTileId == tile.tileId || activeResizeTileId == tile.tileId ? Color.orange : Color.white.opacity(0.15)),
+                            isHighlighted ? Color.orange : (activeDragTileId == tile.tileId || activeResizeTileId == tile.tileId ? Color.orange : palette.color(LineToken.border)),
                             lineWidth: isHighlighted ? 3 : (activeDragTileId == tile.tileId ? 2 : 1)
                         )
                 )
@@ -1778,7 +1783,7 @@ private struct CanvasTabView: View {
                 Image(systemName: "arrow.down.right.and.arrow.up.left")
                     .font(.caption2)
                     .padding(5)
-                    .background(Circle().fill(AppColors.panel))
+                    .background(Circle().fill(palette.color(SurfaceToken.panel)))
                     .padding(4)
                     .highPriorityGesture(resizeGesture(tile: tile))
             }
@@ -1792,7 +1797,11 @@ private struct CanvasTabView: View {
 
     private func statusDot(for tileId: UUID) -> some View {
         let status = model.canvasStatusOverlays[tileId]?.status
-        let fill = status.map { Color(chip: AppColors.statusAccent(for: $0)) } ?? Color.gray.opacity(0.4)
+        // No status yet is muted-and-faint, not a fresh grey: `textSecondary` is
+        // the token the presenter itself uses for the two states that ask nothing
+        // of you (idle, stale).
+        let fill = status.map { palette.color(token: StatusChipPresenter.display(for: $0).accent) }
+            ?? palette.color(TextToken.textSecondary).opacity(0.4)
         return Circle().fill(fill).frame(width: 7, height: 7)
     }
 
@@ -1935,17 +1944,31 @@ private struct EditableTileGestures<DragG: Gesture>: ViewModifier {
     }
 }
 
+// A zone's tint is the persisted `ZonePlacement.color` string the desktop wrote,
+// and the desktop renders it through `ZoneChromeNSView.color(named:)`. This is
+// deliberately NOT routed to `DesignTokens` even though P1.12 asked for it:
+// P1.11 ruled that a zone's colour is USER configuration, not a semantic status,
+// so mapping someone's "mint" onto `accentDone` would silently change what they
+// picked — and it would make the phone paint a different hue than the Mac for the
+// same zone, which is the exact "build once, render twice" failure this ticket
+// exists to close.
+//
+// What WAS private and wrong is the vocabulary: this switch knew "amber",
+// "teal", "pink" and "green" (which the desktop registry does not have, so the
+// Mac painted them its teal default while the phone painted orange, teal, pink
+// and green) and fell back to grey where the desktop falls back to teal. It is
+// now name-for-name the desktop's registry, and
+// `scripts/check-color-hygiene.sh` rule 5 compares the two switches every run so
+// they cannot drift apart again.
 private func zoneTint(for token: String) -> Color {
     switch token.lowercased() {
     case "mint": return .mint
-    case "amber": return .orange
     case "blue": return .blue
-    case "teal": return .teal
     case "purple": return .purple
-    case "pink": return .pink
+    case "orange": return .orange
     case "red": return .red
-    case "green": return .green
-    default: return .gray
+    case "yellow": return .yellow
+    default: return .teal
     }
 }
 
@@ -1958,7 +1981,7 @@ private struct LockBadge: View {
             .font(.caption.weight(.semibold))
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(AppColors.panel)
+            .tokenBackground(.panel)
             .clipShape(Capsule())
     }
 }
@@ -2032,7 +2055,7 @@ private struct PlaceholderScreen: View {
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(AppColors.background.ignoresSafeArea())
+            .tokenBackground(.canvas, ignoringSafeArea: true)
             .navigationTitle(title)
         }
     }
@@ -2099,7 +2122,7 @@ private struct SettingsDiagnosticsView: View {
                 }
             }
             .scrollContentBackground(.hidden)
-            .background(AppColors.background.ignoresSafeArea())
+            .tokenBackground(.canvas, ignoringSafeArea: true)
             .navigationTitle("Settings")
             .alert("Unpair this phone?", isPresented: $confirmingUnpair) {
                 Button("Unpair", role: .destructive) {
@@ -2149,20 +2172,8 @@ private struct SettingsDiagnosticsView: View {
     }
 }
 
-private enum AppColors {
-    static let background = Color(red: 0.05, green: 0.06, blue: 0.08)
-    static let panel = Color(red: 0.10, green: 0.11, blue: 0.14)
-
-    /// P1.8 replaced `color(for token: String)` — the fourth interpretation of
-    /// `AgentStatusPresentation.colorToken`, and the one that painted
-    /// `configuring` teal while the desktop tile painted it purple.
-    ///
-    /// Resolved for `.dark` because this app paints its own dark-only literals
-    /// (`background`/`panel` above) whatever the system appearance is: handing
-    /// back a light-appearance accent here would put a dark hue on a dark fill.
-    /// TODO(P1.12): iOS consumes `DesignTokens` surfaces and this becomes the
-    /// real appearance.
-    static func statusAccent(for status: AgentStatus) -> ChipColor {
-        StatusChipPresenter.display(for: status).accent.resolved(for: .dark)
-    }
-}
+// P1.12 deleted `AppColors`. Its two dark-only literals were the phone's private
+// disagreement with the desktop's surfaces (`SurfaceToken.canvas` / `.panel`
+// carry both appearances), and `statusAccent(for:)` pinned every status hue to
+// `.dark` — the TODO this ticket closes. The replacement is
+// `DesignTokens+SwiftUI.swift`, which is the only place a theme is resolved.

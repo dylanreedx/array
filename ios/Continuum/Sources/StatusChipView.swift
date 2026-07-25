@@ -16,21 +16,23 @@ struct StatusChipView: View {
             Text(display.glyph)
             Text(display.label)
         }
-        .font(.system(size: 12, weight: .semibold))
+        // P1.12: a ROLE, not a size. `.label` is `.caption` on iOS — 12pt at the
+        // default Dynamic Type size, which is the size this pill already shipped,
+        // and it now scales with the reader's setting instead of ignoring it.
+        //
+        // The WEIGHT does move, and deliberately: `.label` is `medium`, where this
+        // pill hardcoded `semibold`. Adopting a role means adopting the role's
+        // weight — the alternative (role for size, hand-picked weight) is the
+        // half-adoption that lets the two platforms drift apart again, and it is
+        // the same collapse the desktop already made (Typography's own mapping
+        // table records `UserInputCardView.headerLabel 11 semibold -> label`).
+        // Visible change, noted for the owner; not a layout change.
+        .font(Font(role: .label))
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
         .foregroundColor(Color(chip: display.foreground))
         .background(Color(chip: display.background))
         .clipShape(Capsule())
         .accessibilityLabel(display.label)
-    }
-}
-
-// Internal rather than private since P1.8: the agents board and the canvas
-// mirror paint a `StatusChipDisplay.accent` too, and a second copy of this
-// conversion is a second place for the sRGB bridge to drift.
-extension Color {
-    init(chip: ChipColor) {
-        self.init(.sRGB, red: chip.r, green: chip.g, blue: chip.b, opacity: 1)
     }
 }

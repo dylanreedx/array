@@ -333,11 +333,180 @@ else
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# Rule 4 (P1.12): on iOS, exactly ONE place resolves a token's theme.
+#
+# `AppColors.statusAccent(for:)` resolved every status hue `for: .dark` because
+# the phone painted its own dark-only fills. Deleting the fills is only half the
+# fix: any call site can still write `.resolved(for: .dark)` and pin itself back
+# to one appearance, and unlike a raw literal that reads as perfectly reasonable
+# code. So theme resolution belongs to the bridge, which reads
+# `@Environment(\.colorScheme)` — the trait SwiftUI keeps correct on its own.
+#
+# NO allowlist, same reasoning as rule 3: the done-criterion is one resolution
+# point. Constructing a `TokenTheme` FROM a colour scheme is not a pin and is not
+# matched; naming `.light`/`.dark`, or calling `resolved(for:)`, is.
+#
+# Observed red with this code (P1.12), restoring the exact line P1.8 left behind:
+#   FAIL: token theme resolved outside ios/Continuum/Sources/DesignTokens+SwiftUI.swift
+#     (a call site that names a theme cannot follow the appearance):
+#     ios/Continuum/Sources/ContinuumApp.swift:1214: .foregroundStyle(Color(chip: display.accent.resolved(for: .dark)))
+# and with the bridge file deleted:
+#   FAIL: missing ios/Continuum/Sources/DesignTokens+SwiftUI.swift — iOS's single
+#     theme-resolution point cannot be verified
+#
+# Rule 4 also owns the EXPLICIT-COLOUR-SPACE constructor, because rule 1
+# deliberately does not match it: `Color(.sRGB, red:…)` is the correct spelling
+# for the bridge (ticket 87 watch-out #1 — the tokens' ratios were measured in
+# sRGB, so a device-RGB `Color(red:…)` would be the wrong colour), which means
+# rule 1 must let it through, which in turn leaves it as the one raw-colour
+# spelling a call site could use to walk around the bridge entirely. Legal in the
+# bridge, banned everywhere else under `ios/Continuum/Sources`, no allowlist —
+# the same shape as the theme-pin rule above and for the same reason.
+#
+# Observed red with this code (P1.12), the bypass the bridge's own comment names:
+#   FAIL: raw colour constructed outside ios/Continuum/Sources/DesignTokens+SwiftUI.swift
+#     (the explicit-colour-space form rule 1 must allow for the bridge is not a
+#     licence for a call site):
+#     ios/Continuum/Sources/ContinuumApp.swift:1961: private let panelLiteral = Color(.sRGB, red: 0.10, green: 0.11, blue: 0.14, opacity: 1)
+IOS_BRIDGE=ios/Continuum/Sources/DesignTokens+SwiftUI.swift
+THEME_PIN_RE='resolved\(for:|TokenTheme\.(light|dark)'
+# Anchored on the COLOUR-SPACE ARGUMENT, not on the constructor name. The first
+# version of this pattern keyed on `Color(` and the vacuity guard below caught it
+# immediately: the bridge's own line is `self.init(.sRGB, red:…)` inside an
+# `extension Color`, so a `Color(`-anchored rule matched neither the bridge nor a
+# call site spelling it `Color.init(.sRGB, …)`. Every initialiser that takes a
+# colour space is a raw colour construction whoever writes it.
+IOS_COLOURSPACE_RE='\([[:space:]]*\.(sRGB|sRGBLinear|displayP3|extendedSRGB)[[:space:]]*,|(SwiftUI\.)?Color(\.init)?\([[:space:]]*(cgColor|colorSpace):'
+
+if [[ ! -f "$IOS_BRIDGE" ]]; then
+  fail "missing $IOS_BRIDGE — iOS's single theme-resolution point cannot be verified"
+else
+  colourspace_hits=$(
+    find ios/Continuum/Sources -name '*.swift' \
+      | { grep -vF "$IOS_BRIDGE" || true; } \
+      | LC_ALL=C sort \
+      | while IFS= read -r file; do
+          [[ -n "$file" ]] || continue
+          file_lines "$file" | { grep -E "$IOS_COLOURSPACE_RE" || true; } \
+            | while IFS= read -r hit; do printf '%s:%s\n' "$file" "$hit"; done
+        done
+  )
+  if [[ -n "$colourspace_hits" ]]; then
+    while IFS= read -r hit; do
+      [[ -n "$hit" ]] || continue
+      fail "raw colour constructed outside $IOS_BRIDGE (the explicit-colour-space form rule 1 must allow for the bridge is not a licence for a call site): $hit"
+    done <<<"$colourspace_hits"
+  fi
+  # Vacuity guard, per rule 5's lesson: the bridge must itself contain the
+  # spelling this rule bans elsewhere. If it stops doing so, the pattern has
+  # drifted off the source and the ban above is matching nothing anywhere.
+  if ! file_lines "$IOS_BRIDGE" | grep -qE "$IOS_COLOURSPACE_RE"; then
+    fail "$IOS_BRIDGE no longer constructs an explicit-colour-space Color — rule 4's raw-colour ban would pass vacuously"
+  fi
+
+  theme_pins=$(
+    find ios/Continuum/Sources -name '*.swift' \
+      | { grep -vF "$IOS_BRIDGE" || true; } \
+      | LC_ALL=C sort \
+      | while IFS= read -r file; do
+          [[ -n "$file" ]] || continue
+          file_lines "$file" | { grep -E "$THEME_PIN_RE" || true; } \
+            | while IFS= read -r hit; do printf '%s:%s\n' "$file" "$hit"; done
+        done
+  )
+  if [[ -n "$theme_pins" ]]; then
+    while IFS= read -r hit; do
+      [[ -n "$hit" ]] || continue
+      fail "token theme resolved outside $IOS_BRIDGE (a call site that names a theme cannot follow the appearance): $hit"
+    done <<<"$theme_pins"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Rule 5 (P1.12): the zone-tint registries agree, name for name.
+#
+# A zone's tint is USER configuration (P1.11's ruling: mapping someone's "mint"
+# onto `accentDone` would change what they picked), so it is the one colour
+# vocabulary that is deliberately NOT a DesignTokens value — which means nothing
+# above this line can catch the two platforms disagreeing about it. They did: iOS
+# knew "amber"/"teal"/"pink"/"green", which the desktop registry does not have,
+# so the Mac painted its teal fallback where the phone painted orange, teal, pink
+# and green, and iOS fell back to grey where the desktop falls back to teal.
+#
+# Both switches have the same shape (`case "<name>": return <system colour>`,
+# then `default:`), so the pairs are extractable and comparable. The colour is
+# normalised across platform spellings — `NSColor.systemMint` and `.mint` are the
+# same hue — and the `default:` arm is compared as a pair of its own, since a
+# fallback is what silently renders an unknown name.
+#
+# Observed red with this code (P1.12), one witness per direction of drift:
+#   iOS "orange" renamed back to "amber"  → "> amber=orange" and "< orange=orange"
+#   iOS "mint" repainted `.green`         → "< mint=mint" and "> mint=green"
+#   the DESKTOP registry gaining "pink"   → "< pink=pink"
+#   the iOS signature renamed so the extraction stops matching →
+#     FAIL: zone-tint registry not found in ios/Continuum/Sources/ContinuumApp.swift
+#       — rule 5 would pass vacuously
+# The last one is the load-bearing witness: rule 3 was silently inert for one
+# revision, and a source-shape comparison that quietly matches nothing is the same
+# failure with a green exit code.
+ZONE_DESKTOP=Sources/ContinuumRevived/Canvas/CanvasNSView.swift
+ZONE_IOS=ios/Continuum/Sources/ContinuumApp.swift
+
+zone_registry() {
+  local file=$1 signature=$2
+  awk -v sig="$signature" '
+    index($0, sig) { inside = 1; next }
+    inside {
+      trimmed = $0
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", trimmed)
+      if (trimmed == "}") exit
+      if (match(trimmed, /^case[[:space:]]+"[^"]+"[[:space:]]*:[[:space:]]*return[[:space:]]+/)) {
+        name = trimmed
+        sub(/^case[[:space:]]+"/, "", name)
+        sub(/".*$/, "", name)
+      } else if (match(trimmed, /^default[[:space:]]*:[[:space:]]*return[[:space:]]+/)) {
+        name = "default"
+      } else {
+        next
+      }
+      colour = trimmed
+      sub(/^.*return[[:space:]]+/, "", colour)
+      # Platform spellings of the same hue: NSColor.systemMint / UIColor.systemMint
+      # / Color.mint / .mint all normalise to "mint".
+      sub(/^(NS|UI|SwiftUI\.)?Color\./, "", colour)
+      sub(/^\./, "", colour)
+      sub(/^system/, "", colour)
+      print tolower(name) "=" tolower(colour)
+    }
+  ' "$file"
+}
+
+if [[ ! -f "$ZONE_DESKTOP" || ! -f "$ZONE_IOS" ]]; then
+  fail "missing a zone-tint registry file ($ZONE_DESKTOP / $ZONE_IOS) — the two platforms cannot be compared"
+else
+  desktop_zones=$(zone_registry "$ZONE_DESKTOP" 'static func color(named name: String)' | LC_ALL=C sort)
+  ios_zones=$(zone_registry "$ZONE_IOS" 'func zoneTint(for token: String)' | LC_ALL=C sort)
+  # An empty side means the extraction stopped matching the source, which would
+  # make this rule silently inert — the failure mode rule 3 already suffered once.
+  if [[ -z "$desktop_zones" ]]; then
+    fail "zone-tint registry not found in $ZONE_DESKTOP — rule 5 would pass vacuously"
+  elif [[ -z "$ios_zones" ]]; then
+    fail "zone-tint registry not found in $ZONE_IOS — rule 5 would pass vacuously"
+  elif [[ "$desktop_zones" != "$ios_zones" ]]; then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      fail "zone-tint registries disagree ($ZONE_DESKTOP vs $ZONE_IOS): $line"
+    done < <(diff <(printf '%s\n' "$desktop_zones") <(printf '%s\n' "$ios_zones") | { grep -E '^[<>]' || true; })
+  fi
+fi
+
 if (( failures > 0 )); then
   printf 'Colour hygiene failed with %d problem(s). Fix the colour (adopt a DesignTokens value) — do not widen the allowlist.\n' \
     "$failures" >&2
   exit 1
 fi
 
-printf 'Colour hygiene passed: %d allowlisted violation line(s), 0 new; 1 status→appearance mapping.\n' \
-  "$(wc -l < "$ALLOWED" | tr -d ' ')"
+printf 'Colour hygiene passed: %d allowlisted violation line(s), 0 new; 1 status→appearance mapping; 1 iOS colour bridge (theme resolution + explicit-colour-space construction); %d zone tints agreeing across platforms.\n' \
+  "$(wc -l < "$ALLOWED" | tr -d ' ')" \
+  "$(printf '%s\n' "$desktop_zones" | wc -l | tr -d ' ')"

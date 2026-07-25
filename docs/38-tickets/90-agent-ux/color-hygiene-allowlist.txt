@@ -17,7 +17,7 @@
 # Owners:
 #   P1.10 — Sources/ContinuumRevived/Canvas (tile surfaces adopt DesignTokens)
 #   P1.11 — Sources/ContinuumRevived/App    (chrome adopts DesignTokens)
-#   P1.12 — ios/Continuum/Sources           (iOS consumes the same tokens)
+#   P1.12 — ios/Continuum/Sources           (iOS consumes the same tokens) — CLEARED
 
 # hardcoded dark-only fill literal · owner: P1.11
 Sources/ContinuumRevived/App/ContinuumApp.swift:1:backing.layer?.backgroundColor = NSColor(srgbRed: 0.08, green: 0.10, blue: 0.13, alpha: 1).cgColor
@@ -100,25 +100,21 @@ Sources/ContinuumRevived/Canvas/TicketQueueTileNSView.swift:1:body.layer?.backgr
 # Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.10
 Sources/ContinuumRevived/Canvas/TicketQueueTileNSView.swift:1:empty.textColor = .secondaryLabelColor
 
-# Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.12
-ios/Continuum/Sources/ContinuumApp.swift:6:.foregroundStyle(.primary)
-
-# Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.12
-ios/Continuum/Sources/ContinuumApp.swift:24:.foregroundStyle(.secondary)
-
-# Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.12
-ios/Continuum/Sources/ContinuumApp.swift:1:.foregroundStyle(isError ? .red : .secondary)
-
-# P1.8 deleted `AppColors.color(for token:)` — the iOS decoder for
-# `AgentStatusPresentation.colorToken` — so the two entries that excused its
-# `Color(.tertiaryLabel)` and `default: .secondary` arms are gone with it. The
-# list shrank by 2, which is the only direction it moves.
-
-# Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.12
-ios/Continuum/Sources/ContinuumApp.swift:2:return .secondary
-
-# hardcoded colour literal · owner: P1.12
-ios/Continuum/Sources/ContinuumApp.swift:1:static let background = Color(red: 0.05, green: 0.06, blue: 0.08)
-
-# hardcoded colour literal · owner: P1.12
-ios/Continuum/Sources/ContinuumApp.swift:1:static let panel = Color(red: 0.10, green: 0.11, blue: 0.14)
+# P1.12 deleted `AppColors` — its two dark-only literals were iOS's whole
+# raw-colour debt, and they are now `SurfaceToken.canvas` / `SurfaceToken.panel`.
+# With them gone, ios/Continuum/Sources no longer paints a hardcoded fill at all,
+# so rule 2's trap (an Apple semantic colour resolved against a literal fill) can
+# no longer be sprung there and its four iOS entries went stale with it. Six
+# entries removed, none added: `.primary`/`.secondary` in that file now sit on
+# token surfaces that carry both appearances, which is what made them a trap in
+# the first place. Rules 4 and 5 (theme resolution, zone-tint parity) took over
+# the iOS-specific coverage; neither has an allowlist.
+#
+# That the four semantic entries are EXCUSED BY THE FILE'S STATE and not by this
+# list is mechanical, not an argument: re-adding a single raw literal
+# (`private let panelLiteral = Color(red: 0.10, green: 0.11, blue: 0.14)`) re-arms
+# rule 2 across the whole file and turns all four back into named violations —
+# observed at exit 1 on 6 lines of `.foregroundStyle(.primary)`, 24 of
+# `.foregroundStyle(.secondary)`, plus `return .secondary` and the ternary. So the
+# coverage did not move to this list's honour system; it moved to the absence of a
+# literal fill, which the gate re-checks every run.

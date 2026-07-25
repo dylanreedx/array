@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		0DAC41F5595764185ADF4BC3 /* ContinuumRevivedCore in Frameworks */ = {isa = PBXBuildFile; productRef = 9E01D723484B29DA34AEC599 /* ContinuumRevivedCore */; };
 		40A5F44EE38B61E9A6B3436E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = D151728376C3F6ABAC382B04 /* Assets.xcassets */; };
+		8E66DACCE58B3338B44AF55B /* DesignTokens+SwiftUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = C455CFC218A49F0B4851F5D3 /* DesignTokens+SwiftUI.swift */; };
 		B8F41E74F6210DDA33B5453C /* ContinuumRevivedAgentUI in Frameworks */ = {isa = PBXBuildFile; productRef = 39D7F461DCC18697C1F6311A /* ContinuumRevivedAgentUI */; };
 		DDA99CDC2BE1065699F09C7A /* StatusChipView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E7C049C56FC6DF9E1EE68BE /* StatusChipView.swift */; };
 		F74BFE16A57249D36643B577 /* ContinuumApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BA0CBC85274F77D8B8949CD /* ContinuumApp.swift */; };
@@ -19,6 +20,7 @@
 		3E7C049C56FC6DF9E1EE68BE /* StatusChipView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusChipView.swift; sourceTree = "<group>"; };
 		67D592583A969FD95A8FA194 /* continuum-overnight */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "continuum-overnight"; path = ..; sourceTree = SOURCE_ROOT; };
 		7BA0CBC85274F77D8B8949CD /* ContinuumApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContinuumApp.swift; sourceTree = "<group>"; };
+		C455CFC218A49F0B4851F5D3 /* DesignTokens+SwiftUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DesignTokens+SwiftUI.swift"; sourceTree = "<group>"; };
 		D151728376C3F6ABAC382B04 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		E922ADD36D0C4CD487B3F803 /* Continuum.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Continuum.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -50,6 +52,7 @@
 			children = (
 				D151728376C3F6ABAC382B04 /* Assets.xcassets */,
 				7BA0CBC85274F77D8B8949CD /* ContinuumApp.swift */,
+				C455CFC218A49F0B4851F5D3 /* DesignTokens+SwiftUI.swift */,
 				3E7C049C56FC6DF9E1EE68BE /* StatusChipView.swift */,
 			);
 			path = Sources;
@@ -159,6 +162,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F74BFE16A57249D36643B577 /* ContinuumApp.swift in Sources */,
+				8E66DACCE58B3338B44AF55B /* DesignTokens+SwiftUI.swift in Sources */,
 				DDA99CDC2BE1065699F09C7A /* StatusChipView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
