@@ -103,18 +103,20 @@ enum UIProbeGeometry {
     }
 
     /// No visible view may spill outside its superview — the narrow-width
-    /// clipping gate. Vertical containment is not asserted inside a scroll view:
-    /// a document view is *supposed* to be taller than its clip view.
+    /// clipping gate. The single exception is a clip view's own child: a document
+    /// view is *supposed* to be taller than its clip view.
     ///
     /// Compares **alignment** rects, not frames: `NSTextField` carries a ~2pt
     /// alignment inset, so a label flush with its stack's leading edge sits at
     /// frame x = -2 by design. Frame containment would fail on every label here.
     static func expectNoClipping(_ root: NSView, label: String) throws {
-        func check(_ view: NSView, path: String, insideScroll: Bool) throws {
-            // A document view is measured against the clip view it hangs in, so the
-            // scroll exemption must apply to the clip view's own children too — not
-            // only to their descendants.
-            let childInsideScroll = insideScroll || view is NSClipView
+        func check(_ view: NSView, path: String) throws {
+            // Only a clip view's own children — the document view — are exempt from
+            // vertical containment; a document view is supposed to be taller than
+            // its clip. The exemption deliberately does NOT inherit, so a label
+            // spilling out of a transcript card *inside* the scroll view still
+            // fails.
+            let childInsideScroll = view is NSClipView
             for subview in view.subviews where !subview.isHidden {
                 let childPath = "\(path)/\(describe(subview))"
                 if !isSpacer(subview) {
@@ -135,17 +137,19 @@ enum UIProbeGeometry {
                         }
                     }
                 }
-                try check(subview, path: childPath, insideScroll: childInsideScroll)
+                try check(subview, path: childPath)
             }
         }
-        try check(root, path: describe(root), insideScroll: root is NSClipView)
+        try check(root, path: describe(root))
     }
 
     // MARK: - Unsatisfiable constraints
 
     /// The "no unsatisfiable constraints" half of the narrow-width pass, evaluated
-    /// rather than read: every active **required** width/height constraint in the
-    /// subtree must actually hold once the tree is laid out. A required constraint
+    /// rather than read: every active **required** width/height constraint *owned by
+    /// a view in this subtree* must actually hold once the tree is laid out. (A
+    /// constraint installed on an ancestor above `root` is out of reach; for the
+    /// probed tile there is no such ancestor — the probe host uses frames.) A required constraint
     /// AppKit had to break is a required constraint that does not hold.
     ///
     /// AppKit's own "Unable to simultaneously satisfy constraints" report is not
@@ -163,13 +167,16 @@ enum UIProbeGeometry {
         let tolerance = 0.51
         try walk(root) { view, path in
             for constraint in view.constraints where constraint.isActive && constraint.priority == .required {
-                // Only constraints someone actually wrote. AppKit's generated
-                // subclasses report `.required` while being breakable by design:
-                // `NSContentSizeLayoutConstraint` carries its real strength in the
-                // view's hugging (251) and compression-resistance (750) priorities,
-                // so an intrinsically-28pt-wide label compressed to 21.5pt reads as
-                // a broken required constraint here — measured, on unmodified code.
-                guard type(of: constraint) == NSLayoutConstraint.self else { continue }
+                // Skip AppKit's own generated subclasses, which report `.required`
+                // while being breakable by design: `NSContentSizeLayoutConstraint`
+                // carries its real strength in the view's hugging (251) and
+                // compression-resistance (750) priorities, so an intrinsically
+                // 28pt-wide label compressed to 21.5pt reads as a broken required
+                // constraint — measured, on unmodified code. Only `NS`-prefixed
+                // subclasses are skipped, so an app-defined subclass is still gated.
+                let constraintClass = type(of: constraint)
+                if constraintClass != NSLayoutConstraint.self,
+                   String(describing: constraintClass).hasPrefix("NS") { continue }
                 guard let first = constraint.firstItem as? NSView,
                       let lhs = sizeValue(constraint.firstAttribute, of: first) else { continue }
                 var rhs = 0.0
