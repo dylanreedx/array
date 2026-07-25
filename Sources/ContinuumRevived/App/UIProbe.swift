@@ -157,8 +157,9 @@ struct UIProbe {
     static let layerBackedWitnessEntryId = "auth.pairingToken"
 
     /// Asserts the probe delivers what it promises: the requested appearance
-    /// (the geometry gates layered on this probe live in `UIProbeGeometry`, run by
-    /// `--ui-geometry-check`, so each has its own matrix leg and inventory record)
+    /// (the gates layered on this probe live in `UIProbeGeometry`, `UIProbeContrast`
+    /// and `UIProbePixels`, run by `--ui-geometry-check`, `--ui-contrast-check` and
+    /// `--ui-pixel-check`, so each has its own matrix leg and inventory record)
     /// actually reaches the view, the requested size actually holds, and two
     /// appearances of the same component actually differ.
     static func runUIProbeChecks() throws {

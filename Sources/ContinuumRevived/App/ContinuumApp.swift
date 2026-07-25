@@ -973,6 +973,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--ui-pixel-check") {
+            do {
+                _ = NSApplication.shared
+                try UIProbePixels.runPixelChecks()
+                print("ContinuumRevivedUIPixelChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--ui-contrast-check") {
             do {
                 _ = NSApplication.shared

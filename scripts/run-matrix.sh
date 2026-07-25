@@ -153,6 +153,11 @@ run_app_check .build/debug/continuum-revived --ui-probe-check
 # card/model parity, no zero-size or ambiguous views, no clipping at the tile minimum
 # width, and a non-vacuous scrolled-to-bottom assertion, in both appearances.
 run_app_check .build/debug/continuum-revived --ui-geometry-check
+# Ticket P0.5: numeric pixel probes over the probed managed-agent tile — a label's
+# rect must be modulated (text that never drew is flat) and a border band must
+# differ from the fill inside it, in both appearances. Flatness only; WCAG ratios
+# are --ui-contrast-check's business.
+run_app_check .build/debug/continuum-revived --ui-pixel-check
 run_app_check .build/debug/continuum-revived --ui-test-support-check
 run_app_check .build/debug/continuum-revived --keybind-edit-check
 run_app_check .build/debug/continuum-revived --browser-url-focus-check
