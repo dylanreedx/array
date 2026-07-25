@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 
 // Ticket: docs/38-tickets/87-agent-ui-component-framework.md
 //
@@ -20,4 +21,75 @@ extension NSColor {
         }
         return resolved
     }
+
+    /// The same, at a reduced alpha.
+    ///
+    /// P1.9 found the trap this exists for: `windowBackgroundColor
+    /// .withAlphaComponent(0.92).appResolvedCGColor` does NOT resolve in the app's
+    /// appearance. `withAlphaComponent` on a dynamic catalog colour resolves it
+    /// immediately, against whatever appearance is current at that moment, and hands
+    /// back a plain colour — so `appResolvedCGColor` is left with nothing dynamic to
+    /// re-resolve. Measured: inside a `.darkAqua` drawing block with the app pinned
+    /// `.aqua`, that spelling yields 0.12 grey where the correct value is white.
+    /// Resolve first, then apply alpha.
+    func appResolvedCGColor(alpha: CGFloat) -> CGColor {
+        appResolvedCGColor.copy(alpha: alpha) ?? appResolvedCGColor
+    }
+}
+
+// Ticket: docs/38-tickets/90-agent-ux/P1.9-live-appearance-switching.md
+//
+// `appResolvedCGColor` fixed the *value* an assignment produces. It cannot fix
+// the *timing*: a CGColor is a resolved colour — there is no dynamic one — so a
+// layer keeps whatever it was handed until somebody assigns again. Nothing in
+// this app ever did, which is why pinning `.darkAqua` turned text white while
+// every CALayer fill stayed light.
+//
+// `TokenThemed.applyTokens()` is the one place a view assigns its layer colours,
+// called from `init` AND from `viewDidChangeEffectiveAppearance`. The gate that
+// keeps it honest is `UIProbeAppearance` (inside `--ui-probe-check`): it writes a
+// sentinel over every layer colour a TokenThemed view owns, flips the appearance
+// for real, and fails on any sentinel that survived — i.e. on any layer colour
+// assigned anywhere other than `applyTokens()`.
+
+extension NSAppearance {
+    /// Which leaf of a `TokenColor` this appearance resolves to. The one mapping
+    /// in the codebase: `ContinuumRevivedAgentUI` is Foundation-only on purpose,
+    /// so NSAppearance → `TokenTheme` belongs to the platform layer.
+    var tokenTheme: TokenTheme {
+        bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .dark : .light
+    }
+}
+
+extension NSView {
+    /// The theme this view is currently drawing in.
+    var effectiveTokenTheme: TokenTheme { effectiveAppearance.tokenTheme }
+}
+
+extension TokenColor {
+    /// This token's value for `theme`, ready to hand to a CALayer. Deliberately
+    /// NOT routed through `appResolvedCGColor`: a token already carries both
+    /// values, so there is nothing to resolve against `NSAppearance.current` —
+    /// the caller names the theme, which is also what lets a gate predict the
+    /// exact colour a layer must be holding after a flip.
+    func cgColor(for theme: TokenTheme) -> CGColor {
+        StatusChipNSView.nsColor(resolved(for: theme)).cgColor
+    }
+
+    /// The same, resolved in the theme `view` is drawing in — the form
+    /// `applyTokens()` implementations use.
+    func cgColor(in view: NSView) -> CGColor { cgColor(for: view.effectiveTokenTheme) }
+}
+
+/// A view that owns layer colours and re-applies them when the appearance moves.
+/// Conformance is the greppable marker for "this view's colours are live", and
+/// what `UIProbeAppearance` enumerates.
+@MainActor
+protocol TokenThemed: NSView {
+    /// Assign EVERY layer colour this view owns, from scratch.
+    ///
+    /// Must be idempotent and cheap: AppKit calls `viewDidChangeEffectiveAppearance`
+    /// on the view *and* on each descendant, so one flip runs this once per view.
+    /// Never build or re-parent views here.
+    func applyTokens()
 }

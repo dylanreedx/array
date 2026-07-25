@@ -13,7 +13,25 @@ final class FlippedStackView: NSStackView {
 
 @MainActor
 final class ManagedAgentTileNSView: TileNSView {
-    private let header = NSStackView()
+    /// P1.9: the three views this tile paints layer fills on are stored so
+    /// `applyTokens()` can re-assign them on an appearance change. `wantsLayer` is
+    /// set here, at construction, so `applyTokens()` is order-independent — it runs
+    /// once from `TileNSView.init`, before these are placed in the tree.
+    private let contentBackdrop: NSView = {
+        let view = NSView()
+        view.wantsLayer = true
+        return view
+    }()
+    private let composeBackdrop: NSView = {
+        let view = NSView()
+        view.wantsLayer = true
+        return view
+    }()
+    private let header: NSStackView = {
+        let stack = NSStackView()
+        stack.wantsLayer = true
+        return stack
+    }()
     private let glyphLabel = NSTextField(labelWithString: "")
     private let nameLabel = NSTextField(labelWithString: "")
     private let phaseLabel = NSTextField(labelWithString: "")
@@ -97,10 +115,17 @@ final class ManagedAgentTileNSView: TileNSView {
         scrollTranscriptToBottom()
     }
 
+    /// This tile's own layer fills, on top of the base tile's (P1.9). Values are
+    /// still the shipped dark literals — P1.10 swaps them for `DesignTokens`.
+    override func applyTokens() {
+        super.applyTokens()
+        contentBackdrop.layer?.backgroundColor = NSColor(red: 0.08, green: 0.10, blue: 0.13, alpha: 1).cgColor
+        header.layer?.backgroundColor = NSColor(red: 0.11, green: 0.13, blue: 0.16, alpha: 1).cgColor
+        composeBackdrop.layer?.backgroundColor = NSColor(red: 0.11, green: 0.13, blue: 0.16, alpha: 1).cgColor
+    }
+
     private func makeContentView() -> NSView {
-        let root = NSView()
-        root.wantsLayer = true
-        root.layer?.backgroundColor = NSColor(red: 0.08, green: 0.10, blue: 0.13, alpha: 1).cgColor
+        let root = contentBackdrop
 
         configureHeader()
 
@@ -206,8 +231,6 @@ final class ManagedAgentTileNSView: TileNSView {
         header.alignment = .centerY
         header.spacing = 10
         header.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
-        header.wantsLayer = true
-        header.layer?.backgroundColor = NSColor(red: 0.11, green: 0.13, blue: 0.16, alpha: 1).cgColor
         header.addArrangedSubview(glyphLabel)
         header.addArrangedSubview(textStack)
         header.addArrangedSubview(NSView())
@@ -215,9 +238,7 @@ final class ManagedAgentTileNSView: TileNSView {
     }
 
     private func makeComposeRow() -> NSView {
-        let row = NSView()
-        row.wantsLayer = true
-        row.layer?.backgroundColor = NSColor(red: 0.11, green: 0.13, blue: 0.16, alpha: 1).cgColor
+        let row = composeBackdrop
 
         composeField.placeholderString = "Send a prompt to the agent…"
         composeField.font = .systemFont(ofSize: 12)

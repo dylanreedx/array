@@ -25,6 +25,15 @@ final class TerminalTileNSView: TileNSView {
 
     override var contentTopInsetWorldHeight: CGFloat { chromeBarHeight }
 
+    /// P1.9: the terminal owns this tile's body colour (it comes from the Ghostty
+    /// theme, not from the tile default), so it has to re-assert it after the base
+    /// class re-applies — otherwise an appearance change repaints a themed terminal
+    /// with the generic tile fill.
+    override func applyTokens() {
+        super.applyTokens()
+        applyThemeBackground(runtime.resolvedThemeSnapshot.backgroundColor)
+    }
+
     private func applyThemeBackground(_ color: NSColor?) {
         guard let color else { return }
         layer?.backgroundColor = color.cgColor

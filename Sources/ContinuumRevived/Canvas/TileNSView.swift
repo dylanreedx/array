@@ -8,7 +8,7 @@ import Foundation
 /// content (terminal interaction, browser, etc.). The 8px ring around the
 /// edges is a resize affordance.
 @MainActor
-class TileNSView: NSView {
+class TileNSView: NSView, TokenThemed {
     struct ChromeSnapshot: Equatable {
         var title: String
         var agentStatus: AgentStatus?
@@ -126,8 +126,7 @@ class TileNSView: NSView {
         self.agentStatus = nil
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor(white: 0.10, alpha: 1.0).cgColor
-        layer?.borderColor = NSColor(white: 0.25, alpha: 1.0).cgColor
+        applyTokens()
         layer?.borderWidth = 1
         layer?.cornerRadius = 6
         layer?.masksToBounds = true
@@ -151,6 +150,24 @@ class TileNSView: NSView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
+    }
+
+    /// P1.9: every layer colour this view owns, assigned from scratch. Subclasses
+    /// override and call `super` — a subclass that paints the tile body from
+    /// somewhere else (the terminal's theme background) must re-assert it here or
+    /// the next appearance change puts this default back.
+    ///
+    /// The values are still the shipped dark-only literals: adopting `DesignTokens`
+    /// is P1.10's job (they are the P1.7 allowlist entries it owns). What changes
+    /// here is only WHEN they are assigned.
+    func applyTokens() {
+        layer?.backgroundColor = NSColor(white: 0.10, alpha: 1.0).cgColor
+        layer?.borderColor = NSColor(white: 0.25, alpha: 1.0).cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
     }
 
     private func installCornerOverlay() {
@@ -653,7 +670,7 @@ class TileNSView: NSView {
 /// than `hitTest = nil` fall-through because it is independent of subview
 /// ordering and `super.hitTest` walking semantics.
 @MainActor
-private final class TitleBarView: NSView {
+private final class TitleBarView: NSView, TokenThemed {
     var tile: Tile { didSet { needsDisplay = true } }
     var agentStatus: AgentStatus? { didSet { needsDisplay = true } }
     var agentStatusErrorMessage: String? { didSet { toolTip = agentStatusErrorMessage } }
@@ -704,13 +721,22 @@ private final class TitleBarView: NSView {
 
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor(white: 0.16, alpha: 1.0).cgColor
+        applyTokens()
 
         btn.target = self
         btn.action = #selector(handleClose(_:))
         btn.translatesAutoresizingMaskIntoConstraints = true
         btn.autoresizingMask = []
         addSubview(btn)
+    }
+
+    func applyTokens() {
+        layer?.backgroundColor = NSColor(white: 0.16, alpha: 1.0).cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
     }
 
     /// Set the close button's edge length (world units) and glyph point size.
@@ -907,7 +933,7 @@ private final class TitleBarView: NSView {
 /// TileNSView. Tracking areas use `.inVisibleRect` so we don't churn them
 /// every frame during a drag-resize.
 @MainActor
-private final class CornerOverlayView: NSView {
+private final class CornerOverlayView: NSView, TokenThemed {
     private var cornerLayers: [ResizeEdge: CAShapeLayer] = [:]
     private var cornerAreas: [NSTrackingArea] = []
 
@@ -917,17 +943,30 @@ private final class CornerOverlayView: NSView {
         let corners: [ResizeEdge] = [.topLeft, .topRight, .bottomLeft, .bottomRight]
         for corner in corners {
             let shape = CAShapeLayer()
-            shape.strokeColor = NSColor(white: 0.85, alpha: 1.0).cgColor
-            shape.fillColor = NSColor.clear.cgColor
             shape.lineWidth = 1.5
             shape.lineCap = .round
             shape.opacity = 0
             layer?.addSublayer(shape)
             cornerLayers[corner] = shape
         }
+        applyTokens()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    /// The bracket colours live on sublayers, not on `layer` — same rule: they are
+    /// resolved CGColors and nothing else re-assigns them.
+    func applyTokens() {
+        for shape in cornerLayers.values {
+            shape.strokeColor = NSColor(white: 0.85, alpha: 1.0).cgColor
+            shape.fillColor = NSColor.clear.cgColor
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
+    }
 
     override var isFlipped: Bool { true }
 

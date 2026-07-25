@@ -14,7 +14,7 @@ struct WorkspaceTopBarModel: Equatable {
 }
 
 @MainActor
-final class WorkspaceTopBarView: NSView {
+final class WorkspaceTopBarView: NSView, TokenThemed {
     private let nameLabel: NSTextField
     private let countsLabel: NSTextField
     private let saveStateLabel: NSTextField
@@ -85,7 +85,7 @@ final class WorkspaceTopBarView: NSView {
         super.init(frame: frameRect)
 
         wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.96).appResolvedCGColor
+        applyTokens()
         setAccessibilityIdentifier("ContinuumWorkspaceTopBarRoot")
 
         nameLabel.setAccessibilityIdentifier("ContinuumWorkspaceTopBarName")
@@ -141,6 +141,17 @@ final class WorkspaceTopBarView: NSView {
 
     required init?(coder: NSCoder) {
         nil
+    }
+
+    /// P1.9: see `WorkspaceSidebarView.applyTokens()` — same system fill, same
+    /// reason it has to be re-assigned rather than snapshotted at `init`.
+    func applyTokens() {
+        layer?.backgroundColor = NSColor.windowBackgroundColor.appResolvedCGColor(alpha: 0.96)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
     }
 
     func reload(_ model: WorkspaceTopBarModel) {

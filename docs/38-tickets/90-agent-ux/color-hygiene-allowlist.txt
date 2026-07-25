@@ -200,10 +200,10 @@ Sources/ContinuumRevived/Canvas/ManagedAgentTileNSView.swift:1:nameLabel.textCol
 Sources/ContinuumRevived/Canvas/ManagedAgentTileNSView.swift:1:phaseLabel.textColor = .secondaryLabelColor
 
 # hardcoded dark-only fill literal · owner: P1.10
-Sources/ContinuumRevived/Canvas/ManagedAgentTileNSView.swift:1:root.layer?.backgroundColor = NSColor(red: 0.08, green: 0.10, blue: 0.13, alpha: 1).cgColor
+Sources/ContinuumRevived/Canvas/ManagedAgentTileNSView.swift:1:contentBackdrop.layer?.backgroundColor = NSColor(red: 0.08, green: 0.10, blue: 0.13, alpha: 1).cgColor
 
 # hardcoded dark-only fill literal · owner: P1.10
-Sources/ContinuumRevived/Canvas/ManagedAgentTileNSView.swift:1:row.layer?.backgroundColor = NSColor(red: 0.11, green: 0.13, blue: 0.16, alpha: 1).cgColor
+Sources/ContinuumRevived/Canvas/ManagedAgentTileNSView.swift:1:composeBackdrop.layer?.backgroundColor = NSColor(red: 0.11, green: 0.13, blue: 0.16, alpha: 1).cgColor
 
 # hardcoded dark-only fill literal · owner: P1.10
 Sources/ContinuumRevived/Canvas/NoteTileNSView.swift:1:tv.backgroundColor = NSColor(white: 0.10, alpha: 1.0)

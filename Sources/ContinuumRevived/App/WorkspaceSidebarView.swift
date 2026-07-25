@@ -11,7 +11,7 @@ enum WorkspaceSidebarSelection: Equatable {
 }
 
 @MainActor
-final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate {
+final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate, TokenThemed {
     private struct ZoneItemKey: Hashable {
         let workspaceId: UUID
         let zoneId: UUID
@@ -127,7 +127,7 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         super.init(frame: frameRect)
 
         wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.92).appResolvedCGColor
+        applyTokens()
         setAccessibilityIdentifier("ContinuumWorkspaceSidebarRoot")
         createButton.setAccessibilityIdentifier("ContinuumWorkspaceSidebarCreate")
         renameButton.setAccessibilityIdentifier("ContinuumWorkspaceSidebarRename")
@@ -173,6 +173,18 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
 
     required init?(coder: NSCoder) {
         return nil
+    }
+
+    /// P1.9: the panel fill is a system colour, so its resolved value genuinely
+    /// differs per appearance — assigning it once at `init` is what left the
+    /// sidebar light while the text went white. Re-applied on every flip.
+    func applyTokens() {
+        layer?.backgroundColor = NSColor.windowBackgroundColor.appResolvedCGColor(alpha: 0.92)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
     }
 
     func reload(tree: SidebarTree, currentWorkspaceId: UUID?, selectedZoneId: UUID? = nil, selectedTileId: UUID? = nil) {

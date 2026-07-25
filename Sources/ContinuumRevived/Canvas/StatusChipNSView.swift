@@ -57,10 +57,8 @@ final class StatusChipNSView: NSView {
     /// fill must NOT use this: under Aqua it would hand back the light variant
     /// and reproduce the black-on-dark bug, so those resolve `.dark` explicitly.
     static func dynamicNSColor(_ token: TokenColor) -> NSColor {
-        NSColor(name: nil) { appearance in
-            let theme: TokenTheme = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .dark : .light
-            return nsColor(token.resolved(for: theme))
-        }
+        // P1.9 owns the one NSAppearance → TokenTheme mapping (`tokenTheme`).
+        NSColor(name: nil) { appearance in nsColor(token.resolved(for: appearance.tokenTheme)) }
     }
 
     /// The one ChipColor→NSColor bridge on this side. Internal rather than

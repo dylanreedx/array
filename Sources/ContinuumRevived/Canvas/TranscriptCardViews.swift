@@ -3,19 +3,21 @@ import ContinuumRevivedCore
 import Foundation
 
 @MainActor
-final class TranscriptCardView: NSView {
+final class TranscriptCardView: NSView, TokenThemed {
     private let titleLabel = NSTextField(labelWithString: "")
     private let bodyLabel = NSTextField(wrappingLabelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "")
+    /// P1.9: the fill is keyed on the kind, so re-applying it on an appearance
+    /// change needs the kind kept, not just consumed in `init`.
+    private var cardKind: ManagedTranscriptCardKind
 
     init(card: ManagedTranscriptCard) {
+        self.cardKind = card.kind
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = 8
         layer?.borderWidth = 1
-        // separatorColor@0.45 rendered at ~1.1:1 on these fills — invisible.
-        layer?.borderColor = NSColor(white: 1, alpha: 0.14).cgColor
-        layer?.backgroundColor = Self.background(for: card.kind).cgColor
+        applyTokens()
 
         titleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
         titleLabel.textColor = .labelColor
@@ -54,7 +56,20 @@ final class TranscriptCardView: NSView {
         fatalError("init(coder:) is not supported")
     }
 
+    func applyTokens() {
+        // separatorColor@0.45 rendered at ~1.1:1 on these fills — invisible.
+        layer?.borderColor = NSColor(white: 1, alpha: 0.14).cgColor
+        layer?.backgroundColor = Self.background(for: cardKind).cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
+    }
+
     func apply(_ card: ManagedTranscriptCard) {
+        cardKind = card.kind
+        applyTokens()
         titleLabel.stringValue = Self.title(for: card)
         bodyLabel.stringValue = card.body.isEmpty ? Self.bodyFallback(for: card) : card.body
         statusLabel.stringValue = Self.statusText(for: card)

@@ -243,5 +243,10 @@ struct UIProbe {
             throw fail("probing mutated NSApp.appearance to '\(NSApp.appearance?.name.rawValue ?? "nil")'")
         }
         print("UIProbe: probed \(probed) card/appearance pairs; \(appearanceSensitiveEntryIds.count) appearance-difference witnesses held; layer witness luminance aqua=\(String(format: "%.3f", lightLuminance)) darkAqua=\(String(format: "%.3f", darkLuminance))")
+
+        // P1.9: the probe can deliver an appearance — now assert the views FOLLOW
+        // one when it moves at runtime. Same leg, because this asserts the
+        // mechanism, not a colour value.
+        try UIProbeAppearance.runAppearanceChecks()
     }
 }
