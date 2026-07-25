@@ -60,8 +60,22 @@ All Phase 0 tickets are tagged `autonomous`.
 | 48 | `P2D.4-parent-child-nesting.md` | P2D.3, P3.6 |
 | 49 | `P2D.5-child-rollup.md` | P2D.4, P4.2 |
 | 50 | `P2D.6-fan-out.md` | P2D.5 |
+| 51 | `P3.1-inbox-row-model.md` | P2B.3 |
+| 52 | `P3.2-five-states-three-colours.md` | P3.1, P1.8 |
+| 53 | `P3.3-attention-axis.md` | P3.2 |
+| 54 | `P3.4-frozen-sort.md` | P3.1 |
+| 55 | `P3.5-in-flight-fade.md` | P3.2, P3.3 |
+| 56 | `P3.6-inbox-list-view.md` | P3.4, P3.5, P1.10 |
+| 57 | `P3.7-slim-rows.md` | P3.6 |
+| 58 | `P3.8-scope-dropdown.md` | P3.6 |
+| 59 | `P3.9-reveal-on-click.md` | P3.6, P2A.5 |
+| 60 | `P3.10-jump-shortcuts.md` | P3.6 |
+| 61 | `P3.11-multi-select-bulk.md` | P3.6 |
+| 62 | `P3.12-row-context-menu.md` | P3.11 |
+| 63 | `P3.13-inline-rename.md` | P3.6 |
+| 64 | `P3.14-preserve-workspace-management.md` | P3.8 |
 
-Phases 0, 1, 2A, 2B and 2C are authored. 2C (worktrees) MUST precede 2D (orchestration): parallel agents without isolation corrupt each other. Phase 2D is authored. Phases 3–9 are authored during the run.
+Phases 0, 1, 2A, 2B and 2C are authored. 2C (worktrees) MUST precede 2D (orchestration): parallel agents without isolation corrupt each other. Phases 2D and 3 are authored. Phases 4–9 are authored during the run.
 
 Note: P2D.4/P2D.5 depend on Phase 3 (inbox rows) and Phase 4 (blocker precedence), so the loop will correctly skip them until those land — that is intended, not a stall. and appended here as they land. Full backlog shape lives in
 the session plan; see `_RUNBOOK.md` for the operating contract.
