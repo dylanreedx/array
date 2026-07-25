@@ -65,22 +65,27 @@ func runPiExecutableResolutionChecks() {
 func runPiSessionArgsChecks() {
     typealias Runner = PiAgentRunner
 
+    // P0.10: the model is the fully-qualified id from AgentModelConfig (no fuzzy
+    // matching), and the thinking level is passed explicitly.
+    let model = AgentModelConfig.defaultModel
+    let thinking = AgentModelConfig.defaultThinking
+
     let withSession = Runner.processArguments(
-        model: "openai-codex/gpt-5.6", sessionId: "continuum-TILE", extraArgs: [], prompt: "hi")
-    expect(withSession == ["-p", "--mode", "json", "--model", "openai-codex/gpt-5.6",
+        model: model, thinking: thinking, sessionId: "continuum-TILE", extraArgs: [], prompt: "hi")
+    expect(withSession == ["-p", "--mode", "json", "--model", model, "--thinking", thinking,
                            "--session-id", "continuum-TILE", "hi"],
-           "processArguments(session): must pass --session-id for continuity, got \(withSession)")
+           "processArguments(session): must pass --model/--thinking then --session-id for continuity, got \(withSession)")
 
     let ephemeral = Runner.processArguments(
-        model: "openai-codex/gpt-5.6", sessionId: nil, extraArgs: [], prompt: "hi")
-    expect(ephemeral == ["-p", "--mode", "json", "--model", "openai-codex/gpt-5.6",
+        model: model, thinking: thinking, sessionId: nil, extraArgs: [], prompt: "hi")
+    expect(ephemeral == ["-p", "--mode", "json", "--model", model, "--thinking", thinking,
                          "--no-session", "hi"],
            "processArguments(nil): must be ephemeral --no-session, got \(ephemeral)")
 
     // Prompt is always last (Pi treats the trailing positional as the prompt);
     // extras slot between the session flag and the prompt.
     let withExtras = Runner.processArguments(
-        model: "m", sessionId: "s", extraArgs: ["--tools", "read"], prompt: "do it")
+        model: "m", thinking: "low", sessionId: "s", extraArgs: ["--tools", "read"], prompt: "do it")
     expect(withExtras.last == "do it" && withExtras.contains("--tools"),
            "processArguments(extras): prompt stays last, extras included, got \(withExtras)")
 

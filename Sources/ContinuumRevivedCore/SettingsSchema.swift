@@ -208,6 +208,18 @@ public enum SettingsSchema {
                 title: "Agents",
                 iconSystemName: "bell.badge",
                 fields: [
+                    .choice(
+                        key: AgentModelConfig.modelKey,
+                        label: "Agent Model",
+                        options: AgentModelConfig.modelOptions,
+                        default: AgentModelConfig.defaultModel
+                    ),
+                    .choice(
+                        key: AgentModelConfig.thinkingKey,
+                        label: "Agent Reasoning Effort",
+                        options: AgentModelConfig.thinkingOptions,
+                        default: AgentModelConfig.defaultThinking
+                    ),
                     .info(label: "Choose which agent events send a push notification. Security alerts always notify."),
                     .toggle(key: PersistedPushCategoryPreferences.key(for: .approvalRequested), label: "Approval Requests", default: PushCategory.approvalRequested.defaultEnabled),
                     .toggle(key: PersistedPushCategoryPreferences.key(for: .agentWaitingForInput), label: "Waiting for Input", default: PushCategory.agentWaitingForInput.defaultEnabled),

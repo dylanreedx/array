@@ -23,6 +23,9 @@ import Foundation
 public final class PiAgentRunner: @unchecked Sendable {
     public struct Config: Sendable {
         public var model: String
+        /// Pi `--thinking` level. Explicit for the same reason `model` is: the
+        /// provider's implicit default is not ours to guess.
+        public var thinking: String
         public var cwd: URL
         /// Stable Pi session id. When set, every prompt runs `--session-id <id>`
         /// so turns CONTINUE the same conversation (memory across prompts); Pi
@@ -30,11 +33,20 @@ public final class PiAgentRunner: @unchecked Sendable {
         /// `--no-session` (ephemeral, one-shot) — used by the smoke harness.
         public var sessionId: String?
         /// Extra args before the prompt. The runner always adds
-        /// `-p --mode json <model>` and the session flag.
+        /// `-p --mode json <model> --thinking <level>` and the session flag.
         public var extraArgs: [String]
 
-        public init(model: String = "openai-codex/gpt-5.6", cwd: URL, sessionId: String? = nil, extraArgs: [String] = []) {
+        /// `model`/`thinking` default from `AgentModelConfig` (Settings ▸ Agents),
+        /// so changing the picker changes what the next prompt spawns.
+        public init(
+            model: String = AgentModelConfig.resolvedFromDefaults().model,
+            thinking: String = AgentModelConfig.resolvedFromDefaults().thinking,
+            cwd: URL,
+            sessionId: String? = nil,
+            extraArgs: [String] = []
+        ) {
             self.model = model
+            self.thinking = thinking
             self.cwd = cwd
             self.sessionId = sessionId
             self.extraArgs = extraArgs
@@ -44,9 +56,9 @@ public final class PiAgentRunner: @unchecked Sendable {
     /// The Pi args after the executable (and any `/usr/bin/env` prefix): the
     /// json/model flags, the session flag, extras, then the prompt. Pure so it
     /// can be pinned in the matrix.
-    public static func processArguments(model: String, sessionId: String?, extraArgs: [String], prompt: String) -> [String] {
+    public static func processArguments(model: String, thinking: String, sessionId: String?, extraArgs: [String], prompt: String) -> [String] {
         let sessionArgs = sessionId.map { ["--session-id", $0] } ?? ["--no-session"]
-        return ["-p", "--mode", "json", "--model", model] + sessionArgs + extraArgs + [prompt]
+        return ["-p", "--mode", "json", "--model", model, "--thinking", thinking] + sessionArgs + extraArgs + [prompt]
     }
 
     public enum RunError: Error {
@@ -153,6 +165,7 @@ public final class PiAgentRunner: @unchecked Sendable {
         process.executableURL = URL(fileURLWithPath: command.executable)
         process.arguments = command.prefixArgs + Self.processArguments(
             model: config.model,
+            thinking: config.thinking,
             sessionId: config.sessionId,
             extraArgs: config.extraArgs,
             prompt: prompt

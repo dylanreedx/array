@@ -6314,6 +6314,8 @@ do {
         TerminalScrollConfig.lineMultiplierKey,
         WorkspaceSidebarConfig.visibleKey,
         WorkspaceSidebarConfig.widthKey,
+        AgentModelConfig.modelKey,
+        AgentModelConfig.thinkingKey,
         // WorkspaceProfileConfig.defaultCaptureModeKey and defaultApplyModeKey are
         // intentionally excluded: captureMode/applyMode have no behavioral effect yet
         // (WorkspaceDocument is layout-only; T13 session-state is in ProjectStore sibling
@@ -9931,6 +9933,9 @@ runStatusChipChecks()
 runPiEventTranslatorChecks()
 runPiExecutableResolutionChecks()
 runPiSessionArgsChecks()
+
+// Ticket: docs/38-tickets/90-agent-ux/P0.10-explicit-model-id.md
+runAgentModelConfigChecks()
 runAgentRuntimeEventRemapChecks()
 runManagedAgentActivityBridgeChecks()
 
