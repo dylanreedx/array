@@ -213,6 +213,11 @@ run_app_check .build/debug/continuum-revived --agent-restore-check
 # that is gone; `currentManagedAgentActivities()` publishes both with no canvas
 # and no workspace runtime (observer-independence, P2B.8).
 run_app_check .build/debug/continuum-revived --cross-project-agents-check
+# P2B.4: the sidebar tree, the canvas tile badge + zone rollup, the dock attention
+# count and the companion payload all read ONE `ActivityLogSnapshot`. Five agents
+# across two projects (one managed, one headless, one shell that is not an agent)
+# agree after a single `applyObserverStatuses`, and a flipped status moves all four.
+run_app_check .build/debug/continuum-revived --agent-inventory-wiring-check
 run_app_check .build/debug/continuum-revived --keybind-edit-check
 run_app_check .build/debug/continuum-revived --browser-url-focus-check
 run_app_check .build/debug/continuum-revived --browser-ui-delegate-check

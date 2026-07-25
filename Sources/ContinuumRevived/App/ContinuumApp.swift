@@ -1088,6 +1088,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--agent-inventory-wiring-check") {
+            do {
+                _ = NSApplication.shared
+                try AppDelegate.runAgentInventoryWiringChecks()
+                print("ContinuumRevivedAgentInventoryWiringChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--settings-panel-check") {
             do {
                 _ = NSApplication.shared
@@ -2774,6 +2786,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     // P2A.8: keyed by agent id, not tile id — an agent's timeline must survive its
     // tile closing, and a headless agent has no tile to key on.
     private var managedAgentActivityByAgent: [UUID: [AgentActivityEventDraft]] = [:]
+    /// P2B.4: THE snapshot. Four surfaces used to derive "agent status" for
+    /// themselves — the sidebar tree, the canvas badges + zone rollups, the dock
+    /// attention count and the companion payload — and they could disagree,
+    /// because each read a different subset through a different filter. They now
+    /// all read this one value, rebuilt by `rebuildAgentActivitySnapshot()`.
+    private var agentActivity = AgentActivitySurface()
+    /// Coalesces rebuilds on the runner event path. `recordManagedActivity` is
+    /// called per streamed token, and a rebuild walks every project's store —
+    /// debounced exactly like `scheduleCompanionSyncPublish`.
+    private var agentSurfaceRefreshDebounceWorkItem: DispatchWorkItem?
     private var profilePalette: LaunchProfilePalette?
     private var paletteContextTileId: UUID?
     private var settingsPanel: SettingsPanel?
@@ -3057,7 +3079,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // tiles are cleared and zone rollups stay derived from one source.
             workspaceRuntime?.activeController?.onAgentStatusWritten = { [weak self] _, _ in
                 guard let self else { return }
-                self.applyObserverStatuses(self.currentObservedAgentStatusesByTileId())
+                // P2B.4: no status map is passed here any more — the rebuild reads
+                // every project's persisted descriptors itself, which is exactly what
+                // the map this used to compute contained.
+                self.refreshAgentSurfaces()
                 self.scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "agent-status", debounce: 1.0)
             }
             // Ticket 86: canvas mutations publish too — the relay delivers
@@ -3125,7 +3150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
 
             try projectStore.saveCanvas(canvasView.canvasState)
-            refreshAgentAttentionSurface(notify: false)
+            refreshAgentSurfaces(notify: false)
 
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
@@ -3855,7 +3880,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasView.removeTile(id: id)
         recoverFocusAfterTileRemoval(deletedTileId: id, in: canvasView)
         flushCanvasSave()
-        refreshAgentAttentionSurface()
+        refreshAgentSurfaces()
     }
 
     private func killTmuxWindowForDeletedTerminalTile(tileId: UUID) {
@@ -3939,7 +3964,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             records.append(found.record)
         }
 
-        return records.map { record in
+        var activities = records.map { record in
             let status = (canvasView?.tileView(for: record.tileId) as? ManagedAgentTileNSView)?.currentAgentStatus
                 ?? Self.agentStatus(for: record.status)
             // P2A.8: the aggregate key is the agent's. A managed session with no
@@ -3956,6 +3981,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 recentEvents: managedAgentActivityByAgent[agentId] ?? []
             )
         }
+
+        // P2B.4: and the agents the SUPERVISOR owns (P2A.2/P2A.6) — headless ones,
+        // and ones that outlived the tile they were spawned in. They have no legacy
+        // `ManagedAgentSessionRecord` and so reached no consumer at all before this:
+        // the loop above lists files on disk, and `AgentStore` is a different store.
+        // Appended, never overriding, so a supervised agent that ALSO has a legacy
+        // record keeps the status the loop above reads off its live tile view.
+        //
+        // Projected onto `DesktopManagedAgentActivity` rather than passed as an
+        // `AgentRecord`: this value is one step from the sync boundary and a record
+        // is host-bound (`cwd`, `worktreeBranch`) — I5. The kind label is what the
+        // summary is built from, exactly as for a legacy record.
+        var seenAgentIds = Set(activities.map(\.agentId))
+        for record in agentSupervisor.records.values.sorted(by: AgentStore.isOrderedBefore)
+        where seenAgentIds.insert(record.id.rawValue).inserted {
+            // A tiled agent's live view is the freshest status it has. Headless, the
+            // supervisor still knows whether a prompt is in flight; without that a
+            // running headless agent would read `idle` for its whole turn.
+            //
+            // HONEST LIMIT, from the cross-review: `recordManagedActivity` is wired
+            // from the TILE's ingest, so a headless agent records no drafts, and
+            // `isRunning` cannot tell "working" from "waiting on an approval". A hand
+            // raised while headless is therefore not counted until a tile ingests it.
+            // Closing that needs an app-owned subscription to
+            // `agentSupervisor.events(for:)`, which is a change to the agent event
+            // plumbing this packet's `## Files` does not name and which P4.1's
+            // lifecycle state and `P5.10-agent-settled-signal` both land on.
+            let status = (record.tileId.flatMap { canvasView?.tileView(for: $0) } as? ManagedAgentTileNSView)?.currentAgentStatus
+                ?? (agentSupervisor.isRunning(record.id) ? .working : .idle)
+            activities.append(DesktopManagedAgentActivity(
+                agentId: record.id.rawValue,
+                tileId: record.tileId,
+                agentKind: .managed,
+                status: status,
+                updatedAt: record.lastActivityAt,
+                recentEvents: managedAgentActivityByAgent[record.id.rawValue] ?? []
+            ))
+        }
+        return activities
     }
 
     private static func agentStatus(for managedStatus: ManagedSessionStatus) -> AgentStatus {
@@ -3965,6 +4029,151 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case .stopped: return .idle
         case .error: return .needsAttention
         }
+    }
+
+    // MARK: - One agent-status derivation (P2B.4)
+
+    /// The one derivation's output: the inventory, plus which of its entries the
+    /// DESKTOP treats as an agent. Held together in one value so a consumer cannot
+    /// read a fresh snapshot against a stale membership set.
+    ///
+    /// THE INVARIANT, stated once so the two shapes below are not mistaken for two
+    /// derivations: `rebuildAgentActivitySnapshot()` is a PURE recomputation from
+    /// disk + canvas + the observer map, and it is the only thing that writes this
+    /// value. A READER (the nav cycle, a sidebar reload, the companion closure)
+    /// recomputes and then reads. A PUSHER (`refreshAgentSurfaces`) recomputes once
+    /// and hands that same value to all four surfaces. Either way no surface can be
+    /// looking at a status another surface would compute differently, which is the
+    /// property this ticket exists to establish.
+    struct AgentActivitySurface {
+        var snapshot: ActivityLogSnapshot = .empty
+        /// Agent identities the desktop shows a status for: every managed/supervised
+        /// agent, plus terminal sessions that actually carry an `AgentDescriptor`.
+        var agentIdentities: Set<UUID> = []
+    }
+
+    /// The replica the desktop stamps its own inventory with. Was a literal inside
+    /// the companion `activitySnapshot` closure; hoisted so the snapshot the desktop
+    /// holds IS the one that gets published, byte for byte, rather than a second one
+    /// built next to it.
+    private static let agentActivityReplicaId = UUID(uuidString: "75000000-0000-4000-8000-00000000D35A")!
+
+    /// Rebuilds `agentActivity` from `AgentInventory` (P2B.1) — the one fold over
+    /// terminal sessions and agents — and nothing else. Every consumer reads the
+    /// result; none of them re-derives a status.
+    ///
+    /// Inputs, in override order (last wins), which is exactly the order the four
+    /// old derivations used between them:
+    ///   1. each project's persisted `AgentDescriptor.status`;
+    ///   2. the live canvas tile view, for a tile that is rendering;
+    ///   3. `observedAgentStatuses`, the runtime observer's map.
+    private func rebuildAgentActivitySnapshot(now: Date = Date()) {
+        let registry = (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
+        let projectCanvases = workspaceSidebarProjectCanvasSnapshots(registry: registry)
+        let descriptors = currentTerminalSessionDescriptors(registry: registry, projectCanvases: projectCanvases)
+
+        var liveStatuses: [UUID: AgentStatus] = [:]
+        for descriptor in descriptors {
+            if let live = canvasView?.agentStatus(for: descriptor.tileId) {
+                liveStatuses[descriptor.tileId] = live
+            }
+        }
+        for (tileId, status) in observedAgentStatuses {
+            liveStatuses[tileId] = status
+        }
+
+        let managedAgents = currentManagedAgentActivities()
+        // A terminal session with no `AgentDescriptor` is a plain shell. It stays in
+        // the snapshot — the phone has always listed one, as `Shell idle` — but it is
+        // NOT an agent on the canvas or in the sidebar, where every shell tile would
+        // otherwise start rolling up as "1 unknown". Carried alongside the snapshot
+        // rather than re-derived per consumer, so the two cannot drift.
+        var agentIdentities = Set(managedAgents.map(\.agentId))
+        for descriptor in descriptors where descriptor.agentDescriptor != nil {
+            agentIdentities.insert(descriptor.tileId)
+        }
+
+        agentActivity = AgentActivitySurface(
+            snapshot: DegradedDesktopActivitySnapshotSource.snapshot(
+                descriptors: descriptors,
+                liveStatuses: liveStatuses,
+                managedAgents: managedAgents,
+                replicaId: Self.agentActivityReplicaId,
+                now: now
+            ),
+            agentIdentities: agentIdentities
+        )
+    }
+
+    /// Every terminal session descriptor that a canvas is actually holding a tile
+    /// for, from every project. The canvas filter is what the sidebar, the badges
+    /// and the dock each applied for themselves: a descriptor whose tile has been
+    /// deleted is a leftover file, not an agent. Deduped by tile, the active
+    /// project's own store first — it is the writer, so it can never be staler
+    /// than the files on disk.
+    private func currentTerminalSessionDescriptors(
+        registry: Registry,
+        projectCanvases: [UUID: CanvasState]
+    ) -> [TerminalSessionDescriptor] {
+        var terminalTileIds: Set<UUID> = []
+        for canvas in projectCanvases.values {
+            for tile in canvas.tiles where tile.kind == .terminal {
+                terminalTileIds.insert(tile.id)
+            }
+        }
+
+        var descriptors: [TerminalSessionDescriptor] = []
+        var seenTiles: Set<UUID> = []
+        func take(_ sessions: [TerminalSessionDescriptor]) {
+            for session in sessions.sorted(by: { $0.id.uuidString < $1.id.uuidString })
+            where terminalTileIds.contains(session.tileId) && seenTiles.insert(session.tileId).inserted {
+                descriptors.append(session)
+            }
+        }
+        take((try? projectStore?.listSessions()) ?? [])
+        // Sorted by project identity, not registry order: `AgentInventory` numbers
+        // events positionally, so an order that moved with the registry would
+        // renumber unrelated agents' events between two publishes (P2B.2's trap).
+        for project in registry.projects.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+            let store = ProjectStore(projectRoot: URL(fileURLWithPath: project.rootPath, isDirectory: true))
+            take((try? store.listSessions()) ?? [])
+        }
+        return descriptors
+    }
+
+    /// The snapshot, keyed by the tile that is showing each agent — what the
+    /// sidebar tree and the canvas badges both consume. Agents with no tile
+    /// (headless) simply have nothing to key on here; they still reach the dock
+    /// count and the phone.
+    private func agentStatusesByTileId() -> [UUID: AgentStatus] {
+        var statuses: [UUID: AgentStatus] = [:]
+        for row in AgentsBoardProjection.rows(from: agentActivity.snapshot)
+        where agentActivity.agentIdentities.contains(row.agentId) {
+            guard let tileId = row.tileId else { continue }
+            statuses[tileId] = row.status
+        }
+        return statuses
+    }
+
+    /// Rebuild once, then push that one value to all four surfaces.
+    private func refreshAgentSurfaces(notify: Bool = true) {
+        rebuildAgentActivitySnapshot()
+        applyAgentStatusesToCanvas()
+        updateAgentAttentionSurface(notify: notify)
+        reloadWorkspaceSidebar(rebuildAgentActivity: false)
+    }
+
+    /// Debounced `refreshAgentSurfaces`, for the runner event stream: a rebuild per
+    /// streamed token would walk every project's store per token.
+    private func scheduleAgentSurfaceRefresh(debounce: TimeInterval) {
+        agentSurfaceRefreshDebounceWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.agentSurfaceRefreshDebounceWorkItem = nil
+            self.refreshAgentSurfaces()
+        }
+        agentSurfaceRefreshDebounceWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + debounce, execute: workItem)
     }
 
     /// `TmuxControl` is async throughout (it may shell out to a real `tmux`
@@ -4646,32 +4855,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         focusHistory.recordTileFocus(nextId, zoneId: zoneContainingTile(nextId), reason: .directTileActivation)
     }
 
+    /// Nav-cycle order over the agent tiles ON THE CANVAS: z-order, which is a
+    /// navigation concern. The STATUS it filters on is no longer re-derived here —
+    /// it comes from the one snapshot (P2B.4), so ⌥-cycling and the badge on the
+    /// tile it lands on can no longer disagree.
     private func currentAgentTileIds(status: AgentStatus?) -> [UUID] {
         guard let canvasView else { return [] }
-        let currentTerminalTiles = canvasView.canvasState.tiles
+        // A keystroke, so it reads fresh — which is what the per-call
+        // `listSessions()` this replaced did too.
+        rebuildAgentActivitySnapshot()
+        let statuses = agentStatusesByTileId()
+        return canvasView.canvasState.tiles
             .filter { $0.kind == .terminal }
             .sorted { lhs, rhs in
                 if lhs.zPosition != rhs.zPosition { return lhs.zPosition < rhs.zPosition }
                 return lhs.id.uuidString < rhs.id.uuidString
             }
-        let currentTerminalTileIds = Set(currentTerminalTiles.map(\.id))
-        let agentSessions = ((try? projectStore?.listSessions()) ?? [])
-            .filter { currentTerminalTileIds.contains($0.tileId) && $0.agentDescriptor != nil }
-        var agentStatusByTileId: [UUID: AgentStatus] = [:]
-        for session in agentSessions {
-            guard agentStatusByTileId[session.tileId] == nil,
-                  let agentStatus = canvasView.agentStatus(for: session.tileId) ?? session.agentDescriptor?.status else { continue }
-            agentStatusByTileId[session.tileId] = agentStatus
-        }
-        return currentTerminalTiles.compactMap { tile in
-            guard let agentStatus = agentStatusByTileId[tile.id] else { return nil }
-            if let status, agentStatus != status { return nil }
-            return tile.id
-        }
+            .compactMap { tile in
+                guard let agentStatus = statuses[tile.id] else { return nil }
+                if let status, agentStatus != status { return nil }
+                return tile.id
+            }
     }
 
-    private func refreshAgentAttentionSurface(notify: Bool = true) {
-        let count = currentAgentTileIds(status: .needsAttention).count
+    /// The dock/attention surface, read off the snapshot and NOT off the canvas:
+    /// an agent in another project, or with no tile at all, raises its hand the
+    /// same way one on screen does.
+    private func updateAgentAttentionSurface(notify: Bool) {
+        let count = AgentsBoardProjection.attentionCount(from: agentActivity.snapshot)
         NSApplication.shared.dockTile.badgeLabel = Self.dockBadgeLabel(needsAttentionCount: count)
         if notify, Self.shouldNotifyNeedsAttention(previousCount: lastNeedsAttentionCount, newCount: count, appIsActive: NSApplication.shared.isActive) {
             deliverNeedsAttentionNotification(count: count)
@@ -4706,8 +4917,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             sessions[index].agentDescriptor = descriptor
             try? projectStore?.saveSession(sessions[index])
         }
-        refreshAgentAttentionSurface()
-        reloadWorkspaceSidebar()
+        // One rebuild, all four surfaces (P2B.4) — this was a dock refresh and a
+        // sidebar reload that each re-derived the status this method just wrote.
+        refreshAgentSurfaces()
     }
 
     private static func canvasBadgeStatus(_ status: AgentStatus?) -> AgentStatus? {
@@ -4740,22 +4952,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return sidebarRollups.mapValues(canvasRollup(from:))
     }
 
-    private func currentObservedAgentStatusesByTileId() -> [UUID: AgentStatus] {
-        guard let canvasView else { return [:] }
-        let activeTileIds = Set(canvasView.canvasState.tiles.map(\.id))
-        var statuses: [UUID: AgentStatus] = [:]
-        if let sessions = try? projectStore?.listSessions() {
-            for session in sessions where activeTileIds.contains(session.tileId) {
-                if let status = session.agentDescriptor?.status {
-                    statuses[session.tileId] = status
-                }
-            }
-        }
-        return statuses
+    /// The runtime observer's map is an INPUT to the one derivation (P2B.4), so it
+    /// is stored rather than pushed straight at the canvas: a later rebuild for any
+    /// other reason must see the same statuses this one did.
+    private func applyObserverStatuses(_ statuses: [UUID: AgentStatus]) {
+        observedAgentStatuses = statuses
+        refreshAgentSurfaces()
     }
 
-    private func applyObserverStatuses(_ statuses: [UUID: AgentStatus]) {
+    /// Canvas badges and zone rollups, from the snapshot.
+    private func applyAgentStatusesToCanvas() {
         guard let canvasView else { return }
+        let statuses = agentStatusesByTileId()
         for tile in canvasView.canvasState.tiles {
             canvasView.tileView(for: tile.id)?.agentStatus = Self.canvasBadgeStatus(statuses[tile.id])
         }
@@ -4767,8 +4975,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return updated
         }
         canvasView.updateZoneRenderModels(updatedModels)
-        refreshAgentAttentionSurface()
-        reloadWorkspaceSidebar()
     }
 
     private static func dockBadgeLabel(needsAttentionCount count: Int) -> String? {
@@ -5567,17 +5773,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     return (canvasView.canvasState, workspace)
                 }
             },
+            // P2B.4: the phone is published from the SAME value the desktop is
+            // showing. This closure used to build its own — the active project's
+            // sessions only, with its own status map — which is how a status could be
+            // on the phone and not in the sidebar, and vice versa.
+            //
+            // DELIBERATE DEVIATION from the packet's "returns it directly": it
+            // recomputes first, as a reader (see the invariant at
+            // `AgentActivitySurface`). Returning the stored value alone would publish
+            // `.empty` on the startup and pairing publishes, which run before any
+            // surface refresh has happened — the phone would show an empty inbox
+            // until something else moved. `--agent-inventory-wiring-check` gates that
+            // this closure holds NO derivation of its own.
             activitySnapshot: { [weak self] in
                 await MainActor.run {
                     guard let self else { return ActivityLogSnapshot.empty }
-                    let descriptors = (try? self.projectStore?.listSessions()) ?? []
-                    return DegradedDesktopActivitySnapshotSource.snapshot(
-                        descriptors: descriptors,
-                        liveStatuses: self.currentObservedAgentStatusesByTileId(),
-                        managedAgents: self.currentManagedAgentActivities(),
-                        replicaId: UUID(uuidString: "75000000-0000-4000-8000-00000000D35A")!,
-                        now: Date()
-                    )
+                    self.rebuildAgentActivitySnapshot()
+                    return self.agentActivity.snapshot
                 }
             },
             freshnessPublisher: DesktopCompanionLogFreshnessPublisher(),
@@ -5639,7 +5851,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let registeredObservedAgents = ((try? projectStore?.listSessions()) ?? [])
             .filter { $0.agentDescriptor != nil }
             .count
-        let liveObservedAgents = currentObservedAgentStatusesByTileId().count
+        // P2B.4: the observer's own map, which is what this field has always meant.
+        // It used to be recomputed here from the active project's sessions; that
+        // walk is now part of the one snapshot rebuild and not a diagnostic's job.
+        let liveObservedAgents = observedAgentStatuses.count
         let managedAgentSessions = ((try? workspaceRuntime?.activeController?.managedSessionStore.loadAll()) ?? [])
             .filter { $0.agentKind == .managed }
             .count
@@ -5832,15 +6047,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             documents[workspaceRuntime.workspaceId] = workspaceRuntime.document
         }
         let projectCanvases = workspaceSidebarProjectCanvasSnapshots(registry: registry)
-        var agentStatuses = workspaceSidebarAgentStatuses(registry: registry, projectCanvases: projectCanvases)
-        for (tileId, status) in observedAgentStatuses {
-            agentStatuses[tileId] = status
-        }
         return SidebarTreeBuilder.build(
             registry: registry,
             documents: documents,
             projectCanvases: projectCanvases,
-            agentStatusesByTileId: agentStatuses
+            // P2B.4: from the one snapshot. This used to be its own walk over every
+            // project's sessions with the observer map layered on top — a third
+            // reading of the same statuses the badges and the dock were computing
+            // separately, and the reason a tile could carry one status while its
+            // sidebar row carried another.
+            agentStatusesByTileId: agentStatusesByTileId()
         )
     }
 
@@ -5859,32 +6075,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return snapshots
     }
 
-    private func workspaceSidebarAgentStatuses(registry: Registry, projectCanvases: [UUID: CanvasState]) -> [UUID: AgentStatus] {
-        var statuses: [UUID: AgentStatus] = [:]
-        for project in registry.projects {
-            let store = ProjectStore(projectRoot: URL(fileURLWithPath: project.rootPath, isDirectory: true))
-            let terminalTileIds = Set((projectCanvases[project.id]?.tiles ?? []).compactMap { tile in
-                tile.kind == .terminal ? tile.id : nil
-            })
-            guard !terminalTileIds.isEmpty else { continue }
-            let sessions = (try? store.listSessions()) ?? []
-            for session in sessions where terminalTileIds.contains(session.tileId) {
-                if let status = session.agentDescriptor?.status {
-                    statuses[session.tileId] = status
-                }
-            }
-        }
-        if let canvasView {
-            for tile in canvasView.canvasState.tiles where tile.kind == .terminal {
-                if let liveStatus = canvasView.agentStatus(for: tile.id) {
-                    statuses[tile.id] = liveStatus
-                }
-            }
-        }
-        return statuses
-    }
-
-    private func reloadWorkspaceSidebar() {
+    /// `rebuildAgentActivity: false` is for `refreshAgentSurfaces`, which has just
+    /// rebuilt the snapshot and is pushing that same value at every surface —
+    /// rebuilding again here would walk every project's store a second time for a
+    /// result that cannot have changed. Every other caller (a rename, a zone edit, a
+    /// workspace switch) wants the fresh read the old per-reload walk gave it.
+    private func reloadWorkspaceSidebar(rebuildAgentActivity: Bool = true) {
+        if rebuildAgentActivity { rebuildAgentActivitySnapshot() }
         defer { reloadWorkspaceTopBar() }
         guard let sidebar = workspaceSidebarView else { return }
         do {
@@ -7746,6 +7943,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         managedAgentActivityByAgent[agentId.rawValue] = buffer
         scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "managed-agent-activity", debounce: 0.5)
+        // P2B.4: and the DESKTOP surfaces, which this path used to reach not at all —
+        // a managed agent raising its hand moved the phone and left the dock badge and
+        // the sidebar row where they were. Debounced on the same 0.5s as the publish,
+        // because this is called per streamed token.
+        scheduleAgentSurfaceRefresh(debounce: 0.5)
     }
 
     private func spawnBrowserDefault() {
@@ -8662,7 +8864,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ghostty_app_set_focus(app, true)
         }
         focusBroker.applicationDidBecomeActive()
-        refreshAgentAttentionSurface()
+        refreshAgentSurfaces()
     }
 
     func applicationDidResignActive(_ notification: Notification) {
@@ -8670,7 +8872,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ghostty_app_set_focus(app, false)
         }
         focusBroker.applicationDidResignActive()
-        refreshAgentAttentionSurface()
+        refreshAgentSurfaces()
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -9512,10 +9714,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try expect(observedNeedsAttentionStatus == .needsAttention, "observer path should push .needsAttention into the needs-attention tile view")
         try expect(observedPlainStatus == nil, "observer path should clear a plain tile absent from the status snapshot")
         try expect(observedRollupText == "1 working · 1 needs you", "observer path should update zone chrome rollup text from the live snapshot")
-        delegate.refreshAgentAttentionSurface(notify: false)
+        delegate.refreshAgentSurfaces(notify: false)
         try expect(NSApplication.shared.dockTile.badgeLabel == "1", "production refresh should count current needs-attention agent tiles")
         productionCanvas.removeTile(id: needsTileId)
-        delegate.refreshAgentAttentionSurface(notify: false)
+        delegate.refreshAgentSurfaces(notify: false)
         try expect(NSApplication.shared.dockTile.badgeLabel == nil, "production refresh should clear the dock badge after needs-attention tile removal")
 
         let models = try loadActiveZoneRenderModels(from: RegistryStore(applicationSupportDirectory: appSupport))
@@ -18020,5 +18222,345 @@ extension AppDelegate {
     )
     try expect(Set(snapshot.byAgent.keys) == Set([tileA, tileB]),
                "agents from every project reach the published inventory — got \(snapshot.byAgent.keys.sorted { $0.uuidString < $1.uuidString })")
+    }
+}
+
+/// Ticket: docs/38-tickets/90-agent-ux/P2B.4-feed-all-consumers.md
+/// Gated on `--agent-inventory-wiring-check`.
+///
+/// FOUR SURFACES, ONE REBUILD. The sidebar tree, the canvas tile badges, the dock
+/// attention count and the companion payload each used to derive "agent status"
+/// for itself, through a different filter over a different subset — so they could
+/// disagree, and did (a managed agent's raised hand reached the phone and left the
+/// dock badge alone). This drives the real `AppDelegate` methods those four
+/// surfaces are built from, ONCE, and asserts they all report the same thing.
+///
+/// Deliberately with NO workspace runtime and NO `ZoneRuntimeController`: the
+/// active project's store is unreachable here, so everything comes through the
+/// cross-project reads (P2B.2) and observer-independence (P2B.8) is witnessed
+/// again. The canvas exists, because the tile badge is one of the four consumers.
+///
+/// SEVEN NEGATIVE TESTS OBSERVED RED at exit 1 with the final code, one per
+/// consumer and one per input rule:
+///   1. `agentStatusesByTileId` filtered to tiles with an installed view (the old
+///      active-canvas filter) → `before the flip: agent …E2 is working in the
+///      companion payload but nil in the sidebar` — the packet's own regression
+///      witness, a status in the payload and absent from the sidebar.
+///   2. the dock back on `currentAgentTileIds(status: .needsAttention).count` →
+///      `the dock badge must be the snapshot's attention count — got nil`.
+///   3. the supervised-record append dropped from
+///      `currentManagedAgentActivities()` → `the published inventory must hold
+///      every agent — got [4 ids]` (the headless agent gone).
+///   4. `agentIdentities` taking every descriptor, not just the ones carrying an
+///      `AgentDescriptor` → `a terminal session with no AgentDescriptor is not an
+///      agent`.
+///   5. the canvas filter dropped from `currentTerminalSessionDescriptors` → the
+///      deleted tile's leftover descriptor (`…E9`) appears in the inventory.
+///   6. `observedAgentStatuses` dropped as an input → `the terminal agent's
+///      persisted status must reach the payload — got …stale`, which is also the
+///      proof that a persisted terminal status is never the live one.
+///   7. `applyAgentStatusesToCanvas` back on the raw observer map → `the zone
+///      rollup is derived from the same statuses — got working: 0`, the managed
+///      agent's status lost from the canvas surface.
+///   8. one `listSessions()` call put back inside the companion closure → `the
+///      companion closure must not build its own inventory — it names
+///      listSessions`.
+///
+/// HONEST LIMIT: "from ONE rebuild" is not asserted by counting rebuilds. It
+/// cannot be from here, and it is not the property that matters: the rebuild is a
+/// pure recomputation, so a consumer that recomputed again would agree anyway (see
+/// the invariant at `AgentActivitySurface`). What is measured is that the four
+/// surfaces AGREE, and — for the one consumer whose real path needs a live sync
+/// service to reach — that it holds no derivation of its own.
+extension AppDelegate {
+    static func runAgentInventoryWiringChecks() throws {
+    enum CheckError: Error, CustomStringConvertible {
+        case failed(String)
+        var description: String { switch self { case let .failed(message): return message } }
+    }
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+        if !condition() { throw CheckError.failed(message) }
+    }
+
+    let fm = FileManager.default
+    let tempRoot = fm.temporaryDirectory
+        .appendingPathComponent("continuum-agent-inventory-wiring-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: tempRoot) }
+    let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+    let agentsSupport = tempRoot.appendingPathComponent("Agents", isDirectory: true)
+    let projectARoot = tempRoot.appendingPathComponent("ProjectA", isDirectory: true)
+    let projectBRoot = tempRoot.appendingPathComponent("ProjectB", isDirectory: true)
+    for dir in [appSupport, agentsSupport, projectARoot, projectBRoot] {
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+
+    let now = Date(timeIntervalSince1970: 1_900_300_000)
+    let workspaceId = UUID(uuidString: "2B400000-0000-4000-8000-0000000000A1")!
+    let projectA = UUID(uuidString: "2B400000-0000-4000-8000-0000000000D1")!
+    let projectB = UUID(uuidString: "2B400000-0000-4000-8000-0000000000D2")!
+    let zoneA = UUID(uuidString: "2B400000-0000-4000-8000-0000000000C1")!
+    let zoneB = UUID(uuidString: "2B400000-0000-4000-8000-0000000000C2")!
+    // One terminal agent, one managed agent, one plain shell (NOT an agent), and a
+    // terminal agent in a second project — the four shapes the four consumers have
+    // to agree about.
+    let terminalAgentTile = UUID(uuidString: "2B400000-0000-4000-8000-0000000000E1")!
+    let managedAgentTile = UUID(uuidString: "2B400000-0000-4000-8000-0000000000E2")!
+    let shellTile = UUID(uuidString: "2B400000-0000-4000-8000-0000000000E3")!
+    let otherProjectAgentTile = UUID(uuidString: "2B400000-0000-4000-8000-0000000000E4")!
+    // A FACT THIS FIXTURE IS BUILT AROUND: `ProjectStore.listSessions()` returns
+    // every descriptor through `restoredForBoot()`, which forces
+    // `AgentDescriptor.status` to `.stale`. A persisted terminal status is therefore
+    // never the live one — which is why the runtime observer's map is an input to the
+    // rebuild, and why this check flips a terminal agent's status through
+    // `applyObserverStatuses`, the production entry point, rather than by rewriting a
+    // file. Cross-project terminal agents legitimately read `.stale`: nothing is
+    // observing them, and that is exactly what the sidebar showed for them before.
+
+    // MARK: 1 · the fixture, all of it on disk — nothing in this process wrote it
+    // through the app
+
+    let placementA = ZonePlacement(zoneId: zoneA, projectId: projectA, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 600, height: 400), color: "blue", collapsed: false, hydrationPolicy: .automatic)
+    let placementB = ZonePlacement(zoneId: zoneB, projectId: projectB, origin: ZonePoint(x: 1000, y: 0), size: ZoneSize(width: 600, height: 400), color: "green", collapsed: false, hydrationPolicy: .automatic)
+    var registry = Registry.empty()
+    registry.lastActiveWorkspaceId = workspaceId
+    registry.workspaces = [WorkspaceEntry(id: workspaceId, name: "Default", projectIds: [projectA, projectB], createdAt: now, updatedAt: now)]
+    registry.projects = [
+        ProjectEntry(id: projectA, name: "Project A", rootPath: projectARoot.path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false),
+        ProjectEntry(id: projectB, name: "Project B", rootPath: projectBRoot.path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false),
+    ]
+    let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+    try registryStore.save(registry)
+    try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport).save(
+        WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [placementA, placementB],
+            zoneZOrder: [zoneA, zoneB],
+            lastActiveZoneId: zoneA
+        )
+    )
+
+    let storeA = ProjectStore(projectRoot: projectARoot)
+    let canvasA = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [
+        Tile(id: terminalAgentTile, kind: .terminal, title: "Agent · Claude", frame: TileFrame(x: 0, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata()),
+        Tile(id: managedAgentTile, kind: .managedAgent, title: "Managed", frame: TileFrame(x: 220, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata()),
+        Tile(id: shellTile, kind: .terminal, title: "Shell", frame: TileFrame(x: 440, y: 0, width: 140, height: 120), zPosition: .fromLegacyRank(3), runtimeRef: nil, metadata: TileMetadata()),
+    ], groups: [], lastActiveTileId: terminalAgentTile)
+    try storeA.saveCanvas(canvasA)
+    func descriptor(id: UUID, tileId: UUID, root: URL, kind: AgentKind?, status: AgentStatus?) -> TerminalSessionDescriptor {
+        TerminalSessionDescriptor(
+            id: id, tileId: tileId, launchProfileId: "shell", command: "/bin/zsh", args: [], cwd: root.path,
+            env: [:], title: "session", createdAt: now, lastStartedAt: now, lastExit: nil,
+            agentDescriptor: kind.flatMap { kind in
+                status.map { AgentDescriptor(agentKind: kind, worktreePath: root.path, status: $0, statusUpdatedAt: now) }
+            }
+        )
+    }
+    let terminalSessionId = UUID(uuidString: "2B400000-0000-4000-8000-0000000000F1")!
+    try storeA.saveSession(descriptor(id: terminalSessionId, tileId: terminalAgentTile, root: projectARoot, kind: .claude, status: .working))
+    // A plain shell. It is a terminal session with NO `AgentDescriptor`, so it is
+    // not an agent on the desktop — see assertion 4.
+    try storeA.saveSession(descriptor(id: UUID(uuidString: "2B400000-0000-4000-8000-0000000000F2")!, tileId: shellTile, root: projectARoot, kind: nil, status: nil))
+    // Deliberately NOT on any canvas: a descriptor whose tile has been deleted is a
+    // leftover file, and every one of the four surfaces dropped it before this ticket.
+    try storeA.saveSession(descriptor(id: UUID(uuidString: "2B400000-0000-4000-8000-0000000000F3")!, tileId: UUID(uuidString: "2B400000-0000-4000-8000-0000000000E9")!, root: projectARoot, kind: .claude, status: .needsAttention))
+    // The managed agent, as a legacy per-project record (P2A.8 keys it by tile id).
+    try ManagedAgentSessionStore(projectRoot: projectARoot).upsert(ManagedAgentSessionRecord(
+        tileId: managedAgentTile, agentKind: .managed, status: .running, lastSeenAt: now
+    ))
+
+    // Another project's agent, with its hand up. A managed record, because that is a
+    // status that survives a read from disk. The dock badge could not see this before
+    // the one-snapshot wiring: it counted tiles on the ACTIVE canvas.
+    let storeB = ProjectStore(projectRoot: projectBRoot)
+    try storeB.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [
+        Tile(id: otherProjectAgentTile, kind: .managedAgent, title: "Agent · Codex", frame: TileFrame(x: 1000, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata()),
+    ], groups: [], lastActiveTileId: nil))
+    try ManagedAgentSessionStore(projectRoot: projectBRoot).upsert(ManagedAgentSessionRecord(
+        tileId: otherProjectAgentTile, agentKind: .managed, status: .error, lastSeenAt: now
+    ))
+
+    // A HEADLESS supervised agent (P2A.6): no tile, in `AgentStore`, with a raised
+    // hand on its recorded timeline. Before this ticket it reached no desktop
+    // surface at all — `currentManagedAgentActivities()` only ever listed files.
+    let headlessId = AgentID(rawValue: UUID(uuidString: "2B400000-0000-4000-8000-0000000000B1")!)
+    let agentStore = AgentStore(applicationSupportDirectory: agentsSupport)
+    try agentStore.upsert(AgentRecord(
+        id: headlessId,
+        displayName: "reviewer",
+        role: "reviewer",
+        model: "openai-codex/gpt-5.6-sol",
+        thinking: "medium",
+        cwd: projectARoot.path,
+        projectId: projectA,
+        createdAt: now,
+        lastActivityAt: now.addingTimeInterval(10)
+    ))
+
+    let app = AppDelegate()
+    app.registryStore = registryStore
+    // Assigned before first access, so the lazy default (which resolves the real
+    // Application Support root) is never constructed.
+    app.agentSupervisor = AgentSupervisor(store: agentStore, makeRunner: { _ in
+        ScriptedAgentRunner(script: [])
+    })
+    app.agentSupervisor.restore()
+    try expect(app.agentSupervisor.records[headlessId] != nil,
+               "the headless agent must be adopted, or the assertions below say nothing about it")
+    app.managedAgentActivityByAgent[headlessId.rawValue] = [AgentActivityEventDraft(
+        agentId: headlessId.rawValue,
+        tileId: nil,
+        runId: nil,
+        tone: .approval,
+        kind: "approval.requested",
+        status: .needsAttention,
+        summary: "reviewer needs attention",
+        occurredAt: now.addingTimeInterval(20),
+        approvalRequestId: "req-1"
+    )]
+
+    let canvas = CanvasNSView(
+        canvasState: canvasA,
+        activeZone: placementA,
+        zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: placementA, displayName: "Project A")]
+    )
+    for tile in canvasA.tiles where tile.kind == .terminal {
+        canvas.install(tileView: TileNSView(tile: tile), for: tile)
+    }
+    // No view for the managed tile ON PURPOSE: a freshly built
+    // `ManagedAgentTileNSView` reports `.configuring`, which would override its
+    // persisted record and make the fixture describe the view instead of the store.
+    app.canvasView = canvas
+
+    // MARK: 2 · ONE rebuild — through the production observer entry point — and all
+    // four surfaces read WITHOUT rebuilding again
+
+    app.applyObserverStatuses([terminalAgentTile: .working])
+    let snapshot = app.agentActivity.snapshot
+    let dockLabel = NSApplication.shared.dockTile.badgeLabel
+    let tree = try app.buildWorkspaceSidebarTree()
+
+    func treeRows(_ tree: SidebarTree) -> [UUID: SidebarTileRow] {
+        var rows: [UUID: SidebarTileRow] = [:]
+        for workspace in tree.workspaces {
+            for zone in workspace.zones {
+                for tile in zone.tiles { rows[tile.tileId] = tile }
+            }
+        }
+        return rows
+    }
+    var rows = treeRows(tree)
+    try expect(Set(rows.keys) == Set([terminalAgentTile, managedAgentTile, shellTile, otherProjectAgentTile]),
+               "the sidebar tree must hold every project's tiles, or an agreement assertion over it is vacuous — got \(rows.keys.count) row(s)")
+
+    // The companion payload: every agent, from both projects, tiled and headless.
+    try expect(Set(snapshot.byAgent.keys) == Set([terminalAgentTile, managedAgentTile, shellTile, otherProjectAgentTile, headlessId.rawValue]),
+               "the published inventory must hold every agent — got \(snapshot.byAgent.keys.sorted { $0.uuidString < $1.uuidString })")
+    try expect(snapshot.byAgent[terminalAgentTile]?.status == .working,
+               "the terminal agent's persisted status must reach the payload — got \(String(describing: snapshot.byAgent[terminalAgentTile]?.status))")
+    try expect(snapshot.byAgent[managedAgentTile]?.status == .working,
+               "the managed agent's record status must reach the payload — got \(String(describing: snapshot.byAgent[managedAgentTile]?.status))")
+    try expect(snapshot.byAgent[otherProjectAgentTile]?.status == .needsAttention,
+               "the other project's agent must reach the payload with its hand up — got \(String(describing: snapshot.byAgent[otherProjectAgentTile]?.status))")
+
+    // MARK: 3 · THE AGREEMENT. A status in the payload is a status in the sidebar,
+    // on the tile, and in the dock count — no consumer may be missing one.
+
+    func assertAgreement(_ snapshot: ActivityLogSnapshot, _ rows: [UUID: SidebarTileRow], _ label: String) throws {
+        for (agentId, activity) in snapshot.byAgent
+        where app.agentActivity.agentIdentities.contains(agentId) {
+            guard let tileId = activity.tileId else { continue }
+            guard let row = rows[tileId] else { continue }
+            try expect(row.agentStatus == activity.status,
+                       "\(label): agent \(agentId.uuidString) is \(activity.status) in the companion payload but \(String(describing: row.agentStatus)) in the sidebar")
+            // `canvasBadgeStatus` deliberately shows no badge for configuring/idle, so
+            // the tile is held to the badge the shared presenter derives from the same
+            // status — not to a second opinion about what that status is.
+            if let view = canvas.tileView(for: tileId) {
+                try expect(view.agentStatus == AppDelegate.canvasBadgeStatus(activity.status),
+                           "\(label): agent \(agentId.uuidString) is \(activity.status) in the payload but its tile badge is \(String(describing: view.agentStatus))")
+            }
+        }
+    }
+    try assertAgreement(snapshot, rows, "before the flip")
+    // Vacuity guard: the agreement loop above is only worth anything if it actually
+    // visited the tiled agents.
+    try expect(rows[terminalAgentTile]?.agentStatus == .working && rows[otherProjectAgentTile]?.agentStatus == .needsAttention,
+               "both projects' agents must carry their status in the sidebar — got \(String(describing: rows[terminalAgentTile]?.agentStatus)) / \(String(describing: rows[otherProjectAgentTile]?.agentStatus))")
+    try expect(canvas.agentStatus(for: terminalAgentTile) == .working,
+               "the tile badge must come from the same rebuild — got \(String(describing: canvas.agentStatus(for: terminalAgentTile)))")
+    // The dock counts the OTHER project's raised hand and the HEADLESS agent's, both
+    // of which the old canvas-filtered count could not see.
+    try expect(AgentsBoardProjection.attentionCount(from: snapshot) == 2,
+               "the attention count must include the other project's agent and the headless one — got \(AgentsBoardProjection.attentionCount(from: snapshot))")
+    try expect(dockLabel == "2", "the dock badge must be the snapshot's attention count — got \(String(describing: dockLabel))")
+    try expect(snapshot.byAgent[headlessId.rawValue]?.tileId == nil && rows[headlessId.rawValue] == nil,
+               "a headless agent has no tile and therefore no sidebar row — it reaches the dock and the phone, which is the point of P2A.6")
+
+    // MARK: 4 · a plain shell is IN the payload and is NOT an agent on the desktop
+
+    try expect(app.agentActivity.agentIdentities.contains(shellTile) == false,
+               "a terminal session with no AgentDescriptor is not an agent")
+    try expect(snapshot.byAgent[shellTile]?.status == .idle,
+               "the shell still reaches the phone as idle, exactly as it always has — got \(String(describing: snapshot.byAgent[shellTile]?.status))")
+    try expect(rows[shellTile]?.agentStatus == nil,
+               "a shell tile must carry NO sidebar status — every shell would otherwise roll up as unknown — got \(String(describing: rows[shellTile]?.agentStatus))")
+    try expect(canvas.agentStatus(for: shellTile) == nil,
+               "a shell tile must carry no badge — got \(String(describing: canvas.agentStatus(for: shellTile)))")
+
+    // MARK: 5 · FLIP ONE STATUS. One refresh, and all four move together.
+
+    app.applyObserverStatuses([terminalAgentTile: .needsAttention])
+    let flipped = app.agentActivity.snapshot
+    let flippedDockLabel = NSApplication.shared.dockTile.badgeLabel
+    rows = treeRows(try app.buildWorkspaceSidebarTree())
+
+    try expect(flipped.byAgent[terminalAgentTile]?.status == .needsAttention,
+               "the flip must reach the companion payload — got \(String(describing: flipped.byAgent[terminalAgentTile]?.status))")
+    try expect(rows[terminalAgentTile]?.agentStatus == .needsAttention,
+               "the flip must reach the sidebar row — got \(String(describing: rows[terminalAgentTile]?.agentStatus))")
+    try expect(canvas.agentStatus(for: terminalAgentTile) == .needsAttention,
+               "the flip must reach the tile badge — got \(String(describing: canvas.agentStatus(for: terminalAgentTile)))")
+    try expect(flippedDockLabel == "3",
+               "the flip must reach the dock badge — got \(String(describing: flippedDockLabel))")
+    try expect(canvas.zoneRenderModels.first?.agentStatusRollup == CanvasNSView.AgentStatusRollup(working: 1, needsAttention: 1, done: 0, stale: 0),
+               "the zone rollup is derived from the same statuses — got \(String(describing: canvas.zoneRenderModels.first?.agentStatusRollup))")
+    try assertAgreement(flipped, rows, "after the flip")
+
+    // MARK: 6 · the COMPANION consumer holds no derivation of its own
+
+    // A source scan, for the reason `piRunnerConstructionSites` is one: reaching the
+    // real closure means standing up a `DesktopCompanionSyncService` with a transport
+    // and a paired device. What can be asserted without that — and is the thing the
+    // cross-review asked for — is that the closure has no inventory of its own: it
+    // reads `agentActivity.snapshot` and does not list sessions or fold anything.
+    let appSource = try String(
+        contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("Sources/ContinuumRevived/App/ContinuumApp.swift"),
+        encoding: .utf8
+    )
+    guard let closureStart = appSource.range(of: "activitySnapshot: { [weak self] in"),
+          let closureEnd = appSource.range(of: "freshnessPublisher:", range: closureStart.upperBound..<appSource.endIndex) else {
+        throw CheckError.failed("could not find the companion activitySnapshot closure — this scan is looking in the wrong place")
+    }
+    let closureBody = String(appSource[closureStart.upperBound..<closureEnd.lowerBound])
+        .split(separator: "\n", omittingEmptySubsequences: false)
+        .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+        .joined(separator: "\n")
+    try expect(closureBody.contains("agentActivity.snapshot"),
+               "the companion closure must return the one snapshot: \(closureBody)")
+    for forbidden in ["DegradedDesktopActivitySnapshotSource", "listSessions", "AgentInventory.snapshot", "currentManagedAgentActivities"] {
+        try expect(closureBody.contains(forbidden) == false,
+                   "the companion closure must not build its own inventory — it names \(forbidden)")
+    }
+
+    // MARK: 7 · the nav-cycle order reads the same statuses
+
+    try expect(app.currentAgentTileIds(status: .needsAttention) == [terminalAgentTile],
+               "⌥-cycling over needs-attention agents must see what the badge sees — got \(app.currentAgentTileIds(status: .needsAttention))")
+    try expect(app.currentAgentTileIds(status: nil) == [terminalAgentTile],
+               "the shell tile is not an agent to cycle to — got \(app.currentAgentTileIds(status: nil))")
+
+    NSApplication.shared.dockTile.badgeLabel = nil
+    print("AgentInventoryWiring: 5 agents (2 projects, 1 managed, 1 headless, 1 shell excluded) agreed across sidebar/badge/dock/companion from one rebuild; a flipped status moved all four")
     }
 }

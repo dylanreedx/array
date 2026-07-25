@@ -1,5 +1,6 @@
 check --add-zone-check
 check --agent-input-check
+check --agent-inventory-wiring-check
 check --agent-message-bus-check
 check --agent-restore-check
 check --agent-status-check
@@ -134,6 +135,7 @@ leg run swift run ContinuumRevivedSyncChecks
 leg run swift run ContinuumRevivedSyncIntegrationChecks
 leg run_app_check .build/debug/continuum-revived --add-zone-check
 leg run_app_check .build/debug/continuum-revived --agent-input-check
+leg run_app_check .build/debug/continuum-revived --agent-inventory-wiring-check
 leg run_app_check .build/debug/continuum-revived --agent-message-bus-check
 leg run_app_check .build/debug/continuum-revived --agent-restore-check
 leg run_app_check .build/debug/continuum-revived --agent-status-check
