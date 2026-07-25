@@ -1731,10 +1731,228 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
 
     func qaEntries() -> [LabEntry] { categories.flatMap { entriesByCategory[$0] ?? [] } }
 
-    /// Renders every static card over an opaque dark backdrop and asserts each is
-    /// non-blank — the Tier-1 visual gate (docs/26). An opaque backdrop means a
-    /// non-rendering card collapses to one flat colour and is caught, while
-    /// light-on-dark chrome stays legible.
+    // MARK: - Static-card gates (P0.7)
+
+    /// Every static card, in both appearances, held to the phase-0 gates: the
+    /// blankness floor, the generic geometry invariants, WCAG contrast over the real
+    /// view tree, the pixel-flatness probes, and its committed PNG baseline.
+    ///
+    /// Why this exists: until P0.7 the entire per-card visual gate here was
+    /// `VisualSnapshot.isBlank` plus a handful of hand-picked
+    /// `distinctSampledColors` thresholds — "the image has more than one colour",
+    /// which black-on-dark text, a half-width transcript and an empty card all pass.
+    /// Blankness is kept as a floor (a genuinely blank render is still worth naming
+    /// cheaply and in the right vocabulary), but it is no longer the gate.
+    ///
+    /// The four hand-picked colour-count assertions it replaced (sidebar vs
+    /// sidebar-selected must differ; approval dock >= 6 colours; user-input card
+    /// >= 5; managed-agent >= 3) are gone rather than kept, because the baseline
+    /// comparison strictly subsumes each of them: it holds every one of those cards
+    /// to its whole committed render, in both appearances, so any change that could
+    /// have moved a sampled colour count is red with the pixels to prove it. This is
+    /// the one ticket allowed to remove assertions, and only on that ground.
+    ///
+    /// Each card is rendered ONCE per appearance and all five gates read that one
+    /// render, so the leg costs one extra render pass over the catalogue rather than
+    /// four. The gates themselves are the same code the dedicated legs run
+    /// (`UIProbeGeometry`, `UIProbeContrast.evaluate`, `UIProbePixels.sweep`,
+    /// `UIProbeBaseline.mismatch`) — not a second implementation that could drift.
+    ///
+    /// The render itself replaces the old hand-rolled one, which built its own
+    /// borderless window over an opaque dark backdrop (the docs/26 Tier-1 setup) and
+    /// so could only ever render one appearance. `UIProbe.render` is the same
+    /// substrate the four dedicated legs use, at a declared scale, in a real
+    /// appearance.
+    ///
+    /// What stays in the dedicated legs, deliberately:
+    /// - the managed-agent tile's width-fill ratios, scrolled-to-bottom and
+    ///   approval-dock slack assertions are about one surface at three widths, so they
+    ///   are not per-entry gates and `--ui-geometry-check` keeps them
+    /// - `UIProbeGeometry.expectNoAmbiguousLayout`, which is NOT a generic invariant
+    ///   and says so at its own definition: `hasAmbiguousLayout` is true for every
+    ///   flexible `NSStackView` child AppKit positions with its priority-260 align
+    ///   constraint, all of which lay out correctly, so widening it to a subtree walk
+    ///   over 23 cards would force weakening the assertion. It stays absolute over the
+    ///   transcript column, which is the chain the shipped bug lived in.
+    ///
+    /// Witnesses observed red with this code, `--component-lab-check` exit 1 each time
+    /// — one per gate, and the third is the one that earns the removal above:
+    /// - baseline / the packet's own witness — removing `agent.kind`'s width pin
+    ///   (`view.widthAnchor.constraint(equalToConstant: 520)`):
+    ///   `2 baseline(s) did not match: managed-agent.approval-dock-560x720-aqua.png:
+    ///   16175 of 403200 pixels differ (4.0117%, worst channel delta 255)` (+darkAqua),
+    ///   `44 other render(s) matched`
+    /// - baseline / SUBSUMPTION of the deleted sidebar-selection delta — dropping the
+    ///   `view.select(...)` call from the `chrome.sidebar.selected` fixture, i.e. the
+    ///   exact regression that assertion existed to catch:
+    ///   `chrome.sidebar.selected-280x560-aqua.png: 16007 of 156800 pixels differ
+    ///   (10.2085%, worst channel delta 38)` and the same in darkAqua. The retired
+    ///   assertion compared two colour COUNTS; this reports 10% of the pixels, per
+    ///   appearance, with a diff image.
+    /// - geometry — that width pin set to 900 instead of 520:
+    ///   `managed-agent.approval-dock.NSAppearanceNameAqua: NSStackView/
+    ///   ManagedAgentTileNSView holds a broken required constraint — measured 560.0,
+    ///   needs == 900.0`
+    /// - contrast — `LabCatalog.mutedLabelColor` back off the token onto a light grey:
+    ///   `7 unreadable pair(s) of 452 measured: approvalsInbox.scope
+    ///   [NSAppearanceNameAqua · text]: 1.61:1, needs >= 4.5:1`
+    /// - pixel-sweep coverage, both floors, per appearance — the text and border
+    ///   branches of `UIProbePixels.sweep` made unreachable, standing in for the walk
+    ///   or the eligibility filters silently stopping to find anything:
+    ///   `static-card pixel sweep probed only 0 text rect(s) in NSAppearanceNameAqua,
+    ///   needs >= 192` and `only 0 border(s) ... needs >= 12`
+    /// - blankness floor (still fires, still first) — the sidebar fixture's subviews
+    ///   hidden: `chrome.sidebar.selected.NSAppearanceNameAqua: render is
+    ///   blank/uniform (1 colors at 560x1120)`
+    /// - render count / "the check count did not shrink" — one card excluded from the
+    ///   gated set: `only 44 static card/appearance render(s) gated, needs >= 46`
+    private static func runStaticCardGates(
+        entries: [LabEntry], artifactDirectory directory: URL, fail: (String) -> Error
+    ) throws -> [[String: Any]] {
+        // Production pins the app appearance at launch (`ContinuumApp`); pin it here
+        // too so the `.aqua` pass can only be honest if the probe really moves it.
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+
+        // A bless run writes the baselines in `--ui-baseline-check`, which runs AFTER
+        // this leg. Comparing here would fail the matrix before the blessing could
+        // happen, so the comparison stands down — and says so — while the other four
+        // gates still run.
+        //
+        // Not an environment-dependent hole: under `CONTINUUM_UPDATE_BASELINES=1`
+        // NOTHING compares against a baseline anywhere in the matrix — that flag's
+        // whole meaning is "the committed bytes are the ones being replaced", and
+        // `--ui-baseline-check` writes rather than compares in exactly the same way.
+        // Blessing is a human action followed by a normal run, and it is the normal run
+        // that re-establishes the gate. The one thing this must not do is write the
+        // baselines itself: two writers of the same 46 files is how they drift.
+        let blessing = UIProbeBaseline.isUpdating
+
+        var rendered: [[String: Any]] = []
+        var baselineFailures: [String] = []
+        var contrast = UIProbeContrast.Evaluation()
+        var pixels = UIProbePixels.Sweep()
+        // Per appearance as well as in total: an aggregate floor is satisfied by one
+        // appearance carrying the whole run while the other silently probes nothing —
+        // the trap P0.5 already hit and recorded in `UIProbePixels.runPixelChecks`.
+        var pixelsByAppearance: [NSAppearance.Name: UIProbePixels.Sweep] = [:]
+        var comparedBaselines = 0
+        var gated = 0
+
+        for entry in entries {
+            guard case let .staticCard(preferredSize, make) = entry.content else { continue }
+            let size = preferredSize ?? UIProbeBaseline.defaultCardSize
+            for appearanceName in UIProbeBaseline.appearances {
+                // The probe id stays `entry.id`, matching `--ui-contrast-check`, so a
+                // measurement key means the same thing in both legs (and an exemption,
+                // if one is ever granted, cannot be keyed to only one of them). The
+                // appearance travels in `label`, which is what names failures and
+                // artifact files.
+                let label = "\(entry.id).\(appearanceName.rawValue)"
+                let probe = try UIProbe.render(
+                    UIProbe.Spec(id: entry.id, size: size, appearance: appearanceName), make: make
+                )
+                let metrics = VisualSnapshot.metrics(of: probe.hostRep)
+                try probe.hostRep.representation(using: .png, properties: [:])?
+                    .write(to: directory.appendingPathComponent("\(label).png"))
+
+                // Floor, not gate: a blank render makes every measurement below flat
+                // for one reason, so say that once instead of reporting it four times.
+                guard !metrics.isBlank else {
+                    throw fail("\(label): render is blank/uniform (\(metrics.distinctSampledColors) colors at \(metrics.width)x\(metrics.height))")
+                }
+
+                try UIProbeGeometry.expectNoZeroSizeViews(probe.view, label: label)
+                try UIProbeGeometry.expectNoClipping(probe.view, label: label)
+                try UIProbeGeometry.expectNoBrokenRequiredSizeConstraints(probe.view, label: label)
+
+                contrast.merge(try UIProbeContrast.evaluate(probe))
+                let cardSweep = try UIProbePixels.sweep(probe, label: label)
+                pixels.merge(cardSweep)
+                pixelsByAppearance[appearanceName, default: UIProbePixels.Sweep()].merge(cardSweep)
+
+                if !blessing {
+                    let name = UIProbeBaseline.baselineName(id: entry.id, size: size, appearance: appearanceName)
+                    let (failure, _) = try UIProbeBaseline.mismatch(of: probe, name: name, size: size)
+                    if let failure { baselineFailures.append(failure) } else { comparedBaselines += 1 }
+                }
+
+                rendered.append([
+                    "entry": entry.id, "appearance": appearanceName.rawValue,
+                    "width": metrics.width, "height": metrics.height,
+                    "distinctColors": metrics.distinctSampledColors
+                ])
+                gated += 1
+            }
+        }
+
+        // Coverage floors, aggregated per appearance rather than per card: a card may
+        // legitimately paint no border and no text, so a per-card floor would be
+        // wrong, but a run where the eligibility filters or the tree walk stop finding
+        // anything passes every gate above vacuously. Numbers are MEASURED on this
+        // catalogue: 46 renders (23 static cards x 2 appearances), 240 text rects and
+        // 15 borders per appearance.
+        //
+        // The render count is floored AT the measured number, not under it: P0.7's own
+        // verification is "confirm the check count did not shrink", and a floor of 40
+        // would let six card/appearance renders disappear green. The two sweep floors
+        // keep a margin (80%) because their eligibility filters are layout-sensitive —
+        // a clipped or mostly-transparent view drops out legitimately — which is the
+        // same reasoning and the same shape as P0.5's per-appearance floors. Growth
+        // passes in all three cases (P0.11's convention); only shrinkage is the signal.
+        let minimumCardsGated = 46
+        let minimumTextRectsPerAppearance = 192
+        let minimumBordersPerAppearance = 12
+        guard gated >= minimumCardsGated else {
+            throw fail("only \(gated) static card/appearance render(s) gated, needs >= \(minimumCardsGated)")
+        }
+        for appearanceName in UIProbeBaseline.appearances {
+            let sweep = pixelsByAppearance[appearanceName] ?? UIProbePixels.Sweep()
+            guard sweep.textProbes >= minimumTextRectsPerAppearance else {
+                throw fail("static-card pixel sweep probed only \(sweep.textProbes) text rect(s) in \(appearanceName.rawValue), needs >= \(minimumTextRectsPerAppearance)")
+            }
+            guard sweep.borderProbes >= minimumBordersPerAppearance else {
+                throw fail("static-card pixel sweep probed only \(sweep.borderProbes) border(s) in \(appearanceName.rawValue), needs >= \(minimumBordersPerAppearance)")
+            }
+        }
+        guard contrast.measured > 0 else { throw fail("static-card contrast gate measured no pairs") }
+        guard contrast.failures.isEmpty else {
+            throw fail(
+                "\(contrast.failures.count) unreadable pair(s) of \(contrast.measured) measured:\n  - "
+                    + contrast.failures.joined(separator: "\n  - ")
+            )
+        }
+        guard baselineFailures.isEmpty else {
+            throw fail(
+                "\(baselineFailures.count) baseline(s) did not match:\n  - "
+                    + baselineFailures.joined(separator: "\n  - ")
+                    + "\n\(comparedBaselines) other render(s) matched. If these changes are intended, bless them: "
+                    + "\(UIProbeBaseline.updateEnvironmentKey)=1 ./scripts/run-matrix.sh — and review the baseline diff before committing."
+            )
+        }
+        guard NSApp.appearance?.name == .darkAqua else {
+            throw fail("probing mutated NSApp.appearance to '\(NSApp.appearance?.name.rawValue ?? "nil")'")
+        }
+
+        let coverage = UIProbeBaseline.appearances.map { name -> String in
+            let sweep = pixelsByAppearance[name] ?? UIProbePixels.Sweep()
+            return "\(name.rawValue) \(sweep.textProbes) text/\(sweep.borderProbes) borders"
+        }.joined(separator: ", ")
+        print(String(
+            format: "ComponentLab: %d static card/appearance renders gated — geometry (no zero-size, no clipping, no broken required size), "
+                + "%d contrast pair(s) (worst text %.2f:1 %@), %d text rect(s) + %d border(s) probed [%@, floors %d/%d] "
+                + "(worst spread %.3f, worst border delta %.3f), %@; blankness is a floor, not the gate",
+            gated, contrast.measured,
+            contrast.worstText.ratio, contrast.worstText.key.isEmpty ? "none" : contrast.worstText.key,
+            pixels.textProbes, pixels.borderProbes, coverage,
+            minimumTextRectsPerAppearance, minimumBordersPerAppearance,
+            pixels.worstText.spread, pixels.worstBorder.delta,
+            blessing
+                ? "baseline comparison stood down for \(UIProbeBaseline.updateEnvironmentKey)=1 (--ui-baseline-check writes them)"
+                : "\(comparedBaselines) committed baseline(s) matched"
+        ))
+        return rendered
+    }
+
     static func runSelfCheck() throws {
         func fail(_ message: String) -> Error {
             NSError(domain: "ComponentLab", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
@@ -2164,66 +2382,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             .appendingPathComponent("component-lab", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
-        var rendered: [[String: Any]] = []
-        var sidebarDistinctColors: Int?
-        var selectedSidebarDistinctColors: Int?
-        var managedAgentDistinctColors: Int?
-        var approvalDockDistinctColors: Int?
-        var userInputCardDistinctColors: Int?
-        for entry in entries {
-            guard case let .staticCard(preferredSize, make) = entry.content else { continue }
-            let size = preferredSize ?? NSSize(width: 560, height: 640)
-            let host = NSView(frame: NSRect(origin: .zero, size: size))
-            host.wantsLayer = true
-            host.layer?.backgroundColor = NSColor(white: 0.12, alpha: 1).cgColor
-            let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-            window.contentView = host
-            place(make(), in: host, preferredSize: preferredSize)
-            host.layoutSubtreeIfNeeded()
-
-            guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
-                throw fail("\(entry.id): could not allocate bitmap")
-            }
-            host.cacheDisplay(in: host.bounds, to: rep)
-            let metrics = VisualSnapshot.metrics(of: rep)
-            try rep.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("\(entry.id).png"))
-            guard !metrics.isBlank else {
-                throw fail("\(entry.id): render is blank/uniform (\(metrics.distinctSampledColors) colors at \(metrics.width)x\(metrics.height))")
-            }
-            if entry.id == "chrome.sidebar" {
-                sidebarDistinctColors = metrics.distinctSampledColors
-            } else if entry.id == "chrome.sidebar.selected" {
-                selectedSidebarDistinctColors = metrics.distinctSampledColors
-            } else if entry.id == "tiles.managedAgent" {
-                managedAgentDistinctColors = metrics.distinctSampledColors
-            } else if entry.id == "managed-agent.approval-dock" {
-                approvalDockDistinctColors = metrics.distinctSampledColors
-            } else if entry.id == "managed-agent.user-input-card" {
-                userInputCardDistinctColors = metrics.distinctSampledColors
-            }
-            rendered.append(["entry": entry.id, "width": metrics.width, "height": metrics.height, "distinctColors": metrics.distinctSampledColors])
-        }
-        guard let sidebarDistinctColors else {
-            throw fail("missing chrome.sidebar render for selection delta gate")
-        }
-        guard let selectedSidebarDistinctColors else {
-            throw fail("missing chrome.sidebar.selected render for selection delta gate")
-        }
-        guard selectedSidebarDistinctColors != sidebarDistinctColors else {
-            throw fail("selected sidebar render should visibly differ; selected=\(selectedSidebarDistinctColors) unselected=\(sidebarDistinctColors)")
-        }
-        guard let managedAgentDistinctColors else {
-            throw fail("missing tiles.managedAgent render")
-        }
-        guard let approvalDockDistinctColors, approvalDockDistinctColors >= 6 else {
-            throw fail("managed-agent.approval-dock waiting-state render too flat: \(approvalDockDistinctColors ?? 0) colors")
-        }
-        guard let userInputCardDistinctColors, userInputCardDistinctColors >= 5 else {
-            throw fail("managed-agent.user-input-card render too flat: \(userInputCardDistinctColors ?? 0) colors")
-        }
-        guard managedAgentDistinctColors >= 3 else {
-            throw fail("managed agent render too uniform: \(managedAgentDistinctColors) distinct colors")
-        }
+        var rendered = try runStaticCardGates(entries: entries, artifactDirectory: directory, fail: fail)
 
         // Interactive sandbox: spawn every fixture tile kind, assert they install,
         // render each tile non-blank, that zoom clamps via setViewport, and that
@@ -2415,14 +2574,10 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
                 "ambientSessionName": ambientLabel,
                 "sessionName": sessionLabel
             ],
-            "sidebarSelection": [
-                "unselectedDistinctColors": sidebarDistinctColors,
-                "selectedDistinctColors": selectedSidebarDistinctColors,
-                "delta": selectedSidebarDistinctColors - sidebarDistinctColors
-            ],
-            "userInputCard": [
-                "distinctColors": userInputCardDistinctColors
-            ]
+            // P0.7: the `sidebarSelection` delta and `userInputCard` colour-count
+            // sections reported the two hand-picked distinct-colour assertions that
+            // the committed baselines now subsume. Per-card numbers live in
+            // `rendered`, one row per card AND appearance.
         ]
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: directory.appendingPathComponent("manifest.json"))

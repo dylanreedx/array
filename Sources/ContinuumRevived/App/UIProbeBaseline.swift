@@ -243,15 +243,61 @@ enum UIProbeBaseline {
     }
 
     /// Failure artifacts land under the gitignored `qa-runs/`, alongside every other
-    /// check's output.
+    /// check's output. Created on first use and reused for the rest of the process,
+    /// so one run's mismatches land in one directory.
+    private static var cachedArtifactDirectory: URL?
+
     private static func artifactDirectory() throws -> URL {
+        if let cachedArtifactDirectory { return cachedArtifactDirectory }
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("qa-runs", isDirectory: true)
             .appendingPathComponent(timestamp, isDirectory: true)
             .appendingPathComponent("ui-baselines", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        cachedArtifactDirectory = directory
         return directory
+    }
+
+    /// One already-rendered probe against its committed baseline.
+    ///
+    /// `failure` is `nil` when it matched; otherwise it names the mismatch and the
+    /// artifacts written for it. Shared with `ComponentLabPanel.runSelfCheck` (P0.7),
+    /// which gates every static card it renders against the same committed bytes —
+    /// so the Lab check and this leg can never drift into two different comparisons.
+    static func mismatch(of probe: UIProbe.Probed, name: String, size: NSSize) throws -> (failure: String?, fraction: Double) {
+        let actual = try canvas(of: probe.hostRep, size: size, label: name)
+        let url = try baselineDirectory().appendingPathComponent(name)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return ("\(name): no committed baseline", 0)
+        }
+        let baseline = try canvas(ofPNGAt: url, label: name)
+        guard baseline.width == actual.width, baseline.height == actual.height else {
+            let dir = try artifactDirectory()
+            let actualURL = dir.appendingPathComponent("\(name).actual.png")
+            try pngData(for: actual, label: name).write(to: actualURL)
+            return (
+                "\(name): render is \(actual.width)x\(actual.height), baseline is "
+                    + "\(baseline.width)x\(baseline.height) — actual: \(actualURL.path)",
+                1
+            )
+        }
+
+        let difference = compare(actual, baseline)
+        guard difference.fraction > maximumDifferingFraction else { return (nil, difference.fraction) }
+        let dir = try artifactDirectory()
+        let actualURL = dir.appendingPathComponent("\(name).actual.png")
+        let diffURL = dir.appendingPathComponent("\(name).diff.png")
+        try pngData(for: actual, label: name).write(to: actualURL)
+        try pngData(for: diffCanvas(actual: actual, baseline: baseline), label: name).write(to: diffURL)
+        return (String(
+            format: "%@: %d of %d pixels differ (%.4f%%, worst channel delta %d), tolerance %.4f%% — "
+                + "actual: %@ · diff (magenta = changed): %@ · baseline: %@",
+            name, difference.differingPixels, difference.totalPixels,
+            difference.fraction * 100, difference.worstChannelDelta,
+            maximumDifferingFraction * 100,
+            actualURL.path, diffURL.path, url.path
+        ), difference.fraction)
     }
 
     static var isUpdating: Bool { ProcessInfo.processInfo.environment[updateEnvironmentKey] == "1" }
@@ -273,7 +319,6 @@ enum UIProbeBaseline {
         var compared = 0
         var written = 0
         var worstFraction = (value: 0.0, name: "")
-        var artifacts: URL?
         // Every mismatch is reported, not just the first: after a shared change one
         // run should tell the owner every card that moved.
         var failures: [String] = []
@@ -287,10 +332,9 @@ enum UIProbeBaseline {
                 let probe = try UIProbe.render(
                     UIProbe.Spec(id: name, size: size, appearance: appearanceName), make: make
                 )
-                let actual = try canvas(of: probe.hostRep, size: size, label: name)
-                let url = directory.appendingPathComponent(name)
-
                 if updating {
+                    let actual = try canvas(of: probe.hostRep, size: size, label: name)
+                    let url = directory.appendingPathComponent(name)
                     let data = try pngData(for: actual, label: name)
                     let existing = try? Data(contentsOf: url)
                     if existing != data {
@@ -300,42 +344,12 @@ enum UIProbeBaseline {
                     continue
                 }
 
-                guard FileManager.default.fileExists(atPath: url.path) else {
-                    failures.append("\(name): no committed baseline")
-                    continue
+                let (failure, fraction) = try mismatch(of: probe, name: name, size: size)
+                if fraction > worstFraction.value {
+                    worstFraction = (fraction, name)
                 }
-                let baseline = try canvas(ofPNGAt: url, label: name)
-                guard baseline.width == actual.width, baseline.height == actual.height else {
-                    let dir = try artifacts ?? artifactDirectory()
-                    artifacts = dir
-                    let actualURL = dir.appendingPathComponent("\(name).actual.png")
-                    try pngData(for: actual, label: name).write(to: actualURL)
-                    failures.append(
-                        "\(name): render is \(actual.width)x\(actual.height), baseline is "
-                            + "\(baseline.width)x\(baseline.height) — actual: \(actualURL.path)"
-                    )
-                    continue
-                }
-
-                let difference = compare(actual, baseline)
-                if difference.fraction > worstFraction.value {
-                    worstFraction = (difference.fraction, name)
-                }
-                if difference.fraction > maximumDifferingFraction {
-                    let dir = try artifacts ?? artifactDirectory()
-                    artifacts = dir
-                    let actualURL = dir.appendingPathComponent("\(name).actual.png")
-                    let diffURL = dir.appendingPathComponent("\(name).diff.png")
-                    try pngData(for: actual, label: name).write(to: actualURL)
-                    try pngData(for: diffCanvas(actual: actual, baseline: baseline), label: name).write(to: diffURL)
-                    failures.append(String(
-                        format: "%@: %d of %d pixels differ (%.4f%%, worst channel delta %d), tolerance %.4f%% — "
-                            + "actual: %@ · diff (magenta = changed): %@ · baseline: %@",
-                        name, difference.differingPixels, difference.totalPixels,
-                        difference.fraction * 100, difference.worstChannelDelta,
-                        maximumDifferingFraction * 100,
-                        actualURL.path, diffURL.path, url.path
-                    ))
+                if let failure {
+                    failures.append(failure)
                     continue
                 }
                 compared += 1

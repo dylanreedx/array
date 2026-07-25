@@ -5,12 +5,25 @@ import AppKit
 /// regression — instead of only checking that PNG bytes exist. A view can
 /// render to a perfectly valid, perfectly grey PNG; `bytes > 0` passes over it.
 ///
-/// This is the Tier-1 visual gate from the verification doctrine (docs/26):
-/// zero-maintenance, no committed baselines, catches gross render failures
-/// (zero-sized overlays, all-one-color fills). Tier-2 baseline diffing layers
-/// on later. Only valid for AppKit-drawn chrome — WKWebView / Ghostty content
-/// (GPU/Metal) does not composite through `cacheDisplay`, so never snapshot
-/// live web/terminal pixels.
+/// **A SMOKE FLOOR, NOT A VISUAL GATE** (retired as one in P0.7). `isBlank` asks
+/// only "does this image have more than one colour", and for most of this program's
+/// history it was the whole per-card visual gate — which is why black-on-dark body
+/// text, a transcript laid out at half the tile width, and a card with no content
+/// at all all shipped green. Keep using it to name a genuinely blank render cheaply
+/// and in one vocabulary; never treat a passing `isBlank` as evidence that a surface
+/// renders correctly.
+///
+/// The real per-render gates, all layered on `UIProbe` and all run over every static
+/// Component Lab card in both appearances:
+/// - `UIProbeGeometry` (`--ui-geometry-check`) — zero-size, clipping, ambiguity,
+///   fill ratios, scroll position
+/// - `UIProbeContrast` (`--ui-contrast-check`) — WCAG ratios per text/border pair
+/// - `UIProbePixels` (`--ui-pixel-check`) — text-rect luminance spread, border delta
+/// - `UIProbeBaseline` (`--ui-baseline-check`) — committed PNG comparison
+/// `--component-lab-check` runs all four per card as well (`runStaticCardGates`).
+///
+/// Only valid for AppKit-drawn chrome — WKWebView / Ghostty content (GPU/Metal) does
+/// not composite through `cacheDisplay`, so never snapshot live web/terminal pixels.
 enum VisualSnapshot {
     struct Metrics {
         let width: Int
@@ -18,7 +31,8 @@ enum VisualSnapshot {
         let distinctSampledColors: Int
 
         /// True when the render is zero-sized or a single flat color — i.e. a
-        /// user would see a blank/grey rectangle.
+        /// user would see a blank/grey rectangle. False means "not blank", and
+        /// nothing more; see the floor-not-a-gate note above.
         var isBlank: Bool { width <= 0 || height <= 0 || distinctSampledColors <= 1 }
     }
 

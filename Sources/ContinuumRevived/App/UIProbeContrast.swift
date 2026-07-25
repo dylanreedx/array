@@ -105,6 +105,53 @@ enum UIProbeContrast {
         return name
     }
 
+    /// Every measurement of one probe, split into what failed and what held. Returned
+    /// rather than thrown so a caller can report every unreadable pair in one run:
+    /// `runContrastChecks` over the whole catalogue, and
+    /// `ComponentLabPanel.runSelfCheck` (P0.7) per static card.
+    struct Evaluation {
+        var failures: [String] = []
+        var measured = 0
+        var exempted = 0
+        var worstText: (ratio: Double, key: String) = (.infinity, "")
+        var worstBorder: (ratio: Double, key: String) = (.infinity, "")
+
+        mutating func merge(_ other: Evaluation) {
+            failures.append(contentsOf: other.failures)
+            measured += other.measured
+            exempted += other.exempted
+            if other.worstText.ratio < worstText.ratio { worstText = other.worstText }
+            if other.worstBorder.ratio < worstBorder.ratio { worstBorder = other.worstBorder }
+        }
+    }
+
+    /// Measures `probe` and holds every non-exempt pair to its floor.
+    static func evaluate(_ probe: UIProbe.Probed) throws -> Evaluation {
+        var result = Evaluation()
+        for measurement in try measurements(of: probe) {
+            if allowlist[measurement.key] != nil {
+                result.exempted += 1
+                continue
+            }
+            result.measured += 1
+            if measurement.kind == "text" {
+                if measurement.ratio < result.worstText.ratio {
+                    result.worstText = (measurement.ratio, measurement.key)
+                }
+            } else if measurement.ratio < result.worstBorder.ratio {
+                result.worstBorder = (measurement.ratio, measurement.key)
+            }
+            guard measurement.ratio < measurement.minimum else { continue }
+            result.failures.append(String(
+                format: "%@ [%@ · %@]: %.2f:1, needs >= %.1f:1 (fg %@ on bg %@)",
+                measurement.key, probe.spec.appearance.rawValue, measurement.kind,
+                measurement.ratio, measurement.minimum,
+                measurement.foreground, measurement.background
+            ))
+        }
+        return result
+    }
+
     private static func hex(_ color: RGBA) -> String {
         String(
             format: "#%02X%02X%02X@%.2f",
@@ -288,11 +335,7 @@ enum UIProbeContrast {
         NSApp.appearance = NSAppearance(named: .darkAqua)
 
         let entries = LabCatalog.entries(env: LabEnvironment(ghostty: nil, browserEngine: nil))
-        var failures: [String] = []
-        var measured = 0
-        var exempted = 0
-        var worstText = (ratio: Double.infinity, key: "")
-        var worstBorder = (ratio: Double.infinity, key: "")
+        var total = Evaluation()
 
         for entry in entries {
             guard case let .staticCard(preferredSize, make) = entry.content else { continue }
@@ -301,35 +344,15 @@ enum UIProbeContrast {
                 let probe = try UIProbe.render(
                     UIProbe.Spec(id: entry.id, size: size, appearance: name), make: make
                 )
-                for measurement in try measurements(of: probe) {
-                    if allowlist[measurement.key] != nil {
-                        exempted += 1
-                        continue
-                    }
-                    measured += 1
-                    if measurement.kind == "text" {
-                        if measurement.ratio < worstText.ratio {
-                            worstText = (measurement.ratio, measurement.key)
-                        }
-                    } else if measurement.ratio < worstBorder.ratio {
-                        worstBorder = (measurement.ratio, measurement.key)
-                    }
-                    guard measurement.ratio < measurement.minimum else { continue }
-                    failures.append(String(
-                        format: "%@ [%@ · %@]: %.2f:1, needs >= %.1f:1 (fg %@ on bg %@)",
-                        measurement.key, name.rawValue, measurement.kind,
-                        measurement.ratio, measurement.minimum,
-                        measurement.foreground, measurement.background
-                    ))
-                }
+                total.merge(try evaluate(probe))
             }
         }
 
-        guard measured > 0 else { throw fail("no text or border pairs were measured") }
-        guard failures.isEmpty else {
+        guard total.measured > 0 else { throw fail("no text or border pairs were measured") }
+        guard total.failures.isEmpty else {
             throw fail(
-                "\(failures.count) unreadable pair(s) of \(measured) measured:\n  - "
-                    + failures.joined(separator: "\n  - ")
+                "\(total.failures.count) unreadable pair(s) of \(total.measured) measured:\n  - "
+                    + total.failures.joined(separator: "\n  - ")
             )
         }
         // The probe must not leak its appearance onto the app.
@@ -338,9 +361,9 @@ enum UIProbeContrast {
         }
         print(String(
             format: "UIProbeContrast: %d pairs gated in both appearances (%d exempt); worst text %.2f:1 (%@); worst non-text %.2f:1 (%@)",
-            measured, exempted,
-            worstText.ratio, worstText.key.isEmpty ? "none" : worstText.key,
-            worstBorder.ratio, worstBorder.key.isEmpty ? "none" : worstBorder.key
+            total.measured, total.exempted,
+            total.worstText.ratio, total.worstText.key.isEmpty ? "none" : total.worstText.key,
+            total.worstBorder.ratio, total.worstBorder.key.isEmpty ? "none" : total.worstBorder.key
         ))
     }
 }

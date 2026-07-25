@@ -331,6 +331,62 @@ enum UIProbePixels {
         for subview in root.subviews { try walk(subview, body) }
     }
 
+    // MARK: - Sweep over a rendered tree
+
+    /// What one sweep measured. Counts and worst cases are returned rather than
+    /// asserted so the caller owns its own floors: `runPixelChecks` asserts them per
+    /// appearance over the managed-agent tile, and `ComponentLabPanel.runSelfCheck`
+    /// (P0.7) asserts them in aggregate over every static card.
+    struct Sweep {
+        var textProbes = 0
+        var borderProbes = 0
+        var cardBorderProbes = 0
+        var skippedText = 0
+        var skippedBorders = 0
+        var worstText: (spread: Double, key: String) = (.infinity, "")
+        var worstBorder: (delta: Double, key: String) = (.infinity, "")
+
+        mutating func merge(_ other: Sweep) {
+            textProbes += other.textProbes
+            borderProbes += other.borderProbes
+            cardBorderProbes += other.cardBorderProbes
+            skippedText += other.skippedText
+            skippedBorders += other.skippedBorders
+            if other.worstText.spread < worstText.spread { worstText = other.worstText }
+            if other.worstBorder.delta < worstBorder.delta { worstBorder = other.worstBorder }
+        }
+    }
+
+    /// Runs both probes over every eligible view in `probe.view`: a text rect must be
+    /// modulated, a border band must differ from the fill inside it. Throws on the
+    /// first flat rect or invisible border, so the failure names the view.
+    static func sweep(_ probe: UIProbe.Probed, label: String) throws -> Sweep {
+        var result = Sweep()
+        try walk(probe.view) { view in
+            let key = "\(label) \(describe(view))"
+            if drawnText(of: view) != nil {
+                if renderedFraction(of: view) >= minimumVisibleTextFraction {
+                    let spread = try expectLegibleText(in: view, probe: probe, label: key)
+                    if spread < result.worstText.spread { result.worstText = (spread, key) }
+                    result.textProbes += 1
+                } else {
+                    result.skippedText += 1
+                }
+            }
+            if let layer = view.layer, layer.borderWidth > 0, layer.borderColor != nil {
+                if isFullyRendered(view) {
+                    let delta = try expectVisibleBorder(of: view, probe: probe, label: key)
+                    if delta < result.worstBorder.delta { result.worstBorder = (delta, key) }
+                    result.borderProbes += 1
+                    if view is TranscriptCardView { result.cardBorderProbes += 1 }
+                } else {
+                    result.skippedBorders += 1
+                }
+            }
+        }
+        return result
+    }
+
     // MARK: - Self-check
 
     /// A deliberately asymmetric patch: mirrored vertically it would land entirely
@@ -392,13 +448,7 @@ enum UIProbePixels {
             throw fail("missing tiles.managedAgent card")
         }
 
-        var textProbes = 0
-        var borderProbes = 0
-        var cardBorderProbes = 0
-        var skippedText = 0
-        var skippedBorders = 0
-        var worstText = (spread: Double.infinity, key: "")
-        var worstBorder = (delta: Double.infinity, key: "")
+        var total = Sweep()
         // Per appearance, not totalled: an aggregate floor is satisfied by one
         // appearance carrying the whole run while the other silently probes nothing.
         let minimumCardBordersPerAppearance = 3
@@ -420,43 +470,17 @@ enum UIProbePixels {
                 throw fail("\(label): probe bitmap is blank (\(metrics.width)x\(metrics.height), \(metrics.distinctSampledColors) colours)")
             }
 
-            var appearanceTextProbes = 0
-            var appearanceCardBorders = 0
-            try walk(tile) { view in
-                let key = "\(label) \(describe(view))"
-                if drawnText(of: view) != nil {
-                    if renderedFraction(of: view) >= minimumVisibleTextFraction {
-                        let spread = try expectLegibleText(in: view, probe: probe, label: key)
-                        if spread < worstText.spread { worstText = (spread, key) }
-                        textProbes += 1
-                        appearanceTextProbes += 1
-                    } else {
-                        skippedText += 1
-                    }
-                }
-                if let layer = view.layer, layer.borderWidth > 0, layer.borderColor != nil {
-                    if isFullyRendered(view) {
-                        let delta = try expectVisibleBorder(of: view, probe: probe, label: key)
-                        if delta < worstBorder.delta { worstBorder = (delta, key) }
-                        borderProbes += 1
-                        if view is TranscriptCardView {
-                            cardBorderProbes += 1
-                            appearanceCardBorders += 1
-                        }
-                    } else {
-                        skippedBorders += 1
-                    }
-                }
-            }
+            let appearanceSweep = try sweep(probe, label: label)
 
             // Floors, so the clipped-view and alpha filters can never quietly empty
             // the run: this appearance must have contributed real coverage.
-            guard appearanceCardBorders >= minimumCardBordersPerAppearance else {
-                throw fail("\(label): only \(appearanceCardBorders) transcript-card border(s) probed, needs >= \(minimumCardBordersPerAppearance)")
+            guard appearanceSweep.cardBorderProbes >= minimumCardBordersPerAppearance else {
+                throw fail("\(label): only \(appearanceSweep.cardBorderProbes) transcript-card border(s) probed, needs >= \(minimumCardBordersPerAppearance)")
             }
-            guard appearanceTextProbes >= minimumTextRectsPerAppearance else {
-                throw fail("\(label): only \(appearanceTextProbes) text rect(s) probed, needs >= \(minimumTextRectsPerAppearance)")
+            guard appearanceSweep.textProbes >= minimumTextRectsPerAppearance else {
+                throw fail("\(label): only \(appearanceSweep.textProbes) text rect(s) probed, needs >= \(minimumTextRectsPerAppearance)")
             }
+            total.merge(appearanceSweep)
         }
 
         guard NSApp.appearance?.name == .darkAqua else {
@@ -466,9 +490,10 @@ enum UIProbePixels {
         // stopped covering something it used to cover.
         print(String(
             format: "UIProbePixels: %d text rects + %d borders (%d transcript cards) gated in both appearances; %d clipped text rects and %d clipped borders skipped; worst text spread %.3f (%@); worst border delta %.3f (%@)",
-            textProbes, borderProbes, cardBorderProbes, skippedText, skippedBorders,
-            worstText.spread, worstText.key.isEmpty ? "none" : worstText.key,
-            worstBorder.delta, worstBorder.key.isEmpty ? "none" : worstBorder.key
+            total.textProbes, total.borderProbes, total.cardBorderProbes,
+            total.skippedText, total.skippedBorders,
+            total.worstText.spread, total.worstText.key.isEmpty ? "none" : total.worstText.key,
+            total.worstBorder.delta, total.worstBorder.key.isEmpty ? "none" : total.worstBorder.key
         ))
     }
 
