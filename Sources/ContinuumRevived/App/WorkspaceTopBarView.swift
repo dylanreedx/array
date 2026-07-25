@@ -85,7 +85,7 @@ final class WorkspaceTopBarView: NSView {
         super.init(frame: frameRect)
 
         wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.96).cgColor
+        layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.96).appResolvedCGColor
         setAccessibilityIdentifier("ContinuumWorkspaceTopBarRoot")
 
         nameLabel.setAccessibilityIdentifier("ContinuumWorkspaceTopBarName")

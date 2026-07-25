@@ -126,7 +126,7 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         super.init(frame: frameRect)
 
         wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.92).cgColor
+        layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.92).appResolvedCGColor
         setAccessibilityIdentifier("ContinuumWorkspaceSidebarRoot")
         createButton.setAccessibilityIdentifier("ContinuumWorkspaceSidebarCreate")
         renameButton.setAccessibilityIdentifier("ContinuumWorkspaceSidebarRename")

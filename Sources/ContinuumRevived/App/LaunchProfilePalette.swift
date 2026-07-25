@@ -361,8 +361,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         let content = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
         content.setAccessibilityIdentifier(Self.rootAccessibilityIdentifier)
         content.wantsLayer = true
-        content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        content.layer?.borderColor = NSColor.separatorColor.cgColor
+        content.layer?.backgroundColor = NSColor.windowBackgroundColor.appResolvedCGColor
+        content.layer?.borderColor = NSColor.separatorColor.appResolvedCGColor
         content.layer?.borderWidth = 1
         content.layer?.cornerRadius = 8
 

@@ -5143,8 +5143,8 @@ final class DragGhostOverlayView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.06).cgColor
-        layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.9).cgColor
+        layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.06).appResolvedCGColor
+        layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.9).appResolvedCGColor
         layer?.borderWidth = 2
         layer?.cornerRadius = 6
         isHidden = true
@@ -5222,7 +5222,7 @@ final class FocusBorderOverlayView: NSView {
         // Subtle, low-opacity accent so the border reads as "focused" without
         // shouting inside a dense dark canvas. `configure` overrides this per the
         // user's color preference before each show.
-        shape.strokeColor = NSColor.controlAccentColor.withAlphaComponent(0.7).cgColor
+        shape.strokeColor = NSColor.controlAccentColor.withAlphaComponent(0.7).appResolvedCGColor
         shape.lineWidth = Self.lineWidth
         shape.lineDashPattern = Self.dashPattern
         layer?.addSublayer(shape)

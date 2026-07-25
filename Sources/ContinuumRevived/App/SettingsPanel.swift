@@ -80,6 +80,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             backing: .buffered,
             defer: false
         )
+        panel.appearance = NSApp?.effectiveAppearance
         panel.title = "Settings"
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
@@ -91,7 +92,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         root.autoresizingMask = [.width, .height]
         root.setAccessibilityIdentifier(Self.rootAccessibilityIdentifier)
         root.wantsLayer = true
-        root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        root.layer?.backgroundColor = NSColor.windowBackgroundColor.appResolvedCGColor
         panel.contentView = root
 
         // Sidebar — section titles.

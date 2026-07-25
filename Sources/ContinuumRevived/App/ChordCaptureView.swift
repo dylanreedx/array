@@ -23,7 +23,7 @@ final class ChordCaptureView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
+        layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.18).appResolvedCGColor
         layer?.cornerRadius = 4
         promptLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         promptLabel.textColor = .controlAccentColor

@@ -217,7 +217,7 @@ final class LabSandboxContext: NSObject {
     private func makeToolbar() -> NSView {
         let bar = NSView()
         bar.wantsLayer = true
-        bar.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.96).cgColor
+        bar.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.96).appResolvedCGColor
 
         func button(_ title: String, _ action: Selector) -> NSButton {
             let b = NSButton(title: title, target: self, action: action)
@@ -1039,7 +1039,7 @@ enum LabCatalog {
         stack.spacing = 8
         stack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
         stack.wantsLayer = true
-        stack.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        stack.layer?.backgroundColor = NSColor.controlBackgroundColor.appResolvedCGColor
         return stack
     }
 
@@ -1498,6 +1498,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             backing: .buffered,
             defer: false
         )
+        panel.appearance = NSApp?.effectiveAppearance
         panel.title = "Component Lab"
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
@@ -1507,7 +1508,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         root.autoresizingMask = [.width, .height]
         root.setAccessibilityIdentifier(Self.rootAccessibilityIdentifier)
         root.wantsLayer = true
-        root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        root.layer?.backgroundColor = NSColor.windowBackgroundColor.appResolvedCGColor
         panel.contentView = root
 
         let navWidth: CGFloat = 240
