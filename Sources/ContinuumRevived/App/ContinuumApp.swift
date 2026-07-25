@@ -4859,6 +4859,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// navigation concern. The STATUS it filters on is no longer re-derived here —
     /// it comes from the one snapshot (P2B.4), so ⌥-cycling and the badge on the
     /// tile it lands on can no longer disagree.
+    ///
+    /// P2B.5: "an agent tile" is a tile the INVENTORY has an agent for, not a tile
+    /// whose kind is `.terminal`. The kind filter predated managed-agent tiles and
+    /// silently skipped every one of them, so ⌥-cycling could not reach a managed
+    /// agent and the attention cycle stepped over a raised hand. Terminal agents are
+    /// unaffected: `statuses` is keyed by `agentIdentities`, so a plain shell tile is
+    /// still not something to cycle to, whatever its kind.
     private func currentAgentTileIds(status: AgentStatus?) -> [UUID] {
         guard let canvasView else { return [] }
         // A keystroke, so it reads fresh — which is what the per-call
@@ -4866,7 +4873,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         rebuildAgentActivitySnapshot()
         let statuses = agentStatusesByTileId()
         return canvasView.canvasState.tiles
-            .filter { $0.kind == .terminal }
             .sorted { lhs, rhs in
                 if lhs.zPosition != rhs.zPosition { return lhs.zPosition < rhs.zPosition }
                 return lhs.id.uuidString < rhs.id.uuidString
@@ -6858,6 +6864,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let staleTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000E314")!
         let createdTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000E315")!
         let groupTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000E316")!
+        // P2B.5: a MANAGED-agent tile. `kind != .terminal`, which is the whole point —
+        // the sidebar's status walk used to filter on that and printed "no agent"
+        // beside a live agent.
+        let managedTileId = UUID(uuidString: "00000000-0000-0000-0000-00000000E317")!
 
         let workingTile = tile(id: workingTileId, title: "Working Agent", x: 40, y: 40, rank: 1)
         let needsTile = tile(id: needsTileId, title: "Needs Agent", x: 260, y: 40, rank: 2)
@@ -6865,6 +6875,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let staleTile = tile(id: staleTileId, title: "Stale Agent", x: 260, y: 220, rank: 4)
         let createdTile = tile(id: createdTileId, title: "Created Live Tile", x: 500, y: 40, kind: .note, rank: 5)
         let groupTile = tile(id: groupTileId, title: "Group Note", x: 940, y: 40, kind: .note, rank: 6)
+        let managedTile = tile(id: managedTileId, title: "Managed Agent", x: 500, y: 220, kind: .managedAgent, rank: 7)
 
         let project = Project(
             id: projectId,
@@ -6880,7 +6891,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try projectStore.saveProject(project)
         try projectStore.saveCanvas(CanvasState(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-            tiles: [workingTile, needsTile, doneTile, staleTile],
+            tiles: [workingTile, needsTile, doneTile, staleTile, managedTile],
             groups: [],
             lastActiveTileId: workingTileId
         ))
@@ -6888,6 +6899,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try saveSession(projectStore, tileId: needsTileId, status: .needsAttention, now: now, root: projectRoot)
         try saveSession(projectStore, tileId: doneTileId, status: .done, now: now, root: projectRoot)
         try saveSession(projectStore, tileId: staleTileId, status: .stale, now: now, root: projectRoot)
+        // The managed agent has no `TerminalSessionDescriptor` — it is not a terminal
+        // session. Its status lives in the per-project managed record store, which is
+        // exactly why the terminal-only walk could not see it.
+        try ManagedAgentSessionStore(projectRoot: projectRoot).upsert(ManagedAgentSessionRecord(
+            tileId: managedTileId, agentKind: .managed, status: .running, lastSeenAt: now
+        ))
 
         var registry = Registry.empty()
         registry.lastActiveWorkspaceId = workspaceId
@@ -6934,7 +6951,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let canvas = CanvasNSView(canvasState: try projectStore.loadCanvas(), activeZone: projectZone, zoneRenderModels: renderModels, showsZoneChrome: false)
         canvas.delegate = app
         canvas.frame = NSRect(x: 0, y: 0, width: 1_000, height: 700)
-        for tile in canvas.canvasState.tiles {
+        // No view for the managed tile ON PURPOSE (the P2B.4 precedent): a freshly
+        // built `ManagedAgentTileNSView` reports `.configuring`, which would override
+        // its persisted record and make the fixture describe the view instead of the
+        // store.
+        for tile in canvas.canvasState.tiles where tile.kind == .terminal {
             let view = TileNSView(tile: tile)
             if tile.id == workingTileId { view.agentStatus = .working }
             if tile.id == needsTileId { view.agentStatus = .needsAttention }
@@ -6959,7 +6980,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             && sidebar.tileStatusTextForQA(workspaceId: workspaceId, zoneId: groupZoneId, tileId: groupTileId) == "no agent"
         try expect(sidebar.tileStatusGlyphForQA(workspaceId: workspaceId, zoneId: projectZoneId, tileId: needsTileId) == "◆", "needs-attention tile should render the attention glyph")
         try expect(initialGlyphsRendered, "sidebar should render working/needs/done/stale/no-agent status texts")
-        try expect(sidebar.zoneStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId)?.contains("1 working") == true, "zone row should include working rollup text")
+
+        // P2B.5 · A MANAGED-AGENT TILE SHOWS ITS STATUS. Its record says `.running`,
+        // so its row must read "working" — the literal defect this ticket closes is
+        // that it read "no agent" while the agent was alive.
+        //
+        // THREE NEGATIVE TESTS OBSERVED RED at exit 1 with the final code:
+        //   1. `agentStatus: tile.kind == .terminal ? … : nil` put back in
+        //      `SidebarTreeBuilder.build` — the pre-P2B.4 sidebar filter, restored →
+        //      `a managed-agent tile must show its record's status in the sidebar —
+        //      got 'no agent'`, and with that assertion stood down, the sweep below
+        //      catches it too: `managed tile has an agent, so its row must not read
+        //      'no agent'`.
+        //   2. `.filter { $0.kind == .terminal }` put back in `currentAgentTileIds`
+        //      → `--agent-inventory-wiring-check` red: `⌥-cycling must reach a
+        //      managed-agent tile … got [2B4…E1]`.
+        //   3. this fixture's `ManagedAgentSessionStore.upsert` deleted → the same
+        //      "no agent", which is what proves the row's status comes from the
+        //      record and not from something incidental to the tile.
+        let managedRowText = sidebar.tileStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId, tileId: managedTileId) ?? ""
+        try expect(managedRowText == "working",
+                   "a managed-agent tile must show its record's status in the sidebar — got '\(managedRowText)'")
+        // The regression witness, as the packet words it: "no agent" must not appear
+        // for a tile that HAS an agent. Swept over every agent-bearing tile rather
+        // than asserted once, so a future kind filter cannot hide behind one row.
+        for (tileId, label) in [(workingTileId, "terminal working"), (needsTileId, "terminal needs-attention"), (doneTileId, "terminal done"), (staleTileId, "terminal stale"), (managedTileId, "managed")] {
+            let text = sidebar.tileStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId, tileId: tileId) ?? "<no row>"
+            try expect(text != "no agent", "\(label) tile has an agent, so its row must not read 'no agent'")
+        }
+        // Vacuity guard: "no agent" is still what a tile WITHOUT an agent reads, so
+        // the sweep above is measuring something.
+        try expect(sidebar.tileStatusTextForQA(workspaceId: workspaceId, zoneId: groupZoneId, tileId: groupTileId) == "no agent",
+                   "a tile with no agent must still read 'no agent', or the sweep above is vacuous")
+
+        try expect(sidebar.zoneStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId)?.contains("2 working") == true, "zone row should include working rollup text for both working agents (terminal + managed)")
         try expect(sidebar.zoneStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId)?.contains("1 needs you") == true, "zone row should include needs-attention rollup text")
 
         canvas.install(tileView: TileNSView(tile: createdTile), for: createdTile)
@@ -6992,7 +7046,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let observerOverrideWon = observerNeedsOverrideText == "needs you"
             && observerWorkingOverrideText == "working"
             && observerZoneStatusText.contains("2 needs you")
-            && observerZoneStatusText.contains("1 working")
+            && observerZoneStatusText.contains("2 working")
         try expect(
             observerOverrideWon,
             "observer-supplied statuses should override canvas/session values in the live sidebar path (workingTile='\(observerNeedsOverrideText)', doneTile='\(observerWorkingOverrideText)', zone='\(observerZoneStatusText)')"
@@ -7022,6 +7076,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             "tileDeleteUpdatedSidebar": tileDeleteUpdatedSidebar,
             "zoneRenameUpdatedSidebar": zoneRenameUpdatedSidebar,
             "agentStatusGlyphsRendered": agentStatusGlyphsRendered,
+            "managedAgentRowStatusText": managedRowText,
             "noNewStatusPipeline": true,
             "statusChangeUpdatedSidebar": statusChangeUpdatedSidebar,
             "observerNeedsOverrideText": observerNeedsOverrideText,
@@ -18557,8 +18612,17 @@ extension AppDelegate {
 
     try expect(app.currentAgentTileIds(status: .needsAttention) == [terminalAgentTile],
                "⌥-cycling over needs-attention agents must see what the badge sees — got \(app.currentAgentTileIds(status: .needsAttention))")
-    try expect(app.currentAgentTileIds(status: nil) == [terminalAgentTile],
-               "the shell tile is not an agent to cycle to — got \(app.currentAgentTileIds(status: nil))")
+    // P2B.5: the managed tile is in this list. It was not before — the cycle filtered
+    // `kind == .terminal` — so ⌥ stepped straight over every managed agent. Z-order,
+    // so terminal (rank 1) then managed (rank 2).
+    try expect(app.currentAgentTileIds(status: nil) == [terminalAgentTile, managedAgentTile],
+               "⌥-cycling must reach a managed-agent tile, and the shell tile is not an agent to cycle to — got \(app.currentAgentTileIds(status: nil))")
+    // …and the STATUS-FILTERED cycle selects it by its own status, not by its kind:
+    // the managed agent is the only `working` one here (the terminal agent was just
+    // flipped to `needsAttention`). Without this the filtered cycle — the one the
+    // packet names — would be proven only for terminal tiles.
+    try expect(app.currentAgentTileIds(status: .working) == [managedAgentTile],
+               "the filtered cycle must select a managed agent by its status — got \(app.currentAgentTileIds(status: .working))")
 
     NSApplication.shared.dockTile.badgeLabel = nil
     print("AgentInventoryWiring: 5 agents (2 projects, 1 managed, 1 headless, 1 shell excluded) agreed across sidebar/badge/dock/companion from one rebuild; a flipped status moved all four")
