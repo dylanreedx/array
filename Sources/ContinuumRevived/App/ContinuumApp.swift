@@ -8783,16 +8783,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private static func resolveAppSupportDir(smokeTest: Bool) -> URL? {
-        if let override = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] {
-            return URL(fileURLWithPath: override, isDirectory: true)
-        }
-        if smokeTest {
-            let temp = FileManager.default.temporaryDirectory
-                .appendingPathComponent("continuum-smoke-appsupport-\(UUID().uuidString)", isDirectory: true)
-            try? FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
-            return temp
-        }
-        return nil // Fall through to the canonical Application Support path.
+        // The logic itself lives in Core (P2A.2) so it is testable; nil still
+        // means "fall through to the canonical Application Support path".
+        AgentStore.resolveApplicationSupportDirectory(smokeTest: smokeTest)
     }
 
     private static func resolveAuthDirectory(applicationSupportDirectory: URL?) -> URL {

@@ -9956,4 +9956,8 @@ runTypographyReadabilityChecks()
 // entity, with the tile demoted to an optional view binding.
 runAgentRecordChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P2A.2-agent-store.md — agents listable
+// across every project, out of application support rather than a project root.
+runAgentStoreChecks()
+
 print("ContinuumRevivedCoreChecks passed")
