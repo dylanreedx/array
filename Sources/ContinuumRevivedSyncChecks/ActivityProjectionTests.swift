@@ -154,6 +154,10 @@ private func makePair() async -> (host: LoopbackSyncTransport, observer: Loopbac
     return (host, observer)
 }
 
+// P2A.8: these fixtures are TILE-BOUND agents, so the agent id and the tile hint are
+// the same value — the same equality the legacy decode relies on. That keeps every
+// existing assertion in this file addressing the same aggregate as before, while the
+// key it addresses is now the agent's.
 private func makeDraft(
     tileId: UUID,
     tone: ActivityEventTone = .info,
@@ -163,6 +167,7 @@ private func makeDraft(
     approvalRequestId: String? = nil
 ) -> AgentActivityEventDraft {
     AgentActivityEventDraft(
+        agentId: tileId,
         tileId: tileId,
         runId: nil,
         tone: tone,
@@ -267,7 +272,7 @@ private func checkSnapshotThenTailIsGapFree() async {
         return
     }
     expect(wireSnapshot.snapshotSequence == 2, "snapshot-then-tail: snapshot carries both existing events")
-    expect(wireSnapshot.byTile[tileId]?.status == .working, "snapshot-then-tail: status projected")
+    expect(wireSnapshot.byAgent[tileId]?.status == .working, "snapshot-then-tail: status projected")
     let snapshotProcessed = await waitForConvergence(receiver: receiver, expectedSequence: 2, timeoutSeconds: 2)
     expect(snapshotProcessed, "snapshot-then-tail: receiver folds snapshot")
     let receiverSnapshot = await receiver.currentSnapshot()
@@ -300,8 +305,8 @@ private func checkGapDetectionTriggersReplay() async {
     let finalSnapshot = await receiver.currentSnapshot()
     let finalStoreSnapshot = await store.currentSnapshot()
     expect(finalSnapshot == finalStoreSnapshot, "gap detection: receiver equals store after replay")
-    expect(finalSnapshot.byTile[tileId]?.status == .done, "gap detection: final status is done")
-    expect(finalSnapshot.byTile[tileId]?.recent.count == 3, "gap detection: no double-application")
+    expect(finalSnapshot.byAgent[tileId]?.status == .done, "gap detection: final status is done")
+    expect(finalSnapshot.byAgent[tileId]?.recent.count == 3, "gap detection: no double-application")
 
     await sender.stop()
     await receiver.stop()
@@ -355,7 +360,7 @@ private func checkFreshReceiverResumeFromPersistedCursorIsIncremental() async {
     let finalSnapshot = await receiver.currentSnapshot()
     let storeSnapshot = await store.currentSnapshot()
     expect(finalSnapshot == storeSnapshot, "cursor resume: fresh receiver equals store")
-    expect(finalSnapshot.byTile[tileId]?.recent.map(\.sequence) == [1, 2, 3, 4], "cursor resume: final snapshot has the full folded activity history")
+    expect(finalSnapshot.byAgent[tileId]?.recent.map(\.sequence) == [1, 2, 3, 4], "cursor resume: final snapshot has the full folded activity history")
 
     await sender.stop()
     await receiver.stop()
@@ -462,8 +467,8 @@ private func checkGapRetryExhaustionFallsBackToColdReconnect() async {
     let receiver = ActivityProjectionReceiver(demux: SyncMessageDemux(transport: transport), scope: .observer, gapRetryLimit: gapRetryLimit, gapRetryBackoff: .milliseconds(5))
     await receiver.connect()
 
-    let baseline = ActivityLogSnapshot(snapshotSequence: 1, snapshotReplicaId: replicaId, byTile: [
-        tileId: TileActivity(status: .working, lastSummary: "s", recent: [], updatedAt: Date())
+    let baseline = ActivityLogSnapshot(snapshotSequence: 1, snapshotReplicaId: replicaId, byAgent: [
+        tileId: AgentActivity(status: .working, lastSummary: "s", recent: [], updatedAt: Date(), tileId: tileId)
     ])
     await transport.push(.activity(.snapshot(baseline)))
     let gapEvent = AgentActivityEvent(stamping: makeDraft(tileId: tileId, status: .done), sequence: 5, replicaId: replicaId)
@@ -533,9 +538,11 @@ private func runActivityProjectionBackendCheck() async -> Double {
     expect(backendReceiverSnapshot == backendStoreSnapshot, "backend: receiver equals store after delay/drop/replay")
     let receiverStatuses = await receiver.agentStatusesByTileId()
     let storeSnapshot = await store.currentSnapshot()
-    expect(receiverStatuses == storeSnapshot.byTile.mapValues(\.status), "backend: status map matches")
+    // Tile-keyed vs agent-keyed, equal because every fixture agent is bound to a tile
+    // of the same id; `agentStatusesByTileId` projects through the hint.
+    expect(receiverStatuses == storeSnapshot.byAgent.mapValues(\.status), "backend: status map matches")
     expect(receiverStatuses[tileIds[2]] == .done, "backend: final status is done")
-    let recentCount = backendReceiverSnapshot.byTile[tileIds[2]]?.recent.count
+    let recentCount = backendReceiverSnapshot.byAgent[tileIds[2]]?.recent.count
     expect(recentCount == statusesForLastTile.count, "backend: no double-application")
     expect(elapsedMs < 100, "backend: completes within 100ms, got \(elapsedMs)")
 
@@ -591,9 +598,9 @@ private func checkAgentsBoardProjectionOverFakeSyncTransportRealPath() async {
 
     let finalSnapshot = await receiver.currentSnapshot()
     let rows = AgentsBoardProjection.rows(from: finalSnapshot)
-    expect(rows.map { $0.tileId } == [tileA, tileC, tileB], "agents board real path: rows are attention-first with newest tie-break inside priority")
+    expect(rows.map { $0.agentId } == [tileA, tileC, tileB], "agents board real path: rows are attention-first with newest tie-break inside priority")
     expect(rows.map { $0.status } == [AgentStatus.needsAttention, AgentStatus.needsAttention, AgentStatus.done], "agents board real path: final statuses match the sent tail")
-    let measuredOrder = rows.map { $0.tileId.uuidString }.joined(separator: ",")
+    let measuredOrder = rows.map { $0.agentId.uuidString }.joined(separator: ",")
     let measuredStatuses = rows.map { $0.status.rawValue }.joined(separator: ",")
     let measuredSummaries = rows.map { $0.lastSummary }.joined(separator: " | ")
     print("agents board real path: fakeSyncTransport coldConnectCursor=nil snapshotSequence=\(finalSnapshot.snapshotSequence) measuredOrder=\(measuredOrder) statuses=\(measuredStatuses) summaries=\(measuredSummaries)")
@@ -606,21 +613,21 @@ private actor FakeApprovalSeam: ApprovalResponding {
     private let store: ActivityStore
     private var resolved: Set<String> = []
     private(set) var callCount = 0
-    private(set) var invocations: [(tileId: UUID, requestId: String, decision: ApprovalDecision)] = []
+    private(set) var invocations: [(agentId: UUID, requestId: String, decision: ApprovalDecision)] = []
 
     init(store: ActivityStore) {
         self.store = store
     }
 
-    func respond(tileId: UUID, requestId: String, decision: ApprovalDecision) async -> ApprovalRespondResult {
+    func respond(agentId: UUID, requestId: String, decision: ApprovalDecision) async -> ApprovalRespondResult {
         callCount += 1
         guard requestId != "unknown-request" else { return .unknownRequest }
         guard !resolved.contains(requestId) else { return .stale }
         resolved.insert(requestId)
-        invocations.append((tileId: tileId, requestId: requestId, decision: decision))
+        invocations.append((agentId: agentId, requestId: requestId, decision: decision))
         if decision == .accept {
             await store.append(makeDraft(
-                tileId: tileId,
+                tileId: agentId,
                 tone: .approval,
                 status: .working,
                 summary: "approval resolved",
@@ -632,7 +639,7 @@ private actor FakeApprovalSeam: ApprovalResponding {
 
     func invocationCount() -> Int { invocations.count }
     func totalCallCount() -> Int { callCount }
-    func allInvocations() -> [(tileId: UUID, requestId: String, decision: ApprovalDecision)] { invocations }
+    func allInvocations() -> [(agentId: UUID, requestId: String, decision: ApprovalDecision)] { invocations }
 }
 
 private actor ApprovalAckCollector {
@@ -701,32 +708,32 @@ private func checkApprovalResponderOverFakeSyncTransportRealPath() async {
     let seeded = await waitForFakeReceiverConvergence(fake: fake, receiver: receiver, expectedSequence: 1, timeoutSeconds: 2)
     expect(seeded, "approval responder real path: pending approval event reaches receiver")
     let seededSnapshot = await receiver.currentSnapshot()
-    let seededActivity = seededSnapshot.byTile[tileId]
+    let seededActivity = seededSnapshot.byAgent[tileId]
     expect(seededActivity?.status == .needsAttention, "approval responder real path: receiver folds needsAttention")
     expect(AgentsBoardProjection.respondableRequest(in: seededActivity!)?.approvalRequestId == requestId, "approval responder real path: receiver exposes approvalRequestId")
 
-    try? await observerDemux.send(.approvalResponse(ApprovalResponseRequest(tileId: tileId, requestId: requestId, decision: .accept)))
+    try? await observerDemux.send(.approvalResponse(ApprovalResponseRequest(agentId: tileId, requestId: requestId, decision: .accept)))
     let resolvedAcks = await waitForApprovalAck(fake: fake, collector: ackCollector, requestId: requestId)
     expect(resolvedAcks.last?.outcome == .resolved, "approval responder real path: operator accept acks resolved")
     let resolvedConverged = await waitForFakeReceiverConvergence(fake: fake, receiver: receiver, expectedSequence: 2, timeoutSeconds: 2)
     expect(resolvedConverged, "approval responder real path: resolution activity flows back through projection")
     let resolvedSnapshot = await receiver.currentSnapshot()
-    expect(resolvedSnapshot.byTile[tileId]?.status == .working, "approval responder real path: folded status clears needsAttention")
+    expect(resolvedSnapshot.byAgent[tileId]?.status == .working, "approval responder real path: folded status clears needsAttention")
     let firstInvocationCount = await seam.invocationCount()
     expect(firstInvocationCount == 1, "approval responder real path: first accept invokes seam exactly once")
     let firstInvocations = await seam.allInvocations()
     let firstInvocation = firstInvocations.first
     expect(
         firstInvocations.count == 1 &&
-            firstInvocation?.tileId == tileId &&
+            firstInvocation?.agentId == tileId &&
             firstInvocation?.requestId == requestId &&
             firstInvocation?.decision == .accept,
-        "approval responder real path: first accept forwards exact tileId, requestId, and .accept decision to seam"
+        "approval responder real path: first accept forwards exact agentId, requestId, and .accept decision to seam"
     )
     let firstCallCount = await seam.totalCallCount()
     expect(firstCallCount == 1, "approval responder real path: first accept calls seam exactly once")
 
-    try? await observerDemux.send(.approvalResponse(ApprovalResponseRequest(tileId: tileId, requestId: requestId, decision: .accept)))
+    try? await observerDemux.send(.approvalResponse(ApprovalResponseRequest(agentId: tileId, requestId: requestId, decision: .accept)))
     let staleAcks = await waitForApprovalAck(fake: fake, collector: ackCollector, requestId: requestId, count: 2)
     expect(staleAcks.last?.outcome == .stale, "approval responder real path: second identical accept acks stale")
     let staleInvocationCount = await seam.invocationCount()
@@ -739,7 +746,7 @@ private func checkApprovalResponderOverFakeSyncTransportRealPath() async {
     let unauthorizedDemux = SyncMessageDemux(transport: unauthorizedTransport)
     let unauthorizedResponder = ApprovalResponder(seam: unauthorizedSeam, demux: unauthorizedDemux, authorizedScope: .observer)
     await unauthorizedResponder.start()
-    await unauthorizedTransport.push(.approvalResponse(ApprovalResponseRequest(tileId: tileId, requestId: "unauthorized-request", decision: .decline)))
+    await unauthorizedTransport.push(.approvalResponse(ApprovalResponseRequest(agentId: tileId, requestId: "unauthorized-request", decision: .decline)))
     try? await Task.sleep(for: .milliseconds(50))
     let unauthorizedAck = await unauthorizedTransport.allSentMessages().compactMap { message -> ApprovalResponseAck? in
         if case .approvalResponseAck(let ack) = message { return ack }
@@ -750,21 +757,88 @@ private func checkApprovalResponderOverFakeSyncTransportRealPath() async {
     expect(unauthorizedInvocationCount == 0, "approval responder real path: unauthorized path never invokes seam")
     await unauthorizedResponder.stop()
 
-    try? await observerDemux.send(.approvalResponse(ApprovalResponseRequest(tileId: tileId, requestId: "unknown-request", decision: .decline)))
+    try? await observerDemux.send(.approvalResponse(ApprovalResponseRequest(agentId: tileId, requestId: "unknown-request", decision: .decline)))
     let unknownAcks = await waitForApprovalAck(fake: fake, collector: ackCollector, requestId: "unknown-request")
     expect(unknownAcks.last?.outcome == .unknownRequest, "approval responder real path: unknown request acks unknownRequest")
 
     let allAcks = await ackCollector.all()
     let measuredAcks = allAcks.map { "\($0.requestId):\($0.outcome.rawValue)" }.joined(separator: ",")
-    let finalStatus = (await receiver.currentSnapshot()).byTile[tileId]?.status.rawValue ?? "nil"
+    let finalStatus = (await receiver.currentSnapshot()).byAgent[tileId]?.status.rawValue ?? "nil"
     let finalInvocationCount = await seam.invocationCount()
     let finalInvocations = await seam.allInvocations()
     let finalUnauthorizedInvocationCount = await unauthorizedSeam.invocationCount()
-    let measuredInvocations = finalInvocations.map { "\($0.tileId.uuidString):\($0.requestId):\($0.decision.rawValue)" }.joined(separator: ",")
+    let measuredInvocations = finalInvocations.map { "\($0.agentId.uuidString):\($0.requestId):\($0.decision.rawValue)" }.joined(separator: ",")
     print("approval responder real path: acks=\(measuredAcks) seamInvocations=\(finalInvocationCount) invocationTuples=\(measuredInvocations) finalStatus=\(finalStatus) unauthorizedInvocations=\(finalUnauthorizedInvocationCount)")
 
     ackTask.cancel()
     await responder.stop()
+    await sender.stop()
+    await receiver.stop()
+}
+
+// P2A.8 over the REAL sender/receiver path, with `agentId != tileId` and a headless
+// agent. Every other fixture in this file binds an agent to a tile of the same id — which
+// keeps their assertions addressing the same aggregate as before the key moved, but means
+// a path that still keyed by tile would pass them. This one cannot: the two ids differ,
+// so a tile-keyed fold lands under the wrong key, and the headless agent has no tile to
+// land under at all.
+private func checkAgentKeyedProjectionOverRealPath() async {
+    let replicaId = UUID(uuidString: "61000000-0000-4000-8000-00000000F101")!
+    let boundAgent = UUID(uuidString: "61000000-0000-4000-8000-00000000FA01")!
+    let boundTile = UUID(uuidString: "61000000-0000-4000-8000-00000000FB01")!
+    let headlessAgent = UUID(uuidString: "61000000-0000-4000-8000-00000000FA02")!
+    let base = Date(timeIntervalSinceReferenceDate: 6_181)
+    let store = ActivityStore(replicaId: replicaId)
+
+    let fake = ContinuumRevivedSync.FakeSyncTransport(seed: 62)
+    let (hostReplica, hostInbound) = await fake.makeReplica()
+    let (observerReplica, observerInbound) = await fake.makeReplica()
+    let hostTransport = FakeReplicaSyncTransport(fake: fake, replicaId: hostReplica, inbound: hostInbound)
+    let observerTransport = FakeReplicaSyncTransport(fake: fake, replicaId: observerReplica, inbound: observerInbound)
+    let sender = ActivityProjectionSender(store: store, demux: SyncMessageDemux(transport: hostTransport), authorizedScope: .observer)
+    await sender.start()
+    let receiver = ActivityProjectionReceiver(demux: SyncMessageDemux(transport: observerTransport), scope: .observer, gapRetryBackoff: .milliseconds(5))
+    await receiver.connect(cursor: nil)
+
+    await store.append(AgentActivityEventDraft(
+        agentId: boundAgent, tileId: boundTile, runId: nil, tone: .info, kind: "status",
+        status: .working, summary: "bound agent working", occurredAt: base))
+    await store.append(AgentActivityEventDraft(
+        agentId: headlessAgent, tileId: nil, runId: nil, tone: .approval, kind: "needs-attention",
+        status: .needsAttention, summary: "headless agent needs approval", occurredAt: base.addingTimeInterval(1),
+        approvalRequestId: "approval-headless"))
+
+    let converged = await waitForFakeReceiverConvergence(fake: fake, receiver: receiver, expectedSequence: 2, timeoutSeconds: 2)
+    expect(converged, "P2A.8 real path: agent-keyed events reach the production receiver")
+
+    let snapshot = await receiver.currentSnapshot()
+    expect(snapshot.byAgent[boundAgent] != nil && snapshot.byAgent[boundTile] == nil,
+           "P2A.8 real path: the received snapshot is keyed by agent id, not by the tile hint")
+    expect(snapshot.byAgent[boundAgent]?.tileId == boundTile,
+           "P2A.8 real path: the tile hint survives the wire")
+    expect(snapshot.byAgent[headlessAgent]?.tileId == nil,
+           "P2A.8 real path: a headless agent arrives with no tile hint")
+
+    let rows = AgentsBoardProjection.rows(from: snapshot)
+    expect(rows.map(\.agentId) == [headlessAgent, boundAgent],
+           "P2A.8 real path: both agents project rows, attention first — measured \(rows.map { $0.agentId.uuidString })")
+    expect(rows.first(where: { $0.agentId == headlessAgent })?.tileId == nil,
+           "P2A.8 real path: the headless row carries no tile, so the phone hides Show on canvas")
+
+    // The one tile-keyed consumer left on this path: a headless agent must not appear in
+    // it, and a bound one must appear under its TILE, not under its agent id.
+    let statuses = await receiver.agentStatusesByTileId()
+    expect(statuses == [boundTile: .working],
+           "P2A.8 real path: agentStatusesByTileId projects through the hint only — measured \(statuses.map { "\($0.key.uuidString):\($0.value.rawValue)" }.sorted())")
+
+    // The approval an operator would answer is addressed by the AGENT — which is the only
+    // way a headless agent's approval can be answered at all.
+    let target = snapshot.byAgent[headlessAgent].flatMap { AgentsBoardProjection.respondableRequest(in: $0) }
+    expect(target == ApprovalResponseTarget(agentId: headlessAgent, approvalRequestId: "approval-headless"),
+           "P2A.8 real path: a headless agent's approval is respondable, addressed by agent id")
+
+    print("P2A.8 real path measured rows=\(rows.map { "\($0.agentId.uuidString.prefix(8)):\($0.tileId?.uuidString.prefix(8) ?? "none")" }.joined(separator: ",")) tileKeyedStatuses=\(statuses.count)")
+
     await sender.stop()
     await receiver.stop()
 }
@@ -780,6 +854,7 @@ func runActivityProjectionChecks() async throws {
     await checkGapRetryExhaustionFallsBackToColdReconnect()
     let backendElapsedMs = await runActivityProjectionBackendCheck()
     await checkAgentsBoardProjectionOverFakeSyncTransportRealPath()
+    await checkAgentKeyedProjectionOverRealPath()
     await checkApprovalResponderOverFakeSyncTransportRealPath()
 
     let manifest = InvariantManifest(

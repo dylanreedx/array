@@ -52,15 +52,42 @@ public enum SyncMessage: Codable, Sendable, Equatable {
     case approvalResponseAck(ApprovalResponseAck)
 }
 
+/// P2A.8: addressed by AGENT, not by tile. The phone reads this id off an
+/// `AgentsBoardRow`/`ApprovalResponseTarget`, both of which are now agent-keyed, so a
+/// field named `tileId` here would be carrying an agent id under the old name — the
+/// half-migrated state the ticket forbids. Decodes a legacy `tileId` payload for the
+/// same reason `AgentActivityEvent` does: historically the two ids were one value.
 public struct ApprovalResponseRequest: Codable, Sendable, Equatable {
-    public let tileId: UUID
+    public let agentId: UUID
     public let requestId: String
     public let decision: ApprovalDecision
 
-    public init(tileId: UUID, requestId: String, decision: ApprovalDecision) {
-        self.tileId = tileId
+    public init(agentId: UUID, requestId: String, decision: ApprovalDecision) {
+        self.agentId = agentId
         self.requestId = requestId
         self.decision = decision
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case agentId, tileId, requestId, decision
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let agentId = try container.decodeIfPresent(UUID.self, forKey: .agentId) {
+            self.agentId = agentId
+        } else {
+            self.agentId = try container.decode(UUID.self, forKey: .tileId)
+        }
+        requestId = try container.decode(String.self, forKey: .requestId)
+        decision = try container.decode(ApprovalDecision.self, forKey: .decision)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(agentId, forKey: .agentId)
+        try container.encode(requestId, forKey: .requestId)
+        try container.encode(decision, forKey: .decision)
     }
 }
 

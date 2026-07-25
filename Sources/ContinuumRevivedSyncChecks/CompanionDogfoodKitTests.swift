@@ -48,7 +48,7 @@ private func checkCompanionDogfoodFixtureIsExplicitAndI5Safe() throws {
     expect(fixture.label == "Continuum Companion Dogfood Fixture", "ticket76 fixture: label is explicit")
     expect(fixture.canvas.tiles.count == 2, "ticket76 fixture: produces a non-empty canvas")
     expect(fixture.workspace.zones.count == 1, "ticket76 fixture: produces a visible dogfood zone")
-    expect(fixture.activity.byTile.values.contains { $0.lastSummary == "Dogfood Dummy Agent working" }, "ticket76 fixture: includes explicit dummy agent activity")
+    expect(fixture.activity.byAgent.values.contains { $0.lastSummary == "Dogfood Dummy Agent working" }, "ticket76 fixture: includes explicit dummy agent activity")
     expect(fixture.mutationPolicy == .temporaryWorkspaceOnly, "ticket76 fixture: does not silently mutate real workspaces")
 
     let encoded = try CompanionDogfoodJSON.encoder.encode(fixture)

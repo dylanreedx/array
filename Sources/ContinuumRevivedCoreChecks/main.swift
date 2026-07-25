@@ -9507,6 +9507,9 @@ do {
     let fixedZone = UUID(uuidString: "FACADE00-0000-4000-8000-000000000002")!
     let fixedReplica = UUID(uuidString: "FACADE00-0000-4000-8000-000000000003")!
     let fixedProject = UUID(uuidString: "FACADE00-0000-4000-8000-000000000004")!
+    // P2A.8: the activity aggregate key, deliberately a DIFFERENT value from the tile so
+    // the scan walks both fields of the migrated payload.
+    let fixedAgent = UUID(uuidString: "FACADE00-0000-4000-8000-000000000005")!
 
     // Every Op case, no gaps — SpatialOp.swift's 19 cases as shipped.
     let ops: [Op] = [
@@ -9561,6 +9564,10 @@ do {
         for status in statuses {
             let event = AgentActivityEvent(
                 stamping: AgentActivityEventDraft(
+                    // P2A.8: the aggregate key is the agent's; the tile is an optional
+                    // hint. BOTH are scanned here so the migrated payload — not just
+                    // the old one — is what I5 is verified over.
+                    agentId: fixedAgent,
                     tileId: fixedTile,
                     runId: nil,            // no runId in projection payloads
                     tone: tone,
@@ -9594,6 +9601,7 @@ do {
     do {
         let runIdEvent = AgentActivityEvent(
             stamping: AgentActivityEventDraft(
+                agentId: fixedAgent,
                 tileId: fixedTile,
                 runId: "FACADE00-0000-4000-8000-000000000005",  // benign, non-pid-shaped
                 tone: .info,
@@ -9631,7 +9639,7 @@ do {
     do {
         let overflowEvent = AgentActivityEvent(
             stamping: AgentActivityEventDraft(
-                tileId: fixedTile, runId: nil, tone: .info, kind: "turn.started",
+                agentId: fixedAgent, tileId: fixedTile, runId: nil, tone: .info, kind: "turn.started",
                 status: .idle, summary: "overflow fixture",
                 occurredAt: Date(timeIntervalSinceReferenceDate: 0)
             ),
@@ -9735,7 +9743,7 @@ do {
     // AgentActivityEvent (one of the two payload families the real scan already covers)
     // so the manifest below is not entirely disconnected from a live assertion.
     let draft = AgentActivityEventDraft(
-        tileId: UUID(uuidString: "B0000000-0000-4000-8000-000000000901")!,
+        agentId: UUID(uuidString: "B0000000-0000-4000-8000-000000000901")!,
         runId: nil,
         tone: .info,
         kind: "turn.started",

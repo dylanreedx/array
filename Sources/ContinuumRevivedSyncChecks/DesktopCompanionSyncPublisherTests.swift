@@ -151,18 +151,21 @@ private func checkDesktopActivitySnapshotIsSanitized() throws {
     )
 
     let managedTileId = UUID(uuidString: "75000000-0000-4000-8000-0000000000E4")!
+    // P2A.8: the aggregate key is the AGENT's, deliberately different from its tile id
+    // here so a row keyed by the tile would be caught.
+    let managedAgentId = UUID(uuidString: "75000000-0000-4000-8000-0000000000A4")!
     let snapshot = DegradedDesktopActivitySnapshotSource.snapshot(
         descriptors: [descriptor],
         liveStatuses: [tileId: .needsAttention],
-        managedAgents: [DesktopManagedAgentActivity(tileId: managedTileId, agentKind: .managed, status: .idle, updatedAt: now)],
+        managedAgents: [DesktopManagedAgentActivity(agentId: managedAgentId, tileId: managedTileId, agentKind: .managed, status: .idle, updatedAt: now)],
         replicaId: UUID(uuidString: "75000000-0000-4000-8000-0000000000E3")!,
         now: now
     )
 
-    expect(snapshot.byTile[tileId]?.status == .needsAttention, "ticket75 activity: live status overrides persisted degraded descriptor status")
-    expect(snapshot.byTile[tileId]?.lastSummary == "Claude needs attention", "ticket75 activity: summary is short safe status copy")
-    expect(snapshot.byTile[managedTileId]?.status == .idle, "ticket85 activity: managed-agent rows are included in the sanitized desktop snapshot")
-    expect(snapshot.byTile[managedTileId]?.lastSummary == "Managed agent idle", "ticket85 activity: managed-agent summary is short safe status copy")
+    expect(snapshot.byAgent[tileId]?.status == .needsAttention, "ticket75 activity: live status overrides persisted degraded descriptor status")
+    expect(snapshot.byAgent[tileId]?.lastSummary == "Claude needs attention", "ticket75 activity: summary is short safe status copy")
+    expect(snapshot.byAgent[managedAgentId]?.status == .idle, "ticket85 activity: managed-agent rows are included in the sanitized desktop snapshot")
+    expect(snapshot.byAgent[managedAgentId]?.lastSummary == "Managed agent idle", "ticket85 activity: managed-agent summary is short safe status copy")
 
     let json = String(decoding: try JSONEncoder().encode(snapshot), as: UTF8.self)
     for forbidden in ["/Users/", "private/repo", "SECRET_TOKEN", "raw-apns-token", "transcript body", "pane", "pid", "local-run-id"] {
@@ -174,6 +177,7 @@ private func checkDesktopActivitySnapshotIsSanitized() throws {
     // (in canonical order), so the phone shows what the agent is doing, not just a
     // status badge. Content deltas are dropped and the payload stays I5-clean.
     let timelineTile = UUID(uuidString: "75000000-0000-4000-8000-0000000000E5")!
+    let timelineAgent = UUID(uuidString: "75000000-0000-4000-8000-0000000000A5")!
     let events: [AgentRuntimeEvent] = [
         .turnStarted(threadId: "t", turnId: "t1"),
         .itemStarted(threadId: "t", itemId: "c1", kind: .commandExecution, title: "read"),
@@ -182,17 +186,22 @@ private func checkDesktopActivitySnapshotIsSanitized() throws {
         .turnCompleted(threadId: "t", turnId: "t1", outcome: .completed, errorMessage: nil),
     ]
     let drafts = events.compactMap {
-        ManagedAgentActivityBridge.draft(for: $0, tileId: timelineTile, status: .working, now: now)
+        ManagedAgentActivityBridge.draft(for: $0, agentId: timelineAgent, tileId: timelineTile, status: .working, now: now)
     }
     let timelineSnapshot = DegradedDesktopActivitySnapshotSource.snapshot(
         descriptors: [],
         liveStatuses: [:],
         managedAgents: [DesktopManagedAgentActivity(
-            tileId: timelineTile, agentKind: .managed, status: .working, updatedAt: now, recentEvents: drafts)],
+            agentId: timelineAgent, tileId: timelineTile, agentKind: .managed, status: .working,
+            updatedAt: now, recentEvents: drafts)],
         replicaId: UUID(uuidString: "75000000-0000-4000-8000-0000000000E6")!,
         now: now
     )
-    let recentKinds = timelineSnapshot.byTile[timelineTile]?.recent.map(\.kind) ?? []
+    let recentKinds = timelineSnapshot.byAgent[timelineAgent]?.recent.map(\.kind) ?? []
+    expect(timelineSnapshot.byAgent[timelineTile] == nil && timelineSnapshot.byAgent[timelineAgent] != nil,
+           "P2A.8: the published snapshot is keyed by agent id, not by the tile rendering it")
+    expect(timelineSnapshot.byAgent[timelineAgent]?.tileId == timelineTile,
+           "P2A.8: the tile rides along as the view hint")
     expect(recentKinds == ["turn.started", "tool.read", "tool.completed", "turn.completed"],
            "88.4c: managed timeline folds into snapshot.recent in order, content delta dropped — got \(recentKinds)")
     let timelineJson = String(decoding: try JSONEncoder().encode(SyncMessage.activity(.snapshot(timelineSnapshot))), as: UTF8.self)
@@ -295,7 +304,7 @@ private func checkDesktopCompanionFakeTransportFetchAndApprovalAck() async throw
         freshnessPublisher: freshness,
         fetchChanges: {
             await fetchCounter.increment()
-            await transport.pushInbound(.approvalResponse(ApprovalResponseRequest(tileId: canvas.tiles[0].id, requestId: requestId, decision: .accept)))
+            await transport.pushInbound(.approvalResponse(ApprovalResponseRequest(agentId: canvas.tiles[0].id, requestId: requestId, decision: .accept)))
         },
         clock: FakeClock(start: Date(timeIntervalSinceReferenceDate: 1_100))
     )

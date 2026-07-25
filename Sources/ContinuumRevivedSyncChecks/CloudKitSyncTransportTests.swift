@@ -304,7 +304,7 @@ private func checkOutboundIntegerOverflow() {
     // (b) AgentActivityEvent — encodeActivityEventRecord's `sequence` field.
     let overflowEvent = AgentActivityEvent(
         stamping: AgentActivityEventDraft(
-            tileId: cksTile, runId: nil, tone: .info, kind: "status",
+            agentId: cksTile, runId: nil, tone: .info, kind: "status",
             status: .idle, summary: "overflow probe", occurredAt: Date()
         ),
         sequence: UInt64(Int64.max) + 1,

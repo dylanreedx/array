@@ -87,7 +87,7 @@ private func runManagedAgentSessionStoreContract() throws {
     ))
     let activityJSON = try JSONCodec.makeEncoder().encode(AgentActivityEvent(
         stamping: AgentActivityEventDraft(
-            tileId: UUID(uuidString: "23000000-0000-4000-8000-000000000024")!,
+            agentId: UUID(uuidString: "23000000-0000-4000-8000-000000000024")!,
             runId: "run-1",
             tone: .info,
             kind: "turn.started",

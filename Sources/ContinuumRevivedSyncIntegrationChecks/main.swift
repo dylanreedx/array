@@ -123,7 +123,7 @@ func runGatedCloudKitIntegrationChecks() async throws {
     let snapshot = ActivityLogSnapshot(
         snapshotSequence: 1,
         snapshotReplicaId: replicaId,
-        byTile: [:]
+        byAgent: [:]
     )
     let snapshotPushStart = Date()
     try await transport.send(.activity(.snapshot(snapshot)))

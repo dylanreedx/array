@@ -292,7 +292,10 @@ public enum CanvasMirrorPresentation {
     }
 
     public static func statusOverlays(scene: CanvasScene, rows: [AgentsBoardRow]) -> [UUID: CanvasMirrorTileStatus] {
-        let rowsByTile = Dictionary(uniqueKeysWithValues: rows.map { ($0.tileId, $0) })
+        // P2A.8: a row is keyed by its agent, so the canvas join goes through the optional
+        // tile hint — a headless row simply contributes no overlay — via the one shared
+        // rule in `keyedByTileHint`.
+        let rowsByTile = keyedByTileHint(rows.map { (agentId: $0.agentId, tileId: $0.tileId, value: $0) })
         return Dictionary(uniqueKeysWithValues: scene.tiles.map { tile in
             if let row = rowsByTile[tile.tileId] {
                 return (tile.tileId, CanvasMirrorTileStatus(

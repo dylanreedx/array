@@ -11,10 +11,13 @@ import Foundation
 // verification convention (see SpatialOpTests.swift for the sibling ticket 02 checks).
 
 // A tiny fixture helper — builds a DRAFT (never a stamped event; the store stamps).
+// P2A.8: these fixtures are tile-bound agents, so the agent key and the tile hint are
+// the same value; every assertion below therefore addresses the same aggregate it did
+// before the key moved.
 private func makeDraft(tileId: UUID, status: AgentStatus, kind: String,
                         tone: ActivityEventTone = .info, summary: String = "ok",
                         runId: String? = nil, at: Date = Date()) -> AgentActivityEventDraft {
-    AgentActivityEventDraft(tileId: tileId, runId: runId, tone: tone,
+    AgentActivityEventDraft(agentId: tileId, tileId: tileId, runId: runId, tone: tone,
                              kind: kind, status: status, summary: summary, occurredAt: at)
 }
 
@@ -58,13 +61,13 @@ private func runActivityStoreTestsAsync() async {
 
         expect(snapshot.snapshotSequence == 4, "apply fold: snapshotSequence tracks the last folded event")
         expect(snapshot.snapshotReplicaId == rid, "apply fold: snapshotReplicaId tracks the last folded event")
-        expect(snapshot.byTile.count == 2, "apply fold: byTile has one entry per distinct tileId touched")
-        let tile = snapshot.byTile[tid]
-        expect(tile?.status == .done, "apply fold: byTile status is the LAST applied event's status, not the first")
+        expect(snapshot.byAgent.count == 2, "apply fold: byAgent has one entry per distinct agentId touched")
+        let tile = snapshot.byAgent[tid]
+        expect(tile?.status == .done, "apply fold: byAgent status is the LAST applied event's status, not the first")
         expect(tile?.lastSummary == "done", "apply fold: lastSummary is the last applied event's summary")
         expect(tile?.updatedAt == t3, "apply fold: updatedAt is the last applied event's occurredAt")
         expect(tile?.recent.map(\.sequence) == [2, 3, 4], "apply fold: recent preserves full application order for this tile only")
-        expect(snapshot.byTile[otherTid]?.status == .idle, "apply fold: a different tile's state is untouched by events for tid")
+        expect(snapshot.byAgent[otherTid]?.status == .idle, "apply fold: a different tile's state is untouched by events for tid")
     }
 
     // --- LOGIC: init-replay fold converges to the same snapshot as live append fold ---
@@ -108,7 +111,7 @@ private func runActivityStoreTestsAsync() async {
         var iter = stream.makeAsyncIterator()
         let first = await iter.next()
         if case .snapshot(let snap) = first {
-            expect(snap.byTile[tid]?.status == .working, "subscribe: pre-subscription snapshot reflects prior appends")
+            expect(snap.byAgent[tid]?.status == .working, "subscribe: pre-subscription snapshot reflects prior appends")
         } else {
             expect(false, "subscribe: expected a snapshot as the first stream item")
         }
@@ -139,9 +142,9 @@ private func runActivityStoreTestsAsync() async {
         let events = (1...250).map { i in makeEvent(seq: UInt64(i), replicaId: rid, tileId: tid,
                                                      status: .working, kind: "tool.bash") }
         let snap = events.reduce(ActivityLogSnapshot.empty, apply)
-        expect(snap.byTile[tid]?.recent.count == 200, "ring buffer caps recent events at 200")
+        expect(snap.byAgent[tid]?.recent.count == 200, "ring buffer caps recent events at 200")
         // Verify it kept the LAST 200, not the first
-        expect(snap.byTile[tid]?.recent.first?.sequence == 51, "ring buffer keeps the last 200 events, not the first")
+        expect(snap.byAgent[tid]?.recent.first?.sequence == 51, "ring buffer keeps the last 200 events, not the first")
     }
 
     // --- LOGIC: replay returns only events after the cursor ---
@@ -206,7 +209,7 @@ private func runActivityStoreTestsAsync() async {
         // (activityEventOrder / apply's canonical order), so the winner is deterministic
         // — compute it the same way the fold does rather than accepting either value.
         let expectedWinner: AgentStatus = replicaA.uuidString > replicaB.uuidString ? .working : .done
-        expect(originalSnapshot.byTile[tid]?.status == expectedWinner,
+        expect(originalSnapshot.byAgent[tid]?.status == expectedWinner,
                "multi-replica fold: the (sequence, replicaId) tie-break determines a single deterministic winner, independent of `existing:` array order")
 
         let tempDir = FileManager.default.temporaryDirectory
@@ -247,7 +250,7 @@ private func runActivityStoreTestsAsync() async {
         await store.append(makeDraft(tileId: tid, status: .working, kind: "turn.start", summary: "local-working"))
 
         let liveSnapshot = await store.currentSnapshot()
-        expect(liveSnapshot.byTile[tid]?.status == .done,
+        expect(liveSnapshot.byAgent[tid]?.status == .done,
                "live append after seeding with a higher-sequence foreign event must NOT tail-clobber the live snapshot: canonical order still picks the foreign event")
         expect(liveSnapshot.snapshotSequence == 100 && liveSnapshot.snapshotReplicaId == foreignReplica,
                "live snapshot watermark tracks the canonically-highest event seen, not the most-recently-applied one")
@@ -334,10 +337,10 @@ private func runActivityStoreTestsAsync() async {
             for await _ in group {}
         }
         let snapshot = await store.currentSnapshot()
-        expect(snapshot.byTile.count == 10, "concurrent appends: every distinct tile lands exactly once in byTile")
-        expect(tileIds.allSatisfy { snapshot.byTile[$0]?.status == .done },
+        expect(snapshot.byAgent.count == 10, "concurrent appends: every distinct agent lands exactly once in byAgent")
+        expect(tileIds.allSatisfy { snapshot.byAgent[$0]?.status == .done },
                "concurrent appends: each tile's status reflects its own last-appended event, no cross-tile corruption")
-        let allSequences = snapshot.byTile.values.flatMap { $0.recent.map(\.sequence) }
+        let allSequences = snapshot.byAgent.values.flatMap { $0.recent.map(\.sequence) }
         expect(Set(allSequences).count == allSequences.count,
                "concurrent appends: sequence numbers are unique across all concurrently appending tasks")
     }

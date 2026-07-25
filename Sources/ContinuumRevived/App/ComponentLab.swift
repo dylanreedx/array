@@ -669,10 +669,11 @@ enum LabCatalog {
     static func agentsBoardRows() -> [AgentsBoardRow] {
         let replica = UUID(uuidString: "61000000-0000-4000-8000-0000000000CC")!
         let base = Date(timeIntervalSinceReferenceDate: 6_167)
-        func event(tileId: UUID, sequence: UInt64, status: AgentStatus, summary: String, offset: TimeInterval) -> AgentActivityEvent {
+        func event(agentId: UUID, sequence: UInt64, status: AgentStatus, summary: String, offset: TimeInterval) -> AgentActivityEvent {
             AgentActivityEvent(
                 stamping: AgentActivityEventDraft(
-                    tileId: tileId,
+                    agentId: agentId,
+                    tileId: agentId,
                     runId: nil,
                     tone: status == .needsAttention ? .approval : .info,
                     kind: status == .needsAttention ? "needs-attention" : "status.\(status.rawValue)",
@@ -689,10 +690,10 @@ enum LabCatalog {
         let gamma = UUID(uuidString: "61000000-0000-4000-8000-0000000000C3")!
         let delta = UUID(uuidString: "61000000-0000-4000-8000-0000000000D4")!
         let snapshot = [
-            event(tileId: gamma, sequence: 1, status: .done, summary: "gamma finished cleanly", offset: 1),
-            event(tileId: alpha, sequence: 2, status: .needsAttention, summary: "alpha needs approval", offset: 4),
-            event(tileId: delta, sequence: 3, status: .working, summary: "delta is running checks", offset: 3),
-            event(tileId: beta, sequence: 4, status: .needsAttention, summary: "beta needs input", offset: 2),
+            event(agentId: gamma, sequence: 1, status: .done, summary: "gamma finished cleanly", offset: 1),
+            event(agentId: alpha, sequence: 2, status: .needsAttention, summary: "alpha needs approval", offset: 4),
+            event(agentId: delta, sequence: 3, status: .working, summary: "delta is running checks", offset: 3),
+            event(agentId: beta, sequence: 4, status: .needsAttention, summary: "beta needs input", offset: 2),
         ].reduce(ActivityLogSnapshot.empty) { apply($0, $1) }
         return AgentsBoardProjection.rows(from: snapshot)
     }
@@ -700,10 +701,11 @@ enum LabCatalog {
     static func approvalsInboxSnapshot() -> ActivityLogSnapshot {
         let replica = UUID(uuidString: "62000000-0000-4000-8000-0000000000CC")!
         let base = Date(timeIntervalSinceReferenceDate: 6_267)
-        func event(tileId: UUID, sequence: UInt64, status: AgentStatus, summary: String, offset: TimeInterval, approvalRequestId: String? = nil) -> AgentActivityEvent {
+        func event(agentId: UUID, sequence: UInt64, status: AgentStatus, summary: String, offset: TimeInterval, approvalRequestId: String? = nil) -> AgentActivityEvent {
             AgentActivityEvent(
                 stamping: AgentActivityEventDraft(
-                    tileId: tileId,
+                    agentId: agentId,
+                    tileId: agentId,
                     runId: nil,
                     tone: status == .needsAttention ? .approval : .info,
                     kind: status == .needsAttention ? "needs-attention" : "status.\(status.rawValue)",
@@ -720,9 +722,9 @@ enum LabCatalog {
         let withoutId = UUID(uuidString: "62000000-0000-4000-8000-0000000000B2")!
         let working = UUID(uuidString: "62000000-0000-4000-8000-0000000000C3")!
         return [
-            event(tileId: working, sequence: 1, status: .working, summary: "gamma is running", offset: 1),
-            event(tileId: withId, sequence: 2, status: .needsAttention, summary: "alpha approve deploy", offset: 3, approvalRequestId: "approval-alpha"),
-            event(tileId: withoutId, sequence: 3, status: .needsAttention, summary: "beta legacy request", offset: 2),
+            event(agentId: working, sequence: 1, status: .working, summary: "gamma is running", offset: 1),
+            event(agentId: withId, sequence: 2, status: .needsAttention, summary: "alpha approve deploy", offset: 3, approvalRequestId: "approval-alpha"),
+            event(agentId: withoutId, sequence: 3, status: .needsAttention, summary: "beta legacy request", offset: 2),
         ].reduce(ActivityLogSnapshot.empty) { apply($0, $1) }
     }
 
@@ -762,7 +764,7 @@ enum LabCatalog {
 
         let rows = AgentsBoardProjection.approvalsInboxRows(from: snapshot)
         for (index, row) in rows.enumerated() {
-            let target = snapshot.byTile[row.tileId].flatMap { AgentsBoardProjection.respondableRequest(in: $0) }
+            let target = snapshot.byAgent[row.agentId].flatMap { AgentsBoardProjection.respondableRequest(in: $0) }
             let request = target?.approvalRequestId ?? "no-id"
             let label = NSTextField(labelWithString: "\(StatusChipPresenter.display(for: row.status).glyph) \(row.lastSummary) request=\(request)")
             label.identifier = NSUserInterfaceItemIdentifier("approvalsInbox.row.\(index + 1)")
@@ -2081,7 +2083,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         // so this needs no fixture change and moves no baseline.
         let everyStatusRows = AgentStatus.allCases.enumerated().map { index, status in
             AgentsBoardRow(
-                tileId: UUID(uuidString: "88000000-0000-4000-8000-0000000001\(String(format: "%02d", index))")!,
+                agentId: UUID(uuidString: "88000000-0000-4000-8000-0000000001\(String(format: "%02d", index))")!,
                 status: status,
                 lastSummary: "row for \(status.rawValue)",
                 recent: [],

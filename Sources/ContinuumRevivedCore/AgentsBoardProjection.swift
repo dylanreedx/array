@@ -8,21 +8,27 @@ import Foundation
 // purple in the tile. A row's appearance is a pure function of its `status`, so
 // consumers now call `StatusChipPresenter.display(for: row.status)` and the
 // second channel that could disagree with the first no longer exists.
+// P2A.8: a row's identity is its AGENT (`id == agentId`), not the tile that happens
+// to render it. `tileId` is the optional view hint — `nil` for a headless agent, whose
+// row still shows on the phone; only "Show on canvas" needs it.
 public struct AgentsBoardRow: Equatable, Sendable, Identifiable {
-    public var id: UUID { tileId }
-    public let tileId: UUID
+    public var id: UUID { agentId }
+    public let agentId: UUID
+    public let tileId: UUID?
     public let status: AgentStatus
     public let lastSummary: String
     public let recent: [AgentActivityEvent]
     public let updatedAt: Date
 
     public init(
-        tileId: UUID,
+        agentId: UUID,
+        tileId: UUID? = nil,
         status: AgentStatus,
         lastSummary: String,
         recent: [AgentActivityEvent],
         updatedAt: Date
     ) {
+        self.agentId = agentId
         self.tileId = tileId
         self.status = status
         self.lastSummary = lastSummary
@@ -31,21 +37,24 @@ public struct AgentsBoardRow: Equatable, Sendable, Identifiable {
     }
 }
 
+// Addressed by agent, because the approval belongs to the agent: a tile-addressed
+// response could not answer a headless agent's request at all.
 public struct ApprovalResponseTarget: Equatable, Sendable {
-    public let tileId: UUID
+    public let agentId: UUID
     public let approvalRequestId: String
 
-    public init(tileId: UUID, approvalRequestId: String) {
-        self.tileId = tileId
+    public init(agentId: UUID, approvalRequestId: String) {
+        self.agentId = agentId
         self.approvalRequestId = approvalRequestId
     }
 }
 
 public enum AgentsBoardProjection {
     public static func rows(from snapshot: ActivityLogSnapshot) -> [AgentsBoardRow] {
-        snapshot.byTile.map { tileId, activity in
+        snapshot.byAgent.map { agentId, activity in
             AgentsBoardRow(
-                tileId: tileId,
+                agentId: agentId,
+                tileId: activity.tileId,
                 status: activity.status,
                 lastSummary: activity.lastSummary,
                 recent: activity.recent,
@@ -59,11 +68,11 @@ public enum AgentsBoardProjection {
         apply(snapshot, event)
     }
 
-    public static func timelineEvents(for activity: TileActivity) -> [AgentActivityEvent] {
+    public static func timelineEvents(for activity: AgentActivity) -> [AgentActivityEvent] {
         Array(activity.recent.reversed())
     }
 
-    public static func latestPendingAttentionEvent(in activity: TileActivity) -> AgentActivityEvent? {
+    public static func latestPendingAttentionEvent(in activity: AgentActivity) -> AgentActivityEvent? {
         activity.recent.last { $0.status == .needsAttention || $0.tone == .approval }
     }
 
@@ -75,13 +84,13 @@ public enum AgentsBoardProjection {
         approvalsInboxRows(from: snapshot).count
     }
 
-    public static func respondableRequest(in activity: TileActivity) -> ApprovalResponseTarget? {
+    public static func respondableRequest(in activity: AgentActivity) -> ApprovalResponseTarget? {
         guard let event = latestPendingAttentionEvent(in: activity),
               event.status == .needsAttention,
               let approvalRequestId = event.approvalRequestId else {
             return nil
         }
-        return ApprovalResponseTarget(tileId: event.tileId, approvalRequestId: approvalRequestId)
+        return ApprovalResponseTarget(agentId: event.agentId, approvalRequestId: approvalRequestId)
     }
 
     public static func priority(for status: AgentStatus) -> Int {
@@ -100,6 +109,6 @@ public enum AgentsBoardProjection {
         let rightPriority = priority(for: rhs.status)
         if leftPriority != rightPriority { return leftPriority < rightPriority }
         if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
-        return lhs.tileId.uuidString < rhs.tileId.uuidString
+        return lhs.agentId.uuidString < rhs.agentId.uuidString
     }
 }

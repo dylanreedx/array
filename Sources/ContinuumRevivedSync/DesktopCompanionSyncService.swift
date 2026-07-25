@@ -114,19 +114,23 @@ public struct DesktopCompanionSyncDiagnostics: Equatable, Sendable {
 }
 
 public struct DesktopManagedAgentActivity: Sendable {
-    public var tileId: UUID
+    /// P2A.8 aggregate key — `AgentRecord.id.rawValue`.
+    public var agentId: UUID
+    /// Optional view hint: the tile rendering this agent, `nil` when headless.
+    public var tileId: UUID?
     public var agentKind: AgentKind
     public var status: AgentStatus
     public var updatedAt: Date
-    /// The tile's real activity timeline (turn/tool/approval/error events),
+    /// The agent's real activity timeline (turn/tool/approval/error events),
     /// built from the runtime event stream (ticket 88.4c). When present, these
     /// are folded into the snapshot's `recent` so the phone shows what the
     /// agent is doing — not just a status badge. Empty falls back to a single
     /// synthetic status event.
     public var recentEvents: [AgentActivityEventDraft]
 
-    public init(tileId: UUID, agentKind: AgentKind, status: AgentStatus, updatedAt: Date,
+    public init(agentId: UUID, tileId: UUID?, agentKind: AgentKind, status: AgentStatus, updatedAt: Date,
                 recentEvents: [AgentActivityEventDraft] = []) {
+        self.agentId = agentId
         self.tileId = tileId
         self.agentKind = agentKind
         self.status = status
@@ -154,6 +158,11 @@ public enum DegradedDesktopActivitySnapshotSource {
             let status = liveStatuses[descriptor.tileId] ?? descriptor.agentDescriptor?.status ?? .idle
             let event = AgentActivityEvent(
                 stamping: AgentActivityEventDraft(
+                    // A terminal session has no AgentRecord, so its tile id IS its
+                    // agent identity here — the same equality P2A.8's legacy decode
+                    // relies on. The tile hint is that same id, so "Show on canvas"
+                    // keeps working for these rows.
+                    agentId: descriptor.tileId,
                     tileId: descriptor.tileId,
                     runId: nil,
                     tone: status == .needsAttention ? .approval : .info,
@@ -168,13 +177,13 @@ public enum DegradedDesktopActivitySnapshotSource {
             snapshot = apply(snapshot, event)
         }
         var sequence = UInt64(sorted.count)
-        let sortedManagedAgents = managedAgents.sorted { lhs, rhs in lhs.tileId.uuidString < rhs.tileId.uuidString }
+        let sortedManagedAgents = managedAgents.sorted { lhs, rhs in lhs.agentId.uuidString < rhs.agentId.uuidString }
         for agent in sortedManagedAgents {
-            // Prefer the tile's real timeline; fall back to a single synthetic
+            // Prefer the agent's real timeline; fall back to a single synthetic
             // status event when no events have been recorded yet.
             let drafts: [AgentActivityEventDraft] = agent.recentEvents.isEmpty
                 ? [AgentActivityEventDraft(
-                    tileId: agent.tileId, runId: nil,
+                    agentId: agent.agentId, tileId: agent.tileId, runId: nil,
                     tone: agent.status == .needsAttention ? .approval : .info,
                     kind: "desktop.managedStatus", status: agent.status,
                     summary: safeSummary(kind: agent.agentKind, status: agent.status),
@@ -264,7 +273,7 @@ public enum DesktopSpatialBootstrap {
 }
 
 private actor UnknownRequestApprovalSeam: ApprovalResponding {
-    func respond(tileId: UUID, requestId: String, decision: ApprovalDecision) async -> ApprovalRespondResult {
+    func respond(agentId: UUID, requestId: String, decision: ApprovalDecision) async -> ApprovalRespondResult {
         .unknownRequest
     }
 }

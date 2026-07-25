@@ -139,6 +139,9 @@ public struct CompanionDogfoodFixture: Codable, Equatable, Sendable {
         )
         let event = AgentActivityEvent(
             stamping: AgentActivityEventDraft(
+                // Fixture agent: its tile is its identity, so the row also has a
+                // working "Show on canvas" hint.
+                agentId: agentTileId,
                 tileId: agentTileId,
                 runId: nil,
                 tone: .info,

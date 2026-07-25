@@ -54,7 +54,7 @@ private func runHostileUserInfoReservedKeyChecks() throws {
         category: .approvalRequested,
         title: "Approval requested",
         body: "Approve production deploy",
-        deepLink: "\(PairingURL.scheme)://approval/approval-real?tileId=00000000-0000-4000-8000-000000000063",
+        deepLink: "\(PairingURL.scheme)://approval/approval-real?agentId=00000000-0000-4000-8000-000000000063",
         approvalRequestId: "approval-real",
         userInfo: [
             "aps": "hostile-aps",
@@ -72,7 +72,7 @@ private func runHostileUserInfoReservedKeyChecks() throws {
     expect((alert?["body"] as? String) == "Approve production deploy", "hostile userInfo cannot clobber aps.alert.body")
     expect((aps?["category"] as? String) == "continuum.push.N1", "hostile userInfo cannot clobber aps.category")
     expect((aps?["interruption-level"] as? String) == "time-sensitive", "hostile userInfo cannot clobber interruption level")
-    expect((object?["deepLink"] as? String) == "\(PairingURL.scheme)://approval/approval-real?tileId=00000000-0000-4000-8000-000000000063", "hostile userInfo cannot clobber deep link")
+    expect((object?["deepLink"] as? String) == "\(PairingURL.scheme)://approval/approval-real?agentId=00000000-0000-4000-8000-000000000063", "hostile userInfo cannot clobber deep link")
 }
 
 private struct PayloadSpec: Equatable {
@@ -84,16 +84,16 @@ private struct PayloadSpec: Equatable {
 }
 
 private func expectedPayloadSpec(for category: PushCategory) throws -> PayloadSpec {
-    let tile = "00000000-0000-4000-8000-000000000063"
+    let agent = "00000000-0000-4000-8000-000000000063"
     switch category {
     case .approvalRequested:
-        return PayloadSpec(categoryId: "continuum.push.N1", interruptionLevel: "time-sensitive", actionIds: ["continuum.push.action.approve", "continuum.push.action.deny"], target: "approvalCard", deepLink: "\(PairingURL.scheme)://approval/approval-fixture?tileId=\(tile)")
+        return PayloadSpec(categoryId: "continuum.push.N1", interruptionLevel: "time-sensitive", actionIds: ["continuum.push.action.approve", "continuum.push.action.deny"], target: "approvalCard", deepLink: "\(PairingURL.scheme)://approval/approval-fixture?agentId=\(agent)")
     case .agentWaitingForInput:
-        return PayloadSpec(categoryId: "continuum.push.N2", interruptionLevel: "time-sensitive", actionIds: ["continuum.push.action.open"], target: "agentDetail", deepLink: "\(PairingURL.scheme)://agent/\(tile)")
+        return PayloadSpec(categoryId: "continuum.push.N2", interruptionLevel: "time-sensitive", actionIds: ["continuum.push.action.open"], target: "agentDetail", deepLink: "\(PairingURL.scheme)://agent/\(agent)")
     case .agentFinished:
-        return PayloadSpec(categoryId: "continuum.push.N3", interruptionLevel: "active", actionIds: [], target: "agentDetail", deepLink: "\(PairingURL.scheme)://agent/\(tile)")
+        return PayloadSpec(categoryId: "continuum.push.N3", interruptionLevel: "active", actionIds: [], target: "agentDetail", deepLink: "\(PairingURL.scheme)://agent/\(agent)")
     case .agentFailed:
-        return PayloadSpec(categoryId: "continuum.push.N4", interruptionLevel: "active", actionIds: [], target: "agentDetail", deepLink: "\(PairingURL.scheme)://agent/\(tile)")
+        return PayloadSpec(categoryId: "continuum.push.N4", interruptionLevel: "active", actionIds: [], target: "agentDetail", deepLink: "\(PairingURL.scheme)://agent/\(agent)")
     case .stillWorkingDigest:
         return PayloadSpec(categoryId: "continuum.push.N5", interruptionLevel: "passive", actionIds: [], target: "agentsBoard", deepLink: "\(PairingURL.scheme)://agents")
     case .desktopConnectionChanged:
@@ -101,7 +101,7 @@ private func expectedPayloadSpec(for category: PushCategory) throws -> PayloadSp
     case .deviceSecurityChanged:
         return PayloadSpec(categoryId: "continuum.push.N7", interruptionLevel: "time-sensitive", actionIds: [], target: "devices", deepLink: "\(PairingURL.scheme)://devices")
     case .sessionReapedOrRevived:
-        return PayloadSpec(categoryId: "continuum.push.N8", interruptionLevel: "passive", actionIds: [], target: "agentDetail", deepLink: "\(PairingURL.scheme)://agent/\(tile)")
+        return PayloadSpec(categoryId: "continuum.push.N8", interruptionLevel: "passive", actionIds: [], target: "agentDetail", deepLink: "\(PairingURL.scheme)://agent/\(agent)")
     }
 }
 
@@ -292,9 +292,9 @@ private func runAPNSDedupHTTPChecks() async throws {
     ])
     let service = APNSPushService(config: APNSConfig(keyPath: "/tmp/missing", keyId: "KID", teamId: "TEAM", deviceToken: "device-token", environment: .sandbox), httpClient: http, signer: .ephemeralForChecks(teamId: "TEAM", keyId: "KID"))
     let tile = UUID()
-    let payload = PushPayload(category: .agentFinished, title: "Agent finished", body: "done", deepLink: "\(PairingURL.scheme)://agent/\(tile.uuidString)", userInfo: ["tileId": tile.uuidString])
-    let changedPayload = PushPayload(category: .agentFinished, title: "Agent finished", body: "done again", deepLink: "\(PairingURL.scheme)://agent/\(tile.uuidString)", userInfo: ["tileId": tile.uuidString])
-    let failedPayload = PushPayload(category: .agentFinished, title: "Agent finished", body: "failed", deepLink: "\(PairingURL.scheme)://agent/\(tile.uuidString)", userInfo: ["tileId": tile.uuidString])
+    let payload = PushPayload(category: .agentFinished, title: "Agent finished", body: "done", deepLink: "\(PairingURL.scheme)://agent/\(tile.uuidString)", userInfo: ["agentId": tile.uuidString])
+    let changedPayload = PushPayload(category: .agentFinished, title: "Agent finished", body: "done again", deepLink: "\(PairingURL.scheme)://agent/\(tile.uuidString)", userInfo: ["agentId": tile.uuidString])
+    let failedPayload = PushPayload(category: .agentFinished, title: "Agent finished", body: "failed", deepLink: "\(PairingURL.scheme)://agent/\(tile.uuidString)", userInfo: ["agentId": tile.uuidString])
     let first = try await service.publish(payload: payload)
     let second = try await service.publish(payload: payload)
     let changed = try await service.publish(payload: changedPayload)
@@ -313,11 +313,18 @@ private func runAPNSDedupHTTPChecks() async throws {
 }
 
 private func runPushActionScopeGateChecks() throws {
-    let intent = handlePushAction(actionId: PushCategory.approveActionId, userInfo: ["approvalRequestId": "approval-1", "tileId": UUID().uuidString], grantedScope: .operator)
-    expect(intent?.requestId == "approval-1" && intent?.decision == .accept, "approve action returns respond intent with operator scope")
-    let denied = handlePushAction(actionId: PushCategory.approveActionId, userInfo: ["approvalRequestId": "approval-1", "tileId": UUID().uuidString], grantedScope: .observer)
+    let agent = UUID()
+    let intent = handlePushAction(actionId: PushCategory.approveActionId, userInfo: ["approvalRequestId": "approval-1", "agentId": agent.uuidString], grantedScope: .operator)
+    expect(intent?.requestId == "approval-1" && intent?.decision == .accept && intent?.agentId == agent, "approve action returns respond intent with operator scope")
+    let denied = handlePushAction(actionId: PushCategory.approveActionId, userInfo: ["approvalRequestId": "approval-1", "agentId": UUID().uuidString], grantedScope: .observer)
     expect(denied == nil, "approve action denied for observer scope")
-    print("APNS push action scope gate: operatorIntent=\(intent != nil) observerIntent=\(denied != nil)")
+    // P2A.8: a notification posted before the key moved still acts — its id rode
+    // under `tileId`, and the two were the same value then.
+    let legacyIntent = handlePushAction(actionId: PushCategory.approveActionId, userInfo: ["approvalRequestId": "approval-1", "tileId": agent.uuidString], grantedScope: .operator)
+    expect(legacyIntent?.agentId == agent, "P2A.8: a legacy tileId-keyed push action still resolves an agentId")
+    expect(handlePushAction(actionId: PushCategory.approveActionId, userInfo: ["approvalRequestId": "approval-1"], grantedScope: .operator) == nil,
+           "P2A.8: a push action with neither agentId nor tileId is refused")
+    print("APNS push action scope gate: operatorIntent=\(intent != nil) observerIntent=\(denied != nil) legacyKeyIntent=\(legacyIntent != nil)")
 }
 
 private func runRealAPNSEnvJWTGateCheck() throws {
@@ -339,7 +346,7 @@ private func runRealAPNSEnvJWTGateCheck() throws {
 
 private func makePushEvent(tile: UUID, status: AgentStatus, tone: ActivityEventTone, summary: String, approvalRequestId: String?) -> AgentActivityEvent {
     AgentActivityEvent(
-        stamping: AgentActivityEventDraft(tileId: tile, runId: "run", tone: tone, kind: tone == .error ? "runtimeError" : "status", status: status, summary: summary, occurredAt: Date(), approvalRequestId: approvalRequestId),
+        stamping: AgentActivityEventDraft(agentId: tile, runId: "run", tone: tone, kind: tone == .error ? "runtimeError" : "status", status: status, summary: summary, occurredAt: Date(), approvalRequestId: approvalRequestId),
         sequence: UInt64.random(in: 1...1000),
         replicaId: UUID()
     )

@@ -8,10 +8,11 @@ import Foundation
 // error) vs. which are dropped (content deltas, token usage), and that no
 // transcript/secret text can ride through a draft summary.
 func runManagedAgentActivityBridgeChecks() {
+    let agent = UUID()
     let tile = UUID()
     let thread = "managed-\(tile.uuidString)"
     func draft(_ e: AgentRuntimeEvent) -> AgentActivityEventDraft? {
-        ManagedAgentActivityBridge.draft(for: e, tileId: tile, status: .working, now: Date(timeIntervalSinceReferenceDate: 0))
+        ManagedAgentActivityBridge.draft(for: e, agentId: agent, tileId: tile, status: .working, now: Date(timeIntervalSinceReferenceDate: 0))
     }
 
     // 1. Surfaced events map to the expected kind/tone.

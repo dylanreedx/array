@@ -1,0 +1,6 @@
+{
+  "note": "Captured wire shapes from BEFORE P2A.8 moved the activity aggregate key from tileId to agentId. Do not 'modernise' this file: its whole value is that it is the old format, byte for byte. schemaVersion 1, no agentId anywhere, no tile hint on the snapshot's per-tile activity.",
+  "event": {"sequence":7,"replicaId":"61000000-0000-4000-8000-000000000061","tileId":"61000000-0000-4000-8000-0000000000AA","tone":"info","kind":"turn.started","status":"working","summary":"Turn started","occurredAtReferenceInterval":6200},
+  "snapshot": {"snapshotSequence":7,"snapshotReplicaId":"61000000-0000-4000-8000-000000000061","byTile":["61000000-0000-4000-8000-0000000000AA",{"status":"working","lastSummary":"Turn started","recent":[],"updatedAt":6200}]},
+  "logFile": {"schemaVersion":1,"events":[{"sequence":7,"replicaId":"61000000-0000-4000-8000-000000000061","tileId":"61000000-0000-4000-8000-0000000000AA","tone":"info","kind":"turn.started","status":"working","summary":"Turn started","occurredAtReferenceInterval":6200}]}
+}

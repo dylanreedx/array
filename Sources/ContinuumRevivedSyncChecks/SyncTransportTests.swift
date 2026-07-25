@@ -533,7 +533,29 @@ private func checkSeedReproducibility() async {
 
 // MARK: - Entry point
 
+// P2A.8: the approval command is addressed by agent now. This pins BOTH directions of
+// the wire shape — a new payload uses `agentId`, and an old `tileId`-keyed payload (the
+// two ids were one value then) still decodes rather than dropping an operator's answer.
+private func checkApprovalRequestAgentKeyMigration() throws {
+    let agentId = UUID(uuidString: "77000000-0000-4000-8000-0000000000A8")!
+    let request = ApprovalResponseRequest(agentId: agentId, requestId: "approval-p2a8", decision: .accept)
+    let encoded = String(decoding: try JSONEncoder().encode(request), as: UTF8.self)
+    expect(encoded.contains("\"agentId\"") && !encoded.contains("\"tileId\""),
+           "P2A.8: an approval response encodes agentId and no tileId — measured \(encoded)")
+    let roundTripped = try JSONDecoder().decode(ApprovalResponseRequest.self, from: Data(encoded.utf8))
+    expect(roundTripped == request, "P2A.8: an approval response round-trips")
+
+    let legacyJSON = """
+    {"tileId":"77000000-0000-4000-8000-0000000000A8","requestId":"approval-p2a8","decision":"accept"}
+    """
+    let legacy = try JSONDecoder().decode(ApprovalResponseRequest.self, from: Data(legacyJSON.utf8))
+    expect(legacy == request,
+           "P2A.8: a legacy tileId-keyed approval response decodes as the same agent-addressed command — measured agentId=\(legacy.agentId.uuidString)")
+    print("P2A.8 approval wire measured encoded=\(encoded) legacyAgentId=\(legacy.agentId.uuidString)")
+}
+
 func runSyncTransportChecks() async throws {
+    try checkApprovalRequestAgentKeyMigration()
     try await checkProtocolConformance()
     await checkBasicDelivery()
     await checkDropSemantics()

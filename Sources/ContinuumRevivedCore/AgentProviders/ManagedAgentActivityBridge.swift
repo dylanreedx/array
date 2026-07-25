@@ -13,52 +13,54 @@ import Foundation
 // SHAPE of what the agent is doing — turn boundaries, tool names, approvals,
 // errors — plus the derived status the tile already computes.
 public enum ManagedAgentActivityBridge {
-    /// Cap on how many recent drafts we keep per tile before publishing. The
+    /// Cap on how many recent drafts we keep per agent before publishing. The
     /// phone's fold caps `recent` at 200; this keeps the wire payload bounded.
     public static let recentCap = 100
 
     /// Map one runtime event to a syncable activity draft, or nil for events
     /// that should not appear on the timeline (streaming deltas, token usage).
     /// `status` is the tile's current derived status at ingest time.
+    /// P2A.8: keyed by `agentId`; `tileId` is the optional view hint (nil = headless).
     public static func draft(
         for event: AgentRuntimeEvent,
-        tileId: UUID,
+        agentId: UUID,
+        tileId: UUID?,
         status: AgentStatus,
         now: Date
     ) -> AgentActivityEventDraft? {
         switch event {
         case .turnStarted:
-            return make(tileId, .info, "turn.started", status, "Turn started", now)
+            return make(agentId, tileId, .info, "turn.started", status, "Turn started", now)
         case .turnCompleted(_, _, let outcome, let errorMessage):
             switch outcome {
             case .completed:
-                return make(tileId, .info, "turn.completed", status, "Turn complete", now)
+                return make(agentId, tileId, .info, "turn.completed", status, "Turn complete", now)
             case .failed:
                 // I5: NEVER forward the raw error text — it carries the
                 // provider's stderr (file paths, cwd, secrets). Truncation is
                 // not sanitization. The local tile shows the detail; the synced
                 // summary stays generic.
-                return make(tileId, .error, "turn.failed", status, "Turn failed", now)
+                return make(agentId, tileId, .error, "turn.failed", status, "Turn failed", now)
             case .interrupted, .cancelled:
-                return make(tileId, .info, "turn.\(outcome.rawValue)", status, "Turn \(outcome.rawValue)", now)
+                return make(agentId, tileId, .info, "turn.\(outcome.rawValue)", status, "Turn \(outcome.rawValue)", now)
             }
         case .itemStarted(_, _, let kind, let title):
             // I5 defense-in-depth: the title is a tool NAME by the Pi adapter's
             // construction, but the bridge is provider-agnostic — sanitize to a
             // conservative token so no upstream can smuggle a path/arg through.
             let name = safeToolToken(title ?? kind.rawValue)
-            return make(tileId, tone(for: kind), "tool.\(name)", status, "Started \(name)", now)
+            return make(agentId, tileId, tone(for: kind), "tool.\(name)", status, "Started \(name)", now)
         case .itemCompleted(_, _, let kind, let itemStatus):
             let tone: ActivityEventTone = (itemStatus == .failed) ? .error : .tool
-            return make(tileId, tone, "tool.\(itemStatus.rawValue)", status, "\(kind.rawValue) \(itemStatus.rawValue)", now)
+            return make(agentId, tileId, tone, "tool.\(itemStatus.rawValue)", status, "\(kind.rawValue) \(itemStatus.rawValue)", now)
         case .requestOpened(_, let requestId, let kind):
-            return make(tileId, .approval, "approval.\(kind.rawValue)", status, "Needs approval", now, approvalRequestId: requestId)
+            return make(agentId, tileId, .approval, "approval.\(kind.rawValue)", status, "Needs approval", now, approvalRequestId: requestId)
         case .requestResolved(_, let requestId, let decision):
-            return make(tileId, .approval, "approval.resolved", status, "Approval \(decision)", now, approvalRequestId: requestId)
+            return make(agentId, tileId, .approval, "approval.resolved", status, "Approval \(decision)", now, approvalRequestId: requestId)
         case .runtimeError:
             // I5: drop the raw message (provider stderr → paths/secrets). Local
             // tile keeps the detail; the phone gets only that an error occurred.
-            return make(tileId, .error, "error", status, "Runtime error", now)
+            return make(agentId, tileId, .error, "error", status, "Runtime error", now)
         case .sessionStateChanged, .contentDelta, .userInputRequested, .userInputResolved, .tokenUsageUpdated:
             // Status changes ride on the other events' `status` field; content
             // deltas / token usage never cross (I5 + noise).
@@ -86,12 +88,12 @@ public enum ManagedAgentActivityBridge {
     }
 
     private static func make(
-        _ tileId: UUID, _ tone: ActivityEventTone, _ kind: String,
+        _ agentId: UUID, _ tileId: UUID?, _ tone: ActivityEventTone, _ kind: String,
         _ status: AgentStatus, _ summary: String, _ now: Date,
         approvalRequestId: String? = nil
     ) -> AgentActivityEventDraft {
         AgentActivityEventDraft(
-            tileId: tileId, runId: nil, tone: tone, kind: kind,
+            agentId: agentId, tileId: tileId, runId: nil, tone: tone, kind: kind,
             status: status, summary: summary, occurredAt: now,
             approvalRequestId: approvalRequestId
         )

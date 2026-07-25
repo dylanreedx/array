@@ -8,7 +8,7 @@ public enum ApprovalRespondResult: Sendable, Equatable {
 }
 
 public protocol ApprovalResponding: Sendable {
-    func respond(tileId: UUID, requestId: String, decision: ApprovalDecision) async -> ApprovalRespondResult
+    func respond(agentId: UUID, requestId: String, decision: ApprovalDecision) async -> ApprovalRespondResult
 }
 
 public actor ApprovalResponder {
@@ -53,7 +53,7 @@ public actor ApprovalResponder {
                 if completedRequestIds.contains(request.requestId) {
                     outcome = .stale
                 } else {
-                    switch await seam.respond(tileId: request.tileId, requestId: request.requestId, decision: request.decision) {
+                    switch await seam.respond(agentId: request.agentId, requestId: request.requestId, decision: request.decision) {
                     case .resolved:
                         completedRequestIds.insert(request.requestId)
                         outcome = .resolved

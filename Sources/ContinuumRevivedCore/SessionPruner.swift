@@ -101,7 +101,7 @@ public actor SessionPruner {
 
             let snapshot = await activitySnapshotSource()
             let hasActiveTurn = binding.tileIds.contains { tileId in
-                guard let activity = snapshot?.byTile[tileId] else { return false }
+                guard let activity = snapshot?.activity(forTile: tileId) else { return false }
                 if activity.status == .working { return true }
                 return now.timeIntervalSince(activity.updatedAt) < configuration.inactivityThreshold
             }

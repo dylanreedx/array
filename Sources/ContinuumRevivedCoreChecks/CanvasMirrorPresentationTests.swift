@@ -194,6 +194,7 @@ func runCanvasMirrorStatusJoinChecks() {
     )
     let rows = [
         AgentsBoardRow(
+            agentId: tileA,
             tileId: tileA,
             status: .needsAttention,
             lastSummary: "Needs approval",
@@ -201,6 +202,7 @@ func runCanvasMirrorStatusJoinChecks() {
             updatedAt: Date(timeIntervalSinceReferenceDate: 1)
         ),
         AgentsBoardRow(
+            agentId: external,
             tileId: external,
             status: .working,
             lastSummary: "Not on canvas",

@@ -23,7 +23,8 @@ public enum ActivityEventTone: String, Codable, Sendable {
 // The store stamps those two. This is the one concrete mechanism for
 // sequence assignment — no builder, no memberwise-copy-of-a-let ambiguity.
 public struct AgentActivityEventDraft: Sendable {
-    public let tileId: UUID
+    public let agentId: UUID
+    public let tileId: UUID?
     public let runId: String?
     public let tone: ActivityEventTone
     public let kind: String
@@ -32,10 +33,10 @@ public struct AgentActivityEventDraft: Sendable {
     public let occurredAt: Date
     public let approvalRequestId: String?
 
-    public init(tileId: UUID, runId: String?, tone: ActivityEventTone,
+    public init(agentId: UUID, tileId: UUID? = nil, runId: String?, tone: ActivityEventTone,
                 kind: String, status: AgentStatus, summary: String, occurredAt: Date,
                 approvalRequestId: String? = nil) {
-        self.tileId = tileId; self.runId = runId; self.tone = tone
+        self.agentId = agentId; self.tileId = tileId; self.runId = runId; self.tone = tone
         self.kind = kind; self.status = status; self.summary = summary
         self.occurredAt = occurredAt
         self.approvalRequestId = approvalRequestId
@@ -47,7 +48,18 @@ public struct AgentActivityEvent: Codable, Equatable, Sendable {
     // Assigned by ActivityStore.append from a draft; callers never set them.
     public let sequence: UInt64
     public let replicaId: UUID          // the host that generated this event
-    public let tileId: UUID             // aggregate key — matches Tile.id in CanvasState
+    // AGGREGATE KEY — `AgentRecord.id.rawValue` (P2A.8). It was `tileId` until an
+    // agent could exist without a tile (P2A.6): keying activity by the view meant a
+    // headless agent could not be observed at all. Kept as a bare `UUID` rather than
+    // `AgentID` because `AgentID` is Core-internal identity and this field is the
+    // opaque key the phone renders; `AgentID` encodes as a bare UUID anyway, so
+    // producers pass `record.id.rawValue` and the wire form is unchanged.
+    public let agentId: UUID
+    // OPTIONAL VIEW HINT, NOT A KEY: the tile currently rendering this agent, if any.
+    // `nil` means headless. Its one consumer is the phone's "Show on canvas" — nothing
+    // aggregates, sorts, or joins the timeline on it. I5-safe: an opaque UUID, no path,
+    // no pid, no pane target.
+    public let tileId: UUID?
     public let runId: String?           // opaque link to the agent's own store (Pi/Claude), if known
     public let tone: ActivityEventTone
     public let kind: String             // "turn.started", "tool.bash", "needs-attention", "exit.clean", …
@@ -60,6 +72,7 @@ public struct AgentActivityEvent: Codable, Equatable, Sendable {
     public init(stamping draft: AgentActivityEventDraft, sequence: UInt64, replicaId: UUID) {
         self.sequence = sequence
         self.replicaId = replicaId
+        self.agentId = draft.agentId
         self.tileId = draft.tileId
         self.runId = draft.runId
         self.tone = draft.tone
@@ -88,15 +101,31 @@ public struct AgentActivityEvent: Codable, Equatable, Sendable {
     //     (empirically ~49% of `Date()` values fail `Date(timeIntervalSince1970: d.timeIntervalSince1970) == d`).
     //     `timeIntervalSinceReferenceDate` is Date's actual internal storage, so
     //     round-tripping through it involves no arithmetic conversion and is always exact.
+    //
+    // P2A.8 forward-compatible decode: a payload written before the key moved
+    // (`ActivityLogFile.schemaVersion` 1, or a desktop on an older build) carries only
+    // `tileId`, and historically that value WAS the agent's identity — so it decodes as
+    // `agentId = tileId`, with the tile hint set to the same id. No data is invented:
+    // for every event that ever existed under the old key, the tile WAS the agent.
     private enum CodingKeys: String, CodingKey {
-        case sequence, replicaId, tileId, runId, tone, kind, status, summary, occurredAtReferenceInterval, approvalRequestId
+        case sequence, replicaId, agentId, tileId, runId, tone, kind, status, summary, occurredAtReferenceInterval, approvalRequestId
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         sequence = try container.decode(UInt64.self, forKey: .sequence)
         replicaId = try container.decode(UUID.self, forKey: .replicaId)
-        tileId = try container.decode(UUID.self, forKey: .tileId)
+        tileId = try container.decodeIfPresent(UUID.self, forKey: .tileId)
+        if let agentId = try container.decodeIfPresent(UUID.self, forKey: .agentId) {
+            self.agentId = agentId
+        } else if let legacyKey = tileId {
+            self.agentId = legacyKey
+        } else {
+            throw DecodingError.keyNotFound(CodingKeys.agentId, DecodingError.Context(
+                codingPath: container.codingPath,
+                debugDescription: "AgentActivityEvent has neither agentId nor a legacy tileId aggregate key"
+            ))
+        }
         runId = try container.decodeIfPresent(String.self, forKey: .runId)
         tone = try container.decode(ActivityEventTone.self, forKey: .tone)
         kind = try container.decode(String.self, forKey: .kind)
@@ -111,7 +140,8 @@ public struct AgentActivityEvent: Codable, Equatable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(sequence, forKey: .sequence)
         try container.encode(replicaId, forKey: .replicaId)
-        try container.encode(tileId, forKey: .tileId)
+        try container.encode(agentId, forKey: .agentId)
+        try container.encodeIfPresent(tileId, forKey: .tileId)
         try container.encodeIfPresent(runId, forKey: .runId)
         try container.encode(tone, forKey: .tone)
         try container.encode(kind, forKey: .kind)
@@ -128,36 +158,106 @@ public struct AgentActivityEvent: Codable, Equatable, Sendable {
 // `ActivityLogSnapshot` by ticket 11 (docs/38-tickets/11-activity-tree-snapshot.md),
 // which reserves the name `ActivityTreeSnapshot` for its own SidebarTree-wrapping
 // envelope. Both types cannot share the name `ActivityTreeSnapshot` in the same
-// module — this fold-derived, per-tile activity cache is the one that yields.
+// module — this fold-derived, per-agent activity cache is the one that yields.
 public struct ActivityLogSnapshot: Codable, Equatable, Sendable {
-    public var snapshotSequence: UInt64     // sequence of the last event folded in
-    public var snapshotReplicaId: UUID      // replicaId of that event
-    public var byTile: [UUID: TileActivity] // keyed by Tile.id
+    public var snapshotSequence: UInt64       // sequence of the last event folded in
+    public var snapshotReplicaId: UUID        // replicaId of that event
+    public var byAgent: [UUID: AgentActivity] // keyed by AgentRecord.id.rawValue (P2A.8; was Tile.id)
 
-    public init(snapshotSequence: UInt64, snapshotReplicaId: UUID, byTile: [UUID: TileActivity]) {
+    public init(snapshotSequence: UInt64, snapshotReplicaId: UUID, byAgent: [UUID: AgentActivity]) {
         self.snapshotSequence = snapshotSequence
         self.snapshotReplicaId = snapshotReplicaId
-        self.byTile = byTile
+        self.byAgent = byAgent
     }
 
     public static let empty = ActivityLogSnapshot(
         snapshotSequence: 0,
         snapshotReplicaId: UUID(uuidString: "00000000-0000-0000-0000-000000000000")!,
-        byTile: [:]
+        byAgent: [:]
     )
+
+    // Same P2A.8 forward-compatible decode as the event: a snapshot published by a
+    // desktop on an older build carries `byTile`, whose keys were agent identity.
+    private enum CodingKeys: String, CodingKey {
+        case snapshotSequence, snapshotReplicaId, byAgent, byTile
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        snapshotSequence = try container.decode(UInt64.self, forKey: .snapshotSequence)
+        snapshotReplicaId = try container.decode(UUID.self, forKey: .snapshotReplicaId)
+        if let byAgent = try container.decodeIfPresent([UUID: AgentActivity].self, forKey: .byAgent) {
+            self.byAgent = byAgent
+        } else {
+            // A legacy `TileActivity` had no hint field, so a straight re-key would leave
+            // every migrated row `tileId == nil` — the phone would render the row and hide
+            // "Show on canvas" for an agent that demonstrably HAD a tile. The legacy key
+            // WAS that tile, so it becomes the hint.
+            let legacy = try container.decode([UUID: AgentActivity].self, forKey: .byTile)
+            var migrated: [UUID: AgentActivity] = [:]
+            for (legacyKey, activity) in legacy {
+                var value = activity
+                if value.tileId == nil { value.tileId = legacyKey }
+                migrated[legacyKey] = value
+            }
+            self.byAgent = migrated
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(snapshotSequence, forKey: .snapshotSequence)
+        try container.encode(snapshotReplicaId, forKey: .snapshotReplicaId)
+        try container.encode(byAgent, forKey: .byAgent)
+    }
+
+    /// Re-keyed by the tile hint, for the consumers whose own key really is a tile (the
+    /// sidebar's tile rows, the tmux session pruner, the phone's canvas overlay).
+    /// Headless agents drop out by construction.
+    public func activitiesByTile() -> [UUID: AgentActivity] {
+        keyedByTileHint(byAgent.map { (agentId: $0.key, tileId: $0.value.tileId, value: $0.value) })
+    }
+
+    /// The activity of whichever agent is currently bound to `tileId`.
+    public func activity(forTile tileId: UUID) -> AgentActivity? {
+        activitiesByTile()[tileId]
+    }
 }
 
-public struct TileActivity: Codable, Equatable, Sendable {
+/// THE one implementation of the tile-hint join (P2A.8). Two entries CAN name the same
+/// tile — a detached agent's last event still carries the hint it had — so this must
+/// never be a `Dictionary(uniqueKeysWithValues:)`, which would trap. The winner is the
+/// lowest agent id, so the join cannot report differently run to run; every consumer
+/// (snapshot, receiver status map, canvas overlay) goes through here rather than
+/// re-deriving a rule that could drift.
+public func keyedByTileHint<V>(_ entries: [(agentId: UUID, tileId: UUID?, value: V)]) -> [UUID: V] {
+    var winners: [UUID: (agentId: UUID, value: V)] = [:]
+    for entry in entries {
+        guard let tileId = entry.tileId else { continue }
+        if let existing = winners[tileId], existing.agentId.uuidString <= entry.agentId.uuidString {
+            continue
+        }
+        winners[tileId] = (entry.agentId, entry.value)
+    }
+    return winners.mapValues(\.value)
+}
+
+// Renamed from `TileActivity` by P2A.8: it is one agent's activity, and the agent
+// outlives any tile that renders it.
+public struct AgentActivity: Codable, Equatable, Sendable {
     public var status: AgentStatus
     public var lastSummary: String
-    public var recent: [AgentActivityEvent]   // capped ring; keep last 200 events per tile
+    public var recent: [AgentActivityEvent]   // capped ring; keep last 200 events per agent
     public var updatedAt: Date
+    /// View hint carried up from the canonically-last event — see `AgentActivityEvent.tileId`.
+    public var tileId: UUID?
 
-    public init(status: AgentStatus, lastSummary: String, recent: [AgentActivityEvent], updatedAt: Date) {
+    public init(status: AgentStatus, lastSummary: String, recent: [AgentActivityEvent], updatedAt: Date, tileId: UUID? = nil) {
         self.status = status
         self.lastSummary = lastSummary
         self.recent = recent
         self.updatedAt = updatedAt
+        self.tileId = tileId
     }
 }
 
@@ -186,8 +286,8 @@ public func apply(_ tree: ActivityLogSnapshot, _ event: AgentActivityEvent) -> A
         next.snapshotReplicaId = event.replicaId
     }
 
-    var tile = next.byTile[event.tileId] ?? TileActivity(
-        status: .idle, lastSummary: "", recent: [], updatedAt: event.occurredAt
+    var agent = next.byAgent[event.agentId] ?? AgentActivity(
+        status: .idle, lastSummary: "", recent: [], updatedAt: event.occurredAt, tileId: event.tileId
     )
 
     // Insert in canonical order (not arrival order), then cap at 200 by dropping the
@@ -195,20 +295,23 @@ public func apply(_ tree: ActivityLogSnapshot, _ event: AgentActivityEvent) -> A
     // lastSummary / updatedAt from the canonically-last element below is what makes
     // this fold order-independent: inserting the same set of events into a sorted
     // array in any order yields the same final array, hence the same last element.
-    let insertIndex = tile.recent.firstIndex {
+    let insertIndex = agent.recent.firstIndex {
         (event.sequence, event.replicaId.uuidString) < ($0.sequence, $0.replicaId.uuidString)
-    } ?? tile.recent.count
-    tile.recent.insert(event, at: insertIndex)
-    if tile.recent.count > 200 {
-        tile.recent.removeFirst(tile.recent.count - 200)
+    } ?? agent.recent.count
+    agent.recent.insert(event, at: insertIndex)
+    if agent.recent.count > 200 {
+        agent.recent.removeFirst(agent.recent.count - 200)
     }
 
-    if let winner = tile.recent.last {
-        tile.status = winner.status
-        tile.lastSummary = winner.summary
-        tile.updatedAt = winner.occurredAt
+    if let winner = agent.recent.last {
+        agent.status = winner.status
+        agent.lastSummary = winner.summary
+        agent.updatedAt = winner.occurredAt
+        // The view binding moves (attach / detach / close), so the hint is read off the
+        // canonically-last event like every other derived field — never off arrival order.
+        agent.tileId = winner.tileId
     }
-    next.byTile[event.tileId] = tile
+    next.byAgent[event.agentId] = agent
     return next
 }
 
@@ -226,7 +329,10 @@ public struct ActivityLogFile: Codable, Sendable {
     // Gated on load by loadActivityEvents, mirroring ProjectStore.checkSchema
     // (ProjectStore.swift:316) — a file with schemaVersion > currentSchemaVersion
     // throws rather than silently accepting an unknown future format.
-    public static let currentSchemaVersion = 1
+    // 2 since P2A.8 moved the aggregate key from `tileId` to `agentId`. A version-1
+    // file still loads: it is below the current version, so the gate passes, and its
+    // events decode through `AgentActivityEvent`'s legacy branch.
+    public static let currentSchemaVersion = 2
 
     public var schemaVersion: Int
     // Ordered by (sequence, replicaId) on flush — the same total-order key the

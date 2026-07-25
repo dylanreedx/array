@@ -162,14 +162,17 @@ public struct PushPayload: Equatable, Sendable {
 }
 
 public struct PushPayloadBuilder: Sendable {
+    // P2A.8: a notification is about an AGENT — it is keyed, deep-linked and
+    // de-duplicated by `agentId`. Keyed by tile it could neither address a headless
+    // agent nor keep two agents that occupied the same tile apart.
     public struct AgentContext: Sendable {
-        public var tileId: UUID
+        public var agentId: UUID
         public var title: String
         public var detail: String
         public var approvalRequestId: String?
 
-        public init(tileId: UUID, title: String, detail: String, approvalRequestId: String? = nil) {
-            self.tileId = tileId
+        public init(agentId: UUID, title: String, detail: String, approvalRequestId: String? = nil) {
+            self.agentId = agentId
             self.title = title
             self.detail = detail
             self.approvalRequestId = approvalRequestId
@@ -177,41 +180,41 @@ public struct PushPayloadBuilder: Sendable {
     }
 
     public static func approvalRequested(_ context: AgentContext) -> PushPayload {
-        PushPayload(category: .approvalRequested, title: "Approval requested", body: context.detail, deepLink: deepLink(.approvalCard, tileId: context.tileId, approvalRequestId: context.approvalRequestId), approvalRequestId: context.approvalRequestId, userInfo: ["tileId": context.tileId.uuidString])
+        PushPayload(category: .approvalRequested, title: "Approval requested", body: context.detail, deepLink: deepLink(.approvalCard, agentId: context.agentId, approvalRequestId: context.approvalRequestId), approvalRequestId: context.approvalRequestId, userInfo: ["agentId": context.agentId.uuidString])
     }
 
     public static func agentWaitingForInput(_ context: AgentContext) -> PushPayload {
-        PushPayload(category: .agentWaitingForInput, title: "Agent waiting for input", body: context.detail, deepLink: deepLink(.agentDetail, tileId: context.tileId), userInfo: ["tileId": context.tileId.uuidString])
+        PushPayload(category: .agentWaitingForInput, title: "Agent waiting for input", body: context.detail, deepLink: deepLink(.agentDetail, agentId: context.agentId), userInfo: ["agentId": context.agentId.uuidString])
     }
 
     public static func agentFinished(_ context: AgentContext) -> PushPayload {
-        PushPayload(category: .agentFinished, title: "Agent finished", body: context.detail, deepLink: deepLink(.agentDetail, tileId: context.tileId), userInfo: ["tileId": context.tileId.uuidString])
+        PushPayload(category: .agentFinished, title: "Agent finished", body: context.detail, deepLink: deepLink(.agentDetail, agentId: context.agentId), userInfo: ["agentId": context.agentId.uuidString])
     }
 
     public static func agentFailed(_ context: AgentContext) -> PushPayload {
-        PushPayload(category: .agentFailed, title: "Agent failed", body: "The agent run failed.", deepLink: deepLink(.agentDetail, tileId: context.tileId), userInfo: ["tileId": context.tileId.uuidString])
+        PushPayload(category: .agentFailed, title: "Agent failed", body: "The agent run failed.", deepLink: deepLink(.agentDetail, agentId: context.agentId), userInfo: ["agentId": context.agentId.uuidString])
     }
 
     public static func stillWorkingDigest(_ context: AgentContext) -> PushPayload {
-        PushPayload(category: .stillWorkingDigest, title: "Still working", body: context.detail, deepLink: deepLink(.agentsBoard, tileId: context.tileId), userInfo: ["tileId": context.tileId.uuidString])
+        PushPayload(category: .stillWorkingDigest, title: "Still working", body: context.detail, deepLink: deepLink(.agentsBoard, agentId: context.agentId), userInfo: ["agentId": context.agentId.uuidString])
     }
 
     public static func desktopConnectionChanged(_ context: AgentContext) -> PushPayload {
-        PushPayload(category: .desktopConnectionChanged, title: "Desktop connection changed", body: context.detail, deepLink: deepLink(.statusFooter, tileId: context.tileId), userInfo: ["tileId": context.tileId.uuidString])
+        PushPayload(category: .desktopConnectionChanged, title: "Desktop connection changed", body: context.detail, deepLink: deepLink(.statusFooter, agentId: context.agentId), userInfo: ["agentId": context.agentId.uuidString])
     }
 
     public static func deviceSecurityChanged(_ context: AgentContext) -> PushPayload {
-        PushPayload(category: .deviceSecurityChanged, title: "Device security changed", body: context.detail, deepLink: "\(PairingURL.scheme)://devices", userInfo: ["tileId": context.tileId.uuidString])
+        PushPayload(category: .deviceSecurityChanged, title: "Device security changed", body: context.detail, deepLink: "\(PairingURL.scheme)://devices", userInfo: ["agentId": context.agentId.uuidString])
     }
 
     public static func sessionReapedOrRevived(_ context: AgentContext) -> PushPayload {
-        PushPayload(category: .sessionReapedOrRevived, title: "Session changed", body: context.detail, deepLink: deepLink(.agentDetail, tileId: context.tileId), userInfo: ["tileId": context.tileId.uuidString])
+        PushPayload(category: .sessionReapedOrRevived, title: "Session changed", body: context.detail, deepLink: deepLink(.agentDetail, agentId: context.agentId), userInfo: ["agentId": context.agentId.uuidString])
     }
 
     public static func fixturePayload(for category: PushCategory, hostileRuntimeError: String = "") throws -> PushPayload {
-        let tile = UUID(uuidString: "00000000-0000-4000-8000-000000000063")!
+        let agent = UUID(uuidString: "00000000-0000-4000-8000-000000000063")!
         let long = "This is a deliberately long notification body for the APNS payload builder table. It must truncate cleanly at one hundred sixty characters without leaking runtime data or transcript material."
-        let context = AgentContext(tileId: tile, title: category.rawValue, detail: category == .agentFailed ? hostileRuntimeError : long, approvalRequestId: "approval-fixture")
+        let context = AgentContext(agentId: agent, title: category.rawValue, detail: category == .agentFailed ? hostileRuntimeError : long, approvalRequestId: "approval-fixture")
         switch category {
         case .approvalRequested: return approvalRequested(context)
         case .agentWaitingForInput: return agentWaitingForInput(context)
@@ -224,12 +227,12 @@ public struct PushPayloadBuilder: Sendable {
         }
     }
 
-    private static func deepLink(_ target: PushDeepLinkTarget, tileId: UUID, approvalRequestId: String? = nil) -> String {
+    private static func deepLink(_ target: PushDeepLinkTarget, agentId: UUID, approvalRequestId: String? = nil) -> String {
         switch target {
         case .approvalCard:
-            return "\(PairingURL.scheme)://approval/\(approvalRequestId ?? "")?tileId=\(tileId.uuidString)"
+            return "\(PairingURL.scheme)://approval/\(approvalRequestId ?? "")?agentId=\(agentId.uuidString)"
         case .agentDetail:
-            return "\(PairingURL.scheme)://agent/\(tileId.uuidString)"
+            return "\(PairingURL.scheme)://agent/\(agentId.uuidString)"
         case .agentsBoard:
             return "\(PairingURL.scheme)://agents"
         case .statusFooter:
@@ -241,13 +244,13 @@ public struct PushPayloadBuilder: Sendable {
 }
 
 public struct PushIdentity: Hashable, Sendable {
-    public var tileId: UUID
+    public var agentId: UUID
     public var status: AgentStatus
     public var approvalRequestId: String?
     public var summary: String
 
-    public init(tileId: UUID, status: AgentStatus, approvalRequestId: String?, summary: String) {
-        self.tileId = tileId
+    public init(agentId: UUID, status: AgentStatus, approvalRequestId: String?, summary: String) {
+        self.agentId = agentId
         self.status = status
         self.approvalRequestId = approvalRequestId
         self.summary = summary
@@ -291,7 +294,7 @@ public struct PushFiringRuleTable: Sendable {
             return nil
         }
 
-        let context = PushPayloadBuilder.AgentContext(tileId: event.tileId, title: event.kind, detail: event.summary, approvalRequestId: event.approvalRequestId)
+        let context = PushPayloadBuilder.AgentContext(agentId: event.agentId, title: event.kind, detail: event.summary, approvalRequestId: event.approvalRequestId)
         let payload: PushPayload
         switch category {
         case .approvalRequested: payload = PushPayloadBuilder.approvalRequested(context)
@@ -301,7 +304,7 @@ public struct PushFiringRuleTable: Sendable {
         case .stillWorkingDigest, .desktopConnectionChanged, .deviceSecurityChanged, .sessionReapedOrRevived:
             return nil
         }
-        return PushCandidate(payload: payload, identity: PushIdentity(tileId: event.tileId, status: event.status, approvalRequestId: event.approvalRequestId, summary: payload.body))
+        return PushCandidate(payload: payload, identity: PushIdentity(agentId: event.agentId, status: event.status, approvalRequestId: event.approvalRequestId, summary: payload.body))
     }
 }
 
@@ -553,7 +556,7 @@ public actor APNSPushService {
             return .categoryDisabled
         }
         let publishedIdentity = PushPublishedIdentity(category: category, identity: identity)
-        if lastPublished[identity.tileId] == publishedIdentity {
+        if lastPublished[identity.agentId] == publishedIdentity {
             return .deduplicated
         }
         let jwt = try (injectedSigner ?? APNSJWTSigner(config: config)).sign()
@@ -567,7 +570,7 @@ public actor APNSPushService {
         let response = try await httpClient.send(request, body: try payload.encodedJSON())
         switch response.statusCode {
         case 200:
-            lastPublished[identity.tileId] = publishedIdentity
+            lastPublished[identity.agentId] = publishedIdentity
             return .sent(statusCode: 200)
         case 410:
             return .tokenExpired
@@ -579,9 +582,9 @@ public actor APNSPushService {
     }
 
     private static func identity(derivedFrom payload: PushPayload) -> PushIdentity {
-        let tileId = payload.userInfo["tileId"].flatMap(UUID.init(uuidString:)) ?? UUID(uuidString: "00000000-0000-4000-8000-000000000000")!
+        let agentId = payload.userInfo["agentId"].flatMap(UUID.init(uuidString:)) ?? UUID(uuidString: "00000000-0000-4000-8000-000000000000")!
         return PushIdentity(
-            tileId: tileId,
+            agentId: agentId,
             status: payload.category.identityStatus,
             approvalRequestId: payload.approvalRequestId,
             summary: payload.body
@@ -605,12 +608,12 @@ private extension PushCategory {
 }
 
 public struct PushApprovalResponseIntent: Equatable, Sendable {
-    public var tileId: UUID
+    public var agentId: UUID
     public var requestId: String
     public var decision: ApprovalDecision
 
-    public init(tileId: UUID, requestId: String, decision: ApprovalDecision) {
-        self.tileId = tileId
+    public init(agentId: UUID, requestId: String, decision: ApprovalDecision) {
+        self.agentId = agentId
         self.requestId = requestId
         self.decision = decision
     }
@@ -626,11 +629,13 @@ public func handlePushAction(actionId: String, userInfo: [AnyHashable: Any], gra
     default:
         return nil
     }
+    // A notification posted before P2A.8 carries the id under `tileId`, and the two
+    // were the same value then — so an already-delivered alert still acts.
     guard let requestId = userInfo["approvalRequestId"] as? String,
-          let tileString = userInfo["tileId"] as? String,
-          let tileId = UUID(uuidString: tileString),
+          let agentString = (userInfo["agentId"] as? String) ?? (userInfo["tileId"] as? String),
+          let agentId = UUID(uuidString: agentString),
           (try? authorize(.respondToApproval, grantedScopes: grantedScope)) != nil else {
         return nil
     }
-    return PushApprovalResponseIntent(tileId: tileId, requestId: requestId, decision: decision)
+    return PushApprovalResponseIntent(agentId: agentId, requestId: requestId, decision: decision)
 }

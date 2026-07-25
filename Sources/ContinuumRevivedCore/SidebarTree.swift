@@ -136,7 +136,7 @@ public struct SidebarTree: Codable, Equatable, Sendable {
 
 // NAME NOTE: ticket 08 (Sources/ContinuumRevivedCore/AgentActivityEvent.swift) had
 // already shipped a public `ActivityTreeSnapshot` — the ActivityStore's materialized
-// read model (snapshotSequence/snapshotReplicaId/byTile) — before this ticket landed.
+// read model (snapshotSequence/snapshotReplicaId/byAgent) — before this ticket landed.
 // Two public types cannot share one name in the same module, so that pre-existing
 // type was renamed to `ActivityLogSnapshot` (see the comment above its declaration
 // in AgentActivityEvent.swift) to free up `ActivityTreeSnapshot` for this ticket's

@@ -240,9 +240,9 @@ private func checkActivitySnapshotCache() async throws -> UInt64 {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ConnectionSupervisorCache-\(UUID().uuidString)")
     let url = dir.appendingPathComponent("activity-cache.json")
     var cache = ActivitySnapshotCache(fileURL: url, clock: clock)
-    let sequence10 = ActivityLogSnapshot(snapshotSequence: 10, snapshotReplicaId: UUID(), byTile: [:])
-    let sequence9 = ActivityLogSnapshot(snapshotSequence: 9, snapshotReplicaId: UUID(), byTile: [:])
-    let sequence11 = ActivityLogSnapshot(snapshotSequence: 11, snapshotReplicaId: UUID(), byTile: [:])
+    let sequence10 = ActivityLogSnapshot(snapshotSequence: 10, snapshotReplicaId: UUID(), byAgent: [:])
+    let sequence9 = ActivityLogSnapshot(snapshotSequence: 9, snapshotReplicaId: UUID(), byAgent: [:])
+    let sequence11 = ActivityLogSnapshot(snapshotSequence: 11, snapshotReplicaId: UUID(), byAgent: [:])
 
     try cache.update(sequence10)
     clock.advance(by: 0.499)
@@ -300,6 +300,7 @@ private func checkLocalTmuxProbeBackend() async throws -> Int? {
 private func activityEvent(sequence: UInt64, tile: UUID, replica: UUID, summary: String) -> AgentActivityEvent {
     AgentActivityEvent(
         stamping: AgentActivityEventDraft(
+            agentId: tile,
             tileId: tile,
             runId: nil,
             tone: .info,

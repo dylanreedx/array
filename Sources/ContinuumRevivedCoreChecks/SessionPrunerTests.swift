@@ -16,8 +16,9 @@ private func makeActivitySnapshot(tileId: UUID, status: AgentStatus, at date: Da
     ActivityLogSnapshot(
         snapshotSequence: 1,
         snapshotReplicaId: UUID(uuidString: "00000000-0000-0000-0000-000000000021")!,
-        byTile: [
-            tileId: TileActivity(status: status, lastSummary: "fixture", recent: [], updatedAt: date)
+        byAgent: [
+            UUID(uuidString: "00000000-0000-0000-0000-000000000022")!:
+                AgentActivity(status: status, lastSummary: "fixture", recent: [], updatedAt: date, tileId: tileId)
         ]
     )
 }

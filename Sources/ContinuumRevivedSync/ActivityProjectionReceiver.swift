@@ -155,8 +155,12 @@ public actor ActivityProjectionReceiver {
         remoteActivitySeen
     }
 
+    /// Tile-keyed statuses for the consumers whose own key is a tile (the sidebar's
+    /// tile rows). P2A.8: the snapshot is agent-keyed, so this projects through the
+    /// optional tile hint — a headless agent contributes no entry, by construction.
+    /// Deterministic on a contested tile: lowest agent id wins, as elsewhere.
     public func agentStatusesByTileId() -> [UUID: AgentStatus] {
-        snapshot.byTile.mapValues(\.status)
+        snapshot.activitiesByTile().mapValues(\.status)
     }
 
     public func currentSnapshot() -> ActivityLogSnapshot {

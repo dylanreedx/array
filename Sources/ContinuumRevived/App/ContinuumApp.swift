@@ -2755,7 +2755,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Per-tile activity timeline (I5-safe drafts) built from the runner event
     /// stream, folded into the companion snapshot so the phone sees what each
     /// agent is doing (ticket 88.4c). Capped per tile.
-    private var managedAgentActivityByTile: [UUID: [AgentActivityEventDraft]] = [:]
+    // P2A.8: keyed by agent id, not tile id — an agent's timeline must survive its
+    // tile closing, and a headless agent has no tile to key on.
+    private var managedAgentActivityByAgent: [UUID: [AgentActivityEventDraft]] = [:]
     private var profilePalette: LaunchProfilePalette?
     private var paletteContextTileId: UUID?
     private var settingsPanel: SettingsPanel?
@@ -3210,7 +3212,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 report("transcript:\n\(view.qaTranscriptText)")
                 // 88.4c: confirm the syncable activity timeline (what the phone
                 // would receive) was populated in-app by the runner.
-                let kinds = self.managedAgentActivityByTile[tileId]?.map(\.kind) ?? []
+                let agentKey = self.agentSupervisor.agent(forTile: tileId)?.rawValue
+                let kinds = agentKey.flatMap { self.managedAgentActivityByAgent[$0]?.map(\.kind) } ?? []
                 report("sync activity timeline recorded (88.4c): \(kinds)")
                 report("PASS: turn 2 recalled '\(codeword)' — session continuity works in-app")
                 Foundation.exit(0)
@@ -3891,12 +3894,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard managedTileIds.contains(record.tileId) else { return nil }
             let status = (canvasView.tileView(for: record.tileId) as? ManagedAgentTileNSView)?.currentAgentStatus
                 ?? Self.agentStatus(for: record.status)
+            // P2A.8: the aggregate key is the agent's. A managed session with no
+            // supervised agent (one restored from a store the supervisor has not
+            // claimed) falls back to its tile id, which is the identity every event
+            // written before this migration used.
+            let agentId = agentSupervisor.agent(forTile: record.tileId)?.rawValue ?? record.tileId
             return DesktopManagedAgentActivity(
+                agentId: agentId,
                 tileId: record.tileId,
                 agentKind: record.agentKind,
                 status: status,
                 updatedAt: record.lastSeenAt,
-                recentEvents: managedAgentActivityByTile[record.tileId] ?? []
+                recentEvents: managedAgentActivityByAgent[agentId] ?? []
             )
         }
     }
@@ -7655,7 +7664,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // status the tile derived from that same event.
         view.onIngestedEvent = { [weak self, weak view] event in
             guard let view else { return }
-            self?.recordManagedActivity(tileId: tileId, event: event, status: view.currentAgentStatus)
+            self?.recordManagedActivity(agentId: agentId, tileId: tileId, event: event, status: view.currentAgentStatus)
         }
         // Replays the agent's history, then follows the tail; re-wiring the same
         // tile to the same agent is a no-op inside `attach`, so none of the three
@@ -7675,16 +7684,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    /// Records a managed-agent runtime event onto the per-tile syncable
+    /// Records a managed-agent runtime event onto the per-agent syncable
     /// timeline and nudges a companion publish so the phone updates (88.4c).
-    private func recordManagedActivity(tileId: UUID, event: AgentRuntimeEvent, status: AgentStatus) {
-        guard let draft = ManagedAgentActivityBridge.draft(for: event, tileId: tileId, status: status, now: Date()) else { return }
-        var buffer = managedAgentActivityByTile[tileId] ?? []
+    /// `tileId` rides along as the optional view hint only (P2A.8).
+    private func recordManagedActivity(agentId: AgentID, tileId: UUID?, event: AgentRuntimeEvent, status: AgentStatus) {
+        guard let draft = ManagedAgentActivityBridge.draft(
+            for: event, agentId: agentId.rawValue, tileId: tileId, status: status, now: Date()
+        ) else { return }
+        var buffer = managedAgentActivityByAgent[agentId.rawValue] ?? []
         buffer.append(draft)
         if buffer.count > ManagedAgentActivityBridge.recentCap {
             buffer.removeFirst(buffer.count - ManagedAgentActivityBridge.recentCap)
         }
-        managedAgentActivityByTile[tileId] = buffer
+        managedAgentActivityByAgent[agentId.rawValue] = buffer
         scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "managed-agent-activity", debounce: 0.5)
     }
 

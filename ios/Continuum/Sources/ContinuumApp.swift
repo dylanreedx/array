@@ -72,7 +72,7 @@ private final class PushNotificationAppDelegate: NSObject, UIApplicationDelegate
             return
         }
         do {
-            _ = try await model.respondToApproval(tileId: intent.tileId, requestId: intent.requestId, decision: intent.decision)
+            _ = try await model.respondToApproval(agentId: intent.agentId, requestId: intent.requestId, decision: intent.decision)
         } catch {
             print("push approval response failed: \(error.localizedDescription)")
         }
@@ -464,8 +464,8 @@ private final class AgentsBoardModel: ObservableObject {
         }
     }
 
-    func activity(for tileId: UUID) -> TileActivity? {
-        snapshot.byTile[tileId]
+    func activity(for agentId: UUID) -> AgentActivity? {
+        snapshot.byAgent[agentId]
     }
 
     var approvalRows: [AgentsBoardRow] {
@@ -476,7 +476,7 @@ private final class AgentsBoardModel: ObservableObject {
         AgentsBoardProjection.attentionCount(from: snapshot)
     }
 
-    func respondToApproval(tileId: UUID, requestId: String, decision: ApprovalDecision) async throws -> ApprovalResponseOutcome {
+    func respondToApproval(agentId: UUID, requestId: String, decision: ApprovalDecision) async throws -> ApprovalResponseOutcome {
         guard canMutateFromFreshness else {
             throw ApprovalSendError.freshnessBlocked(freshness.actionBlocker ?? "Reconnect to act")
         }
@@ -494,7 +494,7 @@ private final class AgentsBoardModel: ObservableObject {
         }
         defer { ackTask.cancel() }
         do {
-            try await demux.send(.approvalResponse(ApprovalResponseRequest(tileId: tileId, requestId: requestId, decision: decision)))
+            try await demux.send(.approvalResponse(ApprovalResponseRequest(agentId: agentId, requestId: requestId, decision: decision)))
             return try await withThrowingTaskGroup(of: ApprovalResponseOutcome.self) { group in
                 group.addTask {
                     try await ackTask.value
@@ -833,15 +833,15 @@ private struct AgentsBoardView: View {
             }
             .tokenBackground(.canvas, ignoringSafeArea: true)
             .navigationTitle("Agents")
-            .navigationDestination(for: UUID.self) { tileId in
-                AgentDetailView(tileId: tileId, selectedTab: $selectedTab)
+            .navigationDestination(for: UUID.self) { agentId in
+                AgentDetailView(agentId: agentId, selectedTab: $selectedTab)
             }
         }
     }
 
     private var agentsList: some View {
         List(model.rows) { row in
-            NavigationLink(value: row.tileId) {
+            NavigationLink(value: row.agentId) {
                 AgentRowView(row: row)
             }
             .listRowBackground(row.status == .needsAttention ? Color.orange.opacity(0.12) : Color.clear)
@@ -872,7 +872,7 @@ private struct ApprovalsInboxView: View {
                     }
                 } else {
                     List(model.approvalRows) { row in
-                        NavigationLink(value: row.tileId) {
+                        NavigationLink(value: row.agentId) {
                             AgentRowView(row: row)
                         }
                         .listRowBackground(Color.orange.opacity(0.12))
@@ -888,8 +888,8 @@ private struct ApprovalsInboxView: View {
                 }
             }
             .navigationTitle("Approvals")
-            .navigationDestination(for: UUID.self) { tileId in
-                AgentDetailView(tileId: tileId, selectedTab: $selectedTab)
+            .navigationDestination(for: UUID.self) { agentId in
+                AgentDetailView(agentId: agentId, selectedTab: $selectedTab)
             }
         }
     }
@@ -921,15 +921,17 @@ private struct AgentRowView: View {
 
 private struct AgentDetailView: View {
     @EnvironmentObject private var model: AgentsBoardModel
-    let tileId: UUID
+    // P2A.8: the detail view is addressed by AGENT. Its tile, if it has one, is a
+    // view hint on the row — which is why "Show on canvas" below is conditional.
+    let agentId: UUID
     @Binding var selectedTab: ContinuumTab
 
     private var row: AgentsBoardRow? {
-        model.rows.first { $0.tileId == tileId }
+        model.rows.first { $0.agentId == agentId }
     }
 
-    private var activity: TileActivity? {
-        model.activity(for: tileId)
+    private var activity: AgentActivity? {
+        model.activity(for: agentId)
     }
 
     var body: some View {
@@ -940,21 +942,25 @@ private struct AgentDetailView: View {
                     if row.status == .needsAttention {
                         PendingAttentionCard(activity: activity, grantedScope: model.grantedScope, freshness: model.freshness) { target, decision in
                             try await model.respondToApproval(
-                                tileId: target.tileId,
+                                agentId: target.agentId,
                                 requestId: target.approvalRequestId,
                                 decision: decision
                             )
                         }
                     }
-                    Button {
-                        model.requestCanvasFocus(tileId: tileId)
-                        selectedTab = .canvas
-                    } label: {
-                        Label("Show on canvas", systemImage: "square.grid.2x2")
-                            .frame(maxWidth: .infinity)
+                    // A headless agent has no tile to show, so the button is ABSENT
+                    // rather than present-and-broken (P2A.8).
+                    if let tileId = row.tileId {
+                        Button {
+                            model.requestCanvasFocus(tileId: tileId)
+                            selectedTab = .canvas
+                        } label: {
+                            Label("Show on canvas", systemImage: "square.grid.2x2")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.orange)
 
                     TimelineView(events: AgentsBoardProjection.timelineEvents(for: activity))
                 } else {
@@ -987,7 +993,7 @@ private struct DetailHeader: View {
             Text(row.lastSummary.isEmpty ? "No activity yet" : row.lastSummary)
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(.primary)
-            Text(row.tileId.uuidString)
+            Text(row.agentId.uuidString)
                 .font(.caption2.monospaced())
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -999,7 +1005,7 @@ private struct DetailHeader: View {
 }
 
 private struct PendingAttentionCard: View {
-    let activity: TileActivity
+    let activity: AgentActivity
     let grantedScope: Scope
     let freshness: CompanionFreshness
     var onRespond: (ApprovalResponseTarget, ApprovalDecision) async throws -> ApprovalResponseOutcome
