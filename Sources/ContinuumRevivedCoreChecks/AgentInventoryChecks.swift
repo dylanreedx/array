@@ -1,5 +1,6 @@
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
+import ContinuumRevivedSync
 import Foundation
 
 // Ticket: docs/38-tickets/90-agent-ux/P2B.1-agent-inventory.md
@@ -29,7 +30,8 @@ func runAgentInventoryChecks() {
     runAgentInventoryDeterminismCheck()
     runAgentInventorySequenceCheck()
     runAgentInventorySyncBoundaryCheck()
-    print("AgentInventory checks: terminal+agent union incl. headless, deterministic sequencing, and I5 purity passed")
+    runCrossProjectWalkChecks()
+    print("AgentInventory checks: terminal+agent union incl. headless, deterministic sequencing, I5 purity, and the cross-project walk passed")
 }
 
 // MARK: - Fixture
@@ -406,4 +408,165 @@ private func runAgentInventorySyncBoundaryCheck() {
     }
     expect(recordText.contains(secretCwd) && recordText.contains(secretBranch),
            "the I5 witness fed the fold records that really do carry a host path and a branch")
+}
+
+// MARK: - P2B.2 · cross-project walk
+//
+// Ticket: docs/38-tickets/90-agent-ux/P2B.2-cross-project-walk.md
+//
+// Four properties of "an agent elsewhere is still an agent":
+//   1. UNION ACROSS ROOTS — two project roots with one legacy
+//      `ManagedAgentSessionRecord` each yield both, tagged with the project they
+//      came from, and both reach the published inventory through the SAME fold
+//      the companion path calls. A third root that does not exist on disk is
+//      skipped, not thrown.
+//   2. ORDER — the result is ordered by identity, not by registry order. The
+//      fold downstream assigns sequence numbers POSITIONALLY, so a walk that
+//      moved with the registry would renumber unrelated agents' events between
+//      two publishes of identical state.
+//   3. DEDUP — the same root reached twice (two registry entries, one path,
+//      which is what re-adding a project produces) lists each agent once.
+//   4. CACHE — a read inside the TTL does not touch the disk again, and the
+//      first read after it does. This is the packet's "cache per wake": the
+//      inbox refreshes far more often than a project gains an agent.
+//
+// Everything here is driven off a real temp directory through the real
+// `ManagedAgentSessionStore`, because the whole ticket is about files that are
+// not reachable from the active controller.
+
+private let walkNow = Date(timeIntervalSinceReferenceDate: 806_500_000)
+private let walkProjectA = UUID(uuidString: "2B200000-0000-4000-8000-0000000000A1")!
+private let walkProjectB = UUID(uuidString: "2B200000-0000-4000-8000-0000000000B1")!
+private let walkProjectMissing = UUID(uuidString: "2B200000-0000-4000-8000-0000000000C1")!
+private let walkTileA = UUID(uuidString: "2B200000-0000-4000-8000-0000000000A2")!
+private let walkTileB = UUID(uuidString: "2B200000-0000-4000-8000-0000000000B2")!
+private let walkTileLate = UUID(uuidString: "2B200000-0000-4000-8000-0000000000B3")!
+private let walkTileLater = UUID(uuidString: "2B200000-0000-4000-8000-0000000000B4")!
+
+private func runCrossProjectWalkChecks() {
+    let temp = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("continuum-cross-project-walk-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: temp) }
+
+    let rootA = temp.appendingPathComponent("project-a", isDirectory: true)
+    let rootB = temp.appendingPathComponent("project-b", isDirectory: true)
+    // Never created. A registry keeps entries for projects that have been moved
+    // or deleted, and an inbox that threw on one of them would list nobody.
+    let rootMissing = temp.appendingPathComponent("project-gone", isDirectory: true)
+
+    do {
+        try FileManager.default.createDirectory(at: rootA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: rootB, withIntermediateDirectories: true)
+        try ManagedAgentSessionStore(projectRoot: rootA).upsert(walkRecord(tileId: walkTileA, kind: .claude, status: .running))
+        try ManagedAgentSessionStore(projectRoot: rootB).upsert(walkRecord(tileId: walkTileB, kind: .codex, status: .stopped))
+    } catch {
+        fputs("FAIL: the cross-project walk fixture could not be written: \(error)\n", stderr)
+        Foundation.exit(1)
+    }
+
+    let roots = [
+        CrossProjectManagedSessionWalk.Root(projectId: walkProjectA, projectRoot: rootA),
+        CrossProjectManagedSessionWalk.Root(projectId: walkProjectB, projectRoot: rootB),
+        CrossProjectManagedSessionWalk.Root(projectId: walkProjectMissing, projectRoot: rootMissing),
+    ]
+
+    runCrossProjectWalkUnionCheck(roots: roots)
+    runCrossProjectWalkOrderCheck(roots: roots)
+    runCrossProjectWalkDedupCheck(rootA: rootA)
+    runCrossProjectWalkCacheCheck(roots: roots, rootB: rootB)
+}
+
+private func walkRecord(tileId: UUID, kind: AgentKind, status: ManagedSessionStatus) -> ManagedAgentSessionRecord {
+    ManagedAgentSessionRecord(
+        tileId: tileId,
+        agentKind: kind,
+        status: status,
+        lastSeenAt: walkNow
+    )
+}
+
+/// 1 · Both projects' agents are found, tagged with their project, and reach the
+/// published inventory. Only ONE of these roots can be the active project, so a
+/// walk that only saw the active one would return a single entry here — which is
+/// exactly today's behaviour without this ticket.
+private func runCrossProjectWalkUnionCheck(roots: [CrossProjectManagedSessionWalk.Root]) {
+    let found = CrossProjectManagedSessionWalk().records(roots: roots, now: walkNow)
+    expect(found.count == 2,
+           "two project roots with one record each fold into 2 discovered agents, and a root that does not exist is skipped — got \(found.count)")
+    expect(found.contains(where: { $0.projectId == walkProjectA && $0.record.tileId == walkTileA }),
+           "the record in project A is found and tagged with project A — got \(found.map { ($0.projectId, $0.record.tileId) })")
+    expect(found.contains(where: { $0.projectId == walkProjectB && $0.record.tileId == walkTileB }),
+           "the record in the NON-ACTIVE project B is found and tagged with project B — got \(found.map { ($0.projectId, $0.record.tileId) })")
+    expect(!found.contains(where: { $0.projectId == walkProjectMissing }),
+           "a project root that no longer exists on disk contributes nothing")
+
+    // The published inventory, through the same entry point the app's companion
+    // closure calls — an agent that the walk finds but the fold drops is still
+    // invisible, so the union is asserted at the payload, not at the walk alone.
+    let snapshot = DegradedDesktopActivitySnapshotSource.snapshot(
+        descriptors: [],
+        liveStatuses: [:],
+        managedAgents: found.map { discovered in
+            DesktopManagedAgentActivity(
+                agentId: discovered.record.tileId,
+                tileId: discovered.record.tileId,
+                agentKind: discovered.record.agentKind,
+                status: .idle,
+                updatedAt: discovered.record.lastSeenAt
+            )
+        },
+        replicaId: inventoryReplicaId,
+        now: walkNow
+    )
+    expect(Set(snapshot.byAgent.keys) == Set([walkTileA, walkTileB]),
+           "agents from BOTH projects appear in the published inventory — got \(snapshot.byAgent.keys.sorted { $0.uuidString < $1.uuidString })")
+}
+
+/// 2 · Registry order must not reach the output.
+private func runCrossProjectWalkOrderCheck(roots: [CrossProjectManagedSessionWalk.Root]) {
+    let forward = CrossProjectManagedSessionWalk().records(roots: roots, now: walkNow)
+    let reversed = CrossProjectManagedSessionWalk().records(roots: roots.reversed(), now: walkNow)
+    expect(forward == reversed,
+           "the walk's order is independent of registry order — got \(forward.map(\.record.tileId)) vs \(reversed.map(\.record.tileId))")
+    expect(forward.map(\.projectId) == forward.map(\.projectId).sorted { $0.uuidString < $1.uuidString },
+           "the walk is ordered by project identity — got \(forward.map(\.projectId))")
+}
+
+/// 3 · One path, two registry entries — an agent is listed once.
+private func runCrossProjectWalkDedupCheck(rootA: URL) {
+    let duplicated = [
+        CrossProjectManagedSessionWalk.Root(projectId: walkProjectA, projectRoot: rootA),
+        CrossProjectManagedSessionWalk.Root(projectId: walkProjectB, projectRoot: rootA),
+    ]
+    let found = CrossProjectManagedSessionWalk().records(roots: duplicated, now: walkNow)
+    expect(found.count == 1,
+           "two registry entries pointing at ONE root list that root's agent once — got \(found.count)")
+}
+
+/// 4 · The cache holds for its TTL and no longer.
+private func runCrossProjectWalkCacheCheck(roots: [CrossProjectManagedSessionWalk.Root], rootB: URL) {
+    let walk = CrossProjectManagedSessionWalk(ttl: 2)
+    expect(walk.records(roots: roots, now: walkNow).count == 2, "the cache check starts from the 2 agents on disk")
+
+    // A record that appears AFTER the first read is the only way to tell a cache
+    // hit from a re-read: same inputs, different disk.
+    try? ManagedAgentSessionStore(projectRoot: rootB).upsert(walkRecord(tileId: walkTileLate, kind: .pi, status: .running))
+
+    expect(walk.records(roots: roots, now: walkNow.addingTimeInterval(1)).count == 2,
+           "a read inside the TTL is served from cache and does not re-enumerate the disk — got \(walk.records(roots: roots, now: walkNow.addingTimeInterval(1)).count)")
+    expect(walk.records(roots: roots, now: walkNow.addingTimeInterval(2)).count == 3,
+           "the first read after the TTL sees the new agent — got \(walk.records(roots: roots, now: walkNow.addingTimeInterval(2)).count)")
+
+    // Clocks move backwards (sleep/wake, NTP). A cache entry stamped in the
+    // future must not become immortal. Discriminating only because the disk
+    // changed again since the read now cached: same roots, same TTL window by
+    // arithmetic, so a cache hit here would report the stale 3.
+    try? ManagedAgentSessionStore(projectRoot: rootB).upsert(walkRecord(tileId: walkTileLater, kind: .pi, status: .running))
+    expect(walk.records(roots: roots, now: walkNow.addingTimeInterval(-3600)).count == 4,
+           "a backwards clock jump re-reads instead of serving a cache entry stamped in the future — got \(walk.records(roots: roots, now: walkNow.addingTimeInterval(-3600)).count)")
+
+    // A changed root set must not be served from a cache keyed on the old one.
+    let narrowed = Array(roots.prefix(1))
+    expect(walk.records(roots: narrowed, now: walkNow.addingTimeInterval(-3600)).count == 1,
+           "a different root set re-reads rather than reusing the cached answer — got \(walk.records(roots: narrowed, now: walkNow.addingTimeInterval(-3600)).count)")
 }

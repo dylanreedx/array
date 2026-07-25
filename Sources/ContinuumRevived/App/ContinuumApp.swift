@@ -1076,6 +1076,18 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--cross-project-agents-check") {
+            do {
+                _ = NSApplication.shared
+                try AppDelegate.runCrossProjectAgentDiscoveryChecks()
+                print("ContinuumRevivedCrossProjectAgentChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--settings-panel-check") {
             do {
                 _ = NSApplication.shared
@@ -2752,6 +2764,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `managedAgentRunners` dictionary this view used to hold: the supervisor owns
     /// the runner and the record, and a tile is one subscriber to its event stream.
     private lazy var agentSupervisor = AgentSupervisor(store: AgentStore(smokeTest: smokeTestEnabled))
+    /// Legacy per-project `ManagedAgentSessionRecord`s, read across every project
+    /// root (P2B.2). Held here rather than made per-call so its cache survives
+    /// between inbox refreshes, which is the point of it.
+    private let crossProjectManagedSessionWalk = CrossProjectManagedSessionWalk()
     /// Per-tile activity timeline (I5-safe drafts) built from the runner event
     /// stream, folded into the companion snapshot so the phone sees what each
     /// agent is doing (ticket 88.4c). Capped per tile.
@@ -3886,13 +3902,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func currentManagedAgentActivities() -> [DesktopManagedAgentActivity] {
-        guard let canvasView,
-              let records = try? workspaceRuntime?.activeController?.managedSessionStore.loadAll()
-        else { return [] }
-        let managedTileIds = Set(canvasView.canvasState.tiles.filter { $0.kind == .managedAgent }.map(\.id))
-        return records.compactMap { record in
-            guard managedTileIds.contains(record.tileId) else { return nil }
-            let status = (canvasView.tileView(for: record.tileId) as? ManagedAgentTileNSView)?.currentAgentStatus
+        // P2B.2: an inbox lists agents from EVERY project, not just the active
+        // one. Two sources, in precedence order:
+        //   1. the active project's live store — it is the writer, so it can
+        //      never be staler than the files on disk;
+        //   2. `CrossProjectManagedSessionWalk` over every registry project
+        //      root, which reads the persisted records directly (no
+        //      `ZoneRuntimeController` is opened just to list agents).
+        // Deduped by tile id, active-first, because the walk covers the active
+        // project's root too.
+        //
+        // The old "tile is on the active canvas" filter is GONE, not relaxed: a
+        // record in another project has no tile here by definition, so the
+        // filter was exactly what made those agents invisible. What it was
+        // otherwise carrying, stated exactly: closing a managed tile deletes
+        // that tile's LEGACY RECORD (see `deleteTile`), so for the active
+        // project the filter and the files agreed. It did NOT bound the
+        // supervised `AgentRecord`, which deliberately outlives its tile — but
+        // an `AgentRecord` never reached this function to begin with. Feeding
+        // those is P2B.4's one-snapshot wiring, not this walk.
+        // The status fallback below already handles a record with no tile view.
+        var records: [ManagedAgentSessionRecord] = []
+        var seenTiles: Set<UUID> = []
+        for record in (try? workspaceRuntime?.activeController?.managedSessionStore.loadAll()) ?? []
+        where seenTiles.insert(record.tileId).inserted {
+            records.append(record)
+        }
+        let roots = ((try? registryStore?.loadOrEmpty())?.projects ?? []).map { project in
+            CrossProjectManagedSessionWalk.Root(
+                projectId: project.id,
+                projectRoot: URL(fileURLWithPath: project.rootPath, isDirectory: true)
+            )
+        }
+        for found in crossProjectManagedSessionWalk.records(roots: roots, now: Date())
+        where seenTiles.insert(found.record.tileId).inserted {
+            records.append(found.record)
+        }
+
+        return records.map { record in
+            let status = (canvasView?.tileView(for: record.tileId) as? ManagedAgentTileNSView)?.currentAgentStatus
                 ?? Self.agentStatus(for: record.status)
             // P2A.8: the aggregate key is the agent's. A managed session with no
             // supervised agent (one restored from a store the supervisor has not
@@ -17868,5 +17916,109 @@ private extension NSView {
             view = current.superview
         }
         return false
+    }
+}
+
+/// Ticket: docs/38-tickets/90-agent-ux/P2B.2-cross-project-walk.md
+/// Gated on `--cross-project-agents-check`.
+///
+/// THE REAL PATH, not the walk in isolation: this drives
+/// `AppDelegate.currentManagedAgentActivities()` — the exact function the
+/// companion-sync `activitySnapshot` closure calls — with a registry naming
+/// three projects, two of which hold one legacy `ManagedAgentSessionRecord`
+/// each and one of which no longer exists on disk.
+///
+/// Deliberately with NO canvas and NO workspace runtime, because that is what
+/// makes the assertion discriminating: the previous implementation opened with
+/// `guard let canvasView … else { return [] }` and then filtered records by the
+/// live canvas's managed-agent tiles, so it returned NOTHING here. It also
+/// witnesses observer-independence (P2B.8) — no `ZoneRuntimeController` is
+/// booted to list an agent.
+extension AppDelegate {
+    // A same-file extension, so the check can reach `registryStore` and
+    // `currentManagedAgentActivities()` without widening either to the rest of
+    // this file.
+    static func runCrossProjectAgentDiscoveryChecks() throws {
+    enum CheckError: Error, CustomStringConvertible {
+        case failed(String)
+        var description: String { switch self { case let .failed(message): return message } }
+    }
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+        if !condition() { throw CheckError.failed(message) }
+    }
+
+    let fm = FileManager.default
+    let tempRoot = fm.temporaryDirectory
+        .appendingPathComponent("continuum-cross-project-agents-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: tempRoot) }
+    let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+    let projectARoot = tempRoot.appendingPathComponent("ProjectA", isDirectory: true)
+    let projectBRoot = tempRoot.appendingPathComponent("ProjectB", isDirectory: true)
+    // Never created — a registry keeps entries for projects that have been moved
+    // or deleted, and one of those must not take the whole listing down.
+    let projectGoneRoot = tempRoot.appendingPathComponent("ProjectGone", isDirectory: true)
+    try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+    try fm.createDirectory(at: projectARoot, withIntermediateDirectories: true)
+    try fm.createDirectory(at: projectBRoot, withIntermediateDirectories: true)
+
+    let now = Date(timeIntervalSince1970: 1_900_200_000)
+    let projectA = UUID(uuidString: "2B200000-0000-4000-8000-0000000000D1")!
+    let projectB = UUID(uuidString: "2B200000-0000-4000-8000-0000000000D2")!
+    let projectGone = UUID(uuidString: "2B200000-0000-4000-8000-0000000000D3")!
+    let tileA = UUID(uuidString: "2B200000-0000-4000-8000-0000000000E1")!
+    let tileB = UUID(uuidString: "2B200000-0000-4000-8000-0000000000E2")!
+
+    try ManagedAgentSessionStore(projectRoot: projectARoot).upsert(ManagedAgentSessionRecord(
+        tileId: tileA,
+        agentKind: .claude,
+        status: .running,
+        lastSeenAt: now
+    ))
+    try ManagedAgentSessionStore(projectRoot: projectBRoot).upsert(ManagedAgentSessionRecord(
+        tileId: tileB,
+        agentKind: .codex,
+        status: .stopped,
+        lastSeenAt: now.addingTimeInterval(60)
+    ))
+
+    var registry = Registry.empty()
+    registry.projects = [
+        ProjectEntry(id: projectA, name: "Project A", rootPath: projectARoot.path, workspaceId: nil, lastOpenedAt: now, pinned: false, missing: false),
+        ProjectEntry(id: projectB, name: "Project B", rootPath: projectBRoot.path, workspaceId: nil, lastOpenedAt: now, pinned: false, missing: false),
+        ProjectEntry(id: projectGone, name: "Project Gone", rootPath: projectGoneRoot.path, workspaceId: nil, lastOpenedAt: now, pinned: false, missing: true),
+    ]
+    let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+    try registryStore.save(registry)
+
+    let app = AppDelegate()
+    app.registryStore = registryStore
+
+    let activities = app.currentManagedAgentActivities()
+    try expect(activities.count == 2,
+               "both projects' agents are published, and the project root that is gone is skipped rather than thrown — got \(activities.count)")
+    guard let fromA = activities.first(where: { $0.tileId == tileA }),
+          let fromB = activities.first(where: { $0.tileId == tileB })
+    else {
+        throw CheckError.failed("both the active-project and the NON-ACTIVE-project agent are published — got \(activities.map(\.tileId))")
+    }
+    // An unsupervised legacy record keys on its tile id (P2A.8's legacy identity).
+    try expect(fromA.agentId == tileA && fromB.agentId == tileB,
+               "an unsupervised legacy record is keyed by its tile id — got \(fromA.agentId) / \(fromB.agentId)")
+    try expect(fromA.agentKind == .claude && fromB.agentKind == .codex,
+               "each record's kind survives the walk — got \(fromA.agentKind) / \(fromB.agentKind)")
+    // Status comes from the persisted record, since neither has a tile view here.
+    try expect(fromA.status == .working && fromB.status == .idle,
+               "status falls back to the persisted record when no tile renders the agent — got \(fromA.status) / \(fromB.status)")
+
+    // And they reach the published payload, through the same fold the phone reads.
+    let snapshot = DegradedDesktopActivitySnapshotSource.snapshot(
+        descriptors: [],
+        liveStatuses: [:],
+        managedAgents: activities,
+        replicaId: UUID(uuidString: "2B200000-0000-4000-8000-0000000000FF")!,
+        now: now
+    )
+    try expect(Set(snapshot.byAgent.keys) == Set([tileA, tileB]),
+               "agents from every project reach the published inventory — got \(snapshot.byAgent.keys.sorted { $0.uuidString < $1.uuidString })")
     }
 }

@@ -208,6 +208,11 @@ run_app_check .build/debug/continuum-revived --agent-supervisor-check
 # their identity/model/role intact, the tiled one re-resolved from its tileId and
 # carrying a previous-session notice — and a prompt is what starts them again.
 run_app_check .build/debug/continuum-revived --agent-restore-check
+# P2B.2: the inbox lists agents from EVERY project. Two temp project roots hold a
+# legacy managed-session record each and a third registry entry points at a root
+# that is gone; `currentManagedAgentActivities()` publishes both with no canvas
+# and no workspace runtime (observer-independence, P2B.8).
+run_app_check .build/debug/continuum-revived --cross-project-agents-check
 run_app_check .build/debug/continuum-revived --keybind-edit-check
 run_app_check .build/debug/continuum-revived --browser-url-focus-check
 run_app_check .build/debug/continuum-revived --browser-ui-delegate-check

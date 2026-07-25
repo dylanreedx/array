@@ -171,3 +171,90 @@ public enum AgentInventory {
         }
     }
 }
+
+// Ticket: docs/38-tickets/90-agent-ux/P2B.2-cross-project-walk.md
+//
+// AGENTS ELSEWHERE ARE STILL AGENTS.
+//
+// `AgentStore` (P2A.2) is app-level, so agents created since it landed need no
+// walk at all. LEGACY `ManagedAgentSessionRecord`s do: one JSON file per tile
+// under each project's own `ProjectStoreLayout.managedSessionsDirectory`, and
+// only `activeController.managedSessionStore` is reachable at runtime — so an
+// agent in any other project is invisible to the inbox.
+//
+// This reads those files DIRECTLY. It does not open a `ZoneRuntimeController`
+// per project: booting a runtime to list agents would start work as a side
+// effect of looking, and observer-independence (P2B.8) says listing must need
+// no live controller. `ManagedAgentSessionStore` is the same reader the active
+// project already uses — a second decode path here would be a second definition
+// of what a record is.
+public final class CrossProjectManagedSessionWalk {
+    /// A registry project entry, reduced to the two fields the walk needs. The
+    /// project id travels with each record because the row context join (P2B.3)
+    /// has no other way back to the project once the file is read.
+    public struct Root: Equatable, Sendable {
+        public let projectId: UUID
+        public let projectRoot: URL
+
+        public init(projectId: UUID, projectRoot: URL) {
+            self.projectId = projectId
+            self.projectRoot = projectRoot
+        }
+    }
+
+    public struct Discovered: Equatable, Sendable {
+        public let projectId: UUID
+        public let record: ManagedAgentSessionRecord
+
+        public init(projectId: UUID, record: ManagedAgentSessionRecord) {
+            self.projectId = projectId
+            self.record = record
+        }
+    }
+
+    /// How long one read stays good. The inbox refreshes far more often than a
+    /// project gains an agent, and every miss is a directory enumeration plus a
+    /// decode per record across every project on the machine.
+    private let ttl: TimeInterval
+    private var cached: (roots: [Root], readAt: Date, found: [Discovered])?
+
+    public init(ttl: TimeInterval = 2) {
+        self.ttl = ttl
+    }
+
+    /// Every legacy managed-session record on disk, from every project root.
+    ///
+    /// A root that no longer exists is SKIPPED, not an error: `registry.projects`
+    /// keeps entries for projects that have been moved or deleted, and an inbox
+    /// that throws because one stale entry points at nothing would list nobody.
+    public func records(roots: [Root], now: Date) -> [Discovered] {
+        if let cached,
+           cached.roots == roots,
+           now >= cached.readAt,
+           now.timeIntervalSince(cached.readAt) < ttl {
+            return cached.found
+        }
+
+        var found: [Discovered] = []
+        // Ordered by identity, not by registry order: the caller folds this into
+        // `AgentInventory.snapshot`, whose sequence numbers are positional, so an
+        // order that moved with the registry would renumber unrelated agents'
+        // events between two publishes of identical state.
+        var seenTiles: Set<UUID> = []
+        for root in roots.sorted(by: { $0.projectId.uuidString < $1.projectId.uuidString }) {
+            // An explicit early-out, not the only guard: `loadAll` also returns
+            // [] for a directory that is not there. Named here because "a
+            // registry entry may point at nothing" is a property of the input,
+            // not an implementation detail of the reader.
+            guard FileManager.default.fileExists(atPath: root.projectRoot.path) else { continue }
+            let store = ManagedAgentSessionStore(projectRoot: root.projectRoot)
+            let records = (try? store.loadAll()) ?? []
+            for record in records.sorted(by: { $0.tileId.uuidString < $1.tileId.uuidString })
+            where seenTiles.insert(record.tileId).inserted {
+                found.append(Discovered(projectId: root.projectId, record: record))
+            }
+        }
+        cached = (roots, now, found)
+        return found
+    }
+}

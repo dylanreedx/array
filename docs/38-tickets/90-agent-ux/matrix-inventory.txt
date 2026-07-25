@@ -25,6 +25,7 @@ check --browser-url-focus-check
 check --companion-sync-health-check
 check --component-lab-check
 check --conductor-queue-tile-check
+check --cross-project-agents-check
 check --diff-tile-check
 check --drag-magnetize-check
 check --file-tree-boot-persistence-check
@@ -158,6 +159,7 @@ leg run_app_check .build/debug/continuum-revived --browser-url-focus-check
 leg run_app_check .build/debug/continuum-revived --companion-sync-health-check
 leg run_app_check .build/debug/continuum-revived --component-lab-check
 leg run_app_check .build/debug/continuum-revived --conductor-queue-tile-check
+leg run_app_check .build/debug/continuum-revived --cross-project-agents-check
 leg run_app_check .build/debug/continuum-revived --diff-tile-check
 leg run_app_check .build/debug/continuum-revived --drag-magnetize-check
 leg run_app_check .build/debug/continuum-revived --file-tree-boot-persistence-check
