@@ -41,6 +41,19 @@ All Phase 0 tickets are tagged `autonomous`.
 | 29 | `P2A.6-headless-agents.md` | P2A.5 |
 | 30 | `P2A.7-restore-on-relaunch.md` | P2A.6 |
 | 31 | `P2A.8-sync-key-migration.md` | P2A.7 |
+| 32 | `P2B.1-agent-inventory.md` | P2A.8 |
+| 33 | `P2B.2-cross-project-walk.md` | P2B.1 |
+| 34 | `P2B.3-row-context-join.md` | P2B.2 |
+| 35 | `P2B.4-feed-all-consumers.md` | P2B.3 |
+| 36 | `P2B.5-drop-terminal-filters.md` | P2B.4 |
+| 37 | `P2B.6-stop-badge-clobbering.md` | P2B.5 |
+| 38 | `P2B.7-incremental-refresh.md` | P2B.4 |
+| 39 | `P2B.8-observer-independence.md` | P2B.2 |
+| 40 | `P2C.1-worktree-manager.md` | P2B.8 |
+| 41 | `P2C.2-isolated-spawn.md` | P2C.1 |
+| 42 | `P2C.3-worktree-cleanup.md` | P2C.2 |
+| 43 | `P2C.4-branch-on-rows.md` | P2C.3 |
+| 44 | `P2C.5-per-agent-diff.md` | P2C.4 |
 
-Phases 0, 1 and 2A are authored. Phases 2B/2C/2D and 3–9 are authored during the run and appended here as they land. Full backlog shape lives in
+Phases 0, 1, 2A, 2B and 2C are authored. 2C (worktrees) MUST precede 2D (orchestration): parallel agents without isolation corrupt each other. 2D and 3–9 are authored during the run and appended here as they land. Full backlog shape lives in
 the session plan; see `_RUNBOOK.md` for the operating contract.
