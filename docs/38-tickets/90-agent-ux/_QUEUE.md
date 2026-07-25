@@ -20,13 +20,13 @@ All Phase 0 tickets are tagged `autonomous`.
 | 8 | `P0.5-pixel-probes.md` | P0.2, P0.3 |
 | 9 | `P0.6-png-baselines.md` | P0.2 |
 | 10 | `P0.9-ui-tour-check.md` | P0.2 |
-| 11 | `P0.7-retire-isblank-gate.md` | P0.3, P0.4, P0.5, P0.6 |
+| 11 | `P0.7-retire-isblank-gate.md` | P0.3, P0.5, P0.6, **P1.6** |
 | 12 | `P1.1-agentui-module.md` | P0.7 |
 | 13 | `P1.2-tokencolor-light-dark.md` | P1.1 |
 | 14 | `P1.4-type-scale.md` | P1.1 |
 | 15 | `P1.5-spacing-radius-scale.md` | P1.1 |
 | 16 | `P1.3-surface-text-border-tokens.md` | P1.2 |
-| 17 | `P1.6-token-contrast-gate.md` | P1.3 |
+| 17 | `P1.6-token-contrast-gate.md` | P1.3, P1.10, P1.11 |
 | 18 | `P1.7-raw-color-lint.md` | P1.3 |
 | 19 | `P1.8-one-status-presenter.md` | P1.3 |
 | 20 | `P1.9-live-appearance-switching.md` | P1.3 |
@@ -65,3 +65,12 @@ Phases 0, 1, 2A, 2B and 2C are authored. 2C (worktrees) MUST precede 2D (orchest
 
 Note: P2D.4/P2D.5 depend on Phase 3 (inbox rows) and Phase 4 (blocker precedence), so the loop will correctly skip them until those land — that is intended, not a stall. and appended here as they land. Full backlog shape lives in
 the session plan; see `_RUNBOOK.md` for the operating contract.
+
+## Re-sequenced 2026-07-25 (supervisor)
+
+`P0.4` is **blocked by design, not by failure**: the gate is built and correct, and is red on 177
+real pairs because the app's colours are broken until Phase 1. My packet was mis-sequenced — it
+asked for a green gate before the tokens existed. Resolution: `P0.4`'s enablement moves into
+`P1.6` (which now also depends on the adoption tickets `P1.10`/`P1.11`), and `P0.7` now waits on
+`P1.6` instead of `P0.4`. `P0.5`, `P0.6` and `P0.9` are unaffected and proceed. The four colour
+decisions are ruled at the end of `P1.3`.
