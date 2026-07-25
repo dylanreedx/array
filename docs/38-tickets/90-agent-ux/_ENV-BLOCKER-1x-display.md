@@ -74,3 +74,51 @@ implementation rather than two, and it removes the four hand-picked `distinctSam
 assertions the baselines subsume. It ran to completion at 2x (failing only a provisional coverage
 floor, since fixed); at 1x it fails on the same border probe as `--ui-pixel-check`. Two numbers it
 still needs, to be measured on a 2x host before commit: the aggregate text-rect and border floors.
+
+---
+
+## RESOLVED 2026-07-25 ~13:35Z — by the supervising session, at the owner's instruction
+
+The owner's reaction was "this shouldn't affect anything", and that was the correct read: an
+**offscreen** probe has no business asking what monitor is attached. This was a defect in the P0.5 /
+P0.6 substrate I specified, not a fact about the host.
+
+**Root cause.** `UIProbe.bitmap(of:)` called `view.bitmapImageRepForCachingDisplay(in:)`, which sizes
+its bitmap from the *window's* `backingScaleFactor` — which follows whichever display is Main. Two
+consequences, both of which had been latent since P0.5:
+
+1. `UIProbeBaseline` normalises to one pixel per point, so the two hosts produced the same
+   *dimensions* but not the same *bytes* — a 2x render downsampled to 1x is not a native 1x render.
+2. `expectVisibleBorder` skipped a fixed 1 pixel to clear the antialiased outer edge. At 2x a 1pt
+   border is 2px, so skipping 1 still lands on it; at 1x the border **is** the pixel at offset 0, so
+   the skip sampled fill on both sides and reported `delta 0.000` on a correctly drawn border.
+
+**Fix.**
+
+- `UIProbe.renderScale = 2.0`, declared. `bitmap(of:)` now allocates its own `NSBitmapImageRep` at
+  `points × renderScale` and sets `rep.size` in *points*, which is what makes `cacheDisplay` render
+  at the declared scale instead of the window's.
+- `runUIProbeChecks` asserts the **declared** scale, not `window.backingScaleFactor`. Asserting the
+  ambient scale is exactly what let the substrate follow the host: it passed at 1x *and* 2x, and only
+  the baselines noticed. It also now prints whether the host's own backing scale differs, so
+  display-independence is positively witnessed when the host can witness it.
+- `expectVisibleBorder` derives its edge skip from the measured border band (`edgeSkip` is 0 when the
+  border is only as thick as the skip), so the probe is correct at any scale, not just 2x.
+
+**Result.** `--ui-pixel-check` green (worst border delta 0.351). `--ui-baseline-check` went 46 of 46
+failing → 24, and the residual 24 were re-blessed after inspecting the diffs on two unrelated
+surfaces: the changed pixels are confined to **glyph edges and capsule outlines**, only on
+accent-coloured text, with layout and fills byte-identical. Full matrix green.
+
+**Two things tried and rejected, recorded so they are not retried:** `.calibratedRGB` instead of
+`.deviceRGB` made it *worse* (24 → 37 failures); an opaque bitmap (`hasAlpha: false`,
+`samplesPerPixel: 3`) broke it completely (46 of 46, channel delta 255).
+
+**Known limitation, deliberately not fixed here.** The scale is now host-independent, but glyph
+rasterisation still depends on the host's font smoothing, so baselines blessed on one Mac may show
+sub-pixel diffs on another. Nothing in the current work needs that, and closing it means taking over
+glyph rendering from `cacheDisplay` — a real ticket, not a tweak. Flagged rather than silently
+accepted.
+
+**P0.7 itself was never attempted.** Its WIP is parked in `git stash@{0}` ("P0.7-wip") and its ledger
+row is back to `pending`.

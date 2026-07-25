@@ -202,7 +202,13 @@ enum UIProbePixels {
         let rect = try bitmapRect(of: view, rect: view.bounds, in: probe)
         let scale = Double(probe.hostRep.pixelsWide) / probe.host.bounds.width
         let borderPixels = max(1, Int((Double(layer.borderWidth) * scale).rounded()))
-        let needed = borderEdgeSkipPixels + borderPixels + borderToFillGapPixels + fillBandPixels
+        // The skip exists to step over the antialiased OUTER edge pixel, so it can
+        // only be spent when the border is thicker than that one pixel. A 1pt border
+        // at scale 1 IS a single pixel at offset 0: skipping it sampled the fill on
+        // both sides of the edge and reported "border invisible — delta 0.000" on a
+        // correctly drawn border. Derived from the measured band, never assumed.
+        let edgeSkip = borderPixels > borderEdgeSkipPixels ? borderEdgeSkipPixels : 0
+        let needed = edgeSkip + borderPixels + borderToFillGapPixels + fillBandPixels
         guard rect.width >= needed * 2, rect.height >= needed * 2 else {
             throw fail(
                 "\(label): \(rect.width)x\(rect.height)px is too small to sample a "
@@ -219,9 +225,9 @@ enum UIProbePixels {
                 guard let value = sample(offset) else {
                     throw fail("\(label): could not read the \(edge) edge scanline at offset \(offset)")
                 }
-                if offset >= borderEdgeSkipPixels, offset < borderEdgeSkipPixels + borderPixels {
+                if offset >= edgeSkip, offset < edgeSkip + borderPixels {
                     border.append(value)
-                } else if offset >= borderEdgeSkipPixels + borderPixels + borderToFillGapPixels {
+                } else if offset >= edgeSkip + borderPixels + borderToFillGapPixels {
                     fill.append(value)
                 }
             }

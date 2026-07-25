@@ -108,13 +108,55 @@ struct UIProbe {
         }
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/_ENV-BLOCKER-1x-display.md
+    //
+    // The scale EVERY probe renders at, whatever displays the host has.
+    //
+    // `view.bitmapImageRepForCachingDisplay(in:)` — what this used to call — sizes
+    // its bitmap from the WINDOW's `backingScaleFactor`, which follows whichever
+    // display is Main. So the entire visual substrate silently inherited the host's
+    // monitor: the same card rendered 2x on a Retina primary and 1x on an external
+    // one, `UIProbeBaseline`'s point-per-pixel normalisation reduced the two to the
+    // same DIMENSIONS but not the same BYTES (antialiasing differs by 8-9% of
+    // pixels), and `expectVisibleBorder`'s fixed 1px edge skip stepped clean past a
+    // 1pt border that occupies exactly one pixel at scale 1.
+    //
+    // Measured consequence when a 1920x1080 external became Main mid-run: 46 of 46
+    // committed baselines red and `--ui-pixel-check` red on its own correct fixture,
+    // with no code change behind it. An offscreen probe must not ask what monitor is
+    // attached, so the scale is declared here and asserted in `runUIProbeChecks`.
+    //
+    // 2.0 rather than 1.0 deliberately: the committed baselines were blessed from 2x
+    // renders, and 2x is what production Retina hardware draws, so a probe at 1x
+    // would gate antialiasing no user sees.
+    static let renderScale: CGFloat = 2.0
+
     private static func bitmap(of view: NSView, id: String) throws -> NSBitmapImageRep {
         guard view.bounds.width > 0, view.bounds.height > 0 else {
             throw fail("\(id): view laid out to \(view.bounds.width)x\(view.bounds.height)")
         }
-        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
-            throw fail("\(id): could not allocate bitmap")
+        let points = view.bounds.size
+        let pixelsWide = Int((points.width * renderScale).rounded())
+        let pixelsHigh = Int((points.height * renderScale).rounded())
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelsWide,
+            pixelsHigh: pixelsHigh,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else {
+            throw fail("\(id): could not allocate a \(pixelsWide)x\(pixelsHigh)px bitmap")
         }
+        // POINTS, not pixels. This is the whole mechanism: `cacheDisplay` derives the
+        // scale it draws at from the ratio of the rep's pixel dimensions to its
+        // `size`, so setting `size` in points pins the render at `renderScale`
+        // instead of the window's backing scale.
+        rep.size = points
         view.cacheDisplay(in: view.bounds, to: rep)
         return rep
     }
@@ -172,6 +214,10 @@ struct UIProbe {
         let entries = LabCatalog.entries(env: LabEnvironment(ghostty: nil, browserEngine: nil))
         let appearances: [NSAppearance.Name] = [.aqua, .darkAqua]
         var probed = 0
+        // True once a render was proven to differ from the host's own backing scale.
+        // On a 2x host it stays false and that is not a failure — it is simply a
+        // stronger statement this host cannot make.
+        var scaleIndependenceWitnessed = false
 
         for entry in entries {
             guard case let .staticCard(preferredSize, make) = entry.content else { continue }
@@ -188,11 +234,19 @@ struct UIProbe {
                 guard result.host.bounds.size == size, result.view.bounds.size == size else {
                     throw fail("\(entry.id): laid out host \(result.host.bounds.size) / view \(result.view.bounds.size), requested \(size)")
                 }
-                let scale = result.window.backingScaleFactor
+                // The DECLARED scale, not `window.backingScaleFactor`. Asserting the
+                // ambient scale is what let the substrate follow the host's monitor:
+                // it passed at 1x and at 2x, and only the baselines noticed.
+                let scale = renderScale
                 let wantWide = Int((size.width * scale).rounded())
                 let wantHigh = Int((size.height * scale).rounded())
                 guard result.hostRep.pixelsWide == wantWide, result.hostRep.pixelsHigh == wantHigh else {
-                    throw fail("\(entry.id): bitmap is \(result.hostRep.pixelsWide)x\(result.hostRep.pixelsHigh)px, requested \(size) at scale \(scale) (\(wantWide)x\(wantHigh))")
+                    throw fail("\(entry.id): bitmap is \(result.hostRep.pixelsWide)x\(result.hostRep.pixelsHigh)px, requested \(size) at declared scale \(scale) (\(wantWide)x\(wantHigh)) — the probe is following the host's display instead of the declared scale")
+                }
+                // And the host's own scale must be irrelevant: if these ever agree only
+                // because the host happens to be 2x, this witness says so.
+                if result.window.backingScaleFactor != scale {
+                    scaleIndependenceWitnessed = true
                 }
                 probed += 1
             }
@@ -242,7 +296,7 @@ struct UIProbe {
         guard NSApp.appearance?.name == .darkAqua else {
             throw fail("probing mutated NSApp.appearance to '\(NSApp.appearance?.name.rawValue ?? "nil")'")
         }
-        print("UIProbe: probed \(probed) card/appearance pairs; \(appearanceSensitiveEntryIds.count) appearance-difference witnesses held; layer witness luminance aqua=\(String(format: "%.3f", lightLuminance)) darkAqua=\(String(format: "%.3f", darkLuminance))")
+        print("UIProbe: probed \(probed) card/appearance pairs; \(appearanceSensitiveEntryIds.count) appearance-difference witnesses held; layer witness luminance aqua=\(String(format: "%.3f", lightLuminance)) darkAqua=\(String(format: "%.3f", darkLuminance)); rendered at declared scale \(renderScale)x (host backing scale \(NSApp.mainWindow?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 0)x\(scaleIndependenceWitnessed ? " — DIFFERS from the declared scale, so display-independence is proven on this host" : " — same as declared, so this host cannot witness display-independence"))")
 
         // P1.9: the probe can deliver an appearance — now assert the views FOLLOW
         // one when it moves at runtime. Same leg, because this asserts the
