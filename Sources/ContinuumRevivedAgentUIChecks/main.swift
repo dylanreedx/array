@@ -26,4 +26,7 @@ runTokenColorChecks()
 // Ticket: docs/38-tickets/90-agent-ux/P1.4-type-scale.md
 runTypographyChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P1.5-spacing-radius-scale.md
+runMetricsChecks()
+
 print("ContinuumRevivedAgentUIChecks passed")
