@@ -44,23 +44,26 @@ enum UIProbePixels {
 
     /// Minimum `max − min` luminance across a label's rect.
     ///
-    /// Measured worst real case over the managed-agent tile: **0.141**, a label in
-    /// `.aqua` — where `.labelColor` is black at 85% over the transcript card's
-    /// hardcoded dark fill. That pair is unreadable and `UIProbeContrast` says so;
-    /// here it still counts as *drawn*. A label painted in its own background
-    /// measures **0.000** (measured, both appearances, on the fixture and on the real
-    /// card). Threshold 0.05 sits 2.8x under the worst real case, so the gate
-    /// separates "not drawn" from "drawn badly" without arbitrating the second.
+    /// Measured worst real case over the managed-agent tile: **0.405** since P1.10
+    /// put the tile on `DesignTokens` (an `NSButton` title in `.aqua`). It was
+    /// **0.141** before — a label where `.labelColor` resolved to black at 85% over
+    /// the transcript card's hardcoded dark fill: a pair that was unreadable, which
+    /// `UIProbeContrast` said so about while this gate still counted it as *drawn*.
+    /// A label painted in its own background measures **0.000** (measured, both
+    /// appearances, on the fixture and on the real card). Threshold 0.05 is left
+    /// where it was: it now sits 8x under the worst real case, and this gate's job is
+    /// to separate "not drawn" from "drawn badly" without arbitrating the second.
     static let minimumTextLuminanceSpread = 0.05
 
     /// Minimum |border − fill| luminance across a scanline crossing an edge.
     ///
-    /// Measured worst real case: **0.093** — `ApprovalDockView`'s
-    /// `systemOrange@0.55` edge over its own `systemOrange@0.14` fill in
-    /// `.darkAqua`; every transcript-card hairline therefore measures at least that
-    /// much, so the threshold does not depend on the dock being visible in the
-    /// fixture. A border painted in the fill colour measures **0.000**. Threshold
-    /// 0.03 sits 3.1x under the worst real case.
+    /// Measured worst real case: **0.106** since P1.10 (the tile's own outline in
+    /// `.aqua`, which is still `TileNSView`'s white@0.25 literal — P1.11's file). It
+    /// was **0.093** before, `ApprovalDockView`'s `systemOrange@0.55` edge over its
+    /// own `systemOrange@0.14` fill in `.darkAqua`; the dock now paints
+    /// `accentApproval` on `SurfaceToken.overlay` and measures far above that. A
+    /// border painted in the fill colour measures **0.000**. Threshold 0.03 is left
+    /// where it was, 3.5x under the worst real case.
     static let minimumBorderLuminanceDelta = 0.03
 
     // Band geometry, in **bitmap pixels**, for the border scanline. Antialiasing

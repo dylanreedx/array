@@ -187,24 +187,6 @@ Sources/ContinuumRevived/Canvas/FileTreeTileNSView.swift:1:truncationBanner.back
 # hardcoded text/glyph colour literal · owner: P1.10
 Sources/ContinuumRevived/Canvas/FileTreeTileNSView.swift:1:truncationBanner.textColor = NSColor(calibratedRed: 0.96, green: 0.80, blue: 0.45, alpha: 1.0)
 
-# Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.10
-Sources/ContinuumRevived/Canvas/ManagedAgentTileNSView.swift:1:elapsedLabel.textColor = .secondaryLabelColor  // tertiary = 2.26:1, fails AA
-
-# hardcoded dark-only fill literal · owner: P1.10
-Sources/ContinuumRevived/Canvas/ManagedAgentTileNSView.swift:1:header.layer?.backgroundColor = NSColor(red: 0.11, green: 0.13, blue: 0.16, alpha: 1).cgColor
-
-# Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.10
-Sources/ContinuumRevived/Canvas/ManagedAgentTileNSView.swift:1:nameLabel.textColor = .labelColor
-
-# Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.10
-Sources/ContinuumRevived/Canvas/ManagedAgentTileNSView.swift:1:phaseLabel.textColor = .secondaryLabelColor
-
-# hardcoded dark-only fill literal · owner: P1.10
-Sources/ContinuumRevived/Canvas/ManagedAgentTileNSView.swift:1:contentBackdrop.layer?.backgroundColor = NSColor(red: 0.08, green: 0.10, blue: 0.13, alpha: 1).cgColor
-
-# hardcoded dark-only fill literal · owner: P1.10
-Sources/ContinuumRevived/Canvas/ManagedAgentTileNSView.swift:1:composeBackdrop.layer?.backgroundColor = NSColor(red: 0.11, green: 0.13, blue: 0.16, alpha: 1).cgColor
-
 # hardcoded dark-only fill literal · owner: P1.10
 Sources/ContinuumRevived/Canvas/NoteTileNSView.swift:1:tv.backgroundColor = NSColor(white: 0.10, alpha: 1.0)
 
@@ -252,36 +234,6 @@ Sources/ContinuumRevived/Canvas/TileNSView.swift:1:let dot = NSColor(white: 0.55
 
 # hardcoded border colour literal · owner: P1.10
 Sources/ContinuumRevived/Canvas/TileNSView.swift:1:shape.strokeColor = NSColor(white: 0.85, alpha: 1.0).cgColor
-
-# Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.10
-Sources/ContinuumRevived/Canvas/TranscriptCardViews.swift:1:bodyLabel.textColor = .labelColor
-
-# hardcoded colour literal · owner: P1.10
-Sources/ContinuumRevived/Canvas/TranscriptCardViews.swift:1:case .diff: return NSColor(red: 0.12, green: 0.17, blue: 0.14, alpha: 1)
-
-# hardcoded colour literal · owner: P1.10
-Sources/ContinuumRevived/Canvas/TranscriptCardViews.swift:1:case .error: return NSColor(red: 0.20, green: 0.11, blue: 0.11, alpha: 1)
-
-# hardcoded colour literal · owner: P1.10
-Sources/ContinuumRevived/Canvas/TranscriptCardViews.swift:1:case .message: return NSColor(red: 0.13, green: 0.15, blue: 0.18, alpha: 1)
-
-# hardcoded colour literal · owner: P1.10
-Sources/ContinuumRevived/Canvas/TranscriptCardViews.swift:1:case .plan: return NSColor(red: 0.15, green: 0.14, blue: 0.18, alpha: 1)
-
-# hardcoded colour literal · owner: P1.10
-Sources/ContinuumRevived/Canvas/TranscriptCardViews.swift:1:case .toolCall: return NSColor(red: 0.12, green: 0.16, blue: 0.18, alpha: 1)
-
-# hardcoded colour literal · owner: P1.10
-Sources/ContinuumRevived/Canvas/TranscriptCardViews.swift:1:case .userMessage: return NSColor(red: 0.15, green: 0.19, blue: 0.26, alpha: 1)
-
-# hardcoded border colour literal · owner: P1.10
-Sources/ContinuumRevived/Canvas/TranscriptCardViews.swift:1:layer?.borderColor = NSColor(white: 1, alpha: 0.14).cgColor
-
-# Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.10
-Sources/ContinuumRevived/Canvas/TranscriptCardViews.swift:1:statusLabel.textColor = .secondaryLabelColor
-
-# Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.10
-Sources/ContinuumRevived/Canvas/TranscriptCardViews.swift:1:titleLabel.textColor = .labelColor
 
 # Apple/SwiftUI semantic colour in a view that paints its own hardcoded fill (the black-on-dark trap) · owner: P1.12
 ios/Continuum/Sources/ContinuumApp.swift:6:.foregroundStyle(.primary)

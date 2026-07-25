@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
@@ -15,32 +16,39 @@ final class TranscriptCardView: NSView, TokenThemed {
         self.cardKind = card.kind
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 8
+        layer?.cornerRadius = Radius.card
+        // 1pt is a hairline stroke, not a spacing value: neither `Space` nor
+        // `Radius` covers border width, so there is no token to adopt here.
         layer?.borderWidth = 1
         applyTokens()
 
-        titleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-        titleLabel.textColor = .labelColor
+        titleLabel.font = .token(.title)
+        titleLabel.textColor = StatusChipNSView.dynamicNSColor(TextToken.textPrimary.color)
         titleLabel.lineBreakMode = .byTruncatingTail
         // The body IS the content of the tile — it gets primary text, not the
-        // secondary grey it had. Metadata sits one step down, but never
-        // tertiary (2.25:1 on every card fill, fails AA outright).
-        bodyLabel.font = .systemFont(ofSize: 13)
-        bodyLabel.textColor = .labelColor
+        // secondary grey it had. Metadata sits one step down on the HOUSE
+        // `textSecondary`, never a tertiary equivalent (2.25:1 on every card
+        // fill, fails AA outright).
+        bodyLabel.font = .token(.body)
+        bodyLabel.textColor = StatusChipNSView.dynamicNSColor(TextToken.textPrimary.color)
         bodyLabel.isSelectable = true
-        statusLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.font = .token(.captionMono)
+        statusLabel.textColor = StatusChipNSView.dynamicNSColor(TextToken.textSecondary.color)
 
         let header = NSStackView(views: [titleLabel, NSView(), statusLabel])
         header.orientation = .horizontal
         header.alignment = .centerY
-        header.spacing = 8
+        header.spacing = Space.m
 
         let stack = NSStackView(views: [header, bodyLabel])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
+        // `Space.s`, not the old 6 and not `Space.m`: a card's title and its body
+        // are one unit, so the gap INSIDE a card has to stay smaller than the
+        // `Space.m` gap the card stack puts BETWEEN cards — otherwise the
+        // grouping reads inverted, which is the same rule as the radius nesting.
+        stack.spacing = Space.s
+        stack.edgeInsets = NSEdgeInsets(Inset.card)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -57,9 +65,10 @@ final class TranscriptCardView: NSView, TokenThemed {
     }
 
     func applyTokens() {
-        // separatorColor@0.45 rendered at ~1.1:1 on these fills — invisible.
-        layer?.borderColor = NSColor(white: 1, alpha: 0.14).cgColor
-        layer?.backgroundColor = Self.background(for: cardKind).cgColor
+        // `LineToken.border`, whose floor is 3:1 on every surface. The shipped
+        // white@0.14 measured ~1.1:1 on these fills — invisible.
+        layer?.borderColor = LineToken.border.color.cgColor(in: self)
+        layer?.backgroundColor = Self.surface(for: cardKind).color.cgColor(in: self)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -106,15 +115,17 @@ final class TranscriptCardView: NSView, TokenThemed {
         }
     }
 
-    private static func background(for kind: ManagedTranscriptCardKind) -> NSColor {
+    /// One card kind, one surface token. `SurfaceToken`'s six `cards` cases exist
+    /// for exactly this switch, and they carry a light leaf as well as a dark one —
+    /// the old literals were dark-only, which is the black-on-dark-under-Aqua bug.
+    private static func surface(for kind: ManagedTranscriptCardKind) -> SurfaceToken {
         switch kind {
-        case .message: return NSColor(red: 0.13, green: 0.15, blue: 0.18, alpha: 1)
-        // Your own messages read as a distinct, slightly blue surface.
-        case .userMessage: return NSColor(red: 0.15, green: 0.19, blue: 0.26, alpha: 1)
-        case .toolCall: return NSColor(red: 0.12, green: 0.16, blue: 0.18, alpha: 1)
-        case .plan: return NSColor(red: 0.15, green: 0.14, blue: 0.18, alpha: 1)
-        case .diff: return NSColor(red: 0.12, green: 0.17, blue: 0.14, alpha: 1)
-        case .error: return NSColor(red: 0.20, green: 0.11, blue: 0.11, alpha: 1)
+        case .message: return .cardMessage
+        case .userMessage: return .cardUserMessage
+        case .toolCall: return .cardTool
+        case .plan: return .cardPlan
+        case .diff: return .cardDiff
+        case .error: return .cardError
         }
     }
 }

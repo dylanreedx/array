@@ -291,6 +291,7 @@ enum UIProbeGeometry {
 
         var probed = 0
         var narrowestCardRatio = Double.infinity
+        var tightestDockSlack = Double.infinity
         for width in probeWidths {
             for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
                 let label = "managedAgent@\(Int(width))pt.\(appearanceName.rawValue)"
@@ -349,6 +350,7 @@ enum UIProbeGeometry {
                 try expectNoClipping(tile, label: label)
                 try expectNoBrokenRequiredSizeConstraints(tile, label: label)
                 try expectScrolledToBottom(scrollView, requireOverflow: true, label: "\(label): transcript")
+                tightestDockSlack = min(tightestDockSlack, try dockSlack(in: tile, label: label))
                 probed += 1
             }
         }
@@ -356,10 +358,74 @@ enum UIProbeGeometry {
         guard probed == probeWidths.count * 2 else {
             throw fail("probed \(probed) width/appearance pairs, expected \(probeWidths.count * 2)")
         }
+        guard tightestDockSlack.isFinite else {
+            throw fail("the approval dock was never measured — the fixture no longer opens an approval, so the derived height is ungated")
+        }
         print(String(
-            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); narrowest card fill ratio %.3f",
-            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), narrowestCardRatio
+            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
+            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), narrowestCardRatio,
+            ApprovalDockView.preferredHeight, tightestDockSlack
         ))
+    }
+
+    // MARK: - The derived approval-dock height (P1.10)
+
+    /// `ApprovalDockView.preferredHeight` minus the height its real content needs,
+    /// at this probe's width. Must not go negative.
+    ///
+    /// This is the assertion that makes replacing the hardcoded 92pt honest. A
+    /// derived height that under-reports its content does NOT show up as clipping:
+    /// the dock's layout stack is pinned to all four edges, so AppKit compresses the
+    /// labels inside it instead of spilling them, and `expectNoClipping` sees a
+    /// stack that fits its parent exactly. Measured against `fittingSize`, the same
+    /// question is answerable with a number.
+    ///
+    /// The dock must also be *visible* to be measurable — the fixture opens an
+    /// approval (`managedAgentFixtureEvents(includeApproval: true)`), and a hidden
+    /// dock is reported rather than skipped, so this cannot pass vacuously.
+    ///
+    /// Measured TWICE: as the fixture leaves it, and again with a detail line. The
+    /// fixture's `requestOpened` carries `detail: nil`, so `detailLabel` is hidden
+    /// and `NSStackView` drops both the row and its gap — the fixture alone
+    /// therefore measures the dock's SHORT state and reports ~20pt of slack that is
+    /// really the detail row the derivation correctly reserves (the dock must not
+    /// change height when a detail arrives). The populated case is the one that can
+    /// clip, so it is the one that has to be gated.
+    private static func dockSlack(in tile: ManagedAgentTileNSView, label: String) throws -> Double {
+        guard let dock = firstDescendant(ApprovalDockView.self, in: tile) else {
+            throw fail("\(label): no ApprovalDockView in the tile")
+        }
+
+        func measure(_ phase: String) throws -> Double {
+            guard !dock.isHidden else {
+                throw fail("\(label) \(phase): the approval dock is hidden, so its derived height is unmeasured — the fixture must open an approval")
+            }
+            let needed = dock.qaContentFittingHeight
+            guard needed > 0 else {
+                throw fail("\(label) \(phase): the approval dock's content reports zero fitting height — nothing was measured")
+            }
+            let slack = Double(dock.bounds.height) - needed
+            guard slack >= -0.5 else {
+                throw fail(String(
+                    format: "%@ %@: the approval dock is %.1fpt tall but its content needs %.1fpt — the derived height under-reports, and AppKit compresses the labels rather than spilling them, so no clipping assertion would catch it",
+                    label, phase, dock.bounds.height, needed
+                ))
+            }
+            return slack
+        }
+
+        let short = try measure("(no detail)")
+        // A detail at the sanitiser's own 160-character ceiling, so the row is as
+        // tall as the dock will ever have to make it.
+        tile.setPendingApprovalForQA(
+            kind: .commandExecutionApproval, requestId: "geometry-detail",
+            detail: String(repeating: "swift build && swift test ", count: 12)
+        )
+        tile.layoutSubtreeIfNeeded()
+        guard !dock.qaDetailText.isEmpty else {
+            throw fail("\(label): the approval dock shows no detail text after one was set — the tall case is unmeasured")
+        }
+        return min(short, try measure("(with detail)"))
     }
 
     // MARK: - Regression witnesses

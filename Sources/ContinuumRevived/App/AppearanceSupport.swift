@@ -81,6 +81,52 @@ extension TokenColor {
     func cgColor(in view: NSView) -> CGColor { cgColor(for: view.effectiveTokenTheme) }
 }
 
+// Ticket: docs/38-tickets/90-agent-ux/P1.10-adopt-tokens-tile.md
+//
+// `Typography` and `Metrics` are Foundation-only on purpose — both files say
+// mapping `TokenWeight` to `NSFont.Weight` and `EdgeInsetsToken` to
+// `NSEdgeInsets` is "the thin view layer's job (P1.10/P1.11 adopt)". This is
+// that layer, and it lives beside the `TokenColor` bridges above so there is
+// exactly ONE of each conversion for every adopting call site to share rather
+// than a copy per view file.
+
+extension NSFont.Weight {
+    /// The AppKit weight for a neutral `TokenWeight`.
+    init(_ weight: TokenWeight) {
+        switch weight {
+        case .regular: self = .regular
+        case .medium: self = .medium
+        case .semibold: self = .semibold
+        case .bold: self = .bold
+        }
+    }
+}
+
+extension NSFont {
+    /// The font a `TextRole` renders in.
+    ///
+    /// `TextStyle.monospaced` maps to `monospacedSystemFont`, not
+    /// `monospacedDigitSystemFont`: a true mono face is tabular by construction,
+    /// so it satisfies `captionMono`'s "must not reflow as digits change" as well
+    /// as `bodyMono`'s column alignment. One flag, one mapping — keying the two
+    /// mono roles to different faces would smuggle a second axis into the scale
+    /// that `TextStyle` does not carry.
+    static func token(_ role: TextRole) -> NSFont {
+        let style = Typography.style(for: role)
+        let weight = NSFont.Weight(style.weight)
+        return style.monospaced
+            ? .monospacedSystemFont(ofSize: style.size, weight: weight)
+            : .systemFont(ofSize: style.size, weight: weight)
+    }
+}
+
+extension NSEdgeInsets {
+    /// An `Inset` token as AppKit insets — what `NSStackView.edgeInsets` wants.
+    init(_ token: EdgeInsetsToken) {
+        self.init(top: token.top, left: token.left, bottom: token.bottom, right: token.right)
+    }
+}
+
 /// A view that owns layer colours and re-applies them when the appearance moves.
 /// Conformance is the greppable marker for "this view's colours are live", and
 /// what `UIProbeAppearance` enumerates.

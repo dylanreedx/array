@@ -17,6 +17,11 @@ final class ManagedAgentTileNSView: TileNSView {
     /// `applyTokens()` can re-assign them on an appearance change. `wantsLayer` is
     /// set here, at construction, so `applyTokens()` is order-independent — it runs
     /// once from `TileNSView.init`, before these are placed in the tree.
+    ///
+    /// P1.10: these three are plain `NSView` containers, so `UIProbeAppearance`'s
+    /// owned-layer rule (a view never answers for a subview's layer) cannot see
+    /// them — this tile is the view that paints them, so it hands them to the gate
+    /// through `qaTokenPaintedLayers`.
     private let contentBackdrop: NSView = {
         let view = NSView()
         view.wantsLayer = true
@@ -115,13 +120,29 @@ final class ManagedAgentTileNSView: TileNSView {
         scrollTranscriptToBottom()
     }
 
-    /// This tile's own layer fills, on top of the base tile's (P1.9). Values are
-    /// still the shipped dark literals — P1.10 swaps them for `DesignTokens`.
+    /// This tile's own layer fills, on top of the base tile's (P1.9), now on
+    /// `DesignTokens` (P1.10): the content area is `tileBody` and the header and
+    /// compose strip are `tileChrome`, which the palette defines as "one step off
+    /// `tileBody`" — the three shipped literals were three unrelated dark values.
+    ///
+    /// The tile's own fill and outline are still `TileNSView`'s literals; those are
+    /// P1.11's (`Sources/ContinuumRevived/Canvas/TileNSView.swift` is not in this
+    /// ticket's file list).
     override func applyTokens() {
         super.applyTokens()
-        contentBackdrop.layer?.backgroundColor = NSColor(red: 0.08, green: 0.10, blue: 0.13, alpha: 1).cgColor
-        header.layer?.backgroundColor = NSColor(red: 0.11, green: 0.13, blue: 0.16, alpha: 1).cgColor
-        composeBackdrop.layer?.backgroundColor = NSColor(red: 0.11, green: 0.13, blue: 0.16, alpha: 1).cgColor
+        let theme = effectiveTokenTheme
+        contentBackdrop.layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(for: theme)
+        header.layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(for: theme)
+        composeBackdrop.layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(for: theme)
+    }
+
+    /// The layer colours this view paints on subviews it owns, for
+    /// `UIProbeAppearance`'s sentinel sweep. Without this the three fills adopted
+    /// above sit in a blind spot: the sweep deliberately never reads a subview's
+    /// layer, and these subviews are plain `NSView`s that answer for nothing.
+    var qaTokenPaintedLayers: [(label: String, layer: CALayer)] {
+        [("contentBackdrop", contentBackdrop), ("header", header), ("composeBackdrop", composeBackdrop)]
+            .compactMap { name, view in view.layer.map { (label: name, layer: $0) } }
     }
 
     private func makeContentView() -> NSView {
@@ -131,8 +152,8 @@ final class ManagedAgentTileNSView: TileNSView {
 
         cardStack.orientation = .vertical
         cardStack.alignment = .leading
-        cardStack.spacing = 8
-        cardStack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        cardStack.spacing = Space.m
+        cardStack.edgeInsets = NSEdgeInsets(Inset.card)
         cardStack.translatesAutoresizingMaskIntoConstraints = false
         let scrollView = NSScrollView()
         scrollView.drawsBackground = false
@@ -168,9 +189,13 @@ final class ManagedAgentTileNSView: TileNSView {
             layout.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             layout.topAnchor.constraint(equalTo: root.topAnchor),
             layout.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            header.heightAnchor.constraint(equalToConstant: 52),
-            approvalDock.heightAnchor.constraint(equalToConstant: 92),
-            composeRow.heightAnchor.constraint(equalToConstant: 44),
+            // All three heights are now FUNCTIONS of the type they hold, not magic
+            // numbers: two title lines for the name/phase stack, one body line for
+            // the compose field, and the dock's own derivation (`Metrics`' mapping
+            // table records the 52→54 / 44→41 moves this produces).
+            header.heightAnchor.constraint(equalToConstant: Metrics.rowHeight(for: .title, lines: 2)),
+            approvalDock.heightAnchor.constraint(equalToConstant: ApprovalDockView.preferredHeight),
+            composeRow.heightAnchor.constraint(equalToConstant: Metrics.rowHeight(for: .body, insets: Inset.card)),
             // A vertical NSStackView centers rows at their FITTING width unless
             // pinned, so the transcript column was sizing itself to the longest
             // message's single-line width and floating in the middle of the
@@ -212,25 +237,29 @@ final class ManagedAgentTileNSView: TileNSView {
     }
 
     private func configureHeader() {
-        glyphLabel.font = .systemFont(ofSize: 18, weight: .bold)
+        glyphLabel.font = .token(.titleL)
         glyphLabel.alignment = .center
-        glyphLabel.widthAnchor.constraint(equalToConstant: 28).isActive = true
-        nameLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        nameLabel.textColor = .labelColor
+        // A square column: one rendered line of the role it holds. The old 28 was a
+        // number with no rule behind it.
+        glyphLabel.widthAnchor.constraint(equalToConstant: Metrics.lineHeight(for: .titleL)).isActive = true
+        nameLabel.font = .token(.title)
+        nameLabel.textColor = StatusChipNSView.dynamicNSColor(TextToken.textPrimary.color)
         nameLabel.lineBreakMode = .byTruncatingTail
-        phaseLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        phaseLabel.textColor = .secondaryLabelColor
-        elapsedLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        elapsedLabel.textColor = .secondaryLabelColor  // tertiary = 2.26:1, fails AA
+        phaseLabel.font = .token(.label)
+        phaseLabel.textColor = StatusChipNSView.dynamicNSColor(TextToken.textSecondary.color)
+        elapsedLabel.font = .token(.captionMono)
+        // The HOUSE muted colour. Apple's own secondary label is 3.95:1 on white
+        // and its tertiary 2.26:1 — neither can clear AA by construction.
+        elapsedLabel.textColor = StatusChipNSView.dynamicNSColor(TextToken.textSecondary.color)
 
         let textStack = NSStackView(views: [nameLabel, phaseLabel])
         textStack.orientation = .vertical
         textStack.alignment = .leading
-        textStack.spacing = 2
+        textStack.spacing = Space.xs
         header.orientation = .horizontal
         header.alignment = .centerY
-        header.spacing = 10
-        header.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        header.spacing = Space.l
+        header.edgeInsets = NSEdgeInsets(Inset.row)
         header.addArrangedSubview(glyphLabel)
         header.addArrangedSubview(textStack)
         header.addArrangedSubview(NSView())
@@ -241,7 +270,8 @@ final class ManagedAgentTileNSView: TileNSView {
         let row = composeBackdrop
 
         composeField.placeholderString = "Send a prompt to the agent…"
-        composeField.font = .systemFont(ofSize: 12)
+        composeField.font = .token(.body)
+        composeField.textColor = StatusChipNSView.dynamicNSColor(TextToken.textPrimary.color)
         composeField.bezelStyle = .roundedBezel
         composeField.target = self
         composeField.action = #selector(submitPrompt)
@@ -256,8 +286,8 @@ final class ManagedAgentTileNSView: TileNSView {
         let stack = NSStackView(views: [composeField, runButton])
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 6, right: 12)
+        stack.spacing = Space.m
+        stack.edgeInsets = NSEdgeInsets(Inset.row)
         stack.translatesAutoresizingMaskIntoConstraints = false
         row.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -291,10 +321,10 @@ final class ManagedAgentTileNSView: TileNSView {
         nameLabel.stringValue = tile.title
         let display = StatusChipPresenter.display(for: status)
         glyphLabel.stringValue = display.glyph
-        // The bare glyph shape, so the accent — and `.dark` because this header
-        // paints its own dark-only literal fill (allowlisted, owner P1.10; when
-        // that adopts `SurfaceToken.tileChrome` the theme comes with it).
-        glyphLabel.textColor = StatusChipNSView.nsColor(display.accent.resolved(for: .dark))
+        // The bare glyph shape, so the accent. `dynamicNSColor`, not the `.dark`
+        // pin it had: the header now paints `SurfaceToken.tileChrome`, which
+        // follows the appearance, so the glyph on it must too.
+        glyphLabel.textColor = StatusChipNSView.dynamicNSColor(display.accent)
         phaseLabel.stringValue = display.label
         if let startedAt, status == .working || status == .needsAttention {
             elapsedLabel.stringValue = "\(max(0, Int(Date().timeIntervalSince(startedAt))))s"
@@ -320,7 +350,7 @@ final class ManagedAgentTileNSView: TileNSView {
                 cardViewsById[card.id] = view
                 cardStack.addArrangedSubview(view)
                 view.translatesAutoresizingMaskIntoConstraints = false
-                view.widthAnchor.constraint(equalTo: cardStack.widthAnchor, constant: -24).isActive = true
+                view.widthAnchor.constraint(equalTo: cardStack.widthAnchor, constant: -Inset.card.horizontal).isActive = true
             }
         }
     }
@@ -338,7 +368,7 @@ final class ManagedAgentTileNSView: TileNSView {
         inputCardViewsByRequestId[request.requestId] = card
         cardStack.addArrangedSubview(card)
         card.translatesAutoresizingMaskIntoConstraints = false
-        card.widthAnchor.constraint(equalTo: cardStack.widthAnchor, constant: -24).isActive = true
+        card.widthAnchor.constraint(equalTo: cardStack.widthAnchor, constant: -Inset.card.horizontal).isActive = true
     }
 
     func respondToUserInput(requestId: String, answer: String) {
