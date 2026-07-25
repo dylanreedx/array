@@ -570,8 +570,260 @@ func runAgentSupervisorChecks() async throws {
         throw fail("PiAgentRunner is constructed outside AgentSupervisor.swift: \(constructionSites.sorted()) (the supervisor owns the runner; a view that makes its own is a second owner and will double-spawn)")
     }
 
+    // MARK: 7 · a TILE is a subscriber (P2A.4), and detaching it leaves the agent running
+
+    let tileReport = try await checkTileIsASubscriber(store: store, config: config, cwd: cwd, fail: fail)
+
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport)")
+}
+
+/// A runner factory that hands out one scripted runner per `send`, in order. The
+/// supervisor makes a new runner per prompt, so a single shared script cannot say
+/// "this turn emits three events and the next two".
+@MainActor
+private final class ScriptedRunnerQueue {
+    private(set) var handedOut: [ScriptedAgentRunner] = []
+    private var pending: [ScriptedAgentRunner]
+
+    init(_ runners: [ScriptedAgentRunner]) { pending = runners }
+
+    func next(_ record: AgentRecord) -> AgentRunning {
+        let runner = pending.isEmpty ? ScriptedAgentRunner(script: []) : pending.removeFirst()
+        handedOut.append(runner)
+        return runner
+    }
+}
+
+/// The tile as a pure view over an agent's stream: attach replays the history,
+/// live events keep arriving, and `detach()` cancels the subscription and nothing
+/// else. Drives the real `ManagedAgentTileNSView` — a stand-in would prove nothing
+/// about the view that ships.
+///
+/// Seven negative tests observed red at exit 1 with the final code, six of them
+/// production edits to `ManagedAgentTileNSView.attach/detach`:
+/// · `let bound = event` (no rebinding to the tile's thread) →
+///   `FAIL: the replayed history did not reach the transcript:` (the model filters
+///   on its own thread, so an unbound event renders nothing)
+/// · the `attachedAgentID == agentID` early return deleted — re-attach WHILE STILL
+///   ATTACHED, which is the live re-wire the app's three call sites can do →
+///   `FAIL: re-attaching the same agent replayed its history again: 6 events`
+/// · `detach()` no longer cancelling →
+///   `FAIL: detach did not remove the tile's subscription; 2 subscribers remain`
+/// · `if replayingIntoAProjection { resetProjection() }` deleted →
+///   `FAIL: attaching to a second agent did not reset the projection: the tile
+///   holds 8 events, expected 2`
+/// · that same guard narrowed to `projectedAgentID != agentID`, which is what the
+///   first draft shipped and the cross-review caught — DETACH then re-attach the
+///   SAME agent →
+///   `FAIL: re-attaching after a detach did not replay the history exactly once:
+///   the tile holds 13 events, the agent's history is 7`
+/// · `resetProjection` leaving the stack's arranged subviews in place →
+///   `FAIL: the card stack holds 4 views for 2 cards — a reset left stale arranged
+///   subviews`
+/// · and, at this call site, a `supervisor.stop(agentId)` next to `tile.detach()`
+///   standing in for a detach that killed its agent →
+///   `FAIL: detaching the tile stopped the agent — a tile is one view of an agent,
+///   not its owner`
+@MainActor
+private func checkTileIsASubscriber(
+    store: AgentStore,
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Error
+) async throws -> String {
+    let provider = "provider-thread"
+    // Turn 1: three events, one of them assistant text, so "shows all 3" is
+    // checkable as rendered content and not only as a count.
+    let turnOne: [AgentRuntimeEvent] = [
+        .sessionStateChanged(.running),
+        .contentDelta(threadId: provider, turnId: "t1", streamKind: .assistant, delta: "alpha"),
+        .turnCompleted(threadId: provider, turnId: "t1", outcome: .completed, errorMessage: nil)
+    ]
+    // Turn 2: two more.
+    let turnTwo: [AgentRuntimeEvent] = [
+        .contentDelta(threadId: provider, turnId: "t2", streamKind: .assistant, delta: "beta"),
+        .turnCompleted(threadId: provider, turnId: "t2", outcome: .completed, errorMessage: nil)
+    ]
+    // Turn 3 blocks, so the agent is provably still working when the tile detaches.
+    let blocking = ScriptedAgentRunner(script: [.turnStarted(threadId: provider, turnId: "t3")], holdUntilStopped: true)
+    let queue = ScriptedRunnerQueue([
+        ScriptedAgentRunner(script: turnOne),
+        ScriptedAgentRunner(script: turnTwo),
+        blocking
+    ])
+    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0) })
+    let tileId = UUID()
+    let agentId = supervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking,
+        tileId: tileId
+    )
+    // An independent subscriber, so "the supervisor still receives events" after
+    // detach is observed on the stream rather than inferred from the runner.
+    let probe = EventInbox()
+    let probeStream = supervisor.events(for: agentId)
+    let probeTask = Task { @MainActor in for await event in probeStream { probe.append(event) } }
+    defer { probeTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { supervisor.subscriberCount(for: agentId) == 1 }) else {
+        throw fail("the probe subscriber did not register")
+    }
+
+    // The turn runs with NO tile attached — the history the tile will replay has to
+    // exist before it does, or "replay" is indistinguishable from "tail".
+    supervisor.send("first prompt", to: agentId)
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { probe.events.count == turnOne.count }) else {
+        throw fail("turn 1 did not complete before the tile attached; probe has \(probe.events.count) of \(turnOne.count)")
+    }
+
+    let tile = ManagedAgentTileNSView(tile: Tile(
+        id: tileId,
+        kind: .managedAgent,
+        title: "agent",
+        frame: TileFrame(x: 0, y: 0, width: 520, height: 320),
+        zPosition: .fromLegacyRank(1),
+        runtimeRef: nil,
+        metadata: TileMetadata(launchProfileId: "managed")
+    ))
+    tile.frame = NSRect(x: 0, y: 0, width: 520, height: 320)
+    guard tile.ingestedEvents.isEmpty else {
+        throw fail("a fresh tile already holds \(tile.ingestedEvents.count) events")
+    }
+
+    tile.attach(agentID: agentId, supervisor: supervisor)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { tile.ingestedEvents.count == turnOne.count }) else {
+        throw fail("attaching a tile did not replay the agent's history: the tile holds \(tile.ingestedEvents.count) of \(turnOne.count) events")
+    }
+    guard tile.attachedAgentID == agentId else {
+        throw fail("the tile did not record which agent it is attached to")
+    }
+    // Replay is not a counter: the transcript has to RENDER the history.
+    guard tile.qaTranscriptText.contains("alpha") else {
+        throw fail("the replayed history did not reach the transcript: \(tile.qaTranscriptText)")
+    }
+    // Rebinding at the boundary (the model filters on the tile's own thread), so a
+    // supervisor-stamped event must arrive carrying the TILE's thread id.
+    guard AgentSupervisor.threadId(for: agentId) != tile.wiringThreadId else {
+        throw fail("the agent's thread id equals the tile's, so the rebinding is untested")
+    }
+    guard case let .turnCompleted(boundThread, _, _, _) = tile.ingestedEvents[2], boundThread == tile.wiringThreadId else {
+        throw fail("ingested events were not rebound to the tile's thread id: \(tile.ingestedEvents[2])")
+    }
+    // Idempotent: re-attaching the same agent must not replay a second time.
+    tile.attach(agentID: agentId, supervisor: supervisor)
+    guard await waitUntil(timeout: 1.0, pollInterval: 0.02, { tile.ingestedEvents.count != turnOne.count }) == false else {
+        throw fail("re-attaching the same agent replayed its history again: \(tile.ingestedEvents.count) events")
+    }
+    guard supervisor.subscriberCount(for: agentId) == 2 else {
+        throw fail("expected the probe plus one tile subscription; got \(supervisor.subscriberCount(for: agentId))")
+    }
+
+    // Live tail: two more events reach the attached tile.
+    supervisor.send("second prompt", to: agentId)
+    let afterTurnTwo = turnOne.count + turnTwo.count
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { tile.ingestedEvents.count == afterTurnTwo }) else {
+        throw fail("live events did not continue to arrive: the tile holds \(tile.ingestedEvents.count) of \(afterTurnTwo)")
+    }
+    guard tile.qaTranscriptText.contains("alpha"), tile.qaTranscriptText.contains("beta") else {
+        throw fail("the transcript lost the replay or missed the tail: \(tile.qaTranscriptText)")
+    }
+
+    // Detach while a prompt is IN FLIGHT, which is the case the locked decision is
+    // about: closing a view of a working agent must not kill it.
+    supervisor.send("third prompt", to: agentId)
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { tile.ingestedEvents.count == afterTurnTwo + 1 }) else {
+        throw fail("the third turn's first event did not reach the tile")
+    }
+    guard supervisor.isRunning(agentId) else {
+        throw fail("the blocking runner should be in flight before the tile detaches")
+    }
+
+    tile.detach()
+    guard tile.attachedAgentID == nil else {
+        throw fail("detach left the tile bound to \(String(describing: tile.attachedAgentID))")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { supervisor.subscriberCount(for: agentId) == 1 }) else {
+        throw fail("detach did not remove the tile's subscription; \(supervisor.subscriberCount(for: agentId)) subscribers remain")
+    }
+    guard supervisor.isRunning(agentId) else {
+        throw fail("detaching the tile stopped the agent — a tile is one view of an agent, not its owner")
+    }
+    guard blocking.completedRuns == 0, blocking.stopCount == 0 else {
+        throw fail("detaching the tile reached the runner: completedRuns \(blocking.completedRuns), stopCount \(blocking.stopCount)")
+    }
+
+    // The agent's stream is still live, and the detached tile is off it.
+    let tileEventsAtDetach = tile.ingestedEvents.count
+    let probeAtDetach = probe.events.count
+    supervisor.stop(agentId)
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { probe.events.count > probeAtDetach }) else {
+        throw fail("the supervisor stopped delivering events to its remaining subscriber after the tile detached")
+    }
+    guard probe.events.last == .sessionStateChanged(.stopped) else {
+        throw fail("the remaining subscriber did not see the stop: \(String(describing: probe.events.last))")
+    }
+    guard tile.ingestedEvents.count == tileEventsAtDetach else {
+        throw fail("a detached tile kept ingesting: \(tile.ingestedEvents.count) events, was \(tileEventsAtDetach)")
+    }
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { blocking.completedRuns == 1 }) else {
+        throw fail("the agent's blocked run() never returned after stop")
+    }
+
+    // Re-attaching the SAME agent after a detach (from the cross-review, which found
+    // this double-ingesting): the replay is the whole conversation and the tile still
+    // holds the part of it that it ingested before detaching, so `attach` has to
+    // reset the projection rather than append a second copy of it.
+    let historyCount = probe.events.count
+    tile.attach(agentID: agentId, supervisor: supervisor)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { tile.ingestedEvents.count == historyCount }) else {
+        throw fail("re-attaching after a detach did not replay the history exactly once: the tile holds \(tile.ingestedEvents.count) events, the agent's history is \(historyCount)")
+    }
+    let alphaCards = tile.qaTranscriptText.components(separatedBy: "alpha").count - 1
+    guard alphaCards == 1 else {
+        throw fail("re-attaching after a detach duplicated the transcript (\(alphaCards) copies of the first reply): \(tile.qaTranscriptText)")
+    }
+    // The reset has to reach the view hierarchy, not just the model behind it.
+    guard tile.qaRenderedCardCount == tile.transcriptCardCount else {
+        throw fail("the card stack holds \(tile.qaRenderedCardCount) views for \(tile.transcriptCardCount) cards — a reset left stale arranged subviews")
+    }
+    tile.detach()
+
+    // Attaching the SAME view to a DIFFERENT agent shows that agent's conversation,
+    // not both of them concatenated.
+    let otherTurn: [AgentRuntimeEvent] = [
+        .contentDelta(threadId: provider, turnId: "t1", streamKind: .assistant, delta: "gamma"),
+        .turnCompleted(threadId: provider, turnId: "t1", outcome: .completed, errorMessage: nil)
+    ]
+    let otherQueue = ScriptedRunnerQueue([ScriptedAgentRunner(script: otherTurn)])
+    let otherSupervisor = AgentSupervisor(store: store, makeRunner: { otherQueue.next($0) })
+    let otherAgentId = otherSupervisor.spawn(
+        role: nil,
+        prompt: "other prompt",
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking,
+        tileId: tileId
+    )
+    let otherProbe = EventInbox()
+    let otherStream = otherSupervisor.events(for: otherAgentId)
+    let otherTask = Task { @MainActor in for await event in otherStream { otherProbe.append(event) } }
+    defer { otherTask.cancel() }
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { otherProbe.events.count == otherTurn.count }) else {
+        throw fail("the second agent's turn did not complete; got \(otherProbe.events.count) of \(otherTurn.count)")
+    }
+    tile.attach(agentID: otherAgentId, supervisor: otherSupervisor)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { tile.ingestedEvents.count == otherTurn.count }) else {
+        throw fail("attaching to a second agent did not reset the projection: the tile holds \(tile.ingestedEvents.count) events, expected \(otherTurn.count)")
+    }
+    guard tile.qaTranscriptText.contains("gamma"), !tile.qaTranscriptText.contains("alpha"), !tile.qaTranscriptText.contains("beta") else {
+        throw fail("the tile mixed two agents' transcripts: \(tile.qaTranscriptText)")
+    }
+    tile.detach()
+
+    return "a tile replayed \(turnOne.count) history events on attach, tailed \(turnTwo.count) more, detached without stopping an in-flight turn, and re-attached to a second agent without mixing transcripts"
 }
 
 /// Main-actor collector for a subscriber task. A class so the collecting closure

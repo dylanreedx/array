@@ -54,8 +54,21 @@ final class ManagedAgentTileNSView: TileNSView {
     private var startedAt: Date?
     private var promptInFlight = false
     private let threadId: String
+    /// P2A.4: the agent this tile is a VIEW OF, and the subscription that feeds it.
+    /// The tile owns neither the agent nor its runner — `AgentSupervisor` does — so
+    /// these are the whole of the tile's side of the relationship.
+    private(set) var attachedAgentID: AgentID?
+    private var eventSubscription: Task<Void, Never>?
+    /// Whose events the transcript on screen actually holds. Distinct from
+    /// `attachedAgentID`, which `detach()` clears: a detached tile still SHOWS the
+    /// agent it was following, so attaching a different one after a detach must
+    /// still clear that transcript.
+    private var projectedAgentID: AgentID?
     var onApprovalDecision: ((String, ApprovalDecision) -> Void)?
     var onUserInputSubmit: ((String, UserInputAnswers) -> Void)?
+    /// Fired after this tile ingests an event, so the app can mirror the stream
+    /// onto the syncable activity timeline (88.4c) without owning the subscription.
+    var onIngestedEvent: ((AgentRuntimeEvent) -> Void)?
     /// Fired when the user submits a prompt from the tile's compose row.
     /// The app wires this to a PiAgentRunner (ticket 88.4b). Minimal now; the
     /// framework ComposeBox component supersedes it later.
@@ -86,6 +99,81 @@ final class ManagedAgentTileNSView: TileNSView {
     var transcriptCardCount: Int { model.cards.count }
     var activeToolCount: Int { model.activeToolCount }
     var currentAgentStatus: AgentStatus { descriptor.status }
+
+    /// The raw events this tile has ingested, in order — its local projection of the
+    /// agent's stream. Read by `--agent-supervisor-check`; the transcript itself is
+    /// `cards`, which folds deltas together and so cannot count events.
+    var ingestedEvents: [AgentRuntimeEvent] { model.events }
+
+    // MARK: - Subscriber (P2A.4)
+
+    /// Become a view of `agentID`'s stream: replay the history the supervisor holds,
+    /// then follow the tail. `AgentSupervisor.events(for:)` yields the snapshot
+    /// before it registers the subscriber, so the boundary is exact — the tile can
+    /// neither miss an event that lands during attach nor see the tail ahead of the
+    /// history.
+    ///
+    /// Idempotent for the agent already attached (re-wiring a live tile is a no-op
+    /// rather than a second replay into a model that already holds it). Any OTHER
+    /// attach onto a tile that already holds a projection resets it first, because
+    /// the replay is the agent's whole conversation and the cards on screen are
+    /// already part of it — whether they came from the same agent (detach, then
+    /// attach again) or a different one (two agents rendered as one).
+    func attach(agentID: AgentID, supervisor: AgentSupervisor) {
+        if attachedAgentID == agentID, eventSubscription != nil { return }
+        let replayingIntoAProjection = projectedAgentID != nil
+        detach()
+        if replayingIntoAProjection { resetProjection() }
+        attachedAgentID = agentID
+        projectedAgentID = agentID
+        // The stream is created HERE, not inside the task: the snapshot is taken
+        // when `events(for:)` is called, so deferring it to the task's first
+        // suspension would widen the window in which events land in neither the
+        // snapshot nor the tail.
+        let stream = supervisor.events(for: agentID)
+        eventSubscription = Task { @MainActor [weak self] in
+            for await event in stream {
+                guard let self else { break }
+                // The transcript model filters on THIS tile's thread id, so events
+                // carrying the agent's thread are rebound on the way in — the same
+                // rebinding the app did at this boundary before the tile owned it.
+                let bound = event.withThreadId(self.threadId)
+                self.ingest(bound)
+                self.onIngestedEvent?(bound)
+            }
+        }
+    }
+
+    /// Stop following the agent. Cancels the subscription and nothing else: the
+    /// agent, its runner and its record are the supervisor's, and closing a view of
+    /// an agent must not kill it (locked decision). The transcript already on screen
+    /// is left alone, so a detached tile still SHOWS the agent it was following;
+    /// `attach` is what clears it, on the next replay.
+    func detach() {
+        eventSubscription?.cancel()
+        eventSubscription = nil
+        attachedAgentID = nil
+    }
+
+    /// Drop the local projection so a replay renders exactly the agent it came from.
+    private func resetProjection() {
+        model = ManagedAgentTranscriptModel(threadId: threadId)
+        for view in cardStack.arrangedSubviews {
+            cardStack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        cardViewsById.removeAll()
+        inputCardViewsByRequestId.removeAll()
+        pendingApprovals.removeAll()
+        pendingUserInputs.removeAll()
+        approvalDock.pendingRequest = nil
+        startedAt = nil
+        promptInFlight = false
+        descriptor.status = model.currentStatus
+        agentStatus = model.currentStatus
+        applyHeader(status: model.currentStatus)
+        applyComposeAvailability()
+    }
 
     /// Shows the prompt the user just submitted as its own "you" card.
     func appendUserPrompt(_ text: String) {
@@ -406,6 +494,9 @@ final class ManagedAgentTileNSView: TileNSView {
         inputCardViewsByRequestId[requestId]?.qaSubmit(answer)
     }
 
+    /// The cards actually in the view hierarchy, so a reset can be asserted against
+    /// the stack and not only against the model behind it.
+    var qaRenderedCardCount: Int { cardStack.arrangedSubviews.count }
     var qaComposeEnabled: Bool { composeField.isEnabled }
     func qaSubmitPrompt(_ prompt: String) {
         composeField.stringValue = prompt

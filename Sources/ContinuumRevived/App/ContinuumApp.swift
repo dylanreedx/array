@@ -2734,9 +2734,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `managedAgentRunners` dictionary this view used to hold: the supervisor owns
     /// the runner and the record, and a tile is one subscriber to its event stream.
     private lazy var agentSupervisor = AgentSupervisor(store: AgentStore(smokeTest: smokeTestEnabled))
-    /// One subscription task per managed-agent tile, so re-wiring a tile replaces
-    /// its subscriber instead of stacking a second one.
-    private var managedAgentTileSubscriptions: [UUID: Task<Void, Never>] = [:]
     /// Per-tile activity timeline (I5-safe drafts) built from the runner event
     /// stream, folded into the companion snapshot so the phone sees what each
     /// agent is doing (ticket 88.4c). Capped per tile.
@@ -3790,12 +3787,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             break
         case .managedAgent:
             try? workspaceRuntime?.activeController?.managedSessionStore.delete(tileId: id)
-            // The tile's subscription is this file's to clean up (P2A.3): without
-            // this the `for await` loop outlives the view and only notices it is
-            // gone on the next event. Deliberately NOT stopping the agent or
-            // clearing `AgentRecord.tileId` — closing a tile must not kill an agent
-            // (locked decision), and detach as an operation is P2A.5's.
-            managedAgentTileSubscriptions.removeValue(forKey: id)?.cancel()
+            // The tile owns its subscription (P2A.4), so closing it detaches rather
+            // than cancelling a task this file holds. Deliberately NOT stopping the
+            // agent or clearing `AgentRecord.tileId` — closing a tile must not kill
+            // an agent (locked decision), and detach as a user-facing operation is
+            // P2A.5's.
+            (canvasView.tileView(for: id) as? ManagedAgentTileNSView)?.detach()
         }
 
         canvasView.removeTile(id: id)
@@ -7570,7 +7567,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             )
         }
 
-        let threadId = view.wiringThreadId
         view.onSubmitPrompt = { [weak view] prompt in
             guard let view else { return }
             // Reflect the user's prompt in the transcript, then hand off to the
@@ -7579,28 +7575,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             supervisor.send(prompt, to: agentId)
         }
 
-        // Re-wiring the same tile replaces its subscriber; two live ones would
-        // double-ingest every event. LIMIT, from the cross-review: the replacement
-        // subscriber replays the agent's history, which is right for a FRESH view
-        // (P2A.5's re-attach) and would duplicate cards in a view that already
-        // ingested them. No call site re-wires a live view today — the three are a
-        // palette spawn, the initial install, and the live check, each on a
-        // just-constructed tile — and making re-attach idempotent is P2A.5's.
-        managedAgentTileSubscriptions[tileId]?.cancel()
-        managedAgentTileSubscriptions[tileId] = Task { @MainActor [weak self, weak view] in
-            for await event in supervisor.events(for: agentId) {
-                guard let view else { break }
-                // The tile's transcript filters on its own thread id, so events
-                // stamped with the AGENT's thread are rebound on the way in — the
-                // same rebinding the pre-supervisor wiring did at this boundary.
-                let bound = event.withThreadId(threadId)
-                view.ingest(bound)
-                // Mirror the event onto the syncable activity timeline so the phone
-                // sees it (88.4c). Status comes from the tile's derived status
-                // after ingest.
-                self?.recordManagedActivity(tileId: tileId, event: bound, status: view.currentAgentStatus)
-            }
+        // P2A.4: the subscription is the TILE's now, not this file's. What stays
+        // here is the app's own interest in the stream — mirroring each event onto
+        // the syncable activity timeline so the phone sees it (88.4c), with the
+        // status the tile derived from that same event.
+        view.onIngestedEvent = { [weak self, weak view] event in
+            guard let view else { return }
+            self?.recordManagedActivity(tileId: tileId, event: event, status: view.currentAgentStatus)
         }
+        // Replays the agent's history, then follows the tail; re-wiring the same
+        // tile to the same agent is a no-op inside `attach`, so none of the three
+        // call sites can double-ingest.
+        view.attach(agentID: agentId, supervisor: supervisor)
     }
 
     /// Records a managed-agent runtime event onto the per-tile syncable
