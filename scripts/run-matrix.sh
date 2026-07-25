@@ -149,6 +149,10 @@ run_app_check .build/debug/continuum-revived --component-lab-check
 # component really renders at the requested size in the requested NSAppearance, and
 # that .aqua vs .darkAqua produce different pixels.
 run_app_check .build/debug/continuum-revived --ui-probe-check
+# Ticket P0.3: geometry gates over the probed managed-agent tile — width-fill ratios,
+# card/model parity, no zero-size or ambiguous views, no clipping at the tile minimum
+# width, and a non-vacuous scrolled-to-bottom assertion, in both appearances.
+run_app_check .build/debug/continuum-revived --ui-geometry-check
 run_app_check .build/debug/continuum-revived --ui-test-support-check
 run_app_check .build/debug/continuum-revived --keybind-edit-check
 run_app_check .build/debug/continuum-revived --browser-url-focus-check

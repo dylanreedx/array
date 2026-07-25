@@ -54,6 +54,14 @@ All Phase 0 tickets are tagged `autonomous`.
 | 42 | `P2C.3-worktree-cleanup.md` | P2C.2 |
 | 43 | `P2C.4-branch-on-rows.md` | P2C.3 |
 | 44 | `P2C.5-per-agent-diff.md` | P2C.4 |
+| 45 | `P2D.1-spawn-agent-extension.md` | P2C.5 |
+| 46 | `P2D.2-detect-spawn-tool-call.md` | P2D.1 |
+| 47 | `P2D.3-role-registry.md` | P2D.2 |
+| 48 | `P2D.4-parent-child-nesting.md` | P2D.3, P3.6 |
+| 49 | `P2D.5-child-rollup.md` | P2D.4, P4.2 |
+| 50 | `P2D.6-fan-out.md` | P2D.5 |
 
-Phases 0, 1, 2A, 2B and 2C are authored. 2C (worktrees) MUST precede 2D (orchestration): parallel agents without isolation corrupt each other. 2D and 3–9 are authored during the run and appended here as they land. Full backlog shape lives in
+Phases 0, 1, 2A, 2B and 2C are authored. 2C (worktrees) MUST precede 2D (orchestration): parallel agents without isolation corrupt each other. Phase 2D is authored. Phases 3–9 are authored during the run.
+
+Note: P2D.4/P2D.5 depend on Phase 3 (inbox rows) and Phase 4 (blocker precedence), so the loop will correctly skip them until those land — that is intended, not a stall. and appended here as they land. Full backlog shape lives in
 the session plan; see `_RUNBOOK.md` for the operating contract.

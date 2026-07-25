@@ -1,0 +1,408 @@
+import AppKit
+import ContinuumRevivedCore
+
+/// Geometry assertions over a `UIProbe`-rendered tree — layout bugs caught with
+/// numbers instead of eyes.
+///
+/// Both layout bugs this program shipped passed every gate that existed:
+/// a transcript whose cards sized themselves to the longest line and floated
+/// centred at half the tile width (the scroller stranded mid-tile), and a
+/// transcript whose cards never laid out at all. Neither is visible to a
+/// "more than one colour" check; both are trivially visible to a width ratio
+/// and a count.
+///
+/// Deliberately ratios and invariants, never exact frames: exact pixel frames
+/// move with font metrics and would make this gate flaky rather than strict.
+@MainActor
+enum UIProbeGeometry {
+    struct GeometryError: Error, CustomStringConvertible {
+        let message: String
+        var description: String { message }
+        var localizedDescription: String { message }
+    }
+
+    private static func fail(_ message: String) -> GeometryError { GeometryError(message: message) }
+
+    // MARK: - Assertions
+
+    /// `child` must span at least `minRatio` of `parent`'s width. The direct
+    /// witness for the half-width transcript.
+    static func fills(child: NSView, parent: NSView, minRatio: Double, label: String) throws {
+        guard parent.bounds.width > 0 else {
+            throw fail("\(label): parent laid out to zero width")
+        }
+        let ratio = child.bounds.width / parent.bounds.width
+        guard ratio >= minRatio else {
+            throw fail(String(
+                format: "%@: spans %.3f of parent width (%.1fpt of %.1fpt), needs >= %.3f",
+                label, ratio, child.bounds.width, parent.bounds.width, minRatio
+            ))
+        }
+    }
+
+    /// Every visible view in the subtree must have a real size. The witness for
+    /// the transcript that had cards in the model and nothing on screen.
+    static func expectNoZeroSizeViews(_ root: NSView, label: String) throws {
+        try walk(root) { view, path in
+            guard view.bounds.width > 0, view.bounds.height > 0 else {
+                throw fail(String(
+                    format: "%@: %@ laid out to %.1fx%.1f", label, path, view.bounds.width, view.bounds.height
+                ))
+            }
+        }
+    }
+
+    /// AppKit reports the exact class of bug that shipped — a stack row with no
+    /// width pin — for free, but only over a laid-out tree.
+    ///
+    /// Takes an explicit view list rather than walking the subtree, because
+    /// `hasAmbiguousLayout` is true for *every* flexible `NSStackView` child that
+    /// AppKit positions with its low-priority (260) `NSStackView.Align`
+    /// constraint: the header's name/phase labels and the approval dock's button
+    /// row all report it today, and all lay out correctly. Widening the walk would
+    /// force weakening the assertion; scoping it keeps it absolute over the
+    /// transcript column — the chain the shipped bug actually lived in.
+    static func expectNoAmbiguousLayout(_ views: [(NSView, String)], label: String) throws {
+        for (view, name) in views {
+            view.layoutSubtreeIfNeeded()
+            guard !view.hasAmbiguousLayout else {
+                throw fail("\(label): \(name) (\(describe(view))) has ambiguous layout")
+            }
+        }
+    }
+
+    static func expectCount(_ actual: Int, _ expected: Int, label: String) throws {
+        guard actual == expected else {
+            throw fail("\(label): \(actual), expected \(expected)")
+        }
+    }
+
+    /// The clip view must sit at its maximum offset — the newest card visible.
+    /// `requireOverflow` keeps the assertion from passing vacuously: a document
+    /// shorter than its clip view is always "at the bottom".
+    static func expectScrolledToBottom(_ scrollView: NSScrollView, requireOverflow: Bool, label: String) throws {
+        guard let document = scrollView.documentView else {
+            throw fail("\(label): scroll view has no document view")
+        }
+        let clip = scrollView.contentView
+        let maxY = max(0, document.bounds.height - clip.bounds.height)
+        if requireOverflow {
+            guard maxY > 0 else {
+                throw fail(String(
+                    format: "%@: document (%.1fpt) does not overflow its clip view (%.1fpt), so the scroll assertion would pass vacuously",
+                    label, document.bounds.height, clip.bounds.height
+                ))
+            }
+        }
+        guard abs(clip.bounds.origin.y - maxY) <= 1 else {
+            throw fail(String(
+                format: "%@: clip offset %.1f, expected %.1f (document %.1fpt, clip %.1fpt)",
+                label, clip.bounds.origin.y, maxY, document.bounds.height, clip.bounds.height
+            ))
+        }
+    }
+
+    /// No visible view may spill outside its superview — the narrow-width
+    /// clipping gate. Vertical containment is not asserted inside a scroll view:
+    /// a document view is *supposed* to be taller than its clip view.
+    ///
+    /// Compares **alignment** rects, not frames: `NSTextField` carries a ~2pt
+    /// alignment inset, so a label flush with its stack's leading edge sits at
+    /// frame x = -2 by design. Frame containment would fail on every label here.
+    static func expectNoClipping(_ root: NSView, label: String) throws {
+        func check(_ view: NSView, path: String, insideScroll: Bool) throws {
+            // A document view is measured against the clip view it hangs in, so the
+            // scroll exemption must apply to the clip view's own children too — not
+            // only to their descendants.
+            let childInsideScroll = insideScroll || view is NSClipView
+            for subview in view.subviews where !subview.isHidden {
+                let childPath = "\(path)/\(describe(subview))"
+                if !isSpacer(subview) {
+                    let bounds = view.bounds
+                    let frame = subview.alignmentRect(forFrame: subview.frame)
+                    guard frame.minX >= bounds.minX - 0.5, frame.maxX <= bounds.maxX + 0.5 else {
+                        throw fail(String(
+                            format: "%@: %@ spills horizontally — frame x %.1f…%.1f outside parent 0…%.1f",
+                            label, childPath, frame.minX, frame.maxX, bounds.width
+                        ))
+                    }
+                    if !childInsideScroll {
+                        guard frame.minY >= bounds.minY - 0.5, frame.maxY <= bounds.maxY + 0.5 else {
+                            throw fail(String(
+                                format: "%@: %@ spills vertically — frame y %.1f…%.1f outside parent 0…%.1f",
+                                label, childPath, frame.minY, frame.maxY, bounds.height
+                            ))
+                        }
+                    }
+                }
+                try check(subview, path: childPath, insideScroll: childInsideScroll)
+            }
+        }
+        try check(root, path: describe(root), insideScroll: root is NSClipView)
+    }
+
+    // MARK: - Unsatisfiable constraints
+
+    /// The "no unsatisfiable constraints" half of the narrow-width pass, evaluated
+    /// rather than read: every active **required** width/height constraint in the
+    /// subtree must actually hold once the tree is laid out. A required constraint
+    /// AppKit had to break is a required constraint that does not hold.
+    ///
+    /// AppKit's own "Unable to simultaneously satisfy constraints" report is not
+    /// usable here — measured: with two conflicting required header heights, a
+    /// probe process that never calls `NSApp.run()` emits nothing on stderr (the
+    /// report goes through unified logging), so a capture-stderr gate would be a
+    /// gate that can never fire.
+    ///
+    /// Scoped to size attributes on purpose: they are independent of view
+    /// flipped-ness, and this tree mixes flipped (`FlippedStackView`) and
+    /// unflipped containers, so edge attributes could not be compared across it
+    /// without guessing. Position breakage surfaces instead through
+    /// `expectNoClipping` and the fill ratios.
+    static func expectNoBrokenRequiredSizeConstraints(_ root: NSView, label: String) throws {
+        let tolerance = 0.51
+        try walk(root) { view, path in
+            for constraint in view.constraints where constraint.isActive && constraint.priority == .required {
+                // Only constraints someone actually wrote. AppKit's generated
+                // subclasses report `.required` while being breakable by design:
+                // `NSContentSizeLayoutConstraint` carries its real strength in the
+                // view's hugging (251) and compression-resistance (750) priorities,
+                // so an intrinsically-28pt-wide label compressed to 21.5pt reads as
+                // a broken required constraint here — measured, on unmodified code.
+                guard type(of: constraint) == NSLayoutConstraint.self else { continue }
+                guard let first = constraint.firstItem as? NSView,
+                      let lhs = sizeValue(constraint.firstAttribute, of: first) else { continue }
+                var rhs = 0.0
+                if constraint.secondAttribute != .notAnAttribute {
+                    guard let second = constraint.secondItem as? NSView,
+                          let value = sizeValue(constraint.secondAttribute, of: second) else { continue }
+                    rhs = value
+                }
+                let target = rhs * Double(constraint.multiplier) + Double(constraint.constant)
+                let holds: Bool
+                switch constraint.relation {
+                case .equal: holds = abs(lhs - target) <= tolerance
+                case .greaterThanOrEqual: holds = lhs >= target - tolerance
+                case .lessThanOrEqual: holds = lhs <= target + tolerance
+                @unknown default: continue
+                }
+                guard holds else {
+                    throw fail(String(
+                        format: "%@: %@ holds a broken required constraint — measured %.1f, needs %@ %.1f (%@)",
+                        label, path, lhs,
+                        constraint.relation == .equal ? "==" : (constraint.relation == .greaterThanOrEqual ? ">=" : "<="),
+                        target, "\(constraint)"
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Alignment-rect size for the two attributes this gate evaluates; `nil` for
+    /// anything else, which the caller skips. Alignment rects, not frames, because
+    /// that is what Auto Layout constrains.
+    private static func sizeValue(_ attribute: NSLayoutConstraint.Attribute, of view: NSView) -> Double? {
+        let rect = view.alignmentRect(forFrame: view.frame)
+        switch attribute {
+        case .width: return rect.width
+        case .height: return rect.height
+        default: return nil
+        }
+    }
+
+    // MARK: - Walking
+
+    /// Depth-first over visible, non-spacer views, `self` included.
+    private static func walk(_ root: NSView, _ body: (NSView, String) throws -> Void) throws {
+        func visit(_ view: NSView, path: String) throws {
+            if !isSpacer(view) { try body(view, path) }
+            for subview in view.subviews where !subview.isHidden {
+                try visit(subview, path: "\(path)/\(describe(subview))")
+            }
+        }
+        guard !root.isHidden else { return }
+        try visit(root, path: describe(root))
+    }
+
+    /// `NSStackView` rows are padded with a bare `NSView()` to push content apart
+    /// (`ManagedAgentTileNSView.configureHeader` does exactly this). Such a view
+    /// has no size of its own on the cross axis and nothing pinning it, so it is
+    /// neither a zero-size bug nor an ambiguity bug. Recognised narrowly — exactly
+    /// `NSView`, no subviews, no intrinsic content size — so scoping it out cannot
+    /// silently excuse a real component.
+    private static func isSpacer(_ view: NSView) -> Bool {
+        type(of: view) == NSView.self
+            && view.subviews.isEmpty
+            && view.intrinsicContentSize.width == NSView.noIntrinsicMetric
+            && view.intrinsicContentSize.height == NSView.noIntrinsicMetric
+    }
+
+    private static func describe(_ view: NSView) -> String {
+        let name = String(describing: type(of: view))
+        if let id = view.identifier?.rawValue { return "\(name)#\(id)" }
+        return name
+    }
+
+    private static func firstDescendant<T: NSView>(_ type: T.Type, in root: NSView) -> T? {
+        if let match = root as? T { return match }
+        for subview in root.subviews {
+            if let match = firstDescendant(type, in: subview) { return match }
+        }
+        return nil
+    }
+
+    // MARK: - Self-check
+
+    /// The managed-agent tile is probed at the tile minimum width
+    /// (`TileGeometry.minimumSize(for: .managedAgent).width`) and at two larger
+    /// widths, in both appearances.
+    static let probeWidths: [Double] = [TileGeometry.minimumSize(for: .managedAgent).width, 640, 900]
+
+    /// Appended after the probe is laid out, so `scrollTranscriptToBottom` runs
+    /// against the real probe geometry rather than the fixture's construction-time
+    /// frame. Many short prompts, not one long one: enough cards to overflow the
+    /// clip view at every probe width (`expectScrolledToBottom(requireOverflow:)`
+    /// asserts that), while each line stays *narrower* than the tile. A single
+    /// 2000-character line masks the half-width bug entirely — an unpinned column
+    /// whose fitting width exceeds the available width still gets clamped to full
+    /// width, so the pins-removed witness passed until the prompts were shortened.
+    static let scrollWitnessPrompts: [String] = (1...10).map {
+        "Scroll witness \($0) — the newest transcript card must stay visible."
+    }
+
+    static func runGeometryChecks() throws {
+        _ = NSApplication.shared
+        // Production pins the app appearance at launch; reproduce it so a probe
+        // that failed to set its own appearance could not pass the .aqua pass.
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+
+        let entries = LabCatalog.entries(env: LabEnvironment(ghostty: nil, browserEngine: nil))
+        guard let entry = entries.first(where: { $0.id == "tiles.managedAgent" }),
+              case let .staticCard(_, make) = entry.content else {
+            throw fail("missing tiles.managedAgent card")
+        }
+
+        var probed = 0
+        var narrowestCardRatio = Double.infinity
+        for width in probeWidths {
+            for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+                let label = "managedAgent@\(Int(width))pt.\(appearanceName.rawValue)"
+                let spec = UIProbe.Spec(
+                    id: label, size: NSSize(width: width, height: 560), appearance: appearanceName
+                )
+                let probe = try UIProbe.render(spec, make: make)
+                guard let tile = probe.view as? ManagedAgentTileNSView else {
+                    throw fail("\(label): tiles.managedAgent did not vend ManagedAgentTileNSView")
+                }
+                guard let cardStack = firstDescendant(FlippedStackView.self, in: tile),
+                      let scrollView = cardStack.enclosingScrollView else {
+                    throw fail("\(label): no transcript stack inside a scroll view")
+                }
+
+                // Ingest at the probe's real size, so the scroll assertion is about
+                // this geometry and not the fixture's 560x560 construction frame.
+                for prompt in scrollWitnessPrompts { tile.appendUserPrompt(prompt) }
+                tile.layoutSubtreeIfNeeded()
+
+                try expectCount(
+                    cardStack.arrangedSubviews.count,
+                    tile.transcriptCardCount + tile.qaUserInputCardCount,
+                    label: "\(label): transcript rows"
+                )
+                guard cardStack.arrangedSubviews.count >= 4 else {
+                    throw fail("\(label): only \(cardStack.arrangedSubviews.count) transcript rows — the fixture is not exercising the stack")
+                }
+
+                try fills(child: scrollView, parent: tile, minRatio: 0.99, label: "\(label): transcript scroll view")
+                for (index, card) in cardStack.arrangedSubviews.enumerated() {
+                    try fills(
+                        child: card, parent: tile, minRatio: 0.9,
+                        label: "\(label): card \(index) (\(describe(card)))"
+                    )
+                    narrowestCardRatio = min(narrowestCardRatio, card.bounds.width / tile.bounds.width)
+                }
+
+                try expectNoZeroSizeViews(tile, label: label)
+                // The transcript column, root-to-card: outer row stack, the scroll
+                // view row that lost its width pin, its clip view, the document
+                // stack, and every card in it.
+                var ancestor = scrollView.superview
+                while let view = ancestor, !(view is NSStackView) { ancestor = view.superview }
+                guard let rowStack = ancestor as? NSStackView else {
+                    throw fail("\(label): transcript scroll view is not inside a row stack")
+                }
+                var ambiguityScope: [(NSView, String)] = [(rowStack, "tile row stack"),
+                                                          (scrollView, "transcript scroll view"),
+                                                          (scrollView.contentView, "transcript clip view"),
+                                                          (cardStack, "transcript stack")]
+                for (index, card) in cardStack.arrangedSubviews.enumerated() {
+                    ambiguityScope.append((card, "card \(index)"))
+                }
+                try expectNoAmbiguousLayout(ambiguityScope, label: label)
+                try expectNoClipping(tile, label: label)
+                try expectNoBrokenRequiredSizeConstraints(tile, label: label)
+                try expectScrolledToBottom(scrollView, requireOverflow: true, label: "\(label): transcript")
+                probed += 1
+            }
+        }
+
+        guard probed == probeWidths.count * 2 else {
+            throw fail("probed \(probed) width/appearance pairs, expected \(probeWidths.count * 2)")
+        }
+        print(String(
+            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); narrowest card fill ratio %.3f",
+            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), narrowestCardRatio
+        ))
+    }
+
+    // MARK: - Regression witnesses
+    //
+    // Every edit below was applied, run, and observed to turn this check RED; the
+    // quoted failures are the real output. All five are re-runnable by hand.
+    //
+    // 1 · Half-width transcript (the bug that shipped). In
+    //     `ManagedAgentTileNSView.makeContentView()`, delete the four width pins:
+    //         header.widthAnchor.constraint(equalTo: layout.widthAnchor),
+    //         scrollView.widthAnchor.constraint(equalTo: layout.widthAnchor),
+    //         approvalDock.widthAnchor.constraint(equalTo: layout.widthAnchor),
+    //         composeRow.widthAnchor.constraint(equalTo: layout.widthAnchor)
+    //     → "managedAgent@640pt…: transcript scroll view: spans 0.670 of parent
+    //        width (429.0pt of 640.0pt), needs >= 0.990"
+    //     Note it fails at 640pt and 900pt, not at 320pt: an unpinned column whose
+    //     fitting width already exceeds the tile is clamped to full width anyway.
+    //     That is exactly why the probe widths must include widths wider than the
+    //     transcript's natural fitting width, and why `scrollWitnessPrompts` are
+    //     short lines.
+    //
+    // 2 · Card/model parity. In `ManagedAgentTileNSView.reconcileCards()`, iterate
+    //     an empty array:
+    //         for card in [ManagedTranscriptCard]() {   // was: model.cards
+    //     → "transcript rows: 0, expected 13"
+    //
+    // 3 · Newest card off-screen. Delete `scrollTranscriptToBottom()` from
+    //     `appendUserPrompt(_:)`:
+    //     → "transcript: clip offset 0.0, expected 689.0 (document 1037.0pt,
+    //        clip 348.0pt)"
+    //
+    // 4 · Clipping. In `reconcileCards()`, make cards wider than their stack —
+    //     `constant: 60` instead of `constant: -24`:
+    //     → "…/TranscriptCardView#managedAgent.card.assistant-1 spills
+    //        horizontally — frame x 0.0…380.0 outside parent 0…320.0"
+    //
+    // 5 · Invisible cards. In `reconcileCards()`, add
+    //         view.heightAnchor.constraint(equalToConstant: 0).isActive = true
+    //     → "…/TranscriptCardView#managedAgent.card.assistant-1 laid out to
+    //        296.0x0.0"
+    //
+    // 6 · Unsatisfiable constraints. In `makeContentView()`, add a second required
+    //     header height alongside the 52pt one:
+    //         header.heightAnchor.constraint(equalToConstant: 90),
+    //     → "…/NSStackView holds a broken required constraint — measured 52.0,
+    //        needs == 90.0 (<NSLayoutConstraint … .height == 90 (active)>)"
+    //
+    // Not witnessed: `expectNoAmbiguousLayout`. Witness 1 — the one bug in this
+    // tile that AppKit's ambiguity reporting is advertised to catch — is caught by
+    // the fill-ratio gate first, and no edit found so far makes the scoped
+    // transcript column report ambiguity without also breaking a stronger
+    // assertion. It is kept as a cheap structural assertion, not a proven gate.
+}
