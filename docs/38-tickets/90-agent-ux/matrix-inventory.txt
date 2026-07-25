@@ -116,6 +116,7 @@ check --zone-save-isolation-check
 check --zone-tier-transition-check
 leg run git diff --check
 leg run scripts/check-app-bundle.sh --configuration debug
+leg run scripts/check-color-hygiene.sh
 leg run scripts/check-matrix-inventory.sh
 leg run scripts/check-root-docs.sh
 leg run swift build

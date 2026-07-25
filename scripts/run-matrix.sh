@@ -122,6 +122,13 @@ run_ios_build() {
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
 run scripts/check-matrix-inventory.sh
+# Ticket P1.7: colour hygiene. A pure grep lint over the view layers, so it runs
+# before the build for the same reason as the inventory guard — a new raw colour
+# should be named in seconds, not after a full build. Red on any raw colour or
+# any Apple semantic colour on a hardcoded fill that is not line-scoped in
+# docs/38-tickets/90-agent-ux/color-hygiene-allowlist.txt, and equally red when
+# an allowlisted line disappears, so the list cannot rot.
+run scripts/check-color-hygiene.sh
 run swift build
 run_ios_build
 run swift run ContinuumRevivedCoreChecks
