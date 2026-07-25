@@ -20,4 +20,7 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
 // Ticket: docs/38-tickets/87-agent-ui-component-framework.md
 runStatusChipChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P1.2-tokencolor-light-dark.md
+runTokenColorChecks()
+
 print("ContinuumRevivedAgentUIChecks passed")
