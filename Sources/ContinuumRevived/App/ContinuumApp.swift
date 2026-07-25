@@ -3786,12 +3786,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // Run artifact viewer tiles are read-only; retain the run directory.
             break
         case .managedAgent:
+            // CLOSING A TILE IS CLOSING A WINDOW, NOT ENDING THE WORK (P2A.5, locked
+            // decision). Three things happen here and a fourth deliberately does not:
+            // the tile-keyed `ManagedAgentSessionRecord` goes (view state, the same
+            // class as canvas persistence dropping the tile — its `tileId` is a
+            // `let`, so it cannot outlive the tile it is keyed on); the agent's VIEW
+            // BINDING is cleared, so it is listed as running-and-unattached rather
+            // than claiming a tile that no longer exists; the tile cancels its own
+            // subscription (P2A.4). What is NOT called is `agentSupervisor.stop` —
+            // the runner keeps running and `AgentRecord` stays in `AgentStore`.
+            // Stopping is a separate deliberate action (Phase 3's row context menu).
+            // `--agent-supervisor-check` scans this branch to hold that.
             try? workspaceRuntime?.activeController?.managedSessionStore.delete(tileId: id)
-            // The tile owns its subscription (P2A.4), so closing it detaches rather
-            // than cancelling a task this file holds. Deliberately NOT stopping the
-            // agent or clearing `AgentRecord.tileId` — closing a tile must not kill
-            // an agent (locked decision), and detach as a user-facing operation is
-            // P2A.5's.
+            if let agentId = agentSupervisor.agent(forTile: id) {
+                agentSupervisor.detachView(agentID: agentId)
+            }
             (canvasView.tileView(for: id) as? ManagedAgentTileNSView)?.detach()
         }
 
@@ -7566,6 +7575,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 tileId: tileId
             )
         }
+        // The view binding lives in one place (P2A.5), so this is the site that
+        // records it whichever branch above ran — and the site Phase 3's "open in
+        // tile" reaches when it hands us an agent that was detached, whose record
+        // therefore no longer names this tile.
+        supervisor.attach(agentID: agentId, to: tileId)
 
         view.onSubmitPrompt = { [weak view] prompt in
             guard let view else { return }

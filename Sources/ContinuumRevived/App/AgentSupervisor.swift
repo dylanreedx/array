@@ -205,6 +205,50 @@ final class AgentSupervisor {
         deliver(.sessionStateChanged(.stopped), to: id)
     }
 
+    // MARK: - View binding (P2A.5)
+
+    /// Binds an agent to a tile. `AgentRecord.tileId` is WHERE THE AGENT IS BEING
+    /// SHOWN, not who owns it, so this is the only thing attaching a view changes:
+    /// no runner is started, stopped or replaced.
+    ///
+    /// One tile shows one agent, so an agent claiming a tile another agent still
+    /// claims unbinds that other one. Without it `agent(forTile:)` — a
+    /// `first(where:)` over the records — would answer nondeterministically after
+    /// Phase 3's "open in tile" retargets a tile, and the losing agent would keep a
+    /// stale binding that says it is visible when it is not.
+    func attach(agentID id: AgentID, to tileId: UUID) {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.attach: no agent \(id.rawValue.uuidString)")
+            return
+        }
+        for (otherId, other) in records where otherId != id && other.tileId == tileId {
+            var displaced = other
+            displaced.tileId = nil
+            records[otherId] = displaced
+            persist(displaced)
+        }
+        guard record.tileId != tileId else { return }
+        record.tileId = tileId
+        records[id] = record
+        persist(record)
+    }
+
+    /// Unbinds the view and NOTHING ELSE: the runner keeps running, the record stays
+    /// in the store, and the agent's stream keeps delivering to its other
+    /// subscribers. This is what closing a tile does (`AppDelegate.deleteTile`) —
+    /// closing a tile is closing a window, not ending the work (locked decision).
+    /// Ending the work is `stop(_:)`, which only a deliberate action calls.
+    func detachView(agentID id: AgentID) {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.detachView: no agent \(id.rawValue.uuidString)")
+            return
+        }
+        guard record.tileId != nil else { return }
+        record.tileId = nil
+        records[id] = record
+        persist(record)
+    }
+
     /// The agent bound to a tile, if this session spawned one. In-memory only —
     /// nothing is loaded from the store at init, so this dedupes a re-wire within a
     /// launch and NOT across launches (P2A.7).
@@ -308,6 +352,7 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     private var runCountStorage = 0
     private var completedRunStorage = 0
     private var promptsStorage: [String] = []
+    private var liveHandler: (@Sendable (AgentRuntimeEvent) -> Void)?
 
     init(script: [AgentRuntimeEvent], holdUntilStopped: Bool = false) {
         self.script = script
@@ -327,10 +372,26 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
         lock.withLock {
             runCountStorage += 1
             promptsStorage.append(prompt)
+            liveHandler = onEvent
         }
         for event in script { onEvent(event) }
         if holdUntilStopped { released.wait() }
-        lock.withLock { completedRunStorage += 1 }
+        lock.withLock {
+            completedRunStorage += 1
+            liveHandler = nil
+        }
+    }
+
+    /// Emits one more event from the turn that is CURRENTLY BLOCKED in `run`, i.e.
+    /// from a runner the supervisor still holds. `false` when no run is in flight, so
+    /// a check cannot mistake "the agent produced nothing" for "the agent was gone".
+    /// P2A.5 needs it: proving a detached agent still delivers to the supervisor takes
+    /// an event produced AFTER the detach, and `send` is (correctly) refused while a
+    /// prompt is in flight.
+    func emit(_ event: AgentRuntimeEvent) -> Bool {
+        guard let handler = lock.withLock({ liveHandler }) else { return false }
+        handler(event)
+        return true
     }
 
     func stop() {
@@ -574,8 +635,12 @@ func runAgentSupervisorChecks() async throws {
 
     let tileReport = try await checkTileIsASubscriber(store: store, config: config, cwd: cwd, fail: fail)
 
+    // MARK: 8 · closing a tile is closing a window, not ending the work (P2A.5)
+
+    let detachReport = try await checkDetachOutlivesItsTile(store: store, config: config, cwd: cwd, fail: fail)
+
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport)")
 }
 
 /// A runner factory that hands out one scripted runner per `send`, in order. The
@@ -824,6 +889,323 @@ private func checkTileIsASubscriber(
     tile.detach()
 
     return "a tile replayed \(turnOne.count) history events on attach, tailed \(turnTwo.count) more, detached without stopping an in-flight turn, and re-attached to a second agent without mixing transcripts"
+}
+
+/// P2A.5: the tile-close path in full. A tile is attached to a running agent, a
+/// prompt is left IN FLIGHT, and then exactly what `AppDelegate.deleteTile`'s
+/// `.managedAgent` branch does happens — `supervisor.detachView` plus
+/// `tile.detach()` — after which the agent must still be running, still listed with
+/// no tile binding, and still delivering. Stopping is then shown to be the separate
+/// deliberate action that DOES end it.
+///
+/// The production branch itself is source-scanned rather than executed
+/// (`managedAgentCloseBranchSource`); the precedent is `piRunnerConstructionSites`
+/// above. `deleteTile` is an `AppDelegate` method over a live `canvasView`,
+/// `workspaceRuntime`, focus broker and canvas save — and it reads
+/// `DeleteConfirmPolicy`, which under `.always` runs an `NSAlert` modal — so
+/// executing it headlessly needs an app-level harness that does not exist and that
+/// this packet's `## Files` does not name. What the scan buys is that "never as a
+/// side effect of closing a tile" is asserted rather than claimed about a diff; what
+/// it does not cover is the rest of that branch's ordering (the
+/// `managedSessionStore.delete`, `removeTile`, focus recovery and canvas flush that
+/// already shipped), which stays the cross-review's and the owner's to read.
+///
+/// Negative tests observed red at exit 1 with the final code (production edits
+/// except where noted):
+/// · `detachView` not clearing `record.tileId` →
+///   `FAIL: closing the tile left the persisted record claiming tile …`
+/// · `detachView` clearing only the in-memory record (no `persist`) →
+///   the same failure, since the assertion reads the store, not `records`
+/// · `agentSupervisor.stop(agentId)` added next to `detachView` in `deleteTile` →
+///   `FAIL: deleteTile's .managedAgent branch stops the agent: …`
+/// · the `detachView` call deleted from `deleteTile` →
+///   `FAIL: deleteTile's .managedAgent branch never detaches the agent's view …`
+/// · `attach` not unbinding the tile's previous agent →
+///   `FAIL: two agents claim tile …`
+/// · (check-local vacuity witness, from the cross-review) the reaper's stale record
+///   written at `Date()` instead of `.distantPast` →
+///   `FAIL: the reaper sweep did not fire, so it proves nothing about a detached
+///   agent: []`
+/// · `attach` not persisting →
+///   `FAIL: attach did not persist the tile binding: nil, expected …` (the assertion
+///   reads the STORE after every bind, so an in-memory-only binding is red at the
+///   first one)
+@MainActor
+private func checkDetachOutlivesItsTile(
+    store: AgentStore,
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Error
+) async throws -> String {
+    let provider = "provider-thread"
+    let firstTurn: [AgentRuntimeEvent] = [
+        .sessionStateChanged(.running),
+        .contentDelta(threadId: provider, turnId: "t1", streamKind: .assistant, delta: "alpha"),
+        .turnCompleted(threadId: provider, turnId: "t1", outcome: .completed, errorMessage: nil)
+    ]
+    // The second turn blocks, so the agent is provably mid-work when its tile closes.
+    let blocking = ScriptedAgentRunner(script: [.turnStarted(threadId: provider, turnId: "t2")], holdUntilStopped: true)
+    let queue = ScriptedRunnerQueue([ScriptedAgentRunner(script: firstTurn), blocking])
+    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0) })
+
+    // Spawned with NO tile, then bound by `attach` — the operation P2A.5 adds, and
+    // the one Phase 3's "open in tile" will reach.
+    let agentId = supervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking
+    )
+    let tileId = UUID()
+    supervisor.attach(agentID: agentId, to: tileId)
+    let boundTileId = try store.load(id: agentId)?.tileId
+    guard boundTileId == tileId else {
+        throw fail("attach did not persist the tile binding: \(String(describing: boundTileId)), expected \(tileId)")
+    }
+    guard supervisor.agent(forTile: tileId) == agentId else {
+        throw fail("the attached agent is not the one found for its tile")
+    }
+
+    let probe = EventInbox()
+    let probeStream = supervisor.events(for: agentId)
+    let probeTask = Task { @MainActor in for await event in probeStream { probe.append(event) } }
+    defer { probeTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { supervisor.subscriberCount(for: agentId) == 1 }) else {
+        throw fail("the probe subscriber did not register")
+    }
+
+    let tile = ManagedAgentTileNSView(tile: Tile(
+        id: tileId,
+        kind: .managedAgent,
+        title: "agent",
+        frame: TileFrame(x: 0, y: 0, width: 520, height: 320),
+        zPosition: .fromLegacyRank(1),
+        runtimeRef: nil,
+        metadata: TileMetadata(launchProfileId: "managed")
+    ))
+    tile.frame = NSRect(x: 0, y: 0, width: 520, height: 320)
+    tile.attach(agentID: agentId, supervisor: supervisor)
+
+    supervisor.send("first prompt", to: agentId)
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { tile.ingestedEvents.count == firstTurn.count }) else {
+        throw fail("the first turn did not reach the attached tile: \(tile.ingestedEvents.count) of \(firstTurn.count)")
+    }
+    // The first runner has to be RELEASED before the next send, or the second prompt
+    // is (correctly) refused as concurrent: `run` returning and the supervisor
+    // clearing `runners[id]` are one main-queue hop apart.
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { supervisor.isRunning(agentId) == false }) else {
+        throw fail("the first turn's runner was never released")
+    }
+    supervisor.send("second prompt", to: agentId)
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { supervisor.isRunning(agentId) && blocking.runCount == 1 }) else {
+        throw fail("the blocking turn did not start; runCount \(blocking.runCount)")
+    }
+
+    // THE CLOSE PATH, exactly as `deleteTile`'s `.managedAgent` branch runs it.
+    supervisor.detachView(agentID: agentId)
+    tile.detach()
+
+    guard let afterClose = try store.load(id: agentId) else {
+        throw fail("closing the tile removed the agent's record from the store — the agent is the entity, the tile is one view of it")
+    }
+    guard afterClose.tileId == nil else {
+        throw fail("closing the tile left the persisted record claiming tile \(String(describing: afterClose.tileId))")
+    }
+    guard supervisor.agent(forTile: tileId) == nil else {
+        throw fail("the closed tile still resolves to an agent")
+    }
+    guard supervisor.records[agentId] != nil else {
+        throw fail("closing the tile dropped the agent from the supervisor's live records")
+    }
+    guard supervisor.isRunning(agentId) else {
+        throw fail("closing the tile stopped the agent's in-flight turn")
+    }
+    guard blocking.stopCount == 0, blocking.completedRuns == 0 else {
+        throw fail("closing the tile reached the runner: stopCount \(blocking.stopCount), completedRuns \(blocking.completedRuns)")
+    }
+
+    // Events still flow to the supervisor, from the turn that is still running.
+    let probeAtClose = probe.events.count
+    let tileAtClose = tile.ingestedEvents.count
+    guard blocking.emit(.contentDelta(threadId: provider, turnId: "t2", streamKind: .assistant, delta: "beta")) else {
+        throw fail("the detached agent's runner is no longer in flight, so post-close delivery is untestable")
+    }
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { probe.events.count == probeAtClose + 1 }) else {
+        throw fail("an event produced after the tile closed did not reach the supervisor's remaining subscriber")
+    }
+    guard case let .contentDelta(threadId, _, _, delta) = probe.events[probeAtClose],
+          delta == "beta",
+          threadId == AgentSupervisor.threadId(for: agentId) else {
+        throw fail("the post-close event arrived wrong: \(probe.events[probeAtClose])")
+    }
+    guard tile.ingestedEvents.count == tileAtClose else {
+        throw fail("the closed tile kept ingesting: \(tile.ingestedEvents.count) events, was \(tileAtClose)")
+    }
+
+    // THE IDLE REAPER (the packet's watch-out). What this asserts, exactly: a real
+    // `SessionPruner.sweep()` over a maximally stale binding covering the closed
+    // tile issues a tmux `detachSession` and NO kill, and leaves the detached
+    // agent running with its record intact. That is the whole of the reaper's
+    // mutating surface, and a supervisor agent is a Pi process the supervisor holds
+    // rather than a tmux pane, so there is nothing for it to reap.
+    //
+    // The binding is built with the PRODUCTION expression
+    // (`ZoneRuntimeController.startReaper`'s `managedSessionStore.load(tileId:)?
+    // .lastSeenAt`, ~:350) over a real `ManagedAgentSessionRecord` written stale, so
+    // the `lastSeenAt` path the watch-out names is the one under test. What stays
+    // unexercised is `startReaper`'s own wiring, which needs a live
+    // `ZoneRuntimeController`; it contributes only `sessionName`/`tileIds`/
+    // `lastSeenAt` to this same sweep.
+    let reaperProjectRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-agent-supervisor-reaper-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: reaperProjectRoot) }
+    let managedSessionStore = ManagedAgentSessionStore(projectRoot: reaperProjectRoot)
+    try managedSessionStore.upsert(ManagedAgentSessionRecord(
+        tileId: tileId,
+        agentKind: .managed,
+        lastSeenAt: .distantPast
+    ))
+    guard let staleLastSeenAt = try managedSessionStore.load(tileId: tileId)?.lastSeenAt else {
+        throw fail("the stale managed-session record did not persist, so the reaper binding is not the production one")
+    }
+    let tmux = InMemoryTmuxControl()
+    let binding = SessionPruner.SessionBinding(
+        sessionName: "continuum-agent-supervisor-check",
+        tileIds: [tileId],
+        lastSeenAt: staleLastSeenAt
+    )
+    let pruner = SessionPruner(
+        tmuxControl: tmux,
+        clock: SystemClock(),
+        bindingSource: { [binding] in [binding] },
+        activitySnapshotSource: { nil }
+    )
+    await pruner.sweep()
+    guard tmux.log.contains(.detachSession(name: binding.sessionName)) else {
+        throw fail("the reaper sweep did not fire, so it proves nothing about a detached agent: \(tmux.log)")
+    }
+    let reaperKills = tmux.log.filter {
+        if case .killSession = $0 { return true }
+        if case .killWindow = $0 { return true }
+        return false
+    }
+    guard reaperKills.isEmpty else {
+        throw fail("the reaper killed something for an idle binding: \(reaperKills)")
+    }
+    guard supervisor.isRunning(agentId), try store.load(id: agentId) != nil else {
+        throw fail("an idle reaper sweep reaped a detached, still-running agent")
+    }
+
+    // Re-attach to a DIFFERENT tile: the agent is rebindable after its first view
+    // closed, and the replay carries the work it did while unattached.
+    let secondTileId = UUID()
+    supervisor.attach(agentID: agentId, to: secondTileId)
+    let reboundTileId = try store.load(id: agentId)?.tileId
+    guard reboundTileId == secondTileId else {
+        throw fail("re-attaching did not persist the new tile binding: \(String(describing: reboundTileId))")
+    }
+    let secondTile = ManagedAgentTileNSView(tile: Tile(
+        id: secondTileId,
+        kind: .managedAgent,
+        title: "agent",
+        frame: TileFrame(x: 0, y: 0, width: 520, height: 320),
+        zPosition: .fromLegacyRank(1),
+        runtimeRef: nil,
+        metadata: TileMetadata(launchProfileId: "managed")
+    ))
+    secondTile.frame = NSRect(x: 0, y: 0, width: 520, height: 320)
+    let historyCount = probe.events.count
+    secondTile.attach(agentID: agentId, supervisor: supervisor)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { secondTile.ingestedEvents.count == historyCount }) else {
+        throw fail("a new tile did not replay the surviving agent's history: \(secondTile.ingestedEvents.count) of \(historyCount)")
+    }
+    guard secondTile.qaTranscriptText.contains("alpha"), secondTile.qaTranscriptText.contains("beta") else {
+        throw fail("the re-attached transcript lost the work done before or after the close: \(secondTile.qaTranscriptText)")
+    }
+
+    // One tile shows one agent: binding a second agent to that tile unbinds the first.
+    let otherAgentId = supervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking
+    )
+    supervisor.attach(agentID: otherAgentId, to: secondTileId)
+    let claimants = supervisor.records.values.filter { $0.tileId == secondTileId }.map(\.id)
+    guard claimants == [otherAgentId] else {
+        throw fail("two agents claim tile \(secondTileId): \(claimants.map { $0.rawValue.uuidString })")
+    }
+    guard try store.load(id: agentId)?.tileId == nil else {
+        throw fail("the displaced agent's persisted record still claims the tile it lost")
+    }
+    guard supervisor.isRunning(agentId) else {
+        throw fail("being displaced from a tile stopped the agent")
+    }
+
+    // …and stopping IS the thing that ends it — a separate deliberate action, which
+    // leaves the record in place (stopped, not deleted).
+    supervisor.stop(agentId)
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { blocking.completedRuns == 1 }) else {
+        throw fail("stop did not make the surviving agent's blocked run() return: completedRuns \(blocking.completedRuns)")
+    }
+    guard blocking.stopCount == 1, supervisor.isRunning(agentId) == false else {
+        throw fail("stop did not reach the runner: stopCount \(blocking.stopCount), isRunning \(supervisor.isRunning(agentId))")
+    }
+    guard try store.load(id: agentId) != nil else {
+        throw fail("stopping an agent deleted its record; stopped is a state, not a removal")
+    }
+    secondTile.detach()
+
+    // The production branch: it detaches, and it does not stop.
+    let branch = try managedAgentCloseBranchSource()
+    guard branch.contains("detachView(") else {
+        throw fail("deleteTile's .managedAgent branch never detaches the agent's view — a closed tile would leave the agent claiming a tile that no longer exists:\n\(branch)")
+    }
+    guard branch.contains(".detach()") else {
+        throw fail("deleteTile's .managedAgent branch does not detach the tile's own subscription:\n\(branch)")
+    }
+    let stopPattern = try NSRegularExpression(pattern: "\\.stop\\s*\\(")
+    guard stopPattern.firstMatch(in: branch, range: NSRange(branch.startIndex..., in: branch)) == nil else {
+        throw fail("deleteTile's .managedAgent branch stops the agent: closing a tile must not end the work (locked decision); stopping is a deliberate action:\n\(branch)")
+    }
+
+    return "a tile closed on an in-flight turn without stopping it (record kept, tileId cleared, events still delivered, an idle sweep could not reach it), the agent re-attached to a new tile and was displaced from it by a second agent, and only stop() ended the turn"
+}
+
+/// The lines of `AppDelegate.deleteTile`'s `case .managedAgent:` branch, comments
+/// stripped. Source-read for the same reason `piRunnerConstructionSites` is: the
+/// branch needs a canvas, a workspace runtime and a modal-capable app to execute, so
+/// "closing a tile never stops the agent" is otherwise only assertable by reading the
+/// diff. Bounded by indentation (the branch's own `case` is at eight spaces) rather
+/// than by a closing brace, since the branch contains nested blocks.
+private func managedAgentCloseBranchSource() throws -> String {
+    struct ScanError: Error, CustomStringConvertible { let description: String }
+    let path = "Sources/ContinuumRevived/App/ContinuumApp.swift"
+    let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        .appendingPathComponent(path)
+    guard let source = try? String(contentsOf: url, encoding: .utf8) else {
+        throw ScanError(description: "could not read \(path) — run this check from the repo root")
+    }
+    let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    guard let functionStart = lines.firstIndex(where: { $0.contains("func deleteTile(id: UUID) {") }) else {
+        throw ScanError(description: "no `func deleteTile(id: UUID)` in \(path)")
+    }
+    guard let branchStart = lines[functionStart...].firstIndex(where: { $0 == "        case .managedAgent:" }) else {
+        throw ScanError(description: "no `case .managedAgent:` in deleteTile — the close path moved, and this scan is now blind")
+    }
+    var body: [String] = []
+    for line in lines[(branchStart + 1)...] {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if !line.hasPrefix("         ") && !trimmed.isEmpty { break }
+        if trimmed.hasPrefix("//") { continue }
+        body.append(line)
+    }
+    guard !body.isEmpty else {
+        throw ScanError(description: "deleteTile's .managedAgent branch scanned as empty")
+    }
+    return body.joined(separator: "\n")
 }
 
 /// Main-actor collector for a subscriber task. A class so the collecting closure
