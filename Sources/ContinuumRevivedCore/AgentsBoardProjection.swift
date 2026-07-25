@@ -19,6 +19,11 @@ public struct AgentsBoardRow: Equatable, Sendable, Identifiable {
     public let lastSummary: String
     public let recent: [AgentActivityEvent]
     public let updatedAt: Date
+    /// P2B.3: project / zone / title / model, joined from `AgentContextIndex`.
+    /// OPTIONAL, and defaulted, so every existing construction site (including
+    /// the iOS one) keeps compiling and a consumer that has no index still gets
+    /// rows. nil means "not joined", never "the agent has no context".
+    public let context: AgentRowContext?
 
     public init(
         agentId: UUID,
@@ -26,7 +31,8 @@ public struct AgentsBoardRow: Equatable, Sendable, Identifiable {
         status: AgentStatus,
         lastSummary: String,
         recent: [AgentActivityEvent],
-        updatedAt: Date
+        updatedAt: Date,
+        context: AgentRowContext? = nil
     ) {
         self.agentId = agentId
         self.tileId = tileId
@@ -34,6 +40,7 @@ public struct AgentsBoardRow: Equatable, Sendable, Identifiable {
         self.lastSummary = lastSummary
         self.recent = recent
         self.updatedAt = updatedAt
+        self.context = context
     }
 }
 
@@ -50,7 +57,13 @@ public struct ApprovalResponseTarget: Equatable, Sendable {
 }
 
 public enum AgentsBoardProjection {
-    public static func rows(from snapshot: ActivityLogSnapshot) -> [AgentsBoardRow] {
+    /// `context` is keyed by agent identity, the same key `snapshot.byAgent` uses
+    /// (see `AgentContextIndex.build`). Defaulted to empty so a caller with no
+    /// index — the phone, a fixture — projects exactly the rows it did before.
+    public static func rows(
+        from snapshot: ActivityLogSnapshot,
+        context: [UUID: AgentRowContext] = [:]
+    ) -> [AgentsBoardRow] {
         snapshot.byAgent.map { agentId, activity in
             AgentsBoardRow(
                 agentId: agentId,
@@ -58,7 +71,8 @@ public enum AgentsBoardProjection {
                 status: activity.status,
                 lastSummary: activity.lastSummary,
                 recent: activity.recent,
-                updatedAt: activity.updatedAt
+                updatedAt: activity.updatedAt,
+                context: context[agentId]
             )
         }
         .sorted(by: attentionFirst)

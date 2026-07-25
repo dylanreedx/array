@@ -9972,4 +9972,8 @@ runAgentStoreChecks()
 // terminal sessions and agents (tiled or headless) as one value.
 runAgentInventoryChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P2B.3-row-context-join.md — which agent
+// this is: project / zone / title / model joined onto every row.
+runAgentContextIndexChecks()
+
 print("ContinuumRevivedCoreChecks passed")
