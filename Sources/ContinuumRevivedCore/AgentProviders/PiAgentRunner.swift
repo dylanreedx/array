@@ -142,7 +142,10 @@ public final class PiAgentRunner: @unchecked Sendable {
         )
     }
 
-    private let config: Config
+    /// Readable so a check can assert what the PRODUCTION runner was configured
+    /// with — P2C.2 needs `cwd` to be the agent's worktree, and an injected fake
+    /// runner cannot witness that (from the cross-review).
+    public let config: Config
     private let queue = DispatchQueue(label: "continuum.pi-agent-runner")
     private var translator = PiEventTranslator()
     private var buffer = Data()

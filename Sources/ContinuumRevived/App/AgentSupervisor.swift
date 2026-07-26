@@ -60,6 +60,10 @@ final class AgentSupervisor {
     private let store: AgentStore
     private let makeRunner: (AgentRecord) -> AgentRunning
     private let warn: (String) -> Void
+    /// P2C.1's `git worktree` wrapper, used only by the isolated `spawn`. Not
+    /// injectable: the checks exercise the failure path with a real failure (a `cwd`
+    /// that is not a repository), so a fake would test less than the real thing.
+    private let worktrees = WorktreeManager()
 
     /// The records this supervisor owns, in memory. `AgentStore` is the durable
     /// copy; this is the live one.
@@ -205,6 +209,11 @@ final class AgentSupervisor {
     /// Creates an agent, persists it, and (when `prompt` is non-empty) runs that
     /// first prompt. `tileId` is a VIEW BINDING, not identity — `nil` is a headless
     /// agent (P2A.6).
+    ///
+    /// The agent works in `cwd` — today's behaviour, and the unchanged default. The
+    /// isolated form below is a separate, THROWING entry point rather than a defaulted
+    /// `isolated:` parameter on this one: only isolation can fail, and folding it in
+    /// here would make every existing caller handle an error its call can never raise.
     func spawn(
         role: String?,
         prompt: String?,
@@ -214,8 +223,80 @@ final class AgentSupervisor {
         projectId: UUID? = nil,
         tileId: UUID? = nil
     ) -> AgentID {
-        let now = Date()
+        makeAgent(
+            id: AgentID(rawValue: UUID()),
+            role: role,
+            prompt: prompt,
+            cwd: cwd,
+            worktreeBranch: nil,
+            model: model,
+            thinking: thinking,
+            projectId: projectId,
+            tileId: tileId
+        )
+    }
+
+    /// P2C.2 — spawn that can opt into its own checkout.
+    ///
+    /// `isolated: true` runs `git worktree add` against `cwd` (the project root) and
+    /// gives the agent `<repo>/.worktrees/<slug>` on `agent/<slug>`: the record's `cwd`
+    /// IS the worktree, so `piRunner(for:)` — which reads `record.cwd` — starts Pi
+    /// there, and `worktreeBranch` records which branch the work lands on. `false` is
+    /// exactly the call above.
+    ///
+    /// A worktree that cannot be created FAILS THE SPAWN. No agent, no record, no
+    /// fallback to the main checkout: falling back would silently put a supposedly
+    /// isolated agent in the shared tree, which is the clobbering 2C exists to
+    /// prevent, and the caller would never learn it.
+    func spawn(
+        role: String?,
+        prompt: String?,
+        cwd: URL,
+        model: String,
+        thinking: String,
+        projectId: UUID? = nil,
+        tileId: UUID? = nil,
+        isolated: Bool
+    ) throws -> AgentID {
+        // The id is minted HERE, before anything is created, because the slug is
+        // derived from it — `WorktreeManager.slug` id-suffixes so two agents given the
+        // same role and prompt do not land on one directory and one branch.
         let id = AgentID(rawValue: UUID())
+        var workingDirectory = cwd
+        var branch: String?
+        if isolated {
+            let worktree = try worktrees.add(
+                repo: cwd,
+                slug: WorktreeManager.slug(role: role, prompt: prompt, id: id)
+            )
+            workingDirectory = worktree.path
+            branch = worktree.branch
+        }
+        return makeAgent(
+            id: id,
+            role: role,
+            prompt: prompt,
+            cwd: workingDirectory,
+            worktreeBranch: branch,
+            model: model,
+            thinking: thinking,
+            projectId: projectId,
+            tileId: tileId
+        )
+    }
+
+    private func makeAgent(
+        id: AgentID,
+        role: String?,
+        prompt: String?,
+        cwd: URL,
+        worktreeBranch: String?,
+        model: String,
+        thinking: String,
+        projectId: UUID?,
+        tileId: UUID?
+    ) -> AgentID {
+        let now = Date()
         let record = AgentRecord(
             id: id,
             displayName: role ?? model,
@@ -223,6 +304,7 @@ final class AgentSupervisor {
             model: model,
             thinking: thinking,
             cwd: cwd.path,
+            worktreeBranch: worktreeBranch,
             projectId: projectId,
             createdAt: now,
             lastActivityAt: now,
@@ -742,8 +824,12 @@ func runAgentSupervisorChecks() async throws {
 
     let headlessReport = try await checkHeadlessAgents(store: store, config: config, cwd: cwd, fail: fail)
 
+    // MARK: 10 · an isolated spawn works in its own checkout (P2C.2)
+
+    let isolationReport = try await checkIsolatedSpawn(config: config, fail: fail)
+
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport)")
 }
 
 /// Gated on `--agent-restore-check` (P2A.7).
@@ -1879,6 +1965,259 @@ private func checkHeadlessAgents(
     }
 
     return "\(headlessCount) agents ran concurrently with no tile (two past the \(ZoneHydrationBudgetConfig.defaultMaxLiveZones)-zone hydration budget), each persisted with tileId nil and delivering events, one then took a tile and replayed the work it did headless, and stopAll made every blocked run() return"
+}
+
+/// A runner factory that records the `cwd` of every record it is handed. The record
+/// is what `AgentSupervisor.piRunner(for:)` reads to build `PiAgentRunner.Config`, so
+/// this is the working directory the real provider process would start in.
+@MainActor
+private final class SpawningCwdRecorder {
+    private(set) var cwds: [String] = []
+    private let runner: ScriptedAgentRunner
+
+    init(_ runner: ScriptedAgentRunner) { self.runner = runner }
+
+    func make(_ record: AgentRecord) -> AgentRunning {
+        cwds.append(record.cwd)
+        return runner
+    }
+}
+
+/// P2C.2 — an isolated spawn works in its OWN checkout.
+///
+/// Runs against a temp `git init` repository created here and deleted after. The real
+/// repository is never a `git worktree add` target — P2C.1's explicit trap, inherited.
+///
+/// Four properties:
+///   1. An isolated spawn's record has `cwd` inside `<repo>/.worktrees/` and
+///      `worktreeBranch` set, and GIT agrees both exist (`git worktree list`).
+///   2. The runner is handed that directory, and the branch actually checked out
+///      there is the agent's own — asserted with `git rev-parse --abbrev-ref HEAD`
+///      inside the cwd the runner was constructed with, so "the agent works on its own
+///      branch" is a git fact rather than a string comparison against the same
+///      constant the code built. The PRODUCTION factory is asserted too
+///      (`PiAgentRunner.Config.cwd`), since an injected runner cannot witness it.
+///   3. A non-isolated spawn against the same repo is UNCHANGED: `cwd` is the project
+///      root, `worktreeBranch` is nil, and no new worktree appears.
+///   4. NO FALLBACK, the packet's load-bearing rule. Two real `add` failures — a `cwd`
+///      that is not a repository, and a `.worktrees` path occupied by a file — must
+///      throw out of `spawn` and leave NO agent behind, in memory or on disk. A silent
+///      fallback would put a supposedly isolated agent in the shared tree.
+///
+/// Negative tests observed red at exit 1 with the final code:
+/// · `spawn(isolated:)` ignoring `isolated` (always `cwd`, no worktree) →
+///   `FAIL: an isolated spawn's cwd … is not inside …/.worktrees/`
+/// · setting `worktreeBranch: nil` on the isolated path →
+///   `FAIL: an isolated agent's record does not name its branch`
+/// · catching the `add` failure and falling back to `cwd` →
+///   `FAIL: a failed worktree (not a repository) did not fail the spawn — the agent
+///    landed in the main checkout …`
+/// · `piRunner(for:)` building its `Config` with a fixed cwd instead of `record.cwd` →
+///   `FAIL: the production runner would start Pi in /Users/dylan, not the agent's
+///    worktree …`
+@MainActor
+private func checkIsolatedSpawn(
+    config: AgentModelConfig.Resolution,
+    fail: (String) -> Error
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-isolated-spawn-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+    let repo = root.appendingPathComponent("repo", isDirectory: true)
+    try makeIsolatedSpawnRepo(at: repo)
+    let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support", isDirectory: true))
+
+    // MARK: 1–2 · the isolated agent's own checkout
+
+    let runner = ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+    let recorder = SpawningCwdRecorder(runner)
+    let supervisor = AgentSupervisor(store: store, makeRunner: { recorder.make($0) })
+    let isolatedId = try supervisor.spawn(
+        role: "implementer",
+        prompt: "fix auth",
+        cwd: repo,
+        model: config.model,
+        thinking: config.thinking,
+        isolated: true
+    )
+    guard let isolated = supervisor.records[isolatedId] else {
+        throw fail("the supervisor lost the isolated agent it spawned")
+    }
+    let container = repo.appendingPathComponent(WorktreeManager.containerDirectoryName, isDirectory: true)
+    guard isolated.cwd.hasPrefix(container.path + "/") else {
+        throw fail("an isolated spawn's cwd \(isolated.cwd) is not inside \(container.path)/")
+    }
+    guard let branch = isolated.worktreeBranch else {
+        throw fail("an isolated agent's record does not name its branch")
+    }
+    guard branch.hasPrefix(WorktreeManager.branchPrefix) else {
+        throw fail("an isolated agent's branch \(branch) is not under \(WorktreeManager.branchPrefix)")
+    }
+    let slug = URL(fileURLWithPath: isolated.cwd).lastPathComponent
+    guard branch == WorktreeManager.branchName(slug: slug) else {
+        throw fail("the branch \(branch) does not match the worktree directory \(slug)")
+    }
+    // The role and the prompt are both in the slug, so a spawn that dropped either
+    // from the derivation would produce a directory no one can identify.
+    guard slug.hasPrefix("implementer-fix-auth-") else {
+        throw fail("the worktree directory \(slug) is not derived from the agent's role and prompt")
+    }
+
+    // Git's own view, not the manager's return value: `list` re-reads the repository.
+    let manager = WorktreeManager()
+    let listed = try manager.list(repo: repo)
+    guard listed.contains(where: {
+        isolatedSpawnResolved($0.path) == isolatedSpawnResolved(URL(fileURLWithPath: isolated.cwd)) && $0.branch == branch
+    }) else {
+        throw fail("git does not know about the agent's worktree: \(listed.map { "\($0.path.path)@\($0.branch ?? "detached")" })")
+    }
+
+    // …and the runner was pointed at it. The recorder captures what
+    // `AgentSupervisor.piRunner(for:)` reads (`record.cwd`), and the branch is read
+    // back out of that directory with git.
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { recorder.cwds.count == 1 }) else {
+        throw fail("the isolated spawn's prompt never reached a runner: \(recorder.cwds)")
+    }
+    guard recorder.cwds == [isolated.cwd] else {
+        throw fail("the runner was constructed for \(recorder.cwds) rather than the worktree \(isolated.cwd)")
+    }
+    let checkedOut = try runIsolatedSpawnGit(["rev-parse", "--abbrev-ref", "HEAD"], in: URL(fileURLWithPath: isolated.cwd))
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard checkedOut == branch else {
+        throw fail("the directory the runner works in is on branch \(checkedOut), not the agent's \(branch)")
+    }
+    // The PRODUCTION factory, not the recorder: an injected runner cannot witness
+    // what `PiAgentRunner.Config.cwd` would be, so a regression in `piRunner(for:)`
+    // would pass everything above (from the cross-review).
+    guard let production = AgentSupervisor.piRunner(for: isolated) as? PiAgentRunner else {
+        throw fail("the default runner factory does not produce a PiAgentRunner for an isolated agent")
+    }
+    guard production.config.cwd.path == isolated.cwd else {
+        throw fail("the production runner would start Pi in \(production.config.cwd.path), not the agent's worktree \(isolated.cwd)")
+    }
+
+    // MARK: 3 · a non-isolated spawn is exactly what it was
+
+    let plainId = supervisor.spawn(
+        role: "reviewer",
+        prompt: nil,
+        cwd: repo,
+        model: config.model,
+        thinking: config.thinking
+    )
+    guard let plain = supervisor.records[plainId] else {
+        throw fail("the supervisor lost the non-isolated agent it spawned")
+    }
+    guard plain.cwd == repo.path, plain.worktreeBranch == nil else {
+        throw fail("a non-isolated spawn changed: cwd \(plain.cwd) branch \(plain.worktreeBranch ?? "nil") — it must stay the project root with no branch")
+    }
+    guard try manager.list(repo: repo).count == listed.count else {
+        throw fail("a non-isolated spawn created a worktree")
+    }
+
+    // MARK: 4 · a worktree that cannot be created FAILS THE SPAWN
+
+    /// Returns the error `spawn` raised, so the caller can be specific about it where
+    /// the manager owns the failure. ANY error is accepted here rather than only a
+    /// `WorktreeError`: the container-creation failure below surfaces as Foundation's
+    /// own `NSFileWriteFileExistsError`, and re-typing it would mean editing P2C.1's
+    /// manager for a ticket that is about the spawn path.
+    func expectNoFallback(_ label: String, cwd: URL) throws -> Error {
+        let before = supervisor.records.count
+        var leaked: AgentID?
+        var thrown: Error?
+        do {
+            leaked = try supervisor.spawn(
+                role: "implementer",
+                prompt: "fix auth",
+                cwd: cwd,
+                model: config.model,
+                thinking: config.thinking,
+                isolated: true
+            )
+        } catch {
+            thrown = error
+        }
+        if let leaked {
+            throw fail("a failed worktree (\(label)) did not fail the spawn — the agent landed in the main checkout \(supervisor.records[leaked]?.cwd ?? "?")")
+        }
+        guard let thrown else {
+            throw fail("a failed worktree (\(label)) neither threw nor returned an agent")
+        }
+        guard supervisor.records.count == before else {
+            throw fail("a failed isolated spawn (\(label)) left \(supervisor.records.count - before) agent(s) behind in memory")
+        }
+        guard try store.loadAll().count == before else {
+            throw fail("a failed isolated spawn (\(label)) persisted a record")
+        }
+        return thrown
+    }
+
+    let notARepo = root.appendingPathComponent("not-a-repo", isDirectory: true)
+    try FileManager.default.createDirectory(at: notARepo, withIntermediateDirectories: true)
+    let notARepoError = try expectNoFallback("not a repository", cwd: notARepo)
+    guard (notARepoError as? WorktreeManager.WorktreeError) == .invalidRepository(notARepo.path) else {
+        throw fail("an isolated spawn into a non-repository reported \(notARepoError) rather than .invalidRepository")
+    }
+
+    // A real repository whose `.worktrees` path is occupied by a FILE: the failure is
+    // in creating the container, i.e. past the repository check, which is where a
+    // fallback would be most tempting.
+    let blocked = root.appendingPathComponent("blocked", isDirectory: true)
+    try makeIsolatedSpawnRepo(at: blocked)
+    try "not a directory\n".write(
+        to: blocked.appendingPathComponent(WorktreeManager.containerDirectoryName),
+        atomically: true,
+        encoding: .utf8
+    )
+    _ = try expectNoFallback(".worktrees occupied by a file", cwd: blocked)
+
+    supervisor.stopAll()
+    return "an isolated spawn ran in .worktrees/\(slug) on \(branch) (git agrees, and that is the branch checked out in the runner's cwd), a non-isolated spawn stayed in the project root with no branch, and two real worktree failures each threw out of spawn leaving no agent"
+}
+
+/// A temp repository with one commit — `git worktree add` needs a HEAD. The `-c`
+/// identity keeps the check independent of the host's global git config, as
+/// `WorktreeManagerChecks` does for the same reason.
+private func makeIsolatedSpawnRepo(at root: URL) throws {
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try runIsolatedSpawnGit(["init", "-q", "-b", "main"], in: root)
+    try "seed\n".write(to: root.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+    try runIsolatedSpawnGit(["add", "README.md"], in: root)
+    try runIsolatedSpawnGit([
+        "-c", "user.email=qa@continuum.test",
+        "-c", "user.name=Continuum QA",
+        "commit", "-q", "--no-gpg-sign", "-m", "seed",
+    ], in: root)
+}
+
+@discardableResult
+private func runIsolatedSpawnGit(_ arguments: [String], in directory: URL) throws -> String {
+    struct GitError: Error, CustomStringConvertible { let description: String }
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    process.arguments = arguments
+    process.currentDirectoryURL = directory
+    let stdout = Pipe()
+    let stderr = Pipe()
+    process.standardOutput = stdout
+    process.standardError = stderr
+    try process.run()
+    let outData = stdout.fileHandleForReading.readDataToEndOfFile()
+    let errData = stderr.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+        throw GitError(description: "git \(arguments.joined(separator: " ")) failed (\(process.terminationStatus)): \(String(data: errData, encoding: .utf8) ?? "")")
+    }
+    return String(data: outData, encoding: .utf8) ?? ""
+}
+
+/// macOS temp directories live under a `/var` symlink to `/private/var`, and git
+/// reports the RESOLVED path in `worktree list --porcelain`.
+private func isolatedSpawnResolved(_ url: URL) -> String {
+    url.resolvingSymlinksInPath().standardizedFileURL.path
 }
 
 /// The body of one `AppDelegate` method, comments stripped. Bounded by the closing
