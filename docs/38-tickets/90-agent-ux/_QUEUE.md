@@ -6,6 +6,14 @@ failed honest verification; it needs a human, not a retry.
 
 All Phase 0 tickets are tagged `autonomous`.
 
+**Rows `48a` / `48b` are two Phase 6 tickets deliberately inserted OUT OF PHASE ORDER**, by the
+owner's explicit instruction on 2026-07-26, after they saw the built app and reported the transcript
+presentation and the missing per-agent model/effort control. Both are corrections of defects the
+owner named on sight, both depend only on work that is already `done`, and both are self-contained
+(no Phase 4 lifecycle, no Phase 5 RPC). Each packet carries a `## Why this is out of order` section.
+Take them in order, then resume at row 49. **Do not pull any further Phase 6 ticket forward** — the
+rest of Phase 6 (`P6.2`–`P6.12`) stays behind Phase 4 and Phase 5 where it can be wired for real.
+
 ## Overnight-executable set
 
 | # | Ticket | Depends on |
@@ -58,6 +66,8 @@ All Phase 0 tickets are tagged `autonomous`.
 | 46 | `P2D.2-detect-spawn-tool-call.md` | P2D.1 |
 | 47 | `P2D.3-role-registry.md` | P2D.2 |
 | 48 | `P2D.4-parent-child-nesting.md` | P2D.3, P3.6 |
+| 48a | `P6.0-prose-is-not-a-card.md` | P1.11 |
+| 48b | `P6.1-per-agent-model-effort.md` | P2A.3, P0.10 |
 | 49 | `P2D.5-child-rollup.md` | P2D.4, P4.2 |
 | 50 | `P2D.6-fan-out.md` | P2D.5 |
 | 51 | `P3.1-inbox-row-model.md` | P2B.3 |
@@ -102,7 +112,14 @@ Phases 0, 1, 2A, 2B and 2C are authored. 2C (worktrees) MUST precede 2D (orchest
 
 Phase 5 note: live rpc behaviour cannot be verified headlessly, so every Phase-5 packet specifies a deterministic fixture/fake-client check for the matrix PLUS a separate supervised manual step. A worker must not claim live coverage from the matrix.
 
-Note: P2D.4/P2D.5 depend on Phase 3 (inbox rows) and Phase 4 (blocker precedence), so the loop will correctly skip them until those land — that is intended, not a stall. and appended here as they land. Full backlog shape lives in
+Note: P2D.4/P2D.5 depend on Phase 3 (inbox rows) and Phase 4 (blocker precedence), so the loop will
+correctly skip them until those land — that was intended, not a stall. **SUPERSEDED 2026-07-26: both
+have landed.** `P2D.4` is `done`, and `P4.2-effective-settled` is `done`, so **`P2D.5-child-rollup`
+(row 49) is ELIGIBLE NOW and must not be skipped again.** Take it in queue order. It is not optional
+polish: until it lands, a folded orchestrator silently conceals a child's approval request, because
+`P2D.4` ruled that nothing folds a group on your behalf and A PUSH DOES NOT UNFOLD. The only
+mitigation today is the app-wide dock badge, which counts needs-attention agents but cannot say which
+row to open. and appended here as they land. Full backlog shape lives in
 the session plan; see `_RUNBOOK.md` for the operating contract.
 
 ## Re-sequenced 2026-07-25 (supervisor)
