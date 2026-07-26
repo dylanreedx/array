@@ -35,6 +35,12 @@ public struct AgentRowContext: Equatable, Sendable {
     public let projectName: String?
     /// nil when the agent has no tile rendering it.
     public let tileTitle: String?
+    /// P3.1: `AgentRecord.displayName` — the name the AGENT owns, which outlives
+    /// the tile that renders it (the locked decision), so a headless agent still
+    /// has one where `tileTitle` is nil. nil for a terminal session, which has no
+    /// record and is named by its tile. A name, so I5-admissible on the same
+    /// footing as the workspace / zone / project / tile names beside it.
+    public let displayName: String?
     public let agentKind: AgentKind
     /// nil for a terminal session: `AgentDescriptor` records a kind and a
     /// status, never a model. Only an `AgentRecord`-backed agent has one.
@@ -83,6 +89,7 @@ public struct AgentRowContext: Equatable, Sendable {
         zoneName: String? = nil,
         projectName: String? = nil,
         tileTitle: String? = nil,
+        displayName: String? = nil,
         agentKind: AgentKind,
         model: String? = nil,
         role: String? = nil,
@@ -93,6 +100,7 @@ public struct AgentRowContext: Equatable, Sendable {
         self.zoneName = zoneName
         self.projectName = projectName
         self.tileTitle = tileTitle
+        self.displayName = displayName
         self.agentKind = agentKind
         self.model = model
         self.role = role
@@ -159,6 +167,7 @@ public enum AgentContextIndex {
                 // record with no projectId still names one.
                 projectName: (record.projectId ?? placement?.projectId).flatMap { projectNames[$0] },
                 tileTitle: placement?.tileTitle,
+                displayName: nonEmpty(record.displayName),
                 // An `AgentRecord` is the managed tier by construction — the
                 // record exists because Continuum runs the agent itself. The
                 // record carries no kind of its own to read.

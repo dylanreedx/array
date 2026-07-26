@@ -35,4 +35,7 @@ runTypographyChecks()
 // Ticket: docs/38-tickets/90-agent-ux/P1.5-spacing-radius-scale.md
 runMetricsChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P3.1-inbox-row-model.md
+runAgentInboxRowChecks()
+
 print("ContinuumRevivedAgentUIChecks passed")

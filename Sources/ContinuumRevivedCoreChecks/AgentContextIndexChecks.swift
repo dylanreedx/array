@@ -638,6 +638,9 @@ private func runAgentContextSyncBoundaryCheck() {
         scannable["\(agentId).zoneName"] = context.zoneName
         scannable["\(agentId).projectName"] = context.projectName
         scannable["\(agentId).tileTitle"] = context.tileTitle
+        // P3.1 added this field to the type this sweep enumerates by hand; a
+        // field left out of the list is a hole in the sweep, not an exemption.
+        scannable["\(agentId).displayName"] = context.displayName
         scannable["\(agentId).agentKind"] = context.agentKind.rawValue
         scannable["\(agentId).model"] = context.model
         scannable["\(agentId).role"] = context.role
