@@ -70,6 +70,12 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     public var projectId: UUID?
     /// Set by the orchestrator when this agent was spawned by another (P2D).
     public var parentAgentID: AgentID?
+    /// P2D.6 — the queue item this agent was fanned out FOR, if any (a Linear
+    /// row's `identifier`, e.g. `ENG-214`). Stored rather than kept in a runtime
+    /// map because the mapping has to survive a relaunch: without it an agent
+    /// that finishes after the app restarts has nothing to check off. An
+    /// identifier the source surface already shows, so it is not new exposure.
+    public var sourceItemId: String?
     public var createdAt: Date
     public var lastActivityAt: Date
     /// VIEW BINDING, NOT IDENTITY. `nil` means the agent is headless — running
@@ -111,6 +117,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         worktreeBranch: String? = nil,
         projectId: UUID? = nil,
         parentAgentID: AgentID? = nil,
+        sourceItemId: String? = nil,
         createdAt: Date,
         lastActivityAt: Date,
         tileId: UUID? = nil,
@@ -129,6 +136,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.worktreeBranch = worktreeBranch
         self.projectId = projectId
         self.parentAgentID = parentAgentID
+        self.sourceItemId = sourceItemId
         self.createdAt = createdAt
         self.lastActivityAt = lastActivityAt
         self.tileId = tileId
@@ -148,7 +156,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     // conversion happens and the round-trip is exact.
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, id, displayName, role, model, thinking, cwd
-        case worktreeBranch, projectId, parentAgentID
+        case worktreeBranch, projectId, parentAgentID, sourceItemId
         case createdAtReferenceInterval, lastActivityAtReferenceInterval
         case tileId
         // P4.1. The three lifecycle dates take reference intervals for exactly
@@ -170,6 +178,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         worktreeBranch = try container.decodeIfPresent(String.self, forKey: .worktreeBranch)
         projectId = try container.decodeIfPresent(UUID.self, forKey: .projectId)
         parentAgentID = try container.decodeIfPresent(AgentID.self, forKey: .parentAgentID)
+        sourceItemId = try container.decodeIfPresent(String.self, forKey: .sourceItemId)
         createdAt = Date(timeIntervalSinceReferenceDate:
             try container.decode(Double.self, forKey: .createdAtReferenceInterval))
         lastActivityAt = Date(timeIntervalSinceReferenceDate:
@@ -202,6 +211,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encodeIfPresent(worktreeBranch, forKey: .worktreeBranch)
         try container.encodeIfPresent(projectId, forKey: .projectId)
         try container.encodeIfPresent(parentAgentID, forKey: .parentAgentID)
+        try container.encodeIfPresent(sourceItemId, forKey: .sourceItemId)
         try container.encode(createdAt.timeIntervalSinceReferenceDate, forKey: .createdAtReferenceInterval)
         try container.encode(lastActivityAt.timeIntervalSinceReferenceDate, forKey: .lastActivityAtReferenceInterval)
         try container.encodeIfPresent(tileId, forKey: .tileId)

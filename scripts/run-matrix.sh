@@ -208,6 +208,12 @@ run_app_check .build/debug/continuum-revived --agent-supervisor-check
 # their identity/model/role intact, the tiled one re-resolved from its tileId and
 # carrying a previous-session notice — and a prompt is what starts them again.
 run_app_check .build/debug/continuum-revived --agent-restore-check
+# P2D.6: selecting N queue rows starts one isolated agent per row. Three rows in a
+# real temp repo get three worktrees, three branches and their own prompts;
+# completing one checks off exactly its row; six items past the cap start four and
+# report the two deferred; a repeat is refused; and the item→agent mapping survives
+# a second supervisor built over the same store.
+run_app_check .build/debug/continuum-revived --agent-fanout-check
 # P2B.2: the inbox lists agents from EVERY project. Two temp project roots hold a
 # legacy managed-session record each and a third registry entry points at a root
 # that is gone; `currentManagedAgentActivities()` publishes both with no canvas

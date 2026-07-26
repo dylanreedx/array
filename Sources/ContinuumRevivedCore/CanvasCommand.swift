@@ -32,6 +32,9 @@ public enum CommandRegistry {
             // tile; this one is the spawn alone, so an agent can exist and run
             // without any canvas layout.
             CanvasCommand(id: "agent.newHeadless", action: .newHeadlessAgent),
+            // N selected queue rows, N isolated agents (P2D.6). The multi-row
+            // sibling of the ticket tile's own one-row dispatch.
+            CanvasCommand(id: "agent.fanOut", action: .fanOutQueueSelection),
             CanvasCommand(id: "tile.newNote", action: .newNote),
             CanvasCommand(id: "tile.newBrowser", action: .newBrowser),
             CanvasCommand(id: "tile.openFile", action: .openFile),

@@ -45,6 +45,10 @@ private func makeAgentRecordFixture(
         worktreeBranch: "agents/refactor-the-sidebar",
         projectId: UUID(uuidString: "2A100000-0000-4000-8000-000000000002")!,
         parentAgentID: AgentID(rawValue: UUID(uuidString: "2A100000-0000-4000-8000-000000000003")!),
+        // P2D.6. Non-nil so the round-trip's `decoded == fixture` covers the
+        // fan-out mapping: an agent that comes back from a relaunch without it
+        // has nothing to check off when it finishes.
+        sourceItemId: "ENG-214",
         createdAt: createdAt,
         lastActivityAt: lastActivityAt,
         tileId: tileId,
@@ -144,7 +148,8 @@ private func runAgentRecordForwardCompatCheck() {
     do {
         let decoded = try decoder.decode(AgentRecord.self, from: Data(minimal.utf8))
         expect(decoded.role == nil && decoded.worktreeBranch == nil && decoded.projectId == nil
-                && decoded.parentAgentID == nil && decoded.tileId == nil,
+                && decoded.parentAgentID == nil && decoded.tileId == nil
+                && decoded.sourceItemId == nil,
                "AgentRecord decodes absent optional fields as nil")
         expect(decoded.createdAt == Date(timeIntervalSinceReferenceDate: 806_000_000.25),
                "AgentRecord decodes createdAt from the reference interval")

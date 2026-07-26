@@ -251,6 +251,7 @@ final class AgentSupervisor {
         thinking: String,
         projectId: UUID? = nil,
         parentAgentID: AgentID? = nil,
+        sourceItemId: String? = nil,
         tileId: UUID? = nil
     ) -> AgentID {
         makeAgent(
@@ -263,6 +264,7 @@ final class AgentSupervisor {
             thinking: thinking,
             projectId: projectId,
             parentAgentID: parentAgentID,
+            sourceItemId: sourceItemId,
             tileId: tileId
         )
     }
@@ -287,6 +289,7 @@ final class AgentSupervisor {
         thinking: String,
         projectId: UUID? = nil,
         parentAgentID: AgentID? = nil,
+        sourceItemId: String? = nil,
         tileId: UUID? = nil,
         isolated: Bool
     ) throws -> AgentID {
@@ -314,6 +317,7 @@ final class AgentSupervisor {
             thinking: thinking,
             projectId: projectId,
             parentAgentID: parentAgentID,
+            sourceItemId: sourceItemId,
             tileId: tileId
         )
     }
@@ -328,6 +332,7 @@ final class AgentSupervisor {
         thinking: String,
         projectId: UUID?,
         parentAgentID: AgentID? = nil,
+        sourceItemId: String? = nil,
         tileId: UUID?
     ) -> AgentID {
         let now = Date()
@@ -341,6 +346,7 @@ final class AgentSupervisor {
             worktreeBranch: worktreeBranch,
             projectId: projectId,
             parentAgentID: parentAgentID,
+            sourceItemId: sourceItemId,
             createdAt: now,
             lastActivityAt: now,
             tileId: tileId
@@ -598,6 +604,158 @@ final class AgentSupervisor {
         }
         return cwd.deletingLastPathComponent().deletingLastPathComponent()
     }
+
+    // MARK: - Fan-out (P2D.6)
+
+    /// One selected work item: the identifier the source surface knows it by (a
+    /// Linear row's `ENG-214`, a conductor task id) and the prompt its agent runs.
+    struct FanOutItem: Equatable {
+        let id: String
+        let prompt: String
+
+        init(id: String, prompt: String) {
+            self.id = id
+            self.prompt = prompt
+        }
+    }
+
+    /// Why one selected item did not get an agent. Kept apart from `deferred`
+    /// because they are different answers: deferred means "not yet, the batch is
+    /// full", refused means "not at all".
+    enum FanOutRefusal: Equatable {
+        /// An agent from an earlier fan-out is already working this item. Spawning a
+        /// second would give one row two isolated checkouts and two answers.
+        case alreadyRunning(AgentID)
+        /// `git worktree add` failed. Per P2C.2 the spawn fails rather than falling
+        /// back to the shared checkout — N agents in one tree is what 2C exists to
+        /// prevent, and a fan-out is the case that makes it certain.
+        case worktreeFailed
+
+        var reason: String {
+            switch self {
+            case .alreadyRunning:
+                return "an agent is already working on it"
+            case .worktreeFailed:
+                return "its isolated checkout could not be created"
+            }
+        }
+    }
+
+    /// What one `fanOut` actually did. Every item is in exactly one of the three
+    /// lists, which is the packet's no-silent-truncation rule made checkable:
+    /// `launched.count + deferred.count + refused.count == items.count`.
+    struct FanOutReport: Equatable {
+        var launched: [(itemId: String, agentId: AgentID)] = []
+        /// Past the cap. Still selected, still yours to run — nothing was started
+        /// for them and nothing pretended otherwise.
+        var deferred: [String] = []
+        var refused: [(itemId: String, refusal: FanOutRefusal)] = []
+        /// The cap this batch was held to. Reported so the surface can say what
+        /// stopped it rather than inventing a number.
+        var cap: Int = 0
+
+        /// One line for the surface that asked. Names counts and the cap only — no
+        /// prompt text, no path.
+        var summary: String {
+            var parts = ["started \(launched.count)"]
+            if !deferred.isEmpty { parts.append("deferred \(deferred.count) past the cap of \(cap)") }
+            if !refused.isEmpty { parts.append("refused \(refused.count)") }
+            return parts.joined(separator: " · ")
+        }
+
+        static func == (lhs: FanOutReport, rhs: FanOutReport) -> Bool {
+            lhs.cap == rhs.cap
+                && lhs.deferred == rhs.deferred
+                && lhs.launched.count == rhs.launched.count
+                && zip(lhs.launched, rhs.launched).allSatisfy { $0 == $1 }
+                && lhs.refused.count == rhs.refused.count
+                && zip(lhs.refused, rhs.refused).allSatisfy { $0 == $1 }
+        }
+    }
+
+    /// How many agents ONE fan-out may start. Selecting thirty rows must not start
+    /// thirty Pi processes and thirty worktrees; the rest come back as `deferred`.
+    /// Same value as `maxChildrenPerParent`, and for the same reason — this is the
+    /// human-authored twin of that model-authored cap.
+    static let maxFanOutBatch = 4
+
+    /// Called when an agent that was fanned out for an item finishes a turn
+    /// successfully: `(itemId, agentId)`. The source surface checks the item off —
+    /// the supervisor does not know what "done" means for a Linear row or a
+    /// conductor task, and guessing would put queue semantics in here.
+    var onFanOutItemCompleted: ((String, AgentID) -> Void)?
+
+    /// Items whose agent has reported a completed turn, so a surface that rebuilds
+    /// its rows (or one that attaches after the fact) can still draw them checked.
+    private(set) var completedFanOutItems: Set<String> = []
+
+    /// N items in, one agent per item out, each with the item's own prompt and —
+    /// when `isolated` — its own worktree.
+    ///
+    /// Siblings by default: `parentAgentID` is nil, because a human selecting rows
+    /// is not an agent. Passing one makes them children of the orchestrator that
+    /// asked, and the batch is then ALSO held to whatever room that parent has left
+    /// under `maxChildrenPerParent` — otherwise a fan-out would be the way around a
+    /// cap that `handleSpawnRequest` enforces one spawn at a time.
+    @discardableResult
+    func fanOut(
+        items: [FanOutItem],
+        role: String?,
+        cwd: URL,
+        model: String,
+        thinking: String,
+        projectId: UUID? = nil,
+        parentAgentID: AgentID? = nil,
+        isolated: Bool = true
+    ) -> FanOutReport {
+        var report = FanOutReport()
+        var cap = Self.maxFanOutBatch
+        if let parentAgentID {
+            cap = min(cap, max(0, Self.maxChildrenPerParent - children(of: parentAgentID).count))
+        }
+        report.cap = cap
+
+        for item in items {
+            // The refusal is decided BEFORE the cap, so an item that was never going
+            // to run does not consume a slot a runnable one could have used.
+            if let existing = agent(forSourceItem: item.id) {
+                report.refused.append((item.id, .alreadyRunning(existing)))
+                continue
+            }
+            guard report.launched.count < cap else {
+                report.deferred.append(item.id)
+                continue
+            }
+            do {
+                let id = try spawn(
+                    role: role,
+                    prompt: item.prompt,
+                    cwd: cwd,
+                    model: model,
+                    thinking: thinking,
+                    projectId: projectId,
+                    parentAgentID: parentAgentID,
+                    sourceItemId: item.id,
+                    isolated: isolated
+                )
+                report.launched.append((item.id, id))
+            } catch {
+                warn("AgentSupervisor.fanOut: no agent for item \(item.id): \(error)")
+                report.refused.append((item.id, .worktreeFailed))
+            }
+        }
+        return report
+    }
+
+    /// The live agent working an item, if any. Derived from the RECORDS rather than
+    /// a runtime map, so it still answers after a relaunch has restored them.
+    /// Archived agents are excluded: the item is free again once its agent is gone.
+    func agent(forSourceItem itemId: String) -> AgentID? {
+        records.values.first { $0.sourceItemId == itemId && $0.archivedAt == nil }?.id
+    }
+
+    /// The item this agent was fanned out for.
+    func sourceItem(of id: AgentID) -> String? { records[id]?.sourceItemId }
 
     // MARK: - Archive / cleanup (P2C.3)
 
@@ -1056,6 +1214,18 @@ final class AgentSupervisor {
 
         for continuation in (subscribers[id] ?? [:]).values {
             continuation.yield(event)
+        }
+
+        // P2D.6: the agent finished the work its item was fanned out for, so the
+        // item is done. Only `.completed` — a turn that failed or was aborted has
+        // not done the work, and checking the row off would lose it. Last, after
+        // the record and every subscriber are consistent, because the handler is
+        // the source surface re-rendering.
+        if case let .turnCompleted(_, _, outcome, _) = event,
+           outcome == .completed,
+           let itemId = records[id]?.sourceItemId {
+            completedFanOutItems.insert(itemId)
+            onFanOutItemCompleted?(itemId, id)
         }
     }
 
@@ -4139,4 +4309,399 @@ private func piRunnerConstructionSites() throws -> (sites: Set<String>, scannedF
         sites.insert(relative)
     }
     return (sites, scanned)
+}
+
+// MARK: - Fan-out self-check (P2D.6)
+
+/// Gated on `--agent-fanout-check`.
+///
+/// Deterministic and offline: a real temp `git init` repository (worktrees are the
+/// half that cannot be faked without testing nothing) and `ScriptedAgentRunner`s in
+/// place of Pi. The runner factory picks its script from the RECORD's
+/// `sourceItemId`, which is also the first witness that the mapping exists at spawn
+/// time rather than being attached afterwards.
+///
+/// Six properties:
+///   1. Three selected rows → three agents, each with its own worktree, its own
+///      branch, and its own item's prompt. Git is asked, not the manager's return
+///      value.
+///   2. Completing agent 2 checks off item 2 IN THE TILE and leaves 1 and 3 alone.
+///   3. Past the cap: 6 items → `maxFanOutBatch` launched, the rest DEFERRED and
+///      named in the report the tile renders. Nothing is silently dropped —
+///      launched + deferred + refused == items, asserted on every report here.
+///   4. An item that already has an agent is REFUSED, not fanned out twice.
+///   5. The mapping survives a relaunch: a second supervisor over the same store
+///      resolves item → agent from the restored records alone.
+///   6. A fan-out under a parent is also held to `maxChildrenPerParent`, so it is
+///      not a way around the cap `handleSpawnRequest` enforces one spawn at a time.
+///
+/// Negative tests observed red at exit 1 with the final code are quoted at the
+/// assertions they land at.
+@MainActor
+func runAgentFanOutChecks() async throws {
+    struct CheckError: Error, CustomStringConvertible { let description: String }
+    func fail(_ message: String) -> CheckError { CheckError(description: message) }
+    func requireAccounted(_ report: AgentSupervisor.FanOutReport, _ items: [AgentSupervisor.FanOutItem], _ label: String) throws {
+        let accounted = report.launched.count + report.deferred.count + report.refused.count
+        guard accounted == items.count else {
+            throw fail("\(label): \(items.count) items in, \(accounted) accounted for (\(report.summary)) — a fan-out may never drop an item silently")
+        }
+    }
+
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-agent-fanout-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let repo = root.appendingPathComponent("repo", isDirectory: true)
+    try makeIsolatedSpawnRepo(at: repo)
+    let storeDirectory = root.appendingPathComponent("support", isDirectory: true)
+    let store = AgentStore(applicationSupportDirectory: storeDirectory)
+    let config = AgentModelConfig.resolvedFromDefaults()
+
+    // MARK: 1 · three selected rows, three isolated agents
+
+    let rows = [
+        LinearTicketQueueRow(identifier: "CON-1", title: "Fix auth", state: "Todo", stateType: "unstarted", priority: .high, labels: []),
+        LinearTicketQueueRow(identifier: "CON-2", title: "Trim the sidebar", state: "Todo", stateType: "unstarted", priority: .medium, labels: []),
+        LinearTicketQueueRow(identifier: "CON-3", title: "Cache the branch read", state: "Todo", stateType: "unstarted", priority: .low, labels: [])
+    ]
+    let tile = Tile(
+        id: UUID(uuidString: "A2D60000-0000-4000-8000-000000000001")!,
+        kind: .ticketQueue,
+        title: "CON Ticket Queue",
+        frame: TileFrame(x: 0, y: 0, width: 520, height: 480),
+        zPosition: .fromLegacyRank(1),
+        runtimeRef: nil,
+        metadata: TileMetadata(linearTeamKey: "CON", linearTeamId: nil, linearQuery: nil)
+    )
+
+    // Only the item that is meant to finish gets a completing script; the other two
+    // stay mid-turn, which is what makes "leaves 1 and 3 untouched" a real claim.
+    let completing: [AgentRuntimeEvent] = [
+        .sessionStateChanged(.running),
+        .turnStarted(threadId: "provider", turnId: "t1"),
+        .turnCompleted(threadId: "provider", turnId: "t1", outcome: .completed, errorMessage: nil),
+        .sessionStateChanged(.ready)
+    ]
+    let runners = FanOutRunnerLog()
+    let supervisor = AgentSupervisor(store: store, makeRunner: { record in
+        runners.make(sourceItemId: record.sourceItemId, script: record.sourceItemId == "CON-2" ? completing : [.sessionStateChanged(.running)])
+    })
+
+    var fannedOut: [[LinearTicketQueueRow]] = []
+    var lastReport: AgentSupervisor.FanOutReport?
+    // Assigned once the tile exists; the handler below runs only on a click.
+    var renderReport: ((AgentSupervisor.FanOutReport) -> Void)?
+    let queueTile = TicketQueueTileNSView(tile: tile, rows: rows, emptyStateMessage: nil, fanOutHandler: { selected in
+        fannedOut.append(selected)
+        let report = supervisor.fanOut(
+            items: selected.map {
+                AgentSupervisor.FanOutItem(id: $0.identifier, prompt: "Work \($0.identifier): \($0.title)")
+            },
+            role: "implementer",
+            cwd: repo,
+            model: config.model,
+            thinking: config.thinking,
+            isolated: true
+        )
+        lastReport = report
+        renderReport?(report)
+    })
+    // The tile is the source surface: it checks its own rows off.
+    supervisor.onFanOutItemCompleted = { [weak queueTile] itemId, _ in
+        queueTile?.markItemDone(itemId)
+    }
+    renderReport = { [weak queueTile] report in queueTile?.report(report.summary) }
+
+    // Selection goes through the rendered checkboxes, not the model behind them —
+    // a fan-out that could not be reached from the view is not the gesture.
+    for identifier in ["CON-1", "CON-2", "CON-3"] {
+        guard let box = queueTile.descendant(withIdentifier: "fanout.select.\(identifier)") as? NSButton else {
+            throw fail("row \(identifier) rendered no selection control — a fan-out tile must be selectable")
+        }
+        box.state = .on
+    }
+    guard queueTile.selectedRowIdentifiers == ["CON-1", "CON-2", "CON-3"] else {
+        throw fail("the tile reports \(queueTile.selectedRowIdentifiers) selected, not all three rows")
+    }
+    guard let runButton = queueTile.descendant(withIdentifier: "fanout.run") as? NSButton else {
+        throw fail("the tile rendered no fan-out control")
+    }
+    runButton.performClick(nil)
+
+    guard fannedOut.map({ $0.map(\.identifier) }) == [["CON-1", "CON-2", "CON-3"]] else {
+        throw fail("the fan-out handler received \(fannedOut.map { $0.map(\.identifier) }), not one batch of all three selected rows")
+    }
+    guard let firstReport = lastReport else {
+        throw fail("the fan-out produced no report")
+    }
+    let firstItems = rows.map { AgentSupervisor.FanOutItem(id: $0.identifier, prompt: "Work \($0.identifier): \($0.title)") }
+    try requireAccounted(firstReport, firstItems, "the first fan-out")
+    guard firstReport.launched.map(\.itemId) == ["CON-1", "CON-2", "CON-3"], firstReport.deferred.isEmpty, firstReport.refused.isEmpty else {
+        throw fail("three items under the cap should all start: \(firstReport.summary)")
+    }
+
+    // Each agent: its own item, its own prompt, its own worktree and branch.
+    // NEGATIVE TEST (observed red): `makeAgent` dropping `sourceItemId` →
+    // "FAIL: agent … was fanned out for CON-1 and its record says nil".
+    var worktrees: [String] = []
+    var branches: [String] = []
+    let manager = WorktreeManager()
+    let listed = try manager.list(repo: repo)
+    for (itemId, agentId) in firstReport.launched {
+        guard let record = supervisor.records[agentId] else {
+            throw fail("the supervisor lost the agent it fanned out for \(itemId)")
+        }
+        guard record.sourceItemId == itemId else {
+            throw fail("agent \(agentId.rawValue.uuidString) was fanned out for \(itemId) and its record says \(record.sourceItemId ?? "nil")")
+        }
+        guard let branch = record.worktreeBranch else {
+            throw fail("the agent for \(itemId) has no branch — a fan-out over one checkout is the clobbering P2C prevents")
+        }
+        guard record.cwd.hasPrefix(repo.appendingPathComponent(WorktreeManager.containerDirectoryName).path + "/") else {
+            throw fail("the agent for \(itemId) works in \(record.cwd), which is not its own worktree")
+        }
+        guard listed.contains(where: {
+            isolatedSpawnResolved($0.path) == isolatedSpawnResolved(URL(fileURLWithPath: record.cwd)) && $0.branch == branch
+        }) else {
+            throw fail("git does not know the worktree for \(itemId): \(listed.map { $0.path.lastPathComponent })")
+        }
+        worktrees.append(record.cwd)
+        branches.append(branch)
+    }
+    // NEGATIVE TEST (observed red): reusing one slug for the batch →
+    // "FAIL: … three agents share 1 worktree …".
+    guard Set(worktrees).count == 3, Set(branches).count == 3 else {
+        throw fail("three agents share \(Set(worktrees).count) worktree(s) and \(Set(branches).count) branch(es) — each item needs its own")
+    }
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { runners.promptCount == 3 }) else {
+        throw fail("only \(runners.promptCount) of 3 fanned-out agents were given a prompt")
+    }
+    guard runners.prompts(for: "CON-1") == ["Work CON-1: Fix auth"],
+          runners.prompts(for: "CON-2") == ["Work CON-2: Trim the sidebar"],
+          runners.prompts(for: "CON-3") == ["Work CON-3: Cache the branch read"] else {
+        throw fail("the agents did not each get their own item's prompt: \(runners.promptsByItem)")
+    }
+
+    // MARK: 2 · completing agent 2 checks off item 2, and only item 2
+
+    // NEGATIVE TEST (observed red): `deliver` firing the completion for every
+    // outcome, or the tile marking every row → "FAIL: completing the agent for
+    // CON-2 checked off ["CON-1", "CON-2", "CON-3"]".
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { queueTile.doneRowIdentifiers == ["CON-2"] }) else {
+        throw fail("completing the agent for CON-2 checked off \(queueTile.doneRowIdentifiers)")
+    }
+    guard supervisor.completedFanOutItems == ["CON-2"] else {
+        throw fail("the supervisor records \(supervisor.completedFanOutItems.sorted()) as completed, not just CON-2")
+    }
+    guard let doneMarker = queueTile.descendant(withIdentifier: "fanout.done.CON-2"), doneMarker.isHidden == false else {
+        throw fail("CON-2's row does not SHOW that it is done")
+    }
+    for untouched in ["CON-1", "CON-3"] {
+        guard let marker = queueTile.descendant(withIdentifier: "fanout.done.\(untouched)"), marker.isHidden else {
+            throw fail("\(untouched)'s agent has not finished and its row is marked done")
+        }
+    }
+    // A checked-off row drops out of the selection, so the next fan-out cannot
+    // re-launch work that is already done.
+    guard queueTile.selectedRowIdentifiers == ["CON-1", "CON-3"] else {
+        throw fail("a completed row is still selected: \(queueTile.selectedRowIdentifiers)")
+    }
+
+    // MARK: 3 · past the cap: launched to the cap, the rest deferred and REPORTED
+    //
+    // Not isolated, on purpose: the cap is orthogonal to isolation and section 1
+    // already proves the worktree half. Six worktrees to re-prove it would only
+    // make this leg slower.
+    let capItems = (1 ... 6).map { AgentSupervisor.FanOutItem(id: "CAP-\($0)", prompt: "cap item \($0)") }
+    let capReport = supervisor.fanOut(
+        items: capItems,
+        role: nil,
+        cwd: repo,
+        model: config.model,
+        thinking: config.thinking,
+        isolated: false
+    )
+    try requireAccounted(capReport, capItems, "the capped fan-out")
+    // NEGATIVE TEST (observed red): `fanOut` launching every item →
+    // "FAIL: 6 items past a cap of 4 started 6 agents and deferred []".
+    guard capReport.launched.count == AgentSupervisor.maxFanOutBatch,
+          capReport.deferred == ["CAP-5", "CAP-6"],
+          capReport.cap == AgentSupervisor.maxFanOutBatch else {
+        throw fail("6 items past a cap of \(AgentSupervisor.maxFanOutBatch) started \(capReport.launched.count) agents and deferred \(capReport.deferred)")
+    }
+    guard supervisor.records.values.filter({ $0.sourceItemId?.hasPrefix("CAP-") == true }).count == AgentSupervisor.maxFanOutBatch else {
+        throw fail("the store holds more capped agents than the cap allowed")
+    }
+    // NEGATIVE TEST (observed red): `summary` omitting the deferred clause →
+    // "FAIL: the deferred count is not surfaced …".
+    queueTile.report(capReport.summary)
+    guard let surfaced = queueTile.fanOutStatusMessage,
+          surfaced.contains("deferred 2"),
+          surfaced.contains("cap of \(AgentSupervisor.maxFanOutBatch)") else {
+        throw fail("the deferred count is not surfaced on the tile: \(queueTile.fanOutStatusMessage ?? "nothing")")
+    }
+    guard let statusView = queueTile.descendant(withIdentifier: "fanout.status") as? NSTextField,
+          statusView.isHidden == false,
+          statusView.stringValue == capReport.summary else {
+        throw fail("the fan-out report is not RENDERED — a cap the user cannot see is a silent truncation")
+    }
+
+    // MARK: 4 · an item that already has an agent is refused, not doubled
+
+    let repeatItems = [AgentSupervisor.FanOutItem(id: "CON-1", prompt: "Work CON-1 again")]
+    let repeatReport = supervisor.fanOut(
+        items: repeatItems,
+        role: "implementer",
+        cwd: repo,
+        model: config.model,
+        thinking: config.thinking,
+        isolated: true
+    )
+    try requireAccounted(repeatReport, repeatItems, "the repeat fan-out")
+    guard repeatReport.launched.isEmpty,
+          repeatReport.refused.count == 1,
+          repeatReport.refused[0].itemId == "CON-1",
+          case .alreadyRunning = repeatReport.refused[0].refusal else {
+        throw fail("fanning out an item that already has an agent produced \(repeatReport.summary)")
+    }
+    guard supervisor.records.values.filter({ $0.sourceItemId == "CON-1" }).count == 1 else {
+        throw fail("CON-1 has \(supervisor.records.values.filter { $0.sourceItemId == "CON-1" }.count) agents — one item is one agent")
+    }
+
+    // MARK: 5 · the mapping survives a relaunch
+
+    // A second supervisor over the same store, holding nothing this one built.
+    // NEGATIVE TEST (observed red): `sourceItemId` left out of `AgentRecord`'s
+    // `encode` → "FAIL: after a relaunch CON-3 has no agent …".
+    let afterRelaunch = AgentSupervisor(store: AgentStore(applicationSupportDirectory: storeDirectory),
+                                        makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    afterRelaunch.restore()
+    for (itemId, agentId) in firstReport.launched {
+        guard afterRelaunch.agent(forSourceItem: itemId) == agentId else {
+            throw fail("after a relaunch \(itemId) has no agent — the mapping did not survive, so nothing can be checked off")
+        }
+        guard afterRelaunch.sourceItem(of: agentId) == itemId else {
+            throw fail("after a relaunch agent \(agentId.rawValue.uuidString) no longer names its item")
+        }
+    }
+
+    // MARK: 6 · a fan-out under a parent is held to the parent's child cap too
+
+    let parentId = supervisor.spawn(
+        role: "orchestrator",
+        prompt: nil,
+        cwd: repo,
+        model: config.model,
+        thinking: config.thinking
+    )
+    for index in 1 ... 3 {
+        _ = supervisor.spawn(
+            role: "worker-\(index)",
+            prompt: nil,
+            cwd: repo,
+            model: config.model,
+            thinking: config.thinking,
+            parentAgentID: parentId
+        )
+    }
+    let childItems = (1 ... 3).map { AgentSupervisor.FanOutItem(id: "CHILD-\($0)", prompt: "child item \($0)") }
+    let childReport = supervisor.fanOut(
+        items: childItems,
+        role: nil,
+        cwd: repo,
+        model: config.model,
+        thinking: config.thinking,
+        parentAgentID: parentId,
+        isolated: false
+    )
+    try requireAccounted(childReport, childItems, "the parented fan-out")
+    // NEGATIVE TEST (observed red): the cap ignoring the parent's existing children
+    // → "FAIL: a parent with 3 of 4 child slots used fanned out 3 …".
+    guard childReport.cap == 1, childReport.launched.count == 1, childReport.deferred == ["CHILD-2", "CHILD-3"] else {
+        throw fail("a parent with 3 of \(AgentSupervisor.maxChildrenPerParent) child slots used fanned out \(childReport.launched.count) (cap \(childReport.cap), deferred \(childReport.deferred))")
+    }
+    guard supervisor.children(of: parentId).count == AgentSupervisor.maxChildrenPerParent else {
+        throw fail("the parent ended with \(supervisor.children(of: parentId).count) children, past the cap of \(AgentSupervisor.maxChildrenPerParent)")
+    }
+
+    // MARK: 7 · the gesture is REACHABLE in the app, not only from this check
+    //
+    // Same shape as P2A.6's headless assertions, and for the same reason: the
+    // sections above drive the view directly, so they would all stay green over an
+    // app that never wires a `fanOutHandler` or never dispatches the command. The
+    // `case .fanOutQueueSelection:` in `performPaletteAction` cannot be scanned for
+    // — deleting it is a compile error, the switch is exhaustive — so what is
+    // asserted is the registry, the palette rows, and the install branch.
+    guard CommandRegistry.all().contains(where: { $0.id == "agent.fanOut" && $0.action == .fanOutQueueSelection }) else {
+        throw fail("⌘K cannot reach a fan-out: no agent.fanOut in CommandRegistry")
+    }
+    guard LaunchPaletteModel.makeRows(profiles: []).contains(.action(.fanOutQueueSelection)) else {
+        throw fail("the fan-out command is registered but not offered as a palette row")
+    }
+    let installBranch = try ticketQueueInstallSource()
+    guard installBranch.contains("fanOutHandler:") else {
+        throw fail("the app installs its ticket-queue tile with no fanOutHandler, so no row is selectable in the running app:\n\(installBranch)")
+    }
+    guard installBranch.contains("completedFanOutItems") else {
+        throw fail("a tile installed after a completion would not show it — the install branch never replays completedFanOutItems:\n\(installBranch)")
+    }
+
+    supervisor.stopAll()
+    print("AgentSupervisor fan-out: 3 rows → 3 agents on 3 worktrees with 3 prompts, completing one checked off exactly that row, \(capReport.summary) at the cap, a repeat refused, the mapping survived a relaunch, and a parented batch fell to cap \(childReport.cap)")
+}
+
+/// The scripted runners a fan-out produced, keyed by the item their agent was
+/// spawned for — so "each agent got ITS item's prompt" is checkable.
+private final class FanOutRunnerLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var runners: [String: ScriptedAgentRunner] = [:]
+
+    func make(sourceItemId: String?, script: [AgentRuntimeEvent]) -> AgentRunning {
+        let runner = ScriptedAgentRunner(script: script)
+        if let sourceItemId {
+            lock.withLock { runners[sourceItemId] = runner }
+        }
+        return runner
+    }
+
+    func prompts(for itemId: String) -> [String] {
+        lock.withLock { runners[itemId] }?.prompts ?? []
+    }
+
+    var promptsByItem: [String: [String]] {
+        lock.withLock { runners.mapValues(\.prompts) }
+    }
+
+    var promptCount: Int {
+        lock.withLock { runners.values.reduce(0) { $0 + $1.prompts.count } }
+    }
+}
+
+/// The body of `installInitialTicketQueueTile`, for the reachability assertions
+/// above. A scan for the same reason `managedAgentCloseBranchSource` is one: the
+/// install needs a live `CanvasNSView`, which a headless check does not have.
+private func ticketQueueInstallSource() throws -> String {
+    struct ScanError: Error, CustomStringConvertible { let description: String }
+    let path = "Sources/ContinuumRevived/App/ContinuumApp.swift"
+    let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        .appendingPathComponent(path)
+    guard let source = try? String(contentsOf: url, encoding: .utf8) else {
+        throw ScanError(description: "could not read \(path) — run this check from the repo root")
+    }
+    let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    guard let start = lines.firstIndex(where: { $0.contains("func installInitialTicketQueueTile(") }) else {
+        throw ScanError(description: "no `func installInitialTicketQueueTile(` in \(path) — the install moved, and this scan is now blind")
+    }
+    var body: [String] = []
+    for line in lines[(start + 1)...] {
+        if line.hasPrefix("    }") { break }
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("//") { continue }
+        body.append(line)
+    }
+    guard !body.isEmpty else {
+        throw ScanError(description: "installInitialTicketQueueTile scanned as empty")
+    }
+    return body.joined(separator: "\n")
 }

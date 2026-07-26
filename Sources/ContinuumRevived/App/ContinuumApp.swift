@@ -1058,6 +1058,24 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--agent-fanout-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runAgentFanOutChecks()
+                    print("ContinuumRevivedAgentFanOutChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            // Same reason as `--agent-supervisor-check`: the completion that checks a
+            // row off arrives via `DispatchQueue.main.async`, and only a live main run
+            // loop drains it.
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--agent-restore-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -2832,6 +2850,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `managedAgentRunners` dictionary this view used to hold: the supervisor owns
     /// the runner and the record, and a tile is one subscriber to its event stream.
     private lazy var agentSupervisor = AgentSupervisor(store: AgentStore(smokeTest: smokeTestEnabled))
+    /// P2D.6: the ticket-queue tiles that can fan out, so the agent that finishes
+    /// can find the row that started it. App-level rather than on
+    /// `ZoneRuntimeController` because the completion arrives from the supervisor,
+    /// which is app-lifetime; dropped in `purgeTileState` with the tile.
+    private var ticketQueueViews: [UUID: TicketQueueTileNSView] = [:]
     /// Legacy per-project `ManagedAgentSessionRecord`s, read across every project
     /// root (P2B.2). Held here rather than made per-call so its cache survives
     /// between inbox refreshes, which is the point of it.
@@ -3909,7 +3932,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 try? projectStore.saveFileTreeState(fileTreeState)
             }
         case .ticketQueue:
-            break
+            ticketQueueViews.removeValue(forKey: id)
         case .conductorQueue:
             break
         case .diffReview:
@@ -4521,9 +4544,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     private func installInitialTicketQueueTile(_ tile: Tile, in canvasView: CanvasNSView) {
-        canvasView.install(tileView: TicketQueueTileNSView(tile: tile, dispatchHandler: { [weak self] row in
+        let view = TicketQueueTileNSView(tile: tile, dispatchHandler: { [weak self] row in
             self?.dispatchAgent(for: row)
-        }), for: tile)
+        }, fanOutHandler: { [weak self] rows in
+            self?.fanOutAgents(for: rows, from: tile.id)
+        })
+        ticketQueueViews[tile.id] = view
+        installFanOutCompletionRouting()
+        // A completion that landed while this tile did not exist — it was closed, or
+        // the workspace rebuilt it — still shows. Without this the check-off would be
+        // whatever the live view happened to witness (from the cross-review).
+        for itemId in agentSupervisor.completedFanOutItems { view.markItemDone(itemId) }
+        canvasView.install(tileView: view, for: tile)
     }
 
     private func installInitialConductorQueueTile(_ tile: Tile, in canvasView: CanvasNSView) {
@@ -4570,6 +4602,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case let .failure(error):
             fputs("Ticket queue dispatch failed: \(error)\n", stderr)
         }
+    }
+
+    /// P2D.6 — N selected rows become N agents, one per row, each in its own
+    /// worktree.
+    ///
+    /// `dispatchAgent` above is this gesture at one row and into a TERMINAL; this
+    /// one goes through the supervisor, because a batch needs the things only the
+    /// supervisor has: the cap, one isolated checkout per agent, and the item→agent
+    /// mapping that lets a finished agent check its row off. Isolated is not
+    /// optional here — N agents fanned out over one checkout is exactly the
+    /// clobbering P2C exists to prevent.
+    private func fanOutAgents(for rows: [LinearTicketQueueRow], from tileId: UUID) {
+        let project = activeProject
+        let repoPath = project?.rootPath ?? FileManager.default.currentDirectoryPath
+        let model = AgentModelConfig.resolvedFromDefaults()
+        let items = rows.map {
+            AgentSupervisor.FanOutItem(
+                id: $0.identifier,
+                prompt: AgentKickoffPrompt.make(row: $0, repoPath: repoPath, projectName: project?.name)
+            )
+        }
+        let report = agentSupervisor.fanOut(
+            items: items,
+            role: nil,
+            cwd: URL(fileURLWithPath: repoPath, isDirectory: true),
+            model: model.model,
+            thinking: model.thinking,
+            projectId: project?.id,
+            isolated: true
+        )
+        // RENDERED, not logged: a batch held to the cap has to say so on the tile
+        // that asked for it.
+        ticketQueueViews[tileId]?.report(report.summary)
+        refreshAgentSurfaces()
+    }
+
+    /// Routes a fan-out completion back to whichever queue tile holds that row.
+    /// Broadcast rather than addressed: `markItemDone` ignores an identifier it does
+    /// not render, and the alternative — remembering which tile owns which item —
+    /// is a second mapping that can disagree with `AgentRecord.sourceItemId`.
+    /// Installed once; the supervisor outlives every tile.
+    private func installFanOutCompletionRouting() {
+        guard agentSupervisor.onFanOutItemCompleted == nil else { return }
+        agentSupervisor.onFanOutItemCompleted = { [weak self] itemId, _ in
+            guard let self else { return }
+            for view in self.ticketQueueViews.values { view.markItemDone(itemId) }
+        }
+    }
+
+    /// The `agent.fanOut` command. Acts on the focused ticket-queue tile, which is
+    /// the one whose selection the user can see; with none focused it says so rather
+    /// than picking a tile for them.
+    private func fanOutFocusedTicketQueue() {
+        guard let tileId = canvasView?.canvasState.lastActiveTileId, let view = ticketQueueViews[tileId] else {
+            fputs("Fan Out Selected Tickets: no ticket-queue tile is focused\n", stderr)
+            return
+        }
+        view.fanOutSelection()
     }
 
     // MARK: - Hotkeys + spawning
@@ -8728,6 +8818,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             spawnManagedAgentFromPalette()
         case .newHeadlessAgent:
             spawnHeadlessAgentFromPalette()
+        case .fanOutQueueSelection:
+            fanOutFocusedTicketQueue()
         case .newNote:
             spawnNoteFromPalette()
         case .newBrowser:

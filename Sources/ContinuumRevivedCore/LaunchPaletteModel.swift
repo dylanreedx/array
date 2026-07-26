@@ -5,6 +5,9 @@ public enum LaunchPaletteAction: Equatable, Sendable {
     /// An agent with no tile at all (P2A.6): it runs, persists and appears in the
     /// supervisor's records without any canvas layout.
     case newHeadlessAgent
+    /// P2D.6 — one agent per selected row of the focused ticket-queue tile, each
+    /// in its own worktree.
+    case fanOutQueueSelection
     case newNote
     case newBrowser
     case openFile
@@ -34,6 +37,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return "New Agent…"
         case .newHeadlessAgent:
             return "New Agent Without a Tile…"
+        case .fanOutQueueSelection:
+            return "Fan Out Selected Tickets…"
         case .newNote:
             return "New Note"
         case .newBrowser:
@@ -87,6 +92,8 @@ public enum LaunchPaletteAction: Equatable, Sendable {
             return ["new", "agent", "managed", "assistant"]
         case .newHeadlessAgent:
             return ["new", "agent", "headless", "tileless"]
+        case .fanOutQueueSelection:
+            return ["fan", "out", "fanout", "agents", "tickets", "queue", "selected", "batch"]
         case .newNote:
             return ["new", "note"]
         case .newBrowser:
