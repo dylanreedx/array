@@ -1124,6 +1124,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--agent-observer-independence-check") {
+            do {
+                _ = NSApplication.shared
+                try AppDelegate.runAgentObserverIndependenceChecks()
+                print("ContinuumRevivedAgentObserverIndependenceChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--settings-panel-check") {
             do {
                 _ = NSApplication.shared
@@ -3956,7 +3968,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try? workspaceRuntime?.activeController?.managedSessionStore.load(tileId: tileId)
     }
 
-    private func currentManagedAgentActivities() -> [DesktopManagedAgentActivity] {
+    /// What `currentManagedAgentActivities()` found, plus WHICH of those agents
+    /// something live reported (P2B.8).
+    ///
+    /// An agent is OBSERVED here under exactly one rule: its status below came from
+    /// a live source (a rendering `ManagedAgentTileNSView`, or a running supervised
+    /// agent) rather than from a file. Held together with the activities so a caller
+    /// cannot pair a fresh listing with a stale idea of who is being watched — the
+    /// same reason `AgentActivitySurface` holds `agentIdentities`.
+    struct ManagedAgentActivityScan {
+        var activities: [DesktopManagedAgentActivity] = []
+        var observedAgentIds: Set<UUID> = []
+    }
+
+    private func currentManagedAgentActivities() -> ManagedAgentActivityScan {
         // P2B.2: an inbox lists agents from EVERY project, not just the active
         // one. Two sources, in precedence order:
         //   1. the active project's live store — it is the writer, so it can
@@ -3994,14 +4019,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             records.append(found.record)
         }
 
+        // P2B.8: every agent whose status below comes from something LIVE. A record
+        // read off disk is not in here, and that is the normal case for every
+        // project whose `ZoneRuntimeController` has been released.
+        var observedAgentIds: Set<UUID> = []
+
         var activities = records.map { record in
-            let status = (canvasView?.tileView(for: record.tileId) as? ManagedAgentTileNSView)?.currentAgentStatus
-                ?? Self.agentStatus(for: record.status)
+            let liveStatus = (canvasView?.tileView(for: record.tileId) as? ManagedAgentTileNSView)?.currentAgentStatus
+            let status = liveStatus ?? Self.agentStatus(for: record.status)
             // P2A.8: the aggregate key is the agent's. A managed session with no
             // supervised agent (one restored from a store the supervisor has not
             // claimed) falls back to its tile id, which is the identity every event
             // written before this migration used.
             let agentId = agentSupervisor.agent(forTile: record.tileId)?.rawValue ?? record.tileId
+            if liveStatus != nil { observedAgentIds.insert(agentId) }
             return DesktopManagedAgentActivity(
                 agentId: agentId,
                 tileId: record.tileId,
@@ -4038,8 +4069,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // `agentSupervisor.events(for:)`, which is a change to the agent event
             // plumbing this packet's `## Files` does not name and which P4.1's
             // lifecycle state and `P5.10-agent-settled-signal` both land on.
-            let status = (record.tileId.flatMap { canvasView?.tileView(for: $0) } as? ManagedAgentTileNSView)?.currentAgentStatus
-                ?? (agentSupervisor.isRunning(record.id) ? .working : .idle)
+            let liveStatus = (record.tileId.flatMap { canvasView?.tileView(for: $0) } as? ManagedAgentTileNSView)?.currentAgentStatus
+            let isRunning = agentSupervisor.isRunning(record.id)
+            let status = liveStatus ?? (isRunning ? .working : .idle)
+            // P2B.8: a RESTORED record the supervisor merely holds is not observed —
+            // `restore()` (P2A.7) adopts records without a runner, so the supervisor
+            // knows the agent exists and hears nothing from it. Observed means a live
+            // view or a runner actually in flight, which is exactly the pair the
+            // status above is derived from.
+            if liveStatus != nil || isRunning { observedAgentIds.insert(record.id.rawValue) }
             activities.append(DesktopManagedAgentActivity(
                 agentId: record.id.rawValue,
                 tileId: record.tileId,
@@ -4049,7 +4087,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 recentEvents: managedAgentActivityByAgent[record.id.rawValue] ?? []
             ))
         }
-        return activities
+        return ManagedAgentActivityScan(activities: activities, observedAgentIds: observedAgentIds)
     }
 
     private static func agentStatus(for managedStatus: ManagedSessionStatus) -> AgentStatus {
@@ -4093,6 +4131,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         /// diffs rows instead of reloading them. `WorkspaceSidebarView` still reloads
         /// whole — rewriting it is Phase 3's ticket, not this one.
         var lastChange: AgentsBoardChangeSet = .empty
+        /// P2B.8: the agents in `snapshot` that nothing live reported at rebuild time.
+        /// Their status is the last one anybody persisted, which is the CORRECT thing
+        /// to show for an agent in a workspace whose `ZoneRuntimeController` has been
+        /// released — with the fact that nobody has confirmed it attached, so the UI
+        /// can say so. No time threshold is applied; see `AgentObservation`.
+        ///
+        /// NOT `AgentStatus.stale`, which is a derived state of the AGENT (see
+        /// `AgentObservation`). Carried alongside the snapshot, like
+        /// `agentIdentities`, rather than pushed into `AgentActivity`: that value
+        /// crosses to the phone, and "the desktop has no observer for this" is a fact
+        /// about this host. Phase 3 renders it; here it is only carried.
+        var unobservedAgentIds: Set<UUID> = []
     }
 
     /// The replica the desktop stamps its own inventory with. Was a literal inside
@@ -4125,7 +4175,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             liveStatuses[tileId] = status
         }
 
-        let managedAgents = currentManagedAgentActivities()
+        let managedScan = currentManagedAgentActivities()
+        let managedAgents = managedScan.activities
         // A terminal session with no `AgentDescriptor` is a plain shell. It stays in
         // the snapshot — the phone has always listed one, as `Shell idle` — but it is
         // NOT an agent on the canvas or in the sidebar, where every shell tile would
@@ -4136,15 +4187,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             agentIdentities.insert(descriptor.tileId)
         }
 
+        let snapshot = DegradedDesktopActivitySnapshotSource.snapshot(
+            descriptors: descriptors,
+            liveStatuses: liveStatuses,
+            managedAgents: managedAgents,
+            replicaId: Self.agentActivityReplicaId,
+            now: now
+        )
+
+        // P2B.8: who did anything LIVE report in this rebuild. For a terminal agent
+        // that is the runtime observer's map ALONE (its key is its tile id) — NOT
+        // `liveStatuses`, even though that is what overlays its status.
+        //
+        // The difference is the whole point: `canvasView?.agentStatus(for:)` reads the
+        // BADGE, and the badge is what `applyAgentStatusesToCanvas` wrote from the
+        // previous snapshot. Counting it as an observation would make the app confirm
+        // its own echo — an agent would look observed forever after one sweep, which
+        // since P2B.6 made badges sticky is exactly what would happen. A managed
+        // agent's `currentAgentStatus` is a different animal: the tile derives it from
+        // the agent's own event stream, so the scan above may and does count it.
+        //
+        // Everything else in the snapshot came off disk, and no controller is started
+        // to change that.
+        //
+        // KNOWN AND DELIBERATE, from the cross-review: `SessionObserver`'s map is
+        // SPARSE — `publishStatusesChanged` emits only observations whose
+        // `lastWrittenStatus` is set — so a tile the observer is watching but has not
+        // yet derived a status for reads as unobserved. That matches what this fact
+        // means ("nothing live has told us anything about this agent yet"), and it is
+        // the honest reading: its status in the snapshot did come from the file.
+        // Distinguishing "an observer exists" from "an observer has reported" would
+        // need the observed tile-id set published out of `ZoneRuntimeController`,
+        // which is not this packet's file.
+        var observedAgentIds = Set(observedAgentStatuses.keys)
+        observedAgentIds.formUnion(managedScan.observedAgentIds)
+
         agentActivity = AgentActivitySurface(
-            snapshot: DegradedDesktopActivitySnapshotSource.snapshot(
-                descriptors: descriptors,
-                liveStatuses: liveStatuses,
-                managedAgents: managedAgents,
-                replicaId: Self.agentActivityReplicaId,
-                now: now
-            ),
-            agentIdentities: agentIdentities
+            snapshot: snapshot,
+            agentIdentities: agentIdentities,
+            unobservedAgentIds: AgentObservation.unobservedAgentIds(
+                in: snapshot,
+                observedAgentIds: observedAgentIds
+            )
         )
     }
 
@@ -4239,6 +4323,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             draft, to: agentActivity.snapshot, replicaId: Self.agentActivityReplicaId
         )
         agentActivity.agentIdentities.insert(draft.agentId)
+        // P2B.8: an event FROM the agent is the strongest possible observation of it,
+        // so it stops being unobserved here rather than at the next full rebuild —
+        // otherwise a headless agent that just spoke would keep a "not heard from"
+        // mark until something structural moved.
+        agentActivity.unobservedAgentIds.remove(draft.agentId)
     }
 
     /// Debounced `pushAgentSurfaces`, for the runner event stream: a sidebar reload
@@ -18358,7 +18447,12 @@ extension AppDelegate {
     let app = AppDelegate()
     app.registryStore = registryStore
 
-    let activities = app.currentManagedAgentActivities()
+    let scan = app.currentManagedAgentActivities()
+    let activities = scan.activities
+    // P2B.8: nothing live reported either of them — there is no canvas and no
+    // supervised runner here, which is the whole point of the fixture.
+    try expect(scan.observedAgentIds.isEmpty,
+               "an agent listed off disk with no view and no runner is NOT observed — got \(scan.observedAgentIds.count) observed")
     try expect(activities.count == 2,
                "both projects' agents are published, and the project root that is gone is skipped rather than thrown — got \(activities.count)")
     guard let fromA = activities.first(where: { $0.tileId == tileA }),
@@ -19171,5 +19265,315 @@ extension AppDelegate {
 
     NSApplication.shared.dockTile.badgeLabel = nil
     print("AgentIncrementalRefresh: with the fixture deleted from disk, 3 agent events folded into the held snapshot (sequence \(sequenceBeforeEvent) → \(sequenceAfterEvents)), the bystander terminal agent survived all of them untouched, one coalesced push reported exactly the 3 agents that moved (2 updated, 1 added), and the structural rebuild then dropped the bystander")
+    }
+}
+
+/// Ticket: docs/38-tickets/90-agent-ux/P2B.8-observer-independence.md
+/// Gated on `--agent-observer-independence-check`.
+///
+/// THE INVENTORY MUST NOT DEPEND ON LIVE OBSERVERS. `ZoneRuntimeBudgetConfig`
+/// `.closeOnZero` defaults true, so releasing a project's last zone reference tears
+/// down its `ZoneRuntimeController` and with it that project's `SessionObserver`. An
+/// inbox that spans workspaces cannot be built on live observers — it would show
+/// empty or frozen state for everything you are not currently looking at.
+///
+/// So this drives the real `refreshAgentSurfaces()` with NO `ZoneRuntimeController`,
+/// NO workspace runtime and (in section 1) NO canvas at all: every agent it finds
+/// comes from a file, and each must appear with the status that file holds, MARKED as
+/// something nobody has confirmed. Then a live view and a live observer sweep are
+/// added, and the overlay must win and clear the mark.
+///
+/// Not a second AgentObservation unit test: `unobservedAgentIds` is pure and could be
+/// called with hand-built arguments, which would prove nothing about whether the app
+/// passes it the real observer set. What is asserted here is the WIRING — that the
+/// desktop's own rebuild produces the flag from its own inputs.
+///
+/// WHY THE FLAG CARRIES NO AGE, measured here rather than argued: section 2 shows a
+/// TERMINAL agent's persisted information reading a fraction of a second old on a
+/// fixture written an hour ago, because `ProjectStore.listSessions()` returns every
+/// descriptor through `AgentDescriptor.restoredForBoot()`, which stamps
+/// `statusUpdatedAt = now` (see `--agent-inventory-wiring-check`). A threshold-based
+/// flag would therefore exempt every terminal agent forever — the packet's
+/// `## Approach` asked for one, and its own `## Verify` ("every agent … a staleness
+/// flag set") is what rules against it. See `AgentObservation` for the full
+/// reasoning and where the threshold went instead.
+///
+/// FIVE NEGATIVE TESTS OBSERVED RED at exit 1 with the final code:
+///   1. `unobservedAgentIds:` dropped from the `AgentActivitySurface` the rebuild
+///      writes → `an agent read off disk with no observer must be marked unobserved
+///      — got 0 marked of 4 agents`.
+///   2. `AgentObservation.unobservedAgentIds` aging rows past a 900s threshold — the
+///      packet's literal `## Approach` → `an agent read off disk with no observer
+///      must be marked unobserved — got 3 marked of 4 agents`, the terminal agent
+///      exempted on an hour-old fixture. This is the measurement that removed the
+///      threshold.
+///   3. managed records counted as observed unconditionally (`observedAgentIds`
+///      inserted regardless of `liveStatus`) → `an agent read off disk with no
+///      observer must be marked unobserved — got 2 marked of 4 agents`, and
+///      `--cross-project-agents-check` red too: `an agent listed off disk with no
+///      view and no runner is NOT observed — got 2 observed`.
+///   4. the `unobservedAgentIds.remove` dropped from
+///      `ingestAgentActivityIncrementally` → `an agent's OWN event must clear the
+///      mark without a rebuild — got 3 marked`.
+///   5. `observedAgentIds` seeded from `liveStatuses` instead of
+///      `observedAgentStatuses`, i.e. the canvas badge the app itself wrote counted
+///      as an observation → `an agent whose observer went away must go BACK to
+///      unobserved — got 2 marked`. Raised by the cross-review; section 4.
+extension AppDelegate {
+    static func runAgentObserverIndependenceChecks() throws {
+    enum CheckError: Error, CustomStringConvertible {
+        case failed(String)
+        var description: String { switch self { case let .failed(message): return message } }
+    }
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+        if !condition() { throw CheckError.failed(message) }
+    }
+
+    let fm = FileManager.default
+    let tempRoot = fm.temporaryDirectory
+        .appendingPathComponent("continuum-observer-independence-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: tempRoot) }
+    let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+    let agentsSupport = tempRoot.appendingPathComponent("Agents", isDirectory: true)
+    let projectARoot = tempRoot.appendingPathComponent("ProjectA", isDirectory: true)
+    let projectBRoot = tempRoot.appendingPathComponent("ProjectB", isDirectory: true)
+    for dir in [appSupport, agentsSupport, projectARoot, projectBRoot] {
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+
+    // The REAL clock, not a fixed fixture one: section 2 measures how old the app
+    // thinks a persisted terminal agent's information is, and `restoredForBoot()`
+    // stamps `Date()`. A fixture clock parked in 2030 would make that measurement say
+    // whatever the offset chose. Everything persisted here is deliberately an hour
+    // old, so "the app thinks it is seconds old" can only come from the re-stamp.
+    let now = Date()
+    let anHourAgo = now.addingTimeInterval(-3600)
+    let workspaceId = UUID(uuidString: "2B800000-0000-4000-8000-0000000000A1")!
+    let projectA = UUID(uuidString: "2B800000-0000-4000-8000-0000000000D1")!
+    let projectB = UUID(uuidString: "2B800000-0000-4000-8000-0000000000D2")!
+    let zoneA = UUID(uuidString: "2B800000-0000-4000-8000-0000000000C1")!
+    let zoneB = UUID(uuidString: "2B800000-0000-4000-8000-0000000000C2")!
+    let terminalAgentTile = UUID(uuidString: "2B800000-0000-4000-8000-0000000000E1")!
+    let managedTileA = UUID(uuidString: "2B800000-0000-4000-8000-0000000000E2")!
+    // The agent in the OTHER project — the one whose controller is exactly what
+    // `closeOnZero` releases when you look somewhere else.
+    let managedTileB = UUID(uuidString: "2B800000-0000-4000-8000-0000000000E3")!
+    let headlessId = AgentID(rawValue: UUID(uuidString: "2B800000-0000-4000-8000-0000000000B1")!)
+
+    // MARK: 1 · the fixture, entirely on disk
+
+    let placementA = ZonePlacement(zoneId: zoneA, projectId: projectA, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 600, height: 400), color: "blue", collapsed: false, hydrationPolicy: .automatic)
+    let placementB = ZonePlacement(zoneId: zoneB, projectId: projectB, origin: ZonePoint(x: 1000, y: 0), size: ZoneSize(width: 600, height: 400), color: "green", collapsed: false, hydrationPolicy: .automatic)
+    var registry = Registry.empty()
+    registry.lastActiveWorkspaceId = workspaceId
+    registry.workspaces = [WorkspaceEntry(id: workspaceId, name: "Default", projectIds: [projectA, projectB], createdAt: anHourAgo, updatedAt: anHourAgo)]
+    registry.projects = [
+        ProjectEntry(id: projectA, name: "Project A", rootPath: projectARoot.path, workspaceId: workspaceId, lastOpenedAt: anHourAgo, pinned: false, missing: false),
+        ProjectEntry(id: projectB, name: "Project B", rootPath: projectBRoot.path, workspaceId: workspaceId, lastOpenedAt: anHourAgo, pinned: false, missing: false),
+    ]
+    let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+    try registryStore.save(registry)
+    try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport).save(
+        WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [placementA, placementB],
+            zoneZOrder: [zoneA, zoneB],
+            lastActiveZoneId: zoneA
+        )
+    )
+
+    let canvasA = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [
+        Tile(id: terminalAgentTile, kind: .terminal, title: "Agent · Claude", frame: TileFrame(x: 0, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata()),
+        Tile(id: managedTileA, kind: .managedAgent, title: "Managed A", frame: TileFrame(x: 220, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata()),
+    ], groups: [], lastActiveTileId: terminalAgentTile)
+    let storeA = ProjectStore(projectRoot: projectARoot)
+    try storeA.saveCanvas(canvasA)
+    try storeA.saveSession(TerminalSessionDescriptor(
+        id: UUID(uuidString: "2B800000-0000-4000-8000-0000000000F1")!,
+        tileId: terminalAgentTile, launchProfileId: "shell", command: "/bin/zsh", args: [],
+        cwd: projectARoot.path, env: [:], title: "session", createdAt: anHourAgo, lastStartedAt: anHourAgo, lastExit: nil,
+        agentDescriptor: AgentDescriptor(agentKind: .claude, worktreePath: projectARoot.path, status: .working, statusUpdatedAt: anHourAgo)
+    ))
+    try ManagedAgentSessionStore(projectRoot: projectARoot).upsert(ManagedAgentSessionRecord(
+        tileId: managedTileA, agentKind: .managed, status: .running, lastSeenAt: anHourAgo
+    ))
+
+    let canvasB = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [
+        Tile(id: managedTileB, kind: .managedAgent, title: "Managed B", frame: TileFrame(x: 1000, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata()),
+    ], groups: [], lastActiveTileId: nil)
+    try ProjectStore(projectRoot: projectBRoot).saveCanvas(canvasB)
+    try ManagedAgentSessionStore(projectRoot: projectBRoot).upsert(ManagedAgentSessionRecord(
+        tileId: managedTileB, agentKind: .managed, status: .running, lastSeenAt: anHourAgo
+    ))
+
+    // A HEADLESS supervised agent, restored from its store: the supervisor HOLDS it
+    // and no runner is in flight, which is precisely "we know it exists and hear
+    // nothing from it".
+    let agentStore = AgentStore(applicationSupportDirectory: agentsSupport)
+    try agentStore.upsert(AgentRecord(
+        id: headlessId,
+        displayName: "reviewer",
+        role: "reviewer",
+        model: "openai-codex/gpt-5.6-sol",
+        thinking: "medium",
+        cwd: projectARoot.path,
+        projectId: projectA,
+        createdAt: anHourAgo,
+        lastActivityAt: anHourAgo
+    ))
+
+    let app = AppDelegate()
+    app.registryStore = registryStore
+    app.agentSupervisor = AgentSupervisor(store: agentStore, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    app.agentSupervisor.restore()
+    try expect(app.agentSupervisor.records[headlessId] != nil,
+               "the headless agent must be adopted, or the assertions below say nothing about it")
+    try expect(app.agentSupervisor.isRunning(headlessId) == false,
+               "a restored agent has no runner in flight — otherwise it is legitimately observed and this fixture is not about the unobserved case")
+
+    // MARK: 2 · NO OBSERVER ANYWHERE. Every agent still appears, from disk, marked.
+
+    // Vacuity guards for the whole check: nothing live exists to be read, and — the
+    // trap this ticket is named for — nothing starts one either.
+    try expect(app.workspaceRuntime == nil && app.canvasView == nil,
+               "there must be no workspace runtime and no canvas, or 'without a live observer' is not what is being measured")
+    app.refreshAgentSurfaces(notify: false)
+    try expect(app.workspaceRuntime == nil,
+               "listing agents must not boot a ZoneRuntimeController — that would make looking at the inbox start work")
+
+    var surface = app.agentActivity
+    try expect(Set(surface.snapshot.byAgent.keys) == Set([terminalAgentTile, managedTileA, managedTileB, headlessId.rawValue]),
+               "every agent must appear with no observer at all — got \(surface.snapshot.byAgent.keys.count) of 4")
+    try expect(surface.snapshot.byAgent[managedTileA]?.status == .working,
+               "the active project's agent keeps its PERSISTED status — got \(String(describing: surface.snapshot.byAgent[managedTileA]?.status))")
+    try expect(surface.snapshot.byAgent[managedTileB]?.status == .working,
+               "so does the agent in the project whose controller is gone — got \(String(describing: surface.snapshot.byAgent[managedTileB]?.status))")
+    try expect(surface.snapshot.byAgent[headlessId.rawValue]?.tileId == nil,
+               "the headless agent appears with no tile — got \(String(describing: surface.snapshot.byAgent[headlessId.rawValue]?.tileId))")
+    // PINNED, because it is the one place the packet's "last persisted status" is not
+    // literally what a human sees, and the cross-review was right to ask: a TERMINAL
+    // agent's descriptor was saved as `.working`, and `restoredForBoot()` rewrites
+    // both the status and its stamp on every read, so what survives the disk is
+    // `.stale` + this ticket's mark. That is a property of `TerminalSessionDescriptor`
+    // (recorded in `--agent-inventory-wiring-check` and P2B.7's owner note), not
+    // something this ticket chose; asserted here so a fix to that stamp shows up as a
+    // red gate rather than as a silent behaviour change.
+    try expect(surface.snapshot.byAgent[terminalAgentTile]?.status == .stale,
+               "a persisted terminal agent reads .stale after restoredForBoot, mark and all — got \(String(describing: surface.snapshot.byAgent[terminalAgentTile]?.status))")
+
+    try expect(surface.unobservedAgentIds == Set([terminalAgentTile, managedTileA, managedTileB, headlessId.rawValue]),
+               "an agent read off disk with no observer must be marked unobserved — got \(surface.unobservedAgentIds.count) marked of \(surface.snapshot.byAgent.count) agents")
+    try expect(surface.unobservedAgentIds.contains(terminalAgentTile),
+               "a terminal agent read off disk must be marked unobserved too — an age-based flag would exempt it forever, see the age measured below")
+    // The mark is OUR ignorance, not the agent's state: every one of those three is
+    // still reported as `working`/`idle`, never rewritten to `AgentStatus.stale`.
+    try expect(surface.snapshot.byAgent[managedTileA]?.status != .stale
+                && surface.snapshot.byAgent[headlessId.rawValue]?.status != .stale,
+               "an unobserved agent must NOT be rewritten as AgentStatus.stale — that is a derived state of the AGENT, not of our knowledge")
+
+    // THE MEASUREMENT THAT RULED OUT A TIME THRESHOLD. Everything on disk here is an
+    // hour old, and the app believes this agent's information is seconds old, because
+    // `listSessions()` re-stamps it. Any threshold above a few seconds would leave
+    // every terminal agent unmarked forever, so the flag carries no threshold at all.
+    let terminalAge = now.timeIntervalSince(surface.snapshot.byAgent[terminalAgentTile]?.updatedAt ?? anHourAgo)
+    let managedAge = now.timeIntervalSince(surface.snapshot.byAgent[managedTileB]?.updatedAt ?? now)
+    try expect(terminalAge < 60,
+               "a terminal agent's stamp is refreshed by restoredForBoot, so its age is unusable — measured \(terminalAge)s on an hour-old fixture")
+    try expect(managedAge > 3000,
+               "…while a managed record's own lastSeenAt survives the read, which is what made the difference visible — measured \(managedAge)s")
+
+    // MARK: 3 · THE OVERLAY WINS. A live tile view beats the file, and clears the mark.
+
+    let canvas = CanvasNSView(
+        canvasState: canvasA,
+        activeZone: placementA,
+        zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: placementA, displayName: "Project A")]
+    )
+    canvas.install(tileView: TileNSView(tile: canvasA.tiles[0]), for: canvasA.tiles[0])
+    let managedView = ManagedAgentTileNSView(tile: canvasA.tiles[1])
+    canvas.install(tileView: managedView, for: canvasA.tiles[1])
+    app.canvasView = canvas
+    managedView.ingest(.requestOpened(
+        threadId: managedView.wiringThreadId,
+        requestId: "req-1",
+        kind: .commandExecutionApproval
+    ))
+    try expect(managedView.currentAgentStatus == .needsAttention,
+               "the live view must hold a status that differs from the file's, or 'the overlay wins' is unmeasurable — got \(managedView.currentAgentStatus)")
+
+    app.refreshAgentSurfaces(notify: false)
+    surface = app.agentActivity
+    try expect(surface.snapshot.byAgent[managedTileA]?.status == .needsAttention,
+               "a live view's status must override the persisted one — got \(String(describing: surface.snapshot.byAgent[managedTileA]?.status))")
+    try expect(surface.unobservedAgentIds.contains(managedTileA) == false,
+               "…and the agent it reports is no longer unobserved — got \(surface.unobservedAgentIds.count) marked")
+    // The other project is untouched by any of that: still listed, still from disk.
+    try expect(surface.snapshot.byAgent[managedTileB]?.status == .working
+                && surface.unobservedAgentIds.contains(managedTileB),
+               "the agent in the other project is still listed from disk and still marked — got \(String(describing: surface.snapshot.byAgent[managedTileB]?.status))")
+
+    // The other overlay input, through the production observer entry point: a
+    // terminal agent's live status is the runtime observer's map.
+    app.applyObserverStatuses([terminalAgentTile: .needsAttention])
+    surface = app.agentActivity
+    try expect(surface.snapshot.byAgent[terminalAgentTile]?.status == .needsAttention,
+               "a runtime observer's status must override the persisted one — got \(String(describing: surface.snapshot.byAgent[terminalAgentTile]?.status))")
+    try expect(surface.unobservedAgentIds == Set([managedTileB, headlessId.rawValue]),
+               "only the agents nothing reported stay marked — got \(surface.unobservedAgentIds.count) marked")
+
+    // MARK: 4 · TEARDOWN — the case the ticket is named for, raised by the
+    // cross-review: a project that HAD a live observer and then loses it must go back
+    // to being unobserved, not keep a status the app believes is live forever.
+    //
+    // `ZoneRuntimeController.close()` is what `closeOnZero` calls, and it emits an
+    // EMPTY map through `onObservedAgentStatusesChanged` before it stops the observer
+    // (asserted from source below, because standing up a real controller here would
+    // boot a project runtime — the thing this check exists to do without; so what is
+    // proven mechanically is that `close()` publishes the empty map, NOT that the
+    // production wiring delivers it, which needs the GUI path). The app's
+    // side of that hand-off is `applyObserverStatuses`, which REPLACES the map, so
+    // that empty map is the teardown.
+    let controllerSource = try String(
+        contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("Sources/ContinuumRevived/App/ZoneRuntimeController.swift"),
+        encoding: .utf8
+    )
+    guard let closeStart = controllerSource.range(of: "func close() {"),
+          let closeEnd = controllerSource.range(of: "flushPendingSaves()", range: closeStart.upperBound..<controllerSource.endIndex) else {
+        throw CheckError.failed("could not find ZoneRuntimeController.close() — this scan is looking in the wrong place")
+    }
+    try expect(controllerSource[closeStart.upperBound..<closeEnd.upperBound].contains("onObservedAgentStatusesChanged?([:])"),
+               "releasing a controller must publish an EMPTY observer map, or its agents stay 'observed' with a frozen status forever")
+    app.applyObserverStatuses([:])
+    surface = app.agentActivity
+    try expect(surface.unobservedAgentIds.contains(terminalAgentTile),
+               "an agent whose observer went away must go BACK to unobserved — got \(surface.unobservedAgentIds.count) marked")
+    try expect(surface.snapshot.byAgent[terminalAgentTile] != nil,
+               "…and it must still be listed, from disk — losing the observer must not lose the agent")
+    // The managed agent's live VIEW is still installed, so it is still observed: an
+    // observer teardown is not a canvas teardown.
+    try expect(surface.unobservedAgentIds.contains(managedTileA) == false,
+               "the agent whose live tile view is still installed stays observed — got \(surface.unobservedAgentIds.count) marked")
+
+    // MARK: 5 · an agent's OWN event clears the mark with no rebuild at all (P2B.7's
+    // incremental path — the headless agent has no view and no file to re-read).
+
+    try expect(surface.unobservedAgentIds.contains(headlessId.rawValue),
+               "the headless agent must still be marked here, or the clear below proves nothing")
+    app.recordManagedActivity(
+        agentId: headlessId,
+        tileId: nil,
+        event: .turnStarted(threadId: "thread-1", turnId: "turn-1"),
+        status: .working
+    )
+    try expect(app.agentActivity.unobservedAgentIds.contains(headlessId.rawValue) == false,
+               "an agent's OWN event must clear the mark without a rebuild — got \(app.agentActivity.unobservedAgentIds.count) marked")
+    try expect(app.agentActivity.snapshot.byAgent[headlessId.rawValue]?.status == .working,
+               "…and that event is what it says it is — got \(String(describing: app.agentActivity.snapshot.byAgent[headlessId.rawValue]?.status))")
+    try expect(app.agentActivity.unobservedAgentIds.contains(managedTileB),
+               "the silent agent in the other project stays marked — nobody heard from it")
+
+    NSApplication.shared.dockTile.badgeLabel = nil
+    print("AgentObserverIndependence: with no ZoneRuntimeController and no canvas, 4 agents were listed from disk with their persisted statuses and all 4 marked unobserved; a live tile view and a runtime observer status each overrode the file and cleared the mark; releasing the observer put an agent back to unobserved without losing it; an agent's own event cleared the mark with no rebuild; and the agent in the released project stayed listed and marked throughout (terminal age measured \(String(format: "%.1f", terminalAge))s vs managed \(String(format: "%.0f", managedAge))s on the same hour-old fixture)")
     }
 }

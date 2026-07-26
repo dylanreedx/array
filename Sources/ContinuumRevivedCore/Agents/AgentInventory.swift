@@ -258,3 +258,69 @@ public final class CrossProjectManagedSessionWalk {
         return found
     }
 }
+
+// Ticket: docs/38-tickets/90-agent-ux/P2B.8-observer-independence.md
+//
+// LISTING AN AGENT MUST NOT NEED A LIVE OBSERVER.
+//
+// `ZoneRuntimeBudgetConfig.closeOnZero` defaults true, so releasing a project's
+// last zone reference tears down its `ZoneRuntimeController` and with it that
+// project's `SessionObserver`. An inbox that spans workspaces therefore hears
+// from only the agents in the workspace you happen to be looking at.
+//
+// `AgentInventory.snapshot` above already has the right shape for that: every
+// status reads `liveStatuses[…] ?? persisted`, so persisted state is the base
+// truth and a live observer is an OVERLAY on the agents that happen to be
+// observed. What was missing is the FACT that a given row came off disk alone —
+// without it the UI presents a status nobody has confirmed for an hour exactly
+// as it presents one from a second ago.
+//
+// This is a statement about OUR KNOWLEDGE, not about the agent, which is why it
+// is not `AgentStatus.stale`: that one is a DERIVED AGENT STATE
+// (`AgentStatusEngine`, 300s since the agent's last signal, on an agent we are
+// watching). An agent can be perfectly busy and unobserved, or idle and
+// observed. Conflating them would tell a human "this agent went quiet" when the
+// truth is "we stopped listening".
+//
+// NO TIME THRESHOLD HERE, and that is a DELIBERATE DEVIATION from the packet's
+// `## Approach` ("mark rows whose newest information is older than a threshold").
+// Two reasons, both measured:
+//   1. An age-based flag cannot satisfy the packet's own `## Verify` ("with
+//      liveStatuses empty and only persisted records present … a staleness flag
+//      set"). `ProjectStore.listSessions()` returns every descriptor through
+//      `AgentDescriptor.restoredForBoot()`, which stamps `statusUpdatedAt = now`,
+//      so a TERMINAL agent's persisted information always measures a second old no
+//      matter how long ago anybody actually looked at it. Aging would silently
+//      exempt every terminal agent — witnessed in
+//      `--agent-observer-independence-check` as a measured age under any threshold.
+//   2. The age is not lost by leaving it out: a consumer already has it, on
+//      `AgentsBoardRow.updatedAt` / `AgentActivity.updatedAt`. A renderer that
+//      wants a grace period ("do not repaint the inbox as suspect the instant you
+//      switch workspaces") can hold "unobserved AND older than X" itself; a
+//      renderer that wants the raw fact cannot recover it from a pre-thresholded
+//      set. The narrower value goes in the model, the policy goes where it is
+//      rendered (Phase 3/9), and this way the flag never LIES.
+public enum AgentObservation {
+    /// The agents in `snapshot` that nothing live is reporting.
+    ///
+    /// `observedAgentIds` is keyed by the same aggregate identity everything else
+    /// here uses (`AgentRecord.id.rawValue`, or a terminal session's `tileId`).
+    /// Membership means one thing: this agent's status in that snapshot came from a
+    /// LIVE source — a rendering tile view, the runtime observer's map, a running
+    /// supervised agent — rather than from a file. Absence is not an error; it is
+    /// the normal state of every agent in a workspace you are not looking at.
+    ///
+    /// The arithmetic is a set difference; the DEFINITION is the deliverable — one
+    /// place that says what "we have no observer for this" means, so the desktop and
+    /// the inbox cannot each decide for themselves.
+    ///
+    /// PURE: no disk, no controller, no `AgentStore`. Starting a controller to
+    /// freshen the data is the trap this ticket exists to avoid — that would make
+    /// looking at the inbox start work.
+    public static func unobservedAgentIds(
+        in snapshot: ActivityLogSnapshot,
+        observedAgentIds: Set<UUID>
+    ) -> Set<UUID> {
+        Set(snapshot.byAgent.keys).subtracting(observedAgentIds)
+    }
+}

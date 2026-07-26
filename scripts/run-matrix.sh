@@ -226,6 +226,10 @@ run_app_check .build/debug/continuum-revived --observer-sweep-badge-check
 # fixture is DELETED from disk before the event is fed, and the bystander agent
 # survives untouched — while the change-set names exactly the agents that moved.
 run_app_check .build/debug/continuum-revived --agent-incremental-refresh-check
+# P2B.8: with no ZoneRuntimeController and no canvas, every agent is still listed
+# from disk with its persisted status and marked as unobserved; a live view or
+# observer status overrides the file and clears the mark.
+run_app_check .build/debug/continuum-revived --agent-observer-independence-check
 run_app_check .build/debug/continuum-revived --keybind-edit-check
 run_app_check .build/debug/continuum-revived --browser-url-focus-check
 run_app_check .build/debug/continuum-revived --browser-ui-delegate-check

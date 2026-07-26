@@ -3,6 +3,7 @@ check --agent-incremental-refresh-check
 check --agent-input-check
 check --agent-inventory-wiring-check
 check --agent-message-bus-check
+check --agent-observer-independence-check
 check --agent-restore-check
 check --agent-status-check
 check --agent-supervisor-check
@@ -140,6 +141,7 @@ leg run_app_check .build/debug/continuum-revived --agent-incremental-refresh-che
 leg run_app_check .build/debug/continuum-revived --agent-input-check
 leg run_app_check .build/debug/continuum-revived --agent-inventory-wiring-check
 leg run_app_check .build/debug/continuum-revived --agent-message-bus-check
+leg run_app_check .build/debug/continuum-revived --agent-observer-independence-check
 leg run_app_check .build/debug/continuum-revived --agent-restore-check
 leg run_app_check .build/debug/continuum-revived --agent-status-check
 leg run_app_check .build/debug/continuum-revived --agent-supervisor-check
