@@ -9976,4 +9976,8 @@ runAgentInventoryChecks()
 // this is: project / zone / title / model joined onto every row.
 runAgentContextIndexChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P2C.1-worktree-manager.md — an agent gets
+// its own checkout, so N agents stop editing one working tree.
+runWorktreeManagerChecks()
+
 print("ContinuumRevivedCoreChecks passed")
