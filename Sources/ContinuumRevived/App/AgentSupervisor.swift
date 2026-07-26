@@ -1056,6 +1056,67 @@ final class AgentSupervisor {
         return true
     }
 
+    // MARK: - Model and thinking level (P6.1)
+
+    /// What this agent's NEXT turn will run with. Returns the record's own values,
+    /// never the global default: `AgentModelConfig` is only what a record was seeded
+    /// from at spawn, and changing that Settings default must not move an agent that
+    /// already exists. nil for an agent this supervisor does not know.
+    func providerSettings(for id: AgentID) -> AgentModelConfig.Resolution? {
+        records[id].map { AgentModelConfig.Resolution(model: $0.model, thinking: $0.thinking) }
+    }
+
+    /// Choose the model and/or thinking level for ONE agent, and persist it.
+    ///
+    /// This is the whole mechanism: `piRunner(for:)` builds a runner per turn from
+    /// the record (`runnerConfig(for:)` reads `record.model` / `record.thinking`), so
+    /// writing them here is what makes the next `send` spawn Pi with those flags.
+    /// Nothing mid-turn changes — `send` refuses a prompt on a busy agent rather than
+    /// replacing the in-flight runner, and switching a live turn's model needs Pi's
+    /// `set_model` RPC (P5.4/P5.5).
+    ///
+    /// A value outside `AgentModelConfig`'s catalogue is REFUSED rather than
+    /// substituted: `--model` takes a *pattern*, so a shortened or misspelt id fuzzy
+    /// matches and the agent silently runs whichever model Pi picked — the exact bug
+    /// P0.10 exists to prevent. Persisting immediately is correct here even though
+    /// P2A.3 keeps writes to lifecycle events: this is a discrete user action, not a
+    /// per-token write on the main thread.
+    ///
+    /// Returns whether anything changed — as `rename` does, so a caller cannot
+    /// mistake a no-op for a write.
+    @discardableResult
+    func setProviderSettings(agentID id: AgentID, model: String? = nil, thinking: String? = nil) -> Bool {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.setProviderSettings: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        if let model {
+            guard AgentModelConfig.modelOptions.contains(model) else {
+                warn("AgentSupervisor.setProviderSettings: \(model) is not a fully-qualified id in AgentModelConfig.modelOptions — refusing, because `--model` takes a pattern and a partial id fuzzy-matches")
+                return false
+            }
+        }
+        if let thinking {
+            guard AgentModelConfig.thinkingOptions.contains(thinking) else {
+                warn("AgentSupervisor.setProviderSettings: \(thinking) is not one of AgentModelConfig.thinkingOptions — refusing")
+                return false
+            }
+        }
+        var changed = false
+        if let model, record.model != model {
+            record.model = model
+            changed = true
+        }
+        if let thinking, record.thinking != thinking {
+            record.thinking = thinking
+            changed = true
+        }
+        guard changed else { return false }
+        records[id] = record
+        persist(record)
+        return true
+    }
+
     /// The agent bound to a tile. Reads `records`, which `restore()` (P2A.7)
     /// repopulates from the store at boot — so this dedupes a re-wire within a launch
     /// AND across launches, and a restored tile finds its own agent instead of
@@ -1736,8 +1797,12 @@ func runAgentSupervisorChecks() async throws {
 
     let unsettleReport = try await checkAutoUnsettle(config: config, cwd: cwd, fail: fail)
 
+    // MARK: 16 · the model and the effort level belong to the AGENT, not to Settings (P6.1)
+
+    let providerReport = try await checkPerAgentProviderSettings(cwd: cwd, fail: fail)
+
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport)")
 }
 
 /// Gated on `--agent-restore-check` (P2A.7).
@@ -4541,6 +4606,310 @@ private func checkAutoUnsettle(
     }
 
     return "auto-unsettle over \(caseCount) event shapes: an approval, an input request and a session coming alive clear a restored settle (memory AND store), a user message clears it, \(notActivity.count) observer-shaped events + stop + focus + a branch refresh do not, the keep-active pin survives all of it, and the two clears are attributed activity vs user in \(warnings.lines.filter { $0.contains("cleared the settle") }.count) log lines"
+}
+
+// Ticket: docs/38-tickets/90-agent-ux/P6.1-per-agent-model-effort.md
+//
+/// Model and thinking level, per agent, in the tile — the failure this closes is
+/// that both were configurable ONLY as a global default in Settings, for every
+/// future agent at once and nowhere near the agent you were looking at.
+///
+/// NO PI, NO NETWORK, NO WALL CLOCK: the runner behind the two-method
+/// `AgentRunning` protocol is a `ScriptedAgentRunner`, and the flags a real turn
+/// would carry are asserted through `AgentSupervisor.runnerConfig(for:)` and
+/// `PiAgentRunner.processArguments`, both pure over the record.
+///
+/// THE FIXTURE'S VALUES DIFFER FROM THE GLOBAL DEFAULT, deliberately and with a
+/// vacuity guard: the defaults and a freshly-spawned record are equal by
+/// construction, so an agent that picked the default would prove nothing — every
+/// assertion here would stay green against a `runnerConfig` that read
+/// `AgentModelConfig` instead of the record.
+///
+/// What it asserts:
+///   1. The mutator writes the record and the write REACHES DISK — asserted on a
+///      re-read from the store, so a change that lived only in memory (and would
+///      come back as the old model next launch) is red.
+///   2. The next turn's flags: `runnerConfig(for:)` over the RELOADED record, and
+///      the argument vector `PiAgentRunner` builds from it.
+///   3. Two agents holding different models at the same time.
+///   4. Moving the global Settings default does NOT move an existing agent.
+///   5. A value outside `AgentModelConfig`'s catalogue is refused, not substituted.
+///   6. The tile: its pickers carry exactly the catalogue, seed from the RECORD,
+///      write a pick back through to the store, go unavailable with the rest of
+///      compose while a turn is in flight, and keep the "next turn" notice
+///      unpickable across an `NSMenu.update()`.
+///
+/// SEVEN NEGATIVE TESTS observed RED at exit 1 against this final code, the failure
+/// text quoted verbatim:
+///   1. `persist(record)` dropped from `setProviderSettings` — "the store holds
+///      openai-codex/gpt-5.6-sol / medium, not the picked openai-codex/gpt-5.4-mini
+///      / xhigh". The re-read from disk is what catches it; the in-memory assertion
+///      above stays green.
+///   2. `runnerConfig(for:)` fed `AgentModelConfig.resolvedFromDefaults()` instead of
+///      the record — "the runner would be built with openai-codex/gpt-5.6-sol /
+///      medium". THE ONE THAT NEEDS THE UNLIKE-THE-DEFAULT FIXTURE: with a
+///      default-valued agent this bug is green.
+///   3. The two popups left out of `applyComposeAvailability()` — "the pickers
+///      stayed live during a turn".
+///   4. `autoenablesItems` left at AppKit's default — "`Applies to the next turn`
+///      came back pickable after NSMenu.update()".
+///   5. The model options re-typed as a five-entry literal — "the model picker
+///      offers […5 ids], not AgentModelConfig.modelOptions […7 ids]".
+///   6. `attach` re-seeding the tile from the global default instead of the record —
+///      "attaching left the tile showing Resolution(model: openai-codex/gpt-5.6-sol,
+///      thinking: medium) instead of the agent's own".
+///   7. The compose row left at its old single-body-line height — red in
+///      `--ui-geometry-check`, not here: "managedAgent@320pt.NSAppearanceNameAqua:
+///      … holds a broken required constraint — measured 24.0, needs == 41.0".
+/// Two more for the cross-review's findings, same standard:
+///   8. Both fields submitted on every pick instead of only the one that moved —
+///      "an off-catalogue model made the thinking level unchangeable".
+///   9. The revert-on-refusal dropped — "a refused pick left the record at
+///      openai-codex/gpt-5.5 and the picker showing openai-codex/gpt-4o-legacy".
+@MainActor
+private func checkPerAgentProviderSettings(
+    cwd: URL,
+    fail: (String) -> Error
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-provider-settings-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = AgentStore(applicationSupportDirectory: root)
+
+    // The picks, chosen to be UNLIKE the defaults in both fields. Guarded, because
+    // the whole check turns on that difference.
+    let pickedModel = "openai-codex/gpt-5.4-mini"
+    let pickedThinking = "xhigh"
+    let globalDefault = AgentModelConfig.resolvedFromDefaults()
+    guard pickedModel != globalDefault.model, pickedThinking != globalDefault.thinking,
+          AgentModelConfig.modelOptions.contains(pickedModel),
+          AgentModelConfig.thinkingOptions.contains(pickedThinking) else {
+        throw fail("provider-settings: the fixture's pick (\(pickedModel) / \(pickedThinking)) is the global default or is not in the catalogue — every assertion below would be green against a runner that ignored the record")
+    }
+
+    let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    let tileId = UUID()
+    let agentId = supervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: cwd,
+        model: globalDefault.model,
+        thinking: globalDefault.thinking,
+        tileId: tileId
+    )
+
+    // MARK: 1 · the mutator writes the record, and the write reaches disk
+
+    guard supervisor.providerSettings(for: agentId) == globalDefault else {
+        throw fail("provider-settings: a fresh agent reads \(String(describing: supervisor.providerSettings(for: agentId))), not the values it was spawned with")
+    }
+    guard supervisor.setProviderSettings(agentID: agentId, model: pickedModel, thinking: pickedThinking) else {
+        throw fail("provider-settings: setProviderSettings refused a catalogue model/thinking pair on a live agent")
+    }
+    guard supervisor.setProviderSettings(agentID: agentId, model: pickedModel, thinking: pickedThinking) == false else {
+        throw fail("provider-settings: re-picking the values the agent already had reported a write")
+    }
+    guard supervisor.setProviderSettings(agentID: AgentID(rawValue: UUID()), model: pickedModel) == false else {
+        throw fail("provider-settings: setProviderSettings reported a write for an agent this supervisor does not have")
+    }
+    guard let stored = try store.load(id: agentId) else {
+        throw fail("provider-settings: no record on disk for the agent at \(store.layout.agentFile(id: agentId).path)")
+    }
+    guard stored.model == pickedModel, stored.thinking == pickedThinking else {
+        throw fail("provider-settings: the store holds \(stored.model) / \(stored.thinking), not the picked \(pickedModel) / \(pickedThinking) — a pick that lives only in memory comes back as the old model on the next launch")
+    }
+
+    // MARK: 2 · the NEXT turn's flags, from the reloaded record
+
+    let config = AgentSupervisor.runnerConfig(for: stored)
+    guard config.model == pickedModel, config.thinking == pickedThinking else {
+        throw fail("provider-settings: the runner would be built with \(config.model) / \(config.thinking) — the record is not what decides the next turn")
+    }
+    let args = PiAgentRunner.processArguments(
+        model: config.model,
+        thinking: config.thinking,
+        sessionId: config.sessionId,
+        extraArgs: config.extraArgs,
+        prompt: "next turn"
+    )
+    guard let modelFlag = args.firstIndex(of: "--model"), args.indices.contains(modelFlag + 1),
+          args[modelFlag + 1] == pickedModel,
+          let thinkingFlag = args.firstIndex(of: "--thinking"), args.indices.contains(thinkingFlag + 1),
+          args[thinkingFlag + 1] == pickedThinking else {
+        throw fail("provider-settings: Pi would be spawned as \(args) — the pick does not reach the flags")
+    }
+
+    // MARK: 3 · two agents, two models, at the same time
+
+    let otherId = supervisor.spawn(
+        role: nil,
+        prompt: nil,
+        cwd: cwd,
+        model: globalDefault.model,
+        thinking: globalDefault.thinking
+    )
+    guard supervisor.providerSettings(for: otherId) == globalDefault,
+          supervisor.providerSettings(for: agentId)?.model == pickedModel else {
+        throw fail("provider-settings: picking a model for one agent moved another's — \(String(describing: supervisor.providerSettings(for: otherId))) vs \(String(describing: supervisor.providerSettings(for: agentId)))")
+    }
+
+    // MARK: 4 · the global default moves; the agent that already exists does not
+
+    let suite = "continuum-provider-settings-check-\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else {
+        throw fail("provider-settings: could not open an isolated defaults suite")
+    }
+    defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+    let movedDefault = "openai-codex/gpt-5.3-codex-spark"
+    guard movedDefault != pickedModel, movedDefault != globalDefault.model else {
+        throw fail("provider-settings: the moved default \(movedDefault) is not distinct from the pick or the original default")
+    }
+    defaults.set(movedDefault, forKey: AgentModelConfig.modelKey)
+    defaults.set("minimal", forKey: AgentModelConfig.thinkingKey)
+    guard AgentModelConfig.resolvedFromDefaults(defaults: defaults).model == movedDefault else {
+        throw fail("provider-settings: the isolated defaults suite did not take the moved default, so this section proves nothing")
+    }
+    guard supervisor.providerSettings(for: agentId)?.model == pickedModel,
+          try store.load(id: agentId)?.model == pickedModel,
+          AgentSupervisor.runnerConfig(for: stored).model == pickedModel else {
+        throw fail("provider-settings: moving the global Settings default moved an agent that already existed — the record is the truth, and \"per-agent\" means the default is only a seed")
+    }
+
+    // MARK: 5 · a value outside the catalogue is refused, never substituted
+
+    for bad in ["gpt-5.6", "openai-codex/gpt-9", ""] {
+        guard supervisor.setProviderSettings(agentID: agentId, model: bad) == false else {
+            throw fail("provider-settings: \(bad.isEmpty ? "an empty model" : bad) was accepted — `--model` takes a pattern, so a partial id fuzzy-matches and the agent silently runs whichever model Pi picked (the P0.10 bug)")
+        }
+    }
+    guard supervisor.setProviderSettings(agentID: agentId, thinking: "ludicrous") == false else {
+        throw fail("provider-settings: a thinking level Pi does not accept was written to the record")
+    }
+    guard supervisor.providerSettings(for: agentId)?.model == pickedModel,
+          supervisor.providerSettings(for: agentId)?.thinking == pickedThinking else {
+        throw fail("provider-settings: a refused value still moved the record to \(String(describing: supervisor.providerSettings(for: agentId)))")
+    }
+    // `"off"` is a LEGAL thinking level, not a null — the packet's watch-out.
+    guard supervisor.setProviderSettings(agentID: agentId, thinking: "off"),
+          try store.load(id: agentId)?.thinking == "off" else {
+        throw fail("provider-settings: `off` was refused as a thinking level — Pi accepts it, and filtering it out would take a real option off the picker")
+    }
+    supervisor.setProviderSettings(agentID: agentId, thinking: pickedThinking)
+
+    // MARK: 6 · the tile
+
+    let tile = ManagedAgentTileNSView(tile: Tile(
+        id: tileId,
+        kind: .managedAgent,
+        title: "agent",
+        frame: TileFrame(x: 0, y: 0, width: 520, height: 360),
+        zPosition: .fromLegacyRank(1),
+        runtimeRef: nil,
+        metadata: TileMetadata(launchProfileId: "managed")
+    ))
+    // Before it knows an agent, the tile shows the global default — the seed.
+    guard tile.qaProviderSettings == AgentModelConfig.resolvedFromDefaults() else {
+        throw fail("provider-settings: a tile with no agent shows \(tile.qaProviderSettings), not the global default")
+    }
+    // The options ARE the catalogue, listed rather than counted: a second hardcoded
+    // list here would drift from Pi's, which is what P0.10 closed.
+    guard tile.qaModelOptionTitles == AgentModelConfig.modelOptions else {
+        throw fail("provider-settings: the model picker offers \(tile.qaModelOptionTitles), not AgentModelConfig.modelOptions \(AgentModelConfig.modelOptions)")
+    }
+    guard tile.qaThinkingOptionTitles == AgentModelConfig.thinkingOptions else {
+        throw fail("provider-settings: the thinking picker offers \(tile.qaThinkingOptionTitles), not AgentModelConfig.thinkingOptions \(AgentModelConfig.thinkingOptions)")
+    }
+    guard tile.qaProviderNoticeIsPickable == false else {
+        throw fail("provider-settings: `\(ManagedAgentTileNSView.providerNoticeText)` came back pickable after NSMenu.update() — autoenablesItems is at AppKit's default, so a menu header re-derives itself live")
+    }
+
+    tile.attach(agentID: agentId, supervisor: supervisor)
+    guard tile.qaProviderSettings == AgentModelConfig.Resolution(model: pickedModel, thinking: pickedThinking) else {
+        throw fail("provider-settings: attaching left the tile showing \(tile.qaProviderSettings) instead of the agent's own \(pickedModel) / \(pickedThinking)")
+    }
+
+    // A pick made the way a user makes it reaches the record AND the disk.
+    let secondModel = "openai-codex/gpt-5.5"
+    guard secondModel != pickedModel else { throw fail("provider-settings: the second pick is the first one") }
+    // `qaPick` goes through the popup's own target/action, so a control that was
+    // never wired reports false here rather than passing on a handler call the user
+    // could not make (from the cross-review).
+    guard tile.qaPickModel(secondModel), tile.qaPickThinking("low") else {
+        throw fail("provider-settings: a picker's action did not fire — its target/action is unwired, so a real user's pick would do nothing")
+    }
+    guard supervisor.providerSettings(for: agentId) == AgentModelConfig.Resolution(model: secondModel, thinking: "low"),
+          try store.load(id: agentId)?.model == secondModel,
+          try store.load(id: agentId)?.thinking == "low" else {
+        throw fail("provider-settings: picking in the tile left the record at \(String(describing: supervisor.providerSettings(for: agentId))) / the store at \(String(describing: try store.load(id: agentId).map { "\($0.model) / \($0.thinking)" }))")
+    }
+    guard AgentSupervisor.runnerConfig(for: try store.load(id: agentId)!).model == secondModel else {
+        throw fail("provider-settings: the tile's pick does not reach the next turn's runner config")
+    }
+
+    // While a turn is in flight both controls go dark with the rest of compose.
+    tile.ingest(.sessionStateChanged(.running))
+    tile.ingest(.turnStarted(threadId: tile.wiringThreadId, turnId: "t1"))
+    guard tile.qaComposeEnabled == false else {
+        throw fail("provider-settings: compose stayed enabled during a turn, so the in-flight assertion below is vacuous")
+    }
+    guard tile.qaProviderControlsEnabled == false else {
+        throw fail("provider-settings: the pickers stayed live during a turn — a change picked mid-turn cannot apply until Phase 5's set_model RPC, and a control that silently does nothing is worse than one that is visibly unavailable")
+    }
+    tile.qaPickModel(globalDefault.model)
+    guard supervisor.providerSettings(for: agentId)?.model == secondModel else {
+        throw fail("provider-settings: a disabled picker still wrote \(String(describing: supervisor.providerSettings(for: agentId)?.model)) to the record mid-turn")
+    }
+    tile.ingest(.turnCompleted(threadId: tile.wiringThreadId, turnId: "t1", outcome: .completed, errorMessage: nil))
+    tile.ingest(.sessionStateChanged(.ready))
+    // Both, together: the pickers are on `applyComposeAvailability()` and not on a
+    // second notion of "busy", so they must come back exactly when compose does.
+    guard tile.qaProviderControlsEnabled, tile.qaComposeEnabled else {
+        throw fail("provider-settings: after the turn ended compose is \(tile.qaComposeEnabled ? "live" : "dark") and the pickers are \(tile.qaProviderControlsEnabled ? "live" : "dark") — they must move together")
+    }
+    tile.detach()
+
+    // MARK: 7 · a value this catalogue no longer has (the cross-review's finding)
+
+    // A record written by an older build can hold a value this catalogue no longer
+    // has. The picker SHOWS it rather than renaming it silently, and — the
+    // cross-review's finding — the OTHER field stays changeable, because only the
+    // field that moved is submitted. Written through the store and re-adopted, so
+    // nothing in this process put the foreign value in memory.
+    var foreign = try store.load(id: agentId)!
+    foreign.model = "openai-codex/gpt-4o-legacy"
+    try store.upsert(foreign)
+    let foreignSupervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    foreignSupervisor.restore()
+    let foreignTile = ManagedAgentTileNSView(tile: Tile(
+        id: UUID(),
+        kind: .managedAgent,
+        title: "agent",
+        frame: TileFrame(x: 0, y: 0, width: 520, height: 360),
+        zPosition: .fromLegacyRank(1),
+        runtimeRef: nil,
+        metadata: TileMetadata(launchProfileId: "managed")
+    ))
+    foreignTile.attach(agentID: agentId, supervisor: foreignSupervisor)
+    guard foreignTile.qaProviderSettings.model == foreign.model,
+          foreignTile.qaModelOptionTitles == AgentModelConfig.modelOptions + [foreign.model] else {
+        throw fail("provider-settings: a record holding \(foreign.model) renders as \(foreignTile.qaProviderSettings.model) with options \(foreignTile.qaModelOptionTitles) — the picker must not rename what the next turn will really run")
+    }
+    guard foreignTile.qaPickThinking("high"),
+          foreignSupervisor.providerSettings(for: agentId)?.thinking == "high",
+          foreignSupervisor.providerSettings(for: agentId)?.model == foreign.model else {
+        throw fail("provider-settings: an off-catalogue model made the thinking level unchangeable — \(String(describing: foreignSupervisor.providerSettings(for: agentId)))")
+    }
+    // A pick the supervisor REFUSES puts the record's own value back, rather than
+    // leaving a choice on screen that never happened.
+    foreignTile.qaPickModel(secondModel)
+    foreignTile.qaPickModel(foreign.model)
+    guard foreignSupervisor.providerSettings(for: agentId)?.model == secondModel,
+          foreignTile.qaProviderSettings.model == secondModel else {
+        throw fail("provider-settings: a refused pick left the record at \(String(describing: foreignSupervisor.providerSettings(for: agentId)?.model)) and the picker showing \(foreignTile.qaProviderSettings.model) — a control must not display a choice that was not written")
+    }
+    foreignTile.detach()
+
+    return "per-agent provider settings: a pick lands on the record and the disk and reaches --model/--thinking (\(pickedModel) / \(pickedThinking), both unlike the global default), two agents hold different models, a moved global default moves neither, \(3 + 1) off-catalogue values are refused while `off` is accepted, and the tile's \(tile.qaModelOptionTitles.count)+\(tile.qaThinkingOptionTitles.count) options are AgentModelConfig's own, unpickable notice included"
 }
 
 /// macOS temp directories live under a `/var` symlink to `/private/var`, and git

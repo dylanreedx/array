@@ -492,7 +492,7 @@ enum LabCatalog {
 
             // MARK: 90-agent-ux cards
             branchChipCard, agentInboxCard, agentInboxSelectedCard, agentInboxParkedCard,
-            agentInboxJumpHintsCard, agentInboxBulkCard
+            agentInboxJumpHintsCard, agentInboxBulkCard, managedAgentProviderCard
         ]
     }
 
@@ -1363,8 +1363,46 @@ enum LabCatalog {
             category: "Managed Agent",
             title: "Approval dock - three states",
             summary: "Working, waiting with orange dock and border, then done.",
-            content: .staticCard(preferredSize: NSSize(width: 560, height: 720)) {
+            // P6.1: the card grows with its three tiles rather than holding the 720
+            // they used to add up to — 3 tiles, 2 gaps of `Space.l`, and the stack's
+            // own `Space.l` inset top and bottom.
+            content: .staticCard(preferredSize: NSSize(
+                width: 560,
+                height: 3 * approvalDockPreviewTileHeight + 4 * Space.l
+            )) {
                 makeManagedAgentApprovalDockPreview()
+            }
+        )
+    }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P6.1-per-agent-model-effort.md
+    /// The compose area with its two pickers, holding values that are NOT the global
+    /// default — so the gates measure a per-agent choice rather than the seed, and
+    /// the PNG beside `tiles.managedAgent` (which shows the default) is the visual
+    /// witness that two agents can hold different models at the same time.
+    ///
+    /// A whole tile, because the compose row is `ManagedAgentTileNSView`'s own
+    /// subview and cannot be rendered outside it. Shorter than the other tile card
+    /// and with no approval open, so the compose area is most of what the card is.
+    ///
+    /// Its fixture ends mid-turn, so this card's pickers render UNAVAILABLE while
+    /// `tiles.managedAgent`'s (which ends on `needsAttention`) render live — the two
+    /// baselines are the visual pair for "they go dark with the rest of compose while
+    /// a turn is in flight", which is otherwise only asserted as a Bool.
+    private static var managedAgentProviderCard: LabEntry {
+        LabEntry(
+            id: "managed-agent.provider-controls",
+            category: "Managed Agent",
+            title: "Model and effort - a per-agent choice",
+            summary: "The compose area's model and thinking pickers, on values the global default did not give them.",
+            content: .staticCard(preferredSize: NSSize(width: 560, height: 320)) {
+                let view = makeManagedAgentFixtureView(includeApproval: false)
+                view.frame = NSRect(x: 0, y: 0, width: 560, height: 320)
+                view.applyProviderSettings(AgentModelConfig.Resolution(
+                    model: "openai-codex/gpt-5.4-mini",
+                    thinking: "xhigh"
+                ))
+                return view
             }
         )
     }
@@ -1651,6 +1689,19 @@ enum LabCatalog {
         return root
     }
 
+    /// P6.1: these preview tiles were a hardcoded 210pt, which stopped fitting the
+    /// moment the compose area grew a picker row — the transcript's scroll view laid
+    /// out to 520x0 and `--component-lab-check` named it. DERIVED from the tile's own
+    /// fixed chrome plus three body lines of transcript, so the next control that
+    /// changes height moves this instead of collapsing the transcript again.
+    static var approvalDockPreviewTileHeight: Double {
+        Metrics.rowHeight(for: .title, lines: 2)              // header
+            + ApprovalDockView.preferredHeight                // the dock this card is about
+            + Metrics.rowHeight(for: .body, insets: Inset.card)  // the prompt row
+            + ManagedAgentTileNSView.providerControlHeight    // the model/effort row
+            + Metrics.rowHeight(for: .body, lines: 3, insets: Inset.card)  // transcript
+    }
+
     static func makeManagedAgentApprovalDockPreview() -> NSView {
         let root = NSStackView()
         root.orientation = .vertical
@@ -1663,13 +1714,13 @@ enum LabCatalog {
                 id: UUID(),
                 kind: .managedAgent,
                 title: title,
-                frame: TileFrame(x: 0, y: 0, width: 520, height: 210),
+                frame: TileFrame(x: 0, y: 0, width: 520, height: approvalDockPreviewTileHeight),
                 zPosition: .fromLegacyRank(1),
                 runtimeRef: nil,
                 metadata: TileMetadata(launchProfileId: "managed")
             )
             let view = ManagedAgentTileNSView(tile: tile)
-            view.frame = NSRect(x: 0, y: 0, width: 520, height: 210)
+            view.frame = NSRect(x: 0, y: 0, width: 520, height: approvalDockPreviewTileHeight)
             view.ingest(.sessionStateChanged(status == .done ? .stopped : .running))
             view.ingest(.turnStarted(threadId: "thread-main", turnId: "turn-\(status.rawValue)"))
             view.ingest(.contentDelta(threadId: "thread-main", turnId: "turn-\(status.rawValue)", streamKind: .assistant, delta: "Checking the auth change set."))
@@ -1683,7 +1734,7 @@ enum LabCatalog {
             }
             view.translatesAutoresizingMaskIntoConstraints = false
             view.widthAnchor.constraint(equalToConstant: 520).isActive = true
-            view.heightAnchor.constraint(equalToConstant: 210).isActive = true
+            view.heightAnchor.constraint(equalToConstant: approvalDockPreviewTileHeight).isActive = true
             if pending {
                 // The card stands in for the canvas's marching-ants attention
                 // ring, so it must be painted from the same source: P1.8's one
