@@ -21,12 +21,26 @@ import Foundation
 //   3. IDENTITY — `Identifiable.id` is the agent id it was built with, unchanged
 //      by anything else on the row. List diffing is keyed on it.
 //   4. VARIANT FOLLOWS LIFECYCLE — parked work collapses, nothing else does.
+//
+// Ticket: docs/38-tickets/90-agent-ux/P3.2-five-states-three-colours.md
+//   5. COLOUR IS RESERVED FOR MEANING — `ready` has NO accent and NO label, the
+//      other four have a distinct P1.3 token each, and no state invents a hue.
+//      The nil is the assertion: giving `ready` a colour turns this red.
+//   6. PENDING OUTRANKS STATUS — a pending approval beats `working`, and the
+//      approval/input split that `AgentStatus` cannot express.
+//   7. AGREEMENT WITH THE ONE STATUS PRESENTER — where the inbox vocabulary and
+//      P1.8's chip say the same thing they use the same token, and the two places
+//      they deliberately diverge are pinned so neither can drift silently.
 
 func runAgentInboxRowChecks() {
     runInboxStateTotalityCheck()
     runInboxRowIdentityCheck()
     runRowVariantCheck()
-    print("AgentInboxRow checks: status totality, unreachable states, stable identity and lifecycle-driven variant passed")
+    runInboxStateAccentCheck()
+    runInboxStatePrecedenceCheck()
+    runInboxAccentAgreesWithStatusChipCheck()
+    print("AgentInboxRow checks: status totality, unreachable states, stable identity, lifecycle-driven variant, "
+        + "uncoloured resting state, pending-over-status precedence and status-presenter agreement passed")
 }
 
 // MARK: - 1 & 2 · totality
@@ -65,7 +79,9 @@ private func runInboxStateTotalityCheck() {
            "the reachable-from-status states are exactly working/approval/ready, got \(mapped.map(\.rawValue).sorted())")
 
     // Deterministic: rows are rebuilt on every refresh.
-    expect(AgentStatus.allCases.map(AgentInboxRow.state(for:)) == AgentStatus.allCases.map(AgentInboxRow.state(for:)),
+    // (Spelled with a closure rather than an unapplied `AgentInboxRow.state(for:)`
+    // since P3.2 gave the function a defaulted second parameter.)
+    expect(AgentStatus.allCases.map { AgentInboxRow.state(for: $0) } == AgentStatus.allCases.map { AgentInboxRow.state(for: $0) },
            "AgentInboxRow.state(for:) must be a pure function of its status")
 
     print("AgentInboxRow state totality measured \(AgentStatus.allCases.map { "\($0.rawValue)->\(AgentInboxRow.state(for: $0).rawValue)" }.joined(separator: " "))")
@@ -139,4 +155,150 @@ private func runRowVariantCheck() {
         )
         expect(row.variant == .card, "an active \(state.rawValue) row is a full card, got \(row.variant.rawValue)")
     }
+}
+
+// MARK: - 5 · colour is reserved for meaning
+
+private func runInboxStateAccentCheck() {
+    // A table again, not a switch: a switch would be the code under test.
+    let expected: [InboxState: AccentToken?] = [
+        .working: .accentWorking,
+        .approval: .accentApproval,
+        .input: .accentInput,
+        .failed: .accentFailed,
+        .ready: AccentToken?.none,
+    ]
+    expect(expected.count == InboxState.allCases.count,
+           "the accent table covers every InboxState — \(expected.count) of \(InboxState.allCases.count)")
+
+    for state in InboxState.allCases {
+        guard let want = expected[state] else {
+            fputs("FAIL: InboxState accents — no expectation for \(state.rawValue)\n", stderr)
+            Foundation.exit(1)
+        }
+        expect(state.accent == want,
+               "InboxState.\(state.rawValue) accent is \(want?.rawValue ?? "none"), got \(state.accent?.rawValue ?? "none")")
+    }
+
+    // THE REGRESSION WITNESS the packet names: the resting state carries no
+    // colour and no label. Anything but nil here — including a "subtle" muted
+    // token — is the mistake, so it is asserted on its own rather than only as a
+    // table row.
+    expect(InboxState.ready.accent == nil,
+           "the resting state must have NO accent — colour marks act-now/in-motion/broken only, got \(InboxState.ready.accent?.rawValue ?? "none")")
+    expect(InboxState.ready.label == nil,
+           "the resting state is deliberately unlabelled, got \(InboxState.ready.label ?? "nil")")
+
+    // Exactly one state is uncoloured, and no two coloured states share a hue —
+    // otherwise "five states" could quietly collapse into four on screen.
+    let coloured = InboxState.allCases.filter { $0.accent != nil }
+    expect(coloured.map(\.rawValue).sorted() == ["approval", "failed", "input", "working"],
+           "exactly working/approval/input/failed are coloured, got \(coloured.map(\.rawValue).sorted())")
+    expect(Set(coloured.compactMap { $0.accent?.rawValue }).count == coloured.count,
+           "each coloured state has an accent of its own, got \(coloured.compactMap { $0.accent?.rawValue }.sorted())")
+
+    // Every accent is an existing P1.3 token, so the inbox cannot become a
+    // private palette that escapes `runDesignTokenChecks`' contrast gate.
+    for state in coloured {
+        expect(AccentToken.allCases.contains(state.accent!),
+               "InboxState.\(state.rawValue) uses a token from the gated palette, got \(state.accent!.rawValue)")
+    }
+
+    // A coloured state labels itself; that is the head of the label priority.
+    for state in coloured {
+        expect(state.label?.isEmpty == false,
+               "InboxState.\(state.rawValue) carries a label, got \(state.label ?? "nil")")
+    }
+
+    print("InboxState accents measured \(InboxState.allCases.map { "\($0.rawValue)->\($0.accent?.rawValue ?? "none")" }.joined(separator: " "))")
+}
+
+// MARK: - 6 · a pending request outranks the folded status
+
+private func runInboxStatePrecedenceCheck() {
+    // The packet's named case: an agent whose fold still says `working` but that
+    // is holding an unanswered approval is NOT in motion.
+    expect(AgentInboxRow.state(for: .working, pending: .approval) == .approval,
+           "a pending approval outranks working, got \(AgentInboxRow.state(for: .working, pending: .approval).rawValue)")
+    expect(AgentInboxRow.state(for: .working, pending: .input) == .input,
+           "a pending question outranks working, got \(AgentInboxRow.state(for: .working, pending: .input).rawValue)")
+
+    // It outranks EVERY status, not just working — including the resting ones,
+    // which is what stops an agent that asked something from sitting silently in
+    // the list with no accent at all.
+    for status in AgentStatus.allCases {
+        for pending in PendingRequest.allCases {
+            let got = AgentInboxRow.state(for: status, pending: pending)
+            let want: InboxState = pending == .approval ? .approval : .input
+            expect(got == want,
+                   "\(status.rawValue) + pending \(pending.rawValue) is \(want.rawValue), got \(got.rawValue)")
+            expect(got.accent != nil,
+                   "an agent waiting on you is always coloured — \(status.rawValue) + \(pending.rawValue) got no accent")
+        }
+    }
+
+    // THE SPLIT `AgentStatus` cannot express: one status, two states.
+    expect(AgentInboxRow.state(for: .needsAttention, pending: .approval)
+            != AgentInboxRow.state(for: .needsAttention, pending: .input),
+           "needsAttention resolves to two different states depending on what is pending")
+
+    // No fact means the P3.1 mapping, unchanged — the phone and every fixture
+    // call the one-argument form and must get exactly what they got before.
+    for status in AgentStatus.allCases {
+        expect(AgentInboxRow.state(for: status) == AgentInboxRow.state(for: status, pending: nil),
+               "the defaulted argument is the same call — \(status.rawValue)")
+    }
+    expect(AgentInboxRow.state(for: .needsAttention, pending: nil) == .approval,
+           "needsAttention with no fact answers to approval (a request id is what raises it today), got \(AgentInboxRow.state(for: .needsAttention, pending: nil).rawValue)")
+
+    // Nothing reaches `.failed` yet — Phase 4 supplies that fact. Pinned so a
+    // stray mapping cannot start colouring rows red before it does.
+    var reachable: Set<InboxState> = []
+    for status in AgentStatus.allCases {
+        reachable.insert(AgentInboxRow.state(for: status))
+        for pending in PendingRequest.allCases {
+            reachable.insert(AgentInboxRow.state(for: status, pending: pending))
+        }
+    }
+    expect(reachable == [.working, .approval, .input, .ready],
+           "status + pending reaches working/approval/input/ready and never failed, got \(reachable.map(\.rawValue).sorted())")
+}
+
+// MARK: - 7 · agreement with the one status presenter
+
+private func runInboxAccentAgreesWithStatusChipCheck() {
+    // Where the two vocabularies say the same thing, they must resolve to the
+    // same token — the inbox row and the tile chip painting one agent in two
+    // hues is exactly the drift P1.8 deleted five duplicate maps to end.
+    for status in [AgentStatus.working, .needsAttention] {
+        let state = AgentInboxRow.state(for: status)
+        let chip = StatusChipPresenter.display(for: status)
+        guard let accent = state.accent else {
+            fputs("FAIL: \(status.rawValue) maps to the uncoloured state \(state.rawValue)\n", stderr)
+            Foundation.exit(1)
+        }
+        expect(accent.color == chip.accent,
+               "\(status.rawValue): the inbox accent and the chip accent are one token, got \(accent.rawValue)")
+    }
+
+    // THE TWO DELIBERATE DIVERGENCES, pinned as facts (the same treatment
+    // StatusChip.swift gives `idle`'s teal pill vs its neutral accent):
+    //
+    //  * `configuring` is violet as a chip and folds into `.working` here, so the
+    //    inbox paints it blue. A sixth state is what this ticket forbids.
+    expect(StatusChipPresenter.display(for: .configuring).accent == AccentToken.accentInput.color,
+           "configuring's chip accent is still the violet accentInput")
+    expect(AgentInboxRow.state(for: .configuring).accent == .accentWorking,
+           "configuring folds into the in-motion accent in the inbox, got \(AgentInboxRow.state(for: .configuring).accent?.rawValue ?? "none")")
+    //  * `idle`/`stale`/`done` are painted by the chip (muted, or green for done)
+    //    but resolve to the uncoloured resting state here. A chip always paints
+    //    something; a row does not have to, and this is where colour is saved.
+    for status in [AgentStatus.idle, .stale, .done] {
+        expect(AgentInboxRow.state(for: status) == .ready,
+               "\(status.rawValue) is the resting state, got \(AgentInboxRow.state(for: status).rawValue)")
+        expect(AgentInboxRow.state(for: status).accent == nil,
+               "\(status.rawValue) renders with no accent even though its chip has one")
+    }
+    expect(StatusChipPresenter.display(for: .done).accent == AccentToken.accentDone.color,
+           "the chip keeps its green done accent — only the inbox drops it")
 }

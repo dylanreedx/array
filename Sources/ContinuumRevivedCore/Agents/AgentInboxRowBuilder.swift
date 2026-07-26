@@ -37,7 +37,13 @@ public enum AgentInboxRowBuilder {
 
     public static func row(from boardRow: AgentsBoardRow, now: Date) -> AgentInboxRow {
         let context = boardRow.context
-        let state = AgentInboxRow.state(for: boardRow.status)
+        // P3.2: the status alone cannot say WHICH of the two things a
+        // `needsAttention` agent wants, and a pending request outranks the fold's
+        // status. Both facts come from `AgentsBoardProjection`, which owns the
+        // ring; this join still derives nothing of its own.
+        let state = AgentInboxRow.state(
+            for: boardRow.status,
+            pending: AgentsBoardProjection.pendingRequest(in: boardRow.recent))
         // P4 populates these two; until it does, every agent is active and no row
         // is slim (`RowVariant.forLifecycle` is what keeps those two consistent —
         // a caller never picks a variant).

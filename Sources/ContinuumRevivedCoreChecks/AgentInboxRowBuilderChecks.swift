@@ -29,7 +29,8 @@ func runAgentInboxRowBuilderChecks() {
     runInboxRowTitleSourceAndTerminalCheck()
     runInboxRowElapsedCheck()
     runInboxRowBranchCheck()
-    print("AgentInboxRowBuilder checks: coverage/identity, refresh stability, headless rows, title source, terminal sessions, elapsed derivation and branch precedence passed")
+    runInboxRowPendingRequestCheck()
+    print("AgentInboxRowBuilder checks: coverage/identity, refresh stability, headless rows, title source, terminal sessions, elapsed derivation, branch precedence and the approval/input split passed")
 }
 
 // MARK: - Fixture
@@ -247,7 +248,10 @@ private func runInboxRowCoverageAndIdentityCheck() {
     expect(Set(refreshed.map(\.id)) == Set(rows.map(\.id)),
            "every row keeps its id across a refresh, got \(Set(refreshed.map(\.id))) vs \(Set(rows.map(\.id)))")
     let refreshedById = Dictionary(uniqueKeysWithValues: refreshed.map { ($0.id, $0) })
-    expect(refreshedById[inboxIsolatedAgentId.rawValue]?.state == .approval,
+    // `.input`, not `.approval`: `inboxDraft` carries no `approvalRequestId`, so
+    // P3.2's split reads this needs-attention event as a plain question. The
+    // property under test is unchanged — the row really did move state.
+    expect(refreshedById[inboxIsolatedAgentId.rawValue]?.state == .input,
            "the refreshed row really did change state — otherwise stability is vacuous, got \(String(describing: refreshedById[inboxIsolatedAgentId.rawValue]?.state))")
 
     // Determinism: the inbox rebuilds this on every frame.
@@ -466,4 +470,127 @@ private func runInboxRowBranchCheck() {
         .first { $0.id == inboxHeadlessAgentId.rawValue }
     expect(silent?.branch == nil,
            "a shared agent whose checkout was not read reports no branch, got \(silent?.branch ?? "nil")")
+}
+
+// MARK: - 6 · the approval/input split
+
+// Ticket: docs/38-tickets/90-agent-ux/P3.2-five-states-three-colours.md
+//
+// The fact `AgentStatus` cannot carry, derived where the ring lives. The mapping
+// itself (precedence, accents, the uncoloured resting state) is the vocabulary's
+// and is checked in ContinuumRevivedAgentUIChecks; what needs a real snapshot is
+// that the JOIN actually reaches both sides of the split and knows when nobody is
+// waiting on anything.
+private func runInboxRowPendingRequestCheck() {
+    func pendingDraft(requestId: String?, secondsAfterStart: TimeInterval) -> AgentActivityEventDraft {
+        AgentActivityEventDraft(
+            agentId: inboxIsolatedAgentId.rawValue,
+            tileId: nil,
+            runId: nil,
+            tone: .approval,
+            kind: "needs-attention",
+            status: .needsAttention,
+            summary: AgentInventory.safeSummary(name: "Isolated Builder", status: .needsAttention),
+            occurredAt: inboxNow.addingTimeInterval(secondsAfterStart),
+            approvalRequestId: requestId
+        )
+    }
+
+    func row(_ drafts: [AgentActivityEventDraft]) -> AgentInboxRow {
+        let rows = AgentInboxRowBuilder.rows(
+            from: inboxSnapshot(activityByAgent: [inboxIsolatedAgentId: drafts]),
+            context: inboxIndex(),
+            now: inboxNow
+        )
+        guard let row = rows.first(where: { $0.id == inboxIsolatedAgentId.rawValue }) else {
+            fputs("FAIL: AgentInboxRowBuilder dropped the waiting agent\n", stderr)
+            Foundation.exit(1)
+        }
+        return row
+    }
+
+    let working = inboxDraft(inboxIsolatedAgentId, status: .working, kind: "turn.started", secondsAfterStart: -100)
+
+    // An adapter is holding a request open — there is something to APPROVE.
+    let approving = row([working, pendingDraft(requestId: "req-7", secondsAfterStart: -10)])
+    expect(approving.state == .approval,
+           "a needs-attention event carrying a request id is an approval, got \(approving.state.rawValue)")
+
+    // The agent asked you something with nothing to approve — INPUT. Same status,
+    // same tone, same everything but the request id: this is the discriminating
+    // pair, so a builder that ignored the split could not pass both.
+    let asking = row([working, pendingDraft(requestId: nil, secondsAfterStart: -10)])
+    expect(asking.state == .input,
+           "a needs-attention event with no request id is a question, got \(asking.state.rawValue)")
+    expect(approving.state != asking.state,
+           "one AgentStatus, two states — the split is what this ticket adds")
+    expect(approving.accentIsPresent && asking.accentIsPresent,
+           "an agent waiting on you is coloured either way")
+
+    // Neither is in motion, so neither counts up. `elapsed` is meaningful only
+    // while `.working`, and the pending fact is what takes it away here.
+    expect(approving.elapsed == nil && asking.elapsed == nil,
+           "a waiting agent shows no live duration, got \(String(describing: approving.elapsed))/\(String(describing: asking.elapsed))")
+
+    // NOBODY IS WAITING: the request was raised and then the agent carried on.
+    // The ring's last event is what the fold reads, so the row says working — the
+    // same rule `runInboxRowElapsedCheck`'s interrupted run already depends on.
+    let resumed = row([
+        working,
+        pendingDraft(requestId: "req-7", secondsAfterStart: -60),
+        inboxDraft(inboxIsolatedAgentId, status: .working, kind: "turn.started", secondsAfterStart: -30),
+    ])
+    expect(resumed.state == .working && resumed.elapsed == 30,
+           "an agent that resumed after a request is working again, got \(resumed.state.rawValue)/\(String(describing: resumed.elapsed))")
+
+    // The derivation agrees with the fold by construction: pending exactly when
+    // the status is needs-attention, over every fixture in this file.
+    let snapshots: [(String, ActivityLogSnapshot)] = [
+        ("approval", inboxSnapshot(activityByAgent: [inboxIsolatedAgentId: [working, pendingDraft(requestId: "req-7", secondsAfterStart: -10)]])),
+        ("input", inboxSnapshot(activityByAgent: [inboxIsolatedAgentId: [working, pendingDraft(requestId: nil, secondsAfterStart: -10)]])),
+        ("resumed", inboxSnapshot(activityByAgent: [inboxIsolatedAgentId: [working, pendingDraft(requestId: "req-7", secondsAfterStart: -60), inboxDraft(inboxIsolatedAgentId, status: .working, kind: "turn.started", secondsAfterStart: -30)]])),
+        ("at rest", inboxSnapshot()),
+    ]
+    for (name, snapshot) in snapshots {
+        for boardRow in AgentsBoardProjection.rows(from: snapshot) {
+            let pending = AgentsBoardProjection.pendingRequest(in: boardRow.recent)
+            expect((pending != nil) == (boardRow.status == .needsAttention),
+                   "\(name): pendingRequest is set exactly when the status is needsAttention — got \(pending?.rawValue ?? "none") for \(boardRow.status.rawValue)")
+
+            // AND THE RELATIONSHIP TO `respondableRequest`, pinned rather than
+            // left as prose, because both now live on this type and mean subtly
+            // different things. ONE DIRECTION ONLY: a row this ticket calls
+            // `.approval` always has something the responder can answer, so the
+            // inbox can never offer an approve button with no target. The
+            // converse deliberately does NOT hold — `respondableRequest` scans
+            // BACK past later events to find something answerable, which is right
+            // for "can this be responded to" and wrong for "is this agent waiting
+            // on you right now" (the `resumed` fixture is exactly that case, and
+            // it is why an `expect` in the other direction would be false).
+            guard let activity = snapshot.byAgent[boardRow.agentId] else { continue }
+            if pending == .approval {
+                expect(AgentsBoardProjection.respondableRequest(in: activity) != nil,
+                       "\(name): a row in the approval state always has a respondable request behind it")
+            }
+        }
+    }
+    // The asymmetry is real, not hypothetical — measured on the fixture that
+    // separates them, so "one direction only" above cannot quietly become two.
+    let resumedSnapshot = snapshots.first { $0.0 == "resumed" }!.1
+    let resumedActivity = resumedSnapshot.byAgent[inboxIsolatedAgentId.rawValue]!
+    expect(AgentsBoardProjection.pendingRequest(in: resumedActivity.recent) == nil
+            && AgentsBoardProjection.respondableRequest(in: resumedActivity) != nil,
+           "the resumed agent is not waiting on you, though its earlier request is still answerable — got \(String(describing: AgentsBoardProjection.pendingRequest(in: resumedActivity.recent)))")
+
+    // An empty ring asks for nothing rather than trapping.
+    expect(AgentsBoardProjection.pendingRequest(in: []) == nil,
+           "an agent with no events is not waiting on you")
+
+    print("AgentInboxRow pending split measured approval=\(approving.state.rawValue) input=\(asking.state.rawValue) resumed=\(resumed.state.rawValue)")
+}
+
+private extension AgentInboxRow {
+    /// Colour is the vocabulary's, not the join's — this only asserts the join
+    /// landed on a state that has one.
+    var accentIsPresent: Bool { state.accent != nil }
 }

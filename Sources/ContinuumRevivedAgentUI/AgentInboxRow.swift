@@ -20,19 +20,81 @@ import Foundation
 // forced by the module boundary — same call P1.1 made when it moved `AgentStatus`
 // here for exactly this reason.
 
-/// What the agent is doing. FIVE STATES, and only three of them are coloured —
-/// P3.2 attaches the accents and refines the mapping with pending-approval /
-/// pending-input facts, which are not visible from `AgentStatus` alone.
+/// What the agent is doing. FIVE STATES, and only three MEANINGS get colour:
+/// **in motion** (`working`), **act now** (`approval`, `input`) and **broken**
+/// (`failed`). The resting state is deliberately unlabelled and uncoloured.
 ///
-/// `ready` is the resting state: the agent stopped and is waiting on you,
+/// `ready` is that resting state: the agent stopped and is waiting on you,
 /// whatever the reason (finished, asked, proposed a plan). It is NOT an error,
-/// and it is deliberately unlabelled and uncoloured.
+/// so it gets no accent — see `accent`, where the nil is the whole point.
 public enum InboxState: String, CaseIterable, Equatable, Sendable {
     case working
     case approval
     case input
     case failed
     case ready
+
+    /// The row's accent, or **nil for `ready`** — colour is reserved for meaning
+    /// (P3.2), and the resting state has none to carry.
+    ///
+    /// Tokens, never hues: every value here is a P1.3 `AccentToken`, so the
+    /// colours are appearance-aware and already gated on all eleven surfaces in
+    /// both themes by `runDesignTokenChecks`. Nothing in the inbox may pick a
+    /// colour of its own.
+    ///
+    /// AGREEMENT WITH `StatusChipPresenter` (P1.8, the single status presenter):
+    /// where the two vocabularies say the same thing they use the same token —
+    /// `working`/`accentWorking` and `approval`/`accentApproval`. They diverge in
+    /// exactly two places, both deliberate and both pinned in
+    /// `runAgentInboxRowChecks` rather than left to drift:
+    ///
+    ///   * `configuring` is `accentInput` violet as a chip but folds into
+    ///     `.working` here — "getting ready" is in motion, and a sixth state is
+    ///     what this ticket exists to forbid;
+    ///   * `idle`/`stale`/`done` are painted by the chip (muted, or green) but
+    ///     resolve to the uncoloured resting state here. A chip always paints
+    ///     something; a row does not have to, and this is where colour is saved.
+    public var accent: AccentToken? {
+        switch self {
+        case .working: return .accentWorking
+        case .approval: return .accentApproval
+        case .input: return .accentInput
+        case .failed: return .accentFailed
+        case .ready: return nil
+        }
+    }
+
+    /// The state's own label, or **nil for `ready`** — same reason as `accent`.
+    ///
+    /// This is the head of the packet's label priority
+    /// (`working → approval → input → failed → (woke) → (done) → relative
+    /// timestamp`): a state that carries a label wins the row's one label slot.
+    /// The tail belongs to its owners and is not invented here — `(woke)` is
+    /// `InboxAttention` (P3.3) and `(done)`/settled is `InboxLifecycle` (P4.1),
+    /// with the relative timestamp as the last resort when nothing above speaks.
+    public var label: String? {
+        switch self {
+        case .working: return "Working"
+        case .approval: return "Approval"
+        case .input: return "Input"
+        case .failed: return "Failed"
+        case .ready: return nil
+        }
+    }
+}
+
+/// What the agent is blocked on, when it is blocked on you. The fact
+/// `AgentStatus` cannot carry: `needsAttention` says *something* is wanted, not
+/// which of the two things it is.
+///
+/// It lives here rather than in Core so the mapping below stays pure and shared
+/// (this module may not import Core — P1.1). Core derives it from the event ring
+/// in `AgentsBoardProjection.pendingRequest(in:)`.
+public enum PendingRequest: String, CaseIterable, Equatable, Sendable {
+    /// An approval the adapter is holding open — it has a request id to answer.
+    case approval
+    /// The agent asked you something with no request to approve.
+    case input
 }
 
 /// Whether the row is YOURS to look at — a separate axis from `InboxState`,
@@ -161,12 +223,41 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// `stale` all mean the agent stopped and is waiting on you, which is exactly
     /// what `ready` covers — and none of them is an error, so none may be
     /// coloured. `needsAttention` is the one status that asks for something; P3.2
-    /// splits it into `.approval` vs `.input` using the pending request itself,
-    /// which the status cannot distinguish, and answers to `.approval` until then
-    /// because a pending `approvalRequestId` is what raises the status today
+    /// splits it into `.approval` vs `.input` using `pending`, which the status
+    /// cannot distinguish, and answers to `.approval` when the caller has no such
+    /// fact because a pending `approvalRequestId` is what raises the status today
     /// (`AgentsBoardProjection.respondableRequest`). Nothing maps to `.failed`
-    /// yet: no `AgentStatus` records failure — Phase 4 does.
-    public static func state(for status: AgentStatus) -> InboxState {
+    /// yet: no `AgentStatus` records failure — Phase 4 does. The case stays,
+    /// coloured and reachable by a caller, so Phase 4 wires a fact and not a state.
+    ///
+    /// PRECEDENCE — **`pending` outranks the status**, which is the one ordering
+    /// the packet's verification pins ("a pending approval outranks `working`").
+    /// An agent blocked on you is not in motion however busy its last event
+    /// looked, and "act now" is the stronger of the three meanings colour is
+    /// allowed to carry. Between the two pending kinds the packet's own order
+    /// holds, `approval` before `input`; they are mutually exclusive by
+    /// construction (`pendingRequest` returns one event's classification), so that
+    /// tiebreak is a statement about this function, not a choice made per row.
+    ///
+    /// WHERE THAT ORDERING BITES, honestly: Core's `pendingRequest(in:)` reads the
+    /// same ring element the fold derives the status from, so today it cannot hand
+    /// this function a pending request alongside a `working` status — the two
+    /// agree by construction. The precedence is a property of the mapping, checked
+    /// as one, and it is what makes a caller holding a request the adapter is
+    /// still blocking on — a live approval out-of-band of the ring, which P5.9
+    /// introduces — correct without editing this function.
+    ///
+    /// `pending` defaults to nil so a caller that has only a status — the phone,
+    /// a fixture — gets exactly the mapping P3.1 shipped.
+    public static func state(for status: AgentStatus, pending: PendingRequest? = nil) -> InboxState {
+        switch pending {
+        case .approval:
+            return .approval
+        case .input:
+            return .input
+        case nil:
+            break
+        }
         switch status {
         case .working, .configuring:
             return .working

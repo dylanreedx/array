@@ -207,6 +207,37 @@ public enum AgentsBoardProjection {
         return ApprovalResponseTarget(agentId: event.agentId, approvalRequestId: approvalRequestId)
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.2-five-states-three-colours.md
+    //
+    /// WHICH of the two things the agent wants from you, or nil if it wants
+    /// nothing — the fact `AgentStatus.needsAttention` cannot carry, and the one
+    /// input `AgentInboxRow.state(for:pending:)` needs beyond a status.
+    ///
+    /// Read off the ring's CANONICALLY-LAST event, which is the same element
+    /// `apply` derives `AgentActivity.status` from (`recent` is kept in
+    /// `(sequence, replicaId)` order, so `last` is that winner). Two consequences,
+    /// both deliberate:
+    ///
+    ///   * Anything recorded AFTER a request means the agent moved on and nobody
+    ///     is blocked — the interrupted run in `runInboxRowElapsedCheck`
+    ///     (`working → needs-attention → working`) is a working agent, not a
+    ///     waiting one. This is where it differs from `respondableRequest`, which
+    ///     scans BACK past later events to find something to answer; that is the
+    ///     right rule for "can this be responded to" and the wrong one for "is
+    ///     this agent waiting on you right now".
+    ///   * Reading the same element as the fold makes this consistent with the
+    ///     status by construction rather than a second opinion that can contradict
+    ///     it: nil exactly when the status is not `needsAttention`. The value it
+    ///     ADDS is the split — the presence of the adapter's request id, something
+    ///     to approve versus a plain question, which the status cannot express.
+    ///
+    /// Takes the ring rather than an `AgentActivity` because the inbox join holds
+    /// an `AgentsBoardRow`.
+    public static func pendingRequest(in events: [AgentActivityEvent]) -> PendingRequest? {
+        guard let newest = events.last, newest.status == .needsAttention else { return nil }
+        return newest.approvalRequestId == nil ? .input : .approval
+    }
+
     public static func priority(for status: AgentStatus) -> Int {
         switch status {
         case .needsAttention:
