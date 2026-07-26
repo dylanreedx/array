@@ -491,7 +491,8 @@ enum LabCatalog {
             topologyMigrationNoteCard,
 
             // MARK: 90-agent-ux cards
-            branchChipCard, agentInboxCard, agentInboxSelectedCard, agentInboxParkedCard
+            branchChipCard, agentInboxCard, agentInboxSelectedCard, agentInboxParkedCard,
+            agentInboxJumpHintsCard
         ]
     }
 
@@ -1442,9 +1443,27 @@ enum LabCatalog {
         )
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
+    /// The same list with ⌘ held: one hint pill per jumpable row, floating over the
+    /// card. Its baseline against `chrome.agentInbox`'s is the only thing that can
+    /// hold "the pill is an overlay" still in pixels — every word on every row has to
+    /// be in exactly the same place in both.
+    private static var agentInboxJumpHintsCard: LabEntry {
+        LabEntry(
+            id: "chrome.agentInbox.jumpHints",
+            category: "Chrome",
+            title: "Agent Inbox - ⌘ held",
+            summary: "⌘1–⌘7 pills floating over the seven rows; nothing else in the list moves.",
+            content: .staticCard(preferredSize: NSSize(width: 320, height: 620 + AgentInboxView.scopeControlHeight)) {
+                makeAgentInboxPreview(selecting: nil, jumpHints: true)
+            }
+        )
+    }
+
     static func makeAgentInboxPreview(
         selecting id: UUID?,
-        rows: [AgentInboxRow] = LabFixtures.inboxRows()
+        rows: [AgentInboxRow] = LabFixtures.inboxRows(),
+        jumpHints: Bool = false
     ) -> NSView {
         // P3.8: 620 was the height that fitted this fixture's seven rows. The scope
         // popup sits above them, so the card is that much taller — the alternative is
@@ -1455,6 +1474,14 @@ enum LabCatalog {
         // P3.7: pinned, not live — a parked row's "12m ago" is read off this clock,
         // and a wall-clock one would make the committed baseline flap by the minute.
         view.clock = { LabFixtures.inboxNow }
+        // P3.10: set directly rather than through a synthesized `flagsChanged` — the
+        // card is a render, not a responder, and there is no window to hold ⌘ in.
+        // BEFORE `reload`, so the pills are there on the first cell build: flipping
+        // the flag afterwards reloads nine rows of a table that has never laid out,
+        // and the row geometry that came back disagreed with where the rows actually
+        // drew (measured: `UIProbePixels` mapped row one's project label onto the
+        // scope popup's white bezel and called the label flat).
+        if jumpHints { view.setJumpHintsVisible(true) }
         view.reload(rows: rows)
         if let id { _ = view.selectRowForQA(id: id) }
         return view
@@ -2138,7 +2165,8 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         // 52 since P3.6 added `chrome.agentInbox` and `chrome.agentInbox.selected`
         // (26 static cards x 2).
         // 54 since P3.7 added `chrome.agentInbox.parked` (27 static cards x 2).
-        let minimumCardsGated = 54
+        // 56 since P3.10 added `chrome.agentInbox.jumpHints` (28 static cards x 2).
+        let minimumCardsGated = 56
         let minimumTextRectsPerAppearance = 192
         let minimumBordersPerAppearance = 12
         guard gated >= minimumCardsGated else {

@@ -464,6 +464,7 @@ final class SettingsPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         switch layer {
         case .global: return "Global"
         case .navMode: return "Nav Mode"
+        case .inbox: return "Agent Inbox"
         case .tile(let kind): return "Tile — \(kind.rawValue)"
         }
     }

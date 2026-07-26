@@ -5,6 +5,13 @@ public enum ShortcutLayer: Equatable, Sendable {
     case global
     case navMode
     case tile(TileKind)
+    // Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
+    /// Bindings that apply only while the agent inbox holds first responder. Its
+    /// OWN layer because ⌘1–⌘4 are `spawnProfile` globals: two readings of one
+    /// chord are legal exactly when they live in different scopes, and putting
+    /// these in `.global` would (rightly) go red in the intra-scope uniqueness
+    /// check. See `InboxJump`.
+    case inbox
 }
 
 /// Routes an edited row to the correct persist/live-apply path. A non-
@@ -54,7 +61,27 @@ public enum ShortcutCatalog {
     /// chord. With `nil`, tile rows show the in-code default chords (the Guide /
     /// exhaustiveness baseline).
     public static func entries(navKeymap: NavKeymap = .default, defaults: UserDefaults? = nil) -> [ShortcutCatalogEntry] {
-        globalEntries(navKeymap: navKeymap) + navModeEntries(navKeymap: navKeymap) + tileEntries(defaults: defaults)
+        globalEntries(navKeymap: navKeymap) + navModeEntries(navKeymap: navKeymap) + inboxEntries()
+            + tileEntries(defaults: defaults)
+    }
+
+    // MARK: Agent inbox — ⌘1–⌘9 row jumps (P3.10).
+
+    /// One entry per jumpable row, so Settings can SHOW the chords instead of the
+    /// user having to discover them. `configurable: false` for the same reason the
+    /// hardcoded globals are: the chords live in `InboxJump`, and there is no
+    /// persistence path for them in this phase.
+    static func inboxEntries() -> [ShortcutCatalogEntry] {
+        (1...InboxJump.maximumRows).compactMap { number in
+            guard let chord = InboxJump.chord(forRowNumber: number) else { return nil }
+            return ShortcutCatalogEntry(
+                id: "inbox.jumpToRow.\(number)",
+                label: "Jump to row \(number)",
+                chordDisplay: chord.displayString,
+                layer: .inbox,
+                configurable: false
+            )
+        }
     }
 
     // MARK: Globals — one entry per ReservedShortcut.

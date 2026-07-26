@@ -1354,6 +1354,33 @@ do {
     expect(ReservedShortcut.classify(keyCode: 49, modifiers: []) == nil, "plain Space should not classify as a reserved shortcut")
     expect(ReservedShortcut.classify(keyCode: 53, modifiers: []) == nil, "plain Escape should not classify as a reserved shortcut")
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
+    // ⌘1–⌘9 read as inbox row jumps — AND the four assertions above still hold, which
+    // together are the collision decision: the chords are not moved, the second
+    // reading is scoped to the focused inbox (see `AppDelegate.handleInboxJump`).
+    expect(InboxJump.rowIndex(keyCode: 18, modifiers: .command) == 0, "Cmd-1 is inbox row 1")
+    expect(InboxJump.rowIndex(keyCode: 21, modifiers: .command) == 3, "Cmd-4 is inbox row 4")
+    expect(InboxJump.rowIndex(keyCode: 23, modifiers: .command) == 4, "Cmd-5 is inbox row 5 (5/6 are not contiguous key codes)")
+    expect(InboxJump.rowIndex(keyCode: 22, modifiers: .command) == 5, "Cmd-6 is inbox row 6")
+    expect(InboxJump.rowIndex(keyCode: 25, modifiers: .command) == 8, "Cmd-9 is inbox row 9")
+    expect(InboxJump.rowIndex(keyCode: 29, modifiers: .command) == nil, "Cmd-0 is not a row — there is no row zero")
+    expect(InboxJump.rowIndex(keyCode: 18, modifiers: [.command, .shift]) == nil, "Cmd-Shift-1 is not a jump")
+    expect(InboxJump.rowIndex(keyCode: 18, modifiers: []) == nil, "a bare 1 is typing, not a jump")
+    expect(InboxJump.rowIndex(keyCode: 40, modifiers: .command) == nil, "Cmd-K is not a jump")
+    expect((1...9).compactMap { InboxJump.chord(forRowNumber: $0)?.displayString } == ["⌘1", "⌘2", "⌘3", "⌘4", "⌘5", "⌘6", "⌘7", "⌘8", "⌘9"],
+           "the nine jump chords render as ⌘1…⌘9")
+    expect(InboxJump.chord(forRowNumber: 0) == nil && InboxJump.chord(forRowNumber: 10) == nil,
+           "there is no row 0 and no row 10 — \(InboxJump.maximumRows) is the cap")
+    // The round trip: every jump chord is the inverse of its row index.
+    for number in 1...InboxJump.maximumRows {
+        guard let chord = InboxJump.chord(forRowNumber: number) else {
+            expect(false, "row \(number) must have a chord")
+            continue
+        }
+        expect(InboxJump.rowIndex(keyCode: chord.keyCode, modifiers: chord.modifiers) == number - 1,
+               "row \(number)'s chord resolves back to index \(number - 1)")
+    }
+
     let suiteName = "NavKeymapChecks-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suiteName)!
     defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -4962,6 +4989,14 @@ do {
     ]
     for global in reservedGlobals { auditNoKnownConflict(global.chord, global.label) }
 
+    // P3.10's inbox jumps are shipped defaults too, so they are held to the same
+    // audit — ⌘5–⌘9 are new chords for this app and had never been checked.
+    for number in 1...InboxJump.maximumRows {
+        if let chord = InboxJump.chord(forRowNumber: number) {
+            auditNoKnownConflict(chord, "inbox.jumpToRow.\(number)")
+        }
+    }
+
     // Positive anchors: throw's new chord is clear; the old chords ARE flagged;
     // and the allowlisted leader genuinely is a macOS chord (documents the finding).
     expect(KnownChordConflicts.conflict(for: KeyChord(keyCode: 124, modifiers: [.command, .control])) == nil, "throw ⌘⌃→ must be free of known conflicts")
@@ -4984,6 +5019,11 @@ do {
     }
     assertUniqueChords(entries.filter { $0.layer == .global }, "global")
     assertUniqueChords(entries.filter { $0.layer == .navMode }, "navMode")
+    // Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
+    // The inbox's ⌘1–⌘9 are their own scope. Declaring them in `.global` instead is
+    // the mistake this line catches: ⌘1–⌘4 are already `spawnProfile` there, so the
+    // global assertion above would name the duplicate.
+    assertUniqueChords(entries.filter { $0.layer == .inbox }, "inbox")
     for kind in TileKind.allCases {
         assertUniqueChords(entries.filter { $0.layer == .tile(kind) }, "tile.\(kind.rawValue)")
     }
@@ -5173,6 +5213,21 @@ do {
                 expect(false, "ShortcutCatalog: tile \(entry.id) must carry a .tileAction edit target")
             }
         }
+    }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
+    // The inbox layer: exactly nine rows, ⌘1 through ⌘9, in order, none of them
+    // configurable in this phase.
+    let inboxEntries = entries.filter { $0.layer == .inbox }
+    expect(inboxEntries.count == InboxJump.maximumRows,
+           "ShortcutCatalog: one .inbox entry per jumpable row, got \(inboxEntries.count)")
+    expect(inboxEntries.map(\.id) == (1...InboxJump.maximumRows).map { "inbox.jumpToRow.\($0)" },
+           "ShortcutCatalog: inbox entries are the nine row jumps in order, got \(inboxEntries.map(\.id))")
+    expect(inboxEntries.map(\.chordDisplay) == ["⌘1", "⌘2", "⌘3", "⌘4", "⌘5", "⌘6", "⌘7", "⌘8", "⌘9"],
+           "ShortcutCatalog: inbox jump chords render as ⌘1…⌘9 — a user told to press '⌘key23' has been told nothing; got \(inboxEntries.map(\.chordDisplay))")
+    for entry in inboxEntries {
+        expect(!entry.configurable, "ShortcutCatalog: inbox \(entry.id) is not configurable in this phase")
+        expect(entry.editTarget == nil, "ShortcutCatalog: inbox \(entry.id) has no edit target")
     }
 
     // navKeymap parameter threads through to nav + leader chord displays.

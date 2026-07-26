@@ -89,6 +89,54 @@ public enum ReservedShortcut: Equatable, Hashable, Sendable {
     }
 }
 
+// Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
+/// ⌘1–⌘9 → an inbox row, by position in the list you are looking at. The order is
+/// frozen (P3.4), so the same chord keeps hitting the same agent.
+///
+/// THE COLLISION, RESOLVED BY SCOPE RATHER THAN BY THEFT. ⌘1–⌘4 are
+/// `ReservedShortcut.spawnProfile(1...4)` and this ticket does NOT move them:
+/// `classify` is unchanged, `FocusDispatch.resolve` is unchanged, and every one of
+/// those four chords still spawns its launch profile everywhere in the app. A jump
+/// is a SECOND reading of the same chord that applies only while the inbox list
+/// itself holds first responder — which is why this is a separate function and not
+/// a `ReservedShortcut` case: a reserved shortcut is global by construction, and a
+/// new case there would have taken ⌘1 away from the profile that owns it (and gone
+/// red in `ShortcutCatalog`'s own intra-scope uniqueness check, which is the
+/// collision surfacing exactly as the packet says it should).
+///
+/// The consequence, stated plainly for the owner rather than hidden: revealing an
+/// agent moves focus to its tile (P3.9), so a jump hands the keyboard to the canvas
+/// and a second jump needs the inbox focused again. Scoping is what buys ⌘1–4
+/// keeping their meaning; the alternative the packet offers — re-homing the four
+/// launch profiles onto other chords — would break four documented global bindings
+/// for it.
+public enum InboxJump: Sendable {
+    /// Nine, because ⌘0 is not a row: a zero-indexed digit row would make "the
+    /// first agent" ambiguous, and ten rows of hint pill is already more than a
+    /// glance can hold.
+    public static let maximumRows = 9
+
+    /// Row 1…9's key codes, in order (`kVK_ANSI_1`… — note 5/6 and 7/8/9 are not
+    /// contiguous on this keyboard layout, which is the whole reason this is a
+    /// table and not arithmetic on a base code).
+    static let keyCodes: [UInt16] = [18, 19, 20, 21, 23, 22, 26, 28, 25]
+
+    /// The chord that jumps to row `number` (1-based), or nil outside 1…9.
+    public static func chord(forRowNumber number: Int) -> KeyChord? {
+        guard (1...maximumRows).contains(number) else { return nil }
+        return KeyChord(keyCode: keyCodes[number - 1], modifiers: .command)
+    }
+
+    /// The ZERO-based row this chord jumps to, or nil if it is not a jump chord.
+    /// `⌘` exactly: ⌘⇧1 and a bare 1 are somebody else's events, and the modifier
+    /// set is compared rather than tested with `contains` so a chord that merely
+    /// includes ⌘ cannot be read as a jump.
+    public static func rowIndex(keyCode: UInt16, modifiers: FocusKeyModifiers) -> Int? {
+        guard modifiers == .command else { return nil }
+        return keyCodes.firstIndex(of: keyCode)
+    }
+}
+
 public enum NavLeaderDecision: Equatable, Sendable {
     case openNavMode
     case closeNavMode

@@ -140,6 +140,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// The rows that HAVE a child on screen, from the sorted list before it was
     /// collapsed — a folded parent must keep the triangle you fold it back with.
     private var parentsWithChildren: Set<UUID> = []
+    // Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
+    /// Whether the ⌘-hold hint pills are showing. VIEW-LOCAL and transient, like
+    /// hover: it is a fact about the modifier you are holding right now.
+    private var jumpHintsVisible = false
     /// The row the mouse is over, or -1. Hover is one of P3.5's three
     /// interaction facts and it is tracked HERE, on the table, rather than per
     /// cell: cell views are recycled, so a tracking area installed on one would
@@ -559,6 +563,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
             isInteracting: interacting,
             now: clock()
         )
+        // P3.10: the hint is set AFTER `apply` and through its own call, because it
+        // is an overlay and not part of the row's content — `apply` paints what the
+        // agent IS, and a pill is a thing about the keyboard.
+        cell.showJumpHint(jumpHintsVisible ? AgentInboxView.jumpHintText(forRowIndex: row) : nil)
         cellsByRow[row] = cell
         return cell
     }
@@ -584,6 +592,49 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     private func reveal(rowAt index: Int) {
         guard rows.indices.contains(index) else { return }
         onRevealRow?(rows[index].id)
+    }
+
+    // MARK: - Jump (P3.10)
+
+    /// The chord written on row `index`'s hint pill, or nil past the ninth row.
+    /// `InboxJump` owns which chord that is; this only renders it.
+    static func jumpHintText(forRowIndex index: Int) -> String? {
+        InboxJump.chord(forRowNumber: index + 1)?.displayString
+    }
+
+    /// ⌘1–⌘9: select that row and reveal its agent — the same two steps a click
+    /// takes (`clickRowForQA` is the same pair), so a jump and a click cannot mean
+    /// two different things.
+    ///
+    /// Returns false for a chord that is not a jump AND for a jump past the end of
+    /// the list, so the caller can let the event continue to its other meaning —
+    /// which for ⌘1–⌘4 is the launch profile that owns the chord globally.
+    @discardableResult
+    func jump(keyCode: UInt16, modifiers: FocusKeyModifiers) -> Bool {
+        guard let index = InboxJump.rowIndex(keyCode: keyCode, modifiers: modifiers),
+              rows.indices.contains(index) else { return false }
+        // The pills come down with the jump rather than waiting for the release: you
+        // have pressed the chord, and the ⌘ that comes up will come up over the tile
+        // the reveal just focused.
+        setJumpHintsVisible(false)
+        tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        reveal(rowAt: index)
+        return true
+    }
+
+    /// Show or hide the pills, rebuilding only the rows that can carry one.
+    ///
+    /// TOLD, NOT OBSERVED, and deliberately not a `flagsChanged` override on this
+    /// view: the app already watches every modifier transition
+    /// (`AppDelegate.handleFlagsChanged`, the monitor the hold-⌥ leader runs on), and
+    /// that monitor is global. A responder-chain override here would only see the
+    /// transitions that reach this view, so ⌘ held while focus moved away — the
+    /// reveal does exactly that — would leave the pills up with nothing to press.
+    /// (Cross-review found that; the fix is reuse, not a second modifier tracker.)
+    func setJumpHintsVisible(_ visible: Bool) {
+        guard visible != jumpHintsVisible else { return }
+        jumpHintsVisible = visible
+        redraw(rows: Array(0..<InboxJump.maximumRows))
     }
 
     /// P3.5's `isInteracting`: hover, selection, or keyboard-active. The last two
@@ -697,6 +748,24 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// disclosure glyph on it ("" for a row with no children). Read off the laid-out
     /// cells rather than recomputed from `depth`, which would assert nothing.
     var indentsForQA: [Double] { cells().map(\.qaIndent) }
+    // Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
+    /// The chord each row is ADVERTISING ("" for a row with no pill), read off the
+    /// rendered pill rather than recomputed from the index.
+    var jumpHintsForQA: [String] { cells().map(\.qaJumpHint) }
+    /// Where each row's status label actually sits, in its own cell's coordinates.
+    /// The T3 regression this ticket names — holding ⌘ blanked out "Working" — is a
+    /// LAYOUT fact, so it is caught by comparing this before and after the pills
+    /// appear and by nothing else.
+    var statusFramesForQA: [NSRect] { cells().map(\.qaStatusFrame) }
+    /// Make the list itself first responder, which is the scope the jump is confined
+    /// to — so a check can put the app in the state a click on a row leaves it in.
+    @discardableResult
+    func focusListForQA() -> Bool {
+        window?.makeFirstResponder(tableView) ?? false
+    }
+    /// Whether the pills are UP, for the app-level check that drives the real
+    /// modifier monitor — the paint itself is asserted by `jumpHintsForQA`.
+    var areJumpHintsVisibleForQA: Bool { jumpHintsVisible }
     var disclosureGlyphsForQA: [String] { cells().map(\.qaDisclosureGlyph) }
     var collapsedParentsForQA: Set<UUID> { collapsedParents }
 
@@ -782,6 +851,13 @@ protocol AgentInboxRowCell: NSTableCellView {
     /// it because it has no control to click.
     var onToggleDisclosure: (() -> Void)? { get set }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
+    /// Show this chord as a floating pill, or nil to hide it. An OVERLAY on both
+    /// variants — never an arranged subview — because a pill that joins the row's
+    /// stack pushes the status label out of the line (the T3 regression: holding ⌘
+    /// blanked out "Working").
+    func showJumpHint(_ chord: String?)
+
     var qaVariant: RowVariant { get }
     var qaTitle: String { get }
     var qaStateLabel: String { get }
@@ -794,6 +870,10 @@ protocol AgentInboxRowCell: NSTableCellView {
     var qaGlyphAlpha: Double { get }
     var qaIndent: Double { get }
     var qaDisclosureGlyph: String { get }
+    var qaJumpHint: String { get }
+    /// The frame of whatever this variant paints the state with — the word on a
+    /// card, the glyph on a parked row — in the cell's own coordinates.
+    var qaStatusFrame: NSRect { get }
     @discardableResult
     func clickDisclosureForQA() -> Bool
 }
@@ -867,6 +947,77 @@ final class InboxDisclosureButton: NSButton, TokenThemed {
     var qaGlyph: String { isHidden ? "" : glyph }
 }
 
+// Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
+/// The floating "⌘3" pill a row shows while ⌘ is held.
+///
+/// `overlay` fill with a `border` outline and `textPrimary` text — all three are
+/// documented pairs (`TextToken.legalBackgrounds` allows every surface;
+/// `LineToken.border.legalSurfaces` likewise), so P1.6's contrast gate measures this
+/// rather than exempting it. `.captionMono`, because a chord is a key you press and
+/// the digit must not shift width between rows.
+///
+/// It is added to the CARD and constrained to the card, so it floats over the row's
+/// words instead of taking a slot in their stack. Hidden by default, which is what
+/// every committed baseline holds except `chrome.agentInbox.jumpHints` — that one card
+/// exists so the pills are in a render at all, since a modifier cannot be held down in
+/// a static one.
+final class InboxJumpHintView: NSView, TokenThemed {
+    private let label = NSTextField(labelWithString: "")
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.borderWidth = 1
+        // `Radius.card`, NOT `Radius.pill`, for the reason `BranchChipNSView` already
+        // records at its own radius: CALayer does not clamp a radius to half the
+        // view's height, so 999 on a 15pt pill is undefined-looking geometry. Measured
+        // here before the note was believed — the 999 render painted a white shape
+        // across every row and took the whole list's text with it.
+        layer?.cornerRadius = Radius.card
+        layer?.masksToBounds = true
+        isHidden = true
+
+        label.font = .token(.captionMono)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.s),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.s),
+            label.topAnchor.constraint(equalTo: topAnchor, constant: Space.xs),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Space.xs),
+        ])
+        applyTokens()
+    }
+
+    required init?(coder: NSCoder) { return nil }
+
+    /// nil hides the pill. An empty string would leave a bordered box with no glyph
+    /// in it, which `UIProbePixels` is right to call flat.
+    func show(_ chord: String?) {
+        guard let chord, !chord.isEmpty else {
+            isHidden = true
+            return
+        }
+        label.stringValue = chord
+        isHidden = false
+        applyTokens()
+    }
+
+    func applyTokens() {
+        let theme = effectiveTokenTheme
+        layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
+        layer?.borderColor = LineToken.border.color.cgColor(for: theme)
+        label.textColor = TextToken.textPrimary.color.nsColor(in: self)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
+    }
+
+    var qaChord: String { isHidden ? "" : label.stringValue }
+}
+
 /// The card one row's words sit on: a `tileBody` fill with a `border` outline,
 /// or `borderStrong` while the row is selected.
 ///
@@ -918,6 +1069,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
 final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     private let card = AgentInboxCardView()
 
+    private let jumpHint = InboxJumpHintView()
     private let disclosureButton = InboxDisclosureButton()
     var onToggleDisclosure: (() -> Void)?
     private let projectLabel = NSTextField(labelWithString: "")
@@ -1009,6 +1161,18 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
             metaLabel.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor),
             branchLabel.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor),
         ])
+
+        // P3.10: added AFTER the stack (so it draws over it) and constrained to the
+        // CARD rather than joined to any stack — that is what makes it an overlay.
+        // Trailing and vertically centred: the words are left-aligned in three lines,
+        // so the middle of the card's right edge is the emptiest part of the row, and
+        // it is nowhere near the status word on the headline.
+        jumpHint.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(jumpHint)
+        NSLayoutConstraint.activate([
+            jumpHint.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Inset.card.right),
+            jumpHint.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+        ])
     }
 
     required init?(coder: NSCoder) { return nil }
@@ -1075,6 +1239,8 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
 
     @objc private func disclosureClicked() { onToggleDisclosure?() }
 
+    func showJumpHint(_ chord: String?) { jumpHint.show(chord) }
+
     @discardableResult
     func clickDisclosureForQA() -> Bool {
         guard !disclosureButton.isHidden else { return false }
@@ -1135,6 +1301,8 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     var qaGlyphAlpha: Double { Opacity.full }
     var qaIndent: Double { Double(leadingInset?.constant ?? 0) }
     var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
+    var qaJumpHint: String { jumpHint.qaChord }
+    var qaStatusFrame: NSRect { stateLabel.convert(stateLabel.bounds, to: self) }
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md
@@ -1166,6 +1334,7 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
 /// being an alpha of this view's own choosing.
 final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     private let card = AgentInboxCardView()
+    private let jumpHint = InboxJumpHintView()
     private let disclosureButton = InboxDisclosureButton()
     var onToggleDisclosure: (() -> Void)?
     private let glyphLabel = NSTextField(labelWithString: "")
@@ -1235,6 +1404,16 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
             titleLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: AgentInboxCellView.minimumTextWidth(.title)),
             branchLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: AgentInboxCellView.minimumTextWidth(.label)),
         ])
+
+        // P3.10: an overlay here too — a parked row is one line, so a pill in the
+        // stack would push the whole line sideways rather than merely displace one
+        // label.
+        jumpHint.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(jumpHint)
+        NSLayoutConstraint.activate([
+            jumpHint.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Inset.row.right),
+            jumpHint.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+        ])
     }
 
     required init?(coder: NSCoder) { return nil }
@@ -1274,6 +1453,8 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     }
 
     @objc private func disclosureClicked() { onToggleDisclosure?() }
+
+    func showJumpHint(_ chord: String?) { jumpHint.show(chord) }
 
     @discardableResult
     func clickDisclosureForQA() -> Bool {
@@ -1351,4 +1532,8 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     var qaGlyphAlpha: Double { Double(glyphLabel.alphaValue) }
     var qaIndent: Double { Double(leadingInset?.constant ?? 0) }
     var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
+    var qaJumpHint: String { jumpHint.qaChord }
+    /// The GLYPH is this variant's status (`qaStateLabel` is empty by design), so
+    /// that is the frame the pill must not move.
+    var qaStatusFrame: NSRect { glyphLabel.convert(glyphLabel.bounds, to: self) }
 }

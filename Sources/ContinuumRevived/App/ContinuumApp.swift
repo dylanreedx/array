@@ -4596,6 +4596,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// exit the leader if open.
     func handleFlagsChanged(_ event: NSEvent) {
         let modifiers = FocusKeyModifiers(modifierFlags: event.modifierFlags)
+        // P3.10: the inbox's ⌘-hold hint pills ride this monitor rather than a
+        // `flagsChanged` override on the list. It is the only observer that sees a
+        // release the list itself would miss — revealing an agent hands focus to its
+        // tile, so the ⌘ that came up after a jump was never the inbox's event.
+        updateInboxJumpHints(modifiers: modifiers)
         let leaderModifier = navKeymap.leaderHoldModifier
         if !leaderModifier.isEmpty, modifiers == leaderModifier {
             scheduleLeaderActivation()
@@ -4769,12 +4774,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return true
         }
 
+        // P3.10: ⌘1–⌘9 jump to an inbox row — but ONLY while the inbox list holds
+        // first responder, and therefore BEFORE the reserved dispatch below, which is
+        // where ⌘1–⌘4 mean "spawn launch profile N". The scope is the whole of the
+        // collision resolution: the four profile chords are not moved, not
+        // re-classified and not shadowed anywhere else in the app.
+        if handleInboxJump(event) { return true }
+
         // Dispatch through FocusDispatch. It consumes a matching reserved global
         // or focused-tile action and otherwise returns false (.passThrough), so
         // non-⌘ chords (e.g. the ⌘⌃-digit resize presets) now reach the dispatcher
         // instead of being dropped by a coarse "⌘-only" gate — while unmatched
         // keys (typing) still fall through to the responder chain / content.
         return handleReservedShortcut(event)
+    }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
+    /// Consume a ⌘1–⌘9 the inbox can act on, or return false so the event keeps its
+    /// other meaning.
+    ///
+    /// Internal rather than private because the check drives this exact function with
+    /// the responder in both positions — asserting the scope through a mirror of the
+    /// guard would witness the mirror.
+    func handleInboxJump(_ event: NSEvent) -> Bool {
+        guard let inbox = focusedAgentInbox() else { return false }
+        return inbox.jump(
+            keyCode: event.keyCode, modifiers: FocusKeyModifiers(modifierFlags: event.modifierFlags))
+    }
+
+    /// Hint pills up while ⌘ is held AND the inbox is the thing that would act on it;
+    /// down for every other modifier state, including a ⌘ that is still held over a
+    /// surface the jump does not reach.
+    ///
+    /// The condition is `focusedAgentInbox()` — the SAME guard the jump uses — so the
+    /// pills can never advertise a chord that would not fire.
+    private func updateInboxJumpHints(modifiers: FocusKeyModifiers) {
+        guard let inbox = workspaceSidebarView?.agentInbox else { return }
+        inbox.setJumpHintsVisible(modifiers == .command && focusedAgentInbox() != nil)
+    }
+
+    /// The inbox, but only when it — or a view inside it, which is what the table is
+    /// — holds first responder.
+    ///
+    /// The responder is read off the INBOX'S OWN window rather than `self.window`, so
+    /// this asks the one question that matters ("does this list have the keyboard")
+    /// and does not also depend on which window the app happens to hold a reference
+    /// to.
+    private func focusedAgentInbox() -> AgentInboxView? {
+        guard let inbox = workspaceSidebarView?.agentInbox,
+              !inbox.isHiddenOrHasHiddenAncestor,
+              let responder = inbox.window?.firstResponder as? NSView,
+              responder === inbox || responder.isDescendant(of: inbox) else { return nil }
+        return inbox
     }
 
     private func openNavMode() {
@@ -19928,6 +19979,48 @@ extension AppDelegate {
 //      the version that spawns a fresh agent for the new tile → the same line as 5,
 //      because the tile is then bound to that brand-new agent and the headless one's
 //      binding never moves. That is the whole reason the parameter exists.
+// Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
+//
+// Section D is ⌘1–⌘9. It is the collision that needs the witnesses: ⌘1–⌘4 are launch
+// profiles, and the resolution is SCOPE (the inbox holds first responder) rather than
+// moving those chords. SIX NEGATIVE TESTS OBSERVED RED at exit 1 with the final code:
+//
+//   1. the hint pill added to the headline `NSStackView` instead of as an overlay on
+//      the card — the T3 regression itself → `a hint pill is an OVERLAY: no status
+//      label may move — [(258.0, 49.0, 52.0, 14.0), …] became [(230.5, 49.0, 52.0,
+//      14.0), …]`, every status word shifted 27.5pt left.
+//      MEASURED AND RECORDED, because it bounds what this witness proves: the pill
+//      inserted BEFORE `stateLabel` (i.e. next to the flexible spacer) is green — the
+//      spacer absorbs it and the status column does not move. The frame assertion
+//      catches a pill that displaces the status, which is the stated obligation; it
+//      does not catch every possible stack placement.
+//   2. `handleInboxJump` dropped from `handleHotkey` → `…and it must land on row two's
+//      agent — focus is Optional(…FocusSurfaceID.canvas)`. NOT the "must be consumed"
+//      line above it, which stays green: ⌘2 is launch profile 2, so the event is
+//      consumed either way. That is exactly why the landing and the tile count are
+//      asserted separately — "it was consumed" cannot tell a jump from a spawn.
+//   3. `focusedAgentInbox()` returning the inbox without the responder test → `⌘1 must
+//      not be a jump while the inbox does not hold first responder`
+//   4. `InboxJump.rowIndex` testing `modifiers.contains(.command)` instead of `==` →
+//      `⌘⇧3 is not a jump`
+//   5. `updateInboxJumpHints` dropped from `handleFlagsChanged` → `⌘ held with the
+//      inbox focused raises the hint pills`
+//   6. that call left in but without the focus half of its condition → `⌘ held over a
+//      surface the jump cannot reach must not leave pills on the list`
+//
+// Witnesses 5 and 6 exist because of cross-review: the hints were first an
+// `AgentInboxView.flagsChanged` override, which cannot see the release that follows a
+// jump (the reveal has already handed focus to the tile), so a stuck pill was a real
+// state. The fix was reuse — the app's existing global modifier monitor, scoped by the
+// same `focusedAgentInbox()` guard the jump uses — which also closed the review's
+// second point, that the check drove a view-local override rather than the shipped
+// path.
+//
+// Also measured, and the reason `InboxJumpHintView` uses `Radius.card`: at
+// `Radius.pill` (999) CALayer's unclamped radius painted a white shape across every
+// row and took the whole list's text with it — `chrome.agentInbox.jumpHints…
+// NSTextField: text rect is flat — luminance spread 0.000 over 2222 px`. The note
+// `BranchChipNSView` already carried about that radius was right.
 extension AppDelegate {
     static func runAgentInboxChecks() async throws {
     enum CheckError: Error, CustomStringConvertible {
@@ -21051,7 +21144,181 @@ extension AppDelegate {
     try expect(revealApp.focusBroker.activeSurface == .tile(thereTile),
                "…and then lands on its tile — focus is \(String(describing: revealApp.focusBroker.activeSurface))")
 
+    // MARK: D · ⌘1–⌘9 jump to a row, and the hints do not move the status (P3.10)
+
+    // D1 · THE VIEW. Ten rows, because the ninth is the last jumpable one and the
+    // tenth is the one that must advertise nothing: a fixture of seven could not
+    // tell "capped at nine" from "capped at however many rows there are".
+    let jumpFixture = LabFixtures.inboxRows() + (1...3).map { extra in
+        AgentInboxRow(
+            id: UUID(uuidString: String(format: "00000000-0000-0000-0000-0000000004%02X", extra))!,
+            title: "filler \(extra)", projectName: "continuum", state: .ready,
+            createdAt: LabFixtures.epoch.addingTimeInterval(Double(-extra) * 60))
+    }
+    let jumper = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 900))
+    jumper.clock = { LabFixtures.inboxNow }
+    var jumped: [UUID] = []
+    jumper.onRevealRow = { jumped.append($0) }
+    jumper.reload(rows: jumpFixture)
+    let jumpWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 900),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    jumpWindow.contentView = jumper
+    jumper.layoutForQA()
+    try expect(jumper.rowCountForQA == 10,
+               "the jump fixture must have 10 rows, or 'the tenth row has no hint' is vacuous — got \(jumper.rowCountForQA)")
+
+    // At rest there is no pill anywhere: the hints exist only while a modifier is
+    // down, which is also why no committed baseline shows one.
+    try expect(jumper.jumpHintsForQA.allSatisfy(\.isEmpty),
+               "no row may advertise a chord until the modifier is held — got \(jumper.jumpHintsForQA)")
+    // THE T3 REGRESSION, MEASURED: holding ⌘ blanked out "Working" because the hint
+    // took a slot in the row's stack. These are the frames the pills may not move.
+    let statusBefore = jumper.statusFramesForQA
+    try expect(statusBefore.contains { $0.width > 0 && $0.height > 0 },
+               "some row must actually be drawing a status, or the frame comparison below measures nothing")
+
+    jumper.setJumpHintsVisible(true)
+    jumper.layoutForQA()
+    try expect(jumper.jumpHintsForQA == ["⌘1", "⌘2", "⌘3", "⌘4", "⌘5", "⌘6", "⌘7", "⌘8", "⌘9", ""],
+               "holding ⌘ shows one pill per jumpable row and none on the tenth — got \(jumper.jumpHintsForQA)")
+    try expect(jumper.statusFramesForQA == statusBefore,
+               "a hint pill is an OVERLAY: no status label may move — \(statusBefore) became \(jumper.statusFramesForQA)")
+    jumper.setJumpHintsVisible(false)
+    jumper.layoutForQA()
+    try expect(jumper.jumpHintsForQA.allSatisfy(\.isEmpty),
+               "releasing the modifier takes the pills away — got \(jumper.jumpHintsForQA)")
+
+    // The jump itself, against the ORDER ON SCREEN (frozen, P3.4) rather than the
+    // order the rows were handed in.
+    let jumpOrder = jumper.rowIdsForQA
+    try expect(jumper.jump(keyCode: 20, modifiers: .command), "⌘3 must be a jump")
+    try expect(jumped == [jumpOrder[2]],
+               "⌘3 reveals the third row on screen — got \(jumped.count) reveal(s)")
+    try expect(jumper.selectedRowCountForQA == 1,
+               "…and selects it, the same pair a click makes — \(jumper.selectedRowCountForQA) rows selected")
+    try expect(jumper.jump(keyCode: 25, modifiers: .command), "⌘9 must be a jump")
+    try expect(jumped.last == jumpOrder[8], "⌘9 reveals the ninth row on screen")
+    // Everything that is NOT a jump leaves the event alone, which is what lets ⌘1–⌘4
+    // keep meaning "spawn launch profile N" everywhere else.
+    let jumpsSoFar = jumped.count
+    try expect(!jumper.jump(keyCode: 20, modifiers: [.command, .shift]), "⌘⇧3 is not a jump")
+    try expect(!jumper.jump(keyCode: 20, modifiers: []), "a bare 3 is typing, not a jump")
+    try expect(!jumper.jump(keyCode: 29, modifiers: .command), "⌘0 is not a jump — there is no row zero")
+    try expect(jumped.count == jumpsSoFar,
+               "a chord that is not a jump must reveal nothing — \(jumped.count - jumpsSoFar) extra reveal(s)")
+    // A jump past the END of the list is not a jump either: with five rows, ⌘9 has to
+    // fall through to the chord's other meaning rather than be swallowed.
+    let shortList = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    var shortJumps: [UUID] = []
+    shortList.onRevealRow = { shortJumps.append($0) }
+    shortList.reload(rows: Array(jumpFixture.prefix(5)))
+    try expect(!shortList.jump(keyCode: 25, modifiers: .command),
+               "⌘9 over a five-row list must not be consumed")
+    try expect(shortJumps.isEmpty, "…and must reveal nothing — got \(shortJumps.count)")
+
+    // The pills come down when you jump, without waiting to be told about the
+    // release: the ⌘ comes up over whatever the reveal focused.
+    jumper.setJumpHintsVisible(true)
+    jumper.layoutForQA()
+    try expect(!jumper.jumpHintsForQA.allSatisfy(\.isEmpty), "setup: the pills must be up before the jump")
+    try expect(jumper.jump(keyCode: 18, modifiers: .command), "⌘1 must be a jump")
+    jumper.layoutForQA()
+    try expect(jumper.jumpHintsForQA.allSatisfy(\.isEmpty),
+               "a jump takes the pills down — got \(jumper.jumpHintsForQA)")
+
+    // D2 · THE APP, and the whole of the collision decision: the SAME chord means
+    // two things depending on whether this list has the keyboard.
+    guard let jumpChord = NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: 0,
+        context: nil, characters: "1", charactersIgnoringModifiers: "1", isARepeat: false,
+        keyCode: 18) else {
+        throw CheckError.failed("could not synthesize ⌘1")
+    }
+    revealSidebar.inboxForQA.layoutForQA()
+    let sidebarJumpWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 300, height: 640),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    sidebarJumpWindow.contentView = revealSidebar
+    revealSidebar.layoutSubtreeIfNeeded()
+    revealSidebar.inboxForQA.layoutForQA()
+
+    // Not focused: the app must not touch the event.
+    sidebarJumpWindow.makeFirstResponder(nil)
+    try expect(!revealApp.handleInboxJump(jumpChord),
+               "⌘1 must not be a jump while the inbox does not hold first responder")
+    // …and the chord's global meaning is intact, which is this ticket's "no chord
+    // regression" stated as a measurement rather than a promise. (The spawn itself is
+    // `--reserved-dispatch-check`'s; what matters here is that nothing re-homed it.)
+    try expect(FocusDispatch.resolve(keyCode: 18, modifiers: .command, scope: .canvas, focusedKind: nil)
+                == .global(.spawnProfile(1)),
+               "⌘1 on the canvas is still spawn profile 1 — the jump is scoped, not stolen")
+    try expect(ReservedShortcut.classify(keyCode: 25, modifiers: .command) == nil,
+               "⌘9 was free before this ticket and is still not a reserved global")
+
+    // Focused: the same shape of event jumps, through the real `handleHotkey` — so
+    // the ORDER (jump before reserved dispatch) is what is being asserted, not just
+    // the guard.
+    //
+    // ROW TWO, not row one, and ⌘2 (which is launch profile 2, so the collision is
+    // still the point): section C leaves the app in the THERE workspace, and row two
+    // is the agent that lives there. A cross-workspace landing is P3.9's assertion
+    // and section C already makes it — using it here would make this line depend on
+    // the workspace switch rather than on the jump.
+    let jumpTargetRow = revealInbox.rowIdsForQA[1]
+    try expect(jumpTargetRow == thereAgent.rawValue,
+               "setup: row two must be the there-agent, or ⌘2 is jumping somewhere else — got \(revealInbox.titlesForQA)")
+    let jumpTargetTile = revealSupervisor.records[AgentID(rawValue: jumpTargetRow)]?.tileId ?? jumpTargetRow
+    guard let jumpChord2 = NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: 0,
+        context: nil, characters: "2", charactersIgnoringModifiers: "2", isARepeat: false,
+        keyCode: 19) else {
+        throw CheckError.failed("could not synthesize ⌘2")
+    }
+    let tilesBeforeJump = revealCanvas.canvasState.tiles.count
+    revealApp.focusBroker.recoverToCanvas(reason: .userClick)
+    try expect(revealApp.focusBroker.activeSurface != .tile(jumpTargetTile),
+               "setup: the jump's target must not already be focused")
+    try expect(revealInbox.focusListForQA(), "the inbox list must be focusable")
+    try expect(revealApp.handleHotkey(jumpChord2),
+               "⌘2 with the inbox focused must be consumed by the jump, not by launch profile 2")
+    try expect(revealApp.focusBroker.activeSurface == .tile(jumpTargetTile),
+               "…and it must land on row two's agent — focus is \(String(describing: revealApp.focusBroker.activeSurface))")
+    try expect(revealCanvas.canvasState.tiles.count == tilesBeforeJump,
+               "…and spawn nothing: profile 2 would have added a terminal — \(revealCanvas.canvasState.tiles.count) tiles, was \(tilesBeforeJump)")
+
+    // D3 · THE PILLS, through the production path: `handleFlagsChanged` is what the
+    // app's `.flagsChanged` monitor calls, so this is the real observer and not a
+    // view-local override. Driving it here is what closes the cross-review's gap —
+    // the D1 assertions above set the flag directly and prove the PAINT, this proves
+    // what turns it on.
+    func flags(_ mods: NSEvent.ModifierFlags) throws -> NSEvent {
+        guard let event = NSEvent.keyEvent(
+            with: .flagsChanged, location: .zero, modifierFlags: mods, timestamp: 0, windowNumber: 0,
+            context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false,
+            keyCode: 55) else {
+            throw CheckError.failed("could not synthesize .flagsChanged for \(mods)")
+        }
+        return event
+    }
+    try expect(revealInbox.focusListForQA(), "the inbox list must be focusable for the hint scope")
+    revealApp.handleFlagsChanged(try flags([.command]))
+    try expect(revealInbox.areJumpHintsVisibleForQA,
+               "⌘ held with the inbox focused raises the hint pills")
+    revealApp.handleFlagsChanged(try flags([.command, .shift]))
+    try expect(!revealInbox.areJumpHintsVisibleForQA,
+               "⌘⇧ is not a jump, so it must not advertise rows — pills still up")
+    // FOCUS LOST WITH ⌘ STILL DOWN — the case a `flagsChanged` override on the list
+    // could not see, because the release would go to whatever took focus. Found in
+    // cross-review; the fix was to put the hints on the app's existing global monitor.
+    revealApp.handleFlagsChanged(try flags([.command]))
+    try expect(revealInbox.areJumpHintsVisibleForQA, "setup: the pills must be up before focus moves")
+    sidebarJumpWindow.makeFirstResponder(nil)
+    revealApp.handleFlagsChanged(try flags([.command]))
+    try expect(!revealInbox.areJumpHintsVisibleForQA,
+               "⌘ held over a surface the jump cannot reach must not leave pills on the list")
+
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down")
     }
 }

@@ -608,7 +608,12 @@ enum UIProbeAppearance {
         // P3.6. The list's own `panel` fill, and the row card — `tileBody` filled,
         // outlined `border`, or `borderStrong` while the row is selected.
         "AgentInboxView",
-        "AgentInboxCardView"
+        "AgentInboxCardView",
+        // P3.10. The ⌘-hold hint pill: `SurfaceToken.overlay` fill with a
+        // `LineToken.border` outline. It only paints while the modifier is held, so
+        // what puts it under this gate is the `chrome.agentInbox.jumpHints` Lab card
+        // — the one probed surface that renders the pills visible.
+        "InboxJumpHintView"
     ]
 
     /// Still painting literals, each with the ticket that retires them.

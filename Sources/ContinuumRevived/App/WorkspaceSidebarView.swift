@@ -277,6 +277,12 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         inboxView.scopeCatalog = catalog
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
+    /// The list, for the app's ⌘1–⌘9 jump routing. The same view `inboxForQA`
+    /// exposes; a second name because this one is a production path and the app has
+    /// to ask "is the inbox focused" of the real view.
+    var agentInbox: AgentInboxView { inboxView }
+
     var inboxForQA: AgentInboxView { inboxView }
     var isWorkspaceTreeVisibleForQA: Bool { !scrollView.isHidden }
 
