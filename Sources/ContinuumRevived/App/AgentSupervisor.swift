@@ -1837,8 +1837,12 @@ func runAgentSupervisorChecks() async throws {
 
     let providerReport = try await checkPerAgentProviderSettings(cwd: cwd, fail: fail)
 
+    // MARK: 17 · a row's status is the TURN's state, not the process's (P4.14)
+
+    let rowStatusReport = try await AppDelegate.checkRowStatusIsTurnState(config: config, cwd: cwd, fail: fail)
+
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport)")
 }
 
 /// Gated on `--agent-restore-check` (P2A.7).
@@ -2557,8 +2561,19 @@ private func checkDetachOutlivesItsTile(
         throw fail("the first turn's runner was never released")
     }
     supervisor.send("second prompt", to: agentId)
-    guard await waitUntil(timeout: 10, pollInterval: 0.02, { supervisor.isRunning(agentId) && blocking.runCount == 1 }) else {
-        throw fail("the blocking turn did not start; runCount \(blocking.runCount)")
+    // Waiting for the blocking turn's `.turnStarted` to have REACHED THE PROBE, not
+    // merely for `run()` to have been entered: the runner emits on a background queue
+    // and the supervisor hops each event to main, so `isRunning && runCount == 1` is
+    // true while that first event is still in flight. Capturing `probeAtClose` under
+    // that condition left a moving baseline, and the `+ 1` comparison below then
+    // watched the count step 3 → 4 → 5 and never equal 4. Observed as
+    // "an event produced after the tile closed did not reach the supervisor's
+    // remaining subscriber: probe holds 5, was 3" in roughly one run in five.
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, {
+        supervisor.isRunning(agentId) && blocking.runCount == 1
+            && probe.events.last == .turnStarted(threadId: AgentSupervisor.threadId(for: agentId), turnId: "t2")
+    }) else {
+        throw fail("the blocking turn did not start; runCount \(blocking.runCount), probe last \(String(describing: probe.events.last))")
     }
 
     // THE CLOSE PATH, exactly as `deleteTile`'s `.managedAgent` branch runs it.
@@ -2591,7 +2606,7 @@ private func checkDetachOutlivesItsTile(
         throw fail("the detached agent's runner is no longer in flight, so post-close delivery is untestable")
     }
     guard await waitUntil(timeout: 10, pollInterval: 0.02, { probe.events.count == probeAtClose + 1 }) else {
-        throw fail("an event produced after the tile closed did not reach the supervisor's remaining subscriber")
+        throw fail("an event produced after the tile closed did not reach the supervisor's remaining subscriber: probe holds \(probe.events.count), was \(probeAtClose)")
     }
     guard case let .contentDelta(threadId, _, _, delta) = probe.events[probeAtClose],
           delta == "beta",
