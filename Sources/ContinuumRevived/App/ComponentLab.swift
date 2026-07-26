@@ -89,6 +89,60 @@ enum LabFixtures {
         )
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.6-inbox-list-view.md
+    //
+    // Every `InboxState` once, both `RowEmphasis` values, a HEADLESS agent, a
+    // spawned child at depth 1, both branch states (isolated / shared) and both
+    // attention marks — one fixture rather than one card per state, the precedent
+    // `managed-agent.branch-chip` set for exactly this reason ("three states, side
+    // by side, so the PNG baselines cover all of them"). A card per state would
+    // have re-rendered the same list five times to vary one row.
+    //
+    // Ids are canned like every other fixture here: `InboxSort` breaks ties on
+    // them, and a random UUID would reorder the card between two renders and make
+    // its committed baseline flap.
+    static let inboxAgentIds: [UUID] = (1...7).map {
+        UUID(uuidString: String(format: "00000000-0000-0000-0000-0000000003%02X", $0))!
+    }
+
+    static func inboxRows() -> [AgentInboxRow] {
+        func at(_ minutes: Double) -> Date { epoch.addingTimeInterval(minutes * 60) }
+        return [
+            AgentInboxRow(
+                id: inboxAgentIds[0], title: "codex · migration review", projectName: "continuum",
+                state: .approval, attention: .unread, model: "gpt-5.6-sol", role: "reviewer",
+                branch: "agent/migration-review", isIsolated: true, createdAt: at(60)),
+            AgentInboxRow(
+                id: inboxAgentIds[1], title: "claude · matrix green", projectName: "continuum",
+                state: .working, model: "claude-opus-5", role: "builder",
+                branch: "main", elapsed: 254, createdAt: at(50)),
+            AgentInboxRow(
+                id: inboxAgentIds[2], title: "pi · session naming", projectName: "bannockburn",
+                state: .input, model: "gpt-5.6-sol", branch: "main", createdAt: at(40)),
+            AgentInboxRow(
+                id: inboxAgentIds[3], title: "codex · flake hunt", projectName: "continuum",
+                state: .failed, model: "gpt-5.6-sol", role: "debugger",
+                branch: "agent/flake-hunt", isIsolated: true, createdAt: at(30)),
+            AgentInboxRow(
+                id: inboxAgentIds[4], title: "claude · docs sweep", projectName: "continuum",
+                state: .ready, model: "claude-opus-5", branch: "main", createdAt: at(20)),
+            // HEADLESS (P2A.6): no tile renders it, so it has no tile title — its
+            // name is the one the `AgentRecord` owns. It is `woke`, which is the one
+            // attention value that keeps a row at full strength in any state.
+            AgentInboxRow(
+                id: inboxAgentIds[5], title: "orchestrator", projectName: "continuum",
+                state: .ready, attention: .woke, model: "claude-opus-5", role: "orchestrator",
+                createdAt: at(10)),
+            // Its child (P2D.4): depth 1, and `InboxSort` places it immediately
+            // after its parent whatever it is doing.
+            AgentInboxRow(
+                id: inboxAgentIds[6], title: "claude · child worker", projectName: "continuum",
+                state: .working, model: "claude-opus-5", role: "builder",
+                branch: "agent/child-worker", isIsolated: true, elapsed: 8_460,
+                depth: 1, createdAt: at(5), parentId: inboxAgentIds[5]),
+        ]
+    }
+
     static func sidebarTree() -> SidebarTree {
         let alpha = SidebarZoneRow(
             zoneId: selectedZoneId, name: "continuum-revived", color: "#5B8DEF", navKey: "1", collapsed: false, projectId: UUID(),
@@ -392,7 +446,7 @@ enum LabCatalog {
             topologyMigrationNoteCard,
 
             // MARK: 90-agent-ux cards
-            branchChipCard
+            branchChipCard, agentInboxCard, agentInboxSelectedCard
         ]
     }
 
@@ -1127,6 +1181,7 @@ enum LabCatalog {
             content: .staticCard(preferredSize: NSSize(width: 280, height: 560)) {
                 let view = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 280, height: 560))
                 view.reload(tree: LabFixtures.sidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
+                view.reloadInbox(rows: LabFixtures.inboxRows())
                 return view
             }
         )
@@ -1139,6 +1194,7 @@ enum LabCatalog {
             content: .staticCard(preferredSize: NSSize(width: 300, height: 420)) {
                 let view = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 300, height: 420))
                 view.reload(tree: observerSidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
+                view.reloadInbox(rows: LabFixtures.inboxRows())
                 return view
             }
         )
@@ -1202,6 +1258,7 @@ enum LabCatalog {
             content: .staticCard(preferredSize: NSSize(width: 280, height: 640)) {
                 let view = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 280, height: 640))
                 view.reload(tree: LabFixtures.richSidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
+                view.reloadInbox(rows: LabFixtures.inboxRows())
                 return view
             }
         )
@@ -1216,6 +1273,7 @@ enum LabCatalog {
             content: .staticCard(preferredSize: NSSize(width: 280, height: 600)) {
                 let view = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 280, height: 600))
                 view.reload(tree: LabFixtures.richSidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
+                view.reloadInbox(rows: LabFixtures.inboxRows())
                 return view
             }
         )
@@ -1229,6 +1287,8 @@ enum LabCatalog {
             content: .staticCard(preferredSize: NSSize(width: 280, height: 560)) {
                 let view = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 280, height: 560))
                 view.reload(tree: LabFixtures.sidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
+                view.reloadInbox(rows: LabFixtures.inboxRows())
+                _ = view.inboxForQA.selectRowForQA(id: LabFixtures.inboxAgentIds[1])
                 _ = view.select(
                     workspaceId: LabFixtures.workspaceId,
                     zoneId: LabFixtures.selectedZoneId,
@@ -1289,6 +1349,43 @@ enum LabCatalog {
                 makeBranchChipPreview()
             }
         )
+    }
+
+    /// P3.6's list, with every `InboxState`, both emphases, a headless agent and a
+    /// spawned child — see `LabFixtures.inboxRows()` for why it is one card and not
+    /// one per state.
+    private static var agentInboxCard: LabEntry {
+        LabEntry(
+            id: "chrome.agentInbox",
+            category: "Chrome",
+            title: "Agent Inbox",
+            summary: "Five states, frozen creation order, a headless agent and one spawned child.",
+            content: .staticCard(preferredSize: NSSize(width: 320, height: 620)) {
+                makeAgentInboxPreview(selecting: nil)
+            }
+        )
+    }
+
+    /// The same list with one row selected: selection clears P3.5's recession on
+    /// that row and outlines its card in `borderStrong`, and both are pixel facts
+    /// that only a second baseline can hold still.
+    private static var agentInboxSelectedCard: LabEntry {
+        LabEntry(
+            id: "chrome.agentInbox.selected",
+            category: "Chrome",
+            title: "Agent Inbox - row selected",
+            summary: "The working row selected: it stops receding and its card takes the selection outline.",
+            content: .staticCard(preferredSize: NSSize(width: 320, height: 620)) {
+                makeAgentInboxPreview(selecting: LabFixtures.inboxAgentIds[1])
+            }
+        )
+    }
+
+    static func makeAgentInboxPreview(selecting id: UUID?) -> NSView {
+        let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+        view.reload(rows: LabFixtures.inboxRows())
+        if let id { _ = view.selectRowForQA(id: id) }
+        return view
     }
 
     /// Built through `BranchChipNSView.display(for:)` from real `AgentRowContext`
@@ -1966,7 +2063,9 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         // same reasoning and the same shape as P0.5's per-appearance floors. Growth
         // passes in all three cases (P0.11's convention); only shrinkage is the signal.
         // 48 since P2C.4 added `managed-agent.branch-chip` (24 static cards x 2).
-        let minimumCardsGated = 48
+        // 52 since P3.6 added `chrome.agentInbox` and `chrome.agentInbox.selected`
+        // (26 static cards x 2).
+        let minimumCardsGated = 52
         let minimumTextRectsPerAppearance = 192
         let minimumBordersPerAppearance = 12
         guard gated >= minimumCardsGated else {

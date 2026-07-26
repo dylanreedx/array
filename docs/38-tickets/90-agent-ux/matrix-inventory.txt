@@ -1,4 +1,5 @@
 check --add-zone-check
+check --agent-inbox-check
 check --agent-incremental-refresh-check
 check --agent-input-check
 check --agent-inventory-wiring-check
@@ -137,6 +138,7 @@ leg run swift run ContinuumRevivedRelayChecks
 leg run swift run ContinuumRevivedSyncChecks
 leg run swift run ContinuumRevivedSyncIntegrationChecks
 leg run_app_check .build/debug/continuum-revived --add-zone-check
+leg run_app_check .build/debug/continuum-revived --agent-inbox-check
 leg run_app_check .build/debug/continuum-revived --agent-incremental-refresh-check
 leg run_app_check .build/debug/continuum-revived --agent-input-check
 leg run_app_check .build/debug/continuum-revived --agent-inventory-wiring-check

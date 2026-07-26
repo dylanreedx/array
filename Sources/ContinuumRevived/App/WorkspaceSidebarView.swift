@@ -49,6 +49,22 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         }
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.6-inbox-list-view.md
+    //
+    // THE SIDEBAR IS THE INBOX (locked decision), so `inboxView` is this view's
+    // content and the workspace ▸ zone ▸ tile outline below it is no longer shown.
+    //
+    // WHAT REMAINS, as the packet's "watch out" requires it be stated: the outline
+    // is still built, still reloaded by `reload(tree:…)` and still answers every
+    // `…ForQA` accessor, because things do still depend on it —
+    // `--workspace-sidebar-shell-check`, `--workspace-sidebar-actions-check` and
+    // `--workspace-sidebar-live-status-check` all read it, and the workspace / zone
+    // selection callbacks (`onSelection`) are how `handleWorkspaceSidebarSelection`
+    // switches workspace and focuses a zone. It is hidden rather than deleted so
+    // this ticket does not have to migrate those consumers at the same time as it
+    // introduces the list: the scope dropdown that replaces workspace navigation is
+    // P3.8's, and preserving workspace management is P3.14's.
+    private let inboxView: AgentInboxView
     private let scrollView: NSScrollView
     private let outlineView: NSOutlineView
     private let column: NSTableColumn
@@ -72,7 +88,10 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     var onDeleteWorkspace: ((UUID) -> Void)?
 
     override init(frame frameRect: NSRect) {
-        titleLabel = NSTextField(labelWithString: "Workspaces")
+        // "Agents", not "Workspaces": the list underneath it is the agent inbox.
+        // The three buttons keep their workspace meaning — their tooltips already
+        // say so, and P3.14 is where workspace management gets its own home.
+        titleLabel = NSTextField(labelWithString: "Agents")
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
@@ -121,6 +140,10 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         outlineView.addTableColumn(column)
         outlineView.outlineTableColumn = column
         scrollView.documentView = outlineView
+        scrollView.isHidden = true
+
+        inboxView = AgentInboxView(frame: .zero)
+        inboxView.translatesAutoresizingMaskIntoConstraints = false
 
         super.init(frame: frameRect)
 
@@ -136,6 +159,7 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         addSubview(actionStack)
         addSubview(managementMessageLabel)
         addSubview(scrollView)
+        addSubview(inboxView)
 
         createButton.target = self
         createButton.action = #selector(createWorkspaceClicked(_:))
@@ -166,6 +190,11 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: managementMessageLabel.bottomAnchor, constant: 8),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            inboxView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            inboxView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            inboxView.topAnchor.constraint(equalTo: managementMessageLabel.bottomAnchor, constant: 8),
+            inboxView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
     }
 
@@ -203,6 +232,22 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         applyDefaultExpansion(selectedZoneId: selectedZoneId, selectedTileId: selectedTileId)
         updateManagementButtonState()
     }
+
+    /// Replace the inbox. Kept separate from `reload(tree:…)` on purpose: the tree
+    /// comes off disk (registry + documents + canvases) and the rows come out of
+    /// the one agent-activity snapshot, on two different cadences — an agent event
+    /// must be able to move a row without re-reading every project's store.
+    func reloadInbox(rows: [AgentInboxRow]) {
+        inboxView.reload(rows: rows)
+    }
+
+    /// The incremental path (P2B.7): the same rows plus which agents moved.
+    func applyInbox(rows: [AgentInboxRow], changed: AgentsBoardChangeSet) {
+        inboxView.apply(rows: rows, changed: changed)
+    }
+
+    var inboxForQA: AgentInboxView { inboxView }
+    var isWorkspaceTreeVisibleForQA: Bool { !scrollView.isHidden }
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         guard let item = item as? SidebarItem else { return rootItems.count }

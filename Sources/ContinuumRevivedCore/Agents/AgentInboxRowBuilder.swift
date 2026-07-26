@@ -26,16 +26,29 @@ public enum AgentInboxRowBuilder {
     /// That order is attention-first, which is the phone's. The desktop's frozen
     /// creation order is P3.4's `sortForInbox`, deliberately a separate step: this
     /// ticket builds rows, it does not rank them.
+    ///
+    /// P3.6: `attention` is the desktop's read-state, keyed the same way. It is a
+    /// PARAMETER and not something this fold can look up — the axis lives in
+    /// `AgentSupervisor` (P3.3: "local, and deliberately not durable or synced"),
+    /// which is an App-layer object Core may not reach, and P3.3 says in as many
+    /// words that "the value is fed to rows from the desktop side when that list
+    /// exists". This is that list existing. An agent with no entry reads `.none`,
+    /// which is what a caller with no read-state (the phone, a fixture) gets.
     public static func rows(
         from snapshot: ActivityLogSnapshot,
         context: [UUID: AgentRowContext] = [:],
+        attention: [UUID: InboxAttention] = [:],
         now: Date
     ) -> [AgentInboxRow] {
         AgentsBoardProjection.rows(from: snapshot, context: context)
-            .map { row(from: $0, now: now) }
+            .map { row(from: $0, attention: attention[$0.agentId] ?? .none, now: now) }
     }
 
-    public static func row(from boardRow: AgentsBoardRow, now: Date) -> AgentInboxRow {
+    public static func row(
+        from boardRow: AgentsBoardRow,
+        attention: InboxAttention = .none,
+        now: Date
+    ) -> AgentInboxRow {
         let context = boardRow.context
         // P3.2: the status alone cannot say WHICH of the two things a
         // `needsAttention` agent wants, and a pending request outranks the fold's
@@ -55,8 +68,8 @@ public enum AgentInboxRowBuilder {
             state: state,
             // P3.3 owns read-state. It is local desktop state stored beside the
             // agent record, so it is not visible from a snapshot and cannot be
-            // guessed from one.
-            attention: .none,
+            // guessed from one — it arrives as an argument or not at all.
+            attention: attention,
             lifecycle: lifecycle,
             model: context?.model,
             role: context?.role,

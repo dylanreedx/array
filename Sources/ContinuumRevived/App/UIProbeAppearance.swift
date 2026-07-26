@@ -187,10 +187,13 @@ enum UIProbeAppearance {
     /// equalities, so a new themed view or an extra card is not a failure — but a
     /// view or a whole surface silently dropping out of the sweep is.
     /// 12 / 25 since P2C.4 added `BranchChipNSView` (its fill and its outline).
-    /// Floored AT the measured number, the program's convention: growth passes,
-    /// shrinkage is the signal.
-    private static let minimumThemedViews = 12
-    private static let minimumSentineledSlots = 25
+    /// 27 / 53 since P3.6 made the sidebar's content the agent inbox: the list
+    /// itself plus one `AgentInboxCardView` per row, on two surfaces (the sidebar
+    /// and the dedicated `appearance.agentInbox`), each card owning a fill and an
+    /// outline. Floored AT the measured number, the program's convention: growth
+    /// passes, shrinkage is the signal.
+    private static let minimumThemedViews = 27
+    private static let minimumSentineledSlots = 53
 
     /// P1.10: the tile paints three plain `NSView` container fills, which
     /// `ownedLayers(of:)` cannot attribute to it (a view never answers for a
@@ -239,11 +242,22 @@ enum UIProbeAppearance {
         // App-layer half of the ticket is covered by the same sweep.
         let surfaces: [(id: String, size: NSSize, make: () -> NSView)] = [
             ("appearance.managedAgentTile", NSSize(width: 640, height: 560), makeTile),
-            ("appearance.sidebar", NSSize(width: 280, height: 520), { WorkspaceSidebarView(frame: .zero) }),
+            ("appearance.sidebar", NSSize(width: 280, height: 520), {
+                let view = WorkspaceSidebarView(frame: .zero)
+                view.reloadInbox(rows: LabFixtures.inboxRows())
+                return view
+            }),
             ("appearance.topBar", NSSize(width: 900, height: 44), { WorkspaceTopBarView(frame: .zero) }),
             // P1.11 made the canvas a `TokenThemed` conformer, so `declaredConformers()`
             // requires it here — and the canvas fill is the background half of the
             // `borderStrong`-on-`canvas` pair this ticket's Goal names.
+            // P3.6: the inbox and its row cards. Rows are fed here rather than
+            // relying on the sidebar surface above, because an EMPTY list owns no
+            // row views — `AgentInboxRowView` would be a declared conformer this
+            // sweep never renders, which `declaredConformers()` is right to reject.
+            ("appearance.agentInbox", NSSize(width: 320, height: 620), {
+                LabCatalog.makeAgentInboxPreview(selecting: LabFixtures.inboxAgentIds[1])
+            }),
             ("appearance.canvas", NSSize(width: 700, height: 480), {
                 CanvasNSView(canvasState: CanvasState(
                     viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
@@ -584,7 +598,11 @@ enum UIProbeAppearance {
         "FileTreeTileNSView",
         "CanvasNSView",
         "WorkspaceSidebarView",
-        "WorkspaceTopBarView"
+        "WorkspaceTopBarView",
+        // P3.6. The list's own `panel` fill, and the row card — `tileBody` filled,
+        // outlined `border`, or `borderStrong` while the row is selected.
+        "AgentInboxView",
+        "AgentInboxCardView"
     ]
 
     /// Still painting literals, each with the ticket that retires them.
@@ -1012,6 +1030,10 @@ enum UIProbeAppearance {
             AdoptedSurface(id: "sidebar", size: NSSize(width: 280, height: 520), make: {
                 let view = WorkspaceSidebarView(frame: .zero)
                 view.reload(tree: LabFixtures.sidebarTree(), currentWorkspaceId: LabFixtures.workspaceId)
+                // P3.6: the sidebar's content is the inbox, and an EMPTY inbox owns
+                // no row cards — so `AgentInboxCardView` would be an adopted owner
+                // this gate never sees paint, which it is right to call out.
+                view.reloadInbox(rows: LabFixtures.inboxRows())
                 return view
             }),
             AdoptedSurface(id: "topBar", size: NSSize(width: 900, height: 44), make: {

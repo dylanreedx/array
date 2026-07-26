@@ -1268,6 +1268,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--agent-inbox-check") {
+            do {
+                _ = NSApplication.shared
+                try AppDelegate.runAgentInboxChecks()
+                print("ContinuumRevivedAgentInboxChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--workspace-sidebar-shell-check") {
             do {
                 _ = NSApplication.shared
@@ -6266,10 +6278,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// rebuilding again here would walk every project's store a second time for a
     /// result that cannot have changed. Every other caller (a rename, a zone edit, a
     /// workspace switch) wants the fresh read the old per-reload walk gave it.
+    /// P3.6: the inbox's rows, from the SAME snapshot every other surface reads.
+    ///
+    /// Filtered by `agentIdentities` for the reason the sidebar tree and the canvas
+    /// badges are (P2B.4): a terminal session with no `AgentDescriptor` is a plain
+    /// shell, and a shell is not an agent — it would otherwise arrive as a row
+    /// titled "Agent" with no state.
+    ///
+    /// Read-state is layered on here rather than inside the fold, because
+    /// `AgentSupervisor` owns it and Core cannot reach a supervisor (P3.3).
+    private func buildAgentInboxRows(now: Date = Date()) -> [AgentInboxRow] {
+        let registry = (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
+        var documents: [UUID: WorkspaceDocument] = [:]
+        if let registryStore {
+            let appSupport = registryStore.registryFile.deletingLastPathComponent()
+            for workspace in registry.workspaces {
+                let store = WorkspaceStore(workspaceId: workspace.id, applicationSupportDirectory: appSupport)
+                if let document = try? store.tryLoad() { documents[workspace.id] = document }
+            }
+        }
+        if let workspaceRuntime {
+            documents[workspaceRuntime.workspaceId] = workspaceRuntime.document
+        }
+        let projectCanvases = workspaceSidebarProjectCanvasSnapshots(registry: registry)
+        let records = agentSupervisor.records.values.sorted(by: AgentStore.isOrderedBefore)
+        var checkedOutBranches: [UUID: String] = [:]
+        var attention: [UUID: InboxAttention] = [:]
+        for record in records {
+            if let branch = agentSupervisor.branchContext(for: record.id)?.checkedOutBranch {
+                checkedOutBranches[record.id.rawValue] = branch
+            }
+            attention[record.id.rawValue] = agentSupervisor.attention(for: record.id)
+        }
+        let context = AgentContextIndex.build(
+            registry: registry,
+            documents: documents,
+            projectCanvases: projectCanvases,
+            terminalDescriptors: currentTerminalSessionDescriptors(registry: registry, projectCanvases: projectCanvases),
+            agents: records,
+            checkedOutBranches: checkedOutBranches
+        )
+        return AgentInboxRowBuilder.rows(
+            from: agentActivity.snapshot, context: context, attention: attention, now: now
+        )
+        .filter { agentActivity.agentIdentities.contains($0.id) }
+    }
+
     private func reloadWorkspaceSidebar(rebuildAgentActivity: Bool = true) {
         if rebuildAgentActivity { rebuildAgentActivitySnapshot() }
         defer { reloadWorkspaceTopBar() }
         guard let sidebar = workspaceSidebarView else { return }
+        // P3.6: the inbox is the sidebar's content, so it is fed on the same
+        // reload. `applyInbox` and not `reloadInbox` — the change set says which
+        // agents moved, and rebuilding every row for one streamed token is what
+        // P2B.7 removed from the surfaces it could reach.
+        sidebar.applyInbox(rows: buildAgentInboxRows(), changed: agentActivity.lastChange)
         do {
             let tree = try buildWorkspaceSidebarTree()
             sidebar.reload(
@@ -19574,5 +19637,331 @@ extension AppDelegate {
 
     NSApplication.shared.dockTile.badgeLabel = nil
     print("AgentObserverIndependence: with no ZoneRuntimeController and no canvas, 4 agents were listed from disk with their persisted statuses and all 4 marked unobserved; a live tile view and a runtime observer status each overrode the file and cleared the mark; releasing the observer put an agent back to unobserved without losing it; an agent's own event cleared the mark with no rebuild; and the agent in the released project stayed listed and marked throughout (terminal age measured \(String(format: "%.1f", terminalAge))s vs managed \(String(format: "%.0f", managedAge))s on the same hour-old fixture)")
+    }
+}
+
+// Ticket: docs/38-tickets/90-agent-ux/P3.6-inbox-list-view.md
+//
+// THE INBOX IS WHAT THE SIDEBAR SHOWS. Two halves, because the claim has two
+// halves and one fixture cannot carry both:
+//
+//  A · THE VIEW AGAINST THE MODEL. A canned `[AgentInboxRow]` in, the rendered
+//      list out: the frozen order (P3.4), the five states' labels (P3.2), the
+//      emphasis actually PAINTED on the row's words and on its accent (P3.5's
+//      obligation on this file — a value it cannot assert about itself), what
+//      hover and selection do to it, and P2B.7's incremental refresh measured as
+//      "how many cells did AppKit rebuild".
+//
+//  B · THE APP AGAINST DISK. A real registry, a real terminal agent, a real
+//      HEADLESS supervised agent and a plain shell tile, through
+//      `refreshAgentSurfaces` into a real `WorkspaceSidebarView`: the sidebar's
+//      default content is the agent list, the headless agent is in it, and the
+//      shell is not.
+//
+// NINE NEGATIVE TESTS OBSERVED RED at exit 1 with the final code, quoted
+// verbatim (the last is on `--ui-contrast-check`, for the correction this ticket
+// made to `UIProbeContrast`):
+//
+//   1. `InboxSort.sortForInbox(rows: newRows)` -> `newRows` in
+//      `AgentInboxView.reload` → `the list must be in InboxSort's frozen order,
+//      got [orchestrator, claude · child worker, codex · migration review, claude
+//      · docs sweep, codex · flake hunt, pi · session naming, claude · matrix
+//      green]`
+//   2. `emphasis:` hardcoded to `.full` in `tableView(_:viewFor:row:)` →
+//      `'claude · matrix green' is working/none, so its words are receded — text
+//      alpha 1.0, wanted 0.88`
+//   3. `stateLabel.alphaValue = emphasis.textOpacity` (the accent faded with the
+//      words — P3.5's named regression) → `'claude · matrix green' must paint its
+//      accent at full strength however far the row recedes — accent alpha 0.88,
+//      wanted 1.0`
+//   4. `isInteracting:` forced to `false` at the call site → `selecting a row must
+//      clear its recession — text alpha 0.88, wanted 1.0`
+//   5. `apply(rows:changed:)` short-circuited to `reload(rows:)` → `one agent
+//      moved, so exactly 1 cell may be rebuilt — 7 were`
+//   6. the `agentIdentities` filter dropped from `buildAgentInboxRows` → `a plain
+//      shell tile is not an agent and must not be a row — got 3 rows`
+//   7. `sidebar.applyInbox(...)` deleted from `reloadWorkspaceSidebar` → `the
+//      sidebar's default content is the agent inbox — got 0 rows`
+//   8. the `|| rows[$0] != previous[$0]` half of `apply(rows:changed:)`'s staleness
+//      test removed, i.e. the change-set-only version the cross-review found → `a
+//      row whose VALUE changed with an empty change set must still be repainted —
+//      0 cells rebuilt`
+//   9. `Opacity.receded` = 0.50 → `--ui-contrast-check`: `130 unreadable pair(s)
+//      of 846 measured: chrome.sidebar NSTextField … 2.26:1, needs >= 4.5:1`.
+//      That one is the vacuity guard on this ticket's one-line correction to
+//      `UIProbeContrast.visit` (it was squaring a layer-backed view's fade): the
+//      alpha is still applied, it is now applied ONCE. Its failure line also shows
+//      the background as `#FAFBFC` — `SurfaceToken.tileBody`, the row card — which
+//      is the other half of that fix landing.
+extension AppDelegate {
+    static func runAgentInboxChecks() throws {
+    enum CheckError: Error, CustomStringConvertible {
+        case failed(String)
+        var description: String { switch self { case let .failed(message): return message } }
+    }
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+        if !condition() { throw CheckError.failed(message) }
+    }
+
+    // MARK: A · the view against the model
+
+    let fixture = LabFixtures.inboxRows()
+    let expectedOrder = InboxSort.sortForInbox(rows: fixture).map(\.id)
+    // Handed in REVERSED, so "the view is in the model's order" cannot be
+    // satisfied by the view simply keeping what it was given.
+    let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    inbox.reload(rows: fixture.reversed())
+    try expect(expectedOrder != fixture.reversed().map(\.id),
+               "the fixture must not already be in sorted order, or the ordering assertion is vacuous")
+    try expect(inbox.rowIdsForQA == expectedOrder,
+               "the list must be in InboxSort's frozen order, got \(inbox.rows.map(\.title))")
+    try expect(inbox.rowCountForQA == fixture.count,
+               "every row in the model must be a row on screen — got \(inbox.rowCountForQA) of \(fixture.count)")
+    try expect(!inbox.isEmptyMessageVisibleForQA,
+               "a list with rows must not also be showing its empty state")
+
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    window.contentView = inbox
+    inbox.layoutForQA()
+
+    let sorted = InboxSort.sortForInbox(rows: fixture)
+    let byId = Dictionary(uniqueKeysWithValues: sorted.map { ($0.id, $0) })
+    try expect(inbox.titlesForQA == sorted.map(\.title),
+               "each row shows its agent's name — got \(inbox.titlesForQA)")
+    try expect(inbox.stateLabelsForQA == sorted.map { $0.label ?? "" },
+               "each row shows its own state's word, and `ready` shows none — got \(inbox.stateLabelsForQA)")
+    // Vacuity: the five states must actually be represented, or the line above is
+    // an assertion about one word.
+    try expect(Set(sorted.map(\.state)) == Set(InboxState.allCases),
+               "the fixture must cover every InboxState — got \(Set(sorted.map(\.state)).count)")
+
+    // P3.5, PAINTED. Both numbers read off the rendered labels.
+    for (index, row) in sorted.enumerated() {
+        let wanted = row.emphasis
+        let text = inbox.textAlphasForQA[index]
+        let accent = inbox.accentAlphasForQA[index]
+        try expect(abs(text - wanted.textOpacity) < 0.001,
+                   "'\(row.title)' is \(row.state.rawValue)/\(row.attention.rawValue), so its words are \(wanted.rawValue) — text alpha \(text), wanted \(wanted.textOpacity)")
+        try expect(abs(accent - Opacity.full) < 0.001,
+                   "'\(row.title)' must paint its accent at full strength however far the row recedes — accent alpha \(accent), wanted \(Opacity.full)")
+    }
+    // …and that the fade is not uniform, which is the whole of P3.5: the working
+    // rows recede and the ones asking for you do not.
+    try expect(inbox.textAlphasForQA.contains(where: { abs($0 - Opacity.receded) < 0.001 }),
+               "some row must actually recede, or the emphasis sweep is measuring nothing")
+    try expect(inbox.textAlphasForQA.contains(where: { abs($0 - Opacity.full) < 0.001 }),
+               "some row must be at full strength, or every row receded")
+
+    // Selection and hover each clear recession on their row and only their row.
+    let workingId = sorted.first { $0.state == .working && $0.emphasis == .receded }!.id
+    let workingIndex = sorted.firstIndex { $0.id == workingId }!
+    try expect(inbox.selectRowForQA(id: workingId), "the working row must be selectable")
+    inbox.layoutForQA()
+    try expect(abs(inbox.textAlphasForQA[workingIndex] - Opacity.full) < 0.001,
+               "selecting a row must clear its recession — text alpha \(inbox.textAlphasForQA[workingIndex]), wanted \(Opacity.full)")
+    _ = inbox.selectRowForQA(id: sorted[0].id)
+    inbox.layoutForQA()
+    try expect(abs(inbox.textAlphasForQA[workingIndex] - Opacity.receded) < 0.001,
+               "and moving the selection off it must put the recession back — text alpha \(inbox.textAlphasForQA[workingIndex])")
+    try expect(inbox.hoverRowForQA(id: workingId), "the working row must be hoverable")
+    inbox.layoutForQA()
+    try expect(abs(inbox.textAlphasForQA[workingIndex] - Opacity.full) < 0.001,
+               "hovering a row must clear its recession — text alpha \(inbox.textAlphasForQA[workingIndex])")
+    _ = inbox.hoverRowForQA(id: nil)
+    inbox.layoutForQA()
+
+    // The metadata lines, against the values the row carries — including the
+    // branch line in `BranchChipNSView`'s vocabulary rather than a second one.
+    let isolatedIndex = sorted.firstIndex { $0.isIsolated }!
+    let sharedIndex = sorted.firstIndex { $0.branch != nil && !$0.isIsolated }!
+    try expect(inbox.branchLinesForQA[isolatedIndex] == "\(BranchChipNSView.branchGlyph) \(sorted[isolatedIndex].branch!)",
+               "an isolated agent's row names its own branch — got '\(inbox.branchLinesForQA[isolatedIndex])'")
+    try expect(inbox.branchLinesForQA[sharedIndex] == "\(BranchChipNSView.branchGlyph) \(sorted[sharedIndex].branch!) \(BranchChipNSView.sharedSuffix)",
+               "an agent in the project's own checkout says so — got '\(inbox.branchLinesForQA[sharedIndex])'")
+    let withRole = sorted.firstIndex { $0.role != nil && $0.model != nil }!
+    try expect(inbox.metaLinesForQA[withRole] == "\(sorted[withRole].role!) · \(sorted[withRole].model!)",
+               "the second line is role · model — got '\(inbox.metaLinesForQA[withRole])'")
+
+    // P2B.7 · ONE AGENT MOVED, ONE CELL REBUILT.
+    let moved = sorted[2]
+    let movedRow = AgentInboxRow(
+        id: moved.id, title: moved.title, projectName: moved.projectName, state: .approval,
+        attention: moved.attention, lifecycle: moved.lifecycle, model: moved.model, role: moved.role,
+        branch: moved.branch, isIsolated: moved.isIsolated, elapsed: nil, depth: moved.depth,
+        variant: moved.variant, createdAt: moved.createdAt, parentId: moved.parentId)
+    let nextRows = sorted.map { $0.id == moved.id ? movedRow : $0 }
+    let buildsBefore = inbox.cellBuildCountForQA
+    inbox.apply(rows: nextRows, changed: AgentsBoardChangeSet(added: [], updated: [moved.id], removed: []))
+    inbox.layoutForQA()
+    let rebuilt = inbox.cellBuildCountForQA - buildsBefore
+    try expect(rebuilt == 1, "one agent moved, so exactly 1 cell may be rebuilt — \(rebuilt) were")
+    try expect(inbox.stateLabelsForQA[2] == InboxState.approval.label,
+               "…and that one cell must show the new state — got '\(inbox.stateLabelsForQA[2])'")
+    try expect(inbox.rowIdsForQA == expectedOrder,
+               "a state change must not move a row — the desktop order is frozen (P3.4)")
+
+    // …and a change the CHANGE SET cannot see — a rename, a re-join, a read-state
+    // move — still repaints. From the cross-review: keying only on
+    // `AgentsBoardChangeSet.touched` left a renamed project on screen indefinitely,
+    // because that set is about ACTIVITY and half of what a row shows is not.
+    let renamedSource = inbox.rows[3]
+    let renamed = AgentInboxRow(
+        id: renamedSource.id, title: renamedSource.title, projectName: "renamed-project",
+        state: renamedSource.state, attention: renamedSource.attention,
+        lifecycle: renamedSource.lifecycle, model: renamedSource.model, role: renamedSource.role,
+        branch: renamedSource.branch, isIsolated: renamedSource.isIsolated,
+        elapsed: renamedSource.elapsed, depth: renamedSource.depth, variant: renamedSource.variant,
+        createdAt: renamedSource.createdAt, parentId: renamedSource.parentId)
+    let buildsBeforeRename = inbox.cellBuildCountForQA
+    inbox.apply(rows: inbox.rows.map { $0.id == renamed.id ? renamed : $0 }, changed: .empty)
+    inbox.layoutForQA()
+    try expect(inbox.cellBuildCountForQA - buildsBeforeRename == 1,
+               "a row whose VALUE changed with an empty change set must still be repainted — \(inbox.cellBuildCountForQA - buildsBeforeRename) cells rebuilt")
+    // …and nothing at all when nothing moved, which is what stops this from being a
+    // full reload wearing a diff's clothes.
+    let buildsBeforeNoop = inbox.cellBuildCountForQA
+    inbox.apply(rows: inbox.rows, changed: .empty)
+    inbox.layoutForQA()
+    try expect(inbox.cellBuildCountForQA == buildsBeforeNoop,
+               "a push where nothing moved must rebuild nothing — \(inbox.cellBuildCountForQA - buildsBeforeNoop) cells rebuilt")
+
+    // A change to the SET of agents is a different thing, and takes the whole list.
+    let withoutOne = nextRows.filter { $0.id != moved.id }
+    let buildsBeforeRemoval = inbox.cellBuildCountForQA
+    inbox.apply(rows: withoutOne, changed: AgentsBoardChangeSet(added: [], updated: [], removed: [moved.id]))
+    inbox.layoutForQA()
+    try expect(inbox.rowCountForQA == withoutOne.count,
+               "an agent that went away must leave the list — got \(inbox.rowCountForQA) of \(withoutOne.count)")
+    try expect(inbox.cellBuildCountForQA - buildsBeforeRemoval == withoutOne.count,
+               "a list whose agents changed is rebuilt whole — a partial reload against a shifted array repaints a row with its neighbour's agent")
+
+    let empty = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 200))
+    empty.reload(rows: [])
+    try expect(empty.isEmptyMessageVisibleForQA && empty.rowCountForQA == 0,
+               "an inbox with no agents says so rather than rendering as a blank rectangle")
+
+    // MARK: B · the app against disk
+
+    let fm = FileManager.default
+    let tempRoot = fm.temporaryDirectory
+        .appendingPathComponent("continuum-agent-inbox-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: tempRoot) }
+    let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+    let agentsSupport = tempRoot.appendingPathComponent("Agents", isDirectory: true)
+    let projectRoot = tempRoot.appendingPathComponent("Project", isDirectory: true)
+    for dir in [appSupport, agentsSupport, projectRoot] {
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+
+    let now = Date(timeIntervalSince1970: 1_900_600_000)
+    let workspaceId = UUID(uuidString: "3B600000-0000-4000-8000-0000000000A1")!
+    let projectId = UUID(uuidString: "3B600000-0000-4000-8000-0000000000D1")!
+    let zoneId = UUID(uuidString: "3B600000-0000-4000-8000-0000000000C1")!
+    let terminalAgentTile = UUID(uuidString: "3B600000-0000-4000-8000-0000000000E1")!
+    // A PLAIN SHELL: a terminal session with no `AgentDescriptor`. It is in the
+    // snapshot (the phone lists it) and it is NOT an agent, so it must not be a row.
+    let shellTile = UUID(uuidString: "3B600000-0000-4000-8000-0000000000E2")!
+
+    let placement = ZonePlacement(zoneId: zoneId, projectId: projectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 600, height: 400), color: "blue", collapsed: false, hydrationPolicy: .automatic)
+    var registry = Registry.empty()
+    registry.lastActiveWorkspaceId = workspaceId
+    registry.workspaces = [WorkspaceEntry(id: workspaceId, name: "Default", projectIds: [projectId], createdAt: now, updatedAt: now)]
+    registry.projects = [
+        ProjectEntry(id: projectId, name: "Continuum", rootPath: projectRoot.path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false)
+    ]
+    let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+    try registryStore.save(registry)
+    try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport).save(
+        WorkspaceDocument(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+            zones: [placement], zoneZOrder: [zoneId], lastActiveZoneId: zoneId))
+
+    let store = ProjectStore(projectRoot: projectRoot)
+    let canvasState = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [
+        Tile(id: terminalAgentTile, kind: .terminal, title: "claude · matrix", frame: TileFrame(x: 0, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata()),
+        Tile(id: shellTile, kind: .terminal, title: "shell", frame: TileFrame(x: 240, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata()),
+    ], groups: [], lastActiveTileId: terminalAgentTile)
+    try store.saveCanvas(canvasState)
+    try store.saveSession(TerminalSessionDescriptor(
+        id: UUID(uuidString: "3B600000-0000-4000-8000-0000000000F1")!,
+        tileId: terminalAgentTile, launchProfileId: "shell", command: "/bin/zsh", args: [],
+        cwd: projectRoot.path, env: [:], title: "session", createdAt: now, lastStartedAt: now, lastExit: nil,
+        agentDescriptor: AgentDescriptor(agentKind: .claude, worktreePath: projectRoot.path, status: .working, statusUpdatedAt: now)))
+    try store.saveSession(TerminalSessionDescriptor(
+        id: UUID(uuidString: "3B600000-0000-4000-8000-0000000000F2")!,
+        tileId: shellTile, launchProfileId: "shell", command: "/bin/zsh", args: [],
+        cwd: projectRoot.path, env: [:], title: "shell", createdAt: now, lastStartedAt: now, lastExit: nil,
+        agentDescriptor: nil))
+
+    // The HEADLESS agent (P2A.6): an `AgentRecord` with no tile. It is the row the
+    // old sidebar tree could not draw at all — a tree keyed on tiles has nowhere to
+    // put an agent that has none.
+    let headlessId = AgentID(rawValue: UUID(uuidString: "3B600000-0000-4000-8000-0000000000B1")!)
+    let agentStore = AgentStore(applicationSupportDirectory: agentsSupport)
+    try agentStore.upsert(AgentRecord(
+        id: headlessId, displayName: "orchestrator", role: "orchestrator",
+        model: "openai-codex/gpt-5.6-sol", thinking: "medium", cwd: projectRoot.path,
+        projectId: projectId, createdAt: now, lastActivityAt: now))
+
+    let app = AppDelegate()
+    app.registryStore = registryStore
+    app.agentSupervisor = AgentSupervisor(store: agentStore, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    app.agentSupervisor.restore()
+    try expect(app.agentSupervisor.records[headlessId] != nil,
+               "the headless agent must be adopted, or the assertions below say nothing about it")
+
+    let canvas = CanvasNSView(
+        canvasState: canvasState, activeZone: placement,
+        zoneRenderModels: [CanvasNSView.ZoneRenderModel(placement: placement, displayName: "Continuum")])
+    for tile in canvasState.tiles { canvas.install(tileView: TileNSView(tile: tile), for: tile) }
+    app.canvasView = canvas
+
+    let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 300, height: 640))
+    app.workspaceSidebarView = sidebar
+    app.refreshAgentSurfaces(notify: false)
+    let sidebarWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 300, height: 640),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    sidebarWindow.contentView = sidebar
+    sidebar.layoutSubtreeIfNeeded()
+    sidebar.inboxForQA.layoutForQA()
+
+    let ids = Set(sidebar.inboxForQA.rowIdsForQA)
+    try expect(!ids.isEmpty, "the sidebar's default content is the agent inbox — got 0 rows")
+    try expect(ids.contains(headlessId.rawValue),
+               "a HEADLESS agent must be in the inbox — it has no tile, so the tree could not show it at all")
+    try expect(ids.contains(terminalAgentTile),
+               "the terminal agent must be in the inbox — got \(sidebar.inboxForQA.titlesForQA)")
+    try expect(!ids.contains(shellTile),
+               "a plain shell tile is not an agent and must not be a row — got \(ids.count) rows")
+    try expect(sidebar.inboxForQA.titlesForQA.contains("orchestrator"),
+               "the headless agent's row is named by the record it owns — got \(sidebar.inboxForQA.titlesForQA)")
+    try expect(!sidebar.isWorkspaceTreeVisibleForQA,
+               "the workspace tree is no longer the sidebar's content — the sidebar IS the inbox")
+    // The tree is still THERE, which is the packet's "do not delete it wholesale":
+    // the workspace-sidebar checks and the zone-selection callbacks still read it.
+    try expect(sidebar.tileRowsRenderedForQA > 0,
+               "the workspace tree must still be built for the consumers that read it")
+
+    // An agent event moves its row with no disk read (P2B.7's path, through the
+    // sidebar this time).
+    let buildsBeforeEvent = sidebar.inboxForQA.cellBuildCountForQA
+    app.recordManagedActivity(
+        agentId: headlessId, tileId: nil,
+        event: .requestOpened(threadId: "thread-1", requestId: "req-1", kind: .commandExecutionApproval),
+        status: .needsAttention)
+    app.pushAgentSurfaces(notify: false)
+    sidebar.inboxForQA.layoutForQA()
+    let headlessIndex = sidebar.inboxForQA.rowIdsForQA.firstIndex(of: headlessId.rawValue)!
+    try expect(sidebar.inboxForQA.stateLabelsForQA[headlessIndex] == InboxState.approval.label,
+               "an agent's own event must reach its row — got '\(sidebar.inboxForQA.stateLabelsForQA[headlessIndex])'")
+    let rebuiltByEvent = sidebar.inboxForQA.cellBuildCountForQA - buildsBeforeEvent
+    try expect(rebuiltByEvent <= 2,
+               "one agent's event must not rebuild the whole list — \(rebuiltByEvent) cells were rebuilt")
+
+    NSApplication.shared.dockTile.badgeLabel = nil
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown")
     }
 }

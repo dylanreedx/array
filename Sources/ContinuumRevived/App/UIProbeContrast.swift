@@ -210,7 +210,16 @@ enum UIProbeContrast {
         _ view: NSView, background: RGBA, prefix: String, alpha: Double,
         into collected: inout [Measurement]
     ) throws {
-        let effectiveAlpha = alpha * Double(view.alphaValue) * Double(view.layer?.opacity ?? 1)
+        // `alphaValue` ALONE, not `alphaValue * layer.opacity`: on a layer-backed
+        // view those are ONE fact, not two — `NSView.alphaValue` is stored in
+        // `layer.opacity` and its getter reads it back, so multiplying them squares
+        // the fade. Measured when P3.6 became the first surface to fade a
+        // layer-backed label: `RowEmphasis.receded` (0.88, derived in P3.5 as the
+        // exact AA break-even) was reported as 0.88^2 = 0.774 and 8 rows went red
+        // at 3.89:1 for a fade the screen never applied. A non-layer-backed view
+        // has no `layer`, and one whose `layer.opacity` was set directly still
+        // answers with it through `alphaValue`, so nothing stops being counted.
+        let effectiveAlpha = alpha * Double(view.alphaValue)
         // Invisible chrome is not a contrast bug. Zero-size views are the
         // geometry gate's business (`UIProbeGeometry.expectNoZeroSizeViews`);
         // asserting on them here would report a colour problem for a layout one.
