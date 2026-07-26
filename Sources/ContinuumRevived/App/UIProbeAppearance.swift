@@ -186,8 +186,11 @@ enum UIProbeAppearance {
     /// tile's own backdrop subviews (see `extraSlots`). Floors rather than
     /// equalities, so a new themed view or an extra card is not a failure — but a
     /// view or a whole surface silently dropping out of the sweep is.
-    private static let minimumThemedViews = 11
-    private static let minimumSentineledSlots = 23
+    /// 12 / 25 since P2C.4 added `BranchChipNSView` (its fill and its outline).
+    /// Floored AT the measured number, the program's convention: growth passes,
+    /// shrinkage is the signal.
+    private static let minimumThemedViews = 12
+    private static let minimumSentineledSlots = 25
 
     /// P1.10: the tile paints three plain `NSView` container fills, which
     /// `ownedLayers(of:)` cannot attribute to it (a view never answers for a
@@ -560,6 +563,10 @@ enum UIProbeAppearance {
         "TranscriptCardView",
         "ApprovalDockView",
         "UserInputCardView",
+        // P2C.4's branch chip, born on tokens: `SurfaceToken.overlay` fill with a
+        // `LineToken.border` outline that becomes `AccentToken.accentApproval` when
+        // the agent is off the branch it was given.
+        "BranchChipNSView",
         // P1.11. `ManagedAgentTileNSView`'s own layer is `TileNSView`'s fill and
         // outline, inherited through `super.applyTokens()` — so listing it here is
         // what puts the tile's `tileBody` fill and its `borderStrong` edge under

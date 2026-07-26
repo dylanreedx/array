@@ -389,7 +389,10 @@ enum LabCatalog {
 
             // MARK: night3-C cards
             managedAgentApprovalDockCard, managedAgentUserInputCard, newTileCwdPolicyCard,
-            topologyMigrationNoteCard
+            topologyMigrationNoteCard,
+
+            // MARK: 90-agent-ux cards
+            branchChipCard
         ]
     }
 
@@ -1274,6 +1277,58 @@ enum LabCatalog {
         )
     }
 
+    /// P2C.4's three states, side by side, so the PNG baselines cover all of them
+    /// and the contrast gate measures the warning variant as well as the plain one.
+    private static var branchChipCard: LabEntry {
+        LabEntry(
+            id: "managed-agent.branch-chip",
+            category: "Managed Agent",
+            title: "Branch chip - three states",
+            summary: "Shared checkout, an isolated agent on its own branch, and one that has left it.",
+            content: .staticCard(preferredSize: NSSize(width: 420, height: 200)) {
+                makeBranchChipPreview()
+            }
+        )
+    }
+
+    /// Built through `BranchChipNSView.display(for:)` from real `AgentRowContext`
+    /// values — never by setting the chip's text directly — so this card renders
+    /// exactly what a tile would and cannot drift from the mapping under test.
+    static func makeBranchChipPreview() -> NSView {
+        let root = NSStackView()
+        root.orientation = .vertical
+        root.alignment = .leading
+        root.spacing = Space.l
+        root.edgeInsets = NSEdgeInsets(Inset.card)
+
+        let states: [(String, AgentRowContext)] = [
+            ("no worktree — shares the project checkout", AgentRowContext(
+                agentKind: .managed, checkedOutBranch: "main")),
+            ("isolated, on the branch it was given", AgentRowContext(
+                agentKind: .managed,
+                worktreeBranch: "agent/implementer-fix-auth-1a2b3c4d",
+                checkedOutBranch: "agent/implementer-fix-auth-1a2b3c4d")),
+            ("isolated, but its checkout has moved", AgentRowContext(
+                agentKind: .managed,
+                worktreeBranch: "agent/implementer-fix-auth-1a2b3c4d",
+                checkedOutBranch: "main")),
+        ]
+
+        for (caption, context) in states {
+            let chip = BranchChipNSView()
+            chip.apply(BranchChipNSView.display(for: context))
+            let label = NSTextField(labelWithString: caption)
+            label.font = .token(.caption)
+            label.textColor = mutedLabelColor
+            let row = NSStackView(views: [chip, label])
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = Space.m
+            root.addArrangedSubview(row)
+        }
+        return root
+    }
+
     private static var newTileCwdPolicyCard: LabEntry {
         LabEntry(
             id: "terminal.new-tile-cwd",
@@ -1447,6 +1502,15 @@ enum LabCatalog {
         )
         let view = ManagedAgentTileNSView(tile: tile)
         view.frame = NSRect(x: 0, y: 0, width: 560, height: 560)
+        // P2C.4: an isolated agent ON the branch it was given — the ordinary case.
+        // The fixture carries it so `--ui-geometry-check` exercises the header with
+        // a chip in it at the 320pt tile minimum, where a header that cannot fit one
+        // would clip. The mismatch variant is the branch-chip card's job.
+        view.applyBranchContext(AgentRowContext(
+            agentKind: .managed,
+            worktreeBranch: "agent/implementer-fix-login-1a2b3c4d",
+            checkedOutBranch: "agent/implementer-fix-login-1a2b3c4d"
+        ))
         for event in managedAgentFixtureEvents(includeApproval: includeApproval) {
             view.ingest(event)
         }
@@ -1901,7 +1965,8 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         // a clipped or mostly-transparent view drops out legitimately — which is the
         // same reasoning and the same shape as P0.5's per-appearance floors. Growth
         // passes in all three cases (P0.11's convention); only shrinkage is the signal.
-        let minimumCardsGated = 46
+        // 48 since P2C.4 added `managed-agent.branch-chip` (24 static cards x 2).
+        let minimumCardsGated = 48
         let minimumTextRectsPerAppearance = 192
         let minimumBordersPerAppearance = 12
         guard gated >= minimumCardsGated else {

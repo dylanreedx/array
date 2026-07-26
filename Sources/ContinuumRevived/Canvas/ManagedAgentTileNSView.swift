@@ -41,6 +41,10 @@ final class ManagedAgentTileNSView: TileNSView {
     private let nameLabel = NSTextField(labelWithString: "")
     private let phaseLabel = NSTextField(labelWithString: "")
     private let elapsedLabel = NSTextField(labelWithString: "0s")
+    /// P2C.4: which checkout this agent is about to touch. Hidden until something
+    /// tells the tile (`applyBranchContext`), so a tile that knows nothing shows
+    /// nothing rather than implying a shared checkout.
+    private let branchChip = BranchChipNSView()
     private let cardStack = FlippedStackView()
     private let approvalDock = ApprovalDockView()
     private let composeField = NSTextField()
@@ -59,6 +63,9 @@ final class ManagedAgentTileNSView: TileNSView {
     /// these are the whole of the tile's side of the relationship.
     private(set) var attachedAgentID: AgentID?
     private var eventSubscription: Task<Void, Never>?
+    /// P2C.4: whoever the tile asks for its agent's branch state. WEAK — the tile is
+    /// a view of an agent the supervisor owns, and a view must never keep it alive.
+    private weak var branchSource: AgentSupervisor?
     /// Whose events the transcript on screen actually holds. Distinct from
     /// `attachedAgentID`, which `detach()` clears: a detached tile still SHOWS the
     /// agent it was following, so attaching a different one after a detach must
@@ -130,6 +137,11 @@ final class ManagedAgentTileNSView: TileNSView {
         // when `events(for:)` is called, so deferring it to the task's first
         // suspension would widen the window in which events land in neither the
         // snapshot nor the tail.
+        // P2C.4: the supervisor holds the record, so attaching is the moment the
+        // tile can learn which checkout this agent works in — before its first
+        // event, and without the tile ever reading a repository itself.
+        branchSource = supervisor
+        applyBranchContext(supervisor.branchContext(for: agentID))
         let stream = supervisor.events(for: agentID)
         eventSubscription = Task { @MainActor [weak self] in
             for await event in stream {
@@ -153,6 +165,25 @@ final class ManagedAgentTileNSView: TileNSView {
         eventSubscription?.cancel()
         eventSubscription = nil
         attachedAgentID = nil
+    }
+
+    /// P2C.4: show which branch this agent's writes land on.
+    ///
+    /// Takes the whole `AgentRowContext` rather than two strings so that a caller
+    /// which already holds a joined row (`AgentContextIndex`, Phase 3's inbox)
+    /// passes it straight through, and so the mismatch rule has exactly one
+    /// definition — the context's. `nil` hides the chip.
+    func applyBranchContext(_ context: AgentRowContext?) {
+        branchChip.apply(BranchChipNSView.display(for: context))
+    }
+
+    /// Re-read the agent's branch state and repaint. Drops the cached read first:
+    /// the TTL is short but a fast turn can finish inside it, and the whole point of
+    /// refreshing at a turn boundary is to see what that turn did.
+    private func refreshBranchContext() {
+        guard let branchSource, let agentID = projectedAgentID else { return }
+        branchSource.invalidateCheckedOutBranches()
+        applyBranchContext(branchSource.branchContext(for: agentID))
     }
 
     /// Drop the local projection so a replay renders exactly the agent it came from.
@@ -229,6 +260,17 @@ final class ManagedAgentTileNSView: TileNSView {
         default:
             break
         }
+        // P2C.4: a turn is the only thing that can move this agent's checkout — it
+        // is when the agent runs commands. Refreshing HERE and nowhere else is what
+        // keeps the chip from going stale for the rest of the session, at one git
+        // read per turn rather than one per streamed token (which is why the
+        // per-render path stays on the cache).
+        switch event {
+        case .turnCompleted, .runtimeError, .sessionStateChanged(.stopped), .sessionStateChanged(.error):
+            refreshBranchContext()
+        default:
+            break
+        }
         model.ingest(event)
         updatePendingApproval(from: event)
         updatePendingUserInput(from: event)
@@ -256,6 +298,10 @@ final class ManagedAgentTileNSView: TileNSView {
         contentBackdrop.layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(for: theme)
         header.layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(for: theme)
         composeBackdrop.layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(for: theme)
+        // The chip is `TokenThemed` and re-applies on its own flip too; driving it
+        // from here as well costs one idempotent assignment and means the header's
+        // colours cannot fall behind if AppKit skips a hidden subview.
+        branchChip.applyTokens()
     }
 
     /// The layer colours this view paints on subviews it owns, for
@@ -382,9 +428,11 @@ final class ManagedAgentTileNSView: TileNSView {
         header.alignment = .centerY
         header.spacing = Space.l
         header.edgeInsets = NSEdgeInsets(Inset.row)
+        branchChip.isHidden = true
         header.addArrangedSubview(glyphLabel)
         header.addArrangedSubview(textStack)
         header.addArrangedSubview(NSView())
+        header.addArrangedSubview(branchChip)
         header.addArrangedSubview(elapsedLabel)
     }
 
@@ -532,6 +580,11 @@ final class ManagedAgentTileNSView: TileNSView {
     /// the stack and not only against the model behind it.
     var qaRenderedCardCount: Int { cardStack.arrangedSubviews.count }
     var qaComposeEnabled: Bool { composeField.isEnabled }
+    /// nil when the chip is hidden, so "no branch is shown" and "an empty branch is
+    /// shown" cannot be confused.
+    var qaBranchChipText: String? { branchChip.isHidden ? nil : branchChip.qaText }
+    var qaBranchChipIsWarning: Bool { !branchChip.isHidden && branchChip.qaIsWarning }
+    var qaBranchChipTooltip: String? { branchChip.isHidden ? nil : branchChip.toolTip }
     func qaSubmitPrompt(_ prompt: String) {
         composeField.stringValue = prompt
         submitPrompt()

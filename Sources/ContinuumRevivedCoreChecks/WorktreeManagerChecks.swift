@@ -33,6 +33,12 @@ import Foundation
 //      the path git reports.
 //  11. `repair` deletes a clean orphan, RETAINS a dirty one with a reason, keeps
 //      every branch, and prunes the admin record of one whose directory is gone.
+//
+// P2C.4 (docs/38-tickets/90-agent-ux/P2C.4-branch-on-rows.md) adds one:
+//  12. `currentBranch` reports a checkout's branch (nil when detached), a fresh
+//      worktree is on the branch `add` created, an agent that checks out something
+//      else is visible as such, git REFUSES the main checkout onto a branch a
+//      worktree holds, and `CheckedOutBranchCache` serves repeats from cache.
 
 func runWorktreeManagerChecks() {
     do {
@@ -47,7 +53,8 @@ func runWorktreeManagerChecks() {
         try runWorktreeMergedBranchCheck()
         try runWorktreeOrphanCheck()
         try runWorktreeRepairCheck()
-        print("WorktreeManager checks: slug purity/determinism, add+list, duplicate slug, existing branch, remove, porcelain parsing, invalid repository, merged-branch deletion, orphan detection, and repair passed")
+        try runWorktreeCurrentBranchCheck()
+        print("WorktreeManager checks: slug purity/determinism, add+list, duplicate slug, existing branch, remove, porcelain parsing, invalid repository, merged-branch deletion, orphan detection, repair, and the checked-out branch + its cache passed")
     } catch {
         fputs("FAIL: WorktreeManager checks failed: \(error)\n", stderr)
         Foundation.exit(1)
@@ -667,5 +674,148 @@ private func runWorktreeRepairCheck() throws {
     try worktreeExpect(
         listed.sorted() == [resolved(repo), resolved(kept.path), resolved(dirty.path)].sorted(),
         "after repair git lists \(listed), expected the main checkout, the live agent, and the retained dirty orphan"
+    )
+}
+
+// MARK: - 12. The checked-out branch, and its cache (P2C.4)
+
+/// What a branch chip renders, and the two facts that decide WHICH checkout it is
+/// compared against.
+///
+/// Five properties:
+///   (a) `currentBranch` reports the short name for a normal checkout and nil —
+///       never the literal "HEAD" — when detached.
+///   (b) A freshly added worktree's HEAD IS the branch `add` recorded, so the
+///       ordinary isolated agent MATCHES and shows no warning. This is the state
+///       P2C.4's chip calls "isolated, matching".
+///   (c) A `git checkout` inside that worktree moves it, and `currentBranch`
+///       follows — the mismatch the chip warns about is a real reachable state,
+///       not a hypothetical.
+///   (d) MEASURED GIT FACT, recorded because it rules out the other candidate
+///       comparison: the MAIN checkout cannot be moved onto an agent's branch at
+///       all (git refuses a branch already checked out in another worktree). So
+///       comparing an isolated agent's branch against the main checkout's would
+///       flag every isolated agent forever, and the comparison is against the
+///       agent's OWN checkout instead.
+///   (e) `CheckedOutBranchCache` answers a repeat read from cache — asserted with
+///       its own `gitReads` counter — while a changed checkout is picked up once
+///       the entry is invalidated, and an unreadable path is cached as nil rather
+///       than re-launching git per render.
+private func runWorktreeCurrentBranchCheck() throws {
+    let repo = try makeWorktreeTempRepo()
+    defer { try? FileManager.default.removeItem(at: repo) }
+    let manager = WorktreeManager()
+
+    // (a)
+    let seedBranch = try manager.currentBranch(repo: repo)
+    try worktreeExpect(seedBranch == "main", "the seed repository reads as \(String(describing: seedBranch)), not main")
+    let head = try runTempGit(["rev-parse", "HEAD"], in: repo).trimmingCharacters(in: .whitespacesAndNewlines)
+    try runTempGit(["checkout", "-q", "--detach", head], in: repo)
+    let detached = try manager.currentBranch(repo: repo)
+    try worktreeExpect(
+        detached == nil,
+        "a detached HEAD must read as nil, got \(String(describing: detached)) — the literal \"HEAD\" is not a branch name"
+    )
+    try runTempGit(["checkout", "-q", "main"], in: repo)
+
+    // (b)
+    let slug = WorktreeManager.slug(role: "implementer", prompt: "fix auth", id: worktreeAgentId("00701"))
+    let worktree = try manager.add(repo: repo, slug: slug)
+    let branch = WorktreeManager.branchName(slug: slug)
+    let fresh = try manager.currentBranch(repo: worktree.path)
+    try worktreeExpect(
+        fresh == branch,
+        "a fresh worktree is on \(String(describing: fresh)), not the branch add created (\(branch))"
+    )
+    let mainAfterAdd = try manager.currentBranch(repo: repo)
+    try worktreeExpect(
+        mainAfterAdd == "main",
+        "adding a worktree moved the MAIN checkout to \(String(describing: mainAfterAdd))"
+    )
+
+    // (d) — asserted before (c) so the worktree is still on its own branch.
+    var mainCheckoutRefused: String?
+    do {
+        _ = try runTempGit(["checkout", branch], in: repo)
+    } catch let error as WorktreeCheckError {
+        mainCheckoutRefused = error.description
+    }
+    guard let refusal = mainCheckoutRefused else {
+        throw WorktreeCheckError(
+            "git let the MAIN checkout move onto \(branch) while a worktree holds it — if that were "
+                + "allowed, comparing an isolated agent against the main checkout would be a usable rule"
+        )
+    }
+    try worktreeExpect(
+        refusal.contains("already used by worktree"),
+        "the main checkout refused \(branch) for an unexpected reason: \(refusal)"
+    )
+    let mainAfterRefusal = try manager.currentBranch(repo: repo)
+    try worktreeExpect(
+        mainAfterRefusal == "main",
+        "the refused checkout still moved the main checkout to \(String(describing: mainAfterRefusal))"
+    )
+
+    // (c)
+    try runTempGit(["checkout", "-q", "-b", "wandered-off"], in: worktree.path)
+    let wandered = try manager.currentBranch(repo: worktree.path)
+    try worktreeExpect(
+        wandered == "wandered-off",
+        "an agent that checked out another branch still reads as \(String(describing: wandered))"
+    )
+
+    // (e)
+    let clock = Date(timeIntervalSinceReferenceDate: 800_000_000)
+    let cache = CheckedOutBranchCache(ttl: 2)
+    try worktreeExpect(cache.gitReads == 0, "a fresh cache has already run git \(cache.gitReads) time(s)")
+    try worktreeExpect(cache.branch(repo: repo, now: clock) == "main", "the cache's first read is wrong")
+    try worktreeExpect(cache.gitReads == 1, "the first read took \(cache.gitReads) git call(s), expected 1")
+    for offset in [0.0, 0.5, 1.9] {
+        try worktreeExpect(
+            cache.branch(repo: repo, now: clock.addingTimeInterval(offset)) == "main",
+            "a cached read inside the TTL changed its answer at +\(offset)s"
+        )
+    }
+    try worktreeExpect(
+        cache.gitReads == 1,
+        "three reads inside the TTL cost \(cache.gitReads) git call(s) — a header re-render must not shell out"
+    )
+    // A second repository is a second entry, not a cache hit on the first.
+    try worktreeExpect(
+        cache.branch(repo: worktree.path, now: clock) == "wandered-off",
+        "the cache answered for the wrong repository"
+    )
+    try worktreeExpect(cache.gitReads == 2, "a different repository must be its own read, got \(cache.gitReads)")
+    // Past the TTL, and a checkout that moved underneath it.
+    try runTempGit(["checkout", "-q", "-b", "moved-on"], in: repo)
+    try worktreeExpect(
+        cache.branch(repo: repo, now: clock.addingTimeInterval(1.0)) == "main",
+        "the cache abandoned a valid entry when the checkout moved — the TTL is what expires it"
+    )
+    try worktreeExpect(
+        cache.branch(repo: repo, now: clock.addingTimeInterval(2.5)) == "moved-on",
+        "past the TTL the cache still reports the old branch"
+    )
+    // A backwards clock (sleep/wake, an NTP step) must not make a future-stamped
+    // entry immortal — the same guard `CrossProjectManagedSessionWalk` carries.
+    try worktreeExpect(
+        cache.branch(repo: repo, now: clock.addingTimeInterval(-3600)) == "moved-on",
+        "an entry stamped in the future was served to a read before it"
+    )
+    let readsBeforeInvalidate = cache.gitReads
+    cache.invalidate()
+    _ = cache.branch(repo: repo, now: clock.addingTimeInterval(2.5))
+    try worktreeExpect(
+        cache.gitReads == readsBeforeInvalidate + 1,
+        "invalidate() did not force a re-read"
+    )
+    // An unreadable path: nil, cached, and never thrown at a renderer.
+    let missing = repo.appendingPathComponent("not-a-checkout", isDirectory: true)
+    let readsBeforeMissing = cache.gitReads
+    try worktreeExpect(cache.branch(repo: missing, now: clock) == nil, "a path that is not a repository resolved a branch")
+    try worktreeExpect(cache.branch(repo: missing, now: clock) == nil, "the second read of a missing path disagreed with the first")
+    try worktreeExpect(
+        cache.gitReads == readsBeforeMissing + 1,
+        "a nil answer is not cached — \(cache.gitReads - readsBeforeMissing) git call(s) for two reads of a missing path"
     )
 }

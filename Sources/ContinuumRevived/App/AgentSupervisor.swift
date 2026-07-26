@@ -64,6 +64,10 @@ final class AgentSupervisor {
     /// injectable: the checks exercise the failure path with a real failure (a `cwd`
     /// that is not a repository), so a fake would test less than the real thing.
     private let worktrees = WorktreeManager()
+    /// P2C.4: the branch each agent's working directory is on. Cached because the
+    /// tile header that renders it re-lays out on every streamed token, and a
+    /// `git rev-parse` per render is a process launch per token.
+    private let checkedOutBranches = CheckedOutBranchCache()
 
     /// The records this supervisor owns, in memory. `AgentStore` is the durable
     /// copy; this is the live one.
@@ -635,6 +639,42 @@ final class AgentSupervisor {
         runners[id] != nil
     }
 
+    // MARK: - Branch context (P2C.4)
+
+    /// What a view needs to say which checkout this agent is about to touch: the
+    /// branch its record names, and the branch actually checked out in the directory
+    /// it works in.
+    ///
+    /// `record.cwd` IS that directory — an isolated agent's own worktree, or the
+    /// project root for a shared one — so no repository root has to be re-derived
+    /// here (the derivation `cleanUpWorktree` needs, and its container guard, exist
+    /// because THAT call deletes things).
+    ///
+    /// Returns an `AgentRowContext` carrying only the branch fields rather than a
+    /// pair of strings: it is the type Phase 3's rows already join, so a renderer
+    /// takes one shape from either source and `isBranchMismatch` keeps one
+    /// definition. nil for an agent this supervisor does not know.
+    func branchContext(for id: AgentID) -> AgentRowContext? {
+        guard let record = records[id] else { return nil }
+        return AgentRowContext(
+            agentKind: .managed,
+            worktreeBranch: record.worktreeBranch,
+            checkedOutBranch: checkedOutBranches.branch(
+                repo: URL(fileURLWithPath: record.cwd, isDirectory: true)
+            )
+        )
+    }
+
+    /// Forget the cached branches, for a caller that knows a checkout moved. The
+    /// TTL gets there on its own; this is how a refresh gets there at once.
+    func invalidateCheckedOutBranches() {
+        checkedOutBranches.invalidate()
+    }
+
+    /// How many `git rev-parse` calls the branch cache has made — the witness that
+    /// re-rendering a header does not shell out.
+    var qaBranchGitReads: Int { checkedOutBranches.gitReads }
+
     // MARK: - Multicast
 
     /// Snapshot-then-tail, per `ActivityStore.subscribe()`: the buffered history is
@@ -1024,8 +1064,12 @@ func runAgentSupervisorChecks() async throws {
 
     let cleanupReport = try await checkArchiveCleanup(config: config, fail: fail)
 
+    // MARK: 12 · a tile SAYS which checkout its agent is about to touch (P2C.4)
+
+    let branchReport = try await checkBranchChip(config: config, fail: fail)
+
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport)")
 }
 
 /// Gated on `--agent-restore-check` (P2A.7).
@@ -2805,6 +2849,148 @@ private func runIsolatedSpawnGit(_ arguments: [String], in directory: URL) throw
         throw GitError(description: "git \(arguments.joined(separator: " ")) failed (\(process.terminationStatus)): \(String(data: errData, encoding: .utf8) ?? "")")
     }
     return String(data: outData, encoding: .utf8) ?? ""
+}
+
+/// P2C.4 — the tile SAYS which checkout its agent is about to touch.
+///
+/// The whole path, against a real temp repository: a real isolated spawn, a real
+/// `ManagedAgentTileNSView`, the production `attach(agentID:supervisor:)`, and the
+/// chip text read back off the view. Nothing here sets the chip directly — that is
+/// what makes it a check of the wiring rather than of `BranchChipNSView.display`.
+///
+/// Five properties:
+///   1. An isolated agent's tile shows its branch, with no warning: its checkout IS
+///      on the branch it was given, which is the ordinary case.
+///   2. A shared-checkout agent's tile shows the branch the PROJECT is on, marked
+///      shared — the "which of five agents is about to touch my tree" question.
+///   3. A tile nobody has told anything shows NO chip, rather than implying a
+///      shared checkout.
+///   4. THE WARNING IS REACHABLE, THROUGH THE PRODUCTION REFRESH: a real `git
+///      checkout` inside the agent's own worktree, then an ordinary `.turnCompleted`
+///      into the tile — no hand-written re-apply — and the chip flags it and names
+///      both branches. Not a synthesized context; git moved the checkout.
+///   5. The branch is read from CACHE: re-deriving the context ten times costs no
+///      further `git rev-parse`, because the chip re-renders per streamed token.
+@MainActor
+private func checkBranchChip(
+    config: AgentModelConfig.Resolution,
+    fail: (String) -> Error
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-branch-chip-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+    let repo = root.appendingPathComponent("repo", isDirectory: true)
+    try makeIsolatedSpawnRepo(at: repo)
+    let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support", isDirectory: true))
+    let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+
+    func makeTile(_ title: String) -> ManagedAgentTileNSView {
+        let view = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(),
+            kind: .managedAgent,
+            title: title,
+            frame: TileFrame(x: 0, y: 0, width: 520, height: 320),
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")
+        ))
+        view.frame = NSRect(x: 0, y: 0, width: 520, height: 320)
+        return view
+    }
+
+    // MARK: 3 · a tile that has been told nothing shows nothing
+    let untold = makeTile("untold")
+    guard untold.qaBranchChipText == nil else {
+        throw fail("a tile with no branch context shows \(untold.qaBranchChipText ?? "nil") — it must show no chip at all")
+    }
+
+    // MARK: 1 · the isolated agent
+    let isolatedId = try supervisor.spawn(
+        role: "implementer",
+        prompt: nil,
+        cwd: repo,
+        model: config.model,
+        thinking: config.thinking,
+        isolated: true
+    )
+    guard let isolated = supervisor.records[isolatedId], let branch = isolated.worktreeBranch else {
+        throw fail("the isolated spawn produced no record with a branch")
+    }
+    let isolatedTile = makeTile("isolated")
+    isolatedTile.attach(agentID: isolatedId, supervisor: supervisor)
+    guard let isolatedChip = isolatedTile.qaBranchChipText else {
+        throw fail("an isolated agent's tile shows NO branch — the packet's own done-criterion")
+    }
+    guard isolatedChip.contains(branch) else {
+        throw fail("the chip reads \(isolatedChip), which does not name the agent's branch \(branch)")
+    }
+    guard !isolatedTile.qaBranchChipIsWarning else {
+        throw fail("an isolated agent sitting ON its own branch was flagged as a mismatch: \(isolatedChip)")
+    }
+
+    // MARK: 2 · the shared-checkout agent
+    let sharedId = supervisor.spawn(
+        role: "reviewer",
+        prompt: nil,
+        cwd: repo,
+        model: config.model,
+        thinking: config.thinking
+    )
+    let sharedTile = makeTile("shared")
+    sharedTile.attach(agentID: sharedId, supervisor: supervisor)
+    guard let sharedChip = sharedTile.qaBranchChipText else {
+        throw fail("a shared-checkout agent's tile shows no branch — you cannot tell it apart from an isolated one")
+    }
+    guard sharedChip.contains("main") else {
+        throw fail("a shared agent's chip reads \(sharedChip), not the project's own branch (main)")
+    }
+    guard sharedChip.contains(BranchChipNSView.sharedSuffix) else {
+        throw fail("a shared agent's chip \(sharedChip) does not say it is the project's own checkout")
+    }
+    guard !sharedTile.qaBranchChipIsWarning else {
+        throw fail("an agent working in YOUR checkout was flagged as being on the wrong branch: \(sharedChip)")
+    }
+
+    // MARK: 5 · the reads are cached
+    let readsBefore = supervisor.qaBranchGitReads
+    for _ in 0..<10 { _ = supervisor.branchContext(for: isolatedId) }
+    guard supervisor.qaBranchGitReads == readsBefore else {
+        throw fail(
+            "ten re-renders cost \(supervisor.qaBranchGitReads - readsBefore) extra git call(s) — "
+                + "the chip re-renders per streamed token, so the read has to come from cache"
+        )
+    }
+
+    // MARK: 4 · the agent leaves the branch it was given, for real
+    //
+    // The refresh goes through the PRODUCTION path — an event the tile ingests —
+    // not a hand-written `applyBranchContext`. A turn is the only thing that can move
+    // an agent's checkout, so `.turnCompleted` is where the tile re-reads it; a check
+    // that invalidated and re-applied by hand would pass over a tile that never
+    // refreshes at all (the cross-review's finding).
+    try runIsolatedSpawnGit(["checkout", "-q", "-b", "wandered-off"], in: URL(fileURLWithPath: isolated.cwd))
+    isolatedTile.ingest(.turnCompleted(
+        threadId: AgentSupervisor.threadId(for: isolatedId),
+        turnId: "branch-chip-turn",
+        outcome: .completed,
+        errorMessage: nil
+    ))
+    guard isolatedTile.qaBranchChipIsWarning else {
+        throw fail(
+            "the agent's checkout moved to wandered-off and the tile still reads "
+                + "\(isolatedTile.qaBranchChipText ?? "nil") with no warning"
+        )
+    }
+    guard let wanderedChip = isolatedTile.qaBranchChipText, wanderedChip.contains("wandered-off") else {
+        throw fail("the warning chip \(isolatedTile.qaBranchChipText ?? "nil") does not name the branch the work is actually landing on")
+    }
+    guard let tooltip = isolatedTile.qaBranchChipTooltip, tooltip.contains(branch), tooltip.contains("wandered-off") else {
+        throw fail("the warning names only one of the two branches: \(isolatedTile.qaBranchChipTooltip ?? "nil")")
+    }
+
+    return "a tile names its checkout (isolated \(isolatedChip), shared \(sharedChip), moved \(wanderedChip)), an unbound tile shows none, and 10 re-renders cost 0 git calls"
 }
 
 /// macOS temp directories live under a `/var` symlink to `/private/var`, and git

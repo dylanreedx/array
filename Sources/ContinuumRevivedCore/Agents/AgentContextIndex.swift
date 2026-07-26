@@ -17,10 +17,16 @@ import Foundation
 // and the inbox end up disagreeing about where an agent lives.
 //
 // I5 (sync-boundary purity): every field here is a NAME or a model id — a
-// workspace name, a zone name, a project name, a tile title. `AgentRecord.cwd`
-// and `worktreeBranch` are host paths and are deliberately never read, not even
-// as a fallback for a missing project name. `AgentContextIndexChecks` witnesses
-// that with a record whose cwd and branch are distinctive strings.
+// workspace name, a zone name, a project name, a tile title, and since P2C.4 a
+// BRANCH name. `AgentRecord.cwd` is a host path and is deliberately never read,
+// not even as a fallback for a missing project name. `AgentContextIndexChecks`
+// witnesses that with a record whose cwd is a distinctive string, and witnesses
+// the branch fields the other way round: they must carry the name verbatim, and a
+// host path handed to one of them is still caught by the taint scanner.
+//
+// P2C.4 rules the branch admissible ("the branch *name* may cross to the phone;
+// the worktree **path** must not"). A branch name is a ref, not a location: it
+// says nothing about where this machine keeps its checkouts.
 public struct AgentRowContext: Equatable, Sendable {
     /// nil when the agent has no view — a headless agent lives in no workspace.
     public let workspaceName: String?
@@ -35,6 +41,42 @@ public struct AgentRowContext: Equatable, Sendable {
     public let model: String?
     /// A `.pi/agents/<role>.md` id, never a title (see `AgentRecord.role`).
     public let role: String?
+    /// P2C.4: the branch an ISOLATED agent was given — `AgentRecord.worktreeBranch`,
+    /// which P2C.2 writes as `agent/<slug>` at the moment it creates the checkout.
+    /// nil when the agent shares its project's working copy, and always nil for a
+    /// terminal session (an `AgentDescriptor` records a worktree PATH, never a
+    /// branch).
+    public let worktreeBranch: String?
+    /// P2C.4: the branch actually checked out in the directory this agent WORKS IN,
+    /// as the caller last read it (`CheckedOutBranchCache`).
+    ///
+    /// "The directory this agent works in" is `AgentRecord.cwd` — for an isolated
+    /// agent its own worktree, for a shared one the project root. nil means the
+    /// caller did not look, or the checkout is detached or unreadable; never "no
+    /// branch". The lookup is I/O, so it is the caller's, not this fold's (this
+    /// file is pure — names in, names out).
+    public let checkedOutBranch: String?
+
+    /// This agent has a checkout of its own.
+    ///
+    /// Derived, not stored, and derived from the BRANCH rather than from `cwd`:
+    /// P2C.2's isolated spawn creates the worktree and records its branch in one
+    /// step and nothing else ever sets `worktreeBranch`, so a stored flag could
+    /// only ever disagree with it — and `cwd` is the one field this value may not
+    /// carry.
+    public var isIsolated: Bool { worktreeBranch != nil }
+
+    /// The agent is not working on the branch it was given.
+    ///
+    /// Only an isolated agent can be: it is the only one that HAS a branch of its
+    /// own to leave. A shared-checkout agent works on whatever the project has
+    /// checked out, which is not a mismatch — it is the thing the chip shows.
+    ///
+    /// False whenever the checkout was not read, so a failed lookup never warns.
+    public var isBranchMismatch: Bool {
+        guard let worktreeBranch, let checkedOutBranch else { return false }
+        return worktreeBranch != checkedOutBranch
+    }
 
     public init(
         workspaceName: String? = nil,
@@ -43,7 +85,9 @@ public struct AgentRowContext: Equatable, Sendable {
         tileTitle: String? = nil,
         agentKind: AgentKind,
         model: String? = nil,
-        role: String? = nil
+        role: String? = nil,
+        worktreeBranch: String? = nil,
+        checkedOutBranch: String? = nil
     ) {
         self.workspaceName = workspaceName
         self.zoneName = zoneName
@@ -52,6 +96,8 @@ public struct AgentRowContext: Equatable, Sendable {
         self.agentKind = agentKind
         self.model = model
         self.role = role
+        self.worktreeBranch = worktreeBranch
+        self.checkedOutBranch = checkedOutBranch
     }
 }
 
@@ -61,12 +107,18 @@ public enum AgentContextIndex {
     /// `AgentRecord.id.rawValue` for an agent, and a terminal session's `tileId`
     /// (which has no `AgentRecord`, so its tile id IS its agent identity). One
     /// keyspace, so a row and its context cannot fail to meet.
+    ///
+    /// `checkedOutBranches` is keyed the same way, and carries what the caller read
+    /// off disk for each agent's working directory (P2C.4). Defaulted to empty, so
+    /// a caller that has not looked simply reports no branch state rather than a
+    /// guess — and the fold stays pure.
     public static func build(
         registry: Registry,
         documents: [UUID: WorkspaceDocument],
         projectCanvases: [UUID: CanvasState] = [:],
         terminalDescriptors: [TerminalSessionDescriptor] = [],
-        agents: [AgentRecord] = []
+        agents: [AgentRecord] = [],
+        checkedOutBranches: [UUID: String] = [:]
     ) -> [UUID: AgentRowContext] {
         let placements = tilePlacements(
             registry: registry,
@@ -88,7 +140,11 @@ public enum AgentContextIndex {
                 // The builder's title, not the descriptor's: the tile row is what
                 // the sidebar shows, and two names for one tile is a bug waiting.
                 tileTitle: placement?.tileTitle,
-                agentKind: descriptor.agentDescriptor?.agentKind ?? .shell
+                agentKind: descriptor.agentDescriptor?.agentKind ?? .shell,
+                // A terminal session has no branch of its own to report: the
+                // descriptor records a worktree PATH, and this value may not carry
+                // one. Its checkout is reported if the caller read it.
+                checkedOutBranch: checkedOutBranches[descriptor.tileId]
             )
         }
         for record in agents {
@@ -108,7 +164,9 @@ public enum AgentContextIndex {
                 // record carries no kind of its own to read.
                 agentKind: .managed,
                 model: record.model,
-                role: record.role
+                role: record.role,
+                worktreeBranch: record.worktreeBranch,
+                checkedOutBranch: checkedOutBranches[record.id.rawValue]
             )
         }
         return index

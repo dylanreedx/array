@@ -27,12 +27,19 @@ import Foundation
 //      agent identity, and that keyspace really is the one `AgentInventory`
 //      publishes: every row of a real folded snapshot finds its context. Called
 //      without an index, every row's context is nil — the older-consumer path.
-//   7. I5 — no field of a context carries a host path. The record feeding it has
-//      a deliberately distinctive `cwd` and `worktreeBranch`, and neither the
-//      taint scanner nor a literal substring sweep finds them. The fixture
+//   7. I5 — no field of a context carries a host PATH, while the branch NAME is
+//      carried verbatim (P2C.4's ruling). The record feeding it has a
+//      deliberately distinctive `cwd` that neither the taint scanner nor a
+//      literal substring sweep finds, and a host path smuggled through
+//      `worktreeBranch` is still a violation, so the new field is not a blind
+//      spot. The fixture
 //      includes an agent whose project has LEFT the registry, because that is
 //      the only state in which a "fall back to something" implementation would
 //      reach for `cwd` at all — see `contextOrphanAgentId`.
+//   9. BRANCH + ISOLATION (P2C.4) — five states, in `runAgentContextBranchCheck`:
+//      isolated-and-matching, isolated-and-mismatched, a shared checkout (which is
+//      never a mismatch), a lookup that never happened (which never warns), and a
+//      terminal session (which has no branch at all).
 //   8. PROJECT PRECEDENCE — when an agent's record and the zone its tile sits in
 //      name DIFFERENT projects, the record wins and the placement still reports
 //      the zone it is really drawn in. Pinned by a fixture in which the two
@@ -43,8 +50,9 @@ func runAgentContextIndexChecks() {
     runAgentContextGeometricMembershipCheck()
     runAgentContextSidebarAgreementCheck()
     runAgentContextRowJoinCheck()
+    runAgentContextBranchCheck()
     runAgentContextSyncBoundaryCheck()
-    print("AgentContextIndex checks: tiled/headless resolution, geometric membership, sidebar agreement, the row join and I5 purity passed")
+    print("AgentContextIndex checks: tiled/headless resolution, geometric membership, sidebar agreement, the row join, branch/isolation state and I5 purity passed")
 }
 
 // MARK: - Fixture
@@ -195,7 +203,11 @@ private func contextTerminalDescriptors() -> [TerminalSessionDescriptor] {
     ]
 }
 
-private func contextTerminalDescriptor(tileId: UUID, kind: AgentKind) -> TerminalSessionDescriptor {
+private func contextTerminalDescriptor(
+    tileId: UUID,
+    kind: AgentKind,
+    worktreePath: String? = nil
+) -> TerminalSessionDescriptor {
     TerminalSessionDescriptor(
         id: UUID(uuidString: "2B300000-0000-4000-8000-0000000000" + tileId.uuidString.suffix(2))!,
         tileId: tileId,
@@ -210,7 +222,7 @@ private func contextTerminalDescriptor(tileId: UUID, kind: AgentKind) -> Termina
         createdAt: contextNow,
         lastStartedAt: contextNow,
         lastExit: nil,
-        agentDescriptor: AgentDescriptor(agentKind: kind, worktreePath: nil, status: .idle, statusUpdatedAt: contextNow)
+        agentDescriptor: AgentDescriptor(agentKind: kind, worktreePath: worktreePath, status: .idle, statusUpdatedAt: contextNow)
     )
 }
 
@@ -289,14 +301,16 @@ private func contextAgents(
 
 private func contextIndex(
     projectCanvases: [UUID: CanvasState]? = nil,
-    agents: [AgentRecord]? = nil
+    agents: [AgentRecord]? = nil,
+    checkedOutBranches: [UUID: String] = [:]
 ) -> [UUID: AgentRowContext] {
     AgentContextIndex.build(
         registry: contextRegistry(),
         documents: contextDocuments(),
         projectCanvases: projectCanvases ?? contextProjectCanvases(),
         terminalDescriptors: contextTerminalDescriptors(),
-        agents: agents ?? contextAgents()
+        agents: agents ?? contextAgents(),
+        checkedOutBranches: checkedOutBranches
     )
 }
 
@@ -510,6 +524,105 @@ private func runAgentContextRowJoinCheck() {
     expect(unjoined.map(\.agentId) == joined.map(\.agentId), "joining context must not change row identity or order")
 }
 
+// MARK: - 9 · the branch an agent works on (P2C.4)
+
+/// Five states, all off the same fold:
+///   · ISOLATED, MATCHING — a branch of its own, and its checkout is on it.
+///   · ISOLATED, MISMATCHED — the agent has left the branch it was given, so its
+///     commits are not landing where the record says.
+///   · SHARED — no branch of its own, so it works on whatever the project has
+///     checked out. Not a mismatch: `isBranchMismatch` must stay false, or every
+///     ordinary agent would warn.
+///   · NOT LOOKED UP — no `checkedOutBranches` entry. Both fields nil and NO
+///     warning, so a failed or skipped git read cannot invent one.
+///   · A TERMINAL SESSION — never reports a branch, even though its descriptor
+///     carries a worktree PATH. Nothing may promote that path to a branch.
+///
+/// Negative tests observed red at exit 1 with the final code, each quoted at its
+/// assertion — see the ledger note for this ticket.
+private func runAgentContextBranchCheck() {
+    let ownBranch = "agent/reviewer-check-auth-1a2b3c4d"
+    let isolatedAgents = contextAgents(worktreeBranch: ownBranch)
+
+    // Isolated and matching.
+    let matching = contextIndex(
+        agents: isolatedAgents,
+        checkedOutBranches: [contextTiledAgentId.rawValue: ownBranch]
+    )
+    guard let onItsBranch = matching[contextTiledAgentId.rawValue] else {
+        fputs("FAIL: AgentContextIndex lost the isolated agent\n", stderr)
+        Foundation.exit(1)
+    }
+    expect(onItsBranch.worktreeBranch == ownBranch,
+           "an isolated agent's context carries its branch, got \(onItsBranch.worktreeBranch ?? "nil")")
+    expect(onItsBranch.isIsolated,
+           "an agent with a worktree branch is isolated")
+    expect(onItsBranch.checkedOutBranch == ownBranch,
+           "the caller's checked-out branch is carried through, got \(onItsBranch.checkedOutBranch ?? "nil")")
+    expect(!onItsBranch.isBranchMismatch,
+           "an isolated agent ON its own branch must NOT be flagged — this is the ordinary case")
+
+    // Isolated, and it has wandered off.
+    let mismatched = contextIndex(
+        agents: isolatedAgents,
+        checkedOutBranches: [contextTiledAgentId.rawValue: "main"]
+    )
+    guard let wandered = mismatched[contextTiledAgentId.rawValue] else {
+        fputs("FAIL: AgentContextIndex lost the mismatched agent\n", stderr)
+        Foundation.exit(1)
+    }
+    expect(wandered.isBranchMismatch,
+           "an isolated agent whose checkout is on \(wandered.checkedOutBranch ?? "nil") rather than \(ownBranch) must be flagged")
+
+    // Shared checkout: no branch of its own, and NOT a mismatch.
+    let shared = contextIndex(checkedOutBranches: [contextTiledAgentId.rawValue: "main"])
+    guard let sharing = shared[contextTiledAgentId.rawValue] else {
+        fputs("FAIL: AgentContextIndex lost the shared-checkout agent\n", stderr)
+        Foundation.exit(1)
+    }
+    expect(sharing.worktreeBranch == nil && !sharing.isIsolated,
+           "an agent with no worktree branch is not isolated, got \(String(describing: sharing.worktreeBranch))")
+    expect(sharing.checkedOutBranch == "main",
+           "a shared agent still reports the branch it works on, got \(sharing.checkedOutBranch ?? "nil")")
+    expect(!sharing.isBranchMismatch,
+           "an agent that shares the project checkout can never be 'on the wrong branch' — it is on yours")
+
+    // Nothing looked up: no branch state, and no warning.
+    let unlooked = contextIndex(agents: isolatedAgents)
+    guard let unread = unlooked[contextTiledAgentId.rawValue] else {
+        fputs("FAIL: AgentContextIndex lost the agent with no branch lookup\n", stderr)
+        Foundation.exit(1)
+    }
+    expect(unread.checkedOutBranch == nil && !unread.isBranchMismatch,
+           "an unread checkout must not warn, got \(String(describing: unread.checkedOutBranch))")
+
+    // A terminal session: no branch, ever. Its descriptor carries a worktree PATH.
+    let terminalWorktreePath = "/Users/qa/continuum-worktrees/terminal-session"
+    let withTerminalPath = AgentContextIndex.build(
+        registry: contextRegistry(),
+        documents: contextDocuments(),
+        projectCanvases: contextProjectCanvases(),
+        terminalDescriptors: [contextTerminalDescriptor(
+            tileId: contextTerminalTile, kind: .claude, worktreePath: terminalWorktreePath
+        )],
+        agents: [],
+        checkedOutBranches: [contextTerminalTile: "main"]
+    )
+    guard let terminal = withTerminalPath[contextTerminalTile] else {
+        fputs("FAIL: AgentContextIndex lost the terminal session\n", stderr)
+        Foundation.exit(1)
+    }
+    expect(terminal.worktreeBranch == nil && !terminal.isIsolated,
+           "a terminal session has no branch to report, got \(String(describing: terminal.worktreeBranch))")
+    expect(terminal.checkedOutBranch == "main",
+           "a terminal session still reports the checkout it sits in, got \(terminal.checkedOutBranch ?? "nil")")
+    // Discriminating: the path really was in the input, so "no branch" is a choice.
+    expect(taintCheck(["worktreePath": terminalWorktreePath]).contains { $0.pattern == .hostLocalPath },
+           "fixture check: the terminal descriptor's worktree path really is host-bound")
+
+    print("AgentContextIndex branch states measured matching=\(onItsBranch.worktreeBranch ?? "nil")/\(onItsBranch.checkedOutBranch ?? "nil") mismatched=\(wandered.checkedOutBranch ?? "nil") shared=\(sharing.checkedOutBranch ?? "nil")")
+}
+
 // MARK: - 7 · I5
 
 private func runAgentContextSyncBoundaryCheck() {
@@ -528,6 +641,8 @@ private func runAgentContextSyncBoundaryCheck() {
         scannable["\(agentId).agentKind"] = context.agentKind.rawValue
         scannable["\(agentId).model"] = context.model
         scannable["\(agentId).role"] = context.role
+        scannable["\(agentId).worktreeBranch"] = context.worktreeBranch
+        scannable["\(agentId).checkedOutBranch"] = context.checkedOutBranch
     }
     let compacted = scannable.compactMapValues { $0 }
     let violations = taintCheck(compacted)
@@ -535,7 +650,29 @@ private func runAgentContextSyncBoundaryCheck() {
 
     let text = compacted.values.map { "\($0)" }.joined(separator: "\n")
     expect(!text.contains(secretCwd), "AgentRowContext does not carry AgentRecord.cwd")
-    expect(!text.contains(secretBranch), "AgentRowContext does not carry AgentRecord.worktreeBranch")
+    // P2C.4 RULED THE BRANCH ADMISSIBLE — "the branch *name* may cross to the
+    // phone; the worktree **path** must not" — so this asserts the opposite of what
+    // it did under P2B.3: the name is carried VERBATIM, and the two branch fields
+    // are swept above so a host path handed to either is still a violation. The
+    // narrower invariant, `cwd` never crossing, is unchanged and asserted right here
+    // on the same fixture.
+    expect(text.contains(secretBranch),
+           "AgentRowContext must carry AgentRecord.worktreeBranch — a chip cannot name a branch it was not given")
+    // The branch field is not a blind spot: a cwd-shaped value in it is caught.
+    let smuggled = AgentContextIndex.build(
+        registry: contextRegistry(),
+        documents: contextDocuments(),
+        projectCanvases: contextProjectCanvases(),
+        terminalDescriptors: [],
+        agents: contextAgents(cwd: secretCwd, worktreeBranch: secretCwd)
+    )
+    let smuggledViolations = taintCheck(
+        smuggled.compactMapValues { $0.worktreeBranch }.reduce(into: [String: Any]()) { out, pair in
+            out["\(pair.key).worktreeBranch"] = pair.value
+        }
+    )
+    expect(smuggledViolations.contains { $0.pattern == .hostLocalPath },
+           "a host path smuggled through worktreeBranch must still be a taint violation — found \(smuggledViolations)")
     // Discriminating case: the sweep only means something if those strings were
     // really in the input the join read.
     guard let recordData = try? JSONCodec.makeEncoder().encode(contextAgents(cwd: secretCwd, worktreeBranch: secretBranch)),

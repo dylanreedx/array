@@ -354,6 +354,28 @@ public struct WorktreeManager: Sendable {
             .path
     }
 
+    // MARK: - The checked-out branch (P2C.4)
+
+    /// Short name of the branch `repo`'s own checkout is on, or nil when its HEAD
+    /// is detached.
+    ///
+    /// "The repo" is whichever working copy is passed: for an isolated agent that
+    /// is its OWN worktree (`AgentRecord.cwd`), which is the comparison P2C.4
+    /// renders — the branch an agent was given versus the branch its checkout is
+    /// actually on. Comparing against the MAIN checkout instead would flag every
+    /// isolated agent forever, because `worktree add -b` cuts a fresh branch and
+    /// git refuses to check out a branch that is already checked out somewhere
+    /// else (both asserted in `runWorktreeCurrentBranchCheck`).
+    public func currentBranch(repo: URL) throws -> String? {
+        try requireRepository(repo)
+        let output = try runGit(["rev-parse", "--abbrev-ref", "HEAD"], repo: repo)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // `--abbrev-ref` prints the literal "HEAD" for a detached head. That is
+        // not a branch name: rendering it would read as "on HEAD", and comparing
+        // it would compare against a string no branch can equal.
+        return output.isEmpty || output == "HEAD" ? nil : output
+    }
+
     /// True when `refs/heads/<branch>` resolves.
     public func branchExists(repo: URL, branch: String) throws -> Bool {
         do {
@@ -468,6 +490,57 @@ public struct WorktreeManager: Sendable {
         _ = repo
         throw WorktreeError.unsupportedPlatform
         #endif
+    }
+}
+
+// Ticket: docs/38-tickets/90-agent-ux/P2C.4-branch-on-rows.md
+//
+// READING A BRANCH IS A PROCESS LAUNCH. The chip that shows it lives in a tile
+// header that re-renders on every streamed token, so the read has to be cached —
+// the packet's own watch-out. Shape follows `CrossProjectManagedSessionWalk`: a
+// TTL, a clock guard, and the caller passing `now`.
+public final class CheckedOutBranchCache {
+    private let manager: WorktreeManager
+    private let ttl: TimeInterval
+    /// Keyed by `WorktreeManager.resolved`, so the `/var` -> `/private/var` form
+    /// of one directory is one entry rather than two.
+    private var entries: [String: (readAt: Date, branch: String?)] = [:]
+
+    /// Every `git rev-parse` this cache has actually run. The witness for "do not
+    /// shell out per render" — without a counter that claim is unassertable.
+    public private(set) var gitReads = 0
+
+    public init(manager: WorktreeManager = WorktreeManager(), ttl: TimeInterval = 2) {
+        self.manager = manager
+        self.ttl = ttl
+    }
+
+    /// The branch `repo`'s checkout is on, or nil when it is detached, missing or
+    /// unreadable.
+    ///
+    /// A nil answer is cached like any other: a record pointing at a directory
+    /// that is gone (the P2A.7 stale case) would otherwise pay a failed process
+    /// launch on every render. Nothing throws — a chip that cannot be resolved is
+    /// simply not drawn, and a header is not the place to report a git error.
+    public func branch(repo: URL, now: Date = Date()) -> String? {
+        let key = WorktreeManager.resolved(repo)
+        if let entry = entries[key],
+           now >= entry.readAt,
+           now.timeIntervalSince(entry.readAt) < ttl {
+            return entry.branch
+        }
+        gitReads += 1
+        let branch = try? manager.currentBranch(repo: repo)
+        let resolved = branch ?? nil
+        entries[key] = (now, resolved)
+        return resolved
+    }
+
+    /// Forget everything, for a caller that knows a checkout moved (a `git
+    /// checkout` the app itself ran, or a manual refresh). The TTL alone would get
+    /// there, but only after up to `ttl` of showing the old branch.
+    public func invalidate() {
+        entries.removeAll()
     }
 }
 
