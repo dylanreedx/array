@@ -233,6 +233,15 @@ public final class PiAgentRunner: @unchecked Sendable {
         queue.sync { process?.terminate() }
     }
 
+    /// P2D.2 — observe `spawn_agent` calls this agent makes, out of band.
+    ///
+    /// Set before `run`. The handler is invoked on the runner's serial queue (the
+    /// same confinement the translator has), so a caller that needs the main actor
+    /// hops itself, exactly as it already does for events.
+    public func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {
+        queue.sync { translator.onSpawnRequest = handler }
+    }
+
     // MARK: - queue-confined line assembly
 
     private func consume(_ chunk: Data, onEvent: @Sendable (AgentRuntimeEvent) -> Void) {

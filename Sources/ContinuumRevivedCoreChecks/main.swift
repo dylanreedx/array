@@ -9981,4 +9981,8 @@ runAgentContextIndexChecks()
 runWorktreeManagerChecks()
 runAgentDiffSourceChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P2D.2-detect-spawn-tool-call.md — the
+// `spawn_agent` call an orchestrator makes, read off the real captured stream.
+runSpawnRequestChecks()
+
 print("ContinuumRevivedCoreChecks passed")

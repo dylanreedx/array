@@ -26,6 +26,19 @@ public struct PiEventTranslator {
     private var turnCounter: Int = 0
     private var currentTurnId: String = "pi-unknown#t0"
 
+    /// P2D.2 — the LOCAL-ONLY side channel for `spawn_agent` (and nothing else).
+    ///
+    /// Deliberately NOT an `AgentRuntimeEvent`: widening the event would put
+    /// model-authored tool arguments into the type that crosses the sync boundary,
+    /// which is the one thing the I5 note above says this file must not do. A
+    /// `SpawnRequest` is not `Codable`, so what arrives here cannot be published
+    /// even by accident; the observed call still emits its `.itemStarted` carrying
+    /// the tool NAME exactly as before, so nothing about the timeline changes.
+    ///
+    /// Invoked on whatever thread `translate` runs on — the runner's serial queue
+    /// in production.
+    public var onSpawnRequest: (@Sendable (SpawnRequest) -> Void)?
+
     public init() {}
 
     /// Translate one line of Pi json output into zero or more normalized
@@ -62,6 +75,15 @@ public struct PiEventTranslator {
         case "tool_execution_start":
             guard let toolCallId = object["toolCallId"] as? String,
                   let toolName = object["toolName"] as? String else { return [] }
+            // The whitelisted tool's args go out of band (P2D.2), never into the
+            // event below. `tool_execution_start` carries the WHOLE args object;
+            // the `toolcall_delta` fragments in `message_update` are partial JSON
+            // by construction, so this is the only line worth reading.
+            if let onSpawnRequest,
+               let args = object["args"] as? [String: Any],
+               let request = SpawnRequest.parse(toolName: toolName, args: args) {
+                onSpawnRequest(request)
+            }
             // title = tool NAME only. Never args (args.path is I5-sensitive).
             return [.itemStarted(
                 threadId: threadId,

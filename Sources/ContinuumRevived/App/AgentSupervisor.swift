@@ -44,6 +44,10 @@ protocol AgentRunning: AnyObject, Sendable {
     /// they arrive. Called off the main thread by `send`.
     func run(prompt: String, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws
     func stop()
+    /// P2D.2 — the local-only `spawn_agent` side channel. Separate from `onEvent`
+    /// because a `SpawnRequest` carries the call's ARGUMENTS, which may never enter
+    /// `AgentRuntimeEvent` (I5); set by `send` before the prompt runs.
+    func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void)
 }
 
 extension PiAgentRunner: AgentRunning {}
@@ -225,6 +229,7 @@ final class AgentSupervisor {
         model: String,
         thinking: String,
         projectId: UUID? = nil,
+        parentAgentID: AgentID? = nil,
         tileId: UUID? = nil
     ) -> AgentID {
         makeAgent(
@@ -236,6 +241,7 @@ final class AgentSupervisor {
             model: model,
             thinking: thinking,
             projectId: projectId,
+            parentAgentID: parentAgentID,
             tileId: tileId
         )
     }
@@ -259,6 +265,7 @@ final class AgentSupervisor {
         model: String,
         thinking: String,
         projectId: UUID? = nil,
+        parentAgentID: AgentID? = nil,
         tileId: UUID? = nil,
         isolated: Bool
     ) throws -> AgentID {
@@ -285,6 +292,7 @@ final class AgentSupervisor {
             model: model,
             thinking: thinking,
             projectId: projectId,
+            parentAgentID: parentAgentID,
             tileId: tileId
         )
     }
@@ -298,6 +306,7 @@ final class AgentSupervisor {
         model: String,
         thinking: String,
         projectId: UUID?,
+        parentAgentID: AgentID? = nil,
         tileId: UUID?
     ) -> AgentID {
         let now = Date()
@@ -310,6 +319,7 @@ final class AgentSupervisor {
             cwd: cwd.path,
             worktreeBranch: worktreeBranch,
             projectId: projectId,
+            parentAgentID: parentAgentID,
             createdAt: now,
             lastActivityAt: now,
             tileId: tileId
@@ -349,6 +359,12 @@ final class AgentSupervisor {
 
         let runner = makeRunner(record)
         runners[id] = runner
+        // P2D.2: an agent asking for another agent arrives here, out of band from
+        // the event stream. Hopped to the main actor like the events are, and for
+        // the same reason — the handler mutates supervisor state.
+        runner.observeSpawnRequests { [weak self] request in
+            DispatchQueue.main.async { self?.handleSpawnRequest(request, from: id) }
+        }
         let threadId = Self.threadId(for: id)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
@@ -387,6 +403,153 @@ final class AgentSupervisor {
     /// snapshot because `stop` mutates `runners`.
     func stopAll() {
         for id in Array(runners.keys) { stop(id) }
+    }
+
+    // MARK: - Orchestration (P2D.2)
+
+    /// How deep a chain of spawns may go. The root agent a human started is depth 0,
+    /// the worker it asks for is depth 1, and that worker's own worker is depth 2 —
+    /// which is the last one: an agent already at the cap cannot spawn.
+    ///
+    /// A cap exists because the request is MODEL-AUTHORED (the packet's watch-out): a
+    /// prompt that tells a worker to delegate produces workers that delegate, and
+    /// every one of them is a Pi process. Nothing else in the app bounds that.
+    static let maxSpawnDepth = 2
+    /// How many children one parent may have. Same reason, the other axis: a single
+    /// turn can emit as many tool calls as the model likes.
+    static let maxChildrenPerParent = 4
+
+    /// Why a `spawn_agent` call did not produce an agent. Carries counts and caps
+    /// only — never the request's `prompt` or a path — because the refusal is
+    /// SURFACED IN THE PARENT'S TRANSCRIPT, which is an `AgentRuntimeEvent`, i.e. the
+    /// far side of the boundary `SpawnRequest` stays off (I5).
+    enum SpawnRefusal: Equatable {
+        case unknownParent
+        case depthCapped(depth: Int, cap: Int)
+        case childCapped(children: Int, cap: Int)
+        case worktreeFailed
+        /// What the parent's transcript says. `worktreeFailed` deliberately does not
+        /// name the git error: `WorktreeManager`'s failures quote paths.
+        var reason: String {
+            switch self {
+            case .unknownParent:
+                return "the requesting agent is not known to this session"
+            case let .depthCapped(depth, cap):
+                return "spawn depth \(depth) exceeds the cap of \(cap)"
+            case let .childCapped(children, cap):
+                return "this agent already has \(children) child agents (cap \(cap))"
+            case .worktreeFailed:
+                return "its isolated checkout could not be created"
+            }
+        }
+    }
+
+    /// Turns an observed `spawn_agent` call into a real child agent.
+    ///
+    /// THE TOOL CALL IS THE API (P2D.1): the extension is inert, so this is the only
+    /// place a child is created. The child inherits the parent's model, thinking level
+    /// and project — the request names a task and a role, and inventing a different
+    /// model for a delegated worker is not this call's decision.
+    ///
+    /// `parentAgentID` is set on the child's record, which is what makes P2D.4's
+    /// nesting and P2D.5's roll-up possible from the store alone.
+    ///
+    /// Returns nil on a refusal, having said so in the parent's transcript.
+    @discardableResult
+    func handleSpawnRequest(_ request: SpawnRequest, from parentId: AgentID) -> AgentID? {
+        guard let parent = records[parentId] else {
+            return refuseSpawn(.unknownParent, for: parentId)
+        }
+        let depth = depth(of: parentId) + 1
+        guard depth <= Self.maxSpawnDepth else {
+            return refuseSpawn(.depthCapped(depth: depth, cap: Self.maxSpawnDepth), for: parentId)
+        }
+        let siblings = children(of: parentId).count
+        guard siblings < Self.maxChildrenPerParent else {
+            return refuseSpawn(.childCapped(children: siblings, cap: Self.maxChildrenPerParent), for: parentId)
+        }
+        do {
+            return try spawn(
+                role: request.role,
+                prompt: request.prompt,
+                cwd: Self.repositoryRoot(of: parent),
+                model: parent.model,
+                thinking: parent.thinking,
+                projectId: parent.projectId,
+                parentAgentID: parentId,
+                isolated: request.isolated
+            )
+        } catch {
+            // The isolated spawn refuses to fall back to the shared checkout (P2C.2),
+            // so a failed worktree is a failed spawn — reported, not downgraded.
+            warn("AgentSupervisor.handleSpawnRequest: child of \(parentId.rawValue.uuidString) not spawned: \(error)")
+            return refuseSpawn(.worktreeFailed, for: parentId)
+        }
+    }
+
+    /// Says the refusal on the parent's own stream, so an orchestrator's transcript
+    /// shows the ask being declined rather than silently producing nothing.
+    ///
+    /// Shaped as a failed tool item because that is what it is — the parent called a
+    /// tool and the tool's effect did not happen — and because the bridge already
+    /// renders `.itemCompleted(.failed)` on the timeline while collapsing the title to
+    /// a safe token on the way to the phone.
+    private func refuseSpawn(_ refusal: SpawnRefusal, for parentId: AgentID) -> AgentID? {
+        warn("AgentSupervisor: refusing \(SpawnRequest.toolName) from \(parentId.rawValue.uuidString) — \(refusal.reason)")
+        guard records[parentId] != nil else { return nil }
+        let itemId = "spawn-refused-\(UUID().uuidString)"
+        let thread = Self.threadId(for: parentId)
+        deliver(.itemStarted(
+            threadId: thread,
+            itemId: itemId,
+            kind: .error,
+            title: "\(SpawnRequest.toolName) refused: \(refusal.reason)"
+        ), to: parentId)
+        deliver(.itemCompleted(
+            threadId: thread,
+            itemId: itemId,
+            kind: .error,
+            status: .failed
+        ), to: parentId)
+        return nil
+    }
+
+    /// The agents this one spawned.
+    func children(of id: AgentID) -> [AgentID] {
+        records.values.filter { $0.parentAgentID == id }.map(\.id)
+    }
+
+    /// How many parents this agent has above it. Bounded by the record count so a
+    /// store that somehow describes a cycle terminates instead of hanging the app.
+    func depth(of id: AgentID) -> Int {
+        var depth = 0
+        var current = records[id]?.parentAgentID
+        var seen: Set<AgentID> = [id]
+        while let parent = current, !seen.contains(parent), depth <= records.count {
+            seen.insert(parent)
+            depth += 1
+            current = records[parent]?.parentAgentID
+        }
+        return depth
+    }
+
+    /// The repository a child should be isolated FROM: the parent's own working
+    /// directory, unless the parent is itself in an agent worktree, in which case it
+    /// is the repository that worktree was created from.
+    ///
+    /// Without the second half a child of an isolated parent would get
+    /// `<repo>/.worktrees/<parent>/.worktrees/<child>` — a worktree nested inside a
+    /// worktree, which git allows and nothing else in this codebase expects (P2C.3's
+    /// cleanup identifies an agent checkout by its `.worktrees/` container, and keeps
+    /// its own guard because it DELETES; this one only chooses where to add).
+    static func repositoryRoot(of record: AgentRecord) -> URL {
+        let cwd = URL(fileURLWithPath: record.cwd, isDirectory: true)
+        guard record.worktreeBranch != nil,
+              cwd.deletingLastPathComponent().lastPathComponent == WorktreeManager.containerDirectoryName
+        else {
+            return cwd
+        }
+        return cwd.deletingLastPathComponent().deletingLastPathComponent()
     }
 
     // MARK: - Archive / cleanup (P2C.3)
@@ -766,6 +929,7 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     private var completedRunStorage = 0
     private var promptsStorage: [String] = []
     private var liveHandler: (@Sendable (AgentRuntimeEvent) -> Void)?
+    private var spawnHandler: (@Sendable (SpawnRequest) -> Void)?
 
     init(script: [AgentRuntimeEvent], holdUntilStopped: Bool = false) {
         self.script = script
@@ -810,6 +974,19 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     func stop() {
         lock.withLock { stopCountStorage += 1 }
         released.signal()
+    }
+
+    func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {
+        lock.withLock { spawnHandler = handler }
+    }
+
+    /// Fires the side channel the supervisor registered, as a provider stream would.
+    /// `false` when nothing is observing, so a check cannot mistake "the supervisor
+    /// never wired the channel" for "the request was refused".
+    func emit(spawn request: SpawnRequest) -> Bool {
+        guard let handler = lock.withLock({ spawnHandler }) else { return false }
+        handler(request)
+        return true
     }
 }
 
@@ -1068,8 +1245,12 @@ func runAgentSupervisorChecks() async throws {
 
     let branchReport = try await checkBranchChip(config: config, fail: fail)
 
+    // MARK: 13 · an observed spawn_agent call becomes a child agent (P2D.2)
+
+    let spawnCallReport = try await checkSpawnFromToolCall(config: config, fail: fail)
+
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport)")
 }
 
 /// Gated on `--agent-restore-check` (P2A.7).
@@ -2221,6 +2402,333 @@ private final class SpawningCwdRecorder {
         cwds.append(record.cwd)
         return runner
     }
+}
+
+/// A runner that replays P2D.1's REAL captured Pi stream through a REAL
+/// `PiEventTranslator`, forwarding both halves: the normalized events to `onEvent`,
+/// and the `spawn_agent` arguments to the side channel. So what MARK 13 drives is the
+/// production reading path (fixture line → translator → runner seam → supervisor), not
+/// a hand-made `SpawnRequest`.
+final class FixtureStreamRunner: AgentRunning, @unchecked Sendable {
+    private let lines: [String]
+    private let lock = NSLock()
+    private var spawnHandler: (@Sendable (SpawnRequest) -> Void)?
+    private var promptsStorage: [String] = []
+
+    init(lines: [String]) { self.lines = lines }
+
+    var prompts: [String] { lock.withLock { promptsStorage } }
+
+    func run(prompt: String, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        lock.withLock { promptsStorage.append(prompt) }
+        var translator = PiEventTranslator()
+        if let handler = lock.withLock({ spawnHandler }) {
+            translator.onSpawnRequest = handler
+        }
+        for line in lines {
+            for event in translator.translate(line: line) { onEvent(event) }
+        }
+    }
+
+    func stop() {}
+
+    func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {
+        lock.withLock { spawnHandler = handler }
+    }
+}
+
+/// A runner factory that hands a distinct runner to each agent and remembers which
+/// record it was built for, so a child's own prompt and working directory can be read
+/// back. The parent's runner is supplied; everybody else gets a fresh scripted one.
+@MainActor
+private final class SpawnedRunnerFactory {
+    private(set) var records: [AgentRecord] = []
+    private(set) var runners: [AgentID: ScriptedAgentRunner] = [:]
+    private let parent: (id: AgentID, runner: AgentRunning)?
+
+    init(parent: (id: AgentID, runner: AgentRunning)? = nil) { self.parent = parent }
+
+    func make(_ record: AgentRecord) -> AgentRunning {
+        records.append(record)
+        if let parent, parent.id == record.id { return parent.runner }
+        if let existing = runners[record.id] { return existing }
+        let runner = ScriptedAgentRunner(script: [.sessionStateChanged(.ready)])
+        runners[record.id] = runner
+        return runner
+    }
+}
+
+/// P2D.2 — an observed `spawn_agent` call becomes a real child agent.
+///
+/// Six properties, all against a temp `git init` repository (the fixture's call is
+/// `isolated: true`, so a real worktree is created; P2C.1's inherited trap — the real
+/// repository is never a `worktree add` target):
+///   1. Replaying the REAL captured stream through the parent's runner produces
+///      exactly ONE child, with the role and the prompt the model sent, `parentAgentID`
+///      pointing at the emitting agent, and the parent's model/thinking/project
+///      inherited (the request names a task, not a model).
+///   2. The child actually RUNS that prompt — read off the child's own runner, so
+///      "a child agent was created" is not satisfied by an inert record.
+///   3. I5 — the child's prompt and role appear in NO event on the parent's stream and
+///      in no activity event published from it, while `tool.spawn_agent` still does.
+///   4. The isolated child's checkout is a SIBLING of the parent's, not nested inside
+///      it: `<repo>/.worktrees/<child>`, with git agreeing.
+///   5. The depth cap holds: a grandchild is allowed, a great-grandchild is refused,
+///      and the refusal is SAID in the requesting agent's transcript.
+///   6. The per-parent child cap holds, and refusing does not disturb the children
+///      that already exist.
+///
+/// Negative tests observed red at exit 1 with the final code are quoted at each
+/// assertion.
+@MainActor
+private func checkSpawnFromToolCall(
+    config: AgentModelConfig.Resolution,
+    fail: (String) -> Error
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-spawn-tool-call-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let repo = root.appendingPathComponent("repo", isDirectory: true)
+    try makeIsolatedSpawnRepo(at: repo)
+    let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support", isDirectory: true))
+
+    // The same committed capture P2D.1 produced and `SpawnRequestChecks` parses —
+    // one artifact, read from disk, not a copy of its contents.
+    let fixtureURL = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()          // App
+        .deletingLastPathComponent()          // ContinuumRevived
+        .deletingLastPathComponent()          // Sources
+        .appendingPathComponent("ContinuumRevivedCoreChecks/Fixtures/spawn-agent-tool-call.jsonl", isDirectory: false)
+    guard let fixtureText = try? String(contentsOf: fixtureURL, encoding: .utf8) else {
+        throw fail("the captured spawn_agent stream is missing at \(fixtureURL.path)")
+    }
+    let capturedPrompt = "Find every call site of AgentSupervisor.spawn and report the file:line list."
+    let capturedRole = "code-scout"
+    guard fixtureText.contains(capturedPrompt), fixtureText.contains(capturedRole) else {
+        throw fail("the capture no longer carries the arguments this check asserts on — re-check after a re-capture")
+    }
+    let lines = fixtureText.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+
+    // MARK: 1–2 · the call becomes a child that runs the task
+
+    let parentRunner = FixtureStreamRunner(lines: lines)
+    let projectId = UUID()
+    var factory: SpawnedRunnerFactory!
+    let supervisor = AgentSupervisor(store: store, makeRunner: { factory.make($0) })
+    factory = SpawnedRunnerFactory()
+    // The parent is spawned WITHOUT a prompt so its id exists before its runner is
+    // needed; the factory then hands it the fixture runner.
+    let parentId = supervisor.spawn(
+        role: "orchestrator",
+        prompt: nil,
+        cwd: repo,
+        model: config.model,
+        thinking: config.thinking,
+        projectId: projectId
+    )
+    factory = SpawnedRunnerFactory(parent: (parentId, parentRunner))
+
+    let parentInbox = EventInbox()
+    let parentStream = supervisor.events(for: parentId)
+    let parentTask = Task { @MainActor in for await event in parentStream { parentInbox.append(event) } }
+    defer { parentTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { supervisor.subscriberCount(for: parentId) == 1 }) else {
+        throw fail("the parent's subscriber never registered")
+    }
+
+    supervisor.send("delegate the search", to: parentId)
+    // Red when `send` does not call `observeSpawnRequests` (the wiring deleted):
+    // `the captured spawn_agent call produced 0 child agent(s), expected 1`.
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { supervisor.children(of: parentId).count == 1 }) else {
+        throw fail("the captured spawn_agent call produced \(supervisor.children(of: parentId).count) child agent(s), expected 1")
+    }
+    guard supervisor.records.count == 2 else {
+        throw fail("the stream produced \(supervisor.records.count) agents in total, expected the parent and one child")
+    }
+    guard let childId = supervisor.children(of: parentId).first,
+          let child = supervisor.records[childId] else {
+        throw fail("the child agent has no record")
+    }
+    // Red when `handleSpawnRequest` omits `parentAgentID:` — the child exists but
+    // nothing links it, so `children(of:)` above returns 0 and this never runs; the
+    // durable half is asserted separately below.
+    guard child.role == capturedRole else {
+        throw fail("the child's role is \(String(describing: child.role)), expected the requested \(capturedRole)")
+    }
+    guard child.model == config.model, child.thinking == config.thinking, child.projectId == projectId else {
+        throw fail("the child did not inherit the parent's provider settings: model \(child.model), thinking \(child.thinking), project \(String(describing: child.projectId))")
+    }
+    guard let storedChild = try store.load(id: childId), storedChild.parentAgentID == parentId else {
+        throw fail("the parent link did not reach the store: \(String(describing: try store.load(id: childId)?.parentAgentID))")
+    }
+    // …and it is DOING the work, not merely recorded. Red when `handleSpawnRequest`
+    // spawns with `prompt: nil`: `the child never ran the requested task`.
+    guard let childRunner = factory.runners[childId] else {
+        throw fail("no runner was ever constructed for the child — it was recorded but never started")
+    }
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { childRunner.prompts == [capturedPrompt] }) else {
+        throw fail("the child never ran the requested task; prompts \(childRunner.prompts)")
+    }
+
+    // MARK: 3 · I5 — the arguments stay out of everything that is published
+
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, {
+        parentInbox.events.contains { event in
+            if case let .itemStarted(_, _, _, title) = event { return title == SpawnRequest.toolName }
+            return false
+        }
+    }) else {
+        throw fail("the parent's stream never carried the tool call itself: \(parentInbox.events.count) events")
+    }
+    let encodedEvents = String(decoding: try JSONEncoder().encode(parentInbox.events), as: UTF8.self)
+    for (label, secret) in [("prompt", capturedPrompt), ("role", capturedRole)] {
+        guard !encodedEvents.contains(secret) else {
+            throw fail("I5: the child's \(label) reached an AgentRuntimeEvent on the parent's stream")
+        }
+    }
+    let published = parentInbox.events.enumerated().compactMap { offset, event in
+        ManagedAgentActivityBridge.draft(
+            for: event, agentId: parentId.rawValue, tileId: nil, status: .working, now: Date()
+        ).map { AgentActivityEvent(stamping: $0, sequence: UInt64(offset), replicaId: UUID()) }
+    }
+    guard !published.isEmpty else {
+        throw fail("no activity event was published from the parent's stream, so the I5 witness is vacuous")
+    }
+    let encodedPublished = String(decoding: try JSONEncoder().encode(published), as: UTF8.self)
+    guard !encodedPublished.contains(capturedPrompt), !encodedPublished.contains(capturedRole) else {
+        throw fail("I5: a published activity event carries the spawn arguments: \(encodedPublished)")
+    }
+    guard encodedPublished.contains("tool.\(SpawnRequest.toolName)") else {
+        throw fail("the tool NAME should still cross — no tool.\(SpawnRequest.toolName) in \(encodedPublished)")
+    }
+
+    // MARK: 4 · the isolated child is a SIBLING checkout, not a nested one
+
+    guard let branch = child.worktreeBranch else {
+        throw fail("the request asked for isolation and the child has no branch")
+    }
+    let container = repo.appendingPathComponent(WorktreeManager.containerDirectoryName, isDirectory: true)
+    guard URL(fileURLWithPath: child.cwd).deletingLastPathComponent().path == container.path else {
+        throw fail("the isolated child works in \(child.cwd), not directly in \(container.path)/")
+    }
+    // Red when `repositoryRoot(of:)` returns the parent's `cwd` unconditionally and
+    // the parent is itself isolated (asserted below with a grandchild).
+    let listed = try WorktreeManager().list(repo: repo)
+    guard listed.contains(where: {
+        WorktreeManager.resolved($0.path) == WorktreeManager.resolved(URL(fileURLWithPath: child.cwd)) && $0.branch == branch
+    }) else {
+        throw fail("git does not know the child's worktree: \(listed.map { "\($0.path.path)@\($0.branch ?? "detached")" })")
+    }
+
+    // MARK: 5 · the depth cap, and what a refusal says
+
+    // A grandchild is inside the cap. Requested from the CHILD, which is isolated —
+    // so this is also where a nested `.worktrees/.worktrees/` would show up.
+    guard let grandchildId = supervisor.handleSpawnRequest(
+        SpawnRequest(role: "grandchild", prompt: "look at one file", isolated: true),
+        from: childId
+    ) else {
+        throw fail("a grandchild is at depth \(AgentSupervisor.maxSpawnDepth) and must be allowed")
+    }
+    guard let grandchild = supervisor.records[grandchildId] else {
+        throw fail("the grandchild has no record")
+    }
+    // A DIRECT child of the container, not merely somewhere under it. `hasPrefix` is
+    // the trap the negative test caught: a nested
+    // `<repo>/.worktrees/<child>/.worktrees/<grandchild>` satisfies the prefix and is
+    // exactly the shape `repositoryRoot(of:)` exists to prevent.
+    guard URL(fileURLWithPath: grandchild.cwd).deletingLastPathComponent().path == container.path else {
+        throw fail("the grandchild's checkout \(grandchild.cwd) is nested inside its parent's rather than a sibling in \(container.path)/")
+    }
+    guard supervisor.depth(of: grandchildId) == AgentSupervisor.maxSpawnDepth else {
+        throw fail("the grandchild's depth is \(supervisor.depth(of: grandchildId)), expected \(AgentSupervisor.maxSpawnDepth)")
+    }
+
+    let grandchildInbox = EventInbox()
+    let grandchildStream = supervisor.events(for: grandchildId)
+    let grandchildTask = Task { @MainActor in for await event in grandchildStream { grandchildInbox.append(event) } }
+    defer { grandchildTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { supervisor.subscriberCount(for: grandchildId) == 1 }) else {
+        throw fail("the grandchild's subscriber never registered")
+    }
+    let beforeDepthRefusal = supervisor.records.count
+    // Red when the depth guard is deleted: `a great-great-grandchild was spawned past
+    // the depth cap`.
+    guard supervisor.handleSpawnRequest(
+        SpawnRequest(role: "too-deep", prompt: "keep delegating", isolated: false),
+        from: grandchildId
+    ) == nil else {
+        throw fail("an agent past the depth cap of \(AgentSupervisor.maxSpawnDepth) was spawned anyway")
+    }
+    guard supervisor.records.count == beforeDepthRefusal else {
+        throw fail("a refused spawn still created a record: \(supervisor.records.count) agents, expected \(beforeDepthRefusal)")
+    }
+    // The refusal is SAID, not swallowed. Red when `refuseSpawn` only warns:
+    // `the refusal never reached the requesting agent's transcript`.
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        grandchildInbox.events.contains { event in
+            if case let .itemStarted(_, _, kind, title) = event {
+                return kind == .error && (title ?? "").contains("\(SpawnRequest.toolName) refused")
+            }
+            return false
+        }
+    }) else {
+        throw fail("the refusal never reached the requesting agent's transcript: \(grandchildInbox.events)")
+    }
+    guard grandchildInbox.events.contains(where: { event in
+        if case let .itemCompleted(_, _, kind, status) = event { return kind == .error && status == .failed }
+        return false
+    }) else {
+        throw fail("the refusal was started but never completed as failed: \(grandchildInbox.events)")
+    }
+    // The reason may not carry the refused prompt or a path — the transcript is the
+    // near side of the boundary, but the bridge publishes from it.
+    let refusalTitles = grandchildInbox.events.compactMap { event -> String? in
+        if case let .itemStarted(_, _, _, title) = event, (title ?? "").contains("refused") { return title }
+        return nil
+    }
+    guard refusalTitles.allSatisfy({ !$0.contains("keep delegating") && !$0.contains(root.path) }) else {
+        throw fail("I5: a refusal reason carries the request's prompt or a host path: \(refusalTitles)")
+    }
+
+    // MARK: 6 · the per-parent child cap
+
+    // The parent already has one child (the captured call). Fill the rest of the cap,
+    // non-isolated so this stays a records-and-caps assertion rather than N worktrees.
+    for index in 1..<AgentSupervisor.maxChildrenPerParent {
+        guard supervisor.handleSpawnRequest(
+            SpawnRequest(role: "worker-\(index)", prompt: "task \(index)", isolated: false),
+            from: parentId
+        ) != nil else {
+            throw fail("child \(index + 1) of \(AgentSupervisor.maxChildrenPerParent) was refused while inside the cap")
+        }
+    }
+    guard supervisor.children(of: parentId).count == AgentSupervisor.maxChildrenPerParent else {
+        throw fail("the parent has \(supervisor.children(of: parentId).count) children, expected \(AgentSupervisor.maxChildrenPerParent)")
+    }
+    let atCap = supervisor.children(of: parentId).count
+    // Red when the child-count guard is deleted: `a 5th child was spawned past the
+    // per-parent cap of 4`.
+    guard supervisor.handleSpawnRequest(
+        SpawnRequest(role: "one-too-many", prompt: "task N", isolated: false),
+        from: parentId
+    ) == nil else {
+        throw fail("a child past the per-parent cap of \(AgentSupervisor.maxChildrenPerParent) was spawned anyway")
+    }
+    guard supervisor.children(of: parentId).count == atCap else {
+        throw fail("a refused spawn disturbed the existing children: \(supervisor.children(of: parentId).count), expected \(atCap)")
+    }
+    // An agent this supervisor does not know gets nothing, and does not crash.
+    guard supervisor.handleSpawnRequest(
+        SpawnRequest(role: nil, prompt: "from nowhere", isolated: false),
+        from: AgentID(rawValue: UUID())
+    ) == nil else {
+        throw fail("a spawn request from an unknown agent produced a child")
+    }
+
+    for id in supervisor.children(of: parentId) + [grandchildId] { supervisor.stop(id) }
+    return "the captured spawn_agent call produced 1 child (role \(capturedRole), isolated on \(branch), parent linked in the store) that ran the requested prompt, prompt/role absent from \(parentInbox.events.count) parent events and \(published.count) published activity events while tool.\(SpawnRequest.toolName) crossed, a grandchild got a sibling worktree, depth capped at \(AgentSupervisor.maxSpawnDepth) and children at \(AgentSupervisor.maxChildrenPerParent) with the refusal said in the requesting agent's transcript"
 }
 
 /// P2C.2 — an isolated spawn works in its OWN checkout.
