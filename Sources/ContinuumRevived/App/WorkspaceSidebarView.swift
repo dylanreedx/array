@@ -69,10 +69,6 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     private let outlineView: NSOutlineView
     private let column: NSTableColumn
     private let titleLabel: NSTextField
-    private let actionStack: NSStackView
-    private let createButton: NSButton
-    private let renameButton: NSButton
-    private let deleteButton: NSButton
     private let managementMessageLabel: NSTextField
 
     private var tree = SidebarTree(workspaces: [])
@@ -88,30 +84,16 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     var onDeleteWorkspace: ((UUID) -> Void)?
 
     override init(frame frameRect: NSRect) {
-        // "Agents", not "Workspaces": the list underneath it is the agent inbox.
-        // The three buttons keep their workspace meaning — their tooltips already
-        // say so, and P3.14 is where workspace management gets its own home.
+        // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
+        //
+        // "Agents", and now nothing else in the header: the three workspace buttons
+        // that used to sit under this label have moved into the scope popup's menu,
+        // which is where the workspace being acted on is named. The header keeps the
+        // management MESSAGE — a rejected rename or a preserved workspace has to be
+        // readable somewhere, and a menu that has already closed is not that place.
         titleLabel = NSTextField(labelWithString: "Agents")
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        createButton = NSButton(title: "New", target: nil, action: nil)
-        createButton.bezelStyle = .rounded
-        createButton.toolTip = "Create workspace"
-
-        renameButton = NSButton(title: "Rename", target: nil, action: nil)
-        renameButton.bezelStyle = .rounded
-        renameButton.toolTip = "Rename selected workspace"
-
-        deleteButton = NSButton(title: "Delete", target: nil, action: nil)
-        deleteButton.bezelStyle = .rounded
-        deleteButton.toolTip = "Delete selected workspace"
-
-        actionStack = NSStackView(views: [createButton, renameButton, deleteButton])
-        actionStack.orientation = .horizontal
-        actionStack.alignment = .centerY
-        actionStack.spacing = 6
-        actionStack.translatesAutoresizingMaskIntoConstraints = false
 
         managementMessageLabel = NSTextField(labelWithString: "")
         managementMessageLabel.font = .systemFont(ofSize: 11, weight: .medium)
@@ -150,23 +132,17 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         wantsLayer = true
         applyTokens()
         setAccessibilityIdentifier("ContinuumWorkspaceSidebarRoot")
-        createButton.setAccessibilityIdentifier("ContinuumWorkspaceSidebarCreate")
-        renameButton.setAccessibilityIdentifier("ContinuumWorkspaceSidebarRename")
-        deleteButton.setAccessibilityIdentifier("ContinuumWorkspaceSidebarDelete")
         managementMessageLabel.setAccessibilityIdentifier("ContinuumWorkspaceSidebarManagementMessage")
 
         addSubview(titleLabel)
-        addSubview(actionStack)
         addSubview(managementMessageLabel)
         addSubview(scrollView)
         addSubview(inboxView)
 
-        createButton.target = self
-        createButton.action = #selector(createWorkspaceClicked(_:))
-        renameButton.target = self
-        renameButton.action = #selector(renameWorkspaceClicked(_:))
-        deleteButton.target = self
-        deleteButton.action = #selector(deleteWorkspaceClicked(_:))
+        // P3.14: the header buttons' three targets, now one menu.
+        inboxView.onWorkspaceManagementAction = { [weak self] action in
+            self?.performWorkspaceManagement(action)
+        }
 
         outlineView.dataSource = self
         outlineView.delegate = self
@@ -178,13 +154,9 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
             titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 10),
 
-            actionStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            actionStack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10),
-            actionStack.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
-
             managementMessageLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             managementMessageLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            managementMessageLabel.topAnchor.constraint(equalTo: actionStack.bottomAnchor, constant: 4),
+            managementMessageLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
 
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -253,8 +225,15 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     /// nothing about `UserDefaults` — which is also what keeps its three committed
     /// Lab baselines independent of whose defaults ran the check.
     func configureInboxScope(_ scope: InboxScope, onChange: @escaping (InboxScope) -> Void) {
-        inboxView.onScopeChange = onChange
+        // P3.14: the scope decides which workspace the menu's verbs act on, so a flip
+        // can turn Delete on or off (scoping to a workspace names a target where the
+        // canvas had none) without any reload having happened.
+        inboxView.onScopeChange = { [weak self] next in
+            onChange(next)
+            self?.updateManagementButtonState()
+        }
         inboxView.setScope(scope)
+        updateManagementButtonState()
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.9-reveal-on-click.md
@@ -373,7 +352,12 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     var visibleStatusTextsForQA: [String] { visibleItems().compactMap { statusPresentation(for: $0)?.text } }
     var visibleStatusGlyphsForQA: [String] { visibleItems().compactMap { statusPresentation(for: $0)?.glyph } }
     var managementMessageForQA: String { managementMessageLabel.stringValue }
-    var deleteEnabledForQA: Bool { deleteButton.isEnabled }
+    // P3.14: the same question, asked of the menu item the buttons became.
+    var deleteEnabledForQA: Bool { inboxView.isWorkspaceManagementEnabledForQA(.delete) }
+    var renameEnabledForQA: Bool { inboxView.isWorkspaceManagementEnabledForQA(.rename) }
+    var workspaceManagementTitlesForQA: [String] { inboxView.workspaceManagementTitlesForQA }
+    var isWorkspaceManagementSeparatedForQA: Bool { inboxView.isWorkspaceManagementSeparatedForQA }
+    var workspaceIdForManagementActionForQA: UUID? { workspaceIdForManagementAction() }
     var selectedTargetForQA: WorkspaceSidebarSelection? {
         guard outlineView.selectedRow >= 0,
               let item = outlineView.item(atRow: outlineView.selectedRow) as? SidebarItem else { return nil }
@@ -406,25 +390,21 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         managementMessageLabel.isHidden = text.isEmpty
     }
 
+    // P3.14: same three names, driving the scope menu instead of the removed header
+    // buttons — the coverage that called them now exercises the new location.
     @discardableResult
     func clickCreateForQA() -> Bool {
-        guard createButton.isEnabled else { return false }
-        createButton.performClick(nil)
-        return true
+        inboxView.pickWorkspaceManagementForQA(.create)
     }
 
     @discardableResult
     func clickRenameForQA() -> Bool {
-        guard renameButton.isEnabled else { return false }
-        renameButton.performClick(nil)
-        return true
+        inboxView.pickWorkspaceManagementForQA(.rename)
     }
 
     @discardableResult
     func clickDeleteForQA() -> Bool {
-        guard deleteButton.isEnabled else { return false }
-        deleteButton.performClick(nil)
-        return true
+        inboxView.pickWorkspaceManagementForQA(.delete)
     }
 
     @discardableResult
@@ -470,21 +450,46 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         performSelection(for: item)
     }
 
-    @objc private func createWorkspaceClicked(_ sender: NSButton) {
-        onCreateWorkspace?()
+    // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
+    private func performWorkspaceManagement(_ action: AgentInboxView.WorkspaceManagementAction) {
+        switch action {
+        case .create:
+            onCreateWorkspace?()
+        case .rename:
+            guard let workspaceId = workspaceIdForManagementAction() else { return }
+            onRenameWorkspace?(workspaceId)
+        case .delete:
+            guard let workspaceId = workspaceIdForManagementAction(), tree.workspaces.count > 1 else { return }
+            onDeleteWorkspace?(workspaceId)
+        }
     }
 
-    @objc private func renameWorkspaceClicked(_ sender: NSButton) {
-        guard let workspaceId = workspaceIdForManagementAction() else { return }
-        onRenameWorkspace?(workspaceId)
-    }
-
-    @objc private func deleteWorkspaceClicked(_ sender: NSButton) {
-        guard let workspaceId = workspaceIdForManagementAction() else { return }
-        onDeleteWorkspace?(workspaceId)
-    }
-
+    /// Which workspace a verb lands on.
+    ///
+    /// THE SCOPED WORKSPACE FIRST (P3.14): the scope popup is the control the verbs
+    /// now hang off, so "Rename Workspace…" under a workspace scope must mean that
+    /// workspace and not whichever one the canvas happens to be showing. The scope
+    /// carries a NAME (`InboxScope.workspace`), so it is resolved against the tree,
+    /// and only a UNIQUE match counts — duplicate workspace names are allowed by
+    /// `Registry.createWorkspace`, and guessing which of two same-named workspaces to
+    /// delete is not a guess this view may make.
+    ///
+    /// AN AMBIGUOUS WORKSPACE SCOPE HAS NO TARGET AT ALL — it does not fall through
+    /// (found in cross-review). Falling back would put the verbs back on the open
+    /// workspace while the control above them names a different one, which is worse
+    /// than a greyed-out Delete: the name-based scope is safe for FILTERING because a
+    /// wrong match only shows extra rows, and that argument does not survive contact
+    /// with a destructive verb. Same for a scope naming a workspace this tree does not
+    /// have.
+    ///
+    /// Under any other scope, the old chain unchanged: the outline's selection, then
+    /// the current workspace. Under `.all` — the default — that is exactly the
+    /// behaviour the header buttons had.
     private func workspaceIdForManagementAction() -> UUID? {
+        if case let .workspace(name) = inboxView.scope {
+            let matches = tree.workspaces.filter { $0.name == name }
+            return matches.count == 1 ? matches[0].workspaceId : nil
+        }
         if let selection = selectedTargetForQA {
             switch selection {
             case let .workspace(workspaceId): return workspaceId
@@ -497,9 +502,10 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
 
     private func updateManagementButtonState() {
         let workspaceId = workspaceIdForManagementAction()
-        createButton.isEnabled = true
-        renameButton.isEnabled = workspaceId != nil
-        deleteButton.isEnabled = workspaceId != nil && tree.workspaces.count > 1
+        inboxView.setWorkspaceManagement(
+            canRename: workspaceId != nil,
+            canDelete: workspaceId != nil && tree.workspaces.count > 1
+        )
     }
 
     private func rebuildItems() {

@@ -109,6 +109,25 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// move (widen the scope) is only obvious if the message names the cause.
     static let scopedEmptyMessage = "No agents in this scope"
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
+    /// The three workspace actions that used to be buttons in the sidebar header.
+    /// They live in the scope popup's menu because the scope is already the control
+    /// that names a workspace — acting on the one you have scoped to is the only
+    /// place a workspace verb can sit without a header full of buttons.
+    enum WorkspaceManagementAction: CaseIterable {
+        case create
+        case rename
+        case delete
+
+        var title: String {
+            switch self {
+            case .create: return "New Workspace…"
+            case .rename: return "Rename Workspace…"
+            case .delete: return "Delete Workspace…"
+            }
+        }
+    }
+
     private let scopePopUp: NSPopUpButton
     private let scrollView: NSScrollView
     private let tableView: NSTableView
@@ -143,6 +162,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     private var allRows: [AgentInboxRow] = []
     /// The entries in the popup, parallel to the menu items' tags.
     private var scopeEntries: [InboxScope] = []
+    // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
+    /// The management items in the menu as BUILT — rebuilt with the menu, because an
+    /// `NSMenuItem` may only belong to one `NSMenu` and `updateScopeMenu` replaces
+    /// the whole menu whenever the scope set changes.
+    private var managementItems: [WorkspaceManagementAction: NSMenuItem] = [:]
+    /// Enablement, told by the host: whether there is a workspace to act on at all,
+    /// and whether it may be deleted (the last workspace may not). `create` is
+    /// always available, which is the guard the header buttons had too.
+    private var canRenameWorkspace = false
+    private var canDeleteWorkspace = false
     // Ticket: docs/38-tickets/90-agent-ux/P2D.4-parent-child-nesting.md
     /// The parents you have folded. VIEW-LOCAL: no defaults key, nothing in the
     /// change set, nothing on the row — collapsing a group is a thing you did to
@@ -229,6 +258,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// persists it. Not called for a programmatic `setScope` — restoring a scope at
     /// launch must not write the value back.
     var onScopeChange: ((InboxScope) -> Void)?
+    // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
+    /// A workspace verb was picked from the scope menu. WHICH workspace it lands on
+    /// is not this view's business — it holds a scope, not a workspace id — so the
+    /// host resolves the target exactly as it did for the header buttons.
+    var onWorkspaceManagementAction: ((WorkspaceManagementAction) -> Void)?
     // Ticket: docs/38-tickets/90-agent-ux/P3.9-reveal-on-click.md
     /// Clicking a row asks the host to take you to that agent. The list holds NO
     /// navigation of its own — it hands over the row's aggregate id and the host
@@ -625,8 +659,54 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     }
 
     @objc private func scopePicked(_ sender: NSPopUpButton) {
-        guard let tag = sender.selectedItem?.tag, scopeEntries.indices.contains(tag) else { return }
+        guard let tag = sender.selectedItem?.tag else { return }
+        // P3.14: the management block shares the popup's action rather than carrying
+        // its own. A popup sends BOTH its own action and a selected item's action, so
+        // an item-level selector would have to be reconciled with this one; a tag
+        // range is the same dispatch `scopeEntries` already uses.
+        if let action = AgentInboxView.managementAction(forTag: tag) {
+            // The scope did not change, so the button must not read as if it had:
+            // `pullsDown: false` titles the popup with whatever was last selected.
+            restoreScopeSelection()
+            onWorkspaceManagementAction?(action)
+            return
+        }
+        guard scopeEntries.indices.contains(tag) else { return }
         setScope(scopeEntries[tag], notify: true)
+    }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
+    /// Which workspace verbs are available. Told by the host on every reload, since
+    /// both answers come off the registry (`rename` needs a target at all; `delete`
+    /// additionally needs a second workspace to fall back to).
+    func setWorkspaceManagement(canRename: Bool, canDelete: Bool) {
+        guard canRename != canRenameWorkspace || canDelete != canDeleteWorkspace else { return }
+        canRenameWorkspace = canRename
+        canDeleteWorkspace = canDelete
+        applyManagementEnablement()
+    }
+
+    private static let managementTagBase = 1_000_000
+
+    private static func tag(for action: WorkspaceManagementAction) -> Int {
+        managementTagBase + (WorkspaceManagementAction.allCases.firstIndex(of: action) ?? 0)
+    }
+
+    private static func managementAction(forTag tag: Int) -> WorkspaceManagementAction? {
+        let index = tag - managementTagBase
+        guard index >= 0, WorkspaceManagementAction.allCases.indices.contains(index) else { return nil }
+        return WorkspaceManagementAction.allCases[index]
+    }
+
+    private func applyManagementEnablement() {
+        managementItems[.create]?.isEnabled = true
+        managementItems[.rename]?.isEnabled = canRenameWorkspace
+        managementItems[.delete]?.isEnabled = canDeleteWorkspace
+    }
+
+    private func restoreScopeSelection() {
+        guard let index = scopeEntries.firstIndex(of: scope) else { return }
+        scopePopUp.selectItem(withTag: index)
     }
 
     /// Rebuild the popup's menu when the set of scopes changed, and point it at the
@@ -649,13 +729,32 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
                 }
                 let item = NSMenuItem(title: entry.title, action: nil, keyEquivalent: "")
                 item.tag = index
+                // Explicit, because `autoenablesItems` is turned off below.
+                item.isEnabled = true
                 menu.addItem(item)
             }
+            // P3.14: the workspace verbs, below a separator, so the menu reads as
+            // "which agents" first and "this workspace" second.
+            //
+            // `autoenablesItems = false` IS LOAD-BEARING, for the reason P3.12 wrote
+            // down for `rowMenu`: left at AppKit's default, `NSMenu.update()` re-derives
+            // every item's enablement from whether a target responds to its action just
+            // before the menu is drawn, so the disabled Delete on a one-workspace
+            // registry would come back up live. The scope items are enabled explicitly
+            // here because turning the flag off means nothing enables them for us.
+            menu.autoenablesItems = false
+            menu.addItem(.separator())
+            managementItems.removeAll()
+            for action in WorkspaceManagementAction.allCases {
+                let item = NSMenuItem(title: action.title, action: nil, keyEquivalent: "")
+                item.tag = AgentInboxView.tag(for: action)
+                menu.addItem(item)
+                managementItems[action] = item
+            }
+            applyManagementEnablement()
             scopePopUp.menu = menu
         }
-        if let index = scopeEntries.firstIndex(of: scope) {
-            scopePopUp.selectItem(withTag: index)
-        }
+        restoreScopeSelection()
     }
 
     /// The empty state, and WHICH empty state. An inbox with agents in it that are
@@ -1154,7 +1253,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// The popup as RENDERED — the titles AppKit is really showing and the one it
     /// has ticked — rather than `scopeEntries`, which would assert about the array
     /// the menu was built from and not about the menu.
-    var scopeTitlesForQA: [String] { scopePopUp.itemTitles.filter { !$0.isEmpty } }
+    /// P3.14 put a second block in the same menu, so this is the SCOPE block only —
+    /// the verbs have `workspaceManagementTitlesForQA`. Filtered by tag rather than
+    /// by position, for the same reason the tags exist at all: a workspace and a
+    /// project may share a title.
+    var scopeTitlesForQA: [String] {
+        (scopePopUp.menu?.items ?? [])
+            .filter { !$0.isSeparatorItem && AgentInboxView.managementAction(forTag: $0.tag) == nil }
+            .map(\.title)
+            .filter { !$0.isEmpty }
+    }
     var selectedScopeTitleForQA: String { scopePopUp.titleOfSelectedItem ?? "" }
     var selectedRowCountForQA: Int { tableView.selectedRowIndexes.count }
 
@@ -1164,6 +1272,42 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     func pickScopeForQA(_ scope: InboxScope) -> Bool {
         guard let index = scopeEntries.firstIndex(of: scope),
               scopePopUp.selectItem(withTag: index) else { return false }
+        scopePicked(scopePopUp)
+        return true
+    }
+    // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
+    /// The management block as RENDERED: the titles in the menu below the separator,
+    /// in menu order, and the enablement AppKit would show — read after
+    /// `NSMenu.update()`, because a check that only reads back the `isEnabled` this
+    /// file set never sees the pass that used to re-enable a disabled item.
+    var workspaceManagementTitlesForQA: [String] {
+        guard let menu = scopePopUp.menu else { return [] }
+        menu.update()
+        return menu.items
+            .filter { AgentInboxView.managementAction(forTag: $0.tag) != nil }
+            .map(\.title)
+    }
+
+    func isWorkspaceManagementEnabledForQA(_ action: WorkspaceManagementAction) -> Bool {
+        scopePopUp.menu?.update()
+        return managementItems[action]?.isEnabled ?? false
+    }
+
+    /// Whether the separator really sits between the scopes and the verbs — the
+    /// packet's "separated section", asserted on the menu rather than by eye.
+    var isWorkspaceManagementSeparatedForQA: Bool {
+        guard let items = scopePopUp.menu?.items,
+              let firstManagement = items.firstIndex(where: { AgentInboxView.managementAction(forTag: $0.tag) != nil }),
+              firstManagement > 0 else { return false }
+        return items[firstManagement - 1].isSeparatorItem
+    }
+
+    /// Pick a workspace verb the way the user does — through the popup's own action,
+    /// and only if the item is one AppKit would let them hit.
+    @discardableResult
+    func pickWorkspaceManagementForQA(_ action: WorkspaceManagementAction) -> Bool {
+        guard isWorkspaceManagementEnabledForQA(action),
+              scopePopUp.selectItem(withTag: AgentInboxView.tag(for: action)) else { return false }
         scopePicked(scopePopUp)
         return true
     }

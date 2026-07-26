@@ -7790,6 +7790,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.layoutSubtreeIfNeeded()
         topBar.layoutSubtreeIfNeeded()
 
+        // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
+        //
+        // The three verbs are no longer buttons in the sidebar header; they are the
+        // separated block at the foot of the scope popup's menu. Asserted on the menu
+        // AppKit is really showing, and asserted BEFORE the actions are driven —
+        // `clickCreateForQA` and friends go through that menu now, so a check that only
+        // called them could pass against a UI with no visible way in.
+        let managementTitles = sidebar.workspaceManagementTitlesForQA
+        try expect(
+            managementTitles == ["New Workspace…", "Rename Workspace…", "Delete Workspace…"],
+            "the scope menu should carry the three workspace verbs, got \(managementTitles)"
+        )
+        try expect(
+            sidebar.isWorkspaceManagementSeparatedForQA,
+            "the workspace verbs should be a separated section, below the scopes"
+        )
+        try expect(
+            sidebar.inboxForQA.scopeTitlesForQA.allSatisfy { !managementTitles.contains($0) },
+            "a verb must not read as a scope you can pick — got scopes \(sidebar.inboxForQA.scopeTitlesForQA)"
+        )
+
+        // "Acting on the currently scoped workspace": under a workspace scope the verbs
+        // must land on THAT workspace, not on whichever one the canvas is showing.
+        // Alpha stays open and untouched throughout.
+        sidebar.configureInboxScope(.workspace("Beta Workspace")) { _ in }
+        try expect(
+            sidebar.workspaceIdForManagementActionForQA == workspaceB,
+            "a workspace scope should name the verbs' target, got \(String(describing: sidebar.workspaceIdForManagementActionForQA))"
+        )
+        app.workspaceRenamePromptProvider = { currentName in
+            currentName == "Beta Workspace" ? "Beta Renamed" : nil
+        }
+        let scopedRenameDelivered = sidebar.clickRenameForQA()
+        sidebar.layoutSubtreeIfNeeded()
+        let scopedRegistry = try registryStore.loadOrEmpty()
+        let scopedRenameTargetedScope = scopedRenameDelivered
+            && scopedRegistry.workspaces.contains(where: { $0.id == workspaceB && $0.name == "Beta Renamed" })
+            && scopedRegistry.workspaces.contains(where: { $0.id == workspaceA && $0.name == "Alpha Workspace" })
+            && runtime.workspaceId == workspaceA
+        try expect(scopedRenameTargetedScope, "a scoped rename should act on the scoped workspace, not the open one")
+
+        // Back to `.all` for the rest, which is both the default scope and the one the
+        // header buttons' old behaviour (selection, then current workspace) is defined
+        // under. Set explicitly rather than left to whatever `configureWorkspaceSidebar`
+        // restored from this machine's defaults.
+        sidebar.configureInboxScope(.all) { _ in }
+
         app.workspaceCreatePromptProvider = { "Created From Sidebar" }
         let createDelivered = sidebar.clickCreateForQA()
         sidebar.layoutSubtreeIfNeeded()
@@ -7831,6 +7878,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             deleteRequests.append(request)
             return false
         }
+        // P3.14: the sidebar's Delete verb, DECLINED — the guard the header button had,
+        // reached through the menu, with the confirmation provider still in front of it.
+        // (The popup keeping its scope title is asserted here too, but the witness for
+        // it is in `runAgentInboxChecks`: every app path that runs a verb also pushes
+        // rows, and the menu rebuild inside that push re-selects the scope anyway.)
+        let cancelFromMenuDelivered = sidebar.clickDeleteForQA()
+        sidebar.layoutSubtreeIfNeeded()
+        let cancelFromMenuRegistry = try registryStore.loadOrEmpty()
+        let scopeSurvivedVerb = cancelFromMenuDelivered
+            && sidebar.inboxForQA.selectedScopeTitleForQA == InboxScope.allTitle
+            && cancelFromMenuRegistry.workspaces.contains(where: { $0.id == createdWorkspace.id })
+        try expect(
+            scopeSurvivedVerb,
+            "picking a verb should leave the popup on its scope, got '\(sidebar.inboxForQA.selectedScopeTitleForQA)'"
+        )
+
         let cancelDelivered = topBar.clickDeleteForQA()
         topBar.layoutSubtreeIfNeeded()
         let cancelRegistry = try registryStore.loadOrEmpty()
@@ -7855,8 +7918,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             && topBar.managementMessageForQA.contains("not deleted")
         try expect(deleteConfirmRemovedWorkspace, "confirming delete should remove workspace registry/document while preserving project data semantics")
 
+        // P3.14: driven from the SIDEBAR's menu this time — the delete path the header
+        // button used to own, with the same confirmation provider in front of it.
         let workspaceAfterCreatedDelete = runtime.workspaceId
-        let deleteReplacementDelivered = topBar.clickDeleteForQA()
+        let deleteReplacementDelivered = sidebar.clickDeleteForQA()
+        sidebar.layoutSubtreeIfNeeded()
         topBar.layoutSubtreeIfNeeded()
         let oneWorkspaceRegistry = try registryStore.loadOrEmpty()
         try expect(deleteReplacementDelivered, "second delete should be delivered while two workspaces remain")
@@ -7866,13 +7932,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let lastWorkspaceId = runtime.workspaceId
         let lastDeleteDelivered = topBar.clickDeleteForQA()
         topBar.layoutSubtreeIfNeeded()
+        // P3.14: the same guard on the menu item. `deleteEnabledForQA` reads the item
+        // after `NSMenu.update()`, so this is the enablement AppKit would draw and not
+        // just the flag this code set.
+        let lastDeleteFromMenuDelivered = sidebar.clickDeleteForQA()
+        sidebar.layoutSubtreeIfNeeded()
         let lastRegistry = try registryStore.loadOrEmpty()
         let lastWorkspaceProtected = !lastDeleteDelivered
             && !topBar.deleteEnabledForQA
+            && !lastDeleteFromMenuDelivered
+            && !sidebar.deleteEnabledForQA
+            && sidebar.renameEnabledForQA
             && lastRegistry.workspaces.count == 1
             && lastRegistry.workspaces.first?.id == lastWorkspaceId
             && runtime.workspaceId == lastWorkspaceId
         try expect(lastWorkspaceProtected, "last workspace delete action should be disabled and preserve the workspace")
+
+        // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
+        //
+        // AN AMBIGUOUS WORKSPACE SCOPE IS NOT A TARGET (from cross-review). Duplicate
+        // workspace names are allowed — `Registry.createWorkspace` says so and the
+        // check's own manifest records it — and the scope carries a NAME, so a
+        // same-named pair leaves the verbs with nothing to act on. Falling back to the
+        // open workspace would rename or delete one the control above does not name,
+        // which is the one outcome worse than a greyed-out item. Run last, so the two
+        // same-named workspaces cannot disturb anything above.
+        let twinWorkspace = UUID(uuidString: "00000000-0000-0000-0000-00000000F503")!
+        var twinnedRegistry = try registryStore.loadOrEmpty()
+        let survivingName = twinnedRegistry.workspaces.first?.name ?? ""
+        twinnedRegistry.workspaces.append(
+            WorkspaceEntry(id: twinWorkspace, name: survivingName, projectIds: [], createdAt: now, updatedAt: now)
+        )
+        try registryStore.save(twinnedRegistry)
+        try WorkspaceStore(workspaceId: twinWorkspace, applicationSupportDirectory: appSupport).save(document())
+        app.reloadWorkspaceSidebar()
+        sidebar.configureInboxScope(.workspace(survivingName)) { _ in }
+        sidebar.layoutSubtreeIfNeeded()
+        let ambiguousRenameRefused = !sidebar.clickRenameForQA()
+        let ambiguousDeleteRefused = !sidebar.clickDeleteForQA()
+        let ambiguousRegistry = try registryStore.loadOrEmpty()
+        let ambiguousScopeHasNoTarget = sidebar.workspaceIdForManagementActionForQA == nil
+            && !sidebar.renameEnabledForQA
+            && !sidebar.deleteEnabledForQA
+            && ambiguousRenameRefused
+            && ambiguousDeleteRefused
+            && ambiguousRegistry.workspaces.count == 2
+            && ambiguousRegistry.workspaces.allSatisfy { $0.name == survivingName }
+        try expect(
+            ambiguousScopeHasNoTarget,
+            "two workspaces of the same name should leave a scoped verb with no target rather than acting on the open one"
+        )
 
         let timestamp = String(Int(Date().timeIntervalSince1970))
         let directory = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
@@ -7883,7 +7992,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let artifact = directory.appendingPathComponent("manifest.json")
         let manifest: [String: Any] = [
             "check": "workspace-management-polish",
-            "path": "WorkspaceSidebarView/WorkspaceTopBarView buttons -> AppDelegate create/rename/delete validation and confirmation -> RegistryStore/WorkspaceStore/WorkspaceRuntime",
+            "path": "AgentInboxView scope menu / WorkspaceTopBarView buttons -> AppDelegate create/rename/delete validation and confirmation -> RegistryStore/WorkspaceStore/WorkspaceRuntime",
+            "workspaceManagementTitles": managementTitles,
+            "workspaceManagementSeparated": sidebar.isWorkspaceManagementSeparatedForQA,
+            "scopedRenameTargetedScope": scopedRenameTargetedScope,
+            "scopeSurvivedVerb": scopeSurvivedVerb,
+            "ambiguousScopeHasNoTarget": ambiguousScopeHasNoTarget,
             "createWorked": createWorked,
             "renameWorked": renameWorked,
             "invalidRenameRejected": invalidRenameRejected,
@@ -20516,6 +20630,57 @@ extension AppDelegate {
     try expect(restored.selectedScopeTitleForQA == "continuum" && restored.titlesForQA == wantedTitles,
                "a scope restored before the first push filters that push — got '\(restored.selectedScopeTitleForQA)' over \(restored.titlesForQA)")
     try expect(restoreWrites == 0, "restoring a scope must not write it back — \(restoreWrites) writes")
+
+    // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
+    //
+    // THE WORKSPACE VERBS SHARE THIS MENU. They are asserted here, on a bare view,
+    // and not only through the app: every app-level path that runs a verb also
+    // pushes rows, and a push rebuilds the menu — which re-selects the scope for its
+    // own reasons and would mask the restore below.
+    let verbs = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    verbs.reload(rows: fixture)
+    verbs.layoutForQA()
+    var verbsPicked: [AgentInboxView.WorkspaceManagementAction] = []
+    verbs.onWorkspaceManagementAction = { verbsPicked.append($0) }
+    try expect(verbs.workspaceManagementTitlesForQA == ["New Workspace…", "Rename Workspace…", "Delete Workspace…"],
+               "the scope menu carries the three workspace verbs — got \(verbs.workspaceManagementTitlesForQA)")
+    try expect(verbs.isWorkspaceManagementSeparatedForQA,
+               "…as their own section, below a separator")
+    try expect(verbs.scopeTitlesForQA.allSatisfy { !verbs.workspaceManagementTitlesForQA.contains($0) },
+               "…and a verb is not offered as a scope — got \(verbs.scopeTitlesForQA)")
+
+    // The guards the header buttons had, on the items that replaced them. Create is
+    // always live; the other two are the host's to allow.
+    verbs.setWorkspaceManagement(canRename: false, canDelete: false)
+    try expect(verbs.isWorkspaceManagementEnabledForQA(.create)
+                && !verbs.isWorkspaceManagementEnabledForQA(.rename)
+                && !verbs.isWorkspaceManagementEnabledForQA(.delete),
+               "with no workspace to act on, only New is live")
+    try expect(!verbs.pickWorkspaceManagementForQA(.delete) && verbsPicked.isEmpty,
+               "…and a disabled verb is unpickable and silent — got \(verbsPicked)")
+    verbs.setWorkspaceManagement(canRename: true, canDelete: false)
+    try expect(verbs.isWorkspaceManagementEnabledForQA(.rename) && !verbs.isWorkspaceManagementEnabledForQA(.delete),
+               "the last workspace can be renamed but not deleted")
+    verbs.setWorkspaceManagement(canRename: true, canDelete: true)
+
+    // PICKING A VERB IS NOT PICKING A SCOPE. The popup is `pullsDown: false`, so it
+    // titles itself with whatever was last selected — without putting the selection
+    // back, the control would sit there reading "Delete Workspace…" as if that were
+    // the filter, and the rows would not match it.
+    try expect(verbs.pickScopeForQA(.project("continuum")), "setup: a scope to come back to")
+    verbs.layoutForQA()
+    let scopeBeforeVerbs = verbs.scope
+    let listBeforeVerbs = verbs.rowIdsForQA
+    for action in AgentInboxView.WorkspaceManagementAction.allCases {
+        try expect(verbs.pickWorkspaceManagementForQA(action), "'\(action.title)' must be pickable")
+        verbs.layoutForQA()
+        try expect(verbs.selectedScopeTitleForQA == scopeBeforeVerbs.title,
+                   "…and must leave the popup on its scope — got '\(verbs.selectedScopeTitleForQA)'")
+        try expect(verbs.scope == scopeBeforeVerbs && verbs.rowIdsForQA == listBeforeVerbs,
+                   "…and must not re-filter the list — \(verbs.rowIdsForQA.count) rows against \(listBeforeVerbs.count)")
+    }
+    try expect(verbsPicked == AgentInboxView.WorkspaceManagementAction.allCases,
+               "each verb reports itself, once — got \(verbsPicked)")
 
     // MARK: A2 · P3.7 · the parked tail collapses and nothing else does
 
