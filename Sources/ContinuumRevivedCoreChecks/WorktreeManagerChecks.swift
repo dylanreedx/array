@@ -61,7 +61,7 @@ func runWorktreeManagerChecks() {
     }
 }
 
-private struct WorktreeCheckError: Error, CustomStringConvertible {
+struct WorktreeCheckError: Error, CustomStringConvertible {
     let description: String
     init(_ description: String) { self.description = description }
 }
@@ -76,13 +76,17 @@ private func worktreeAgentId(_ suffix: String) -> AgentID {
 
 // MARK: - Temp repository
 
+// Not `private`, deliberately: `AgentDiffSourceChecks` (P2C.5) needs the same
+// throwaway repository and the same host-config-independent git invocation. One
+// helper shared beats a second copy that could drift from this one.
+
 /// A real repository with one commit, in a temp directory. `git worktree add`
 /// needs a HEAD, so the commit is not optional.
 ///
 /// `-c` identity and `--no-gpg-sign` keep the check independent of whatever the
 /// host's global git config says; a machine with no `user.email` set would
 /// otherwise fail here for a reason that has nothing to do with the ticket.
-private func makeWorktreeTempRepo() throws -> URL {
+func makeWorktreeTempRepo() throws -> URL {
     let root = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("continuum-worktree-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -98,7 +102,7 @@ private func makeWorktreeTempRepo() throws -> URL {
 }
 
 @discardableResult
-private func runTempGit(_ arguments: [String], in directory: URL) throws -> String {
+func runTempGit(_ arguments: [String], in directory: URL) throws -> String {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
     process.arguments = arguments

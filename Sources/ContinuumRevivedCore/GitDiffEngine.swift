@@ -54,6 +54,60 @@ public struct GitDiffEngine {
         return GitDiffParser.parse(output)
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P2C.5-per-agent-diff.md
+    //
+    // How big is this change? — asked per row, so it must not depend on parsing
+    // the diff BODY. `diff(repositoryURL:source:)` reads every hunk line and is
+    // capped at `maxOutputBytes` (1MB by default), so a large agent diff answers
+    // `outputTooLarge` rather than a number. `--numstat` is three fields per
+    // FILE, so the same change is orders of magnitude smaller on the wire and the
+    // counts survive where the full payload does not.
+    public struct Counts: Equatable, Sendable {
+        public var filesChanged: Int
+        public var insertions: Int
+        public var deletions: Int
+
+        public init(filesChanged: Int, insertions: Int, deletions: Int) {
+            self.filesChanged = filesChanged
+            self.insertions = insertions
+            self.deletions = deletions
+        }
+
+        public static let zero = Counts(filesChanged: 0, insertions: 0, deletions: 0)
+    }
+
+    public func counts(repositoryURL: URL, source: Source) throws -> Counts {
+        guard FileManager.default.fileExists(atPath: repositoryURL.path) else {
+            throw DiffError.invalidRepository(repositoryURL.path)
+        }
+        var arguments = ["diff", "--no-ext-diff", "--find-renames", "--numstat"]
+        switch source {
+        case .workingTreeVsHEAD:
+            arguments.append("HEAD")
+        case let .branchVsBase(branch, base):
+            arguments.append("\(base)...\(branch)")
+        }
+        return Self.parseNumstat(try runGit(arguments: arguments, repositoryURL: repositoryURL))
+    }
+
+    /// Parses `git diff --numstat`: `<insertions>\t<deletions>\t<path>` per file.
+    /// Pure, so the format handling is testable without a repository.
+    ///
+    /// A BINARY file prints `-` for both counts. It is still a changed file, so it
+    /// counts as one — dropping the row would under-report the change, and reading
+    /// the `-` as zero-and-therefore-unchanged would too.
+    public static func parseNumstat(_ text: String) -> Counts {
+        var counts = Counts.zero
+        for line in text.split(separator: "\n") {
+            let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard fields.count >= 3 else { continue }
+            counts.filesChanged += 1
+            counts.insertions += Int(fields[0]) ?? 0
+            counts.deletions += Int(fields[1]) ?? 0
+        }
+        return counts
+    }
+
     private func runGit(arguments: [String], repositoryURL: URL) throws -> String {
         #if os(macOS)
         let process = Process()
