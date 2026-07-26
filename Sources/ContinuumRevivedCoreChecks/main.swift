@@ -9985,4 +9985,8 @@ runAgentDiffSourceChecks()
 // `spawn_agent` call an orchestrator makes, read off the real captured stream.
 runSpawnRequestChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P2D.3-role-registry.md — roles get a home,
+// and a spawn's role decides what it runs with.
+runRoleRegistryChecks()
+
 print("ContinuumRevivedCoreChecks passed")

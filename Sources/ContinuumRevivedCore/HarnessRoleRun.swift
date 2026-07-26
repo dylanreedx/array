@@ -39,6 +39,14 @@ public enum HarnessRoleParser {
             .sorted { $0.id < $1.id }
     }
 
+    /// The `---` block's fields, for callers that need to know whether a key was
+    /// DECLARED — `HarnessRole` cannot say (a missing `name` is indistinguishable
+    /// from one that equals the derived display name). `RoleRegistry` uses it to
+    /// require `name`.
+    public static func frontmatter(path: String) -> [String: String] {
+        parseFrontmatter(path: path)
+    }
+
     private static func parseFrontmatter(path: String) -> [String: String] {
         guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { return [:] }
         var lines = contents.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)

@@ -115,12 +115,32 @@ final class AgentSupervisor {
 
     /// THE production runner, and the only `PiAgentRunner(` construction in the app.
     nonisolated static func piRunner(for record: AgentRecord) -> AgentRunning {
-        PiAgentRunner(config: PiAgentRunner.Config(
+        PiAgentRunner(config: runnerConfig(for: record))
+    }
+
+    /// What the production runner is built with. Split out of `piRunner(for:)` so the
+    /// matrix can read it — the runner itself exposes nothing.
+    ///
+    /// P2D.3: the role's `tools` reaches Pi from HERE, derived from the record's role
+    /// id and its working directory, rather than from a new persisted field: role
+    /// files are tracked in the repository, so an isolated agent's worktree carries
+    /// the same `.pi/agents` its project does, and editing a role file takes effect on
+    /// the next run instead of being frozen at spawn time.
+    nonisolated static func runnerConfig(for record: AgentRecord) -> PiAgentRunner.Config {
+        let cwd = URL(fileURLWithPath: record.cwd, isDirectory: true)
+        // `model`/`thinking` come from the RECORD: the role already decided them at
+        // spawn time (`handleSpawnRequest`), and a role file edited since must not
+        // silently move a running agent's provider settings. Only the tool list is
+        // read live, and via `toolsArguments` rather than `resolve` (cross-review):
+        // resolving would also validate the role's model/reasoning, so a typo in a
+        // field this call ignores would silently drop the agent's `--tools`.
+        return PiAgentRunner.Config(
             model: record.model,
             thinking: record.thinking,
-            cwd: URL(fileURLWithPath: record.cwd, isDirectory: true),
-            sessionId: sessionId(for: record.id)
-        ))
+            cwd: cwd,
+            sessionId: sessionId(for: record.id),
+            extraArgs: RoleRegistry(projectRoot: cwd).toolsArguments(roleId: record.role)
+        )
     }
 
     // MARK: - Restore (P2A.7)
@@ -428,8 +448,15 @@ final class AgentSupervisor {
         case depthCapped(depth: Int, cap: Int)
         case childCapped(children: Int, cap: Int)
         case worktreeFailed
+        /// P2D.3 — the request named a role this project does not define, or defines
+        /// with a model/thinking value Pi would have to guess at.
+        case roleUnresolved
         /// What the parent's transcript says. `worktreeFailed` deliberately does not
-        /// name the git error: `WorktreeManager`'s failures quote paths.
+        /// name the git error: `WorktreeManager`'s failures quote paths. `roleUnresolved`
+        /// deliberately does not name the role id either — not because an id is unsafe
+        /// (it is not; P2D.3's watch-out says ids may be published) but because the
+        /// P2D.2 witness holds the requested role out of every event on the parent's
+        /// stream, and a reason that echoes it would be the one hole in that.
         var reason: String {
             switch self {
             case .unknownParent:
@@ -440,6 +467,8 @@ final class AgentSupervisor {
                 return "this agent already has \(children) child agents (cap \(cap))"
             case .worktreeFailed:
                 return "its isolated checkout could not be created"
+            case .roleUnresolved:
+                return "the requested role is not defined in this project"
             }
         }
     }
@@ -447,9 +476,12 @@ final class AgentSupervisor {
     /// Turns an observed `spawn_agent` call into a real child agent.
     ///
     /// THE TOOL CALL IS THE API (P2D.1): the extension is inert, so this is the only
-    /// place a child is created. The child inherits the parent's model, thinking level
-    /// and project — the request names a task and a role, and inventing a different
-    /// model for a delegated worker is not this call's decision.
+    /// place a child is created. The child inherits the parent's project always, and
+    /// the parent's model and thinking level unless the ROLE it was asked for declares
+    /// its own (P2D.3) — a `code-scout` runs what `.pi/agents/code-scout.md` says it
+    /// runs. A role id this project does not define is REFUSED, not defaulted: the
+    /// orchestrator asked for a specific worker, and quietly starting a generic one
+    /// would answer a question nobody asked.
     ///
     /// `parentAgentID` is set on the child's record, which is what makes P2D.4's
     /// nesting and P2D.5's roll-up possible from the store alone.
@@ -468,13 +500,27 @@ final class AgentSupervisor {
         guard siblings < Self.maxChildrenPerParent else {
             return refuseSpawn(.childCapped(children: siblings, cap: Self.maxChildrenPerParent), for: parentId)
         }
+        // The role resolves against the PROJECT's registry, not the parent's possibly
+        // isolated checkout — and after the caps, so a request that was going to be
+        // refused anyway is refused for the reason that actually stopped it.
+        let projectRoot = Self.repositoryRoot(of: parent)
+        let resolvedRole: RoleRegistry.Resolution
+        do {
+            resolvedRole = try RoleRegistry(projectRoot: projectRoot).resolve(
+                roleId: request.role,
+                inheriting: AgentModelConfig.Resolution(model: parent.model, thinking: parent.thinking)
+            )
+        } catch {
+            warn("AgentSupervisor.handleSpawnRequest: child of \(parentId.rawValue.uuidString) not spawned: \(error)")
+            return refuseSpawn(.roleUnresolved, for: parentId)
+        }
         do {
             return try spawn(
                 role: request.role,
                 prompt: request.prompt,
-                cwd: Self.repositoryRoot(of: parent),
-                model: parent.model,
-                thinking: parent.thinking,
+                cwd: projectRoot,
+                model: resolvedRole.model,
+                thinking: resolvedRole.thinking,
                 projectId: parent.projectId,
                 parentAgentID: parentId,
                 isolated: request.isolated
@@ -2465,8 +2511,8 @@ private final class SpawnedRunnerFactory {
 /// repository is never a `worktree add` target):
 ///   1. Replaying the REAL captured stream through the parent's runner produces
 ///      exactly ONE child, with the role and the prompt the model sent, `parentAgentID`
-///      pointing at the emitting agent, and the parent's model/thinking/project
-///      inherited (the request names a task, not a model).
+///      pointing at the emitting agent, the parent's project inherited, and — P2D.3 —
+///      the model, thinking level and `--tools` its ROLE FILE declares.
 ///   2. The child actually RUNS that prompt — read off the child's own runner, so
 ///      "a child agent was created" is not satisfied by an inert record.
 ///   3. I5 — the child's prompt and role appear in NO event on the parent's stream and
@@ -2475,8 +2521,11 @@ private final class SpawnedRunnerFactory {
 ///      it: `<repo>/.worktrees/<child>`, with git agreeing.
 ///   5. The depth cap holds: a grandchild is allowed, a great-grandchild is refused,
 ///      and the refusal is SAID in the requesting agent's transcript.
-///   6. The per-parent child cap holds, and refusing does not disturb the children
-///      that already exist.
+///   6. The per-parent child cap holds, refusing does not disturb the children that
+///      already exist, and children whose role declares no provider settings still
+///      inherit the parent's (P2D.3).
+///   7. A role this project does not define is REFUSED (P2D.3), said on the requesting
+///      agent's transcript, without echoing the role id or a path.
 ///
 /// Negative tests observed red at exit 1 with the final code are quoted at each
 /// assertion.
@@ -2491,6 +2540,30 @@ private func checkSpawnFromToolCall(
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     let repo = root.appendingPathComponent("repo", isDirectory: true)
     try makeIsolatedSpawnRepo(at: repo)
+    // P2D.3 — the roles this project defines. The captured call asks for `code-scout`,
+    // so it gets a model and a reasoning level DIFFERENT from the parent's: a child
+    // that matched the parent by coincidence would prove nothing about resolution. The
+    // others declare no provider settings, which is where inheritance is asserted.
+    // Committed, because the isolated child works in a worktree and only tracked files
+    // reach one — which is the property `runnerConfig(for:)` relies on.
+    guard let scoutModel = AgentModelConfig.modelOptions.last else {
+        throw fail("AgentModelConfig lists no models, so the role fixture cannot name one")
+    }
+    let scoutThinking = "xhigh"
+    let scoutTools = "read, grep, find"
+    guard scoutModel != config.model, scoutThinking != config.thinking else {
+        throw fail("the role fixture must differ from the inherited settings, or the resolution assertions are vacuous")
+    }
+    try writeSpawnCheckRole(in: repo, id: "code-scout", model: scoutModel, reasoning: scoutThinking, tools: scoutTools)
+    for id in ["grandchild"] + (1..<AgentSupervisor.maxChildrenPerParent).map({ "worker-\($0)" }) {
+        try writeSpawnCheckRole(in: repo, id: id)
+    }
+    try runIsolatedSpawnGit(["add", ".pi"], in: repo)
+    try runIsolatedSpawnGit([
+        "-c", "user.email=qa@continuum.test",
+        "-c", "user.name=Continuum QA",
+        "commit", "-q", "--no-gpg-sign", "-m", "roles",
+    ], in: repo)
     let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support", isDirectory: true))
 
     // The same committed capture P2D.1 produced and `SpawnRequestChecks` parses —
@@ -2556,8 +2629,23 @@ private func checkSpawnFromToolCall(
     guard child.role == capturedRole else {
         throw fail("the child's role is \(String(describing: child.role)), expected the requested \(capturedRole)")
     }
-    guard child.model == config.model, child.thinking == config.thinking, child.projectId == projectId else {
-        throw fail("the child did not inherit the parent's provider settings: model \(child.model), thinking \(child.thinking), project \(String(describing: child.projectId))")
+    // P2D.3 — the ROLE decides the provider settings when it declares them, the parent
+    // decides the project. Red when `handleSpawnRequest` passes `parent.model` /
+    // `parent.thinking` again: `the child did not take its role's provider settings:
+    // model openai-codex/gpt-5.6-sol, thinking medium — expected
+    // openai-codex/gpt-5.3-codex-spark / xhigh from .pi/agents/code-scout.md`.
+    guard child.model == scoutModel, child.thinking == scoutThinking else {
+        throw fail("the child did not take its role's provider settings: model \(child.model), thinking \(child.thinking) — expected \(scoutModel) / \(scoutThinking) from \(RoleRegistry.directoryName)/\(capturedRole).md")
+    }
+    guard child.projectId == projectId else {
+        throw fail("the child did not inherit the parent's project: \(String(describing: child.projectId))")
+    }
+    // …and the role's tool list is what the provider process would actually be
+    // launched with. Red when `runnerConfig(for:)` drops `extraArgs`: `the child's
+    // runner would not pass its role's tools: []`.
+    let childRunnerArgs = AgentSupervisor.runnerConfig(for: child).extraArgs
+    guard childRunnerArgs == ["--tools", scoutTools] else {
+        throw fail("the child's runner would not pass its role's tools: \(childRunnerArgs)")
     }
     guard let storedChild = try store.load(id: childId), storedChild.parentAgentID == parentId else {
         throw fail("the parent link did not reach the store: \(String(describing: try store.load(id: childId)?.parentAgentID))")
@@ -2707,6 +2795,24 @@ private func checkSpawnFromToolCall(
     guard supervisor.children(of: parentId).count == AgentSupervisor.maxChildrenPerParent else {
         throw fail("the parent has \(supervisor.children(of: parentId).count) children, expected \(AgentSupervisor.maxChildrenPerParent)")
     }
+    // P2D.3 — those roles declare no model or reasoning, so the PARENT's settings are
+    // still what they run with (and no `--tools`, because the role names none). Red
+    // when `resolve` defaults a silent model instead of inheriting: `worker-1 did not
+    // inherit the parent's provider settings`.
+    let workers = supervisor.children(of: parentId)
+        .compactMap { supervisor.records[$0] }
+        .filter { ($0.role ?? "").hasPrefix("worker-") }
+    guard workers.count == AgentSupervisor.maxChildrenPerParent - 1 else {
+        throw fail("expected \(AgentSupervisor.maxChildrenPerParent - 1) role-only children, got \(workers.count)")
+    }
+    for worker in workers {
+        guard worker.model == config.model, worker.thinking == config.thinking else {
+            throw fail("\(worker.role ?? "?") did not inherit the parent's provider settings: model \(worker.model), thinking \(worker.thinking)")
+        }
+        guard AgentSupervisor.runnerConfig(for: worker).extraArgs.isEmpty else {
+            throw fail("\(worker.role ?? "?") declares no tools but its runner would pass \(AgentSupervisor.runnerConfig(for: worker).extraArgs)")
+        }
+    }
     let atCap = supervisor.children(of: parentId).count
     // Red when the child-count guard is deleted: `a 5th child was spawned past the
     // per-parent cap of 4`.
@@ -2727,8 +2833,53 @@ private func checkSpawnFromToolCall(
         throw fail("a spawn request from an unknown agent produced a child")
     }
 
+    // MARK: 7 · a role this project does not define is refused (P2D.3)
+
+    // Asked of the CHILD: it is at depth 1 with one child of its own, so neither cap
+    // can be what stops this — only the unknown role can.
+    let childInbox = EventInbox()
+    let childStream = supervisor.events(for: childId)
+    let childTask = Task { @MainActor in for await event in childStream { childInbox.append(event) } }
+    defer { childTask.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { supervisor.subscriberCount(for: childId) == 1 }) else {
+        throw fail("the child's subscriber never registered")
+    }
+    let undefinedRole = "not-a-role-in-this-project"
+    let beforeRoleRefusal = supervisor.records.count
+    // Red when `handleSpawnRequest` skips the registry and inherits the parent's model
+    // for an unknown role: `a spawn naming an undefined role produced a child`.
+    guard supervisor.handleSpawnRequest(
+        SpawnRequest(role: undefinedRole, prompt: "work for a role that does not exist", isolated: false),
+        from: childId
+    ) == nil else {
+        throw fail("a spawn naming an undefined role produced a child")
+    }
+    guard supervisor.records.count == beforeRoleRefusal else {
+        throw fail("the refused role still created a record: \(supervisor.records.count), expected \(beforeRoleRefusal)")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        childInbox.events.contains { event in
+            if case let .itemStarted(_, _, kind, title) = event {
+                return kind == .error && (title ?? "").contains(AgentSupervisor.SpawnRefusal.roleUnresolved.reason)
+            }
+            return false
+        }
+    }) else {
+        throw fail("the unknown role was refused silently — nothing on the requesting agent's transcript: \(childInbox.events)")
+    }
+    // The reason names no role id and no path: the P2D.2 witness above holds the
+    // REQUESTED role out of every event on a parent's stream, and this is the one
+    // place that could put one back.
+    let roleRefusalTitles = childInbox.events.compactMap { event -> String? in
+        if case let .itemStarted(_, _, _, title) = event, (title ?? "").contains("refused") { return title }
+        return nil
+    }
+    guard roleRefusalTitles.allSatisfy({ !$0.contains(undefinedRole) && !$0.contains(root.path) }) else {
+        throw fail("I5: a role refusal echoes the requested role id or a host path: \(roleRefusalTitles)")
+    }
+
     for id in supervisor.children(of: parentId) + [grandchildId] { supervisor.stop(id) }
-    return "the captured spawn_agent call produced 1 child (role \(capturedRole), isolated on \(branch), parent linked in the store) that ran the requested prompt, prompt/role absent from \(parentInbox.events.count) parent events and \(published.count) published activity events while tool.\(SpawnRequest.toolName) crossed, a grandchild got a sibling worktree, depth capped at \(AgentSupervisor.maxSpawnDepth) and children at \(AgentSupervisor.maxChildrenPerParent) with the refusal said in the requesting agent's transcript"
+    return "the captured spawn_agent call produced 1 child (role \(capturedRole) at \(scoutModel)/\(scoutThinking) and --tools from its role file, isolated on \(branch), parent linked in the store) that ran the requested prompt, prompt/role absent from \(parentInbox.events.count) parent events and \(published.count) published activity events while tool.\(SpawnRequest.toolName) crossed, a grandchild got a sibling worktree, depth capped at \(AgentSupervisor.maxSpawnDepth) and children at \(AgentSupervisor.maxChildrenPerParent) with the refusal said in the requesting agent's transcript, \(workers.count) role-only children inherited the parent's settings, and an undefined role was refused without echoing its id"
 }
 
 /// P2C.2 — an isolated spawn works in its OWN checkout.
@@ -3326,6 +3477,28 @@ private func checkArchiveCleanup(
 /// A temp repository with one commit — `git worktree add` needs a HEAD. The `-c`
 /// identity keeps the check independent of the host's global git config, as
 /// `WorktreeManagerChecks` does for the same reason.
+/// Writes one `.pi/agents/<id>.md` role file into a fixture repository (P2D.3).
+///
+/// `name` is always declared, because `RoleRegistry` requires it — a file without one
+/// is deliberately not a role, and that exclusion is asserted directly in
+/// `runRoleRegistryChecks`.
+private func writeSpawnCheckRole(
+    in repo: URL,
+    id: String,
+    model: String? = nil,
+    reasoning: String? = nil,
+    tools: String? = nil
+) throws {
+    let directory = repo.appendingPathComponent(RoleRegistry.directoryName, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    var frontmatter = ["name: \(id)"]
+    if let model { frontmatter.append("model: \(model)") }
+    if let reasoning { frontmatter.append("reasoning: \(reasoning)") }
+    if let tools { frontmatter.append("tools: \(tools)") }
+    let body = "---\n\(frontmatter.joined(separator: "\n"))\n---\n\nYou are the \(id).\n"
+    try body.write(to: directory.appendingPathComponent("\(id).md"), atomically: true, encoding: .utf8)
+}
+
 private func makeIsolatedSpawnRepo(at root: URL) throws {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     try runIsolatedSpawnGit(["init", "-q", "-b", "main"], in: root)

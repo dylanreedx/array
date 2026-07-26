@@ -5539,10 +5539,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func harnessRolesForActiveProject() -> [HarnessRole] {
         guard let rootPath = workspaceRuntime?.activeController?.project.rootPath else { return [] }
-        let agentsDirectory = URL(fileURLWithPath: rootPath, isDirectory: true).appendingPathComponent(".pi/agents", isDirectory: true)
-        let paths = ((try? FileManager.default.contentsOfDirectory(at: agentsDirectory, includingPropertiesForKeys: nil)) ?? [])
-            .map(\.path)
-        return HarnessRoleParser.parse(roleFilePaths: paths)
+        // P2D.3: discovery lives in `RoleRegistry` now, so the palette and a spawn's
+        // role resolution read the same list from the same code.
+        return RoleRegistry(projectRoot: URL(fileURLWithPath: rootPath, isDirectory: true)).roles()
     }
 
     private func makeProfilePalette() -> LaunchProfilePalette {
