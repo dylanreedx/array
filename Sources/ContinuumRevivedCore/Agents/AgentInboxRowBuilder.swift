@@ -79,7 +79,10 @@ public enum AgentInboxRowBuilder {
             branch: branch(for: context),
             isIsolated: context?.isIsolated ?? false,
             elapsed: state == .working ? elapsed(in: boardRow, now: now) : nil,
-            // P2D.4 nests children under their parent. A flat list is depth 0.
+            // P2D.4 nests children under their parent, and assigns the depth in
+            // `InboxSort` — depth is a property of the row's place in a LIST and
+            // this fold sees one agent at a time. `parentId` below is the fact it
+            // CAN carry; 0 here is the value that sort overwrites.
             depth: 0,
             variant: RowVariant.forLifecycle(lifecycle),
             // P3.4's frozen order. `distantPast` when the caller passed no context

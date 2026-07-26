@@ -20239,11 +20239,23 @@ extension AppDelegate {
     let nextLive = live.rows.map { $0.id == tail.id ? settledTail : $0 }
     try expect(InboxSort.sortForInbox(rows: nextLive).map(\.id) == live.rowIdsForQA,
                "this witness needs the settled row to stay put, or `apply` takes the full-reload path and proves nothing")
+    // P2D.4 MADE THIS TWO ROWS, NOT ONE, and the second is named rather than
+    // absorbed into a looser bound: the tail of this fixture is the orchestrator's
+    // CHILD, so settling it promotes it out of the group and its parent's disclosure
+    // triangle has to go with it. Both rows are asserted below — a rebuild count on
+    // its own would have been the place a stale triangle hid.
+    let liveParentIndex = live.rowIdsForQA.firstIndex(of: tail.parentId!)!
+    try expect(live.disclosureGlyphsForQA[liveParentIndex] == "▾",
+               "the tail's parent must have a triangle before the settle, or the assertion below is vacuous — got '\(live.disclosureGlyphsForQA[liveParentIndex])'")
     let buildsBeforeSettle = live.cellBuildCountForQA
     live.apply(rows: nextLive, changed: AgentsBoardChangeSet(added: [], updated: [tail.id], removed: []))
     live.layoutForQA()
-    try expect(live.cellBuildCountForQA - buildsBeforeSettle == 1,
-               "one agent settled, so exactly 1 cell may be rebuilt — \(live.cellBuildCountForQA - buildsBeforeSettle) were")
+    try expect(live.cellBuildCountForQA - buildsBeforeSettle == 2,
+               "one agent settled out of a group, so exactly 2 cells may be rebuilt — it and its parent — \(live.cellBuildCountForQA - buildsBeforeSettle) were")
+    try expect(live.disclosureGlyphsForQA[liveParentIndex].isEmpty,
+               "…and the second is the parent losing the triangle its only child took with it — got '\(live.disclosureGlyphsForQA[liveParentIndex])'")
+    try expect(live.rows[live.rows.count - 1].depth == 0 && live.indentsForQA[live.rows.count - 1] == 0,
+               "…with the settled child promoted to a root rather than left indented under a group it is no longer in — depth \(live.rows[live.rows.count - 1].depth), indent \(live.indentsForQA[live.rows.count - 1])pt")
     let settledIdx = live.rows.count - 1
     try expect(live.rowVariantsForQA[settledIdx] == .slim,
                "a settled row collapses — got \(live.rowVariantsForQA[settledIdx].rawValue)")
@@ -20251,6 +20263,206 @@ extension AppDelegate {
                "…and the TABLE must take the new height, not just the new view — laid out at \(live.rowHeightsForQA[settledIdx])pt, wanted \(AgentInboxView.slimRowHeight)pt")
     try expect(live.relativeTimesForQA[settledIdx] == "5m ago",
                "…and it says when it ended — got '\(live.relativeTimesForQA[settledIdx])'")
+
+    // MARK: A4 · P2D.4 · delegated work reads as a tree
+    //
+    // SIX NEGATIVE TESTS OBSERVED RED at exit 1 with the final code, quoted
+    // verbatim — three on the pure suite (`ContinuumRevivedAgentUIChecks`), three
+    // here:
+    //
+    //   1. `placed.depth = min(depth, AgentInboxRow.maxDepth)` -> `= depth` in
+    //      `InboxSort.nest` → pure: `depth counts to the cap and stops, got
+    //      [0, 1, 2, 3]`; here: `depth counts to the cap and stops — got
+    //      [0, 1, 2, 3]`
+    //   2. `emit(root, depth: 0)` -> `emit(root, depth: root.depth)`, i.e. an orphan
+    //      keeping the indent it arrived with → pure: `a child whose parent left the
+    //      list is a root at depth 0, got [(…A1, 1), (…D4, 0)]`
+    //   3. `visibleRows` dropping its `hidden.contains(parentId)` clause, i.e.
+    //      folding only the row directly under a parent → pure: `folding a parent
+    //      hides its children AND their children, got […E5, …D4, …B2, …C3]`; here:
+    //      `folding the top of a chain hides every row below it — got [… "worker
+    //      01", "worker 02"]`
+    //   4. `parentsWithChildren` measured on the COLLAPSED list instead of the
+    //      sorted one → `a folded parent keeps the triangle you unfold it with,
+    //      pointing the other way — got ''` (the control vanishes the moment you
+    //      use it, and the group can never be unfolded)
+    //   5. `indent:` forced to 0 at the cell call site → `the child's card is inset
+    //      one level — 0.0pt, wanted 16.0pt`
+    //   6. `disclosureClicked()` no longer calling `onToggleDisclosure` → `folding a
+    //      group hides its children and moves nothing else — got [… "claude · child
+    //      worker"]`
+    //
+    // AND THE TWO THE CROSS-REVIEW FOUND, both fixed here and both witnessed:
+    //
+    //   7. `visibleRows` keying on `parentId` alone, without the `depth > 0` test —
+    //      i.e. folding a row that is on screen but is not this row's parent HERE →
+    //      pure: `a fold on a parent that is not in the list must not hide the
+    //      orphan`. The live case is the settled parent in section 8 of the pure
+    //      suite: its promoted child would have vanished when history was folded.
+    //   8. `apply(rows:changed:)` without the `disclosureMoved` term → `one agent
+    //      settled out of a group, so exactly 2 cells may be rebuilt — it and its
+    //      parent — 1 were`, i.e. a parent left holding a triangle that folds
+    //      nothing and cannot be dismissed. The disclosure is view state, so row
+    //      equality cannot see it move.
+
+    // THE CAP IS ONE NUMBER IN TWO PLACES, and this is what keeps them the same
+    // one: `AgentInboxRow.maxDepth` cannot import the App layer, so raising the
+    // spawn cap without widening the indent — which would draw a great-grandchild
+    // as though it were a grandchild — is a red matrix rather than a rendering
+    // nobody notices.
+    try expect(AgentInboxRow.maxDepth == AgentSupervisor.maxSpawnDepth,
+               "the inbox's indent cap and the spawn cap are the same number — inbox \(AgentInboxRow.maxDepth), spawn \(AgentSupervisor.maxSpawnDepth)")
+
+    let nested = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    nested.clock = { LabFixtures.inboxNow }
+    nested.reload(rows: fixture)
+    let nestedWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    nestedWindow.contentView = nested
+    nested.layoutForQA()
+
+    // Vacuity first: this fixture has to actually contain a spawned child, or every
+    // assertion below is about a flat list.
+    let parentRow = fixture.first { row in fixture.contains { $0.parentId == row.id } }!
+    let childRow = fixture.first { $0.parentId == parentRow.id }!
+    let parentIndex = nested.rowIdsForQA.firstIndex(of: parentRow.id)!
+    let childIndex = nested.rowIdsForQA.firstIndex(of: childRow.id)!
+    try expect(childIndex == parentIndex + 1,
+               "a child is drawn immediately under its parent — parent at \(parentIndex), child at \(childIndex)")
+    try expect(nested.rows[childIndex].depth == 1 && nested.rows[parentIndex].depth == 0,
+               "the parent is a root and the child is one level in — got \(nested.rows[parentIndex].depth)/\(nested.rows[childIndex].depth)")
+    // THE INDENT AS DRAWN, off the laid-out cell rather than recomputed from `depth`.
+    try expect(abs(nested.indentsForQA[childIndex] - AgentInboxView.indentPerLevel) < 0.5,
+               "the child's card is inset one level — \(nested.indentsForQA[childIndex])pt, wanted \(AgentInboxView.indentPerLevel)pt")
+    try expect(nested.indentsForQA[parentIndex] == 0,
+               "…and its parent's is not — \(nested.indentsForQA[parentIndex])pt")
+    try expect(Set(nested.rowIdsForQA.indices.filter { nested.indentsForQA[$0] > 0 }) == [childIndex],
+               "exactly the children are indented — got \(nested.indentsForQA)")
+
+    // THE DISCLOSURE IS ON THE PARENT AND NOWHERE ELSE: a row with no children draws
+    // no control at all rather than a dead one.
+    try expect(nested.disclosureGlyphsForQA[parentIndex] == "▾",
+               "an expanded parent points its triangle down — got '\(nested.disclosureGlyphsForQA[parentIndex])'")
+    try expect(nested.disclosureGlyphsForQA.enumerated().allSatisfy { $0.offset == parentIndex || $0.element.isEmpty },
+               "only a row with children gets a triangle — got \(nested.disclosureGlyphsForQA)")
+    try expect(!nested.clickDisclosureForQA(id: childRow.id),
+               "a childless row has no control to click")
+
+    // FOLDING, through the button's own target/action.
+    let expandedIds = nested.rowIdsForQA
+    try expect(nested.selectRowForQA(id: childRow.id), "the child must be selectable before the fold")
+    nested.layoutForQA()
+    try expect(nested.clickDisclosureForQA(id: parentRow.id), "the parent's triangle must be clickable")
+    nested.layoutForQA()
+    try expect(nested.rowIdsForQA == expandedIds.filter { $0 != childRow.id },
+               "folding a group hides its children and moves nothing else — got \(nested.titlesForQA)")
+    try expect(nested.disclosureGlyphsForQA[parentIndex] == "▸",
+               "a folded parent keeps the triangle you unfold it with, pointing the other way — got '\(nested.disclosureGlyphsForQA[parentIndex])'")
+    try expect(nested.selectedRowCountForQA == 0,
+               "…and the selection goes with the rows that went — \(nested.selectedRowCountForQA) rows still selected")
+    // The fold is VIEW state: nothing was taken out of the model, so an unfold
+    // restores the list exactly rather than waiting for the next push.
+    try expect(nested.collapsedParentsForQA == [parentRow.id],
+               "the fold is remembered as view state — got \(nested.collapsedParentsForQA)")
+    try expect(nested.clickDisclosureForQA(id: parentRow.id), "the parent's triangle must unfold it again")
+    nested.layoutForQA()
+    try expect(nested.rowIdsForQA == expandedIds,
+               "unfolding restores the group in place — got \(nested.titlesForQA)")
+
+    // A PUSH DOES NOT UNFOLD. An event about the hidden child arrives while its
+    // group is folded and the child stays hidden — the fold is yours until you undo
+    // it, which is the same rule as the frozen order (P3.4).
+    try expect(nested.clickDisclosureForQA(id: parentRow.id), "fold it again")
+    nested.layoutForQA()
+    let busyChild = AgentInboxRow(
+        id: childRow.id, title: childRow.title, projectName: childRow.projectName,
+        workspaceName: childRow.workspaceName, state: .approval, attention: .unread,
+        lifecycle: childRow.lifecycle, model: childRow.model, role: childRow.role,
+        branch: childRow.branch, isIsolated: childRow.isIsolated, elapsed: nil,
+        depth: childRow.depth, variant: childRow.variant, createdAt: childRow.createdAt,
+        parentId: childRow.parentId)
+    nested.apply(rows: fixture.map { $0.id == childRow.id ? busyChild : $0 },
+                 changed: AgentsBoardChangeSet(added: [], updated: [childRow.id], removed: []))
+    nested.layoutForQA()
+    try expect(!nested.rowIdsForQA.contains(childRow.id),
+               "a folded child stays folded when its agent reports in — got \(nested.titlesForQA)")
+    try expect(nested.clickDisclosureForQA(id: parentRow.id), "unfold for the next section")
+    nested.layoutForQA()
+    try expect(nested.stateLabelsForQA[childIndex] == InboxState.approval.label,
+               "…and the event was not lost while it was hidden — got '\(nested.stateLabelsForQA[childIndex])'")
+
+    // A CHAIN, AND THE CAP. A grandchild indents twice; a great-grandchild — which
+    // `AgentSupervisor` refuses to spawn, so it can only arrive off disk — stops at
+    // the cap instead of marching off the edge of a 320pt sidebar.
+    func descendant(_ suffix: String, of parent: AgentInboxRow, minutesAfter: Double) -> AgentInboxRow {
+        AgentInboxRow(
+            id: UUID(uuidString: "00000000-0000-0000-0000-0000000004\(suffix)")!,
+            title: "worker \(suffix)", projectName: parent.projectName,
+            workspaceName: parent.workspaceName, state: .working, model: parent.model,
+            role: "builder", createdAt: parent.createdAt.addingTimeInterval(minutesAfter * 60),
+            parentId: parent.id)
+    }
+    let grandchild = descendant("01", of: childRow, minutesAfter: 1)
+    let greatGrandchild = descendant("02", of: grandchild, minutesAfter: 2)
+    let deep = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    deep.clock = { LabFixtures.inboxNow }
+    deep.reload(rows: fixture + [grandchild, greatGrandchild])
+    let deepWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    deepWindow.contentView = deep
+    deep.layoutForQA()
+    let chainIds = [parentRow.id, childRow.id, grandchild.id, greatGrandchild.id]
+    let chainIndexes = chainIds.map { id in deep.rowIdsForQA.firstIndex(of: id)! }
+    try expect(chainIndexes == Array(chainIndexes[0]...chainIndexes[0] + 3),
+               "the chain is four consecutive rows — got \(chainIndexes)")
+    try expect(chainIndexes.map { deep.rows[$0].depth } == [0, 1, 2, AgentInboxRow.maxDepth],
+               "depth counts to the cap and stops — got \(chainIndexes.map { deep.rows[$0].depth })")
+    try expect(chainIndexes.map { deep.indentsForQA[$0] }
+                == [0, AgentInboxView.indentPerLevel, 2 * AgentInboxView.indentPerLevel, 2 * AgentInboxView.indentPerLevel],
+               "…and so does the drawn indent — got \(chainIndexes.map { deep.indentsForQA[$0] })")
+    // …and the whole subtree folds with the top of the chain, not just the row
+    // directly under it.
+    try expect(deep.clickDisclosureForQA(id: parentRow.id), "the top of the chain must be foldable")
+    deep.layoutForQA()
+    try expect(deep.rowIdsForQA.filter(chainIds.contains) == [parentRow.id],
+               "folding the top of a chain hides every row below it — got \(deep.titlesForQA)")
+    // The row that is still on screen has to be a card at full width, not a stump:
+    // the indent is a leading inset, so a fold that left one behind would show a
+    // gap where its parent was.
+    try expect(deep.indentsForQA[deep.rowIdsForQA.firstIndex(of: parentRow.id)!] == 0,
+               "the folded parent is still a root at the leading edge")
+
+    // A TRIANGLE THAT OUTLIVES ITS CHILDREN (from cross-review). The disclosure is
+    // VIEW state, so it is not part of `AgentInboxRow` and the incremental path's
+    // value comparison cannot see it move: with the group folded, the child leaving
+    // the model changes no VISIBLE row at all — same ids, same values — and the
+    // parent would keep a triangle that now folds nothing and cannot be got rid of.
+    let folding = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    folding.clock = { LabFixtures.inboxNow }
+    folding.reload(rows: fixture)
+    let foldingWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    foldingWindow.contentView = folding
+    folding.layoutForQA()
+    try expect(folding.clickDisclosureForQA(id: parentRow.id), "fold the group")
+    folding.layoutForQA()
+    let foldedIds = folding.rowIdsForQA
+    let foldedParentIndex = foldedIds.firstIndex(of: parentRow.id)!
+    folding.apply(rows: fixture.filter { $0.id != childRow.id },
+                  changed: AgentsBoardChangeSet(added: [], updated: [], removed: [childRow.id]))
+    folding.layoutForQA()
+    try expect(folding.rowIdsForQA == foldedIds,
+               "the hidden child leaving must not move a visible row, or this takes the full-reload path and proves nothing — got \(folding.titlesForQA)")
+    try expect(folding.disclosureGlyphsForQA[foldedParentIndex].isEmpty,
+               "a parent with no children left draws no triangle, even folded — got '\(folding.disclosureGlyphsForQA[foldedParentIndex])'")
+    folding.apply(rows: fixture,
+                  changed: AgentsBoardChangeSet(added: [childRow.id], updated: [], removed: []))
+    folding.layoutForQA()
+    try expect(folding.rowIdsForQA == foldedIds && folding.disclosureGlyphsForQA[foldedParentIndex] == "▸",
+               "…and a child arriving under a folded parent puts the triangle back — got '\(folding.disclosureGlyphsForQA[foldedParentIndex])'")
 
     let empty = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 200))
     empty.reload(rows: [])
@@ -20427,6 +20639,6 @@ extension AppDelegate {
                "one agent's event must not rebuild the whole list — \(rebuiltByEvent) cells were rebuilt")
 
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown")
     }
 }

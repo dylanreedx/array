@@ -28,6 +28,16 @@ import Foundation
 //      always a permutation of the input whatever order it arrived in.
 //   6. A PARENT CYCLE TERMINATES — corrupted `parentId` pairs do not hang or drop
 //      rows.
+//
+// Ticket: docs/38-tickets/90-agent-ux/P2D.4-parent-child-nesting.md
+//   7. DEPTH IS ASSIGNED BY THE SORT — a root is 0, a child is one deeper than its
+//      parent, an ORPHAN is promoted back to 0 whatever depth it arrived carrying,
+//      and the chain stops indenting at `AgentInboxRow.maxDepth`. Nesting and the
+//      frozen order are checked TOGETHER (the packet's watch-out): a child's
+//      activity moves neither its parent nor itself.
+//   8. A FOLDED GROUP HIDES ITS WHOLE SUBTREE — `visibleRows` drops descendants at
+//      any depth, leaves the other groups alone, and is a no-op for an id that is
+//      nobody's parent here.
 
 func runInboxSortChecks() {
     runInboxFrozenUnderActivityCheck()
@@ -36,7 +46,9 @@ func runInboxSortChecks() {
     runInboxHistoryOrderCheck()
     runInboxTiebreakAndPermutationCheck()
     runInboxCycleCheck()
-    print("InboxSort checks: frozen under activity (200 trials, status-sorted witness fails), parent/child nesting, lifecycle relocation, history by end time, tie determinism and cycle termination passed")
+    runInboxDepthCheck()
+    runInboxCollapseCheck()
+    print("InboxSort checks: frozen under activity (200 trials, status-sorted witness fails), parent/child nesting, lifecycle relocation, history by end time, tie determinism, cycle termination, depth assignment (orphan promoted, chain capped at \(AgentInboxRow.maxDepth)) and subtree collapse passed")
 }
 
 // MARK: - Fixture
@@ -67,6 +79,7 @@ private func sortRow(
     attention: InboxAttention = .none,
     lifecycle: InboxLifecycle = .active,
     elapsed: TimeInterval? = nil,
+    depth: Int = 0,
     parentId: UUID? = nil
 ) -> AgentInboxRow {
     AgentInboxRow(
@@ -76,6 +89,7 @@ private func sortRow(
         attention: attention,
         lifecycle: lifecycle,
         elapsed: elapsed,
+        depth: depth,
         variant: RowVariant.forLifecycle(lifecycle),
         createdAt: sortEpoch.addingTimeInterval(spawnedAfter),
         parentId: parentId
@@ -410,4 +424,138 @@ private func runInboxCycleCheck() {
     let selfParent = [sortRow(rowOne, spawnedAfter: 400, parentId: rowOne)]
     expect(InboxSort.sortForInbox(rows: selfParent).map(\.id) == [rowOne],
            "a self-parenting row is a root")
+}
+
+// MARK: - 7 · depth is assigned by the sort (P2D.4)
+
+private func runInboxDepthCheck() {
+    // THE PACKET'S FIRST CASE: an orchestrator and three workers are four rows, the
+    // parent first and the children after it, and the children are the only indented
+    // ones. Spawn times are hostile again — the children are all OLDER than the
+    // parent, so a flat sort would put the parent last.
+    let orchestrated = [
+        sortRow(rowThree, spawnedAfter: 200, parentId: rowOne),
+        sortRow(rowFive, spawnedAfter: 0),
+        sortRow(rowOne, spawnedAfter: 400),
+        sortRow(rowFour, spawnedAfter: 100, parentId: rowOne),
+        sortRow(rowTwo, spawnedAfter: 300, parentId: rowOne),
+    ]
+    let group = InboxSort.sortForInbox(rows: orchestrated)
+    expect(group.map(\.id) == [rowOne, rowTwo, rowThree, rowFour, rowFive],
+           "a parent and its three children are one group in creation order, got \(group.map(\.id))")
+    expect(group.map(\.depth) == [0, 1, 1, 1, 0],
+           "the three children are drawn one level in and nothing else is, got \(group.map(\.depth))")
+
+    // FROZEN AND NESTED AT ONCE (the packet's watch-out): a child working, failing
+    // and raising a hand moves neither itself nor its parent, and the depths hold.
+    for state in InboxState.allCases {
+        let churned = orchestrated.map { row -> AgentInboxRow in
+            guard row.id == rowThree else { return row }
+            return withActivity(row, state: state, attention: .unread, elapsed: 42)
+        }
+        let after = InboxSort.sortForInbox(rows: churned)
+        expect(after.map(\.id) == group.map(\.id),
+               "a child going \(state.rawValue) must not move a row, got \(after.map(\.id))")
+        expect(after.map(\.depth) == group.map(\.depth),
+               "…and must not change a depth, got \(after.map(\.depth))")
+    }
+
+    // AN ORPHAN PROMOTES. It arrives carrying depth 1 — which is what it was drawn
+    // at while its parent was still in the list — and must come back flat rather
+    // than indented under whatever now precedes it.
+    let orphaned = [
+        sortRow(rowThree, spawnedAfter: 200),
+        sortRow(rowTwo, spawnedAfter: 300, depth: 1, parentId: rowOne),
+    ]
+    let promoted = InboxSort.sortForInbox(rows: orphaned)
+    expect(promoted.map(\.id) == [rowTwo, rowThree] && promoted.map(\.depth) == [0, 0],
+           "a child whose parent left the list is a root at depth 0, got \(promoted.map { ($0.id, $0.depth) })")
+    // Including when it is the only row there is — the case a `count > 1` shortcut
+    // would return untouched.
+    expect(InboxSort.sortForInbox(rows: [orphaned[1]]).map(\.depth) == [0],
+           "a lone orphan is flat too")
+    // …and a settled parent is a different BLOCK, which orphans its live child by
+    // the same rule. Section 2 pins the order; this pins the depth.
+    let split = [
+        sortRow(rowOne, spawnedAfter: 400, lifecycle: .settled(at: sortEpoch)),
+        sortRow(rowTwo, spawnedAfter: 300, depth: 1, parentId: rowOne),
+    ]
+    expect(InboxSort.sortForInbox(rows: split).map(\.depth) == [0, 0],
+           "a live child of a settled parent is not indented under history, got \(InboxSort.sortForInbox(rows: split).map(\.depth))")
+
+    // THE CAP (P2D.2's `AgentSupervisor.maxSpawnDepth`, pinned to it in
+    // `runAgentInboxChecks`): a grandchild indents, and a great-grandchild — which
+    // the spawn cap refuses, so it can only come off disk — stops indenting instead
+    // of marching off the edge of a 320pt sidebar.
+    let chain = [
+        sortRow(rowOne, spawnedAfter: 400),
+        sortRow(rowTwo, spawnedAfter: 300, parentId: rowOne),
+        sortRow(rowThree, spawnedAfter: 200, parentId: rowTwo),
+        sortRow(rowFour, spawnedAfter: 100, parentId: rowThree),
+    ]
+    let nested = InboxSort.sortForInbox(rows: chain)
+    expect(nested.map(\.id) == [rowOne, rowTwo, rowThree, rowFour],
+           "a chain stays in chain order, got \(nested.map(\.id))")
+    expect(nested.map(\.depth) == [0, 1, 2, AgentInboxRow.maxDepth],
+           "depth counts to the cap and stops, got \(nested.map(\.depth))")
+    expect(AgentInboxRow.maxDepth == 2,
+           "the cap is a root, its worker and that worker's worker — got \(AgentInboxRow.maxDepth)")
+}
+
+// MARK: - 8 · a folded group hides its whole subtree (P2D.4)
+
+private func runInboxCollapseCheck() {
+    // Two groups: rowOne over rowTwo over rowThree (a chain), and rowFour over
+    // rowFive. Folding one must not touch the other.
+    let rows = InboxSort.sortForInbox(rows: [
+        sortRow(rowOne, spawnedAfter: 400),
+        sortRow(rowTwo, spawnedAfter: 300, parentId: rowOne),
+        sortRow(rowThree, spawnedAfter: 200, parentId: rowTwo),
+        sortRow(rowFour, spawnedAfter: 100),
+        sortRow(rowFive, spawnedAfter: 0, parentId: rowFour),
+    ])
+    expect(rows.map(\.id) == [rowOne, rowTwo, rowThree, rowFour, rowFive],
+           "the collapse fixture must nest as expected first, got \(rows.map(\.id))")
+    expect(InboxSort.parentIds(in: rows) == [rowOne, rowTwo, rowFour],
+           "a disclosure belongs on exactly the rows with a child here, got \(InboxSort.parentIds(in: rows))")
+
+    expect(InboxSort.visibleRows(rows, collapsed: []).map(\.id) == rows.map(\.id),
+           "nothing folded shows everything")
+    // A GRANDCHILD GOES WITH ITS GRANDPARENT: folding the top of a chain hides the
+    // whole subtree, not just the row directly under it.
+    expect(InboxSort.visibleRows(rows, collapsed: [rowOne]).map(\.id) == [rowOne, rowFour, rowFive],
+           "folding a parent hides its children AND their children, got \(InboxSort.visibleRows(rows, collapsed: [rowOne]).map(\.id))")
+    expect(InboxSort.visibleRows(rows, collapsed: [rowTwo]).map(\.id) == [rowOne, rowTwo, rowFour, rowFive],
+           "folding the middle of a chain hides only below it, got \(InboxSort.visibleRows(rows, collapsed: [rowTwo]).map(\.id))")
+    expect(InboxSort.visibleRows(rows, collapsed: [rowFour]).map(\.id) == [rowOne, rowTwo, rowThree, rowFour],
+           "folding one group leaves the other alone, got \(InboxSort.visibleRows(rows, collapsed: [rowFour]).map(\.id))")
+    expect(InboxSort.visibleRows(rows, collapsed: [rowOne, rowFour]).map(\.id) == [rowOne, rowFour],
+           "folding both leaves the two roots, got \(InboxSort.visibleRows(rows, collapsed: [rowOne, rowFour]).map(\.id))")
+    // A PARENT IS NEVER HIDDEN BY ITS OWN FOLD, and folding a leaf or an id that is
+    // not here at all does nothing — the set is remembered, not pruned, so a scope
+    // change and back restores the fold you left.
+    expect(InboxSort.visibleRows(rows, collapsed: [rowThree]).map(\.id) == rows.map(\.id),
+           "folding a childless row hides nothing, got \(InboxSort.visibleRows(rows, collapsed: [rowThree]).map(\.id))")
+    expect(InboxSort.visibleRows(rows, collapsed: [sortId("FF")]).map(\.id) == rows.map(\.id),
+           "an id no row here carries hides nothing")
+    // An orphan is nobody's child on screen, so a stale fold on its absent parent
+    // must not make it disappear.
+    let orphan = InboxSort.sortForInbox(rows: [sortRow(rowTwo, spawnedAfter: 300, parentId: rowOne)])
+    expect(InboxSort.visibleRows(orphan, collapsed: [rowOne]).map(\.id) == [rowTwo],
+           "a fold on a parent that is not in the list must not hide the orphan")
+
+    // THE PARENT IS HERE AND IS STILL NOT THIS ROW'S PARENT (from cross-review): a
+    // settled parent sits in history, foldable, while its live child was promoted to
+    // a root in the live block. Folding history must not delete an active agent.
+    let crossBlock = InboxSort.sortForInbox(rows: [
+        sortRow(rowOne, spawnedAfter: 400, lifecycle: .settled(at: sortEpoch)),
+        sortRow(rowTwo, spawnedAfter: 300, depth: 1, parentId: rowOne),
+        sortRow(rowThree, spawnedAfter: 200),
+    ])
+    expect(crossBlock.map(\.id) == [rowTwo, rowThree, rowOne] && crossBlock.map(\.depth) == [0, 0, 0],
+           "the cross-block fixture must promote the child first, got \(crossBlock.map { ($0.id, $0.depth) })")
+    expect(InboxSort.parentIds(in: crossBlock).isEmpty,
+           "a settled parent whose child was promoted has no children HERE, so it draws no triangle")
+    expect(InboxSort.visibleRows(crossBlock, collapsed: [rowOne]).map(\.id) == crossBlock.map(\.id),
+           "folding a settled parent must not hide the live child that was promoted out of its group, got \(InboxSort.visibleRows(crossBlock, collapsed: [rowOne]).map(\.id))")
 }

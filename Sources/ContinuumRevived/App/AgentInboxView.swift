@@ -27,11 +27,21 @@ import Foundation
 //
 // WHY `NSTableView` AND NOT `NSOutlineView`. The sidebar tree is an outline
 // because workspace ▸ zone ▸ tile is a real hierarchy you expand and collapse.
-// The inbox is FLAT: `depth` is a drawing indent for a spawned child (P2D.4),
-// not a disclosure — a child row is never hidden behind its parent, because a
-// child asking for approval is exactly the row you must not have to expand to
-// find. `InboxSort` already places a child immediately after its parent, so the
-// order an outline would give is the order the array already has.
+// The inbox is a FLAT ARRAY that draws a hierarchy: `InboxSort` already places a
+// child immediately after its parent and stamps its depth, so the order and the
+// indent an outline would compute are things the array already carries — an
+// `NSOutlineView` would want to own that tree, and it owns row height and
+// selection differently too (P3.7's two variants and P3.5's emphasis are wired
+// against a table).
+//
+// P2D.4 ADDS THE DISCLOSURE, and it is the one thing this file holds that is not
+// in the row: which parents you have folded. That is local UI state — not
+// persisted and never synced, because which groups you collapsed on this Mac is
+// not a fact about the agents (the packet says so in as many words). Folding a
+// group DOES hide a child that is asking for approval; the earlier note here
+// claimed a child is never hidden, and this ticket overrules it — a fold is
+// something you did, and P3.6's own frozen-order argument applies: the list moves
+// when you act. Nothing folds a group on your behalf.
 
 @MainActor
 final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, TokenThemed {
@@ -118,6 +128,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     private var allRows: [AgentInboxRow] = []
     /// The entries in the popup, parallel to the menu items' tags.
     private var scopeEntries: [InboxScope] = []
+    // Ticket: docs/38-tickets/90-agent-ux/P2D.4-parent-child-nesting.md
+    /// The parents you have folded. VIEW-LOCAL: no defaults key, nothing in the
+    /// change set, nothing on the row — collapsing a group is a thing you did to
+    /// this list on this Mac, and a synced fold would hide an agent on a device
+    /// you were not looking at.
+    ///
+    /// Ids are kept even when their agent leaves the list (a scope change, a settle)
+    /// so that coming back re-collapses the group the way you left it.
+    private var collapsedParents: Set<UUID> = []
+    /// The rows that HAVE a child on screen, from the sorted list before it was
+    /// collapsed — a folded parent must keep the triangle you fold it back with.
+    private var parentsWithChildren: Set<UUID> = []
     /// The row the mouse is over, or -1. Hover is one of P3.5's three
     /// interaction facts and it is tracked HERE, on the table, rather than per
     /// cell: cell views are recycled, so a tracking area installed on one would
@@ -339,15 +361,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // that first mentions it.
         allRows = newRows
         updateScopeMenu()
+        // P2D.4: the disclosure is VIEW state, so it is not in `AgentInboxRow` and
+        // the value comparison below cannot see it move. A first child arriving under
+        // a folded parent — or the last one leaving — changes nothing visible about
+        // the parent's row and everything about its triangle, so the rows whose
+        // control appeared or vanished are stale too. (Found in cross-review.)
+        let previousParents = parentsWithChildren
         let sorted = visibleRows(from: newRows)
         guard sorted.map(\.id) == rows.map(\.id) else {
             render(sorted)
             return
         }
+        let disclosureMoved = previousParents.symmetricDifference(parentsWithChildren)
         let previous = rows
         rows = sorted
         let indexes = IndexSet(rows.indices.filter {
             changed.touched.contains(rows[$0].id) || rows[$0] != previous[$0]
+                || disclosureMoved.contains(rows[$0].id)
         })
         guard !indexes.isEmpty else { return }
         // P3.7: a lifecycle move changes the row's VARIANT, and a variant is a
@@ -364,8 +394,42 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// sort: the two commute (filtering a permutation and permuting a subset give the
     /// same list), and this way `InboxSort` only ever nests the children it can see.
     private func visibleRows(from newRows: [AgentInboxRow]) -> [AgentInboxRow] {
-        InboxSort.sortForInbox(
+        let sorted = InboxSort.sortForInbox(
             rows: InboxScope.filter(rows: newRows, scope: scope, openAgentId: openAgentId))
+        // P2D.4: measured on the SORTED list, before the fold — a collapsed parent
+        // has no children on screen, and a triangle derived from what is on screen
+        // would vanish the moment you used it.
+        parentsWithChildren = InboxSort.parentIds(in: sorted)
+        return InboxSort.visibleRows(sorted, collapsed: collapsedParents)
+    }
+
+    // MARK: - Nesting (P2D.4)
+
+    /// Fold or unfold one parent's children.
+    ///
+    /// A FULL RE-RENDER, not an incremental apply: folding removes rows, so the
+    /// identity sequence changed and `apply(rows:changed:)`'s own rule ("if an agent
+    /// appeared, vanished or moved, the LIST changed and a full reload is the honest
+    /// answer") applies. Selection and hover are dropped for the same reason
+    /// `setScope` drops them — their indexes belong to the list that just went away,
+    /// and a bulk action (P3.11) must never reach a row you cannot see.
+    func toggleCollapse(parentId: UUID) {
+        if collapsedParents.contains(parentId) {
+            collapsedParents.remove(parentId)
+        } else {
+            collapsedParents.insert(parentId)
+        }
+        tableView.deselectAll(nil)
+        selectedRowForEmphasis = -1
+        hoveredRow = -1
+        render(visibleRows(from: allRows))
+    }
+
+    /// Which control a row draws, if any: only a parent with children in this list
+    /// gets one, and it says which way it is pointing.
+    private func disclosure(for row: AgentInboxRow) -> RowDisclosure {
+        guard parentsWithChildren.contains(row.id) else { return .none }
+        return collapsedParents.contains(row.id) ? .collapsed : .expanded
     }
 
     /// Change the scope. `notify: false` for a restore at launch — the host is
@@ -467,12 +531,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         }
         cell.identifier = NSUserInterfaceItemIdentifier(AgentInboxView.accessibilityIdentifier(for: model))
         cell.setAccessibilityIdentifier(AgentInboxView.accessibilityIdentifier(for: model))
+        let agentId = model.id
+        cell.onToggleDisclosure = { [weak self] in self?.toggleCollapse(parentId: agentId) }
         cell.apply(
             model,
             emphasis: AgentInboxRow.emphasis(
                 for: model.state, attention: model.attention, isInteracting: interacting
             ),
             indent: Double(max(0, model.depth)) * AgentInboxView.indentPerLevel,
+            disclosure: disclosure(for: model),
             isSelected: tableView.selectedRow == row,
             isInteracting: interacting,
             now: clock()
@@ -597,6 +664,22 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     var relativeTimesForQA: [String] { cells().map(\.qaElapsed) }
     var glyphAlphasForQA: [Double] { cells().map(\.qaGlyphAlpha) }
     var identifiersForQA: [String] { cells().map { $0.identifier?.rawValue ?? "" } }
+    // Ticket: docs/38-tickets/90-agent-ux/P2D.4-parent-child-nesting.md
+    /// The nesting as DRAWN: how far each row's card was actually inset, and the
+    /// disclosure glyph on it ("" for a row with no children). Read off the laid-out
+    /// cells rather than recomputed from `depth`, which would assert nothing.
+    var indentsForQA: [Double] { cells().map(\.qaIndent) }
+    var disclosureGlyphsForQA: [String] { cells().map(\.qaDisclosureGlyph) }
+    var collapsedParentsForQA: Set<UUID> { collapsedParents }
+
+    /// Fold a group the way the user does — through the button's own target/action,
+    /// so the check exercises the wiring and not just `toggleCollapse`.
+    @discardableResult
+    func clickDisclosureForQA(id: UUID) -> Bool {
+        guard let index = rows.firstIndex(where: { $0.id == id }),
+              let cell = cellsByRow[index] else { return false }
+        return cell.clickDisclosureForQA()
+    }
 
     @discardableResult
     func selectRowForQA(id: UUID) -> Bool {
@@ -635,7 +718,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 /// it can be gated, and never in a condition scattered through the painting.
 @MainActor
 protocol AgentInboxRowCell: NSTableCellView {
-    func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double, isSelected: Bool, isInteracting: Bool, now: Date)
+    func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double,
+               disclosure: RowDisclosure, isSelected: Bool, isInteracting: Bool, now: Date)
+
+    /// What the row's disclosure triangle does. Set by the list, which is the only
+    /// thing that knows the fold state; a cell with `RowDisclosure.none` never calls
+    /// it because it has no control to click.
+    var onToggleDisclosure: (() -> Void)? { get set }
 
     var qaVariant: RowVariant { get }
     var qaTitle: String { get }
@@ -647,6 +736,79 @@ protocol AgentInboxRowCell: NSTableCellView {
     var qaTextAlpha: Double { get }
     var qaAccentAlpha: Double { get }
     var qaGlyphAlpha: Double { get }
+    var qaIndent: Double { get }
+    var qaDisclosureGlyph: String { get }
+    @discardableResult
+    func clickDisclosureForQA() -> Bool
+}
+
+// Ticket: docs/38-tickets/90-agent-ux/P2D.4-parent-child-nesting.md
+/// Whether a row draws a disclosure triangle, and which way it points. `none` is a
+/// row with no children in this list — most rows — and it draws nothing at all
+/// rather than a disabled control, which would put a dead glyph on every line of a
+/// list that has no orchestrator in it.
+enum RowDisclosure: Equatable {
+    case none
+    case expanded
+    case collapsed
+
+    var glyph: String {
+        switch self {
+        case .none: return ""
+        case .expanded: return "▾"
+        case .collapsed: return "▸"
+        }
+    }
+}
+
+/// The triangle that folds a parent's children away.
+///
+/// An `NSButton` with a token-coloured attributed title rather than AppKit's
+/// `.disclosure` bezel: that bezel draws a system-coloured chevron this app cannot
+/// theme, and P1.7's lint plus P1.6's contrast gate hold every painted colour in
+/// this view to a token. Borderless, so the only thing on screen is the glyph.
+final class InboxDisclosureButton: NSButton, TokenThemed {
+    private var glyph = ""
+
+    init() {
+        super.init(frame: .zero)
+        isBordered = false
+        bezelStyle = .inline
+        setButtonType(.momentaryChange)
+        font = .token(.label)
+        // The glyph is the whole control, so it must not be squeezed out of a
+        // narrow sidebar the way a truncating label can be.
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+        setContentHuggingPriority(.required, for: .horizontal)
+    }
+
+    required init?(coder: NSCoder) { return nil }
+
+    func show(_ disclosure: RowDisclosure) {
+        isHidden = disclosure == .none
+        glyph = disclosure.glyph
+        setAccessibilityLabel(disclosure == .collapsed ? "Expand" : "Collapse")
+        applyTokens()
+    }
+
+    /// `textSecondary`, the same token the row's own metadata uses: the triangle is
+    /// chrome, and an accent here would be a fourth colour meaning in a list P3.2
+    /// holds to three.
+    func applyTokens() {
+        attributedTitle = NSAttributedString(
+            string: glyph,
+            attributes: [
+                .font: NSFont.token(.label),
+                .foregroundColor: TextToken.textSecondary.color.nsColor(in: self),
+            ])
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
+    }
+
+    var qaGlyph: String { isHidden ? "" : glyph }
 }
 
 /// The card one row's words sit on: a `tileBody` fill with a `border` outline,
@@ -700,6 +862,8 @@ final class AgentInboxCardView: NSView, TokenThemed {
 final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     private let card = AgentInboxCardView()
 
+    private let disclosureButton = InboxDisclosureButton()
+    var onToggleDisclosure: (() -> Void)?
     private let projectLabel = NSTextField(labelWithString: "")
     private let titleLabel = NSTextField(labelWithString: "")
     private let stateLabel = NSTextField(labelWithString: "")
@@ -712,7 +876,7 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     /// text colours when the appearance moves — an `NSTextField.textColor` is a
     /// resolved colour, and the list above must not reload the table to fix it
     /// (see `AgentInboxView.applyTokens`).
-    private var shown: (row: AgentInboxRow, emphasis: RowEmphasis)?
+    private var shown: (row: AgentInboxRow, emphasis: RowEmphasis, disclosure: RowDisclosure)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -745,7 +909,10 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         branchLabel.font = .token(.label)
         branchLabel.lineBreakMode = .byTruncatingMiddle
 
-        let headline = NSStackView(views: [projectLabel, titleLabel, NSView(), stateLabel, elapsedLabel])
+        disclosureButton.target = self
+        disclosureButton.action = #selector(disclosureClicked)
+
+        let headline = NSStackView(views: [disclosureButton, projectLabel, titleLabel, NSView(), stateLabel, elapsedLabel])
         headline.orientation = .horizontal
         headline.alignment = .firstBaseline
         headline.spacing = Space.m
@@ -805,11 +972,13 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     /// and its elapsed time is a number the ROW holds rather than a distance from
     /// the current clock. They are on the shared call so the list can paint either
     /// variant without knowing which it has.
-    func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double, isSelected: Bool,
+    func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double,
+               disclosure: RowDisclosure = .none, isSelected: Bool = false,
                isInteracting: Bool = false, now: Date = Date()) {
-        shown = (row, emphasis)
+        shown = (row, emphasis, disclosure)
         card.isSelected = isSelected
         leadingInset?.constant = indent
+        disclosureButton.show(disclosure)
 
         projectLabel.stringValue = row.projectName ?? ""
         projectLabel.isHidden = row.projectName == nil
@@ -844,7 +1013,17 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         super.viewDidChangeEffectiveAppearance()
         guard let shown else { return }
         apply(shown.row, emphasis: shown.emphasis,
-              indent: Double(leadingInset?.constant ?? 0), isSelected: card.isSelected)
+              indent: Double(leadingInset?.constant ?? 0), disclosure: shown.disclosure,
+              isSelected: card.isSelected)
+    }
+
+    @objc private func disclosureClicked() { onToggleDisclosure?() }
+
+    @discardableResult
+    func clickDisclosureForQA() -> Bool {
+        guard !disclosureButton.isHidden else { return false }
+        disclosureButton.performClick(nil)
+        return true
     }
 
     /// Four characters of `role`, so a squeezed row truncates rather than
@@ -898,6 +1077,8 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     var qaTextAlpha: Double { Double(titleLabel.alphaValue) }
     var qaAccentAlpha: Double { Double(stateLabel.alphaValue) }
     var qaGlyphAlpha: Double { Opacity.full }
+    var qaIndent: Double { Double(leadingInset?.constant ?? 0) }
+    var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md
@@ -929,12 +1110,15 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
 /// being an alpha of this view's own choosing.
 final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     private let card = AgentInboxCardView()
+    private let disclosureButton = InboxDisclosureButton()
+    var onToggleDisclosure: (() -> Void)?
     private let glyphLabel = NSTextField(labelWithString: "")
     private let titleLabel = NSTextField(labelWithString: "")
     private let branchLabel = NSTextField(labelWithString: "")
     private let timeLabel = NSTextField(labelWithString: "")
     private var leadingInset: NSLayoutConstraint?
-    private var shown: (row: AgentInboxRow, emphasis: RowEmphasis, isInteracting: Bool, now: Date)?
+    private var shown: (row: AgentInboxRow, emphasis: RowEmphasis, disclosure: RowDisclosure,
+                        isInteracting: Bool, now: Date)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -962,7 +1146,12 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         timeLabel.font = .token(.captionMono)
         timeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        let line = NSStackView(views: [glyphLabel, titleLabel, branchLabel, timeLabel])
+        disclosureButton.target = self
+        disclosureButton.action = #selector(disclosureClicked)
+
+        // A parked group folds too: a snoozed parent and its snoozed children are
+        // nested in the shelf the same way the live block nests.
+        let line = NSStackView(views: [disclosureButton, glyphLabel, titleLabel, branchLabel, timeLabel])
         line.orientation = .horizontal
         line.alignment = .firstBaseline
         line.spacing = Space.m
@@ -994,11 +1183,13 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
 
     required init?(coder: NSCoder) { return nil }
 
-    func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double, isSelected: Bool,
+    func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double,
+               disclosure: RowDisclosure = .none, isSelected: Bool = false,
                isInteracting: Bool = false, now: Date = Date()) {
-        shown = (row, emphasis, isInteracting, now)
+        shown = (row, emphasis, disclosure, isInteracting, now)
         card.isSelected = isSelected
         leadingInset?.constant = indent
+        disclosureButton.show(disclosure)
 
         glyphLabel.stringValue = AgentInboxSlimCellView.glyph(for: row.state)
         titleLabel.stringValue = row.title
@@ -1022,7 +1213,17 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         super.viewDidChangeEffectiveAppearance()
         guard let shown else { return }
         apply(shown.row, emphasis: shown.emphasis, indent: Double(leadingInset?.constant ?? 0),
-              isSelected: card.isSelected, isInteracting: shown.isInteracting, now: shown.now)
+              disclosure: shown.disclosure, isSelected: card.isSelected,
+              isInteracting: shown.isInteracting, now: shown.now)
+    }
+
+    @objc private func disclosureClicked() { onToggleDisclosure?() }
+
+    @discardableResult
+    func clickDisclosureForQA() -> Bool {
+        guard !disclosureButton.isHidden else { return false }
+        disclosureButton.performClick(nil)
+        return true
     }
 
     /// The state as one character, in `StatusChipPresenter`'s vocabulary rather
@@ -1092,4 +1293,6 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     /// deliberately not `Opacity.full`: see the divergence note on the class.
     var qaAccentAlpha: Double { Double(glyphLabel.alphaValue) }
     var qaGlyphAlpha: Double { Double(glyphLabel.alphaValue) }
+    var qaIndent: Double { Double(leadingInset?.constant ?? 0) }
+    var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
 }

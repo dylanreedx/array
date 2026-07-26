@@ -36,7 +36,9 @@ public enum InboxSort {
     /// `RowVariant.forLifecycle` already makes by leaving it a card.
     ///
     /// Within each block, a CHILD is placed immediately after its parent (P2D.4),
-    /// depth-first, with siblings ordered by the same comparator as roots.
+    /// depth-first, with siblings ordered by the same comparator as roots, and every
+    /// row's `depth` is ASSIGNED here — 0 for a root, one more than its parent for a
+    /// child, capped at `AgentInboxRow.maxDepth`.
     ///
     /// TOTAL and deterministic: equal timestamps are broken by the id's string
     /// form, the same tiebreak `AgentStore.isOrderedBefore` already uses for the
@@ -87,12 +89,14 @@ public enum InboxSort {
     }
 
     /// Order `rows` by `areInIncreasingOrder`, then pull every child up to sit
-    /// immediately after its parent, depth-first.
+    /// immediately after its parent, depth-first, and stamp each row's `depth`.
     ///
     /// A row whose `parentId` names an agent that is not in `rows` is a ROOT here —
     /// that is the honest answer for a child whose parent was archived, or whose
     /// parent settled into the other block, and it keeps the function a permutation
-    /// instead of silently dropping the row.
+    /// instead of silently dropping the row. It is also PROMOTED TO DEPTH 0: an
+    /// orphan indented under nothing reads as a rendering bug, and the row it would
+    /// look nested beneath is whatever happens to precede it.
     ///
     /// The `visited` set is a cycle guard, not decoration: `parentId` comes from
     /// stored records, and a corrupted pair pointing at each other would otherwise
@@ -103,7 +107,9 @@ public enum InboxSort {
         _ rows: [AgentInboxRow],
         by areInIncreasingOrder: (AgentInboxRow, AgentInboxRow) -> Bool
     ) -> [AgentInboxRow] {
-        guard rows.count > 1 else { return rows }
+        // No `count > 1` shortcut: a single row can still be an orphan carrying a
+        // stale depth from whoever built it, and returning it untouched would draw
+        // one lone row indented under nothing.
         let present = Set(rows.map(\.id))
         var childrenOf: [UUID: [AgentInboxRow]] = [:]
         var roots: [AgentInboxRow] = []
@@ -125,24 +131,85 @@ public enum InboxSort {
         var ordered: [AgentInboxRow] = []
         ordered.reserveCapacity(rows.count)
         var visited: Set<UUID> = []
-        func emit(_ row: AgentInboxRow) {
+        // The cap is applied to the DRAWN depth only, never to the ordering: a
+        // great-grandchild still follows its parent, it just stops indenting. The
+        // spawn cap (P2D.2) means a well-formed list cannot reach here — this is for
+        // records that came off disk before the cap, or under a raised one.
+        func emit(_ row: AgentInboxRow, depth: Int) {
             guard visited.insert(row.id).inserted else { return }
-            ordered.append(row)
+            var placed = row
+            placed.depth = min(depth, AgentInboxRow.maxDepth)
+            ordered.append(placed)
             for child in childrenOf[row.id] ?? [] {
-                emit(child)
+                emit(child, depth: depth + 1)
             }
         }
         for root in roots {
-            emit(root)
+            emit(root, depth: 0)
         }
         // Cycle survivors. Never reached by a well-formed list; asserted rather
-        // than assumed by `runInboxSortCycleCheck`.
+        // than assumed by `runInboxSortCycleCheck`. The first row of a cycle is
+        // taken as a root — a cycle has no root to measure a depth from — and
+        // `emit` walks and marks the rest of it from there, which is also what
+        // stops the walk going round.
         if ordered.count != rows.count {
             for row in rows.sorted(by: areInIncreasingOrder) where !visited.contains(row.id) {
-                visited.insert(row.id)
-                ordered.append(row)
+                emit(row, depth: 0)
             }
         }
         return ordered
+    }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P2D.4-parent-child-nesting.md
+
+    /// The rows a list with these parents collapsed actually shows: every row whose
+    /// PARENT CHAIN passes through a collapsed row is dropped, at any depth.
+    ///
+    /// Takes rows already through `sortForInbox`, which is what makes one pass
+    /// enough — a parent always precedes its children there, so a hidden row's
+    /// children are seen after it and inherit the hiding. Handing it an unsorted list
+    /// would hide a child whose parent happens to come first and keep its sibling.
+    ///
+    /// WHAT IS HIDEABLE IS WHAT THE SORT ACTUALLY NESTED — a row at depth 0 is a
+    /// root and is never hidden, however its `parentId` reads. That is not a detail:
+    /// a child whose parent SETTLED is promoted to a root in the live block while the
+    /// parent sits in history, still on screen and still foldable, and folding
+    /// history there would delete an active agent from the list. (Found in
+    /// cross-review; keying on `parentId` alone did exactly that.)
+    ///
+    /// A collapsed id that names no parent in `rows` (its agent settled, or is in
+    /// another scope) hides nothing: the set is remembered rather than pruned, so
+    /// widening the scope back re-collapses the group it was collapsed in.
+    ///
+    /// Pure and in this module, not in the list view, so the phone can reuse it —
+    /// and so the "is this row on screen" question has one answer. Collapsed state
+    /// itself is LOCAL UI state (the packet: "not synced"): which groups you folded
+    /// on this Mac is not a fact about the agents.
+    public static func visibleRows(_ rows: [AgentInboxRow], collapsed: Set<UUID>) -> [AgentInboxRow] {
+        guard !collapsed.isEmpty else { return rows }
+        var hidden: Set<UUID> = []
+        return rows.filter { row in
+            // `depth > 0` is the test for "the sort nested this row under something
+            // here": an orphan and a cross-block promotion are both roots, and a
+            // fold on the parent they name must not remove them.
+            guard row.depth > 0, let parentId = row.parentId,
+                  collapsed.contains(parentId) || hidden.contains(parentId) else { return true }
+            hidden.insert(row.id)
+            return false
+        }
+    }
+
+    /// The rows in this list that HAVE a child in it — the only rows a disclosure
+    /// control belongs on.
+    ///
+    /// Read off the same list the view draws, and BEFORE collapsing it — a folded
+    /// group has to keep the triangle you unfold it with.
+    ///
+    /// Counted from the rows the sort actually NESTED (`depth > 0`), for the same
+    /// reason `visibleRows` hides only those: a child whose parent settled into the
+    /// other block names a row that is on screen and is not its parent here, and a
+    /// triangle on that settled row would fold nothing.
+    public static func parentIds(in rows: [AgentInboxRow]) -> Set<UUID> {
+        Set(rows.filter { $0.depth > 0 }.compactMap(\.parentId))
     }
 }

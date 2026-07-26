@@ -273,8 +273,28 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// row is built (`AgentInboxRowBuilder`). Nothing stores it — a stored elapsed
     /// is stale the instant after it is written.
     public let elapsed: TimeInterval?
-    /// 0 for a top-level agent, 1 for a child of one (P2D.4).
-    public let depth: Int
+    // Ticket: docs/38-tickets/90-agent-ux/P2D.4-parent-child-nesting.md
+    /// How far this row is drawn in: 0 for a top-level agent, 1 for a child of one,
+    /// capped at `AgentInboxRow.maxDepth`.
+    ///
+    /// ASSIGNED BY `InboxSort.sortForInbox`, and by nothing else — which is why it
+    /// is settable inside this module and read-only outside it. Depth is a property
+    /// of the row's place in a LIST, not of the agent: the same child is at depth 1
+    /// beside its parent and at depth 0 in a list its parent is not in (the parent
+    /// was archived, or settled into the other block). A builder cannot know which,
+    /// because it sees one agent at a time — so the value a caller passes to `init`
+    /// is a hint that the sort overwrites, and `AgentInboxRowBuilder` passes 0.
+    public internal(set) var depth: Int
+    /// How deep the inbox will draw a chain, and the same number
+    /// `AgentSupervisor.maxSpawnDepth` refuses to spawn past (P2D.2): a root, its
+    /// worker, and that worker's worker.
+    ///
+    /// It is repeated here rather than imported because this module may not see the
+    /// App layer (P1.1). The two are pinned to each other by an assertion in
+    /// `runAgentInboxChecks`, so raising the spawn cap without widening the inbox —
+    /// which would draw a great-grandchild as though it were a grandchild — is a red
+    /// matrix rather than a rendering nobody notices.
+    public static let maxDepth = 2
     public let variant: RowVariant
     /// When the agent was SPAWNED — the row's frozen position in the desktop list
     /// (P3.4), and the one timestamp this type may sort on.
