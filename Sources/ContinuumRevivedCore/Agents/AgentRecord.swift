@@ -102,6 +102,25 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     public var settledAt: Date?
     /// When a snooze expires. In the FUTURE while the snooze holds.
     public var snoozedUntil: Date?
+    // Ticket: docs/38-tickets/90-agent-ux/P4.6-snooze-raised-hand.md
+    /// When the snooze was SET. **Schema addition**, written beside
+    /// `snoozedUntil` and optional like every lifecycle date, so a record from
+    /// before this ticket decodes with it absent.
+    ///
+    /// It exists because "wake this row early if something needs me" is only
+    /// answerable against a reference point: a failure that was already on the
+    /// screen when the human snoozed is precisely what they said "not now" to,
+    /// and a failure that arrived afterwards is not. Without this date the two
+    /// are the same fact and the snooze either hides new trouble or never
+    /// holds at all. `snoozedUntil` cannot stand in — it is in the future.
+    ///
+    /// `currentSchemaVersion` deliberately does NOT move for this (cross-review,
+    /// codex): adding an OPTIONAL field that both older and newer builds decode
+    /// as absent is not a shape change — it is what `decodeIfPresent` is for, and
+    /// it is the convention P4.1's three lifecycle dates and P2D.6's
+    /// `sourceItemId` already set. The version marker is for a change a reader
+    /// must branch on; nothing has to branch on this one.
+    public var snoozedAt: Date?
     /// When it left the list. **`archived` ≠ `settled`**: settled stays in the
     /// list, slim and readable; archived is gone from it.
     public var archivedAt: Date?
@@ -124,6 +143,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         settledOverride: SettledOverride = .default,
         settledAt: Date? = nil,
         snoozedUntil: Date? = nil,
+        snoozedAt: Date? = nil,
         archivedAt: Date? = nil
     ) {
         self.schemaVersion = schemaVersion
@@ -143,6 +163,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         self.settledOverride = settledOverride
         self.settledAt = settledAt
         self.snoozedUntil = snoozedUntil
+        self.snoozedAt = snoozedAt
         self.archivedAt = archivedAt
     }
 
@@ -164,6 +185,10 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         // history.
         case settledOverride
         case settledAtReferenceInterval, snoozedUntilReferenceInterval, archivedAtReferenceInterval
+        // P4.6. A fourth lifecycle date, encoded the same way for the same
+        // reason: the newness test compares against it, so drift on reload
+        // would move the line between "I already saw that" and "this is new".
+        case snoozedAtReferenceInterval
     }
 
     public init(from decoder: Decoder) throws {
@@ -194,6 +219,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         settledAt = try container.decodeIfPresent(Double.self, forKey: .settledAtReferenceInterval)
             .map(Date.init(timeIntervalSinceReferenceDate:))
         snoozedUntil = try container.decodeIfPresent(Double.self, forKey: .snoozedUntilReferenceInterval)
+            .map(Date.init(timeIntervalSinceReferenceDate:))
+        snoozedAt = try container.decodeIfPresent(Double.self, forKey: .snoozedAtReferenceInterval)
             .map(Date.init(timeIntervalSinceReferenceDate:))
         archivedAt = try container.decodeIfPresent(Double.self, forKey: .archivedAtReferenceInterval)
             .map(Date.init(timeIntervalSinceReferenceDate:))
@@ -226,6 +253,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
                                       forKey: .settledAtReferenceInterval)
         try container.encodeIfPresent(snoozedUntil?.timeIntervalSinceReferenceDate,
                                       forKey: .snoozedUntilReferenceInterval)
+        try container.encodeIfPresent(snoozedAt?.timeIntervalSinceReferenceDate,
+                                      forKey: .snoozedAtReferenceInterval)
         try container.encodeIfPresent(archivedAt?.timeIntervalSinceReferenceDate,
                                       forKey: .archivedAtReferenceInterval)
     }

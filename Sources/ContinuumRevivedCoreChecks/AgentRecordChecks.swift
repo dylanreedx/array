@@ -31,6 +31,7 @@ private func makeAgentRecordFixture(
     settledOverride: SettledOverride = .default,
     settledAt: Date? = nil,
     snoozedUntil: Date? = nil,
+    snoozedAt: Date? = nil,
     archivedAt: Date? = nil
 ) -> AgentRecord {
     AgentRecord(
@@ -55,6 +56,7 @@ private func makeAgentRecordFixture(
         settledOverride: settledOverride,
         settledAt: settledAt,
         snoozedUntil: snoozedUntil,
+        snoozedAt: snoozedAt,
         archivedAt: archivedAt
     )
 }
@@ -341,7 +343,8 @@ private func runAgentRecordLifecycleCheck() {
         lastActivityAt: Date(timeIntervalSinceReferenceDate: 806_000_123.75))
     expect(fresh.settledOverride == .neutral,
            "a fresh AgentRecord has had nothing said about it — got \(fresh.settledOverride.rawValue)")
-    expect(fresh.settledAt == nil && fresh.snoozedUntil == nil && fresh.archivedAt == nil,
+    expect(fresh.settledAt == nil && fresh.snoozedUntil == nil && fresh.snoozedAt == nil
+            && fresh.archivedAt == nil,
            "a fresh AgentRecord carries no lifecycle dates")
 
     // NEGATIVE TEST (observed red): dropping the `!= .default` guard in
@@ -354,7 +357,8 @@ private func runAgentRecordLifecycleCheck() {
         Foundation.exit(1)
     }
     for key in ["settledOverride", "settledAtReferenceInterval",
-                "snoozedUntilReferenceInterval", "archivedAtReferenceInterval"] {
+                "snoozedUntilReferenceInterval", "snoozedAtReferenceInterval",
+                "archivedAtReferenceInterval"] {
         expect(!freshText.contains(key),
                "a record nobody has ruled on writes no lifecycle keys at all — got \(freshText)")
     }
@@ -388,7 +392,8 @@ private func runAgentRecordLifecycleCheck() {
         let decoded = try decoder.decode(AgentRecord.self, from: Data(beforeThisTicket.utf8))
         expect(decoded.settledOverride == .neutral,
                "a record written before P4.1 defaults to .neutral — got \(decoded.settledOverride.rawValue)")
-        expect(decoded.settledAt == nil && decoded.snoozedUntil == nil && decoded.archivedAt == nil,
+        expect(decoded.settledAt == nil && decoded.snoozedUntil == nil && decoded.snoozedAt == nil
+                && decoded.archivedAt == nil,
                "a record written before P4.1 has no lifecycle dates")
     } catch {
         fputs("FAIL: a record written before P4.1 still decodes: \(error)\n", stderr)
@@ -416,6 +421,10 @@ private func runAgentRecordLifecycleCheck() {
             settledOverride: override,
             settledAt: now,
             snoozedUntil: now.addingTimeInterval(1_800),
+            // P4.6's schema addition, swept with the other three: the newness
+            // test compares failures against this date, so drift on reload
+            // would move the line between "already seen" and "new".
+            snoozedAt: now.addingTimeInterval(-60),
             archivedAt: now.addingTimeInterval(3_600))
         guard let data = try? encoder.encode(record),
               let decoded = try? decoder.decode(AgentRecord.self, from: data)
@@ -476,7 +485,12 @@ private func runAgentRecordLifecycleCheck() {
     // A snooze reaches into the FUTURE, unlike the other two, and that is not a
     // decode error to be clamped away.
     let wakesAt = Date().addingTimeInterval(86_400)
-    let snoozed = makeAgentRecordFixture(snoozedUntil: wakesAt)
+    // P4.6. The two halves of a snooze: when it ENDS and when it was SET. Both
+    // are stored, because the early-wake rule compares a failure against the
+    // second one — `snoozedUntil` cannot stand in for it, and a snooze whose
+    // moment was lost on reload would wake on everything it had already seen.
+    let setAt = Date().addingTimeInterval(-120)
+    let snoozed = makeAgentRecordFixture(snoozedUntil: wakesAt, snoozedAt: setAt)
     guard let snoozedData = try? encoder.encode(snoozed),
           let reloadedSnooze = try? decoder.decode(AgentRecord.self, from: snoozedData)
     else {
@@ -485,6 +499,11 @@ private func runAgentRecordLifecycleCheck() {
     }
     expect(reloadedSnooze.snoozedUntil == wakesAt,
            "a wake-up time in the future round-trips unchanged")
+    // NEGATIVE TEST (observed red): `snoozedAt` encoded to
+    // `.snoozedUntilReferenceInterval` — the two halves collapsed into one key,
+    // which is the mistake a fourth date beside a similarly-named third invites.
+    expect(reloadedSnooze.snoozedAt == setAt && reloadedSnooze.snoozedUntil != reloadedSnooze.snoozedAt,
+           "when a snooze was set and when it ends are two facts — snoozedAt \(String(describing: reloadedSnooze.snoozedAt)) snoozedUntil \(String(describing: reloadedSnooze.snoozedUntil))")
     expect(reloadedSnooze.settledOverride == .neutral,
            "snoozing is not settling — the override is untouched by a snooze")
 

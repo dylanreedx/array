@@ -226,6 +226,118 @@ public struct LifecycleBlockers: OptionSet, Hashable, Sendable {
     }
 }
 
+// Ticket: docs/38-tickets/90-agent-ux/P4.6-snooze-raised-hand.md
+//
+// A snooze must never hide something that needs you — and must not un-snooze for
+// what you had already seen when you set it.
+
+/// The stored facts an early wake is decided from — VALUES, not a record, because
+/// this module may not import Core (P1.1) and `AgentRecord` lives there. Core
+/// composes one of these from the record it holds; the shape is deliberately the
+/// subset `raisedHandWhileSnoozed` reads and nothing else, so a caller cannot pass
+/// a record and have the predicate quietly grow a dependency on some other field.
+///
+/// The names match `AgentRecord`'s (`snoozedUntil`, `snoozedAt`) where the fact is
+/// the same one, so the mapping is by eye and cannot be got backwards.
+public struct SnoozedAgentFacts: Equatable, Sendable {
+    /// When the snooze expires. Nil, or already past, means the row is not
+    /// snoozed and there is nothing for a hand to interrupt.
+    public var snoozedUntil: Date?
+    /// When the snooze was SET — the reference point the newness test compares
+    /// against. P4.6 adds it to `AgentRecord`.
+    public var snoozedAt: Date?
+    /// An approval or a question the agent is holding open right now (P3.1
+    /// derives it from the event ring).
+    public var pending: PendingRequest?
+    /// When the agent last failed.
+    public var failedAt: Date?
+    /// When a run last finished.
+    public var runCompletedAt: Date?
+
+    public init(
+        snoozedUntil: Date? = nil,
+        snoozedAt: Date? = nil,
+        pending: PendingRequest? = nil,
+        failedAt: Date? = nil,
+        runCompletedAt: Date? = nil
+    ) {
+        self.snoozedUntil = snoozedUntil
+        self.snoozedAt = snoozedAt
+        self.pending = pending
+        self.failedAt = failedAt
+        self.runCompletedAt = runCompletedAt
+    }
+}
+
+extension InboxLifecycle {
+    /// Whether a snoozed agent has raised its hand — the early wake.
+    ///
+    /// True when the row is snoozed AND any of the packet's three signals holds:
+    ///
+    ///   · **A pending approval or a pending question.** No newness test, and
+    ///     that is not an oversight: a pending request is unanswered BY
+    ///     DEFINITION — it is a live thing waiting on the human at this instant,
+    ///     not an event that happened once. It also agrees with `resolve`, whose
+    ///     step 1 already pulls a blocked row out of the shelf however old the
+    ///     block is; a newness test here would let the two disagree about the
+    ///     same row.
+    ///   · **A failure NEWER than `snoozedAt`.**
+    ///   · **A run that completed after the snooze was set.**
+    ///
+    /// THE NEWNESS TEST IS THE SUBTLE PART, and it is strict (`>`): snoozing an
+    /// agent that had already failed keeps it snoozed, because that snooze meant
+    /// "I saw it, not now". A failure recorded at the same instant as the snooze
+    /// is on the wrong side of that line by a hair, so it reads as one the human
+    /// had in front of them — the boundary is placed to protect the snooze, since
+    /// the alternative is a row that wakes itself the moment you park it and can
+    /// never be parked at all.
+    ///
+    /// A MISSING `snoozedAt` SUPPRESSES BOTH DATE SIGNALS. There is exactly one
+    /// way to hold a live snooze with no `snoozedAt`: a record written by a build
+    /// from before this ticket. With no reference point, waking on any recorded
+    /// failure would wake permanently and the snooze would not exist for that
+    /// record — while staying parked costs at most the remaining minutes of one
+    /// snooze the human set themselves, and a pending request still wakes it
+    /// above, which is the signal that actually means someone is waiting.
+    ///
+    /// **The snooze is not cleared** (packet's watch-out): this is a derived
+    /// answer over stored facts, so a woken row can be re-snoozed without having
+    /// lost that it was deferred. The row surfaces with
+    /// `InboxAttention.resolve(unread:raisedHand:)` → `.woke` (P3.3), which
+    /// outranks `unread`.
+    public static func raisedHandWhileSnoozed(record: SnoozedAgentFacts, now: Date) -> Bool {
+        // Not snoozed — the same `>` boundary `resolve` uses, so "snoozed" means
+        // one thing in this file. Nothing is hidden, so nothing needs waking.
+        guard let snoozedUntil = record.snoozedUntil, snoozedUntil > now else { return false }
+
+        // Someone is waiting on the human right now.
+        if record.pending != nil { return true }
+
+        // Everything below is "newer than the snooze", and needs the snooze's
+        // own moment to compare against.
+        guard let snoozedAt = record.snoozedAt else { return false }
+        if let failedAt = record.failedAt, failedAt > snoozedAt { return true }
+        if let runCompletedAt = record.runCompletedAt, runCompletedAt > snoozedAt { return true }
+        return false
+    }
+
+    /// The wake-up `resolve` should be given for this agent: the stored one while
+    /// the snooze holds, and **nil while a hand is up**.
+    ///
+    /// This is the whole of "wake" as a visible outcome, and it is one line rather
+    /// than a new rung because the shelf is step 2 of an order that is already
+    /// proved (P4.2's 31-case table and 1,728-case sweep). Withholding the date
+    /// makes `resolve` fall through to the rung below exactly as an expired snooze
+    /// does; adding a fifth precedence step, or a fifth `LifecycleBlockers` bit,
+    /// would re-open an ordering that nothing here needs to change.
+    ///
+    /// The STORED `snoozedUntil` is untouched — this answers what to honour now,
+    /// not what to write.
+    public static func snoozeHonoured(record: SnoozedAgentFacts, now: Date) -> Date? {
+        raisedHandWhileSnoozed(record: record, now: now) ? nil : record.snoozedUntil
+    }
+}
+
 extension InboxLifecycle {
     /// The one pure function that turns P4.1's stored facts into the lifecycle a
     /// row is drawn from. TOTAL — every combination of inputs resolves to exactly

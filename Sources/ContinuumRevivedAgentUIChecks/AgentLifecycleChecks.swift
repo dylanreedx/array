@@ -531,6 +531,236 @@ private func runParentBlockedByDescendantCheck() {
     expect(ownBlocker == .active, "a childless agent's own blocker is unchanged by this ticket")
 }
 
+// Ticket: docs/38-tickets/90-agent-ux/P4.6-snooze-raised-hand.md
+//
+// THE EARLY WAKE, and the line it must not cross. A snooze may never hide
+// something that needs you; it also may not un-snooze for what you had already
+// seen when you set it. Those two pull in opposite directions, and every case
+// here is about where the line between them sits.
+//
+// Three parts:
+//   A · the predicate, as a table of named cases — including the packet's five
+//       verify cases, with the pre-existing failure (`snoozedAt - 1s`) as THE
+//       witness;
+//   B · the boundary swept second-by-second across `snoozedAt`, so the strict
+//       `>` is pinned rather than implied by two hand-picked instants;
+//   C · what a raised hand DOES: it withholds the shelf date from `resolve` (so
+//       the row is back) without clearing the stored snooze, and the row carries
+//       `.woke` (P3.3), which outranks `unread`.
+//
+// SIX NEGATIVE TESTS OBSERVED RED at exit 1 against the final code, quoted
+// verbatim and reported where they LAND:
+//   1. `>=` for `>` on the failure newness — the one edit the packet's witness
+//      exists for → "FAIL: a failure at snoozedAt +0s does not wake a snoozed row
+//      — got true". Caught by the boundary sweep rather than by the table, which
+//      is why the sweep is here: the table's two hand-picked instants are ±1s and
+//      both stay green under it.
+//   2. a missing `snoozedAt` read as `Date.distantPast` (the plausible spelling of
+//      "no reference point") → "FAIL: a pre-P4.6 snooze with no recorded moment
+//      does not wake on a failure it cannot date — expected still snoozed, got
+//      woken".
+//   3. the pending signal made to require newness too → "FAIL: a pending approval
+//      while snoozed raises the hand — expected woken, got still snoozed".
+//   4. `snoozeHonoured` reduced to `record.snoozedUntil` (the predicate computed
+//      and then ignored) → "FAIL: a new failure pulls the row off the shelf — got
+//      snoozed(until: …)".
+//   5. the not-snoozed guard deleted → "FAIL: an agent that is not snoozed has no
+//      hand to raise — expected still snoozed, got woken". Without it every failed
+//      agent in the list would read as permanently woke.
+//   6. the completed-run signal dropped → "FAIL: a run completing after the snooze
+//      was set raises the hand — expected woken, got still snoozed".
+//
+// The record half — `snoozedAt` persisted at all — is witnessed in CoreChecks,
+// where the field lives: `snoozedAt` encoded onto `snoozedUntil`'s key is red at
+// the lifecycle sweep ("round-trips every lifecycle date exactly — 200 of 200
+// differed"), and dropping it from `encode(to:)` with that sweep blinded is red at
+// the named assertion ("when a snooze was set and when it ends are two facts —
+// snoozedAt nil").
+private let snoozeSet = anHourAgo
+private let snoozeEnds = inHalfAnHour
+
+private struct RaisedHandCase {
+    let what: String
+    let record: SnoozedAgentFacts
+    let expected: Bool
+
+    var raised: Bool { InboxLifecycle.raisedHandWhileSnoozed(record: record, now: now) }
+}
+
+private func runRaisedHandTableCheck() {
+    /// A live snooze, set an hour ago and ending in half an hour, with whichever
+    /// signal the case is about laid over it.
+    func snoozed(
+        pending: PendingRequest? = nil,
+        failedAt: Date? = nil,
+        runCompletedAt: Date? = nil,
+        snoozedAt: Date? = snoozeSet,
+        snoozedUntil: Date? = snoozeEnds
+    ) -> SnoozedAgentFacts {
+        SnoozedAgentFacts(snoozedUntil: snoozedUntil, snoozedAt: snoozedAt,
+                          pending: pending, failedAt: failedAt, runCompletedAt: runCompletedAt)
+    }
+
+    let cases: [RaisedHandCase] = [
+        // The packet's five, in its own words.
+        RaisedHandCase(what: "a pending approval while snoozed raises the hand",
+                       record: snoozed(pending: .approval), expected: true),
+        RaisedHandCase(what: "a failure one second BEFORE the snooze was set stays snoozed — the human saw it and said not now",
+                       record: snoozed(failedAt: snoozeSet.addingTimeInterval(-1)), expected: false),
+        RaisedHandCase(what: "a failure one second after the snooze was set raises the hand",
+                       record: snoozed(failedAt: snoozeSet.addingTimeInterval(1)), expected: true),
+        RaisedHandCase(what: "a run completing after the snooze was set raises the hand",
+                       record: snoozed(runCompletedAt: snoozeSet.addingTimeInterval(60)), expected: true),
+        RaisedHandCase(what: "nothing happening leaves the row snoozed until its wake-up",
+                       record: snoozed(), expected: false),
+
+        // The other pending kind — a question with nothing to approve is just as
+        // much someone waiting on you (P3.1's two-case `PendingRequest`).
+        RaisedHandCase(what: "a pending question while snoozed raises the hand too",
+                       record: snoozed(pending: .input), expected: true),
+        // A pending request has no newness test, deliberately: it is unanswered
+        // now, whenever it was asked, and `resolve`'s step 1 already un-shelves a
+        // blocked row however old the block is.
+        RaisedHandCase(what: "an approval that was already open when the snooze was set still raises the hand",
+                       record: snoozed(pending: .approval, failedAt: snoozeSet.addingTimeInterval(-3_600)),
+                       expected: true),
+
+        // The mirror of the witness, for the run signal.
+        RaisedHandCase(what: "a run that completed BEFORE the snooze was set stays snoozed",
+                       record: snoozed(runCompletedAt: snoozeSet.addingTimeInterval(-60)), expected: false),
+        RaisedHandCase(what: "an old failure and an old run together still stay snoozed",
+                       record: snoozed(failedAt: snoozeSet.addingTimeInterval(-1),
+                                       runCompletedAt: snoozeSet.addingTimeInterval(-1)),
+                       expected: false),
+        RaisedHandCase(what: "one new signal beside an old one is enough",
+                       record: snoozed(failedAt: snoozeSet.addingTimeInterval(-1),
+                                       runCompletedAt: snoozeSet.addingTimeInterval(1)),
+                       expected: true),
+
+        // NOT SNOOZED — there is nothing to wake early from, and answering true
+        // would make every failed agent in the list permanently "woke".
+        RaisedHandCase(what: "an agent that is not snoozed has no hand to raise",
+                       record: SnoozedAgentFacts(pending: .approval,
+                                                 failedAt: now.addingTimeInterval(-1)),
+                       expected: false),
+        RaisedHandCase(what: "an EXPIRED snooze is over, so the wake is the shelf's business and not a raised hand",
+                       record: snoozed(failedAt: now.addingTimeInterval(-1), snoozedUntil: halfAnHourAgo),
+                       expected: false),
+        RaisedHandCase(what: "a snooze whose moment has exactly arrived is over here too — the same boundary resolve uses",
+                       record: snoozed(failedAt: now.addingTimeInterval(-1), snoozedUntil: now),
+                       expected: false),
+
+        // A RECORD FROM BEFORE THIS TICKET: a live snooze with no `snoozedAt`.
+        // No reference point, so the date signals are suppressed — waking on any
+        // recorded failure would wake permanently and the snooze would not exist
+        // for that record.
+        RaisedHandCase(what: "a pre-P4.6 snooze with no recorded moment does not wake on a failure it cannot date",
+                       record: snoozed(failedAt: now.addingTimeInterval(-1), snoozedAt: nil),
+                       expected: false),
+        RaisedHandCase(what: "…but a pending approval still wakes it, because that signal needs no date",
+                       record: snoozed(pending: .approval, snoozedAt: nil), expected: true),
+    ]
+
+    for testCase in cases {
+        expect(testCase.raised == testCase.expected,
+               "\(testCase.what) — expected \(testCase.expected ? "woken" : "still snoozed"), got \(testCase.raised ? "woken" : "still snoozed")")
+    }
+    // Not vacuous: the table really says both things.
+    expect(cases.contains { $0.expected } && cases.contains { !$0.expected },
+           "the raised-hand table expects both a wake and a stay — got \(cases.map(\.expected))")
+    expect(cases.count >= 15, "the raised-hand table covers every signal — got \(cases.count) cases")
+}
+
+// B · The boundary, swept. The packet's witness is a single second on either side
+// of `snoozedAt`; this pins the whole line, for BOTH date signals, so a `>=`
+// spelling is red at exactly one offset rather than depending on which two
+// instants someone happened to pick.
+private func runRaisedHandBoundaryCheck() {
+    var woke = 0
+    var stayed = 0
+    for offset in -5...5 {
+        let moment = snoozeSet.addingTimeInterval(TimeInterval(offset))
+        for (signal, record) in [
+            ("failure", SnoozedAgentFacts(snoozedUntil: snoozeEnds, snoozedAt: snoozeSet, failedAt: moment)),
+            ("completed run", SnoozedAgentFacts(snoozedUntil: snoozeEnds, snoozedAt: snoozeSet, runCompletedAt: moment)),
+        ] {
+            let raised = InboxLifecycle.raisedHandWhileSnoozed(record: record, now: now)
+            // STRICTLY newer. Offset 0 — the same instant the snooze was set —
+            // counts as something the human had in front of them, because the
+            // alternative is a row that wakes itself the moment it is parked.
+            expect(raised == (offset > 0),
+                   "a \(signal) at snoozedAt \(offset >= 0 ? "+" : "")\(offset)s \(offset > 0 ? "wakes" : "does not wake") a snoozed row — got \(raised)")
+            if raised { woke += 1 } else { stayed += 1 }
+        }
+    }
+    expect(woke == 10 && stayed == 12,
+           "the boundary sweep crosses the line once per signal — woke \(woke), stayed \(stayed)")
+}
+
+// C · What a raised hand DOES. Three consequences, each asserted rather than
+// described:
+//   1. `snoozeHonoured` withholds the shelf date, so `resolve` — untouched by this
+//      ticket — puts the row back in the list;
+//   2. the STORED snooze is not cleared, so the row can be re-snoozed without
+//      having lost that it was deferred (the packet's watch-out);
+//   3. the row carries `.woke`, which is the one attention value with a word.
+private func runRaisedHandSurfacingCheck() {
+    let newFailure = SnoozedAgentFacts(snoozedUntil: snoozeEnds, snoozedAt: snoozeSet,
+                                       failedAt: snoozeSet.addingTimeInterval(1))
+    let oldFailure = SnoozedAgentFacts(snoozedUntil: snoozeEnds, snoozedAt: snoozeSet,
+                                       failedAt: snoozeSet.addingTimeInterval(-1))
+
+    // 1 · The row is back. Withholding the date makes `resolve` fall through the
+    // shelf to the rung below exactly as an expired snooze does — no new rung, and
+    // nothing about the order changes.
+    let woken = InboxLifecycle.resolve(
+        override: .neutral,
+        snoozedUntil: InboxLifecycle.snoozeHonoured(record: newFailure, now: now),
+        lastActivityAt: anHourAgo, now: now)
+    expect(woken == .active,
+           "a new failure pulls the row off the shelf — got \(woken)")
+    expect(RowVariant.forLifecycle(woken) == .card,
+           "…as a full card, not the one-line parked row it was — got \(RowVariant.forLifecycle(woken).rawValue)")
+
+    let stillShelved = InboxLifecycle.resolve(
+        override: .neutral,
+        snoozedUntil: InboxLifecycle.snoozeHonoured(record: oldFailure, now: now),
+        lastActivityAt: anHourAgo, now: now)
+    expect(stillShelved == .snoozed(until: snoozeEnds),
+           "a failure the human had already seen leaves the row on the shelf until its wake-up — got \(stillShelved)")
+
+    // …and `snoozeHonoured` is exactly the stored date whenever no hand is up, so
+    // it cannot be a shelf-suppressor that fires on something else.
+    expect(InboxLifecycle.snoozeHonoured(record: oldFailure, now: now) == snoozeEnds,
+           "an unraised hand honours the stored wake-up unchanged")
+    expect(InboxLifecycle.snoozeHonoured(record: newFailure, now: now) == nil,
+           "a raised hand withholds the shelf date")
+
+    // 2 · The snooze is NOT cleared. `snoozeHonoured` answers what to honour now;
+    // the stored fact it read is still there to be re-snoozed from.
+    expect(newFailure.snoozedUntil == snoozeEnds && newFailure.snoozedAt == snoozeSet,
+           "waking reads the stored snooze, it does not clear it — got \(String(describing: newFailure.snoozedUntil))")
+
+    // 3 · The attention axis. `.woke` outranks `unread` and is the one value that
+    // gets a word, because it is what put the row back in front of you.
+    let raised = InboxLifecycle.raisedHandWhileSnoozed(record: newFailure, now: now)
+    expect(InboxAttention.resolve(unread: false, raisedHand: raised) == .woke,
+           "a woken row carries .woke")
+    expect(InboxAttention.resolve(unread: true, raisedHand: raised) == .woke,
+           "…and .woke outranks unread when both hold")
+    expect(InboxAttention.resolve(
+        unread: true,
+        raisedHand: InboxLifecycle.raisedHandWhileSnoozed(record: oldFailure, now: now)) == .unread,
+           "a row that stayed snoozed is not woke")
+}
+
+func runSnoozeRaisedHandChecks() {
+    runRaisedHandTableCheck()
+    runRaisedHandBoundaryCheck()
+    runRaisedHandSurfacingCheck()
+    print("Snooze raised-hand checks: blockers and new failures wake a snoozed agent, a failure the human had already seen does not, and waking withholds the shelf date without clearing the snooze")
+}
+
 func runEffectiveLifecycleChecks() {
     runLifecycleBlockerVocabularyCheck()
     runEffectiveLifecycleTableCheck()
