@@ -246,6 +246,16 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// A chip. Project is METADATA on the row — never a group header, because
     /// the list order is frozen (P3.4) and grouping would reorder it.
     public let projectName: String?
+    // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
+    /// The workspace the agent's tile is in (`AgentRowContext.workspaceName`), and
+    /// NOT DRAWN ANYWHERE: the row shows the project chip and no second one.
+    ///
+    /// It is on the row because `InboxScope` offers "one per workspace" and a pure
+    /// filter can only read what the row carries — the alternative is the view
+    /// reaching back into Core for a join it was handed. nil for an agent with no
+    /// tile (a headless agent lives in no workspace) and for any caller that built
+    /// rows with no context, exactly like `projectName` beside it.
+    public let workspaceName: String?
     public let state: InboxState
     public let attention: InboxAttention
     public let lifecycle: InboxLifecycle
@@ -290,6 +300,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         id: UUID,
         title: String,
         projectName: String? = nil,
+        workspaceName: String? = nil,
         state: InboxState,
         attention: InboxAttention = .none,
         lifecycle: InboxLifecycle = .active,
@@ -306,6 +317,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.id = id
         self.title = title
         self.projectName = projectName
+        self.workspaceName = workspaceName
         self.state = state
         self.attention = attention
         self.lifecycle = lifecycle

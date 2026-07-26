@@ -6157,6 +6157,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.onDeleteWorkspace = { [weak self] workspaceId in
             self?.deleteWorkspaceAndRelaunch(workspaceId: workspaceId)
         }
+        // P3.8: the inbox scope survives a relaunch, and it is persisted here beside
+        // the sidebar's width and visibility rather than inside the view — the view
+        // is rendered by committed baselines and must not read anyone's defaults.
+        sidebar.configureInboxScope(WorkspaceSidebarConfig.resolveScope()) { scope in
+            WorkspaceSidebarConfig.setScope(scope)
+        }
     }
 
     private func configureWorkspaceTopBar(_ topBar: WorkspaceTopBarView) {
@@ -6324,6 +6330,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         .filter { agentActivity.agentIdentities.contains($0.id) }
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
+    /// The agent open in the focused tile, in the inbox's aggregate keyspace — the
+    /// one row the scope may never hide.
+    ///
+    /// Two cases, because that keyspace has two halves (P3.1): a managed agent is
+    /// keyed by its record, which `AgentSupervisor.agent(forTile:)` finds from the
+    /// tile it is bound to, and a terminal-session agent is keyed by the TILE ID
+    /// itself. The fallback is therefore the tile id, not nil. A focused tile that
+    /// is neither — a note, a plain shell — yields an id no row carries, which makes
+    /// the force-include a no-op rather than a special case.
+    // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
+    /// Every project and workspace that is OPEN, as scopes — the packet's "one entry
+    /// per open project · one per workspace".
+    ///
+    /// From the registry rather than from the rows, because a project with no agent
+    /// running in it is exactly the one you are about to start an agent in, and a menu
+    /// derived from the rows could not offer it. `missing` projects are left out: a
+    /// checkout whose directory is gone is not open, and scoping to it could only ever
+    /// be empty.
+    private func inboxScopeCatalog() -> [InboxScope] {
+        let registry = (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
+        return registry.projects.filter { !$0.missing }.map { .project($0.name) }
+            + registry.workspaces.map { .workspace($0.name) }
+    }
+
+    private func focusedInboxAgentId() -> UUID? {
+        guard let tileId = canvasView?.canvasState.lastActiveTileId else { return nil }
+        return agentSupervisor.agent(forTile: tileId)?.rawValue ?? tileId
+    }
+
     private func reloadWorkspaceSidebar(rebuildAgentActivity: Bool = true) {
         if rebuildAgentActivity { rebuildAgentActivitySnapshot() }
         defer { reloadWorkspaceTopBar() }
@@ -6332,6 +6368,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // reload. `applyInbox` and not `reloadInbox` — the change set says which
         // agents moved, and rebuilding every row for one streamed token is what
         // P2B.7 removed from the surfaces it could reach.
+        // P3.8: BEFORE the rows, so the scope filter for this push already knows
+        // which row it may not hide, and the popup can offer an open project the rows
+        // do not mention.
+        sidebar.setInboxOpenAgent(focusedInboxAgentId())
+        sidebar.setInboxScopeCatalog(inboxScopeCatalog())
         sidebar.applyInbox(rows: buildAgentInboxRows(), changed: agentActivity.lastChange)
         do {
             let tree = try buildWorkspaceSidebarTree()
@@ -19693,6 +19734,48 @@ extension AppDelegate {
 //      alpha is still applied, it is now applied ONCE. Its failure line also shows
 //      the background as `#FAFBFC` — `SurfaceToken.tileBody`, the row card — which
 //      is the other half of that fix landing.
+// Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
+//
+// Section A3 adds the scope dropdown, and section B the persistence wiring. SEVEN
+// NEGATIVE TESTS OBSERVED RED at exit 1 with the final code, quoted verbatim:
+//
+//   1. `setScope` carrying the selected agent across the flip instead of clearing it
+//      (the packet's named regression) → `a scope change clears the selection — 1
+//      rows are still selected, and this one is still visible`
+//   2. `openAgentId` dropped from the filter call in `visibleRows` → `the agent open
+//      in the focused tile is in the list whatever the scope says — got [… no
+//      "pi · session naming" …]`
+//   3. the popup's menu built with `NSPopUpButton.addItem(withTitle:)`, which REMOVES
+//      an existing item of the same title → `a shared name must still be two
+//      entries — got ["All agents", "bannockburn", "continuum"]`
+//   4. one empty message for both causes → `…and it names the scope as the cause —
+//      got 'No agents yet'`
+//   5. `InboxScope.filter` returning its input → `a project scope keeps exactly that
+//      project's agents … got ["agent 1" … "agent 5"]` (the pure suite) and `a
+//      project scope leaves that project's agents, in the frozen order — got [all 7]`
+//   6. `configureWorkspaceSidebar` no longer restoring/persisting the scope → `the
+//      persisted scope must be restored onto the real sidebar — got 'All agents'`
+//   7. `InboxScope.entries` not appending the SELECTED scope → `a selected scope no
+//      row matches any more stays in the menu` (pure) and `a scope no row matches
+//      stays selected in the popup rather than silently reading as All agents — got
+//      'Overnight'` — the popup silently showing a different scope than the list.
+//   8. the view's menu derived from the rows alone (`catalog:` dropped) → `the
+//      catalog's scopes are in the menu — got ["All agents", "bannockburn",
+//      "continuum", "Overnight", "Side"]`
+//   9. `setInboxScopeCatalog` dropped from `reloadWorkspaceSidebar` → `the popup
+//      offers the registry's projects … including 'Quiet' … — got ["All agents",
+//      "Continuum", "Default"]`
+//  10. `inboxScopeCatalog` no longer filtering `missing` projects → `… and NOT the
+//      missing 'Gone' — got ["All agents", "Continuum", "Gone", "Quiet", "Default"]`
+//
+// Witnesses 9 and 10 are why section B's registry has three projects: with only the
+// one the rows already name, both edits stayed green.
+//
+// MEASURED AND RECORDED, because it changes what witness 1 is worth: `reloadData()`
+// already empties `NSTableView.selectedRowIndexes`, so DELETING the `deselectAll`
+// leaves this check green (probed over four scope flips, one of them growing the row
+// count). The explicit clear stays for the reason written at `setScope`, and witness
+// 1 is the direction that has teeth — an implementation that RETAINS the selection.
 extension AppDelegate {
     static func runAgentInboxChecks() throws {
     enum CheckError: Error, CustomStringConvertible {
@@ -19836,6 +19919,184 @@ extension AppDelegate {
                "an agent that went away must leave the list — got \(inbox.rowCountForQA) of \(withoutOne.count)")
     try expect(inbox.cellBuildCountForQA - buildsBeforeRemoval == withoutOne.count,
                "a list whose agents changed is rebuilt whole — a partial reload against a shifted array repaints a row with its neighbour's agent")
+
+    // MARK: A3 · P3.8 · the scope filters the list, and flipping it clears selection
+
+    let scoped = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    scoped.clock = { LabFixtures.inboxNow }
+    scoped.reload(rows: fixture)
+    let scopedWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    scopedWindow.contentView = scoped
+    scoped.layoutForQA()
+
+    // THE CONTROL, read off the rendered popup: the menu AppKit is showing, and the
+    // entry it has ticked.
+    try expect(scoped.scopeTitlesForQA == InboxScope.entries(for: fixture).map(\.title),
+               "the popup lists every scope the rows mention — got \(scoped.scopeTitlesForQA)")
+    try expect(scoped.scopeTitlesForQA.count == 5,
+               "this fixture spans 2 projects and 2 workspaces, so the menu is those 4 plus All agents — got \(scoped.scopeTitlesForQA)")
+    try expect(scoped.selectedScopeTitleForQA == InboxScope.allTitle,
+               "the list opens on every agent — got '\(scoped.selectedScopeTitleForQA)'")
+    try expect(scoped.rowCountForQA == fixture.count,
+               "…and shows all of them — got \(scoped.rowCountForQA) of \(fixture.count)")
+
+    // A row is selected FIRST, and deliberately one that SURVIVES the scope below:
+    // if the selection only vanished because its row did, "a scope change clears the
+    // selection" would be a statement about the filter and not about the selection.
+    let survivor = fixture.first { $0.projectName == "continuum" && $0.state == .working }!
+    try expect(scoped.selectRowForQA(id: survivor.id), "the row to keep must be selectable")
+    scoped.layoutForQA()
+    try expect(scoped.selectedRowCountForQA == 1,
+               "the fixture must really be selected, or the clearing assertion is vacuous — \(scoped.selectedRowCountForQA) rows selected")
+
+    var picked: [InboxScope] = []
+    scoped.onScopeChange = { picked.append($0) }
+    try expect(scoped.pickScopeForQA(.project("continuum")),
+               "the project scope must be pickable from the popup's own menu")
+    scoped.layoutForQA()
+    let wantedTitles = InboxSort.sortForInbox(rows: fixture.filter { $0.projectName == "continuum" }).map(\.title)
+    try expect(scoped.titlesForQA == wantedTitles,
+               "a project scope leaves that project's agents, in the frozen order — got \(scoped.titlesForQA)")
+    try expect(scoped.rowCountForQA < fixture.count,
+               "…and it must actually hide something, or the scope is decoration — \(scoped.rowCountForQA) of \(fixture.count)")
+    // THE PACKET'S REGRESSION WITNESS: a bulk action (P3.11) must never reach a row
+    // you cannot see, so the selection goes even though this row is still on screen.
+    try expect(scoped.selectedRowCountForQA == 0,
+               "a scope change clears the selection — \(scoped.selectedRowCountForQA) rows are still selected, and this one is still visible")
+    try expect(scoped.titlesForQA.contains(survivor.title),
+               "…with the row itself still in the list, which is what makes that a statement about the selection")
+    try expect(picked == [.project("continuum")],
+               "picking from the popup reports the scope so the host can persist it — got \(picked.map(\.title))")
+
+    // AN OPEN PROJECT WITH NO AGENTS IS STILL A SCOPE (from cross-review): the popup
+    // offers what the registry has open, unioned with what the rows mention, so the
+    // project you are about to start your first agent in is pickable.
+    scoped.scopeCatalog = [.project("quiet-project"), .workspace("Quiet")]
+    scoped.layoutForQA()
+    try expect(scoped.scopeTitlesForQA == InboxScope.entries(
+                for: fixture, catalog: scoped.scopeCatalog, including: scoped.scope).map(\.title),
+               "the catalog's scopes are in the menu — got \(scoped.scopeTitlesForQA)")
+    try expect(scoped.scopeTitlesForQA.contains("quiet-project"),
+               "…including one no row mentions — got \(scoped.scopeTitlesForQA)")
+    try expect(scoped.pickScopeForQA(.project("quiet-project")), "an agentless open project must be pickable")
+    scoped.layoutForQA()
+    try expect(scoped.rowCountForQA == 0 && scoped.emptyMessageForQA == AgentInboxView.scopedEmptyMessage,
+               "…and it shows an empty scope rather than everything — \(scoped.rowCountForQA) rows, '\(scoped.emptyMessageForQA)'")
+    scoped.scopeCatalog = []
+    scoped.setScope(.all)
+    scoped.layoutForQA()
+    picked.removeAll()
+
+    // EVERY ENTRY IN THE MENU SELECTS THE SCOPE IT NAMES. A sweep rather than one
+    // pick, because the popup addresses its entries by tag and an off-by-one in that
+    // mapping shows one project's agents under another project's name — which reads
+    // as a filter bug forever, since nothing about the list looks wrong.
+    for entry in InboxScope.entries(for: fixture) {
+        try expect(scoped.pickScopeForQA(entry), "'\(entry.title)' must be pickable")
+        scoped.layoutForQA()
+        try expect(scoped.selectedScopeTitleForQA == entry.title,
+                   "the popup must show the scope that was picked — got '\(scoped.selectedScopeTitleForQA)' for \(entry)")
+        try expect(scoped.rowIdsForQA
+                    == InboxSort.sortForInbox(rows: InboxScope.filter(rows: fixture, scope: entry)).map(\.id),
+                   "'\(entry.title)' must show exactly its own agents — got \(scoped.titlesForQA)")
+    }
+
+    // Every pick in the sweep was reported to the host that persists it, except the
+    // first — the sweep starts on `All agents`, which is already showing.
+    try expect(picked.count == InboxScope.entries(for: fixture).count - 1,
+               "every pick that CHANGED the scope must be reported — \(picked.count) reports over \(InboxScope.entries(for: fixture).count) entries")
+    picked.removeAll()
+    // …and re-picking the scope already showing reports nothing, so idle menu traffic
+    // does not rewrite the setting.
+    try expect(scoped.pickScopeForQA(scoped.scope) && picked.isEmpty,
+               "re-picking the current scope must not report a change — got \(picked.map(\.title))")
+
+    // A PROJECT AND A WORKSPACE THAT SHARE A NAME are two entries, and the popup has
+    // to keep them apart: `NSPopUpButton.addItem(withTitle:)` REMOVES an existing item
+    // with the same title, which would silently drop one scope and shift every entry
+    // after it. The common case, since a one-project workspace is usually named after
+    // the project.
+    let sameName = fixture.map { row in
+        AgentInboxRow(
+            id: row.id, title: row.title, projectName: row.projectName,
+            workspaceName: row.projectName, state: row.state, attention: row.attention,
+            lifecycle: row.lifecycle, model: row.model, role: row.role, branch: row.branch,
+            isIsolated: row.isIsolated, elapsed: row.elapsed, depth: row.depth,
+            variant: row.variant, createdAt: row.createdAt, parentId: row.parentId)
+    }
+    let collides = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    collides.reload(rows: sameName)
+    try expect(collides.scopeTitlesForQA == InboxScope.entries(for: sameName).map(\.title),
+               "a shared name must still be two entries — got \(collides.scopeTitlesForQA)")
+    try expect(collides.pickScopeForQA(.workspace("bannockburn")) && collides.selectedScopeTitleForQA == "bannockburn",
+               "…and the second of them must be selectable")
+    collides.layoutForQA()
+    try expect(collides.rowIdsForQA
+                == InboxSort.sortForInbox(rows: sameName.filter { $0.workspaceName == "bannockburn" }).map(\.id),
+               "…and select the workspace, not the project that shares its name — got \(collides.titlesForQA)")
+
+    // A WORKSPACE crosses projects, which is the whole reason it is a second kind of
+    // scope rather than a coarser project.
+    try expect(scoped.pickScopeForQA(.workspace("Overnight")), "the workspace scope must be pickable")
+    scoped.layoutForQA()
+    try expect(Set(scoped.titlesForQA) == Set(fixture.filter { $0.workspaceName == "Overnight" }.map(\.title)),
+               "a workspace scope keeps every project's agents in it — got \(scoped.titlesForQA)")
+    try expect(Set(scoped.titlesForQA.compactMap { title in fixture.first { $0.title == title }?.projectName }).count > 1,
+               "…and this fixture's workspace must span more than one project, or that says nothing")
+
+    // A SCOPE THAT MATCHES NOTHING says so, and says which kind of nothing it is.
+    // "No agents yet" in front of seven filtered-out agents is the empty state lying.
+    scoped.setScope(.project("does-not-exist"))
+    scoped.layoutForQA()
+    try expect(scoped.rowCountForQA == 0 && scoped.isEmptyMessageVisibleForQA,
+               "an empty scope shows the empty state — \(scoped.rowCountForQA) rows")
+    try expect(scoped.emptyMessageForQA == AgentInboxView.scopedEmptyMessage,
+               "…and it names the scope as the cause — got '\(scoped.emptyMessageForQA)'")
+    try expect(scoped.selectedScopeTitleForQA == "does-not-exist",
+               "a scope no row matches stays selected in the popup rather than silently reading as All agents — got '\(scoped.selectedScopeTitleForQA)'")
+    try expect(picked == [.workspace("Overnight")],
+               "a programmatic setScope must NOT report back — restoring a persisted scope would write it again; got \(picked.map(\.title))")
+
+    // THE OPEN AGENT SURVIVES ANY SCOPE (the packet's "watch out"): navigating to an
+    // agent must never hide its own row.
+    let elsewhere = fixture.first { $0.projectName == "bannockburn" }!
+    scoped.openAgentId = elsewhere.id
+    scoped.setScope(.project("continuum"))
+    scoped.layoutForQA()
+    try expect(scoped.titlesForQA.contains(elsewhere.title),
+               "the agent open in the focused tile is in the list whatever the scope says — got \(scoped.titlesForQA)")
+    try expect(Set(scoped.titlesForQA) == Set(wantedTitles + [elsewhere.title]),
+               "…and it is the only thing the force-include adds — got \(scoped.titlesForQA)")
+    scoped.openAgentId = nil
+    scoped.layoutForQA()
+    try expect(!scoped.titlesForQA.contains(elsewhere.title),
+               "closing that tile lets the scope hide the row again — got \(scoped.titlesForQA)")
+
+    // PERSISTENCE, in isolated defaults: the scope survives a relaunch, and a value
+    // this version cannot read fails OPEN rather than hiding every row.
+    let scopeSuite = "continuum.inbox.scope.\(UUID().uuidString)"
+    let scopeDefaults = UserDefaults(suiteName: scopeSuite)!
+    defer { scopeDefaults.removePersistentDomain(forName: scopeSuite) }
+    try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == .all,
+               "with no stored scope the inbox shows every agent")
+    WorkspaceSidebarConfig.setScope(.workspace("Overnight"), defaults: scopeDefaults)
+    try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == .workspace("Overnight"),
+               "the picked scope comes back after a relaunch — got \(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults))")
+    scopeDefaults.set("zone:main", forKey: WorkspaceSidebarConfig.scopeKey)
+    try expect(WorkspaceSidebarConfig.resolveScope(defaults: scopeDefaults) == .all,
+               "an unreadable stored scope opens the list up rather than emptying it")
+    // …and the restore path is the one the app uses, with no write-back.
+    let restored = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    var restoreWrites = 0
+    restored.onScopeChange = { _ in restoreWrites += 1 }
+    restored.setScope(.project("continuum"))
+    restored.reload(rows: fixture)
+    restored.layoutForQA()
+    try expect(restored.selectedScopeTitleForQA == "continuum" && restored.titlesForQA == wantedTitles,
+               "a scope restored before the first push filters that push — got '\(restored.selectedScopeTitleForQA)' over \(restored.titlesForQA)")
+    try expect(restoreWrites == 0, "restoring a scope must not write it back — \(restoreWrites) writes")
 
     // MARK: A2 · P3.7 · the parked tail collapses and nothing else does
 
@@ -19995,6 +20256,12 @@ extension AppDelegate {
     empty.reload(rows: [])
     try expect(empty.isEmptyMessageVisibleForQA && empty.rowCountForQA == 0,
                "an inbox with no agents says so rather than rendering as a blank rectangle")
+    // P3.8: and it says "yet" rather than blaming a scope, which is the other half of
+    // the pair asserted in A3 — the two messages must not be the same string.
+    try expect(empty.emptyMessageForQA == AgentInboxView.emptyMessage,
+               "a list with no agents at all is not a list you filtered — got '\(empty.emptyMessageForQA)'")
+    try expect(AgentInboxView.emptyMessage != AgentInboxView.scopedEmptyMessage,
+               "the two empty states must read differently, or distinguishing them is theatre")
 
     // MARK: B · the app against disk
 
@@ -20005,13 +20272,16 @@ extension AppDelegate {
     let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
     let agentsSupport = tempRoot.appendingPathComponent("Agents", isDirectory: true)
     let projectRoot = tempRoot.appendingPathComponent("Project", isDirectory: true)
-    for dir in [appSupport, agentsSupport, projectRoot] {
+    let quietRoot = tempRoot.appendingPathComponent("Quiet", isDirectory: true)
+    for dir in [appSupport, agentsSupport, projectRoot, quietRoot] {
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
     }
 
     let now = Date(timeIntervalSince1970: 1_900_600_000)
     let workspaceId = UUID(uuidString: "3B600000-0000-4000-8000-0000000000A1")!
     let projectId = UUID(uuidString: "3B600000-0000-4000-8000-0000000000D1")!
+    let quietProjectId = UUID(uuidString: "3B600000-0000-4000-8000-0000000000D2")!
+    let goneProjectId = UUID(uuidString: "3B600000-0000-4000-8000-0000000000D3")!
     let zoneId = UUID(uuidString: "3B600000-0000-4000-8000-0000000000C1")!
     let terminalAgentTile = UUID(uuidString: "3B600000-0000-4000-8000-0000000000E1")!
     // A PLAIN SHELL: a terminal session with no `AgentDescriptor`. It is in the
@@ -20023,7 +20293,14 @@ extension AppDelegate {
     registry.lastActiveWorkspaceId = workspaceId
     registry.workspaces = [WorkspaceEntry(id: workspaceId, name: "Default", projectIds: [projectId], createdAt: now, updatedAt: now)]
     registry.projects = [
-        ProjectEntry(id: projectId, name: "Continuum", rootPath: projectRoot.path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false)
+        ProjectEntry(id: projectId, name: "Continuum", rootPath: projectRoot.path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false),
+        // P3.8: a SECOND project, open and with no agent in it. It is what makes the
+        // scope-menu assertion below a statement about the REGISTRY rather than about
+        // the rows — the rows already mention the first project by name.
+        ProjectEntry(id: quietProjectId, name: "Quiet", rootPath: quietRoot.path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false),
+        // …and one whose checkout is GONE. It is in the registry and it is not open, so
+        // it must not be offered as a scope — picking it could only ever be empty.
+        ProjectEntry(id: goneProjectId, name: "Gone", rootPath: tempRoot.appendingPathComponent("Gone").path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: true),
     ]
     let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
     try registryStore.save(registry)
@@ -20074,6 +20351,40 @@ extension AppDelegate {
 
     let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 300, height: 640))
     app.workspaceSidebarView = sidebar
+    // P3.8: the WIRING, which no isolated `UserDefaults` can witness —
+    // `configureWorkspaceSidebar` is where the persisted scope is read and where a
+    // picked one is written, and it reads `.standard`. The stored value is saved and
+    // put back, the way `--workspace-sidebar-shell-check` already does for the
+    // sidebar's width and visibility.
+    let standardDefaults = UserDefaults.standard
+    let storedScope = standardDefaults.object(forKey: WorkspaceSidebarConfig.scopeKey)
+    defer {
+        if let storedScope {
+            standardDefaults.set(storedScope, forKey: WorkspaceSidebarConfig.scopeKey)
+        } else {
+            standardDefaults.removeObject(forKey: WorkspaceSidebarConfig.scopeKey)
+        }
+    }
+    // A scope that BITES: the headless agent has no tile, so it is in no workspace
+    // and a workspace scope must not claim it (`InboxScope.matches`). Scoping to the
+    // project instead would leave both rows in and prove only that nothing crashed.
+    WorkspaceSidebarConfig.setScope(.workspace("Default"), defaults: standardDefaults)
+    app.configureWorkspaceSidebar(sidebar)
+    app.refreshAgentSurfaces(notify: false)
+    sidebar.inboxForQA.layoutForQA()
+    try expect(sidebar.inboxForQA.selectedScopeTitleForQA == "Default",
+               "the persisted scope must be restored onto the real sidebar — got '\(sidebar.inboxForQA.selectedScopeTitleForQA)'")
+    try expect(sidebar.inboxForQA.rowIdsForQA == [terminalAgentTile],
+               "…and applied: the tiled agent is in workspace 'Default' and the headless one is in no workspace — got \(sidebar.inboxForQA.titlesForQA)")
+    // The menu comes from the REGISTRY, not only from the rows: this run's project and
+    // workspace are both offered while the list is showing one row.
+    try expect(sidebar.inboxForQA.scopeTitlesForQA == ["All agents", "Continuum", "Quiet", "Default"],
+               "the popup offers the registry's projects and its workspace, including 'Quiet', which has no agent in it, and NOT the missing 'Gone' — got \(sidebar.inboxForQA.scopeTitlesForQA)")
+    // Back to every agent for the assertions below, through the popup, and the pick
+    // must have been written to defaults — that is the whole persistence loop.
+    try expect(sidebar.inboxForQA.pickScopeForQA(.all), "All agents must be pickable")
+    try expect(WorkspaceSidebarConfig.resolveScope(defaults: standardDefaults) == .all,
+               "a scope picked from the popup must be persisted — got \(WorkspaceSidebarConfig.resolveScope(defaults: standardDefaults))")
     app.refreshAgentSurfaces(notify: false)
     let sidebarWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 300, height: 640),
@@ -20116,6 +20427,6 @@ extension AppDelegate {
                "one agent's event must not rebuild the whole list — \(rebuiltByEvent) cells were rebuilt")
 
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown")
     }
 }

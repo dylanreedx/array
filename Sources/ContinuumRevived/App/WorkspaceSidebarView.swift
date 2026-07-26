@@ -246,6 +246,29 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         inboxView.apply(rows: rows, changed: changed)
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
+    /// Restore the persisted scope and say where a user-picked one should be
+    /// written. Both halves are the app's (`WorkspaceSidebarConfig` lives beside the
+    /// sidebar's width and visibility), so the view holds the scope and knows
+    /// nothing about `UserDefaults` — which is also what keeps its three committed
+    /// Lab baselines independent of whose defaults ran the check.
+    func configureInboxScope(_ scope: InboxScope, onChange: @escaping (InboxScope) -> Void) {
+        inboxView.onScopeChange = onChange
+        inboxView.setScope(scope)
+    }
+
+    /// The agent open in the focused tile — force-included in the inbox whatever the
+    /// scope is, so navigating to an agent can never hide its own row.
+    func setInboxOpenAgent(_ id: UUID?) {
+        inboxView.openAgentId = id
+    }
+
+    /// Every project and workspace that is open, so the scope popup can offer one you
+    /// have no agent in yet.
+    func setInboxScopeCatalog(_ catalog: [InboxScope]) {
+        inboxView.scopeCatalog = catalog
+    }
+
     var inboxForQA: AgentInboxView { inboxView }
     var isWorkspaceTreeVisibleForQA: Bool { !scrollView.isHidden }
 

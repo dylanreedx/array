@@ -65,6 +65,9 @@ public enum AgentInboxRowBuilder {
             id: boardRow.agentId,
             title: title(for: context),
             projectName: context?.projectName,
+            // P3.8: the scope dropdown filters by project OR workspace, and the
+            // filter is pure, so the row has to carry the name. Nothing draws it.
+            workspaceName: context?.workspaceName,
             state: state,
             // P3.3 owns read-state. It is local desktop state stored beside the
             // agent record, so it is not visible from a snapshot and cannot be

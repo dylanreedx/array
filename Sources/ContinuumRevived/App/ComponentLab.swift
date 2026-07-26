@@ -101,6 +101,12 @@ enum LabFixtures {
     // Ids are canned like every other fixture here: `InboxSort` breaks ties on
     // them, and a random UUID would reorder the card between two renders and make
     // its committed baseline flap.
+    //
+    // P3.8 added the workspace names, which NOTHING DRAWS — a row shows its project
+    // chip and no second one. They are here because the scope dropdown offers one
+    // entry per workspace, and the shape it has to be exercised on is the awkward
+    // one: two workspaces over the same project, one workspace spanning two
+    // projects, and a headless agent in neither (it has no tile, so no workspace).
     static let inboxAgentIds: [UUID] = (1...7).map {
         UUID(uuidString: String(format: "00000000-0000-0000-0000-0000000003%02X", $0))!
     }
@@ -110,22 +116,22 @@ enum LabFixtures {
         return [
             AgentInboxRow(
                 id: inboxAgentIds[0], title: "codex · migration review", projectName: "continuum",
-                state: .approval, attention: .unread, model: "gpt-5.6-sol", role: "reviewer",
+                workspaceName: "Overnight", state: .approval, attention: .unread, model: "gpt-5.6-sol", role: "reviewer",
                 branch: "agent/migration-review", isIsolated: true, createdAt: at(60)),
             AgentInboxRow(
                 id: inboxAgentIds[1], title: "claude · matrix green", projectName: "continuum",
-                state: .working, model: "claude-opus-5", role: "builder",
+                workspaceName: "Overnight", state: .working, model: "claude-opus-5", role: "builder",
                 branch: "main", elapsed: 254, createdAt: at(50)),
             AgentInboxRow(
                 id: inboxAgentIds[2], title: "pi · session naming", projectName: "bannockburn",
-                state: .input, model: "gpt-5.6-sol", branch: "main", createdAt: at(40)),
+                workspaceName: "Overnight", state: .input, model: "gpt-5.6-sol", branch: "main", createdAt: at(40)),
             AgentInboxRow(
                 id: inboxAgentIds[3], title: "codex · flake hunt", projectName: "continuum",
-                state: .failed, model: "gpt-5.6-sol", role: "debugger",
+                workspaceName: "Side", state: .failed, model: "gpt-5.6-sol", role: "debugger",
                 branch: "agent/flake-hunt", isIsolated: true, createdAt: at(30)),
             AgentInboxRow(
                 id: inboxAgentIds[4], title: "claude · docs sweep", projectName: "continuum",
-                state: .ready, model: "claude-opus-5", branch: "main", createdAt: at(20)),
+                workspaceName: "Overnight", state: .ready, model: "claude-opus-5", branch: "main", createdAt: at(20)),
             // HEADLESS (P2A.6): no tile renders it, so it has no tile title — its
             // name is the one the `AgentRecord` owns. It is `woke`, which is the one
             // attention value that keeps a row at full strength in any state.
@@ -137,7 +143,7 @@ enum LabFixtures {
             // after its parent whatever it is doing.
             AgentInboxRow(
                 id: inboxAgentIds[6], title: "claude · child worker", projectName: "continuum",
-                state: .working, model: "claude-opus-5", role: "builder",
+                workspaceName: "Overnight", state: .working, model: "claude-opus-5", role: "builder",
                 branch: "agent/child-worker", isIsolated: true, elapsed: 8_460,
                 depth: 1, createdAt: at(5), parentId: inboxAgentIds[5]),
         ]
@@ -173,7 +179,8 @@ enum LabFixtures {
         return inboxRows().map { row in
             guard let lifecycle = parked[row.id] else { return row }
             return AgentInboxRow(
-                id: row.id, title: row.title, projectName: row.projectName, state: row.state,
+                id: row.id, title: row.title, projectName: row.projectName,
+                workspaceName: row.workspaceName, state: row.state,
                 attention: row.attention, lifecycle: lifecycle, model: row.model, role: row.role,
                 branch: row.branch, isIsolated: row.isIsolated, elapsed: row.elapsed,
                 depth: row.depth, variant: RowVariant.forLifecycle(lifecycle),
@@ -1398,7 +1405,7 @@ enum LabCatalog {
             category: "Chrome",
             title: "Agent Inbox",
             summary: "Five states, frozen creation order, a headless agent and one spawned child.",
-            content: .staticCard(preferredSize: NSSize(width: 320, height: 620)) {
+            content: .staticCard(preferredSize: NSSize(width: 320, height: 620 + AgentInboxView.scopeControlHeight)) {
                 makeAgentInboxPreview(selecting: nil)
             }
         )
@@ -1413,7 +1420,7 @@ enum LabCatalog {
             category: "Chrome",
             title: "Agent Inbox - row selected",
             summary: "The working row selected: it stops receding and its card takes the selection outline.",
-            content: .staticCard(preferredSize: NSSize(width: 320, height: 620)) {
+            content: .staticCard(preferredSize: NSSize(width: 320, height: 620 + AgentInboxView.scopeControlHeight)) {
                 makeAgentInboxPreview(selecting: LabFixtures.inboxAgentIds[1])
             }
         )
@@ -1429,7 +1436,7 @@ enum LabCatalog {
             category: "Chrome",
             title: "Agent Inbox - settled and snoozed",
             summary: "Two settled rows and one snoozed collapse to ~36pt; ready, failed, working and approval stay cards.",
-            content: .staticCard(preferredSize: NSSize(width: 320, height: 620)) {
+            content: .staticCard(preferredSize: NSSize(width: 320, height: 620 + AgentInboxView.scopeControlHeight)) {
                 makeAgentInboxPreview(selecting: nil, rows: LabFixtures.inboxParkedRows())
             }
         )
@@ -1439,7 +1446,12 @@ enum LabCatalog {
         selecting id: UUID?,
         rows: [AgentInboxRow] = LabFixtures.inboxRows()
     ) -> NSView {
-        let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+        // P3.8: 620 was the height that fitted this fixture's seven rows. The scope
+        // popup sits above them, so the card is that much taller — the alternative is
+        // a card whose last row is half cut off, which costs the contrast and pixel
+        // sweeps a row's worth of coverage for no reason.
+        let view = AgentInboxView(
+            frame: NSRect(x: 0, y: 0, width: 320, height: 620 + AgentInboxView.scopeControlHeight))
         // P3.7: pinned, not live — a parked row's "12m ago" is read off this clock,
         // and a wall-clock one would make the committed baseline flap by the minute.
         view.clock = { LabFixtures.inboxNow }

@@ -242,7 +242,13 @@ enum UIProbeAppearance {
         // App-layer half of the ticket is covered by the same sweep.
         let surfaces: [(id: String, size: NSSize, make: () -> NSView)] = [
             ("appearance.managedAgentTile", NSSize(width: 640, height: 560), makeTile),
-            ("appearance.sidebar", NSSize(width: 280, height: 520), {
+            // P3.8: 520 plus the scope control. The popup took that much off the top of
+            // the list, which cost this surface one rendered `AgentInboxCardView` and
+            // took the sweep under its own floor. The room is given back rather than
+            // the floor lowered — the floor is measuring how many themed views the
+            // sweep covers, and the answer must not fall because the control above
+            // the list grew.
+            ("appearance.sidebar", NSSize(width: 280, height: 520 + AgentInboxView.scopeControlHeight), {
                 let view = WorkspaceSidebarView(frame: .zero)
                 view.reloadInbox(rows: LabFixtures.inboxRows())
                 return view
@@ -255,7 +261,7 @@ enum UIProbeAppearance {
             // relying on the sidebar surface above, because an EMPTY list owns no
             // row views — `AgentInboxRowView` would be a declared conformer this
             // sweep never renders, which `declaredConformers()` is right to reject.
-            ("appearance.agentInbox", NSSize(width: 320, height: 620), {
+            ("appearance.agentInbox", NSSize(width: 320, height: 620 + AgentInboxView.scopeControlHeight), {
                 LabCatalog.makeAgentInboxPreview(selecting: LabFixtures.inboxAgentIds[1])
             }),
             ("appearance.canvas", NSSize(width: 700, height: 480), {

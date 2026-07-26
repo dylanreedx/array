@@ -63,6 +63,24 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         }
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
+    /// The room the scope control takes off the top of the list: the popup's own
+    /// intrinsic height plus the gap above and below it.
+    ///
+    /// MEASURED off a popup, not typed as a number — the control's height comes from
+    /// its font (`.token(.label)`), so a P1.4 size move grows this instead of
+    /// clipping the control. It is public to this file's callers because the Lab
+    /// cards and the appearance sweep size themselves around the LIST, and a
+    /// hardcoded 32 there would cut a row in half the day the type scale moves. The
+    /// laid-out height is this same intrinsic height: the popup is pinned by its top
+    /// and its leading edge only, so nothing stretches it.
+    static var scopeControlHeight: Double {
+        let probe = NSPopUpButton(frame: .zero, pullsDown: false)
+        probe.font = .token(.label)
+        probe.addItem(withTitle: InboxScope.allTitle)
+        return (2 * Space.s + Double(probe.fittingSize.height)).rounded(.up)
+    }
+
     /// How far one nesting level indents a child row (P2D.4 draws the nesting;
     /// this is only the step). `Space.xl`, so an indented card is still visibly a
     /// card rather than a hairline shift.
@@ -73,14 +91,33 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// phase-0 blankness floor is right to call a failure.
     static let emptyMessage = "No agents yet"
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
+    /// Shown when the list HAS agents and the scope hides all of them. A second
+    /// message rather than one, because "No agents yet" in front of seven agents you
+    /// filtered out is a lie the empty state would be telling — and the useful next
+    /// move (widen the scope) is only obvious if the message names the cause.
+    static let scopedEmptyMessage = "No agents in this scope"
+
+    private let scopePopUp: NSPopUpButton
     private let scrollView: NSScrollView
     private let tableView: NSTableView
     private let column: NSTableColumn
     private let emptyLabel: NSTextField
 
-    /// The rows as they are drawn — already through `InboxSort.sortForInbox`, so
-    /// index N here is row N on screen and every accessor below can be an index.
+    /// The rows as they are drawn — already through the scope filter (P3.8) and
+    /// `InboxSort.sortForInbox`, so index N here is row N on screen and every
+    /// accessor below can be an index.
     private(set) var rows: [AgentInboxRow] = []
+    // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
+    /// Every row the list was HANDED, unfiltered and unsorted. Held because the
+    /// scope is a view-local control: flipping it must re-filter the same push
+    /// rather than wait for the next agent event, and the popup's own menu is
+    /// derived from the projects and workspaces the whole list mentions — not from
+    /// the ones that survived the current scope, which would make every scope but
+    /// `.all` a one-way door.
+    private var allRows: [AgentInboxRow] = []
+    /// The entries in the popup, parallel to the menu items' tags.
+    private var scopeEntries: [InboxScope] = []
     /// The row the mouse is over, or -1. Hover is one of P3.5's three
     /// interaction facts and it is tracked HERE, on the table, rather than per
     /// cell: cell views are recycled, so a tracking area installed on one would
@@ -114,7 +151,52 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// `AgentInboxRowBuilder`.
     var clock: () -> Date = Date.init
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
+    /// Which agents the list is showing. `.all` at birth and NOT read from
+    /// `UserDefaults` here: this view is rendered by three committed Lab baselines,
+    /// and a view that resolved a persisted default in its initialiser would make
+    /// those PNGs depend on the defaults of whoever ran the check. Persistence is
+    /// wired where the sidebar's other two settings are wired (`ContinuumApp`,
+    /// `WorkspaceSidebarConfig`), through `setScope` and `onScopeChange`.
+    private(set) var scope: InboxScope = .all
+    /// Told, never guessed: the user picked a scope from the popup. The host
+    /// persists it. Not called for a programmatic `setScope` — restoring a scope at
+    /// launch must not write the value back.
+    var onScopeChange: ((InboxScope) -> Void)?
+    /// The agent open in the focused tile, force-included whatever the scope says
+    /// (`InboxScope.filter`). Set by the host on every push; a change re-filters,
+    /// and an unchanged value does no work, so this cannot cost the incremental
+    /// refresh (P2B.7) its "one cell rebuilt".
+    var openAgentId: UUID? {
+        didSet {
+            guard openAgentId != oldValue else { return }
+            reload(rows: allRows)
+        }
+    }
+    /// Every project and workspace that is OPEN, from the host's registry. The menu
+    /// is the union of these and what the rows mention, so a project you have open
+    /// with no agent in it is still a scope you can pick — see `InboxScope.entries`.
+    /// It changes only when the registry does, so it re-menus and does not re-filter.
+    var scopeCatalog: [InboxScope] = [] {
+        didSet {
+            guard scopeCatalog != oldValue else { return }
+            updateScopeMenu()
+        }
+    }
+
     override init(frame frameRect: NSRect) {
+        // A popup, not a segmented control or a row of chips: the entry count is
+        // the number of projects and workspaces you have open, so anything that
+        // lays its choices out side by side puts the sidebar's width back under the
+        // control of your project names — which is the exact coupling this ticket
+        // removes from group headers.
+        scopePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+        scopePopUp.font = .token(.label)
+        scopePopUp.translatesAutoresizingMaskIntoConstraints = false
+        // Lets the popup shrink with a narrow sidebar rather than force the whole
+        // view wider than the split-view divider allows.
+        scopePopUp.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
         scrollView = NSScrollView(frame: .zero)
         scrollView.borderType = .noBorder
         scrollView.hasVerticalScroller = true
@@ -155,22 +237,31 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         setAccessibilityIdentifier("ContinuumAgentInboxRoot")
         tableView.setAccessibilityIdentifier("ContinuumAgentInboxList")
         emptyLabel.setAccessibilityIdentifier("ContinuumAgentInboxEmpty")
+        scopePopUp.setAccessibilityIdentifier("ContinuumAgentInboxScope")
 
+        addSubview(scopePopUp)
         addSubview(scrollView)
         addSubview(emptyLabel)
 
         tableView.dataSource = self
         tableView.delegate = self
+        scopePopUp.target = self
+        scopePopUp.action = #selector(scopePicked(_:))
+        updateScopeMenu()
 
         NSLayoutConstraint.activate([
+            scopePopUp.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
+            scopePopUp.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Space.m),
+            scopePopUp.topAnchor.constraint(equalTo: topAnchor, constant: Space.s),
+
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: topAnchor),
+            scrollView.topAnchor.constraint(equalTo: scopePopUp.bottomAnchor, constant: Space.s),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             emptyLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.l),
             emptyLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.l),
-            emptyLabel.topAnchor.constraint(equalTo: topAnchor, constant: Space.xl),
+            emptyLabel.topAnchor.constraint(equalTo: scrollView.topAnchor, constant: Space.l),
         ])
     }
 
@@ -203,10 +294,20 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// frozen desktop order (P3.4) and applying it here is what makes "row N on
     /// screen" and "rows[N]" the same thing for every accessor below.
     func reload(rows newRows: [AgentInboxRow]) {
-        rows = InboxSort.sortForInbox(rows: newRows)
+        allRows = newRows
+        updateScopeMenu()
+        render(visibleRows(from: newRows))
+    }
+
+    /// Draw this list whole. Takes rows that are ALREADY filtered and sorted, which
+    /// is why it is private: `reload(rows:)` is the entry point for a fresh push and
+    /// takes the unfiltered set, and handing it an already-filtered list would make
+    /// the scope narrow itself with every call.
+    private func render(_ visible: [AgentInboxRow]) {
+        rows = visible
         cellsByRow.removeAll()
         tableView.reloadData()
-        emptyLabel.isHidden = !rows.isEmpty
+        updateEmptyState()
     }
 
     /// Apply a new set of rows knowing WHICH agents moved (P2B.7's change set).
@@ -231,9 +332,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// `Equatable` makes exact rather than a guess. (Found in cross-review; the
     /// change-set-only version showed a stale project name after a rename.)
     func apply(rows newRows: [AgentInboxRow], changed: AgentsBoardChangeSet) {
-        let sorted = InboxSort.sortForInbox(rows: newRows)
+        // P3.8: the SCOPE decides what is on screen, so the diff is against the
+        // filtered list — an agent that arrived in a project you are not scoped to
+        // has not changed this list at all. `allRows` and the popup's menu are
+        // updated either way, so a new project appears in the dropdown on the push
+        // that first mentions it.
+        allRows = newRows
+        updateScopeMenu()
+        let sorted = visibleRows(from: newRows)
         guard sorted.map(\.id) == rows.map(\.id) else {
-            reload(rows: sorted)
+            render(sorted)
             return
         }
         let previous = rows
@@ -248,6 +356,90 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // draw its one collapsed line into a card-sized slot — and keep the slot.
         tableView.noteHeightOfRows(withIndexesChanged: indexes)
         tableView.reloadData(forRowIndexes: indexes, columnIndexes: IndexSet(integer: 0))
+    }
+
+    // MARK: - Scope (P3.8)
+
+    /// The rows this scope leaves on screen, in the frozen order. Filter FIRST, then
+    /// sort: the two commute (filtering a permutation and permuting a subset give the
+    /// same list), and this way `InboxSort` only ever nests the children it can see.
+    private func visibleRows(from newRows: [AgentInboxRow]) -> [AgentInboxRow] {
+        InboxSort.sortForInbox(
+            rows: InboxScope.filter(rows: newRows, scope: scope, openAgentId: openAgentId))
+    }
+
+    /// Change the scope. `notify: false` for a restore at launch — the host is
+    /// TELLING the view what was persisted, and calling back would write it again.
+    ///
+    /// THE SELECTION IS CLEARED, always, and this is the ticket's one hard rule:
+    /// a bulk action (P3.11) must never reach a row you cannot see. Today the table
+    /// is single-select, so "the multi-selection" is one row — clearing it here is
+    /// what makes the rule structural before the multi-select lands, instead of a
+    /// thing P3.11 has to remember. Hover is dropped for the mechanical reason too:
+    /// the indexes it was recorded against belong to the previous list.
+    ///
+    /// MEASURED, so the next reader does not have to guess: `reloadData()` below
+    /// already empties `selectedRowIndexes` on this table — deleting this line leaves
+    /// the check green (probed over four scope flips, including one where the row
+    /// count grows). It stays because the rule must not rest on that AppKit
+    /// behaviour: P3.11 adds multi-select and P4.12 a crossfade, and either could
+    /// reasonably start restoring selection across a reload. The assertion that has
+    /// teeth is the other direction — an implementation that re-selects the agent
+    /// after the flip goes red, which is the witness quoted at
+    /// `runAgentInboxChecks`.
+    func setScope(_ next: InboxScope, notify: Bool = false) {
+        guard next != scope else { return }
+        scope = next
+        tableView.deselectAll(nil)
+        selectedRowForEmphasis = -1
+        hoveredRow = -1
+        updateScopeMenu()
+        render(visibleRows(from: allRows))
+        if notify { onScopeChange?(next) }
+    }
+
+    @objc private func scopePicked(_ sender: NSPopUpButton) {
+        guard let tag = sender.selectedItem?.tag, scopeEntries.indices.contains(tag) else { return }
+        setScope(scopeEntries[tag], notify: true)
+    }
+
+    /// Rebuild the popup's menu when the set of scopes changed, and point it at the
+    /// current one either way.
+    ///
+    /// AN `NSMenu` BUILT BY HAND, not `addItem(withTitle:)`: that method REMOVES an
+    /// existing item with the same title, so a workspace and a project that share a
+    /// name — the common case, since a one-project workspace is usually named after
+    /// it — would collapse to a single entry and every index after it would point at
+    /// the wrong scope. The tag carries the index instead of the position, so the
+    /// separator between the two blocks costs nothing.
+    private func updateScopeMenu() {
+        let entries = InboxScope.entries(for: allRows, catalog: scopeCatalog, including: scope)
+        if entries != scopeEntries {
+            scopeEntries = entries
+            let menu = NSMenu()
+            for (index, entry) in entries.enumerated() {
+                if index > 0, case .workspace = entry, case .project = entries[index - 1] {
+                    menu.addItem(.separator())
+                }
+                let item = NSMenuItem(title: entry.title, action: nil, keyEquivalent: "")
+                item.tag = index
+                menu.addItem(item)
+            }
+            scopePopUp.menu = menu
+        }
+        if let index = scopeEntries.firstIndex(of: scope) {
+            scopePopUp.selectItem(withTag: index)
+        }
+    }
+
+    /// The empty state, and WHICH empty state. An inbox with agents in it that are
+    /// all filtered out is not empty, and saying "No agents yet" there would be the
+    /// list lying about the thing the user just did.
+    private func updateEmptyState() {
+        emptyLabel.stringValue = allRows.isEmpty
+            ? AgentInboxView.emptyMessage
+            : AgentInboxView.scopedEmptyMessage
+        emptyLabel.isHidden = !rows.isEmpty
     }
 
     // MARK: - Table
@@ -370,6 +562,24 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     var textAlphasForQA: [Double] { cells().map(\.qaTextAlpha) }
     var accentAlphasForQA: [Double] { cells().map(\.qaAccentAlpha) }
     var isEmptyMessageVisibleForQA: Bool { !emptyLabel.isHidden }
+    var emptyMessageForQA: String { emptyLabel.stringValue }
+    // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
+    /// The popup as RENDERED — the titles AppKit is really showing and the one it
+    /// has ticked — rather than `scopeEntries`, which would assert about the array
+    /// the menu was built from and not about the menu.
+    var scopeTitlesForQA: [String] { scopePopUp.itemTitles.filter { !$0.isEmpty } }
+    var selectedScopeTitleForQA: String { scopePopUp.titleOfSelectedItem ?? "" }
+    var selectedRowCountForQA: Int { tableView.selectedRowIndexes.count }
+
+    /// Pick a scope the way the user does — through the popup's own action, so the
+    /// check exercises the target/action wiring and not just `setScope`.
+    @discardableResult
+    func pickScopeForQA(_ scope: InboxScope) -> Bool {
+        guard let index = scopeEntries.firstIndex(of: scope),
+              scopePopUp.selectItem(withTag: index) else { return false }
+        scopePicked(scopePopUp)
+        return true
+    }
     /// P3.7, read off the RENDERED table rather than recomputed: the variant of
     /// the cell class AppKit actually built, the height it actually laid the row
     /// out at, and the parked row's glyph with the alpha it is painted at.

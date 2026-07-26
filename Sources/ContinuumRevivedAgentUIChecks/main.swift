@@ -41,4 +41,7 @@ runAgentInboxRowChecks()
 // Ticket: docs/38-tickets/90-agent-ux/P3.4-frozen-sort.md
 runInboxSortChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
+runInboxScopeChecks()
+
 print("ContinuumRevivedAgentUIChecks passed")
