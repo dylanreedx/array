@@ -3,8 +3,29 @@ import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
+/// P6.0: a transcript entry has two presentations, and the KIND is the key.
+/// `.toolCall`/`.plan`/`.diff`/`.error` are structured records and keep the
+/// bordered, titled `TranscriptCardView`; `.message`/`.userMessage` are prose and
+/// get `TranscriptProseView`. The tile keeps one of these per card id and calls
+/// `apply(_:)` on the next event, so both views answer the same two entry points.
 @MainActor
-final class TranscriptCardView: NSView, TokenThemed {
+protocol TranscriptEntryView: NSView, TokenThemed {
+    func apply(_ card: ManagedTranscriptCard)
+}
+
+/// The kind→presentation decision, in one place. Both the tile's card stack and
+/// the tour's per-kind gallery go through it, so the two cannot drift into
+/// rendering the same kind differently.
+@MainActor
+func makeTranscriptEntryView(for card: ManagedTranscriptCard) -> TranscriptEntryView {
+    switch card.kind {
+    case .message, .userMessage: return TranscriptProseView(card: card)
+    case .toolCall, .plan, .diff, .error: return TranscriptCardView(card: card)
+    }
+}
+
+@MainActor
+final class TranscriptCardView: NSView, TokenThemed, TranscriptEntryView {
     private let titleLabel = NSTextField(labelWithString: "")
     private let bodyLabel = NSTextField(wrappingLabelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "")
@@ -128,4 +149,106 @@ final class TranscriptCardView: NSView, TokenThemed {
         case .error: return .cardError
         }
     }
+}
+
+/// P6.0: the prose half of the transcript. A conversation rendered as a uniform
+/// stack of titled bordered records reads as a log viewer, so the two message
+/// kinds lose all of it: no border, no title row, no status word.
+///
+/// A user turn is told apart from an assistant turn by a FILL and nothing else —
+/// not a right-aligned bubble (the tile is resizable down to 320pt, where a
+/// percentage-width bubble is indistinguishable from the full-width box this
+/// replaces) and not a narrower column (the trailing edge belongs to the status
+/// dot and `CornerOverlayView`).
+@MainActor
+final class TranscriptProseView: NSView, TokenThemed, TranscriptEntryView {
+    private let bodyLabel = NSTextField(wrappingLabelWithString: "")
+    /// Same reason `TranscriptCardView` keeps it: the fill is keyed on the kind, so
+    /// re-applying it on an appearance change needs the kind kept.
+    private var cardKind: ManagedTranscriptCardKind
+    /// Held because the insets are keyed on the kind, the same way the fill is.
+    private let stack = NSStackView()
+
+    init(card: ManagedTranscriptCard) {
+        self.cardKind = card.kind
+        super.init(frame: .zero)
+        wantsLayer = true
+        applyTokens()
+
+        bodyLabel.font = .token(.body)
+        bodyLabel.textColor = StatusChipNSView.dynamicNSColor(TextToken.textPrimary.color)
+        bodyLabel.isSelectable = true
+
+        stack.addArrangedSubview(bodyLabel)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+        apply(card)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    func applyTokens() {
+        // No border on either kind, and no fill on `.message`: assistant prose sits
+        // directly on the tile body, which is why `TextToken.textPrimary` on
+        // `SurfaceToken.tileBody` is the pair that has to clear 4.5:1.
+        layer?.backgroundColor = Self.fill(for: cardKind)?.color.cgColor(in: self)
+    }
+
+    /// Everything about the shape that is keyed on the kind, in one place.
+    ///
+    /// The radius belongs to the FILL: an assistant turn has no shape to round, so
+    /// it gets none. The insets are `Inset.card` horizontally on both kinds — prose
+    /// that touches the transcript's edge collides with the scroll view — and
+    /// vertically only where there is a fill, whose text would otherwise sit on its
+    /// own edge. An assistant turn keeps no vertical padding of its own, so the gap
+    /// between two turns stays the card stack's `Space.m` and nothing here quietly
+    /// invents a separator.
+    private func applyShape() {
+        let fill = Self.fill(for: cardKind)
+        layer?.cornerRadius = fill == nil ? 0 : Radius.card
+        stack.edgeInsets = NSEdgeInsets(
+            top: fill == nil ? 0 : Inset.card.top,
+            left: Inset.card.left,
+            bottom: fill == nil ? 0 : Inset.card.bottom,
+            right: Inset.card.right
+        )
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
+    }
+
+    func apply(_ card: ManagedTranscriptCard) {
+        cardKind = card.kind
+        applyTokens()
+        applyShape()
+        // `bodyFallback` is "" for both prose kinds, so an empty prose card renders
+        // as empty prose — not as an empty bordered box, which is what it did.
+        bodyLabel.stringValue = card.body
+        identifier = NSUserInterfaceItemIdentifier("managedAgent.card.\(card.id)")
+    }
+
+    /// The one permitted device. `nil` is the assistant's turn: the absence of a
+    /// fill, not a fill that happens to match the backdrop.
+    static func fill(for kind: ManagedTranscriptCardKind) -> SurfaceToken? {
+        switch kind {
+        case .userMessage: return .cardUserMessage
+        case .message, .toolCall, .plan, .diff, .error: return nil
+        }
+    }
+
+    /// What the QA probes assert about, so the presentation rule is readable from
+    /// the view rather than restated in the gate.
+    var qaCardKind: ManagedTranscriptCardKind { cardKind }
 }

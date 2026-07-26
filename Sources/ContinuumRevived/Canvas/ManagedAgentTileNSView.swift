@@ -49,7 +49,9 @@ final class ManagedAgentTileNSView: TileNSView {
     private let approvalDock = ApprovalDockView()
     private let composeField = NSTextField()
     private let runButton = NSButton()
-    private var cardViewsById: [String: TranscriptCardView] = [:]
+    /// P6.0: one entry view per card, and WHICH view is the card's kind — prose or
+    /// record. `makeTranscriptEntryView(for:)` owns that decision.
+    private var cardViewsById: [String: TranscriptEntryView] = [:]
     private var inputCardViewsByRequestId: [String: UserInputCardView] = [:]
     private var pendingApprovals: [String: ApprovalDockRequest] = [:]
     private var pendingUserInputs: [String: AgentUserInputRequest] = [:]
@@ -516,7 +518,7 @@ final class ManagedAgentTileNSView: TileNSView {
             if let view = cardViewsById[card.id] {
                 view.apply(card)
             } else {
-                let view = TranscriptCardView(card: card)
+                let view = makeTranscriptEntryView(for: card)
                 cardViewsById[card.id] = view
                 cardStack.addArrangedSubview(view)
                 view.translatesAutoresizingMaskIntoConstraints = false

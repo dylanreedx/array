@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
 /// Numeric probes over the `UIProbe` **bitmap** — the layer that catches "the
@@ -449,6 +450,7 @@ enum UIProbePixels {
         }
 
         var total = Sweep()
+        var tightestProseDelta = Double.infinity
         // Per appearance, not totalled: an aggregate floor is satisfied by one
         // appearance carrying the whole run while the other silently probes nothing.
         let minimumCardBordersPerAppearance = 3
@@ -481,6 +483,11 @@ enum UIProbePixels {
                 throw fail("\(label): only \(appearanceSweep.textProbes) text rect(s) probed, needs >= \(minimumTextRectsPerAppearance)")
             }
             total.merge(appearanceSweep)
+            let theme: TokenTheme = appearanceName == .darkAqua ? .dark : .light
+            tightestProseDelta = min(
+                tightestProseDelta,
+                try expectProsePresentation(probe, theme: theme, label: label)
+            )
         }
 
         guard NSApp.appearance?.name == .darkAqua else {
@@ -495,6 +502,200 @@ enum UIProbePixels {
             total.worstText.spread, total.worstText.key.isEmpty ? "none" : total.worstText.key,
             total.worstBorder.delta, total.worstBorder.key.isEmpty ? "none" : total.worstBorder.key
         ))
+        print(String(
+            format: "UIProbePixels: prose presentation gated in both appearances; tightest user-vs-assistant fill luminance delta %.3f, needs >= %.3f",
+            tightestProseDelta, minimumProseFillLuminanceDelta
+        ))
+    }
+
+    // MARK: - P6.0 · Prose is not a card
+
+    /// Minimum |user prose − assistant prose| luminance over the fill band, in the
+    /// rendered bitmap.
+    ///
+    /// **Derived from measurement**, like the two thresholds at the head of this
+    /// file. Measured on this fixture with the shipped tokens: **0.054** in light
+    /// (`cardUserMessage` #E5EEFB over `tileBody` #FAFBFC) and **0.095** in dark
+    /// (#26303F over #14171C), so light is the case that binds; both are printed
+    /// every run. A user turn routed to the assistant's path measures **0.000**
+    /// (observed). 0.02 sits 2.7x under the tighter real case — enough headroom that
+    /// a token tweak inside the palette is not red, tight enough that a dropped fill
+    /// is.
+    static let minimumProseFillLuminanceDelta = 0.02
+
+    /// P6.0's rule, on the real tile, as numbers:
+    ///
+    /// - No prose view paints a border. That is the whole point of the ticket, and
+    ///   the border sweep above cannot say it — a bordered prose view would be a
+    ///   perfectly VISIBLE border and would pass.
+    /// - `.message` paints no fill at all (absence, not a fill that happens to match
+    ///   the backdrop), `.userMessage` paints `SurfaceToken.cardUserMessage` for this
+    ///   theme.
+    /// - And the two are told apart in the BITMAP, not only in the layer properties:
+    ///   "no chrome" is otherwise trivially satisfied by drawing nothing.
+    ///
+    /// Returns the measured fill delta so the caller reports the tightest one.
+    private static func expectProsePresentation(
+        _ probe: UIProbe.Probed, theme: TokenTheme, label: String
+    ) throws -> Double {
+        var fillLuminanceByKind: [ManagedTranscriptCardKind: (value: Double, key: String)] = [:]
+        var seenKinds: Set<ManagedTranscriptCardKind> = []
+        try walk(probe.view) { view in
+            guard let prose = view as? TranscriptProseView else { return }
+            let key = "\(label) \(describe(prose))"
+            seenKinds.insert(prose.qaCardKind)
+
+            // The probes name views by this prefix; a prose view that spelled its
+            // identifier differently would be silently un-probed.
+            guard prose.identifier?.rawValue.hasPrefix("managedAgent.card.") == true else {
+                throw fail("\(key): prose identifier is '\(prose.identifier?.rawValue ?? "nil")', not a managedAgent.card.<id> — the transcript probes match on that prefix")
+            }
+            guard let layer = prose.layer else {
+                throw fail("\(key): prose view has no layer, so nothing can be said about its fill")
+            }
+            // Width, not colour: `CALayer.borderColor` defaults to opaque black on
+            // every layer, so a nil-colour rule would be red on correct code. A
+            // zero-width border draws nothing whatever colour it holds.
+            guard layer.borderWidth == 0 else {
+                throw fail(String(
+                    format: "%@: prose paints a %.1fpt border in %@ — an assistant or user turn is prose on the tile body, not a bordered card",
+                    key, layer.borderWidth, hex(layer.borderColor)
+                ))
+            }
+
+            // The rule, restated here rather than read from
+            // `TranscriptProseView.fill(for:)`: an oracle taken from the code under
+            // test would bless a wrong token as long as it still looked different.
+            let expected: SurfaceToken? = prose.qaCardKind == .userMessage ? .cardUserMessage : nil
+            let painted = hex(layer.backgroundColor)
+            switch expected {
+            case nil:
+                guard layer.backgroundColor == nil else {
+                    throw fail("\(key): an assistant turn paints \(painted) — prose has NO fill; the tile body is what shows behind it")
+                }
+            case let token?:
+                let want = hex(token.color.cgColor(for: theme))
+                guard painted == want else {
+                    throw fail("\(key): a user turn paints \(painted) in \(theme.rawValue), expected \(token.rawValue) = \(want) — the fill is the only thing telling your turn from the agent's")
+                }
+            }
+            // The radius belongs to the fill: there is no shape to round on a turn
+            // that paints nothing.
+            let wantRadius = expected == nil ? 0 : Radius.card
+            guard abs(layer.cornerRadius - wantRadius) < 0.01 else {
+                throw fail(String(
+                    format: "%@: prose corner radius is %.1f, expected %.1f — a radius on an unfilled turn is a card's shape with the card removed",
+                    key, layer.cornerRadius, wantRadius
+                ))
+            }
+            // And the padding, measured off the label rather than declared: prose is
+            // inset `Inset.card` horizontally on both kinds so it cannot collide with
+            // the scroll view, and vertically only where a fill needs its own edge.
+            guard let text = firstTextField(in: prose) else {
+                throw fail("\(key): prose renders no label")
+            }
+            // The ALIGNMENT rect, which is what `NSStackView` positions: an
+            // `NSTextField`'s frame sits ~2pt outside it, so comparing the frame to
+            // the inset would be red on correct layout.
+            let textFrame = text.alignmentRect(forFrame: prose.convert(text.bounds, from: text))
+            let wantVertical = expected == nil ? 0 : Inset.card.top
+            guard abs(textFrame.minX - Inset.card.left) < 0.5 else {
+                throw fail(String(
+                    format: "%@: prose text starts %.1fpt from the leading edge, expected Inset.card.left = %.1fpt — prose with no inset collides with the transcript's edge",
+                    key, textFrame.minX, Inset.card.left
+                ))
+            }
+            // `minY` is the gap at the BOTTOM (the prose view is unflipped); the two
+            // vertical insets are one value, so this holds both ends.
+            guard abs(textFrame.minY - wantVertical) < 0.5,
+                  abs(prose.bounds.maxY - textFrame.maxY - wantVertical) < 0.5 else {
+                throw fail(String(
+                    format: "%@: prose text is inset %.1fpt / %.1fpt vertically, expected %.1fpt on both — a fill needs its text off its own edge, and prose with no fill adds no padding of its own",
+                    key, prose.bounds.maxY - textFrame.maxY, textFrame.minY, wantVertical
+                ))
+            }
+
+            // The rendered half. Sampled from the top inset band, which is fill only:
+            // `Inset.card.top` of padding sits above the label, and the horizontal
+            // range steps clear of the corner radius.
+            guard isFullyRendered(prose) else { return }
+            let value = try fillBandLuminance(of: prose, probe: probe, label: key)
+            if fillLuminanceByKind[prose.qaCardKind] == nil {
+                fillLuminanceByKind[prose.qaCardKind] = (value, key)
+            }
+        }
+
+        // Not vacuous: the fixture must really render both presentations, or this
+        // whole check would pass by measuring nothing.
+        for kind in [ManagedTranscriptCardKind.message, .userMessage] {
+            guard seenKinds.contains(kind) else {
+                throw fail("\(label): no \(kind.rawValue) prose view in the tile — the fixture stopped rendering a presentation this gate is supposed to cover")
+            }
+        }
+        guard let assistant = fillLuminanceByKind[.message], let user = fillLuminanceByKind[.userMessage] else {
+            throw fail("\(label): only \(fillLuminanceByKind.keys.map(\.rawValue).sorted().joined(separator: ", ")) prose was fully rendered — both an assistant turn and a user turn must be in the bitmap to compare them")
+        }
+        let delta = abs(user.value - assistant.value)
+        guard delta >= minimumProseFillLuminanceDelta else {
+            throw fail(String(
+                format: "%@: a user turn is indistinguishable from an assistant turn — fill luminance %.3f (%@) vs %.3f (%@), delta %.3f needs >= %.3f",
+                label, user.value, user.key, assistant.value, assistant.key,
+                delta, minimumProseFillLuminanceDelta
+            ))
+        }
+        return delta
+    }
+
+    /// Mean luminance of a prose view's LEADING padding strip — the columns between
+    /// its left edge and its label. Whatever fills that strip is what the turn reads
+    /// as: its own fill, or the tile body showing through the absence of one.
+    ///
+    /// The leading strip rather than the top one, because only the horizontal inset
+    /// exists on both kinds: an assistant turn has no vertical padding at all, so a
+    /// top band would be the label's own rect.
+    private static func fillBandLuminance(
+        of view: NSView, probe: UIProbe.Probed, label: String
+    ) throws -> Double {
+        let rect = try bitmapRect(of: view, rect: view.bounds, in: probe)
+        let scale = Double(probe.hostRep.pixelsWide) / probe.host.bounds.width
+        // One pixel in from each edge: the boundary row blends with whatever is
+        // behind the view. `Radius.card + 2` clears the rounded corner of a filled
+        // turn, so no sample can land outside the fill it is measuring.
+        let top = rect.y + 1
+        let bottom = rect.y + rect.height - 1
+        let left = rect.x + Int(((Radius.card + 2) * scale).rounded())
+        let right = rect.x + Int(((Inset.card.left - 2) * scale).rounded())
+        guard bottom > top, right > left else {
+            throw fail("\(label): \(rect.width)x\(rect.height)px leaves no fill band to sample (rows \(top)..<\(bottom), columns \(left)..<\(right))")
+        }
+        var sum = 0.0
+        var count = 0
+        for y in top..<bottom {
+            for x in left..<right {
+                guard let value = luminance(probe.hostRep, x: x, y: y) else { continue }
+                sum += value
+                count += 1
+            }
+        }
+        guard count > 0 else { throw fail("\(label): fill band sampled no pixels") }
+        return sum / Double(count)
+    }
+
+    private static func firstTextField(in root: NSView) -> NSTextField? {
+        if let field = root as? NSTextField { return field }
+        for subview in root.subviews {
+            if let field = firstTextField(in: subview) { return field }
+        }
+        return nil
+    }
+
+    private static func hex(_ color: CGColor?) -> String {
+        guard let color, let srgb = NSColor(cgColor: color)?.usingColorSpace(.sRGB) else { return "nil" }
+        func component(_ value: CGFloat) -> String {
+            String(format: "%02X", Int((min(max(value, 0), 1) * 255).rounded()))
+        }
+        return "#" + component(srgb.redComponent) + component(srgb.greenComponent)
+            + component(srgb.blueComponent) + component(srgb.alphaComponent)
     }
 
     /// The sampled rect must actually land on the view it was computed from. Without

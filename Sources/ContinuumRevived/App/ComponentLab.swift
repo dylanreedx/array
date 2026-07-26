@@ -1712,6 +1712,13 @@ enum LabCatalog {
             .sessionStateChanged(.running),
             .turnStarted(threadId: threadId, turnId: "turn-1"),
             .contentDelta(threadId: threadId, turnId: "turn-1", streamKind: .assistant, delta: "I'll read the current guard, then refactor it to be idempotent."),
+            // P6.0: a third STRUCTURED card. Two message kinds stopped being
+            // `TranscriptCardView` in that ticket, which would have taken the border
+            // probe's per-appearance floor of 3 down to 2 — the honest fix is to give
+            // the probe something to measure, never to lower the floor. Completed,
+            // not in-progress, so `activeToolCount` stays the 1 the Lab asserts.
+            .itemStarted(threadId: threadId, itemId: "plan-1", kind: .plan, title: "3 steps"),
+            .itemCompleted(threadId: threadId, itemId: "plan-1", kind: .plan, status: .completed),
             .itemStarted(threadId: threadId, itemId: "cmd-1", kind: .commandExecution, title: "swift test"),
             .itemCompleted(threadId: threadId, itemId: "cmd-1", kind: .commandExecution, status: .completed),
             .itemStarted(threadId: threadId, itemId: "file-1", kind: .fileChange, title: "Sources/Auth.swift")
@@ -1746,6 +1753,11 @@ enum LabCatalog {
         for event in managedAgentFixtureEvents(includeApproval: includeApproval) {
             view.ingest(event)
         }
+        // P6.0: a real user turn, so every probe over this fixture sees BOTH prose
+        // presentations — the assistant's, which paints nothing, and yours, whose
+        // `SurfaceToken.cardUserMessage` fill is the only thing distinguishing them.
+        // A fixture with no user turn would leave that fill unrendered and unprobed.
+        view.appendUserPrompt("Also check the token refresh path while you're in there.")
         return view
     }
 

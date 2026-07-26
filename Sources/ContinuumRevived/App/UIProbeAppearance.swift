@@ -581,6 +581,12 @@ enum UIProbeAppearance {
         "ManagedAgentTileNSView.header",
         "ManagedAgentTileNSView.composeBackdrop",
         "TranscriptCardView",
+        // P6.0: the prose half of the transcript. It paints ONE layer colour and
+        // only for `.userMessage` — `SurfaceToken.cardUserMessage`, the one device
+        // that tells a user turn from an assistant turn now that neither is a card.
+        // An assistant turn paints nothing, so what puts this owner under the gate
+        // is the fixture's user turn.
+        "TranscriptProseView",
         "ApprovalDockView",
         "UserInputCardView",
         // P2C.4's branch chip, born on tokens: `SurfaceToken.overlay` fill with a

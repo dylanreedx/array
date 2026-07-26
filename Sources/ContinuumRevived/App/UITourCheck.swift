@@ -186,7 +186,7 @@ enum UITourCheck {
         stack.spacing = 10
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
         for kind in transcriptCardKinds {
-            let card = TranscriptCardView(card: transcriptCardSample(for: kind))
+            let card = makeTranscriptEntryView(for: transcriptCardSample(for: kind))
             card.translatesAutoresizingMaskIntoConstraints = false
             card.widthAnchor.constraint(equalToConstant: max(80, width - 24)).isActive = true
             stack.addArrangedSubview(card)
