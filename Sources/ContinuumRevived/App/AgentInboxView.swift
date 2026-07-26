@@ -47,6 +47,22 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
             + Inset.card.vertical
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md
+    /// A PARKED row's height: one `.title` line in a row inset — 35pt, which is
+    /// the "~36pt" the packet approximates. Derived exactly like `rowHeight`, so
+    /// a P1.4 size move moves both instead of clipping one.
+    static var slimRowHeight: Double { Metrics.rowHeight(for: .title, insets: Inset.row) }
+
+    /// The height a row of this variant gets. The two numbers are far enough apart
+    /// (79 vs 35) that the collapse is the visible fact it is meant to be, and the
+    /// gap is asserted rather than left to the two derivations happening to differ.
+    static func height(for variant: RowVariant) -> Double {
+        switch variant {
+        case .card: return rowHeight
+        case .slim: return slimRowHeight
+        }
+    }
+
     /// How far one nesting level indents a child row (P2D.4 draws the nesting;
     /// this is only the step). `Space.xl`, so an indented card is still visibly a
     /// card rather than a hairline shift.
@@ -84,8 +100,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// The QA accessors read this map rather than asking the table for a view with
     /// `makeIfNecessary: true`, which would BUILD one and inflate the very count
     /// the witness is measuring.
-    private var cellsByRow: [Int: AgentInboxCellView] = [:]
+    private var cellsByRow: [Int: AgentInboxRowCell] = [:]
     private(set) var cellBuildCountForQA = 0
+
+    // Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md
+    /// The clock a parked row's relative time is read from ("12m ago", "in 2h").
+    ///
+    /// A closure so a live list ages as the app runs, and an injection point so a
+    /// committed baseline cannot flap: a Lab card rendering a wall-clock relative
+    /// time would match its PNG for one minute and fail for the rest of the hour.
+    /// Nothing else in this view reads a clock — a card row's elapsed time is a
+    /// number the ROW carries, computed against the caller's `now` by
+    /// `AgentInboxRowBuilder`.
+    var clock: () -> Date = Date.init
 
     override init(frame frameRect: NSRect) {
         scrollView = NSScrollView(frame: .zero)
@@ -215,6 +242,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
             changed.touched.contains(rows[$0].id) || rows[$0] != previous[$0]
         })
         guard !indexes.isEmpty else { return }
+        // P3.7: a lifecycle move changes the row's VARIANT, and a variant is a
+        // different height. `reloadData(forRowIndexes:)` re-asks for the row's VIEW
+        // and not for its height, so without this a row that just settled would
+        // draw its one collapsed line into a card-sized slot — and keep the slot.
+        tableView.noteHeightOfRows(withIndexesChanged: indexes)
         tableView.reloadData(forRowIndexes: indexes, columnIndexes: IndexSet(integer: 0))
     }
 
@@ -222,20 +254,36 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
+    /// P3.7: settled and snoozed collapse, everything else is a full card. The
+    /// height is asked of the ROW's variant and of nothing else — the list may not
+    /// decide a `ready` or `failed` agent has earned less room, which is the
+    /// density mistake the rule exists to forbid.
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        guard rows.indices.contains(row) else { return AgentInboxView.rowHeight }
+        return AgentInboxView.height(for: rows[row].variant)
+    }
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard rows.indices.contains(row) else { return nil }
         cellBuildCountForQA += 1
         let model = rows[row]
-        let cell = AgentInboxCellView()
+        let interacting = isInteracting(row: row)
+        let cell: AgentInboxRowCell
+        switch model.variant {
+        case .card: cell = AgentInboxCellView()
+        case .slim: cell = AgentInboxSlimCellView()
+        }
         cell.identifier = NSUserInterfaceItemIdentifier(AgentInboxView.accessibilityIdentifier(for: model))
         cell.setAccessibilityIdentifier(AgentInboxView.accessibilityIdentifier(for: model))
         cell.apply(
             model,
             emphasis: AgentInboxRow.emphasis(
-                for: model.state, attention: model.attention, isInteracting: isInteracting(row: row)
+                for: model.state, attention: model.attention, isInteracting: interacting
             ),
             indent: Double(max(0, model.depth)) * AgentInboxView.indentPerLevel,
-            isSelected: tableView.selectedRow == row
+            isSelected: tableView.selectedRow == row,
+            isInteracting: interacting,
+            now: clock()
         )
         cellsByRow[row] = cell
         return cell
@@ -266,8 +314,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         tableView.reloadData(forRowIndexes: touched, columnIndexes: IndexSet(integer: 0))
     }
 
+    /// KEYED `id:variant` (P3.7), not by id alone. The two variants are two
+    /// different view trees at two different heights, so a lifecycle transition has
+    /// to replace the row's view rather than re-dress it: sharing a key across the
+    /// collapse is what makes a row appear to slide through its neighbours, and a
+    /// translucent row sliding over another reads as text painted over text. With
+    /// the variant in the key the old view goes and the new one arrives in place,
+    /// which is the crossfade P4.12 animates.
     static func accessibilityIdentifier(for row: AgentInboxRow) -> String {
-        "agent-inbox-row-\(row.id.uuidString)"
+        "agent-inbox-row-\(row.id.uuidString)-\(row.variant.rawValue)"
     }
 
     // MARK: - Hover
@@ -315,6 +370,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     var textAlphasForQA: [Double] { cells().map(\.qaTextAlpha) }
     var accentAlphasForQA: [Double] { cells().map(\.qaAccentAlpha) }
     var isEmptyMessageVisibleForQA: Bool { !emptyLabel.isHidden }
+    /// P3.7, read off the RENDERED table rather than recomputed: the variant of
+    /// the cell class AppKit actually built, the height it actually laid the row
+    /// out at, and the parked row's glyph with the alpha it is painted at.
+    var rowVariantsForQA: [RowVariant] { cells().map(\.qaVariant) }
+    /// The height each row was actually LAID OUT at, less the intercell spacing
+    /// `NSTableView.rect(ofRow:)` folds into it — so this is the number
+    /// `height(for:)` returned, measured off the table rather than re-derived from
+    /// it (which would witness nothing).
+    var rowHeightsForQA: [Double] {
+        (0..<tableView.numberOfRows).map { Double(tableView.rect(ofRow: $0).height - tableView.intercellSpacing.height) }
+    }
+    var glyphsForQA: [String] { cells().map(\.qaGlyph) }
+    /// A card's elapsed turn time, a parked row's "12m ago" — one accessor,
+    /// because it is one column: how long this row has been the way it is.
+    var relativeTimesForQA: [String] { cells().map(\.qaElapsed) }
+    var glyphAlphasForQA: [Double] { cells().map(\.qaGlyphAlpha) }
+    var identifiersForQA: [String] { cells().map { $0.identifier?.rawValue ?? "" } }
 
     @discardableResult
     func selectRowForQA(id: UUID) -> Bool {
@@ -341,9 +413,30 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         }
     }
 
-    private func cells() -> [AgentInboxCellView] {
+    private func cells() -> [AgentInboxRowCell] {
         (0..<tableView.numberOfRows).compactMap { cellsByRow[$0] }
     }
+}
+
+// Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md
+/// The two row views the list can build, behind one call. The list decides WHICH
+/// from `AgentInboxRow.variant` and then knows nothing else about the difference —
+/// so the density rule lives in `RowVariant.forLifecycle` (P3.1), which is where
+/// it can be gated, and never in a condition scattered through the painting.
+@MainActor
+protocol AgentInboxRowCell: NSTableCellView {
+    func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double, isSelected: Bool, isInteracting: Bool, now: Date)
+
+    var qaVariant: RowVariant { get }
+    var qaTitle: String { get }
+    var qaStateLabel: String { get }
+    var qaMeta: String { get }
+    var qaBranch: String { get }
+    var qaElapsed: String { get }
+    var qaGlyph: String { get }
+    var qaTextAlpha: Double { get }
+    var qaAccentAlpha: Double { get }
+    var qaGlyphAlpha: Double { get }
 }
 
 /// The card one row's words sit on: a `tileBody` fill with a `border` outline,
@@ -394,7 +487,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
 }
 
 /// One row's words, on the card that carries them.
-final class AgentInboxCellView: NSTableCellView {
+final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     private let card = AgentInboxCardView()
 
     private let projectLabel = NSTextField(labelWithString: "")
@@ -496,7 +589,14 @@ final class AgentInboxCellView: NSTableCellView {
     /// TEXT LAYER, never to a container the status accent is inside". So the five
     /// word labels take `textOpacity` and `stateLabel` takes `accentOpacity`,
     /// which is full for both emphases by construction.
-    func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double, isSelected: Bool) {
+    ///
+    /// `isInteracting` and `now` are the slim variant's (P3.7) and are unused here:
+    /// a full card dims nothing on hover beyond what `emphasis` already carries,
+    /// and its elapsed time is a number the ROW holds rather than a distance from
+    /// the current clock. They are on the shared call so the list can paint either
+    /// variant without knowing which it has.
+    func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double, isSelected: Bool,
+               isInteracting: Bool = false, now: Date = Date()) {
         shown = (row, emphasis)
         card.isSelected = isSelected
         leadingInset?.constant = indent
@@ -575,11 +675,211 @@ final class AgentInboxCellView: NSTableCellView {
         return "\(minutes / 60)h\(minutes % 60)m"
     }
 
+    var qaVariant: RowVariant { .card }
     var qaTitle: String { titleLabel.stringValue }
     var qaStateLabel: String { stateLabel.isHidden ? "" : stateLabel.stringValue }
     var qaMeta: String { metaLabel.stringValue }
     var qaBranch: String { branchLabel.stringValue }
     var qaElapsed: String { elapsedLabel.stringValue }
+    /// A full card carries the state as a WORD (`qaStateLabel`), never as a glyph —
+    /// the glyph is the collapsed row's way of saying the same thing in the room it
+    /// has. Empty here is the fact, not a missing accessor.
+    var qaGlyph: String { "" }
     var qaTextAlpha: Double { Double(titleLabel.alphaValue) }
     var qaAccentAlpha: Double { Double(stateLabel.alphaValue) }
+    var qaGlyphAlpha: Double { Opacity.full }
+}
+
+// Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md
+/// A PARKED row: settled or snoozed, and nothing else. Density comes from work
+/// you are finished with, never from the list second-guessing importance — a
+/// `ready` or `failed` agent stays a full card however quiet the inbox gets, and
+/// `RowVariant.forLifecycle` is what makes that structural rather than a rule this
+/// view could forget.
+///
+/// One line, four things: the state as a GLYPH, the agent's name, its branch and
+/// how long ago it stopped (or how long until a snooze is up). The glyph is dimmed
+/// at rest and full while you point at the row, so the settled tail stays scannable
+/// when you are hunting through it without being a second column of colour when you
+/// are not.
+///
+/// THE CARD IS REUSED, not dropped. A parked row keeps `AgentInboxCardView` so it
+/// still takes the selection outline, still re-themes itself on an appearance flip,
+/// and still gives `UIProbeContrast` a documented `tileBody` fill to measure its
+/// words against — a bare row would put them on the panel two levels up. The
+/// collapse is the height and the content; the chrome is not what makes a card.
+///
+/// ONE DELIBERATE DIVERGENCE FROM P3.5, recorded here rather than left to be
+/// discovered: `RowEmphasis.accentOpacity` holds a status accent at full strength
+/// "so a waiting row is still findable", and this glyph fades. The reason the rule
+/// does not reach here is that a parked row is not waiting on anyone — settling or
+/// snoozing IS the act of taking it out of the attention flow — so the accent has
+/// nothing left to be findable for. The fade is `Opacity.receded`, the same token
+/// the words use, so it stays inside the contrast envelope P1.6 gates rather than
+/// being an alpha of this view's own choosing.
+final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
+    private let card = AgentInboxCardView()
+    private let glyphLabel = NSTextField(labelWithString: "")
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let branchLabel = NSTextField(labelWithString: "")
+    private let timeLabel = NSTextField(labelWithString: "")
+    private var leadingInset: NSLayoutConstraint?
+    private var shown: (row: AgentInboxRow, emphasis: RowEmphasis, isInteracting: Bool, now: Date)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+
+        card.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(card)
+
+        glyphLabel.font = .token(.label)
+        glyphLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        titleLabel.font = .token(.title)
+        titleLabel.lineBreakMode = .byTruncatingTail
+        // The title takes the slack (there is no spacer view in this line — an
+        // unconstrained one is what made a card's height ambiguous once already and
+        // the render coin-flip that followed it), and it truncates LAST: half a
+        // branch name still identifies the branch, half an agent name is the agent
+        // you were looking for.
+        titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        branchLabel.font = .token(.label)
+        // Middle, for the same reason the card's branch line uses it.
+        branchLabel.lineBreakMode = .byTruncatingMiddle
+        branchLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        timeLabel.font = .token(.captionMono)
+        timeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let line = NSStackView(views: [glyphLabel, titleLabel, branchLabel, timeLabel])
+        line.orientation = .horizontal
+        line.alignment = .firstBaseline
+        line.spacing = Space.m
+        line.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(line)
+
+        let leading = card.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0)
+        leadingInset = leading
+        NSLayoutConstraint.activate([
+            leading,
+            card.trailingAnchor.constraint(equalTo: trailingAnchor),
+            card.topAnchor.constraint(equalTo: topAnchor),
+            card.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            line.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Inset.row.left),
+            line.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Inset.row.right),
+            // Centred, not pinned top-and-bottom: one line in a 35pt row, and a
+            // centre constraint cannot leave the height ambiguous the way a
+            // top+bottom pair on a flexible stack can.
+            line.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+
+            // The same floors the card row carries, for the same reason: a
+            // truncating label squeezed to a few points renders as a rect with no
+            // glyph in it, which `UIProbePixels` is right to call flat.
+            titleLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: AgentInboxCellView.minimumTextWidth(.title)),
+            branchLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: AgentInboxCellView.minimumTextWidth(.label)),
+        ])
+    }
+
+    required init?(coder: NSCoder) { return nil }
+
+    func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double, isSelected: Bool,
+               isInteracting: Bool = false, now: Date = Date()) {
+        shown = (row, emphasis, isInteracting, now)
+        card.isSelected = isSelected
+        leadingInset?.constant = indent
+
+        glyphLabel.stringValue = AgentInboxSlimCellView.glyph(for: row.state)
+        titleLabel.stringValue = row.title
+        branchLabel.stringValue = AgentInboxSlimCellView.branchText(branch: row.branch)
+        branchLabel.isHidden = branchLabel.stringValue.isEmpty
+        timeLabel.stringValue = AgentInboxSlimCellView.relativeText(for: row.lifecycle, now: now)
+        timeLabel.isHidden = timeLabel.stringValue.isEmpty
+
+        titleLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
+        branchLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        timeLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        glyphLabel.textColor = (row.state.accent?.color ?? TextToken.textSecondary.color).nsColor(in: self)
+
+        for label in [titleLabel, branchLabel, timeLabel] {
+            label.alphaValue = emphasis.textOpacity
+        }
+        glyphLabel.alphaValue = isInteracting ? Opacity.full : Opacity.receded
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        guard let shown else { return }
+        apply(shown.row, emphasis: shown.emphasis, indent: Double(leadingInset?.constant ?? 0),
+              isSelected: card.isSelected, isInteracting: shown.isInteracting, now: shown.now)
+    }
+
+    /// The state as one character, in `StatusChipPresenter`'s vocabulary rather
+    /// than a second one — the chip and the collapsed row must not draw one agent
+    /// two ways (P1.8 is the single status presenter, and this borrows from it
+    /// instead of competing with it).
+    ///
+    /// `approval` and `input` share `needsAttention`'s glyph because that is the
+    /// status both of them come from; they are already told apart by colour, which
+    /// is the axis P3.2 gave them. `failed` is the one state with nothing to borrow:
+    /// no `AgentStatus` records failure yet (P3.1 says so at `state(for:)`), so the
+    /// chip vocabulary has no member for it and this is the one glyph chosen here.
+    static let failedGlyph = "✕"
+
+    static func glyph(for state: InboxState) -> String {
+        switch state {
+        case .working: return StatusChipPresenter.display(for: .working).glyph
+        case .approval, .input: return StatusChipPresenter.display(for: .needsAttention).glyph
+        case .ready: return StatusChipPresenter.display(for: .idle).glyph
+        case .failed: return failedGlyph
+        }
+    }
+
+    /// The branch badge, in `BranchChipNSView`'s glyph but WITHOUT the card's
+    /// `· shared` suffix.
+    ///
+    /// Measured, not preferred: with the suffix the 320pt sidebar truncated the
+    /// badge to `⎇ mai…hared` in the first render of this card — middle truncation
+    /// is right for a branch name and useless once the same line also holds a
+    /// glyph, a name and a time. A collapsed row answers "which branch"; the shared
+    /// vs isolated distinction stays on the card, where there is room to say it.
+    static func branchText(branch: String?) -> String {
+        guard let branch else { return "" }
+        return "\(BranchChipNSView.branchGlyph) \(branch)"
+    }
+
+    /// How long ago the work stopped, or how long until a snooze is up.
+    ///
+    /// In `AgentInboxCellView.elapsedText`'s units (`45s` / `4m` / `2h11m`), reused
+    /// rather than reimplemented, so a duration means the same thing on a card and
+    /// on the row it collapses into. Empty for a lifecycle with no time to show and
+    /// for a distance that has gone negative — an overdue snooze is P4.6's raised
+    /// hand, not a row for this view to label "in -3m".
+    static func relativeText(for lifecycle: InboxLifecycle, now: Date) -> String {
+        switch lifecycle {
+        case .settled(let at):
+            guard let text = AgentInboxCellView.elapsedText(now.timeIntervalSince(at)) else { return "" }
+            return "\(text) ago"
+        case .snoozed(let until):
+            guard let text = AgentInboxCellView.elapsedText(until.timeIntervalSince(now)) else { return "" }
+            return "in \(text)"
+        case .active, .archived:
+            return ""
+        }
+    }
+
+    var qaVariant: RowVariant { .slim }
+    var qaTitle: String { titleLabel.stringValue }
+    /// A collapsed row says its state with the glyph, so it has no word to report.
+    var qaStateLabel: String { "" }
+    var qaMeta: String { "" }
+    var qaBranch: String { branchLabel.isHidden ? "" : branchLabel.stringValue }
+    var qaElapsed: String { timeLabel.isHidden ? "" : timeLabel.stringValue }
+    var qaGlyph: String { glyphLabel.stringValue }
+    var qaTextAlpha: Double { Double(titleLabel.alphaValue) }
+    /// The glyph IS this row's accent — the same number as `qaGlyphAlpha`, and
+    /// deliberately not `Opacity.full`: see the divergence note on the class.
+    var qaAccentAlpha: Double { Double(glyphLabel.alphaValue) }
+    var qaGlyphAlpha: Double { Double(glyphLabel.alphaValue) }
 }

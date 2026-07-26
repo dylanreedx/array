@@ -143,6 +143,44 @@ enum LabFixtures {
         ]
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md
+    /// The clock the inbox cards' relative times are read from. Canned like every
+    /// other fixture here: a parked row renders "12m ago", and a wall clock would
+    /// make its committed baseline match for one minute and fail for the next
+    /// fifty-nine. It sits 15 minutes after the newest agent was spawned, so every
+    /// settled distance below is positive and small enough to read in whole units.
+    static var inboxNow: Date { epoch.addingTimeInterval(75 * 60) }
+
+    /// THE SAME SEVEN AGENTS as `inboxRows()`, with three parked. Deliberately the
+    /// same list rather than a second one: the packet's verification is "baselines
+    /// for card and slim variants of the SAME agent", so `chrome.agentInbox` and
+    /// `chrome.agentInbox.parked` differ in exactly the lifecycles, and a diff of
+    /// the two PNGs is the collapse.
+    ///
+    /// The three cover what the rule turns on: a settled `ready` row (the ordinary
+    /// case), a settled `failed` one (collapsing is about being FINISHED WITH, not
+    /// about being unimportant — and it is the row whose glyph carries an accent),
+    /// and a snoozed one (whose time runs the other way, "in 25m"). The four left
+    /// active are the witness for the other half — `ready`, `failed`, `working` and
+    /// `approval` rows that stay full cards.
+    static func inboxParkedRows() -> [AgentInboxRow] {
+        func at(_ minutes: Double) -> Date { epoch.addingTimeInterval(minutes * 60) }
+        let parked: [UUID: InboxLifecycle] = [
+            inboxAgentIds[4]: .settled(at: at(63)),
+            inboxAgentIds[3]: .settled(at: at(21)),
+            inboxAgentIds[2]: .snoozed(until: at(100)),
+        ]
+        return inboxRows().map { row in
+            guard let lifecycle = parked[row.id] else { return row }
+            return AgentInboxRow(
+                id: row.id, title: row.title, projectName: row.projectName, state: row.state,
+                attention: row.attention, lifecycle: lifecycle, model: row.model, role: row.role,
+                branch: row.branch, isIsolated: row.isIsolated, elapsed: row.elapsed,
+                depth: row.depth, variant: RowVariant.forLifecycle(lifecycle),
+                createdAt: row.createdAt, parentId: row.parentId)
+        }
+    }
+
     static func sidebarTree() -> SidebarTree {
         let alpha = SidebarZoneRow(
             zoneId: selectedZoneId, name: "continuum-revived", color: "#5B8DEF", navKey: "1", collapsed: false, projectId: UUID(),
@@ -446,7 +484,7 @@ enum LabCatalog {
             topologyMigrationNoteCard,
 
             // MARK: 90-agent-ux cards
-            branchChipCard, agentInboxCard, agentInboxSelectedCard
+            branchChipCard, agentInboxCard, agentInboxSelectedCard, agentInboxParkedCard
         ]
     }
 
@@ -1381,9 +1419,31 @@ enum LabCatalog {
         )
     }
 
-    static func makeAgentInboxPreview(selecting id: UUID?) -> NSView {
+    // Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md
+    /// The same list with three agents parked: settled and snoozed collapse to one
+    /// line, the other four stay full cards. Its baseline against
+    /// `chrome.agentInbox`'s is the card-vs-slim comparison for the same agents.
+    private static var agentInboxParkedCard: LabEntry {
+        LabEntry(
+            id: "chrome.agentInbox.parked",
+            category: "Chrome",
+            title: "Agent Inbox - settled and snoozed",
+            summary: "Two settled rows and one snoozed collapse to ~36pt; ready, failed, working and approval stay cards.",
+            content: .staticCard(preferredSize: NSSize(width: 320, height: 620)) {
+                makeAgentInboxPreview(selecting: nil, rows: LabFixtures.inboxParkedRows())
+            }
+        )
+    }
+
+    static func makeAgentInboxPreview(
+        selecting id: UUID?,
+        rows: [AgentInboxRow] = LabFixtures.inboxRows()
+    ) -> NSView {
         let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
-        view.reload(rows: LabFixtures.inboxRows())
+        // P3.7: pinned, not live — a parked row's "12m ago" is read off this clock,
+        // and a wall-clock one would make the committed baseline flap by the minute.
+        view.clock = { LabFixtures.inboxNow }
+        view.reload(rows: rows)
         if let id { _ = view.selectRowForQA(id: id) }
         return view
     }
@@ -2065,7 +2125,8 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         // 48 since P2C.4 added `managed-agent.branch-chip` (24 static cards x 2).
         // 52 since P3.6 added `chrome.agentInbox` and `chrome.agentInbox.selected`
         // (26 static cards x 2).
-        let minimumCardsGated = 52
+        // 54 since P3.7 added `chrome.agentInbox.parked` (27 static cards x 2).
+        let minimumCardsGated = 54
         let minimumTextRectsPerAppearance = 192
         let minimumBordersPerAppearance = 12
         guard gated >= minimumCardsGated else {

@@ -19837,6 +19837,160 @@ extension AppDelegate {
     try expect(inbox.cellBuildCountForQA - buildsBeforeRemoval == withoutOne.count,
                "a list whose agents changed is rebuilt whole — a partial reload against a shifted array repaints a row with its neighbour's agent")
 
+    // MARK: A2 · P3.7 · the parked tail collapses and nothing else does
+
+    // The two heights first, as numbers: the packet asks for "~36pt", and a slim
+    // row that is not visibly shorter than a card is the whole ticket not landing.
+    try expect(AgentInboxView.slimRowHeight <= 36,
+               "a collapsed row is ~36pt — got \(AgentInboxView.slimRowHeight)")
+    try expect(AgentInboxView.slimRowHeight < AgentInboxView.rowHeight / 2,
+               "a collapsed row is a fraction of a card — slim \(AgentInboxView.slimRowHeight) vs card \(AgentInboxView.rowHeight)")
+
+    let parkedFixture = LabFixtures.inboxParkedRows()
+    let parkedSorted = InboxSort.sortForInbox(rows: parkedFixture)
+    // Vacuity, both ways: this fixture must actually contain both variants, and it
+    // must be the SAME agents as the card fixture with only their lifecycles moved —
+    // otherwise the baseline pair is two different lists, not one list collapsed.
+    try expect(Set(parkedFixture.map(\.id)) == Set(fixture.map(\.id)),
+               "the parked fixture must be the same agents as the card fixture")
+    try expect(parkedSorted.contains { $0.variant == .slim } && parkedSorted.contains { $0.variant == .card },
+               "the parked fixture must cover both variants, or every assertion below is about one of them")
+    // …and cover both lifecycles that collapse, and at least one collapsed row whose
+    // glyph carries an ACCENT — that is the one place in the app a status colour is
+    // painted faded, so a fixture without it leaves the divergence from P3.5
+    // unrendered and unmeasured by the contrast gate.
+    try expect(parkedSorted.contains { if case .snoozed = $0.lifecycle { return true } else { return false } }
+                && parkedSorted.contains { if case .settled = $0.lifecycle { return true } else { return false } },
+               "the parked fixture must cover both lifecycles that collapse")
+    try expect(parkedSorted.contains { $0.variant == .slim && $0.state.accent != nil },
+               "the parked fixture must include a collapsed row whose glyph carries an accent")
+
+    let parked = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    parked.clock = { LabFixtures.inboxNow }
+    parked.reload(rows: parkedFixture)
+    let parkedWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    parkedWindow.contentView = parked
+    parked.layoutForQA()
+
+    for (index, row) in parkedSorted.enumerated() {
+        // THE RULE, checked on the rendered row and not on the model: the variant
+        // follows the LIFECYCLE, the cell class the list built matches it, and the
+        // height it was laid out at matches that.
+        let wanted = RowVariant.forLifecycle(row.lifecycle)
+        try expect(row.variant == wanted,
+                   "'\(row.title)' is \(row.lifecycle), so it is a \(wanted.rawValue) — the row says \(row.variant.rawValue)")
+        try expect(parked.rowVariantsForQA[index] == wanted,
+                   "'\(row.title)' must be drawn as a \(wanted.rawValue) — got \(parked.rowVariantsForQA[index].rawValue)")
+        // The two heights spelled out here rather than asked of `height(for:)`:
+        // comparing the table against the function that set it would assert nothing.
+        let wantedHeight = wanted == .slim ? AgentInboxView.slimRowHeight : AgentInboxView.rowHeight
+        let height = parked.rowHeightsForQA[index]
+        try expect(abs(height - wantedHeight) < 0.5,
+                   "'\(row.title)' is a \(wanted.rawValue), so it is \(wantedHeight)pt tall — laid out at \(height)pt")
+        // The packet's named regression, stated as its own assertion so its failure
+        // says what it means: `ready` and `failed` are NOT collapsible.
+        switch row.lifecycle {
+        case .settled, .snoozed:
+            break
+        case .active, .archived:
+            try expect(parked.rowVariantsForQA[index] == .card,
+                       "'\(row.title)' is \(row.state.rawValue) and not parked, so it must stay a full card — collapsing it is the density mistake P3.7 forbids")
+        }
+        // …and the row's view is keyed by id AND variant, so a lifecycle move
+        // replaces the view rather than re-dressing one at the wrong height.
+        try expect(parked.identifiersForQA[index] == "agent-inbox-row-\(row.id.uuidString)-\(wanted.rawValue)",
+                   "a row's view is keyed id:variant — got '\(parked.identifiersForQA[index])'")
+    }
+    // The same agent, keyed differently in the two lists — the reason the key holds.
+    let collapsedId = parkedSorted.first { $0.variant == .slim }!.id
+    try expect(AgentInboxView.accessibilityIdentifier(for: byId[collapsedId]!)
+                != AgentInboxView.accessibilityIdentifier(for: parkedSorted.first { $0.id == collapsedId }!),
+               "one agent's card and slim rows must not share a view key")
+
+    // WHAT A COLLAPSED ROW SAYS: the state as a glyph, the name, the branch, and
+    // how long ago it stopped — with the state's WORD gone, because a card's label
+    // column is exactly the room the collapse gives back.
+    for (index, row) in parkedSorted.enumerated() where row.variant == .slim {
+        try expect(parked.glyphsForQA[index] == AgentInboxSlimCellView.glyph(for: row.state),
+                   "'\(row.title)' shows its state as a glyph — got '\(parked.glyphsForQA[index])'")
+        try expect(!parked.glyphsForQA[index].isEmpty && parked.stateLabelsForQA[index].isEmpty,
+                   "a collapsed row says its state with the glyph and not with a word — got '\(parked.stateLabelsForQA[index])'")
+        try expect(parked.titlesForQA[index] == row.title,
+                   "a collapsed row still names its agent — got '\(parked.titlesForQA[index])'")
+        try expect(parked.branchLinesForQA[index] == AgentInboxSlimCellView.branchText(branch: row.branch),
+                   "a collapsed row keeps its branch badge — got '\(parked.branchLinesForQA[index])'")
+        try expect(!parked.branchLinesForQA[index].contains(BranchChipNSView.sharedSuffix),
+                   "…without the card's '\(BranchChipNSView.sharedSuffix)' suffix, which truncates the badge to noise at sidebar width")
+        try expect(parked.metaLinesForQA[index].isEmpty,
+                   "a collapsed row drops the role · model line — got '\(parked.metaLinesForQA[index])'")
+    }
+    // The relative time, against hand-computed values rather than the function under
+    // test: `settled` counts up from when the work ended, `snoozed` counts down to
+    // when the row comes back, and the two must not read the same way.
+    let settledIndex = parkedSorted.firstIndex { if case .settled = $0.lifecycle { return true } else { return false } }!
+    let snoozedIndex = parkedSorted.firstIndex { if case .snoozed = $0.lifecycle { return true } else { return false } }!
+    try expect(parked.relativeTimesForQA[settledIndex] == "12m ago",
+               "the most recently settled row ended 12 minutes before the pinned clock — got '\(parked.relativeTimesForQA[settledIndex])'")
+    try expect(parked.relativeTimesForQA[snoozedIndex] == "in 25m",
+               "the snoozed row comes back 25 minutes after it — got '\(parked.relativeTimesForQA[snoozedIndex])'")
+    try expect(AgentInboxSlimCellView.relativeText(
+                for: .snoozed(until: LabFixtures.inboxNow.addingTimeInterval(-60)), now: LabFixtures.inboxNow).isEmpty,
+               "an overdue snooze is P4.6's raised hand, not a row labelled 'in -1m'")
+
+    // THE GLYPH IS DIMMED UNTIL YOU POINT AT THE ROW. Read off the painted label:
+    // this is the one place a status accent fades, and it fades to the same
+    // `Opacity.receded` the words use so it stays inside P1.6's contrast envelope.
+    let collapsedIndex = parkedSorted.firstIndex { $0.variant == .slim }!
+    try expect(abs(parked.glyphAlphasForQA[collapsedIndex] - Opacity.receded) < 0.001,
+               "a parked row's glyph is dimmed at rest — alpha \(parked.glyphAlphasForQA[collapsedIndex]), wanted \(Opacity.receded)")
+    try expect(parked.hoverRowForQA(id: parkedSorted[collapsedIndex].id), "the collapsed row must be hoverable")
+    parked.layoutForQA()
+    try expect(abs(parked.glyphAlphasForQA[collapsedIndex] - Opacity.full) < 0.001,
+               "…and restored to full while you point at it, so the tail stays scannable — alpha \(parked.glyphAlphasForQA[collapsedIndex])")
+    _ = parked.hoverRowForQA(id: nil)
+    parked.layoutForQA()
+    try expect(abs(parked.glyphAlphasForQA[collapsedIndex] - Opacity.receded) < 0.001,
+               "…and dimmed again when you move off it — alpha \(parked.glyphAlphasForQA[collapsedIndex])")
+
+    // A LIFECYCLE TRANSITION RE-HEIGHTS THE ROW IN PLACE. The row settled here is
+    // the one already last in the frozen order, so settling it does not move it and
+    // `apply(rows:changed:)` takes its incremental path — which re-asks for the
+    // row's view but NOT for its height unless it is told to.
+    let live = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    live.clock = { LabFixtures.inboxNow }
+    live.reload(rows: fixture)
+    let liveWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    liveWindow.contentView = live
+    live.layoutForQA()
+    let tail = live.rows.last!
+    try expect(abs(live.rowHeightsForQA[live.rows.count - 1] - AgentInboxView.rowHeight) < 0.5,
+               "the tail row starts as a full card — \(live.rowHeightsForQA[live.rows.count - 1])pt")
+    let settledLifecycle = InboxLifecycle.settled(at: LabFixtures.inboxNow.addingTimeInterval(-300))
+    let settledTail = AgentInboxRow(
+        id: tail.id, title: tail.title, projectName: tail.projectName, state: tail.state,
+        attention: tail.attention, lifecycle: settledLifecycle, model: tail.model, role: tail.role,
+        branch: tail.branch, isIsolated: tail.isIsolated, elapsed: tail.elapsed, depth: tail.depth,
+        variant: RowVariant.forLifecycle(settledLifecycle), createdAt: tail.createdAt, parentId: tail.parentId)
+    let nextLive = live.rows.map { $0.id == tail.id ? settledTail : $0 }
+    try expect(InboxSort.sortForInbox(rows: nextLive).map(\.id) == live.rowIdsForQA,
+               "this witness needs the settled row to stay put, or `apply` takes the full-reload path and proves nothing")
+    let buildsBeforeSettle = live.cellBuildCountForQA
+    live.apply(rows: nextLive, changed: AgentsBoardChangeSet(added: [], updated: [tail.id], removed: []))
+    live.layoutForQA()
+    try expect(live.cellBuildCountForQA - buildsBeforeSettle == 1,
+               "one agent settled, so exactly 1 cell may be rebuilt — \(live.cellBuildCountForQA - buildsBeforeSettle) were")
+    let settledIdx = live.rows.count - 1
+    try expect(live.rowVariantsForQA[settledIdx] == .slim,
+               "a settled row collapses — got \(live.rowVariantsForQA[settledIdx].rawValue)")
+    try expect(abs(live.rowHeightsForQA[settledIdx] - AgentInboxView.slimRowHeight) < 0.5,
+               "…and the TABLE must take the new height, not just the new view — laid out at \(live.rowHeightsForQA[settledIdx])pt, wanted \(AgentInboxView.slimRowHeight)pt")
+    try expect(live.relativeTimesForQA[settledIdx] == "5m ago",
+               "…and it says when it ended — got '\(live.relativeTimesForQA[settledIdx])'")
+
     let empty = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 200))
     empty.reload(rows: [])
     try expect(empty.isEmptyMessageVisibleForQA && empty.rowCountForQA == 0,
@@ -19962,6 +20116,6 @@ extension AppDelegate {
                "one agent's event must not rebuild the whole list — \(rebuiltByEvent) cells were rebuilt")
 
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown")
     }
 }
