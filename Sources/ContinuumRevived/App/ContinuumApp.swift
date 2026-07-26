@@ -6227,6 +6227,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.configureInboxReveal { [weak self] agentId in
             self?.revealAgentFromInbox(agentId)
         }
+        sidebar.configureInboxRename { [weak self] agentId, name in
+            self?.renameAgentFromInbox(agentId, to: name)
+        }
     }
 
     private func configureWorkspaceTopBar(_ topBar: WorkspaceTopBarView) {
@@ -6548,6 +6551,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // The mark is a fact the rows carry, so the list has to be told; a
         // cross-workspace reveal has already reloaded, and a same-workspace one has
         // not.
+        reloadWorkspaceSidebar()
+        return true
+    }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P3.13-inline-rename.md
+    /// A name committed in the inbox becomes the AGENT's name.
+    ///
+    /// The id is the inbox's aggregate key, whose two halves `revealAgentFromInbox`
+    /// documents: only the managed half has a record, and a record is the only place a
+    /// name can live — a terminal session's title belongs to its tile, and what
+    /// renaming one means is undefined until a ticket rules on it. So that half is
+    /// refused out loud rather than half-written.
+    ///
+    /// The re-push is the whole point of doing it here: the row's title is derived from
+    /// the record on every build (`AgentInboxRowBuilder`), so one reload puts the new
+    /// name on the row, in the scope popup's join and in anything else the snapshot
+    /// feeds.
+    @discardableResult
+    func renameAgentFromInbox(_ rowId: UUID, to name: String) -> Bool {
+        let agentId = AgentID(rawValue: rowId)
+        guard agentSupervisor.records[agentId] != nil else {
+            fputs("Rename ignored: \(rowId.uuidString) is not a managed agent\n", stderr)
+            return false
+        }
+        guard agentSupervisor.rename(agentID: agentId, to: name) else { return false }
         reloadWorkspaceSidebar()
         return true
     }
@@ -22012,7 +22040,176 @@ extension AppDelegate {
     try expect(unwiredMenu.pickRowMenuItemForQA(.openInTile) && unwiredRevealed == [quietRow.id],
                "…while the one live item still works — got \(unwiredRevealed.count) reveal(s)")
 
+    // MARK: G · naming an agent (P3.13)
+
+    // G1 · THE TEXT, before any of it is typed anywhere. `sanitizedDisplayName` is what
+    // stands between a text field and a payload the phone reads, so it is asserted
+    // directly rather than only through the gesture.
+    try expect(AgentSupervisor.sanitizedDisplayName("  the   reviewer \n") == "the reviewer",
+               "a name is trimmed and collapsed to single spaces — got \(String(describing: AgentSupervisor.sanitizedDisplayName("  the   reviewer \n")))")
+    try expect(AgentSupervisor.sanitizedDisplayName("") == nil
+                && AgentSupervisor.sanitizedDisplayName("   \n ") == nil,
+               "a name with nothing in it is not a name")
+    // THE LEAK THIS EXISTS FOR: the name is published in `AgentInventory.safeSummary`,
+    // and a string beginning `/Users/` is the `hostLocalPath` shape
+    // `SyncPayloadTaintScanner` forbids. It becomes a label, not a path.
+    let pathish = "/Users/someone/checkouts/continuum/plan.md"
+    try expect(AgentSupervisor.sanitizedDisplayName(pathish) == "plan.md",
+               "a host-local path keeps only its last component — got \(String(describing: AgentSupervisor.sanitizedDisplayName(pathish)))")
+    // Any absolute path, not only the four prefixes the scanner names: a path it
+    // happens not to catch is still not a name. A slash inside the text is a label.
+    try expect(AgentSupervisor.sanitizedDisplayName("/Volumes/Work/repo") == "repo"
+                && AgentSupervisor.sanitizedDisplayName("~/notes/plan.md") == "plan.md",
+               "any absolute path becomes its last component")
+    try expect(AgentSupervisor.sanitizedDisplayName("fix/parser") == "fix/parser",
+               "…while a slash inside a name is left alone — got \(String(describing: AgentSupervisor.sanitizedDisplayName("fix/parser")))")
+    try expect(taintCheck(["summary": AgentInventory.safeSummary(
+        name: AgentSupervisor.sanitizedDisplayName(pathish) ?? "", status: .idle)]).isEmpty,
+               "…so the synced summary carrying it is clean")
+    try expect(!taintCheck(["summary": AgentInventory.safeSummary(name: pathish, status: .idle)]).isEmpty,
+               "…and the unsanitised one is NOT, or the assertion above is vacuous")
+    let long = String(repeating: "n", count: 400)
+    try expect(AgentSupervisor.sanitizedDisplayName(long)?.count == AgentSupervisor.maximumDisplayNameLength,
+               "a name is capped at \(AgentSupervisor.maximumDisplayNameLength) — got \(String(describing: AgentSupervisor.sanitizedDisplayName(long)?.count))")
+
+    // G2 · THE GESTURE. A titled, key-able window, the same requirement
+    // `--zone-rename-inline-check` records: a borderless window cannot become key, so
+    // the field editor would end the instant it is attached.
+    let renameView = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    renameView.clock = { LabFixtures.inboxNow }
+    var renameCalls: [(UUID, String)] = []
+    renameView.onRenameRow = { renameCalls.append(($0, $1)) }
+    renameView.reload(rows: bulkFixture)
+    let renameWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+        styleMask: [.titled], backing: .buffered, defer: false)
+    renameWindow.contentView = renameView
+    renameWindow.makeKeyAndOrderFront(nil)
+    renameView.layoutForQA()
+    try expect(renameView.isDoubleClickWiredForQA,
+               "a double-click is its OWN action — without one AppKit re-sends the single-click action and the name can never be edited")
+    guard let renameTarget = renameView.rows.first else {
+        throw CheckError.failed("setup: the rename fixture must have a row")
+    }
+    try expect(renameView.renamingRowIdForQA == nil, "setup: nothing is being renamed yet")
+    // A double-click OFF the name is not a rename: the rest of the row still means
+    // "take me to this agent" (the zone header / zone body split, on a row).
+    try expect(!renameView.doubleClickRowForQA(id: renameTarget.id, onTitle: false),
+               "double-clicking the row's meta line must not start editing its name")
+    try expect(renameView.renamingRowIdForQA == nil,
+               "…and must leave no field behind — \(String(describing: renameView.renamingRowIdForQA))")
+    try expect(renameView.doubleClickRowForQA(id: renameTarget.id, onTitle: true),
+               "double-clicking the NAME begins the rename")
+    try expect(renameView.renamingRowIdForQA == renameTarget.id,
+               "…on that row — \(String(describing: renameView.renamingRowIdForQA))")
+    // THE REGRESSION `isOpeningRename` EXISTS FOR: `selectText(_:)` ends current
+    // editing, which posts an end-editing notification for the field just attached. If
+    // the delegate treats that as a blur, the rename commits and tears itself down
+    // inside its own opening gesture and the field is gone before a key is pressed.
+    try expect(renameView.renameFieldTextForQA == renameTarget.title,
+               "…seeded with the name it is replacing — got \(String(describing: renameView.renameFieldTextForQA))")
+    try expect(renameView.isRenameDelegateWiredForQA,
+               "the field reports to the list — Enter, Esc and blur are all delegate calls, so an unwired field is a rename nothing can end")
+
+    // G3 · ENTER COMMITS.
+    try expect(renameView.typeRenameForQA("Migration reviewer"), "the open field takes text")
+    try expect(renameView.pressKeyInRenameForQA(#selector(NSResponder.insertNewline(_:))),
+               "Enter is handled by the field's delegate rather than inserting a newline")
+    try expect(renameCalls.count == 1 && renameCalls[0] == (renameTarget.id, "Migration reviewer"),
+               "Enter commits the typed name once — got \(renameCalls.map { $0.1 })")
+    try expect(renameView.renamingRowIdForQA == nil, "…and closes the field")
+
+    // G4 · ESC REVERTS.
+    renameCalls.removeAll()
+    try expect(renameView.doubleClickRowForQA(id: renameTarget.id, onTitle: true), "re-open the rename")
+    try expect(renameView.typeRenameForQA("thrown away"), "type something else")
+    try expect(renameView.pressKeyInRenameForQA(#selector(NSResponder.cancelOperation(_:))),
+               "Esc is handled by the field's delegate")
+    try expect(renameCalls.isEmpty, "Esc commits nothing — got \(renameCalls.map { $0.1 })")
+    try expect(renameView.renamingRowIdForQA == nil, "…and closes the field")
+
+    // G5 · BLUR COMMITS — clicking away finishes the edit, it does not discard it.
+    try expect(renameView.doubleClickRowForQA(id: renameTarget.id, onTitle: true), "re-open the rename")
+    try expect(renameView.typeRenameForQA("Blurred name"), "type a name and click away")
+    try expect(renameView.blurRenameForQA(), "the field reports its own end-editing")
+    try expect(renameCalls.count == 1 && renameCalls[0].1 == "Blurred name",
+               "focus loss commits — got \(renameCalls.map { $0.1 })")
+
+    // G6 · AN EMPTY NAME IS REFUSED, and so is the name it already had: a row you
+    // cannot read is a row you cannot find again, and a no-op must not look like a write.
+    renameCalls.removeAll()
+    for refused in ["", "   ", renameTarget.title] {
+        try expect(renameView.doubleClickRowForQA(id: renameTarget.id, onTitle: true), "re-open the rename")
+        try expect(renameView.typeRenameForQA(refused), "type '\(refused)'")
+        try expect(renameView.pressKeyInRenameForQA(#selector(NSResponder.insertNewline(_:))), "Enter")
+        try expect(renameView.renamingRowIdForQA == nil, "…the field closes either way")
+    }
+    try expect(renameCalls.isEmpty,
+               "an empty, whitespace-only or unchanged name commits nothing — got \(renameCalls.map { $0.1 })")
+
+    // G7 · A STREAMED PUSH MUST NOT EAT WHAT YOU ARE TYPING. An incremental apply
+    // rebuilds the cell under the field (P2B.7), which is exactly why the field is a
+    // subview of the LIST and not of that cell.
+    try expect(renameView.doubleClickRowForQA(id: renameTarget.id, onTitle: true), "re-open the rename")
+    try expect(renameView.typeRenameForQA("half-typed nam"), "start typing")
+    renameView.apply(rows: bulkFixture,
+                     changed: AgentsBoardChangeSet(added: [], updated: [renameTarget.id], removed: []))
+    renameView.layoutForQA()
+    try expect(renameView.renamingRowIdForQA == renameTarget.id
+                && renameView.renameFieldTextForQA == "half-typed nam",
+               "an event about the very agent being renamed must not close the field — \(String(describing: renameView.renameFieldTextForQA))")
+    // A push that CHANGES THE LIST is a full reload, and every row moves — so the open
+    // rename finishes rather than floating over a different agent.
+    renameCalls.removeAll()
+    renameView.reload(rows: Array(bulkFixture.dropLast()))
+    try expect(renameView.renamingRowIdForQA == nil,
+               "a list whose rows changed identity closes the field rather than leaving it over the wrong agent")
+    try expect(renameCalls.count == 1 && renameCalls[0].1 == "half-typed nam",
+               "…committing what was typed, the same answer clicking away gives — got \(renameCalls.map { $0.1 })")
+
+    // G8 · THROUGH THE APP: the record, the disk, the row, and a relaunch.
+    revealApp.refreshAgentSurfaces(notify: false)
+    revealSidebar.inboxForQA.layoutForQA()
+    let beforeName = revealSupervisor.records[thereAgent]?.displayName
+    try expect(beforeName == "there agent", "setup: the agent starts with its spawned name — got \(String(describing: beforeName))")
+    try expect(revealInbox.rows.contains { $0.id == thereAgent.rawValue },
+               "setup: the agent being renamed must be a row — got \(revealInbox.titlesForQA)")
+    try expect(revealInbox.doubleClickRowForQA(id: thereAgent.rawValue, onTitle: true),
+               "double-click the shipped list's row")
+    try expect(revealInbox.typeRenameForQA("  Ledger sweep  "), "type a name with slack around it")
+    try expect(revealInbox.pressKeyInRenameForQA(#selector(NSResponder.insertNewline(_:))), "Enter")
+    try expect(revealSupervisor.records[thereAgent]?.displayName == "Ledger sweep",
+               "the name is written to the AGENT's record, trimmed — got \(String(describing: revealSupervisor.records[thereAgent]?.displayName))")
+    let onDisk = try revealAgentStore.load(id: thereAgent)?.displayName
+    try expect(onDisk == "Ledger sweep", "…and to disk on the spot — got \(String(describing: onDisk))")
+    revealSidebar.inboxForQA.layoutForQA()
+    try expect(revealInbox.rows.first { $0.id == thereAgent.rawValue }?.title == "Ledger sweep",
+               "…and the row says it without waiting for the next agent event — got \(String(describing: revealInbox.rows.first { $0.id == thereAgent.rawValue }?.title))")
+    try expect(revealInbox.titlesForQA.contains("Ledger sweep"),
+               "…on the CELL, not only in the model — got \(revealInbox.titlesForQA)")
+
+    // RELAUNCH: a second supervisor over the same store, the way `--agent-restore-check`
+    // models a new launch.
+    let relaunched = AgentSupervisor(
+        store: revealAgentStore, makeRunner: { _ in ScriptedAgentRunner(script: turnScript) })
+    relaunched.restore()
+    try expect(relaunched.records[thereAgent]?.displayName == "Ledger sweep",
+               "the name comes back with the agent — got \(String(describing: relaunched.records[thereAgent]?.displayName))")
+    // …and it is the name the PHONE is told too — the same join every other surface
+    // makes, so "everywhere the name is shown" is not only the desktop row.
+    let syncedSummary = AgentInventory.safeSummary(
+        name: relaunched.records[thereAgent]?.displayName ?? "", status: .idle)
+    try expect(syncedSummary.hasPrefix("Ledger sweep"),
+               "the synced summary carries the new name — got '\(syncedSummary)'")
+    try expect(taintCheck(["summary": syncedSummary]).isEmpty,
+               "…and is still a label rather than a leak")
+
+    // A TERMINAL-SESSION ROW HAS NO RECORD, so there is nothing to rename: refused,
+    // rather than half-written somewhere else.
+    try expect(!revealApp.renameAgentFromInbox(UUID(), to: "nowhere"),
+               "an id with no agent record must be refused")
+
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary")
     }
 }

@@ -265,6 +265,14 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         inboxView.onRevealRow = onReveal
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.13-inline-rename.md
+    /// Where a committed rename goes. Passed straight through like the reveal above:
+    /// the name lives on the agent's record, and only the app holds the supervisor
+    /// that may write one.
+    func configureInboxRename(_ onRename: @escaping (UUID, String) -> Void) {
+        inboxView.onRenameRow = onRename
+    }
+
     /// The agent open in the focused tile — force-included in the inbox whatever the
     /// scope is, so navigating to an agent can never hide its own row.
     func setInboxOpenAgent(_ id: UUID?) {

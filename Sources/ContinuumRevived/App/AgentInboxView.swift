@@ -45,7 +45,7 @@ import Foundation
 
 @MainActor
 final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate,
-                            TokenThemed {
+                            NSTextFieldDelegate, TokenThemed {
     /// The row card's height, DERIVED from the type it holds rather than the
     /// packet's "≈78pt": one `.title` line for the name and two `.label` lines
     /// for the metadata, the two gaps between them, and the card's own padding.
@@ -174,6 +174,27 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     private var selectedRowsForEmphasis = IndexSet()
     private var trackingArea: NSTrackingArea?
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.13-inline-rename.md
+    /// The field a rename is being typed into, and the AGENT it is about — by id
+    /// rather than by row index, for the reason `rowMenuTargetIds` records: a push
+    /// can arrive while the field is open, and an index would then name a different
+    /// agent.
+    ///
+    /// A subview of THIS view and not of the cell, which is the difference that
+    /// matters: cells are rebuilt on every incremental apply (P2B.7), so a field
+    /// hosted in one would be torn out from under the typing by the next streamed
+    /// event.
+    private var renameField: NSTextField?
+    private var renamingRowId: UUID?
+    /// True only while `beginRename` is installing + selecting the field.
+    /// `selectText(_:)` ends current editing via `-[NSWindow endEditingFor:]`, which
+    /// posts a synchronous end-editing notification for the field editor just
+    /// attached; without this gate the delegate reads that as a blur and commits +
+    /// tears the rename down inside its own opening gesture. The same gate
+    /// `CanvasNSView.isOpeningZoneRename` exists for, and for the same measured
+    /// reason.
+    private var isOpeningRename = false
+
     /// The cell currently drawn for each row index, and how many cells this view
     /// has built in total. Together they are the witness for "do not full-reload on
     /// every event" (P2B.7): an incremental apply must build the cells of the
@@ -245,6 +266,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// menu has the room to say why. It also keeps the menu's shape stable, so the day a
     /// host wires this nothing about the menu moves except which items answer.
     var onRowAction: ((InboxRowAction, [UUID]) -> Void)?
+    // Ticket: docs/38-tickets/90-agent-ux/P3.13-inline-rename.md
+    /// A new name was COMMITTED for this agent — trimmed, non-empty and different
+    /// from the one on screen, so a host never has to re-decide any of those.
+    ///
+    /// The list does not perform it: the name lives on `AgentRecord` and only
+    /// `AgentSupervisor` may write one (it also sanitises the text, which is the
+    /// half a view must not be trusted with — the name crosses to the phone). The
+    /// row's title changes when the host pushes rows back, exactly like every other
+    /// fact this list draws.
+    var onRenameRow: ((UUID, String) -> Void)?
     /// The agent open in the focused tile, force-included whatever the scope says
     /// (`InboxScope.filter`). Set by the host on every push; a change re-filters,
     /// and an unchanged value does no work, so this cannot cost the incremental
@@ -344,6 +375,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // in the empty space below the rows, which `reveal(rowAt:)` drops.
         tableView.target = self
         tableView.action = #selector(rowClicked(_:))
+        // P3.13: the second click of a double-click on the row's NAME opens the
+        // inline rename. Set explicitly, because `NSTableView` otherwise reports the
+        // plain `action` as its `doubleAction` and the second click would only reveal
+        // again (measured — see `isClickWiredForQA`). The first click still reveals;
+        // that is the same idempotent reveal a second single click makes.
+        tableView.doubleAction = #selector(rowDoubleClicked(_:))
         scopePopUp.target = self
         scopePopUp.action = #selector(scopePicked(_:))
         updateScopeMenu()
@@ -434,6 +471,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// takes the unfiltered set, and handing it an already-filtered list would make
     /// the scope narrow itself with every call.
     private func render(_ visible: [AgentInboxRow]) {
+        // P3.13: a full reload moves every row, so a field left floating would be over
+        // a different agent. Committing is the same answer clicking away gives — the
+        // rename is finished, not thrown away, and this is also the path the host's
+        // own re-push takes right after a commit (where it is already a no-op).
+        endRename(commit: true)
         rows = visible
         cellsByRow.removeAll()
         tableView.reloadData()
@@ -503,6 +545,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // in the same order), so what a selected row may DO can change under a bar that
         // is already up — an agent that just started working must lose Archive.
         updateBulkBar()
+        // P3.13: the rows are the same agents, so an open rename survives an
+        // incremental push — but the cell under it was just rebuilt.
+        repositionRenameField()
     }
 
     // MARK: - Scope (P3.8)
@@ -754,6 +799,155 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         guard visible != jumpHintsVisible else { return }
         jumpHintsVisible = visible
         redraw(rows: Array(0..<InboxJump.maximumRows))
+    }
+
+    // MARK: - Inline rename (P3.13)
+
+    /// The second click of a plain double-click. Only the NAME opens a rename: a
+    /// double-click anywhere else on the row is left alone, so the meta line, the
+    /// branch line and the empty space keep meaning "reveal" (the zone header /
+    /// zone body split `--zone-rename-inline-check` already draws).
+    @objc private func rowDoubleClicked(_ sender: Any?) {
+        guard let event = NSApp.currentEvent else { return }
+        // Any modifier means something else: ⇧/⌘ are the selection gestures
+        // (`revealsOnClick`), and a modified double-click must not start editing a
+        // name in the middle of building a range.
+        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty else { return }
+        let index = tableView.clickedRow
+        guard let cell = cellForRow(index) else { return }
+        doubleClick(rowAt: index, pointInCell: cell.convert(event.locationInWindow, from: nil))
+    }
+
+    /// The routing half of the gesture, taking the point in the CELL's coordinates
+    /// rather than an `NSEvent` — a headless check can call this, and it is the same
+    /// code the real double-click runs (`rowDoubleClicked` only unpacks the event).
+    @discardableResult
+    func doubleClick(rowAt index: Int, pointInCell point: NSPoint) -> Bool {
+        guard rows.indices.contains(index), let cell = cellForRow(index),
+              cell.titleFrame.contains(point) else { return false }
+        return beginRename(rowAt: index)
+    }
+
+    /// Open the inline rename for this agent. Returns false for an agent that is not
+    /// on screen, or whose row has no cell to sit over.
+    @discardableResult
+    func beginRename(agentId: UUID) -> Bool {
+        guard let index = rows.firstIndex(where: { $0.id == agentId }) else { return false }
+        return beginRename(rowAt: index)
+    }
+
+    @discardableResult
+    private func beginRename(rowAt index: Int) -> Bool {
+        // A rename already open on another row commits, the way clicking away from it
+        // would — there is one field, so opening a second is leaving the first.
+        endRename(commit: true)
+        guard let field = installRenameField(rowAt: index) else { return false }
+        isOpeningRename = true
+        window?.makeFirstResponder(field)
+        field.selectText(nil)
+        isOpeningRename = false
+        return true
+    }
+
+    /// Build + place the field over the row's title label and record what is being
+    /// renamed. Extracted so the geometry, the styling and the state have one source
+    /// of truth (`CanvasNSView.installZoneRenameField`'s precedent).
+    private func installRenameField(rowAt index: Int) -> NSTextField? {
+        guard rows.indices.contains(index), let cell = cellForRow(index) else { return nil }
+        let frame = cell.convert(cell.titleFrame, to: self)
+        guard frame.width > 1, frame.height > 1 else { return nil }
+        let field = NSTextField(frame: frame.insetBy(dx: -Space.xs, dy: -Space.xs))
+        field.stringValue = rows[index].title
+        field.font = .token(.title)
+        // The same pair the zone's field uses, and a documented one (P1.3): a field
+        // floating over the list is an `overlay` surface carrying `textPrimary`.
+        field.textColor = TextToken.textPrimary.color.nsColor(in: self)
+        field.backgroundColor = SurfaceToken.overlay.color.nsColor(in: self)
+        field.drawsBackground = true
+        field.isBezeled = false
+        field.isBordered = false
+        field.focusRingType = .none
+        field.usesSingleLineMode = true
+        field.lineBreakMode = .byTruncatingTail
+        field.wantsLayer = true
+        field.layer?.cornerRadius = Radius.card
+        field.layer?.masksToBounds = true
+        field.layer?.borderWidth = 1
+        // `borderStrong`, the focus/selection line — an open editor is the one thing
+        // on this list with the keyboard, and `border` is what every row already draws.
+        field.layer?.borderColor = LineToken.borderStrong.color.cgColor(in: self)
+        field.delegate = self
+        field.setAccessibilityIdentifier("ContinuumAgentInboxRenameField")
+        addSubview(field, positioned: .above, relativeTo: nil)
+        renameField = field
+        renamingRowId = rows[index].id
+        return field
+    }
+
+    /// Close an open rename. `commit: true` is Enter and focus-loss, `false` is Esc.
+    ///
+    /// The field is torn down BEFORE the callback fires: the host answers a rename by
+    /// pushing rows back, which reloads this list, and a field still on screen at that
+    /// point would be floating over whatever row landed underneath it.
+    ///
+    /// An empty or whitespace-only name KEEPS THE PREVIOUS ONE — the same rule
+    /// `applyZoneRename` holds, and the reason nothing here needs a "delete the name"
+    /// case: an agent with no name is a row you cannot find again.
+    private func endRename(commit: Bool) {
+        guard let rowId = renamingRowId, let field = renameField else { return }
+        let typed = field.stringValue
+        // STATE FIRST, THEN THE VIEW: removing a field that holds the field editor
+        // posts `controlTextDidEndEditing` SYNCHRONOUSLY, so with the state still set
+        // the delegate re-enters here and commits the same name a second time
+        // (measured: `Enter commits the typed name once — got ["Migration reviewer",
+        // "Migration reviewer"]`). Cleared first, that re-entrant notification finds no
+        // rename to end.
+        renameField = nil
+        renamingRowId = nil
+        field.removeFromSuperview()
+        guard commit else { return }
+        let trimmed = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != rows.first(where: { $0.id == rowId })?.title else { return }
+        onRenameRow?(rowId, trimmed)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === renameField else { return false }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            endRename(commit: true)
+            return true
+        }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            endRename(commit: false)
+            return true
+        }
+        return false
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        // Ignore the transient end `selectText(_:)` posts while the field is still
+        // being installed (see `isOpeningRename`).
+        guard !isOpeningRename, (obj.object as? NSTextField) === renameField else { return }
+        endRename(commit: true)
+    }
+
+    /// Follow the row an open rename is on. An incremental apply rebuilds the cell
+    /// under the field and can change its height (P3.7's variants), and the field is
+    /// a subview of the LIST, not of that cell — so it has to be told. Reads the
+    /// realised cells only: a row that scrolled out has no frame to follow.
+    private func repositionRenameField() {
+        guard let field = renameField, let rowId = renamingRowId,
+              let index = rows.firstIndex(where: { $0.id == rowId }),
+              let cell = cellsByRow[index] else { return }
+        field.frame = cell.convert(cell.titleFrame, to: self).insetBy(dx: -Space.xs, dy: -Space.xs)
+    }
+
+    /// The cell drawn for a row, building it if the table has not laid it out yet —
+    /// a rename needs the label's real frame, and an unrealised row has none.
+    private func cellForRow(_ index: Int) -> AgentInboxRowCell? {
+        guard rows.indices.contains(index) else { return nil }
+        if let cell = cellsByRow[index] { return cell }
+        return tableView.view(atColumn: 0, row: index, makeIfNecessary: true) as? AgentInboxRowCell
     }
 
     // MARK: - Bulk actions (P3.11)
@@ -1044,10 +1238,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// The table sends its single-click action to this view — the half of the click
     /// path `clickRowForQA` cannot execute.
     ///
-    /// `doubleAction` is NOT asserted nil: measured, `NSTableView` reports the plain
-    /// `action` as its `doubleAction` when none was set separately, so a double click
-    /// calls `rowClicked` a second time. Revealing an agent you are already on is
-    /// idempotent, so that is left alone rather than papered over.
+    /// Measured: `NSTableView` reports the plain `action` as its `doubleAction` when
+    /// none was set separately, so before P3.13 a double click called `rowClicked` a
+    /// second time. It now has one of its own (`isDoubleClickWiredForQA`), and the
+    /// FIRST click of a double click still reveals — revealing an agent you are
+    /// already on is idempotent, so that is left alone rather than papered over.
     var isClickWiredForQA: Bool {
         (tableView.target as? AgentInboxView) === self
             && tableView.action == #selector(rowClicked(_:))
@@ -1145,6 +1340,63 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         return true
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.13-inline-rename.md
+    /// The table really is the thing that reports a double-click, and this view really
+    /// is what answers it — the half of the gesture a headless check cannot execute,
+    /// since `NSTableView.clickedRow` and `NSApp.currentEvent` are only set while
+    /// AppKit dispatches a real click (the same limitation `isClickWiredForQA` records).
+    var isDoubleClickWiredForQA: Bool {
+        (tableView.target as? AgentInboxView) === self
+            && tableView.doubleAction == #selector(rowDoubleClicked(_:))
+            && tableView.doubleAction != tableView.action
+    }
+    /// Double-click a row ON ITS NAME (`onTitle: true`) or on the row's bottom-left
+    /// corner, which is the meta line on a card and empty space on a parked row.
+    /// Everything downstream — the hit test, the field, its delegate — is the shipped
+    /// path; only the `NSEvent` is stood in for.
+    @discardableResult
+    func doubleClickRowForQA(id: UUID, onTitle: Bool) -> Bool {
+        guard let index = rows.firstIndex(where: { $0.id == id }), let cell = cellForRow(index) else {
+            return false
+        }
+        let point = onTitle
+            ? NSPoint(x: cell.titleFrame.midX, y: cell.titleFrame.midY)
+            : NSPoint(x: cell.bounds.minX + 1, y: cell.bounds.minY + 1)
+        return doubleClick(rowAt: index, pointInCell: point)
+    }
+    var renamingRowIdForQA: UUID? { renamingRowId }
+    /// The field really does report to this view. Asserted separately because the two
+    /// key helpers below CALL the delegate methods — AppKit's own delivery needs a live
+    /// field editor in a key window, which a headless check has no way to drive — so
+    /// without this a rename with no delegate at all would still pass them.
+    /// (Cross-review found exactly that hole.)
+    var isRenameDelegateWiredForQA: Bool { renameField?.delegate === self }
+    var renameFieldTextForQA: String? { renameField?.stringValue }
+    /// Type into the open field. Sets the text the way the field editor would leave
+    /// it; what the check is about is what Enter, Esc and blur then do with it.
+    @discardableResult
+    func typeRenameForQA(_ text: String) -> Bool {
+        guard let renameField else { return false }
+        renameField.stringValue = text
+        return true
+    }
+    /// Enter / Esc through the field's own delegate call — the selector AppKit sends,
+    /// dispatched at the same method, so a check cannot pass by calling a commit the
+    /// keyboard never reaches.
+    @discardableResult
+    func pressKeyInRenameForQA(_ commandSelector: Selector) -> Bool {
+        guard let renameField else { return false }
+        return control(renameField, textView: NSTextView(), doCommandBy: commandSelector)
+    }
+    /// Focus loss, through the notification AppKit posts.
+    @discardableResult
+    func blurRenameForQA() -> Bool {
+        guard let renameField else { return false }
+        controlTextDidEndEditing(Notification(
+            name: NSControl.textDidEndEditingNotification, object: renameField))
+        return true
+    }
+
     @discardableResult
     func hoverRowForQA(id: UUID?) -> Bool {
         guard let id else { setHovered(row: -1); return true }
@@ -1206,6 +1458,11 @@ protocol AgentInboxRowCell: NSTableCellView {
     /// The frame of whatever this variant paints the state with — the word on a
     /// card, the glyph on a parked row — in the cell's own coordinates.
     var qaStatusFrame: NSRect { get }
+    // Ticket: docs/38-tickets/90-agent-ux/P3.13-inline-rename.md
+    /// The frame of the row's NAME in the cell's own coordinates. A production
+    /// accessor, not a `qa` one: it is what decides whether a double-click was on the
+    /// name, and where the rename field is placed.
+    var titleFrame: NSRect { get }
     @discardableResult
     func clickDisclosureForQA() -> Bool
 }
@@ -2132,6 +2389,7 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
     var qaJumpHint: String { jumpHint.qaChord }
     var qaStatusFrame: NSRect { stateLabel.convert(stateLabel.bounds, to: self) }
+    var titleFrame: NSRect { titleLabel.convert(titleLabel.bounds, to: self) }
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md
@@ -2365,4 +2623,5 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     /// The GLYPH is this variant's status (`qaStateLabel` is empty by design), so
     /// that is the frame the pill must not move.
     var qaStatusFrame: NSRect { glyphLabel.convert(glyphLabel.bounds, to: self) }
+    var titleFrame: NSRect { titleLabel.convert(titleLabel.bounds, to: self) }
 }

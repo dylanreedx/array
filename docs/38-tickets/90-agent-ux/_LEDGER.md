@@ -3,7 +3,7 @@
 Durable state. The conversation is NOT the source of truth: this file + `git log` are.
 
 ## heartbeat
-last-touch 2026-07-26T22:40:00Z · ticket P3.12-row-context-menu · attempt 1 · pid loop · status done
+last-touch 2026-07-26T23:05:00Z · ticket P3.13-inline-rename · attempt 1 · pid loop · status implementing
 
 ## tickets
 

@@ -840,6 +840,59 @@ final class AgentSupervisor {
         persist(record)
     }
 
+    // MARK: - Rename (P3.13)
+
+    /// The longest name an agent may carry. A label, not a sentence: it is drawn in
+    /// one truncating line and it crosses to the phone inside
+    /// `AgentInventory.safeSummary`, where anything over 512 characters is a
+    /// `transcriptBody` taint (`SyncPayloadTaintScanner`).
+    static let maximumDisplayNameLength = 60
+
+    /// User text, made into a label. Whitespace and newlines collapse to single
+    /// spaces, the result is capped, and an ABSOLUTE PATH keeps only its last
+    /// component — this name is published in a synced summary, and a leading `/` or
+    /// `~` is how a filesystem path starts.
+    ///
+    /// The test is "starts a path", NOT the four prefixes `SyncPayloadTaintScanner`
+    /// names (`/Users/`, `/home/`, `~/`, `/var/folders/`): copying that list here would
+    /// be two copies of one rule that can drift, and it would also let `/tmp/…` or
+    /// `/Volumes/…` through — a path the scanner happens not to catch is still not a
+    /// name. A slash INSIDE the text is left alone, because `fix/parser` is a label
+    /// people really use. (Both halves raised in cross-review.)
+    ///
+    /// nil for a name with nothing left in it, which the caller must read as "keep the
+    /// previous one".
+    static func sanitizedDisplayName(_ raw: String) -> String? {
+        var label = raw.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).joined(separator: " ")
+        if label.hasPrefix("/") || label.hasPrefix("~") {
+            label = (label as NSString).lastPathComponent
+        }
+        guard !label.isEmpty else { return nil }
+        return String(label.prefix(AgentSupervisor.maximumDisplayNameLength))
+    }
+
+    /// Give an agent a human name. The name is the RECORD's (`AgentRecord.displayName`),
+    /// so it outlives the tile it happens to be shown in and comes back with the agent
+    /// after a relaunch — everything that draws a name joins through the record
+    /// (`AgentContextIndex`, `AgentInboxRowBuilder`, `AgentInventory`).
+    ///
+    /// Returns whether anything changed: false for an agent this supervisor does not
+    /// have, for a name that sanitises to nothing, and for the name it already had —
+    /// so a caller cannot mistake a no-op for a write and re-render for nothing.
+    @discardableResult
+    func rename(agentID id: AgentID, to name: String) -> Bool {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.rename: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        guard let label = AgentSupervisor.sanitizedDisplayName(name) else { return false }
+        guard record.displayName != label else { return false }
+        record.displayName = label
+        records[id] = record
+        persist(record)
+        return true
+    }
+
     /// The agent bound to a tile. Reads `records`, which `restore()` (P2A.7)
     /// repopulates from the store at boot — so this dedupes a re-wire within a launch
     /// AND across launches, and a restored tile finds its own agent instead of
