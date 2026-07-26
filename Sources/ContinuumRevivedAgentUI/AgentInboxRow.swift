@@ -187,6 +187,47 @@ public enum RowVariant: String, CaseIterable, Equatable, Sendable {
     }
 }
 
+// Ticket: docs/38-tickets/90-agent-ux/P3.5-in-flight-fade.md
+/// How loud the row is drawn. Counter-intuitive and deliberate: **the rows that
+/// recede are the ones still in motion**, because prominence belongs to what
+/// needs a human — a working thread is not your problem yet, and a finished
+/// turn you have not read is.
+///
+/// Two values, not a scale: an emphasis ladder invites a third rung, and the
+/// only distinction the list can make legibly at row height is "yours" vs "not
+/// yet".
+///
+/// NOTHING PAINTS THIS YET, and that is not an omission: the packet's second
+/// file is "the list view (P3.6)", which does not exist — this module is
+/// Foundation-only and there is no inbox list to fade. What lands here is the
+/// derivation and its gate. When P3.6 paints a row it must apply `textOpacity`
+/// to the row's TEXT LAYER, never to a container the status accent is inside
+/// (a container alpha would fade the accent with it, which is exactly what
+/// `accentOpacity` exists to forbid), and pass hover/selection/keyboard-active
+/// into `emphasis(for:attention:isInteracting:)`. Those are rendered facts, so
+/// their witness is a P3.6 pixel/contrast probe over the real row, not an
+/// assertion this module can make.
+public enum RowEmphasis: String, CaseIterable, Equatable, Sendable {
+    case full
+    case receded
+
+    /// The alpha the row's TEXT is painted at — a P1.3 token, never a literal
+    /// at the call site, and bounded by the AA floor (see `Opacity`).
+    public var textOpacity: Double {
+        switch self {
+        case .full: return Opacity.full
+        case .receded: return Opacity.receded
+        }
+    }
+
+    /// The alpha the row's STATUS ACCENT is painted at — always full, even when
+    /// the row recedes. Fading the one coloured thing on a waiting row is how a
+    /// waiting row becomes unfindable, so the accent is exempt by construction
+    /// rather than by the list view remembering to skip it. It is a property and
+    /// not a constant so P3.6 reads the rule off the emphasis it already has.
+    public var accentOpacity: Double { Opacity.full }
+}
+
 public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// AGGREGATE agent identity — the same `UUID` keyspace as
     /// `AgentsBoardRow.id`, `ActivityLogSnapshot.byAgent`, `AgentContextIndex`
@@ -289,6 +330,55 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// timestamp is the list view's, so a row with nothing above them says nothing
     /// rather than guessing at a word.
     public var label: String? { state.label ?? attention.label }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P3.5-in-flight-fade.md
+    /// How loud to draw this row. Pure, and a function of the two axes only —
+    /// never of elapsed time, lifecycle or position, so the fade cannot become a
+    /// second sort key.
+    ///
+    /// THE RULE, and why each half of it is the way round it is:
+    ///
+    ///   * `working` recedes. It is the one state where the agent, not you, has
+    ///     the next move.
+    ///   * `ready` recedes ONLY when it is already read. A finished turn you
+    ///     have not looked at is the single most important row in the list; the
+    ///     same row after you have read it is history that has not been settled
+    ///     yet.
+    ///   * `approval` and `input` NEVER recede, however busy the agent looks.
+    ///     They are the act-now states — dimming one is the exact inversion of
+    ///     the goal, and it is the packet's named regression witness.
+    ///   * `failed` never recedes: broken is not background.
+    ///   * `woke` never recedes, in ANY state. A raised hand is the thing that
+    ///     put the row back in front of you, so it outranks in-motion here —
+    ///     the opposite of the label priority, where `working` outranks `(woke)`
+    ///     because there the question is "what is it doing", not "is this mine".
+    ///
+    /// `isInteracting` is hover / selection / keyboard-active, which clears
+    /// recession outright: the row you are pointing at is yours by definition
+    /// while you point at it. It is view state, so it is a parameter here rather
+    /// than a field on the row — a row is a snapshot and does not know about a
+    /// mouse. P3.6 passes it; the default is the un-pointed-at row.
+    public static func emphasis(
+        for state: InboxState,
+        attention: InboxAttention,
+        isInteracting: Bool = false
+    ) -> RowEmphasis {
+        if isInteracting { return .full }
+        if attention == .woke { return .full }
+        switch state {
+        case .working:
+            return .receded
+        case .ready:
+            return attention == .none ? .receded : .full
+        case .approval, .input, .failed:
+            return .full
+        }
+    }
+
+    /// This row's emphasis at rest. The interacting case has no field to read
+    /// from, so the list view calls `emphasis(for:attention:isInteracting:)`
+    /// directly for a hovered or selected row.
+    public var emphasis: RowEmphasis { AgentInboxRow.emphasis(for: state, attention: attention) }
 
     /// Shown when neither a display name nor a tile title is known — a terminal
     /// session whose tile the sidebar tree does not place, or a caller that built

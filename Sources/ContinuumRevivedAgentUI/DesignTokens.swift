@@ -238,6 +238,32 @@ public enum AccentToken: String, CaseIterable, Sendable {
     public var legalSurfaces: [SurfaceToken] { SurfaceToken.allCases }
 }
 
+// Ticket: docs/38-tickets/90-agent-ux/P3.5-in-flight-fade.md
+/// The only two strengths anything in the agent UI is painted at. An opacity is
+/// a token for the same reason a colour is: a literal `0.6` at a call site is a
+/// contrast decision made where nothing can measure it.
+///
+/// PROVENANCE of `receded` — DERIVED FROM THE FLOOR, not chosen. Fading a
+/// foreground composites it toward its own background, so every point of alpha
+/// spends contrast the palette does not have much of: `textSecondary` is the
+/// tightest token at 5.99:1 (on `canvas`, light). Solving
+/// `ratio(α·fg + (1-α)·bg, bg) = 4.5` over EVERY documented text pair in BOTH
+/// themes puts the break-even at **α = 0.8724** (textSecondary on canvas,
+/// light). `receded` is 0.88 — the smallest hundredth above that break-even, so
+/// the fade is as deep as AA allows and not one step deeper. Worst faded pair
+/// is then 4.58:1, and `runRowEmphasisChecks` measures all of them rather than
+/// trusting this note.
+///
+/// This is the honest limit, and it is worth stating plainly: 0.88 is a subtle
+/// dim, not a dramatic one. The packet's own rule ("fading is not a licence to
+/// fail contrast") is what bounds it. A deeper fade would need a dimmer text
+/// token that clears 4.5:1 at full strength — a palette change, which is P1.3's
+/// to make, not this ticket's to sneak in under an alpha.
+public enum Opacity {
+    public static let full = 1.0
+    public static let receded = 0.88
+}
+
 /// One (foreground, background) pair that the app is allowed to paint, with the
 /// ratio it must clear. This is the enumerable contract P1.6 gates against the
 /// real view tree — a finite, documented list, not a cross-product.
@@ -258,6 +284,48 @@ public struct TokenPair: Equatable, Sendable {
 
     public func ratio(for theme: TokenTheme) -> Double {
         WCAGContrast.ratio(color.resolved(for: theme), backgroundColor.resolved(for: theme))
+    }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P3.5-in-flight-fade.md
+    /// The same pair as it is actually painted when the row it sits on has
+    /// receded: the foreground composited over THIS pair's background at
+    /// `alpha`, at full opacity. The floor is unchanged — a faded pair is still
+    /// a pair the app paints, so it answers to the same ratio.
+    ///
+    /// Compositing rather than "an alpha the gate is told about" is the point:
+    /// a translucent foreground IS its blend with what is behind it, and that
+    /// blend is a colour `WCAGContrast` can measure. The two ends are exact —
+    /// `alpha` 1 returns this pair's own colour and 0 returns the background,
+    /// giving ratio 1.0.
+    public func faded(_ alpha: Double) -> TokenPair {
+        TokenPair(
+            foreground: "\(foreground)@\(alpha)",
+            background: background,
+            color: TokenColor(
+                light: color.light.composited(over: backgroundColor.light, alpha: alpha),
+                dark: color.dark.composited(over: backgroundColor.dark, alpha: alpha)),
+            backgroundColor: backgroundColor,
+            floor: floor)
+    }
+}
+
+extension ChipColor {
+    // Ticket: docs/38-tickets/90-agent-ux/P3.5-in-flight-fade.md
+    /// Source-over compositing of `self` at `alpha` onto an opaque `background`,
+    /// per channel, in the sRGB space both operands are already expressed in.
+    ///
+    /// This is a TOKEN-LEVEL model of the blend, which is the level this module
+    /// can honestly gate: it has no view tree and no colour space to ask. What
+    /// the window server actually composites is `--ui-contrast-check`'s
+    /// question — that gate reads real rendered pixels and already applies
+    /// ancestor alpha and `layer.opacity` (P0.4) — so a receded row is measured
+    /// there too once P3.6 paints one.
+    public func composited(over background: ChipColor, alpha: Double) -> ChipColor {
+        let a = min(max(alpha, 0), 1)
+        return ChipColor(
+            r: a * r + (1 - a) * background.r,
+            g: a * g + (1 - a) * background.g,
+            b: a * b + (1 - a) * background.b)
     }
 }
 
@@ -294,6 +362,25 @@ public enum DesignTokens {
             }
         }
         return pairs
+    }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P3.5-in-flight-fade.md
+    /// Every documented TEXT pair as a receded row paints it. Derived from
+    /// `documentedPairs`, so a new text token or a widened legal set is gated
+    /// faded the moment it is gated at full strength — the fade cannot fall
+    /// behind the palette.
+    ///
+    /// Text only, and that is the whole of what recedes: `RowEmphasis` fades a
+    /// row's words, never its status accent (which stays full strength so a
+    /// waiting row is still findable) and never a line token (a border is not
+    /// on a row's text layer). Filtering on the text tokens' own raw values
+    /// rather than on the floor keeps accents out even though they share the
+    /// 4.5 floor.
+    public static var recededTextPairs: [TokenPair] {
+        let textNames = Set(TextToken.allCases.map(\.rawValue))
+        return documentedPairs
+            .filter { textNames.contains($0.foreground) }
+            .map { $0.faded(Opacity.receded) }
     }
 
     /// Line tokens that are deliberately not gated, each with its reason. Kept

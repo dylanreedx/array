@@ -32,6 +32,15 @@ import Foundation
 //      P1.8's chip say the same thing they use the same token, and the two places
 //      they deliberately diverge are pinned so neither can drift silently.
 //
+// Ticket: docs/38-tickets/90-agent-ux/P3.5-in-flight-fade.md
+//   9. IN-MOTION RECEDES, YOURS DOES NOT — the full state x attention matrix
+//      against a table, an approval that recedes is red (the packet's named
+//      regression witness), hover/selection clears recession, and the faded text
+//      STILL clears 4.5:1 on every documented pair in both themes. The last one
+//      is the rule that makes the opacity a measurement instead of a taste: the
+//      token is the smallest hundredth that clears AA, and one hundredth deeper
+//      is asserted to fail.
+//
 // Ticket: docs/38-tickets/90-agent-ux/P3.3-attention-axis.md
 //   8. ATTENTION IS A SEPARATE AXIS — `resolve` is total over both facts, `woke`
 //      outranks `unread`, and the axis is INDEPENDENT of state: every
@@ -48,9 +57,10 @@ func runAgentInboxRowChecks() {
     runInboxStatePrecedenceCheck()
     runInboxAccentAgreesWithStatusChipCheck()
     runInboxAttentionAxisCheck()
+    runRowEmphasisChecks()
     print("AgentInboxRow checks: status totality, unreachable states, stable identity, lifecycle-driven variant, "
-        + "uncoloured resting state, pending-over-status precedence, status-presenter agreement "
-        + "and the attention axis passed")
+        + "uncoloured resting state, pending-over-status precedence, status-presenter agreement, "
+        + "the attention axis and in-flight recession passed")
 }
 
 // MARK: - 1 & 2 · totality
@@ -400,4 +410,173 @@ private func runInboxAttentionAxisCheck() {
     expect(AgentInboxRow(id: UUID(), title: "a", state: .ready, attention: .unread, createdAt: inboxRowSpawnedAt).label == nil,
            "a resting unread row carries a mark, not a word")
     print("InboxAttention axis measured \(pairs) state/attention pairs, resolve(unread+hand)=\(InboxAttention.resolve(unread: true, raisedHand: true).rawValue)")
+}
+
+// MARK: - 9 · in-flight fade (P3.5)
+
+/// Negative tests observed red at exit 1 with the final code — all four are
+/// production edits, quoted verbatim:
+/// · `emphasis` receding an approval (`case .approval, .input, .failed` →
+///   `case .approval: return .receded`) →
+///   `FAIL: approval/none is full, got receded`
+/// · `emphasis` receding a finished-unread row (`ready` returning `.receded`
+///   unconditionally) → `FAIL: ready/unread is full, got receded`
+/// · `emphasis` ignoring `isInteracting` (the early return deleted) →
+///   `FAIL: working/none is full while hovered/selected, got receded`
+/// · `Opacity.receded` = 0.87, one hundredth below the measured break-even →
+///   `FAIL: receded textSecondary@0.87 on canvas clears 4.5 in light — 4.48:1`
+private func runRowEmphasisChecks() {
+    runRowEmphasisMatrixCheck()
+    runRecededContrastCheck()
+}
+
+/// THE MATRIX, against a table rather than a switch: a switch here would be the
+/// code under test agreeing with itself.
+private func runRowEmphasisMatrixCheck() {
+    let expected: [String: RowEmphasis] = [
+        // In motion: the agent has the next move, so it steps back.
+        "working/none": .receded,
+        "working/unread": .receded,
+        // …unless it raised its hand, which is what put it back in front of you.
+        "working/woke": .full,
+        // Act-now, whatever the attention axis says. Dimming one of these is the
+        // exact inversion of the goal.
+        "approval/none": .full, "approval/unread": .full, "approval/woke": .full,
+        "input/none": .full, "input/unread": .full, "input/woke": .full,
+        // Broken is not background.
+        "failed/none": .full, "failed/unread": .full, "failed/woke": .full,
+        // The one state the attention axis actually moves: a finished turn you
+        // have not read is the loudest row in the list; the same row once read
+        // is history that has not been settled yet.
+        "ready/none": .receded,
+        "ready/unread": .full,
+        "ready/woke": .full,
+    ]
+    expect(expected.count == InboxState.allCases.count * InboxAttention.allCases.count,
+           "the emphasis table covers every state/attention pair — \(expected.count) of "
+            + "\(InboxState.allCases.count * InboxAttention.allCases.count)")
+
+    var measured = 0
+    var receded = 0
+    for state in InboxState.allCases {
+        for attention in InboxAttention.allCases {
+            let key = "\(state.rawValue)/\(attention.rawValue)"
+            guard let want = expected[key] else {
+                fputs("FAIL: RowEmphasis — no expectation for \(key)\n", stderr)
+                Foundation.exit(1)
+            }
+            let got = AgentInboxRow.emphasis(for: state, attention: attention)
+            expect(got == want, "\(key) is \(want.rawValue), got \(got.rawValue)")
+            // The row's own property is the same derivation, so a list view
+            // reading `row.emphasis` cannot see a different answer.
+            let row = AgentInboxRow(id: UUID(), title: "Reviewer", state: state, attention: attention,
+                                    createdAt: inboxRowSpawnedAt)
+            expect(row.emphasis == want, "a row carrying \(key) reports \(want.rawValue), got \(row.emphasis.rawValue)")
+            // HOVER / SELECTION / ACTIVE CLEARS RECESSION, for every pair — the
+            // row you are pointing at is yours while you point at it.
+            let interacting = AgentInboxRow.emphasis(for: state, attention: attention, isInteracting: true)
+            expect(interacting == .full, "\(key) is full while hovered/selected, got \(interacting.rawValue)")
+            measured += 1
+            if got == .receded { receded += 1 }
+        }
+    }
+    expect(measured == expected.count, "every state/attention pair was measured — \(measured) of \(expected.count)")
+
+    // THE PACKET'S NAMED REGRESSION, pinned by name and not only by the table:
+    // an approval needs you, so it is never dimmed, and neither is a failure.
+    for attention in InboxAttention.allCases {
+        for state in [InboxState.approval, .input, .failed] {
+            expect(AgentInboxRow.emphasis(for: state, attention: attention) == .full,
+                   "\(state.rawValue) never recedes (attention \(attention.rawValue))")
+        }
+    }
+    // …and recession is not vacuous: exactly the three in-motion/already-read
+    // pairs recede. A rule that dims nothing would satisfy every assertion above.
+    expect(receded == 3, "exactly the three receding pairs recede, got \(receded)")
+
+    // THE FADE IS A TOKEN, and the accent is exempt from it by construction.
+    expect(RowEmphasis.full.textOpacity == Opacity.full,
+           "a full row paints text at Opacity.full, got \(RowEmphasis.full.textOpacity)")
+    expect(RowEmphasis.receded.textOpacity == Opacity.receded,
+           "a receded row paints text at Opacity.receded, got \(RowEmphasis.receded.textOpacity)")
+    expect(RowEmphasis.receded.textOpacity < RowEmphasis.full.textOpacity,
+           "receded is actually dimmer than full")
+    for emphasis in RowEmphasis.allCases {
+        expect(emphasis.accentOpacity == Opacity.full,
+               "the status accent stays full strength when the row is \(emphasis.rawValue), "
+                + "got \(emphasis.accentOpacity)")
+    }
+    print("RowEmphasis measured \(measured) state/attention pairs, \(receded) receded, "
+        + "text alpha \(Opacity.receded) with the accent held at \(Opacity.full)")
+}
+
+/// FADING IS NOT A LICENCE TO FAIL CONTRAST. Every documented text pair is
+/// measured AS PAINTED on a receded row — the foreground composited over its own
+/// background at `Opacity.receded` — in both themes.
+private func runRecededContrastCheck() {
+    let pairs = DesignTokens.recededTextPairs
+    let textNames = Set(TextToken.allCases.map(\.rawValue))
+    let expectedCount = DesignTokens.documentedPairs.filter { textNames.contains($0.foreground) }.count
+    expect(expectedCount > 0, "there are documented text pairs to fade")
+    expect(pairs.count == expectedCount,
+           "every documented text pair has a faded counterpart — \(pairs.count) of \(expectedCount)")
+    // …and the count is pinned to a LITERAL as well, because the line above
+    // derives both sides from `documentedPairs` and would stay green if a pair
+    // vanished from the palette entirely. 27 = textPrimary and textSecondary on
+    // the eleven surfaces (22) + textOnAccent on the five accent fills (5).
+    expect(pairs.count == 27,
+           "the faded set is the whole documented text palette — 22 surface pairs + 5 accent-fill pairs, got \(pairs.count)")
+
+    var worst = (ratio: Double.greatestFiniteMagnitude, label: "")
+    var measured = 0
+    for pair in pairs {
+        for theme in TokenTheme.allCases {
+            let ratio = pair.ratio(for: theme)
+            expect(ratio >= pair.floor,
+                   "receded \(pair.foreground) on \(pair.background) clears \(pair.floor) in "
+                    + "\(theme.rawValue) — \(String(format: "%.2f", ratio)):1")
+            if ratio < worst.ratio {
+                worst = (ratio, "\(pair.foreground) on \(pair.background) (\(theme.rawValue))")
+            }
+            measured += 1
+        }
+    }
+    expect(measured == pairs.count * TokenTheme.allCases.count,
+           "both themes were measured for every faded pair — \(measured)")
+    // PINNED, like P1.3's own worst-case table: the fade's headroom is 0.08 over
+    // the floor, so a palette tweak that still clears AA at full strength but
+    // eats that headroom goes red here rather than shipping unreadable.
+    expect(abs(worst.ratio - 4.58) < 0.01,
+           "the worst faded pair is 4.58:1 (textSecondary on canvas, light), got "
+            + "\(String(format: "%.2f", worst.ratio)):1 at \(worst.label)")
+
+    // THE TOKEN IS THE MEASURED MAXIMUM, not a number someone liked: one
+    // hundredth deeper and the same pair fails. This is what makes `Opacity`'s
+    // provenance note an assertion instead of a claim.
+    var deeperFails = 0
+    for pair in DesignTokens.documentedPairs where textNames.contains(pair.foreground) {
+        for theme in TokenTheme.allCases where pair.faded(Opacity.receded - 0.01).ratio(for: theme) < pair.floor {
+            deeperFails += 1
+        }
+    }
+    expect(deeperFails > 0,
+           "0.87 would fail at least one documented text pair — the 0.88 token is the break-even, "
+            + "got \(deeperFails) failures")
+
+    // The compositing itself, at both ends: full alpha is the pair's own colour
+    // (so `full` rows are unchanged by this machinery) and zero alpha is the
+    // background (ratio 1.0, invisible), which is the property that makes every
+    // measurement above meaningful.
+    guard let sample = DesignTokens.documentedPairs.first(where: { $0.foreground == TextToken.textSecondary.rawValue }) else {
+        fputs("FAIL: no textSecondary pair to check compositing with\n", stderr)
+        Foundation.exit(1)
+    }
+    expect(sample.faded(1.0).color == sample.color, "alpha 1 composites to the pair's own colour")
+    expect(sample.faded(0.0).color == sample.backgroundColor, "alpha 0 composites to the background")
+    for theme in TokenTheme.allCases {
+        expect(abs(sample.faded(0.0).ratio(for: theme) - 1.0) < 0.0001,
+               "a fully transparent foreground measures 1.0:1 in \(theme.rawValue)")
+    }
+    print("Receded contrast measured \(measured) faded text pair/theme combinations at alpha "
+        + "\(Opacity.receded), worst \(String(format: "%.2f", worst.ratio)):1 at \(worst.label)")
 }
