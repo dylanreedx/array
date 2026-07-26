@@ -287,6 +287,13 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         inboxView.scopeCatalog = catalog
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.16-inbox-lists-agents-only.md
+    /// How many agents are running in terminal tiles, which this list does not show.
+    /// Only its empty state reads this — see `AgentInboxView.terminalHostedEmptyMessage`.
+    func setInboxExcludedTerminalAgentCount(_ count: Int) {
+        inboxView.excludedTerminalAgentCount = count
+    }
+
     // Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
     /// The list, for the app's ⌘1–⌘9 jump routing. The same view `inboxForQA`
     /// exposes; a second name because this one is a production path and the app has

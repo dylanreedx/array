@@ -4185,6 +4185,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         /// Agent identities the desktop shows a status for: every managed/supervised
         /// agent, plus terminal sessions that actually carry an `AgentDescriptor`.
         var agentIdentities: Set<UUID> = []
+        // Ticket: docs/38-tickets/90-agent-ux/P3.16-inbox-lists-agents-only.md
+        /// THE INBOX'S ROW SOURCE, and the ONE place that policy lives: the agents
+        /// backed by an `AgentRecord` — every agent the SUPERVISOR owns, headless or
+        /// tiled, orchestrator children included. That is the packet's criterion word
+        /// for word, and it is narrower than "everything that is not a terminal" in
+        /// two ways:
+        ///
+        ///   * a `claude` the owner started inside a terminal TILE carries an
+        ///     `AgentDescriptor`, so it is an agent for the canvas badge, the outline
+        ///     and the phone — but the inbox cannot settle, snooze, stop or archive a
+        ///     process inside someone's shell, so it does not list it;
+        ///   * a legacy `ManagedAgentSessionRecord` that no `AgentRecord` claims (a
+        ///     pre-P2A tile, keyed by its tile id) is not listed either, for exactly
+        ///     the same reason: every verb the list offers goes through
+        ///     `AgentSupervisor`, which is keyed by `AgentID`. (Raised in cross-review,
+        ///     which was right: admitting those would have contradicted the packet.)
+        ///
+        /// Derived here, beside `agentIdentities`, for the same reason that one is
+        /// carried rather than re-derived per consumer: the two cannot then drift, and
+        /// reversing this policy is one call site (`buildAgentInboxRows`) rather than
+        /// an archaeology exercise. NARROWING `agentIdentities` instead is the wrong
+        /// layer and breaks P2B.5 — ⌥-cycling and the sidebar outline read it.
+        var managedAgentIdentities: Set<UUID> = []
+        // Ticket: docs/38-tickets/90-agent-ux/P3.16-inbox-lists-agents-only.md
+        /// Agents running inside terminal tiles — the descriptors carrying an
+        /// `AgentDescriptor`, which is `agentIdentities` minus the managed scan.
+        ///
+        /// Carried rather than recomputed as a set difference, because the two
+        /// exclusions above are NOT the same fact: only this one is "your agent is
+        /// running, elsewhere", and it is the only one the empty state can honestly
+        /// explain. A legacy managed session in neither set is a STATED LIMIT — the
+        /// list would say "No agents yet" in front of one — and it is a pre-P2A
+        /// artifact rather than anything Continuum still creates.
+        var terminalHostedAgentIdentities: Set<UUID> = []
         /// P2B.7: which agents moved since the surfaces were last PUSHED — whatever
         /// advanced the snapshot in between, an incremental event or a reader's
         /// rebuild. Deliberately "since the surfaces last saw it" and not "the last
@@ -4250,8 +4284,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // otherwise start rolling up as "1 unknown". Carried alongside the snapshot
         // rather than re-derived per consumer, so the two cannot drift.
         var agentIdentities = Set(managedAgents.map(\.agentId))
+        // P3.16: the same fold, two extra values — the INBOX's row source (the agents
+        // an `AgentRecord` backs, which is a subset of the managed half above: a legacy
+        // managed session the supervisor never claimed is keyed by its tile id and is
+        // not one) and the terminal-hosted set its empty state explains. See
+        // `AgentActivitySurface.managedAgentIdentities`.
+        let managedAgentIdentities = Set(agentSupervisor.records.keys.map(\.rawValue))
+        var terminalHostedAgentIdentities: Set<UUID> = []
         for descriptor in descriptors where descriptor.agentDescriptor != nil {
             agentIdentities.insert(descriptor.tileId)
+            terminalHostedAgentIdentities.insert(descriptor.tileId)
         }
 
         let snapshot = DegradedDesktopActivitySnapshotSource.snapshot(
@@ -4292,6 +4334,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         agentActivity = AgentActivitySurface(
             snapshot: snapshot,
             agentIdentities: agentIdentities,
+            managedAgentIdentities: managedAgentIdentities,
+            terminalHostedAgentIdentities: terminalHostedAgentIdentities,
             unobservedAgentIds: AgentObservation.unobservedAgentIds(
                 in: snapshot,
                 observedAgentIds: observedAgentIds
@@ -4390,6 +4434,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             draft, to: agentActivity.snapshot, replicaId: Self.agentActivityReplicaId
         )
         agentActivity.agentIdentities.insert(draft.agentId)
+        // P3.16: and the inbox's row source, for exactly the same reason — every
+        // draft comes from `recordManagedActivity(agentId:)`, whose parameter is an
+        // `AgentID`, so an agent that speaks here is a supervised one by construction.
+        // Without this line the first event from a freshly spawned agent (an
+        // orchestrator's child) would reach every surface except the list it is
+        // supposed to appear in.
+        agentActivity.managedAgentIdentities.insert(draft.agentId)
         // P2B.8: an event FROM the agent is the strongest possible observation of it,
         // so it stops being unobserved here rather than at the next full rebuild —
         // otherwise a headless agent that just spoke would keep a "not heard from"
@@ -6480,10 +6531,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// workspace switch) wants the fresh read the old per-reload walk gave it.
     /// P3.6: the inbox's rows, from the SAME snapshot every other surface reads.
     ///
-    /// Filtered by `agentIdentities` for the reason the sidebar tree and the canvas
-    /// badges are (P2B.4): a terminal session with no `AgentDescriptor` is a plain
-    /// shell, and a shell is not an agent — it would otherwise arrive as a row
-    /// titled "Agent" with no state.
+    /// Filtered by `managedAgentIdentities`, which is where this list's membership
+    /// policy is written down (P3.16). It excludes what `agentIdentities` excludes for
+    /// every surface — a terminal session with no `AgentDescriptor` is a plain shell,
+    /// and a shell would otherwise arrive as a row titled "Agent" with no state — and
+    /// then one thing more: a terminal session that IS running an agent. The inbox
+    /// lists the agents Continuum owns.
+    ///
+    /// P3.8's force-include does not reach past this, and the answer is written down
+    /// rather than discovered: the scope decides which of the list's rows are VISIBLE,
+    /// this decides which rows EXIST, so focusing a terminal tile that runs an agent
+    /// force-includes an id no row carries — a no-op, the same as focusing a note. The
+    /// narrower change on purpose; the empty state below is what keeps the exclusion
+    /// visible instead of silent.
     ///
     /// Read-state is layered on here rather than inside the fold, because
     /// `AgentSupervisor` owns it and Core cannot reach a supervisor (P3.3).
@@ -6521,7 +6581,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return AgentInboxRowBuilder.rows(
             from: agentActivity.snapshot, context: context, attention: attention, now: now
         )
-        .filter { agentActivity.agentIdentities.contains($0.id) }
+        .filter { agentActivity.managedAgentIdentities.contains($0.id) }
+    }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P3.16-inbox-lists-agents-only.md
+    /// How many agents the row-source policy above left out — agents running inside
+    /// terminal tiles. The inbox needs the COUNT and nothing else: it is what makes
+    /// its empty state honest ("No agents yet" in front of two working `claude`
+    /// sessions is a lie), and a count cannot become a second way to list them.
+    private func inboxExcludedTerminalAgentCount() -> Int {
+        agentActivity.terminalHostedAgentIdentities.count
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
@@ -6567,6 +6636,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // do not mention.
         sidebar.setInboxOpenAgent(focusedInboxAgentId())
         sidebar.setInboxScopeCatalog(inboxScopeCatalog())
+        // P3.16: BEFORE the rows too, so the empty state this push may show already
+        // knows why it is empty.
+        sidebar.setInboxExcludedTerminalAgentCount(inboxExcludedTerminalAgentCount())
         sidebar.applyInbox(rows: buildAgentInboxRows(), changed: agentActivity.lastChange)
         do {
             let tree = try buildWorkspaceSidebarTree()
@@ -20634,6 +20706,89 @@ extension AppDelegate {
 //     packet's Files: an aggregate row id is a record id OR a tile id (P3.1), and what
 //     "stop" means for a terminal-session row is undefined until a ticket rules on it. The
 //     owner note in `_LEDGER.md` names it as the smallest next step.
+// Ticket: docs/38-tickets/90-agent-ux/P3.16-inbox-lists-agents-only.md
+//
+// THE INBOX LISTS AGENTS CONTINUUM MANAGES. Section B's fixture already held the
+// discriminating case — a terminal session carrying an `AgentDescriptor`, i.e. a `claude`
+// the owner started in a shell tile — and asserted it WAS a row. That assertion is now
+// inverted, and three rows were added around it so the new filter cannot pass by being
+// too greedy: a managed agent with a tile, an orchestrator CHILD, and the headless agent
+// that was already there.
+//
+// The change is one value, not a filter at the row build: `AgentActivitySurface` carries
+// `managedAgentIdentities` beside `agentIdentities`, derived in the same fold, and the
+// inbox reads it. `agentIdentities` itself is UNTOUCHED — it is what ⌥-cycling, the
+// outline, the badges and the phone read, and narrowing it there is exactly what P2B.5's
+// witnesses exist to catch (witness 4 below ran that fork on purpose).
+//
+// SEVEN NEGATIVE TESTS OBSERVED RED at exit 1 against the final code, quoted verbatim:
+//
+//   1. the row source back to `agentIdentities` → `an agent running inside a terminal tile
+//      is not one Continuum manages and must not be a row — got ["orchestrator", "child
+//      worker", "builder", "claude · matrix"]`. It ALSO reddens the P3.8 scope assertion
+//      first (`…the tiled agent is in workspace 'Default'… — got ["builder", "claude ·
+//      matrix"]`), so the line above was observed by neutering that one for the run.
+//   2. `managedAgentIdentities` keyed on the wrong half of P3.1's flattened keyspace —
+//      `Set(agentSupervisor.records.values.compactMap(\.tileId))`, tile ids where the rows
+//      carry agent ids → `a HEADLESS agent must be in the inbox — it has no tile, so the
+//      tree could not show it at all`, and behind it `a managed agent with a tile must be
+//      in the inbox — got []`. The whole list empties, which is why the assertions are
+//      per-agent and not a count.
+//   3. `&& $0.parentId == nil` added to the row filter → `an orchestrator's child is an
+//      agent Continuum owns and must be a row — got ["orchestrator", "builder"]`. The
+//      filter overshooting into P2D.4's children is the packet's named hazard.
+//   4. the fix attempted IN THE WRONG LAYER — the descriptor loop deleted from
+//      `agentIdentities` itself → `--agent-inventory-wiring-check`: `both projects' agents
+//      must carry their status in the sidebar — got nil / Optional(…needsAttention)` and
+//      `--workspace-sidebar-live-status-check`: `needs-attention tile should render the
+//      attention glyph`. Recorded because it is the guard that this ticket did not fix the
+//      inbox by breaking four other surfaces.
+//   5. the third empty message collapsed onto `emptyMessage` → `all three empty states must
+//      read differently, or distinguishing them is theatre`.
+//   6. `setInboxExcludedTerminalAgentCount` dropped from `reloadWorkspaceSidebar` → `the
+//      excluded terminal agents must reach the list — got 0`. Without it the words are
+//      right and never appear.
+//   7. `emptyLabel.maximumNumberOfLines` back to 1 → `the empty message must not be
+//      truncated at a 220.0pt sidebar — it needs 2 line(s) in 196.0pt and the label draws
+//      1`.
+//   8. `managedAgentIdentities` back to `Set(managedAgents.map(\.agentId))`, i.e. the
+//      managed SCAN rather than the supervisor's records → `a managed session no
+//      AgentRecord claims is not an agent the inbox can act on and must not be a row —
+//      got ["orchestrator", "child worker", "builder", "Agent"]`. That fourth row is
+//      exactly the junk the owner reported: nameless, and no verb on the menu can touch
+//      it.
+//
+// CROSS-REVIEW (gpt-5.5) raised one substantive point in four shapes and it was RIGHT:
+// the first version derived the row source from `currentManagedAgentActivities()`, which
+// admits a legacy `ManagedAgentSessionRecord` no `AgentRecord` claims — "every row is
+// `AgentRecord`-backed" is the packet's criterion, and that version did not meet it. The
+// set is now `agentSupervisor.records`' own ids, the fixture grew a legacy managed
+// session, and witness 8 is that finding as an assertion. The consequence is recorded as
+// a STATED LIMIT at `AgentActivitySurface.terminalHostedAgentIdentities`: such a session
+// is in neither set, so an inbox holding nothing else says "No agents yet" in front of
+// it. It is a pre-P2A artifact — every managed tile Continuum creates today registers an
+// `AgentRecord` — and the alternative was listing a row on which nothing can be done.
+//
+// MEASURED, and it changed the check: the truncation gate was first written as a view laid
+// out at `WorkspaceSidebarConfig.minWidth` in its own window. A borderless `NSWindow` does
+// not stay 220pt — it laid the view out at 296pt, where this message is one line, so the
+// assertion was green against `maximumNumberOfLines = 1` and proved nothing. It now
+// measures the STRING at `minWidth - 2 * Space.l` and compares needed lines to allowed
+// lines, with a vacuity guard that the message really does wrap at that width.
+//
+// THE CONSEQUENCE THE OWNER ACCEPTED, and where it is visible: a `claude` running in a
+// terminal tile is no longer a row. The scope popup is NOT the escape hatch — a scope
+// filters rows that exist, and these no longer do, so a scope entry could not bring them
+// back without inverting the layering. The narrower change was taken instead, the policy
+// lives in ONE named place (`AgentActivitySurface.managedAgentIdentities`), and the empty
+// state is what keeps the loss visible: an inbox empty only because every agent is in a
+// terminal says so in its own words rather than claiming "No agents yet".
+//
+// AND THE HEAD-ON CASE, stated rather than discovered: section B's `lastActiveTileId` IS
+// the terminal-hosted agent, so P3.8's force-include ("the agent in the focused tile is
+// never hidden") is asked to keep a row the source never produced. It is a no-op — the
+// scope decides what is VISIBLE, the row source decides what EXISTS — and the check
+// asserts both halves so the answer cannot drift into either rule silently.
 extension AppDelegate {
     static func runAgentInboxChecks() async throws {
     enum CheckError: Error, CustomStringConvertible {
@@ -21558,6 +21713,41 @@ extension AppDelegate {
                "a list with no agents at all is not a list you filtered — got '\(empty.emptyMessageForQA)'")
     try expect(AgentInboxView.emptyMessage != AgentInboxView.scopedEmptyMessage,
                "the two empty states must read differently, or distinguishing them is theatre")
+    // P3.16: the THIRD reading. Nothing came out of the row source AND agents were
+    // excluded from it, so "yet" is a lie — those agents are running right now, in
+    // terminal tiles this list does not manage.
+    let emptyWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 200),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    emptyWindow.contentView = empty
+    empty.excludedTerminalAgentCount = 2
+    empty.layoutForQA()
+    try expect(empty.emptyMessageForQA == AgentInboxView.terminalHostedEmptyMessage,
+               "an inbox empty only because its agents live in terminals must say so, not 'yet' — got '\(empty.emptyMessageForQA)'")
+    try expect(Set([AgentInboxView.emptyMessage, AgentInboxView.scopedEmptyMessage,
+                    AgentInboxView.terminalHostedEmptyMessage]).count == 3,
+               "all three empty states must read differently, or distinguishing them is theatre")
+    // The sentence has to FIT where it is drawn…
+    let emptyFrame = empty.emptyMessageFrameForQA
+    try expect(emptyFrame.minX >= 0 && emptyFrame.maxX <= empty.bounds.width
+                   && emptyFrame.minY >= 0 && emptyFrame.maxY <= empty.bounds.height,
+               "the empty message must fit the sidebar — frame \(emptyFrame) outside \(empty.bounds)")
+    // …and it must not be TRUNCATED at the narrowest width the user can drag the
+    // sidebar to (`WorkspaceSidebarConfig.minWidth` less the label's own insets). At
+    // 320pt this message is one line; at 196pt it is two, so the label has to allow
+    // two — and a `maximumNumberOfLines` too low truncates silently, with AppKit
+    // reporting nothing and drawing an ellipsis. Measured off the string, because a
+    // borderless `NSWindow` does not stay 220pt wide (probed: it lays out at 296).
+    let narrowestLabelWidth = WorkspaceSidebarConfig.minWidth - 2 * Space.l
+    let lineFit = empty.emptyMessageLineFitForQA(width: narrowestLabelWidth)
+    try expect(lineFit.needed <= lineFit.allowed,
+               "the empty message must not be truncated at a \(WorkspaceSidebarConfig.minWidth)pt sidebar — it needs \(lineFit.needed) line(s) in \(narrowestLabelWidth)pt and the label draws \(lineFit.allowed)")
+    try expect(lineFit.needed > 1,
+               "…and that assertion must be measuring a message that really does wrap there — got \(lineFit.needed) line(s)")
+    // And back: no exclusions, no explanation to give.
+    empty.excludedTerminalAgentCount = 0
+    try expect(empty.emptyMessageForQA == AgentInboxView.emptyMessage,
+               "an inbox with nothing excluded is a list with no agents yet — got '\(empty.emptyMessageForQA)'")
 
     // MARK: B · the app against disk
 
@@ -21583,6 +21773,17 @@ extension AppDelegate {
     // A PLAIN SHELL: a terminal session with no `AgentDescriptor`. It is in the
     // snapshot (the phone lists it) and it is NOT an agent, so it must not be a row.
     let shellTile = UUID(uuidString: "3B600000-0000-4000-8000-0000000000E2")!
+    // P3.16: a MANAGED agent with a tile, in this workspace. It is what the scope
+    // assertion below now bites on — before this ticket the terminal-hosted agent was
+    // the only placed row, and excluding that one would have left the scope check
+    // asserting an empty list, which any filter at all satisfies.
+    let managedAgentTile = UUID(uuidString: "3B600000-0000-4000-8000-0000000000E3")!
+    // …and a LEGACY managed session that no `AgentRecord` claims — a pre-P2A
+    // managed-agent tile, keyed by its own tile id in the aggregate keyspace. The
+    // cross-review case: it reaches the snapshot through the managed scan, so a row
+    // source built from that scan would list it, and nothing the list offers could be
+    // performed on it (every verb goes through `AgentSupervisor`, keyed by `AgentID`).
+    let legacyManagedTile = UUID(uuidString: "3B600000-0000-4000-8000-0000000000E4")!
 
     let placement = ZonePlacement(zoneId: zoneId, projectId: projectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 600, height: 400), color: "blue", collapsed: false, hydrationPolicy: .automatic)
     var registry = Registry.empty()
@@ -21609,6 +21810,8 @@ extension AppDelegate {
     let canvasState = CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [
         Tile(id: terminalAgentTile, kind: .terminal, title: "claude · matrix", frame: TileFrame(x: 0, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata()),
         Tile(id: shellTile, kind: .terminal, title: "shell", frame: TileFrame(x: 240, y: 0, width: 200, height: 120), zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata()),
+        Tile(id: managedAgentTile, kind: .managedAgent, title: "builder", frame: TileFrame(x: 0, y: 160, width: 200, height: 120), zPosition: .fromLegacyRank(3), runtimeRef: nil, metadata: TileMetadata()),
+        Tile(id: legacyManagedTile, kind: .managedAgent, title: "legacy agent", frame: TileFrame(x: 240, y: 160, width: 200, height: 120), zPosition: .fromLegacyRank(4), runtimeRef: nil, metadata: TileMetadata()),
     ], groups: [], lastActiveTileId: terminalAgentTile)
     try store.saveCanvas(canvasState)
     try store.saveSession(TerminalSessionDescriptor(
@@ -21621,6 +21824,9 @@ extension AppDelegate {
         tileId: shellTile, launchProfileId: "shell", command: "/bin/zsh", args: [],
         cwd: projectRoot.path, env: [:], title: "shell", createdAt: now, lastStartedAt: now, lastExit: nil,
         agentDescriptor: nil))
+    // P3.16: the legacy managed session, written where the cross-project walk reads it.
+    try ManagedAgentSessionStore(projectRoot: projectRoot).upsert(ManagedAgentSessionRecord(
+        tileId: legacyManagedTile, agentKind: .claude, status: .running, lastSeenAt: now))
 
     // The HEADLESS agent (P2A.6): an `AgentRecord` with no tile. It is the row the
     // old sidebar tree could not draw at all — a tree keyed on tiles has nowhere to
@@ -21631,6 +21837,21 @@ extension AppDelegate {
         id: headlessId, displayName: "orchestrator", role: "orchestrator",
         model: "openai-codex/gpt-5.6-sol", thinking: "medium", cwd: projectRoot.path,
         projectId: projectId, createdAt: now, lastActivityAt: now))
+    // P3.16: a managed agent WITH a tile — the row that proves the new filter did not
+    // simply take everything that has a tile with it.
+    let tiledId = AgentID(rawValue: UUID(uuidString: "3B600000-0000-4000-8000-0000000000B2")!)
+    try agentStore.upsert(AgentRecord(
+        id: tiledId, displayName: "builder", role: "builder",
+        model: "anthropic/claude-opus-5", thinking: "medium", cwd: projectRoot.path,
+        projectId: projectId, createdAt: now, lastActivityAt: now, tileId: managedAgentTile))
+    // …and an orchestrator CHILD (P2D.4). It is `AgentRecord`-backed like its parent,
+    // so a filter keyed on the wrong half of P3.1's flattened keyspace would take it
+    // with the terminal-hosted agents.
+    let childId = AgentID(rawValue: UUID(uuidString: "3B600000-0000-4000-8000-0000000000B3")!)
+    try agentStore.upsert(AgentRecord(
+        id: childId, displayName: "child worker", role: "builder",
+        model: "anthropic/claude-opus-5", thinking: "low", cwd: projectRoot.path,
+        projectId: projectId, parentAgentID: headlessId, createdAt: now, lastActivityAt: now))
 
     let app = AppDelegate()
     app.registryStore = registryStore
@@ -21670,7 +21891,7 @@ extension AppDelegate {
     sidebar.inboxForQA.layoutForQA()
     try expect(sidebar.inboxForQA.selectedScopeTitleForQA == "Default",
                "the persisted scope must be restored onto the real sidebar — got '\(sidebar.inboxForQA.selectedScopeTitleForQA)'")
-    try expect(sidebar.inboxForQA.rowIdsForQA == [terminalAgentTile],
+    try expect(sidebar.inboxForQA.rowIdsForQA == [tiledId.rawValue],
                "…and applied: the tiled agent is in workspace 'Default' and the headless one is in no workspace — got \(sidebar.inboxForQA.titlesForQA)")
     // The menu comes from the REGISTRY, not only from the rows: this run's project and
     // workspace are both offered while the list is showing one row.
@@ -21693,10 +21914,43 @@ extension AppDelegate {
     try expect(!ids.isEmpty, "the sidebar's default content is the agent inbox — got 0 rows")
     try expect(ids.contains(headlessId.rawValue),
                "a HEADLESS agent must be in the inbox — it has no tile, so the tree could not show it at all")
-    try expect(ids.contains(terminalAgentTile),
-               "the terminal agent must be in the inbox — got \(sidebar.inboxForQA.titlesForQA)")
+    // P3.16: the tiled managed agent and the orchestrator CHILD are rows — the filter
+    // must not overshoot, in either half of P3.1's flattened keyspace.
+    try expect(ids.contains(tiledId.rawValue),
+               "a managed agent with a tile must be in the inbox — got \(sidebar.inboxForQA.titlesForQA)")
+    try expect(ids.contains(childId.rawValue),
+               "an orchestrator's child is an agent Continuum owns and must be a row — got \(sidebar.inboxForQA.titlesForQA)")
+    // …and the TERMINAL-HOSTED agent is not. Vacuity first, because the whole assertion
+    // rests on it: this descriptor really does carry an `AgentDescriptor`, it really did
+    // reach the snapshot, and it is still an agent for every OTHER surface — narrowing
+    // `agentIdentities` instead of the inbox's row source is the wrong layer and is
+    // what P2B.5's two witnesses catch.
+    try expect(app.agentActivity.agentIdentities.contains(terminalAgentTile),
+               "the terminal session must still be an agent for the canvas, the outline and the phone — P2B.5's set may not narrow")
+    try expect(!app.agentActivity.managedAgentIdentities.contains(terminalAgentTile),
+               "…and it must not be in the inbox's row source")
+    try expect(!ids.contains(terminalAgentTile),
+               "an agent running inside a terminal tile is not one Continuum manages and must not be a row — got \(sidebar.inboxForQA.titlesForQA)")
+    // The FORCE-INCLUDE meets the row source head-on here, and this is the answer:
+    // `lastActiveTileId` is `terminalAgentTile`, so P3.8 is force-including an id no
+    // row carries — a no-op, because the scope decides what is VISIBLE and the row
+    // source decides what EXISTS.
+    try expect(app.workspaceSidebarView?.inboxForQA.openAgentId == terminalAgentTile,
+               "the focused tile really is the terminal-hosted agent, or the line above proves nothing")
     try expect(!ids.contains(shellTile),
                "a plain shell tile is not an agent and must not be a row — got \(ids.count) rows")
+    // The cross-review's case, both halves: the legacy managed session really did
+    // reach the snapshot (so excluding it is a decision and not an accident), and it is
+    // not a row, because nothing this list offers could be performed on it.
+    try expect(app.agentActivity.agentIdentities.contains(legacyManagedTile),
+               "the legacy managed session must reach the snapshot, or excluding it proves nothing")
+    try expect(!ids.contains(legacyManagedTile),
+               "a managed session no AgentRecord claims is not an agent the inbox can act on and must not be a row — got \(sidebar.inboxForQA.titlesForQA)")
+    // The count the empty state reads: exactly the one terminal-hosted agent, wired
+    // from the app through `reloadWorkspaceSidebar` — neither the shell nor the legacy
+    // managed session is in it, because neither is "your agent is running elsewhere".
+    try expect(sidebar.inboxForQA.excludedTerminalAgentCount == 1,
+               "the excluded terminal agents must reach the list — got \(sidebar.inboxForQA.excludedTerminalAgentCount)")
     try expect(sidebar.inboxForQA.titlesForQA.contains("orchestrator"),
                "the headless agent's row is named by the record it owns — got \(sidebar.inboxForQA.titlesForQA)")
     try expect(!sidebar.isWorkspaceTreeVisibleForQA,
@@ -23179,6 +23433,6 @@ extension AppDelegate {
     revealApp.agentSupervisor = revealSupervisor
 
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live while Snooze and Wake stay greyed with 'Not available yet.', the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's TILE survives while its respawn is durably suppressed so re-wiring mints nothing (and a prompt in that tile deliberately revives it), a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)')")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows — a headless one, a tiled one and an orchestrator child — with the plain shell filtered out, the terminal-hosted agent listed for every other surface but not here (P3.16, force-included as the focused tile and still not a row), a legacy managed session no AgentRecord claims left out too, the count of the terminal-hosted ones reaching the list's empty state, and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live while Snooze and Wake stay greyed with 'Not available yet.', the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's TILE survives while its respawn is durably suppressed so re-wiring mints nothing (and a prompt in that tile deliberately revives it), a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)')")
     }
 }

@@ -109,6 +109,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// move (widen the scope) is only obvious if the message names the cause.
     static let scopedEmptyMessage = "No agents in this scope"
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.16-inbox-lists-agents-only.md
+    /// Shown when this list holds nothing because every agent on this desktop is
+    /// running inside a terminal tile, which the inbox does not manage and therefore
+    /// does not list. The THIRD message, not a reuse of either other one: "No agents
+    /// yet" would be a lie in front of a working `claude` session, and blaming the
+    /// scope would be a different lie — the row source excluded them, at every scope.
+    static let terminalHostedEmptyMessage = "No managed agents · terminal agents aren't listed"
+
     // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
     /// The three workspace actions that used to be buttons in the sidebar header.
     /// They live in the scope popup's menu because the scope is already the control
@@ -356,6 +364,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         }
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.16-inbox-lists-agents-only.md
+    /// Agents the host's row-source policy left out because they are running inside
+    /// terminal tiles. It changes only the WORDS of the empty state, so it re-renders
+    /// nothing and cannot cost the incremental refresh (P2B.7) its "one cell rebuilt".
+    var excludedTerminalAgentCount: Int = 0 {
+        didSet {
+            guard excludedTerminalAgentCount != oldValue else { return }
+            updateEmptyState()
+        }
+    }
+
     override init(frame frameRect: NSRect) {
         // A popup, not a segmented control or a row of chips: the entry count is
         // the number of projects and workspaces you have open, so anything that
@@ -411,6 +430,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         emptyLabel = NSTextField(labelWithString: AgentInboxView.emptyMessage)
         emptyLabel.font = .token(.label)
         emptyLabel.alignment = .center
+        // P3.16: the third message is a sentence, not two words, and a 320pt sidebar
+        // clips one. Wrapping rather than shortening — the words have to say WHY the
+        // list is empty, and a clipped explanation explains nothing. Two lines is the
+        // measured need at this width; `runAgentInboxChecks` asserts the label stays
+        // inside the view's bounds so a longer string cannot silently spill.
+        emptyLabel.lineBreakMode = .byWordWrapping
+        emptyLabel.maximumNumberOfLines = 2
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
 
         super.init(frame: frameRect)
@@ -787,10 +813,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// The empty state, and WHICH empty state. An inbox with agents in it that are
     /// all filtered out is not empty, and saying "No agents yet" there would be the
     /// list lying about the thing the user just did.
+    ///
+    /// P3.16 adds the third reading, and the precedence is not arbitrary: `allRows` is
+    /// what the host's row source produced, so if THAT is empty the scope cannot be
+    /// the cause and the honest question is whether anything was excluded — an inbox
+    /// with no managed agents in front of a running terminal agent says so.
     private func updateEmptyState() {
-        emptyLabel.stringValue = allRows.isEmpty
-            ? AgentInboxView.emptyMessage
-            : AgentInboxView.scopedEmptyMessage
+        if !allRows.isEmpty {
+            emptyLabel.stringValue = AgentInboxView.scopedEmptyMessage
+        } else if excludedTerminalAgentCount > 0 {
+            emptyLabel.stringValue = AgentInboxView.terminalHostedEmptyMessage
+        } else {
+            emptyLabel.stringValue = AgentInboxView.emptyMessage
+        }
         emptyLabel.isHidden = !rows.isEmpty
     }
 
@@ -1302,6 +1337,36 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     var accentAlphasForQA: [Double] { cells().map(\.qaAccentAlpha) }
     var isEmptyMessageVisibleForQA: Bool { !emptyLabel.isHidden }
     var emptyMessageForQA: String { emptyLabel.stringValue }
+    /// The empty label as LAID OUT, so a message too long for the sidebar is a number
+    /// that fails rather than a clipped sentence nobody measured (P3.16).
+    var emptyMessageFrameForQA: NSRect { emptyLabel.frame }
+    /// The height the message's words need at the width it was given. Compared with
+    /// the frame's height, this is what catches a `maximumNumberOfLines` that
+    /// truncates — AppKit reports no error for that, it just draws an ellipsis.
+    /// How many lines the empty message NEEDS at `width`, against how many the label
+    /// will draw. The pair is what catches silent truncation: AppKit reports nothing
+    /// when `maximumNumberOfLines` is too low, it just draws an ellipsis.
+    ///
+    /// Measured off the STRING rather than by laying the view out at that width — a
+    /// cell's own `cellSize` is capped by the same limit under test, so it would agree
+    /// with any limit at all, and a 220pt `NSWindow` does not stay 220pt.
+    func emptyMessageLineFitForQA(width: Double) -> (needed: Int, allowed: Int) {
+        let attributed = NSAttributedString(
+            string: emptyLabel.stringValue,
+            attributes: [.font: emptyLabel.font ?? .token(.label)])
+        func height(_ available: Double) -> Double {
+            Double(attributed.boundingRect(
+                with: NSSize(width: available, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading]).height)
+        }
+        let oneLine = height(.greatestFiniteMagnitude)
+        guard oneLine > 0 else { return (0, 0) }
+        let needed = Int((height(width) / oneLine).rounded(.up))
+        let allowed = emptyLabel.maximumNumberOfLines == 0
+            ? Int.max
+            : emptyLabel.maximumNumberOfLines
+        return (needed, allowed)
+    }
     // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
     /// The popup as RENDERED — the titles AppKit is really showing and the one it
     /// has ticked — rather than `scopeEntries`, which would assert about the array
