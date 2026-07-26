@@ -84,6 +84,57 @@ public enum SettledOverride: String, Codable, CaseIterable, Sendable {
     }
 }
 
+// Ticket: docs/38-tickets/90-agent-ux/P4.4-auto-unsettle.md
+//
+// An override must never go stale silently: a settled agent that genuinely starts
+// working again comes back on its own.
+
+/// Why an override went back to `.neutral` — the fact that lets the ledger and a
+/// debugging session tell the app's automatic clear from a human's own decision.
+///
+/// Two SEPARATE PATHS, which is the packet's rule and not a formality: only the app
+/// may clear for `.activity`, and it may only ever clear on real work (the writer is
+/// `AgentSupervisor`, which does it from `send` and from the activity-shaped events in
+/// `deliver`). `.user` is a person saying "not done after all" — a different
+/// authority, so a different word, so a wrong clear can be attributed to the code
+/// that made it rather than guessed at from the resulting `.neutral`.
+///
+/// `String`-backed for the same reason `SettledOverride` is: it is written into logs
+/// and read by eye.
+public enum SettledOverrideClearReason: String, Codable, CaseIterable, Sendable {
+    /// The app observed real work: a user message, a session coming alive, a new
+    /// approval or input request.
+    case activity
+    /// An explicit human action.
+    case user
+}
+
+extension SettledOverride {
+    /// What an override becomes when real activity arrives. TOTAL over the tri-state,
+    /// and pure — the supervisor supplies the "was this real activity" half.
+    ///
+    /// ONLY `.settled` CLEARS. The other two are deliberate:
+    ///
+    /// · `.active` is the keep-active PIN (P4.1), and its whole job is to suppress the
+    ///   auto-settle rung. Resetting it to `.neutral` on activity would discard a
+    ///   human decision in order to un-hide a row that the pin was already keeping
+    ///   visible — no visible gain now, and the agent silently auto-settles one
+    ///   inactivity window later, which is the exact "override goes stale silently"
+    ///   failure this ticket exists to prevent, inverted.
+    /// · `.neutral` has nothing to clear.
+    ///
+    /// So the packet's "clear `settledOverride` back to `.neutral`" is read as clearing
+    /// the SETTLE. A pin is not something activity can outvote; only the person who
+    /// pinned it can.
+    public func afterActivity() -> SettledOverride {
+        self == .settled ? .neutral : self
+    }
+
+    /// Whether `afterActivity()` would actually change anything — so a caller can
+    /// decide to persist and to record a reason without comparing before and after.
+    public var clearsOnActivity: Bool { self != afterActivity() }
+}
+
 // Ticket: docs/38-tickets/90-agent-ux/P4.2-effective-settled.md
 //
 // THE LOAD-BEARING RULE OF THE INBOX: work that needs a human stays visible even

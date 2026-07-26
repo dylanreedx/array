@@ -381,6 +381,11 @@ final class AgentSupervisor {
             return
         }
         record.lastActivityAt = Date()
+        // P4.4: a user message is the plainest real activity there is, so a settle
+        // does not survive it. Before the runner starts, because this write is the
+        // same one `persist` below carries — the clear must not wait for the first
+        // event to come back.
+        clearSettleOnActivity(&record)
         records[id] = record
         persist(record)
 
@@ -1158,6 +1163,129 @@ final class AgentSupervisor {
         InboxAttention.resolve(unread: unread.contains(id), raisedHand: raisedHand)
     }
 
+    // MARK: - Auto-unsettle (P4.4)
+
+    /// Which reason last cleared each agent's settle. Kept so a clear can be
+    /// ATTRIBUTED — `.activity` is the app's own, `.user` is a person's — rather than
+    /// inferred from a `.neutral` that both paths produce. In memory only: the
+    /// attribution is debugging state, not a fact about the agent, and `AgentRecord`
+    /// is what the store and the companion publisher serialize.
+    private(set) var settledOverrideClearReasons: [AgentID: SettledOverrideClearReason] = [:]
+
+    /// Every clear is also SAID OUT LOUD, through this file's one logging seam. The
+    /// dictionary above answers "who cleared it" only while the process lives, and the
+    /// question the packet actually poses ("so the ledger/debugging can tell them
+    /// apart") is usually asked after the fact about an override that is already gone.
+    /// A line per clear is the durable half of the attribution; `warn` is injectable,
+    /// so it is also the testable half. Rare by construction — only a settled agent has
+    /// anything to clear — and it names the agent id and the reason, both of which this
+    /// file's other log lines already carry.
+    private func logSettleCleared(_ id: AgentID, reason: SettledOverrideClearReason) {
+        warn("AgentSupervisor: cleared the settle on agent \(id.rawValue.uuidString) — reason \(reason.rawValue)")
+    }
+
+    /// Whether this event means the agent is REALLY WORKING AGAIN, as opposed to
+    /// reporting on itself.
+    ///
+    /// The whole set, and why each side of the line sits where it does:
+    ///
+    /// · `.sessionStateChanged(.starting)`/`(.running)` — a session coming alive.
+    /// · `.turnStarted` — the same fact one level down; a turn does not begin unless
+    ///   something asked for one.
+    /// · `.requestOpened`/`.userInputRequested` — the agent is now waiting on a human,
+    ///   which is the case a stale settle hides most damagingly (it is also a P4.2
+    ///   blocker, so the row is already visible while the request is open; clearing the
+    ///   override is what keeps it visible AFTER the request is answered).
+    ///
+    /// NOT activity, deliberately:
+    ///
+    /// · **`.sessionStateChanged(.ready)`** — the packet's named watch-out. An agent
+    ///   settling into ready IS the normal end of work, so treating it as activity
+    ///   would undo every settle moments after it was made.
+    /// · `.waiting`, `.stopped`, `.error` — reports about work that is over or stalled.
+    /// · `.turnCompleted` — work ENDING, same reasoning as `.ready`.
+    /// · `.contentDelta`, `.itemStarted`, `.itemCompleted` — mid-turn traffic inside a
+    ///   turn whose `.turnStarted` has already cleared the settle, so they can only
+    ///   re-clear what is already `.neutral`; and `contentDelta` arrives per token, so
+    ///   admitting it would put this decision on the hottest path in the app.
+    /// · `.requestResolved`, `.userInputResolved` — a human answering, i.e. the far
+    ///   side of the request that already counted.
+    /// · `.tokenUsageUpdated` — a meter. This is the event-stream shape of the status
+    ///   poll the packet excludes by name.
+    ///
+    /// `nonisolated static` and a total switch over `AgentRuntimeEvent`, like
+    /// `isPersistWorthy` beside it: a new event case is a compile error here rather
+    /// than a silent default.
+    nonisolated static func isRealActivity(_ event: AgentRuntimeEvent) -> Bool {
+        switch event {
+        case let .sessionStateChanged(state):
+            switch state {
+            case .starting, .running:
+                return true
+            case .ready, .waiting, .stopped, .error:
+                return false
+            }
+        case .turnStarted, .requestOpened, .userInputRequested:
+            return true
+        case .turnCompleted, .itemStarted, .itemCompleted, .contentDelta,
+             .requestResolved, .userInputResolved, .tokenUsageUpdated, .runtimeError:
+            return false
+        }
+    }
+
+    /// THE APP's clear, and the only writer of `reason: .activity`. Returns whether the
+    /// override actually moved, which is what tells `deliver` it has to persist an
+    /// event that is not otherwise persist-worthy — a clear that lives only in memory
+    /// comes back settled on the next launch.
+    ///
+    /// Takes the record `inout` rather than an id so it composes with the callers that
+    /// are already holding a mutated copy (`send`, `deliver`); they own writing it back.
+    @discardableResult
+    private func clearSettleOnActivity(_ record: inout AgentRecord) -> Bool {
+        guard record.settledOverride.clearsOnActivity else { return false }
+        record.settledOverride = record.settledOverride.afterActivity()
+        settledOverrideClearReasons[record.id] = .activity
+        logSettleCleared(record.id, reason: .activity)
+        return true
+    }
+
+    /// THE HUMAN's clear — "not done with this after all" — a separate entry point on
+    /// purpose (the packet: only the app may clear for `activity`, a user action is its
+    /// own path). Same resulting `.neutral`, different recorded reason.
+    ///
+    /// Returns false for an agent this supervisor does not have and for one that was
+    /// not settled, so a caller cannot mistake a no-op for a write.
+    ///
+    /// NOTHING CALLS THIS YET: the surface that lets a person settle or un-settle a row
+    /// is a later Phase-4 ticket, and this ticket owns the writer, not its button.
+    /// Pushes one event through the real `deliver` path. FOR THE CHECKS, like the
+    /// `qa`-prefixed members elsewhere in this file.
+    ///
+    /// It exists because every event this app produces today arrives INSIDE a `send`,
+    /// and `send` clears a settle itself (a user message is activity) — so there is no
+    /// other way to observe what an ARRIVING event does to a still-settled agent, which
+    /// is precisely what this ticket adds. The production caller it defends is Phase 5's
+    /// persistent session: an rpc session comes alive, or an approval opens, without
+    /// this app having just sent a prompt.
+    func qaDeliver(_ event: AgentRuntimeEvent, to id: AgentID) {
+        deliver(event, to: id)
+    }
+
+    @discardableResult
+    func clearSettle(agentID id: AgentID) -> Bool {
+        guard var record = records[id] else {
+            warn("AgentSupervisor.clearSettle: no agent \(id.rawValue.uuidString)")
+            return false
+        }
+        guard record.settledOverride.clearsOnActivity else { return false }
+        record.settledOverride = record.settledOverride.afterActivity()
+        settledOverrideClearReasons[id] = .user
+        logSettleCleared(id, reason: .user)
+        records[id] = record
+        persist(record)
+        return true
+    }
+
     // MARK: - Multicast
 
     /// Snapshot-then-tail, per `ActivityStore.subscribe()`: the buffered history is
@@ -1204,12 +1332,23 @@ final class AgentSupervisor {
 
         if var record = records[id] {
             record.lastActivityAt = Date()
+            // P4.4: real work un-settles the agent. Narrower than the stamp above —
+            // every event is activity for the purposes of "when did this last do
+            // anything", but only the `isRealActivity` set means "it is working
+            // again", and `.sessionStateChanged(.ready)` in particular must not
+            // (it is how a turn ENDS).
+            let unsettled = Self.isRealActivity(event) && clearSettleOnActivity(&record)
             records[id] = record
             // Only lifecycle-shaped events reach the disk. `contentDelta` arrives
             // per token and every write is an AtomicWriter write (temp file +
             // fsync + read-back), so persisting all of them would put a synchronous
             // fsync per token on the main thread.
-            if Self.isPersistWorthy(event) { persist(record) }
+            //
+            // A clear forces the write regardless: `.requestOpened` and
+            // `.userInputRequested` are not persist-worthy, so without this the
+            // agent would read `.neutral` in memory and come back `.settled` on the
+            // next launch.
+            if Self.isPersistWorthy(event) || unsettled { persist(record) }
         }
 
         for continuation in (subscribers[id] ?? [:]).values {
@@ -1593,8 +1732,12 @@ func runAgentSupervisorChecks() async throws {
 
     let readStateReport = try await checkReadState(config: config, cwd: cwd, fail: fail)
 
+    // MARK: 15 · real work un-settles a settled agent; a refresh does not (P4.4)
+
+    let unsettleReport = try await checkAutoUnsettle(config: config, cwd: cwd, fail: fail)
+
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport)")
 }
 
 /// Gated on `--agent-restore-check` (P2A.7).
@@ -4159,6 +4302,245 @@ private func checkReadState(
     }
 
     return "read-state over \(turnsRun) real turns: unwatched turns read unread, focus (by agent and by tile) clears it, a watched turn never sets it, and it survives neither the record (\(fields.count) keys) nor a relaunch"
+}
+
+// Ticket: docs/38-tickets/90-agent-ux/P4.4-auto-unsettle.md
+//
+/// A settle that goes stale silently is the failure here: an agent the human said
+/// "done" to starts working again, and the row stays buried.
+///
+/// Every settled agent in this check is made settled BY THE STORE and adopted with
+/// `restore()` — nothing in this process ever wrote the override in memory — so the
+/// clear is observed against state the supervisor did not create, which is what a
+/// relaunched settled agent really is.
+///
+/// What it asserts:
+///   1. The activity CLASSIFIER, as a table over every `AgentRuntimeEvent` case.
+///      `.sessionStateChanged(.ready)` on the not-activity side is the packet's named
+///      watch-out — an agent settling into ready is the normal END of work.
+///   2. A real activity event through `deliver` clears the settle AND reaches the
+///      disk, including for `.requestOpened`/`.userInputRequested`, which are not
+///      `isPersistWorthy`: a clear that lived only in memory would come back settled.
+///   3. The REGRESSION WITNESS the packet names: an observer-shaped refresh does not
+///      clear. Four shapes of it — the `.ready` that ends a turn, a `.turnCompleted`,
+///      a `.tokenUsageUpdated` meter, and `stop()`'s `.stopped` — plus the two
+///      no-op reads (`focus`/`focusTile` is viewing, and reading is free per P4.9;
+///      `branchContext` is the header refresh).
+///   4. A user message (`send`) clears it.
+///   5. The keep-active `.active` PIN survives activity, per
+///      `SettledOverride.afterActivity()`'s reasoning: clearing it would discard a
+///      human decision and let the next inactivity sweep bury the row.
+///   6. The two clears are ATTRIBUTED: `.activity` for the app's, `.user` for
+///      `clearSettle(agentID:)`, and `restore()` records neither.
+@MainActor
+private func checkAutoUnsettle(
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Error
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-auto-unsettle-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = AgentStore(applicationSupportDirectory: root)
+
+    // MARK: 1 · the classifier, as a table
+
+    let provider = "provider-thread"
+    let activity: [AgentRuntimeEvent] = [
+        .sessionStateChanged(.starting),
+        .sessionStateChanged(.running),
+        .turnStarted(threadId: provider, turnId: "t1"),
+        .requestOpened(threadId: provider, requestId: "r1", kind: .commandExecutionApproval),
+        .userInputRequested(threadId: provider, requestId: "q1", questions: [])
+    ]
+    let notActivity: [AgentRuntimeEvent] = [
+        .sessionStateChanged(.ready),
+        .sessionStateChanged(.waiting),
+        .sessionStateChanged(.stopped),
+        .sessionStateChanged(.error),
+        .turnCompleted(threadId: provider, turnId: "t1", outcome: .completed, errorMessage: nil),
+        .itemStarted(threadId: provider, itemId: "i1", kind: .commandExecution, title: "ls"),
+        .itemCompleted(threadId: provider, itemId: "i1", kind: .commandExecution, status: .completed),
+        .contentDelta(threadId: provider, turnId: "t1", streamKind: .assistant, delta: "…"),
+        .requestResolved(threadId: provider, requestId: "r1", decision: "approved"),
+        .userInputResolved(threadId: provider, requestId: "q1"),
+        .tokenUsageUpdated(threadId: provider, snapshot: TokenUsageSnapshot(inputTokens: 1, outputTokens: 1, totalCostUsd: nil)),
+        .runtimeError(threadId: provider, message: "boom")
+    ]
+    for event in activity where !AgentSupervisor.isRealActivity(event) {
+        throw fail("auto-unsettle: \(event) is real activity and the classifier says it is not")
+    }
+    for event in notActivity where AgentSupervisor.isRealActivity(event) {
+        throw fail("auto-unsettle: \(event) is not real activity and the classifier says it is — un-settling on it would undo a settle the moment it was made")
+    }
+    // Both sides of the table cover every `AgentRuntimeEvent` case, which
+    // `isRealActivity`'s exhaustive switch keeps honest at compile time; the count
+    // guard is what catches a case dropped from THIS table.
+    let caseCount = activity.count + notActivity.count
+    guard caseCount == 17 else {
+        throw fail("auto-unsettle: the classifier table covers \(caseCount) event shapes, expected 17 — a case was added or dropped without a decision")
+    }
+
+    // MARK: 2 · a settled agent, made settled by the store
+
+    let settledOn = Date(timeIntervalSinceReferenceDate: 700_000_000)
+    // The log is the durable half of the attribution (`logSettleCleared`), so it is
+    // captured rather than left on stderr — a reason nobody can read is not a reason.
+    final class WarningLog { var lines: [String] = [] }
+    let warnings = WarningLog()
+    let supervisor = AgentSupervisor(
+        store: store,
+        makeRunner: { _ in ScriptedAgentRunner(script: []) },
+        warn: { warnings.lines.append($0) }
+    )
+    func adoptAgent(_ name: String, override: SettledOverride) throws -> AgentID {
+        let id = AgentID(rawValue: UUID())
+        try store.upsert(AgentRecord(
+            id: id,
+            displayName: name,
+            model: config.model,
+            thinking: config.thinking,
+            cwd: cwd.path,
+            createdAt: settledOn,
+            lastActivityAt: settledOn,
+            settledOverride: override,
+            settledAt: override == .settled ? settledOn : nil
+        ))
+        supervisor.restore()
+        guard supervisor.records[id]?.settledOverride == override else {
+            throw fail("auto-unsettle: restore() did not adopt \(name) as \(override.rawValue) — got \(String(describing: supervisor.records[id]?.settledOverride.rawValue)); a refresh of the store must not touch the override")
+        }
+        guard supervisor.settledOverrideClearReasons[id] == nil else {
+            throw fail("auto-unsettle: restoring \(name) recorded a clear reason \(String(describing: supervisor.settledOverrideClearReasons[id]?.rawValue)) — restore clears nothing")
+        }
+        return id
+    }
+
+    // 2a · an approval opening un-settles it, and the clear reaches the DISK even
+    //      though `.requestOpened` is not persist-worthy on its own.
+    let approvalAgent = try adoptAgent("approval", override: .settled)
+    supervisor.qaDeliver(.requestOpened(threadId: provider, requestId: "r1", kind: .commandExecutionApproval), to: approvalAgent)
+    guard supervisor.records[approvalAgent]?.settledOverride == .neutral else {
+        throw fail("auto-unsettle: an approval request left the agent \(String(describing: supervisor.records[approvalAgent]?.settledOverride.rawValue)) — a settled agent waiting on a human is the row this ticket exists to un-bury")
+    }
+    guard supervisor.settledOverrideClearReasons[approvalAgent] == .activity else {
+        throw fail("auto-unsettle: the app's own clear was attributed \(String(describing: supervisor.settledOverrideClearReasons[approvalAgent]?.rawValue)), not activity")
+    }
+    // The attribution is READABLE, not just held in a dictionary that dies with the
+    // process: one log line naming the agent and the reason.
+    func clearLines(_ id: AgentID) -> [String] {
+        warnings.lines.filter { $0.contains(id.rawValue.uuidString) && $0.contains("cleared the settle") }
+    }
+    guard clearLines(approvalAgent) == ["AgentSupervisor: cleared the settle on agent \(approvalAgent.rawValue.uuidString) — reason activity"] else {
+        throw fail("auto-unsettle: the app's clear was not logged as an activity clear — got \(clearLines(approvalAgent))")
+    }
+    guard try store.load(id: approvalAgent)?.settledOverride == .neutral else {
+        throw fail("auto-unsettle: the clear did not reach the store (\(String(describing: try store.load(id: approvalAgent)?.settledOverride.rawValue))) — `.requestOpened` is not persist-worthy, so the agent would come back settled on the next launch")
+    }
+
+    // 2b · an INPUT request too — the other not-persist-worthy activity event, and the
+    //      one a summary could otherwise claim on the classifier table's word alone.
+    let questionAgent = try adoptAgent("question", override: .settled)
+    supervisor.qaDeliver(
+        .userInputRequested(threadId: provider, requestId: "q1", questions: []),
+        to: questionAgent
+    )
+    guard supervisor.records[questionAgent]?.settledOverride == .neutral,
+          try store.load(id: questionAgent)?.settledOverride == .neutral else {
+        throw fail("auto-unsettle: an input request left the agent \(String(describing: supervisor.records[questionAgent]?.settledOverride.rawValue)) in memory / \(String(describing: try store.load(id: questionAgent)?.settledOverride.rawValue)) on disk")
+    }
+
+    // 2c · a session coming alive does the same.
+    let aliveAgent = try adoptAgent("alive", override: .settled)
+    supervisor.qaDeliver(.sessionStateChanged(.running), to: aliveAgent)
+    guard supervisor.records[aliveAgent]?.settledOverride == .neutral,
+          try store.load(id: aliveAgent)?.settledOverride == .neutral else {
+        throw fail("auto-unsettle: a session coming alive left the agent \(String(describing: supervisor.records[aliveAgent]?.settledOverride.rawValue)) in memory / \(String(describing: try store.load(id: aliveAgent)?.settledOverride.rawValue)) on disk")
+    }
+
+    // MARK: 3 · the regression witness — a refresh does not un-settle
+
+    let refreshAgent = try adoptAgent("refresh", override: .settled)
+    for event in notActivity {
+        supervisor.qaDeliver(event, to: refreshAgent)
+        guard supervisor.records[refreshAgent]?.settledOverride == .settled else {
+            throw fail("auto-unsettle: \(event) un-settled the agent — an agent settling into ready, or reporting on itself, is the normal end of work and would undo every settle")
+        }
+    }
+    guard try store.load(id: refreshAgent)?.settledOverride == .settled else {
+        throw fail("auto-unsettle: the stored override moved to \(String(describing: try store.load(id: refreshAgent)?.settledOverride.rawValue)) with no activity")
+    }
+    guard supervisor.settledOverrideClearReasons[refreshAgent] == nil, clearLines(refreshAgent).isEmpty else {
+        throw fail("auto-unsettle: a refresh recorded a clear reason \(String(describing: supervisor.settledOverrideClearReasons[refreshAgent]?.rawValue)) / logged \(clearLines(refreshAgent))")
+    }
+    // A deliberate stop is the same shape through the REAL entry point rather than
+    // `qaDeliver`: `stop` delivers `.sessionStateChanged(.stopped)` itself.
+    supervisor.stop(refreshAgent)
+    guard supervisor.records[refreshAgent]?.settledOverride == .settled else {
+        throw fail("auto-unsettle: stopping the agent un-settled it — a stop ends work, it does not start it")
+    }
+    // Viewing is free (P4.9), and so is the header's branch refresh.
+    supervisor.focus(agentID: refreshAgent)
+    supervisor.focusTile(UUID())
+    _ = supervisor.branchContext(for: refreshAgent)
+    guard supervisor.records[refreshAgent]?.settledOverride == .settled,
+          supervisor.settledOverrideClearReasons[refreshAgent] == nil else {
+        throw fail("auto-unsettle: looking at the row un-settled it (\(String(describing: supervisor.records[refreshAgent]?.settledOverride.rawValue))) — reading is free")
+    }
+
+    // MARK: 4 · a user message un-settles it, through `send`
+
+    let promptAgent = try adoptAgent("prompt", override: .settled)
+    supervisor.send("carry on", to: promptAgent)
+    guard supervisor.records[promptAgent]?.settledOverride == .neutral,
+          try store.load(id: promptAgent)?.settledOverride == .neutral else {
+        throw fail("auto-unsettle: sending a prompt to a settled agent left it \(String(describing: supervisor.records[promptAgent]?.settledOverride.rawValue)) in memory / \(String(describing: try store.load(id: promptAgent)?.settledOverride.rawValue)) on disk")
+    }
+    guard supervisor.settledOverrideClearReasons[promptAgent] == .activity else {
+        throw fail("auto-unsettle: a user message was attributed \(String(describing: supervisor.settledOverrideClearReasons[promptAgent]?.rawValue)), not activity")
+    }
+    // `settledAt` is deliberately LEFT ALONE: an override that was cleared still
+    // happened, and P3.4 orders history by when work ended.
+    guard supervisor.records[promptAgent]?.settledAt == settledOn else {
+        throw fail("auto-unsettle: clearing the override also erased settledAt (\(String(describing: supervisor.records[promptAgent]?.settledAt)))")
+    }
+
+    // MARK: 5 · the keep-active pin is not something activity may outvote
+
+    let pinnedAgent = try adoptAgent("pinned", override: .active)
+    supervisor.qaDeliver(.sessionStateChanged(.running), to: pinnedAgent)
+    supervisor.send("carry on", to: pinnedAgent)
+    guard supervisor.records[pinnedAgent]?.settledOverride == .active else {
+        throw fail("auto-unsettle: activity reset the keep-active pin to \(String(describing: supervisor.records[pinnedAgent]?.settledOverride.rawValue)) — the next inactivity sweep would then bury a row the human deliberately kept")
+    }
+    guard supervisor.settledOverrideClearReasons[pinnedAgent] == nil else {
+        throw fail("auto-unsettle: a pin that did not move still recorded a clear reason \(String(describing: supervisor.settledOverrideClearReasons[pinnedAgent]?.rawValue))")
+    }
+
+    // MARK: 6 · the human's own path is separate, and says so
+
+    let userAgent = try adoptAgent("user", override: .settled)
+    guard supervisor.clearSettle(agentID: userAgent) else {
+        throw fail("auto-unsettle: clearSettle refused a settled agent")
+    }
+    guard supervisor.records[userAgent]?.settledOverride == .neutral,
+          try store.load(id: userAgent)?.settledOverride == .neutral else {
+        throw fail("auto-unsettle: the user's clear did not stick (\(String(describing: supervisor.records[userAgent]?.settledOverride.rawValue)) / \(String(describing: try store.load(id: userAgent)?.settledOverride.rawValue)))")
+    }
+    guard supervisor.settledOverrideClearReasons[userAgent] == .user else {
+        throw fail("auto-unsettle: the human's clear was attributed \(String(describing: supervisor.settledOverrideClearReasons[userAgent]?.rawValue)), not user — the two paths must be tellable apart")
+    }
+    guard clearLines(userAgent) == ["AgentSupervisor: cleared the settle on agent \(userAgent.rawValue.uuidString) — reason user"] else {
+        throw fail("auto-unsettle: the human's clear was not logged as a user clear — got \(clearLines(userAgent))")
+    }
+    guard supervisor.clearSettle(agentID: userAgent) == false else {
+        throw fail("auto-unsettle: clearSettle reported a write for an agent that was already neutral")
+    }
+    guard supervisor.clearSettle(agentID: AgentID(rawValue: UUID())) == false else {
+        throw fail("auto-unsettle: clearSettle reported a write for an agent this supervisor does not have")
+    }
+
+    return "auto-unsettle over \(caseCount) event shapes: an approval, an input request and a session coming alive clear a restored settle (memory AND store), a user message clears it, \(notActivity.count) observer-shaped events + stop + focus + a branch refresh do not, the keep-active pin survives all of it, and the two clears are attributed activity vs user in \(warnings.lines.filter { $0.contains("cleared the settle") }.count) log lines"
 }
 
 /// macOS temp directories live under a `/var` symlink to `/private/var`, and git
