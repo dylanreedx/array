@@ -20089,6 +20089,84 @@ extension AppDelegate {
 // first render was red on the geometry gate (`NSPopUpButton spills vertically — frame y
 // 17.0…41.0 outside parent 0…40.0`), fixed by making the control own the bar's vertical
 // and the count label centre on it.
+// Ticket: docs/38-tickets/90-agent-ux/P3.12-row-context-menu.md
+//
+// Section F is the row's context menu — the first one the sidebar has ever had. NINE
+// NEGATIVE TESTS OBSERVED RED at exit 1 with the final code, quoted verbatim:
+//
+//   1. `rowMenu.autoenablesItems = false` deleted → `…and Open in Tile is greyed with its
+//      reason, because a reveal has no plural — tooltip 'Open one agent at a time.'`, i.e.
+//      the item enabled with its refusal still written on it. AppKit's auto-enabling asks
+//      whether the target responds to the selector, which this view does for all ten
+//      items, so every deliberate greying comes back up.
+//      MEASURED, AND IT CHANGED THE CHECK: that pass runs in `NSMenu.update()` just
+//      before the menu is drawn, NOT when items are added — so with only the structural
+//      `!autoenablesItems` assertion in `isRowMenuWiredForQA`, every enablement assertion
+//      here stayed GREEN against the bug. `openRowMenuForQA` now calls `update()`, which
+//      is what makes the enablement it reads the enablement AppKit would show.
+//   2. `targetRows` always returning `[rows[clicked]]` → `a menu raised inside a selection
+//      counts its items — got ["Open in Tile", "Settle", …]`
+//   3. …and the other direction, `selection.contains(clicked)` dropped → `a click OUTSIDE
+//      the selection is about one row — got ["Open in Tile (2)", "Settle (2)", …]`, which
+//      is a right-click on row 7 acting on rows 1 and 2.
+//   4. `isWired(action)` replaced by `true` → `Settle has no host to perform it, so it must
+//      not answer a click` — the packet's watch-out, which forbids exactly that.
+//   5. `belongsInMenu` returning true for `.settle` unconditionally → `a settled row is
+//      offered Un-settle INSTEAD of Settle, not beside it — got [… "Settle",
+//      "Un-settle", …]`
+//  10. Snooze/Wake swapped as a pair the way Settle/Un-settle is — the bug cross-review
+//      caught → `a snoozed row is offered Wake AND Snooze — got ["Open in Tile", "Settle",
+//      "Wake", …]`, i.e. the preset list missing from the rows most likely to want a
+//      different preset.
+//   6. the re-resolution dropped from `performRowAction` → `…but the action is re-resolved
+//      when it fires, so a now-working agent is not deleted — got ["Delete"]`
+//   7. `openInTile` routed through `onRowAction` with the rest → `picking it reveals that
+//      agent through onRevealRow — got 0 reveal(s)`. One definition of a reveal, and it is
+//      P3.9's.
+//   8. `hasTurnInFlight` including `.ready` → `a resting agent has no turn in flight, so
+//      Stop Agent would do nothing`
+//   9. the capability clause resolved AHEAD of the not-wired one in `disabledReason` →
+//      `…and must say so rather than grey silently — got 'claude · docs sweep has no turn
+//      in flight.'` While nothing performs an action, that sentence is a true fact
+//      answering the wrong question.
+//
+// THE OPPOSITE CALL TO P3.11 ON HIDE-VS-GREY, and both follow their own packet: the bulk
+// bar hides what a selection cannot take ("bulk actions appear only when every selected
+// row can take the action"), this menu greys it ("items are enabled per the same
+// capability rules as bulk") and puts the reason in the tooltip. The difference is the
+// surface — a 320pt strip has no room to answer "which of my six is blocking this?", a
+// menu line has a tooltip. The rules themselves are not duplicated: `InboxRowAction`
+// DELEGATES the five shared availabilities to `InboxBulkAction`, and F1 asserts the two
+// agree row by row over the whole fixture rather than trusting two copies to stay level.
+//
+// NO VISUAL GATE, and that is a limit rather than an omission: an `NSMenu` is drawn by the
+// window server in a window of its own, so it cannot be rendered into a Lab card or
+// compared to a committed PNG the way `chrome.agentInbox.bulk` is. What IS asserted is
+// every fact the menu carries — the items, their order, their titles, their enablement and
+// their tooltips, read off the `NSMenu` AppKit would show after its own `update()` pass.
+// How the menu LOOKS is a supervised manual step.
+//
+// CROSS-REVIEW (gpt-5.5) raised three things. One was a real bug and is FIXED (witness 10,
+// the Snooze/Wake swap). The other two are answered rather than taken, and both are the
+// same boundary:
+//
+//   * "`Stop Agent`'s availability is guessed from `AgentInboxRow.state` instead of
+//     `AgentSupervisor.isRunning`." The list is a pure function of the rows it was handed
+//     and derives no status of its own — that is P3.1/P3.6's rule, it is what lets this
+//     enablement be checked at all, and it is what "the same capability rules as bulk"
+//     means, since `InboxBulkAction` is pure too. `state` IS the projection of the
+//     supervisor's own status (`InboxState.state(for:pending:)`); if the two disagree the
+//     defect is in the projection, and fixing it there fixes the menu, the bar, the chip
+//     and iOS at once. The fire path re-resolves, and `AgentSupervisor.stop` warns rather
+//     than crashes for an agent it does not have.
+//   * "the shipped sidebar never wires `onRowAction`, so eight items are greyed." True, and
+//     it is the packet's watch-out honoured rather than missed: settle, snooze, un-settle,
+//     wake and mark-unread are lifecycle facts Phase 4 owns, the rename is P3.13's, and the
+//     items are DISABLED WITH A VISIBLE REASON instead of wired to nothing. Wiring the
+//     explicit stop is the one that could land today, and it is deliberately not in this
+//     packet's Files: an aggregate row id is a record id OR a tile id (P3.1), and what
+//     "stop" means for a terminal-session row is undefined until a ticket rules on it. The
+//     owner note in `_LEDGER.md` names it as the smallest next step.
 extension AppDelegate {
     static func runAgentInboxChecks() async throws {
     enum CheckError: Error, CustomStringConvertible {
@@ -21683,7 +21761,258 @@ extension AppDelegate {
     try expect(AgentInboxView.revealsOnClick(modifiers: [.option]),
                "⌥ selects nothing, so an ⌥-click is still a plain click")
 
+    // MARK: F · the row's context menu (P3.12)
+
+    // F1 · THE VOCABULARY IS P3.11's WHERE THE ACTION IS. Two menus that both say
+    // "settle" must say it in the same words and mean the same rule, so the five shared
+    // titles are pinned to `InboxBulkAction`'s and the five shared availabilities are
+    // asserted to BE its answer, row by row — a copied predicate would pass on the day it
+    // was written and drift after.
+    let sharedActions: [(InboxRowAction, InboxBulkAction)] = [
+        (.settle, .settle), (.snooze, .snooze), (.markUnread, .markUnread),
+        (.archive, .archive), (.delete, .delete),
+    ]
+    let snoozedRow = lifecycled(quietRow, .snoozed(until: LabFixtures.inboxNow.addingTimeInterval(3600)))
+    let menuCandidates = bulkFixture + [settledRow, snoozedRow, archivedRow]
+    for (rowAction, bulkAction) in sharedActions {
+        try expect(rowAction.title(forCount: 1) == bulkAction.title,
+                   "'\(rowAction.title(forCount: 1))' and '\(bulkAction.title)' are one action and must read the same in both menus")
+        for candidate in menuCandidates {
+            try expect(rowAction.isAvailable(for: candidate) == bulkAction.isAvailable(for: candidate),
+                       "\(rowAction.baseTitle) on '\(candidate.title)' must be P3.11's own rule — row menu \(rowAction.isAvailable(for: candidate)), bulk \(bulkAction.isAvailable(for: candidate))")
+        }
+    }
+    // SELECTION-AWARE TITLES, the packet's `Settle (3)`. The count goes before the arrow,
+    // because the arrow is the item's shape and not part of its name.
+    try expect(InboxRowAction.settle.title(forCount: 3) == "Settle (3)",
+               "a menu over three rows says so — got '\(InboxRowAction.settle.title(forCount: 3))'")
+    try expect(InboxRowAction.snooze.title(forCount: 3) == "Snooze (3) ›",
+               "…and the submenu arrow stays last — got '\(InboxRowAction.snooze.title(forCount: 3))'")
+    try expect(InboxRowAction.snooze.title(forCount: 1) == "Snooze ›",
+               "one row is not counted — got '\(InboxRowAction.snooze.title(forCount: 1))'")
+
+    // THE TWO PAIRS ARE ONE SLOT EACH, decided by the rows.
+    let activeItems = InboxRowAction.menuItems(for: [quietRow])
+    try expect(activeItems.contains(.settle) && !activeItems.contains(.unsettle),
+               "an active row is offered Settle and not Un-settle — got \(activeItems.map(\.baseTitle))")
+    let settledItems = InboxRowAction.menuItems(for: [settledRow])
+    try expect(settledItems.contains(.unsettle) && !settledItems.contains(.settle),
+               "a settled row is offered Un-settle INSTEAD of Settle, not beside it — got \(settledItems.map(\.baseTitle))")
+    // …AND SNOOZE/WAKE IS NOT THAT PAIR, which is the packet's own spelling ("Settle /
+    // Un-settle" with a slash, "Snooze › · Wake" with the same separator as every other
+    // item) and the honest rule too: a snoozed agent can be snoozed again on a different
+    // preset, so the forward action is never a no-op the way Settle is on a settled row.
+    // (Cross-review found the first version swapping this pair, which took the preset list
+    // away from exactly the rows most likely to want another one.)
+    let snoozedItems = InboxRowAction.menuItems(for: [snoozedRow])
+    try expect(snoozedItems.contains(.wake) && snoozedItems.contains(.snooze),
+               "a snoozed row is offered Wake AND Snooze — got \(snoozedItems.map(\.baseTitle))")
+    try expect(activeItems.contains(.snooze) && activeItems.contains(.wake),
+               "…and so is an active one, with Wake greyed rather than absent — got \(activeItems.map(\.baseTitle))")
+    try expect(InboxRowAction.snooze.isAvailable(for: snoozedRow),
+               "snoozing a snoozed agent is a real action: it moves the preset (P4.5)")
+    try expect(activeItems.count == InboxRowAction.allCases.count - 1
+                && settledItems.count == InboxRowAction.allCases.count - 1,
+               "the menu is every action but the other half of the one pair — got \(activeItems.count) and \(settledItems.count) of \(InboxRowAction.allCases.count)")
+    try expect(InboxRowAction.menuItems(for: [quietRow, settledRow]).contains(.settle),
+               "a MIXED selection gets the forward action (the capability rule then greys it), not both halves")
+    try expect(InboxRowAction.menuItems(for: []).isEmpty,
+               "a right-click on nobody offers nothing — got \(InboxRowAction.menuItems(for: []).map(\.baseTitle))")
+
+    // THE FIVE NEW RULES, each on a row that takes it and a row that does not.
+    try expect(InboxRowAction.stopAgent.isAvailable(for: runningRow),
+               "a working agent has a turn to stop")
+    try expect(InboxRowAction.stopAgent.isAvailable(for: blockedRow),
+               "…and so does one holding an approval open: a pending request overrides a working status, so a blocked agent is a LIVE agent")
+    try expect(!InboxRowAction.stopAgent.isAvailable(for: quietRow),
+               "a resting agent has no turn in flight, so Stop Agent would do nothing")
+    try expect(!InboxRowAction.stopAgent.isAvailable(for: failedRow),
+               "…and neither has one that already ended")
+    try expect(InboxRowAction.rename.isAvailable(for: quietRow)
+                && !InboxRowAction.rename.isAvailable(for: archivedRow),
+               "a name lives on the record, and archiving deletes the record")
+    try expect(InboxRowAction.unsettle.isAvailable(for: settledRow)
+                && !InboxRowAction.unsettle.isAvailable(for: quietRow),
+               "Un-settle needs something settled")
+    try expect(InboxRowAction.wake.isAvailable(for: snoozedRow)
+                && !InboxRowAction.wake.isAvailable(for: quietRow),
+               "Wake needs something snoozed")
+    try expect(InboxRowAction.openInTile.isAvailable(for: archivedRow),
+               "every row names an agent, so reading one is always allowed (P4.9: reading is free)")
+    // No rule is inert, the same sweep E1 runs over the bulk actions.
+    for action in InboxRowAction.allCases where action != .openInTile {
+        try expect(menuCandidates.contains { action.isAvailable(for: $0) },
+                   "\(action.baseTitle) must be available to some row, or its rule is unreachable")
+        try expect(menuCandidates.contains { !action.isAvailable(for: $0) },
+                   "\(action.baseTitle) must be withheld from some row, or its rule is inert")
+    }
+
+    // THE TOOLTIPS. An action nothing performs yet says so FIRST — "Ada is still working"
+    // would be a lie about why Delete is grey while no host has wired it (the packet's
+    // watch-out) — and a capability refusal NAMES the agent that blocks it.
+    try expect(InboxRowAction.delete.disabledReason(for: [quietRow], isWired: true) == nil,
+               "a live item has no tooltip to show")
+    try expect(InboxRowAction.delete.disabledReason(for: [quietRow], isWired: false)
+                == InboxRowAction.notWiredReason,
+               "an unperformable action is greyed for THAT reason — got \(String(describing: InboxRowAction.delete.disabledReason(for: [quietRow], isWired: false)))")
+    try expect(InboxRowAction.delete.disabledReason(for: [quietRow, runningRow], isWired: true)
+                == "\(runningRow.title) is still working.",
+               "…and a refused one names the agent refusing it — got \(String(describing: InboxRowAction.delete.disabledReason(for: [quietRow, runningRow], isWired: true)))")
+    try expect(InboxRowAction.settle.disabledReason(for: [blockedRow], isWired: true)
+                == "\(blockedRow.title) is waiting on you.",
+               "…in the words of the rule it comes from — got \(String(describing: InboxRowAction.settle.disabledReason(for: [blockedRow], isWired: true)))")
+    try expect(InboxRowAction.openInTile.disabledReason(for: [quietRow, runningRow], isWired: true)
+                == InboxRowAction.oneAtATimeReason,
+               "Open in Tile has no plural — got \(String(describing: InboxRowAction.openInTile.disabledReason(for: [quietRow, runningRow], isWired: true)))")
+    try expect(InboxRowAction.openInTile.disabledReason(for: [], isWired: true)
+                == InboxRowAction.noTargetReason,
+               "…and nothing is live for no agents")
+
+    // F2 · THE MENU AS AppKit WOULD SHOW IT.
+    let menuView = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    menuView.clock = { LabFixtures.inboxNow }
+    var menuRevealed: [UUID] = []
+    var menuCalls: [(InboxRowAction, [UUID])] = []
+    menuView.onRevealRow = { menuRevealed.append($0) }
+    menuView.onRowAction = { menuCalls.append(($0, $1)) }
+    menuView.reload(rows: bulkFixture)
+    let menuWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    menuWindow.contentView = menuView
+    menuView.layoutForQA()
+    try expect(menuView.isRowMenuWiredForQA,
+               "the TABLE carries the menu, this view fills it in, and AppKit may not re-enable its items")
+
+    // A right-click below the last row is a no-op, not a menu about nobody. This goes
+    // through the shipped `menuNeedsUpdate` unchanged — `clickedRow` is -1 headlessly,
+    // which IS the background case.
+    try expect(menuView.openRowMenuForQA(clickedRowId: nil), "the background must be right-clickable")
+    try expect(menuView.rowMenuTitlesForQA.isEmpty,
+               "a right-click on the background offers nothing — got \(menuView.rowMenuTitlesForQA)")
+
+    // ONE ROW, nothing selected: the eight items an active agent gets, uncounted.
+    try expect(menuView.openRowMenuForQA(clickedRowId: quietRow.id), "a row must be right-clickable")
+    try expect(menuView.rowMenuTitlesForQA
+                == InboxRowAction.menuItems(for: [quietRow]).map { $0.title(forCount: 1) },
+               "the menu is what this ONE row can be asked — got \(menuView.rowMenuTitlesForQA)")
+    try expect(!menuView.rowMenuTitlesForQA.contains { $0.contains("(") },
+               "…and nothing is counted for a single row — got \(menuView.rowMenuTitlesForQA)")
+    guard let openIndex = InboxRowAction.menuItems(for: [quietRow]).firstIndex(of: .openInTile) else {
+        throw CheckError.failed("setup: Open in Tile must be in a single row's menu")
+    }
+    try expect(menuView.rowMenuEnabledForQA[openIndex] && menuView.rowMenuTooltipsForQA[openIndex].isEmpty,
+               "Open in Tile is live today (P3.9 wired it) and a live item carries no tooltip")
+    // …and it goes through P3.9's callback, which is the ONE definition of a reveal.
+    try expect(menuView.pickRowMenuItemForQA(.openInTile), "Open in Tile must be pickable")
+    try expect(menuRevealed == [quietRow.id],
+               "picking it reveals that agent through onRevealRow — got \(menuRevealed.count) reveal(s)")
+    try expect(menuCalls.isEmpty,
+               "…and NOT through onRowAction, which would be a second definition of a reveal — got \(menuCalls.map(\.0.baseTitle))")
+
+    // A CLICK OUTSIDE THE SELECTION IS ABOUT THE ROW UNDER THE MOUSE, whatever is
+    // selected elsewhere — otherwise a right-click on row 7 would act on rows 1 and 2.
+    try expect(menuView.selectRowsForQA(ids: [failedRow.id, blockedRow.id]),
+               "two rows must be selectable")
+    menuView.layoutForQA()
+    try expect(menuView.openRowMenuForQA(clickedRowId: quietRow.id),
+               "an unselected row must be right-clickable while a selection exists")
+    try expect(!menuView.rowMenuTitlesForQA.contains { $0.contains("(") },
+               "a click OUTSIDE the selection is about one row — got \(menuView.rowMenuTitlesForQA)")
+    menuCalls.removeAll()
+    try expect(menuView.pickRowMenuItemForQA(.archive), "Archive must be pickable for that one row")
+    try expect(menuCalls.count == 1 && menuCalls[0].1 == [quietRow.id],
+               "…and it lands on the clicked row alone — got \(menuCalls.map { ($0.0.baseTitle, $0.1.count) })")
+
+    // A CLICK INSIDE IT ACTS ON THE SELECTION AND SAYS SO, which is the packet's rule.
+    try expect(menuView.openRowMenuForQA(clickedRowId: failedRow.id),
+               "a selected row must be right-clickable")
+    let selectedTargets = menuView.selectedRowIdsForQA
+    try expect(selectedTargets.count == 2, "setup: the selection must still be two rows — got \(selectedTargets.count)")
+    try expect(menuView.rowMenuTitlesForQA.contains(InboxRowAction.archive.title(forCount: 2)),
+               "a menu raised inside a selection counts its items — got \(menuView.rowMenuTitlesForQA)")
+    guard let selectedOpenIndex = InboxRowAction.menuItems(for: [failedRow, blockedRow])
+            .firstIndex(of: .openInTile) else {
+        throw CheckError.failed("setup: Open in Tile must be in the selection's menu too")
+    }
+    try expect(!menuView.rowMenuEnabledForQA[selectedOpenIndex]
+                && menuView.rowMenuTooltipsForQA[selectedOpenIndex] == InboxRowAction.oneAtATimeReason,
+               "…and Open in Tile is greyed with its reason, because a reveal has no plural — tooltip '\(menuView.rowMenuTooltipsForQA[selectedOpenIndex])'")
+    // The AND across members, through the RENDERED menu: the blocked row takes Settle away
+    // from the pair and says which agent did it.
+    guard let settleIndex = InboxRowAction.menuItems(for: [failedRow, blockedRow])
+            .firstIndex(of: .settle) else {
+        throw CheckError.failed("setup: Settle must be in the selection's menu")
+    }
+    try expect(!menuView.rowMenuEnabledForQA[settleIndex],
+               "one blocked member greys Settle for the whole selection")
+    try expect(menuView.rowMenuTooltipsForQA[settleIndex] == "\(blockedRow.title) is waiting on you.",
+               "…and the tooltip answers 'which of my two?' — got '\(menuView.rowMenuTooltipsForQA[settleIndex])'")
+    menuCalls.removeAll()
+    try expect(!menuView.pickRowMenuItemForQA(.settle), "a greyed item is not pickable")
+    try expect(menuCalls.isEmpty, "…and reports nothing — got \(menuCalls.count) call(s)")
+    // What the pair CAN take lands on both, in screen order.
+    try expect(menuView.pickRowMenuItemForQA(.delete), "Delete must be pickable for two stopped agents")
+    try expect(menuCalls.count == 1 && menuCalls[0].0 == .delete && menuCalls[0].1 == selectedTargets,
+               "…reporting both agents in screen order — got \(menuCalls.map { ($0.0.baseTitle, $0.1) })")
+
+    // A PUSH UNDER AN OPEN MENU. The menu is a snapshot; the action is re-resolved when it
+    // is chosen, so an agent that started working between the two cannot be deleted by an
+    // item that was live when the menu appeared.
+    try expect(menuView.openRowMenuForQA(clickedRowId: quietRow.id), "one row again")
+    guard let staleDeleteIndex = InboxRowAction.menuItems(for: [quietRow]).firstIndex(of: .delete) else {
+        throw CheckError.failed("setup: Delete must be in the row's menu")
+    }
+    try expect(menuView.rowMenuEnabledForQA[staleDeleteIndex],
+               "setup: Delete must be live before the push, or the refusal below is vacuous")
+    let nowWorking = AgentInboxRow(
+        id: quietRow.id, title: quietRow.title, projectName: quietRow.projectName,
+        workspaceName: quietRow.workspaceName, state: .working, attention: quietRow.attention,
+        lifecycle: quietRow.lifecycle, model: quietRow.model, role: quietRow.role,
+        branch: quietRow.branch, isIsolated: quietRow.isIsolated, elapsed: 4,
+        depth: quietRow.depth, variant: quietRow.variant, createdAt: quietRow.createdAt,
+        parentId: quietRow.parentId)
+    menuView.apply(rows: bulkFixture.map { $0.id == nowWorking.id ? nowWorking : $0 },
+                   changed: AgentsBoardChangeSet(added: [], updated: [nowWorking.id], removed: []))
+    menuView.layoutForQA()
+    menuCalls.removeAll()
+    try expect(menuView.pickRowMenuItemForQA(.delete),
+               "setup: the STALE item is still enabled — the menu was built before the push")
+    try expect(menuCalls.isEmpty,
+               "…but the action is re-resolved when it fires, so a now-working agent is not deleted — got \(menuCalls.map(\.0.baseTitle))")
+
+    // AN ACTION NO HOST PERFORMS IS DISABLED WITH ITS REASON, never wired to nothing.
+    // Phase 4 owns the lifecycle, P3.13 the rename — so today that is eight of ten items.
+    let unwiredMenu = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    unwiredMenu.clock = { LabFixtures.inboxNow }
+    var unwiredRevealed: [UUID] = []
+    unwiredMenu.onRevealRow = { unwiredRevealed.append($0) }
+    unwiredMenu.reload(rows: bulkFixture)
+    let unwiredMenuWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    unwiredMenuWindow.contentView = unwiredMenu
+    unwiredMenu.layoutForQA()
+    try expect(unwiredMenu.openRowMenuForQA(clickedRowId: quietRow.id), "a row must be right-clickable unwired")
+    let unwiredItems = InboxRowAction.menuItems(for: [quietRow])
+    try expect(unwiredMenu.rowMenuTitlesForQA == unwiredItems.map { $0.title(forCount: 1) },
+               "the menu's SHAPE does not depend on what is wired — got \(unwiredMenu.rowMenuTitlesForQA)")
+    for (index, action) in unwiredItems.enumerated() where action != .openInTile {
+        try expect(!unwiredMenu.rowMenuEnabledForQA[index],
+                   "\(action.baseTitle) has no host to perform it, so it must not answer a click")
+        try expect(unwiredMenu.rowMenuTooltipsForQA[index] == InboxRowAction.notWiredReason,
+                   "…and must say so rather than grey silently — got '\(unwiredMenu.rowMenuTooltipsForQA[index])'")
+    }
+    guard let unwiredOpenIndex = unwiredItems.firstIndex(of: .openInTile) else {
+        throw CheckError.failed("setup: Open in Tile must be in the unwired menu")
+    }
+    try expect(unwiredMenu.rowMenuEnabledForQA[unwiredOpenIndex],
+               "Open in Tile rides P3.9's callback, which IS wired")
+    try expect(!unwiredMenu.pickRowMenuItemForQA(.settle), "…and nothing else is pickable")
+    try expect(unwiredMenu.pickRowMenuItemForQA(.openInTile) && unwiredRevealed == [quietRow.id],
+               "…while the one live item still works — got \(unwiredRevealed.count) reveal(s)")
+
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing")
     }
 }

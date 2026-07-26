@@ -44,7 +44,8 @@ import Foundation
 // when you act. Nothing folds a group on your behalf.
 
 @MainActor
-final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, TokenThemed {
+final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate,
+                            TokenThemed {
     /// The row card's height, DERIVED from the type it holds rather than the
     /// packet's "≈78pt": one `.title` line for the name and two `.label` lines
     /// for the metadata, the two gaps between them, and the card's own padding.
@@ -115,6 +116,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     private let emptyLabel: NSTextField
     // Ticket: docs/38-tickets/90-agent-ux/P3.11-multi-select-bulk.md
     private let bulkBar = InboxBulkActionBar()
+    // Ticket: docs/38-tickets/90-agent-ux/P3.12-row-context-menu.md
+    /// The right-click menu, ONE instance rebuilt per click rather than a fresh menu
+    /// per event: it is the table's `menu`, so AppKit owns showing it and this view
+    /// only owns what is in it when `menuNeedsUpdate` is called.
+    private let rowMenu = NSMenu()
+    /// The actions in `rowMenu`, parallel to the items' tags — the shape
+    /// `scopeEntries` and `InboxBulkActionBar.actions` already use, so an item's
+    /// position in the menu is not what identifies it.
+    private var rowMenuActions: [InboxRowAction] = []
+    /// The agents the open menu is about, BY ID rather than by index: a push can
+    /// arrive while the menu is up, and an index would then name a different agent.
+    private var rowMenuTargetIds: [UUID] = []
 
     /// The rows as they are drawn — already through the scope filter (P3.8) and
     /// `InboxSort.sortForInbox`, so index N here is row N on screen and every
@@ -216,6 +229,22 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// view resolves that and hands the host the set, which is the same shape
     /// `onRevealRow` uses for the one-row case.
     var onBulkAction: ((InboxBulkAction, [UUID]) -> Void)?
+    // Ticket: docs/38-tickets/90-agent-ux/P3.12-row-context-menu.md
+    /// An action was chosen from a row's context menu, for the agents it was about
+    /// (one row, or the whole selection when the click was inside it) in screen order.
+    ///
+    /// ONE CALLBACK FOR THE WHOLE MENU, and `openInTile` is the one item that does not
+    /// come through it: revealing an agent already has a path (`onRevealRow`, P3.9) and
+    /// a second one would be a second definition of what a reveal does. Everything else
+    /// is a lifecycle fact Phase 4 owns, a rename P3.13 owns, or the explicit stop —
+    /// none of which this view may perform.
+    ///
+    /// While it is nil every item but `Open in Tile` is DRAWN AND DISABLED, with the
+    /// reason in its tooltip: the packet's watch-out allows either hiding or a disabled
+    /// item with a tooltip, and unlike the 320pt bulk bar (P3.11, which hides) a context
+    /// menu has the room to say why. It also keeps the menu's shape stable, so the day a
+    /// host wires this nothing about the menu moves except which items answer.
+    var onRowAction: ((InboxRowAction, [UUID]) -> Void)?
     /// The agent open in the focused tile, force-included whatever the scope says
     /// (`InboxScope.filter`). Set by the host on every push; a change re-filters,
     /// and an unchanged value does no work, so this cannot cost the incremental
@@ -322,6 +351,21 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // list's, because only the list knows the selection.
         bulkBar.onAction = { [weak self] action in self?.performBulkAction(action) }
         bulkBar.setAccessibilityIdentifier("ContinuumAgentInboxBulkBar")
+        // P3.12: the TABLE's menu, not this view's — `NSTableView` sets `clickedRow`
+        // before it asks its menu to update, which is the only way the menu knows which
+        // row the mouse was over. A menu on the container would have to hit-test the
+        // event itself.
+        //
+        // `autoenablesItems = false` IS LOAD-BEARING: left at AppKit's default, every
+        // item's enablement is recomputed from whether its target responds to its action
+        // — which this view does, for all ten — so a deliberately disabled item comes back
+        // up enabled in `NSMenu.update()`, which runs just before the menu is drawn.
+        // (Measured: Open in Tile live again over a two-row selection. That pass is why
+        // `openRowMenuForQA` calls `update()` — a check that only reads the `isEnabled`
+        // this code sets never sees the one AppKit would show.)
+        rowMenu.autoenablesItems = false
+        rowMenu.delegate = self
+        tableView.menu = rowMenu
 
         NSLayoutConstraint.activate([
             scopePopUp.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
@@ -760,6 +804,86 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         onBulkAction?(action, selected.map(\.id))
     }
 
+    // MARK: - Row context menu (P3.12)
+
+    /// The agents a right-click acts on.
+    ///
+    /// THE PACKET'S RULE: a click INSIDE a multiple selection acts on the selection —
+    /// that is the gesture you have already made, and a menu that quietly dropped it
+    /// back to one row would undo it. A click anywhere else acts on the one row under
+    /// the mouse, whatever is selected elsewhere in the list.
+    ///
+    /// Empty for a click below the last row (`clickedRow` is -1 there), which is what
+    /// leaves the menu with no items — AppKit shows nothing for an empty menu, so
+    /// right-clicking the background is a no-op rather than a menu about nobody.
+    private func targetRows(forClickedRow clicked: Int) -> [AgentInboxRow] {
+        guard rows.indices.contains(clicked) else { return [] }
+        let selection = tableView.selectedRowIndexes
+        guard selection.count > 1, selection.contains(clicked) else { return [rows[clicked]] }
+        return selectedRows
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        rebuildRowMenu(for: targetRows(forClickedRow: tableView.clickedRow))
+    }
+
+    /// Fill `rowMenu` in for these agents: which items belong at all
+    /// (`InboxRowAction.menuItems`), what each is called (counted for a selection) and
+    /// whether it is live — with the reason in the tooltip when it is not.
+    private func rebuildRowMenu(for targets: [AgentInboxRow]) {
+        rowMenuTargetIds = targets.map(\.id)
+        rowMenuActions = InboxRowAction.menuItems(for: targets)
+        rowMenu.removeAllItems()
+        for (index, action) in rowMenuActions.enumerated() {
+            let item = NSMenuItem(
+                title: action.title(forCount: targets.count),
+                action: #selector(rowMenuPicked(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            let reason = action.disabledReason(for: targets, isWired: isWired(action))
+            item.isEnabled = reason == nil
+            item.toolTip = reason
+            rowMenu.addItem(item)
+        }
+    }
+
+    @objc private func rowMenuPicked(_ sender: NSMenuItem) {
+        guard rowMenuActions.indices.contains(sender.tag) else { return }
+        performRowAction(rowMenuActions[sender.tag])
+    }
+
+    /// Hand the host an action and the agents it lands on.
+    ///
+    /// The targets are RE-READ from the current rows and the enablement RE-RESOLVED, for
+    /// the reason `performBulkAction` records: a push repaints rows in place without
+    /// touching the selection (`apply(rows:changed:)`), so an agent can start working —
+    /// losing Delete — while the menu is open in front of you. An agent that left the
+    /// list entirely drops out of the targets, and an action that then has no agents left
+    /// does nothing.
+    private func performRowAction(_ action: InboxRowAction) {
+        let targets = rowMenuTargetIds.compactMap { id in rows.first { $0.id == id } }
+        guard action.disabledReason(for: targets, isWired: isWired(action)) == nil else { return }
+        switch action {
+        case .openInTile:
+            guard let first = targets.first else { return }
+            onRevealRow?(first.id)
+        case .settle, .unsettle, .snooze, .wake, .markUnread, .rename, .stopAgent,
+             .archive, .delete:
+            onRowAction?(action, targets.map(\.id))
+        }
+    }
+
+    /// Whether the host can perform this action at all. `openInTile` rides P3.9's
+    /// existing callback and is live today; everything else waits on `onRowAction`.
+    private func isWired(_ action: InboxRowAction) -> Bool {
+        switch action {
+        case .openInTile: return onRevealRow != nil
+        case .settle, .unsettle, .snooze, .wake, .markUnread, .rename, .stopAgent,
+             .archive, .delete:
+            return onRowAction != nil
+        }
+    }
+
     /// P3.5's `isInteracting`: hover, selection, or keyboard-active. The last two
     /// are one test rather than two, because arrow-key navigation in an
     /// `NSTableView` IS a selection move — a keyboard-active row and the selected
@@ -971,6 +1095,54 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     @discardableResult
     func pickBulkActionForQA(_ action: InboxBulkAction) -> Bool {
         bulkBar.pickForQA(action)
+    }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P3.12-row-context-menu.md
+    /// The table really is the thing that shows the menu, and this view really is what
+    /// fills it in — the half of the path a headless check cannot execute, since
+    /// `NSTableView.clickedRow` is only set while AppKit dispatches a real right-click
+    /// (the same limitation `isClickWiredForQA` records for the left one).
+    var isRowMenuWiredForQA: Bool {
+        tableView.menu === rowMenu && rowMenu.delegate === self && !rowMenu.autoenablesItems
+    }
+    /// Right-click a row: `nil` for the background below the last row, which goes
+    /// through the shipped `menuNeedsUpdate` unchanged (`clickedRow` is -1 headlessly,
+    /// which IS the background case). For a row, the index stands in for `clickedRow`
+    /// and everything after it — the selection rule, the item set, the titles, the
+    /// enablement — is the shipped path.
+    @discardableResult
+    func openRowMenuForQA(clickedRowId: UUID?) -> Bool {
+        guard let clickedRowId else {
+            menuNeedsUpdate(rowMenu)
+            rowMenu.update()
+            return true
+        }
+        guard let index = rows.firstIndex(where: { $0.id == clickedRowId }) else { return false }
+        rebuildRowMenu(for: targetRows(forClickedRow: index))
+        // WHAT APPKIT DOES JUST BEFORE IT DRAWS, and the reason it is here rather than in
+        // `rebuildRowMenu`: `NSMenu.update()` is the auto-enabling pass, so without it a
+        // check reads the `isEnabled` this code set and never the one AppKit would show.
+        // Measured — with `autoenablesItems` left at its default, every enablement
+        // assertion below stays green until this line runs.
+        rowMenu.update()
+        return true
+    }
+    /// Read off the MENU AppKit would show rather than from `rowMenuActions`, which
+    /// would assert the array the menu was built from and not the menu.
+    var rowMenuTitlesForQA: [String] { rowMenu.items.map(\.title) }
+    var rowMenuEnabledForQA: [Bool] { rowMenu.items.map(\.isEnabled) }
+    var rowMenuTooltipsForQA: [String] { rowMenu.items.map { $0.toolTip ?? "" } }
+    /// Choose an item the way the user does — through the item's own target/action, and
+    /// refusing a disabled one exactly as AppKit does (a disabled item's action is never
+    /// sent), so a check cannot fire something the menu is greying out.
+    @discardableResult
+    func pickRowMenuItemForQA(_ action: InboxRowAction) -> Bool {
+        guard let index = rowMenuActions.firstIndex(of: action),
+              let item = rowMenu.items.first(where: { $0.tag == index }), item.isEnabled else {
+            return false
+        }
+        rowMenuPicked(item)
+        return true
     }
 
     @discardableResult
@@ -1285,26 +1457,225 @@ enum InboxBulkAction: String, CaseIterable, Equatable {
 
     /// The agent is waiting on you — the fact `InboxState` splits into two cases
     /// (P3.2) and the one that outranks a settle.
-    private static func isBlocked(_ row: AgentInboxRow) -> Bool {
+    ///
+    /// These four are `fileprivate` rather than `private` so `InboxRowAction` (P3.12,
+    /// below) can ask the same questions: the context menu's enablement is specified as
+    /// "the same capability rules as bulk", and sharing the predicates is the only way
+    /// that holds by construction instead of by two copies agreeing today.
+    fileprivate static func isBlocked(_ row: AgentInboxRow) -> Bool {
         switch row.state {
         case .approval, .input: return true
         case .working, .ready, .failed: return false
         }
     }
 
-    private static func isRunning(_ row: AgentInboxRow) -> Bool { row.state == .working }
+    fileprivate static func isRunning(_ row: AgentInboxRow) -> Bool { row.state == .working }
 
-    private static func isSettled(_ row: AgentInboxRow) -> Bool {
+    fileprivate static func isSettled(_ row: AgentInboxRow) -> Bool {
         switch row.lifecycle {
         case .settled: return true
         case .active, .snoozed, .archived: return false
         }
     }
 
-    private static func isArchived(_ row: AgentInboxRow) -> Bool {
+    fileprivate static func isArchived(_ row: AgentInboxRow) -> Bool {
         switch row.lifecycle {
         case .archived: return true
         case .active, .snoozed, .settled: return false
+        }
+    }
+}
+
+// Ticket: docs/38-tickets/90-agent-ux/P3.12-row-context-menu.md
+/// What one row's context menu offers — per-row actions where the hand already is.
+/// The sidebar had no context menu at all before this.
+///
+/// TEN ITEMS AND FIVE OF THEM ARE P3.11's, by delegation and not by copy:
+/// `isAvailable(for:)` asks `InboxBulkAction` for settle, snooze, mark-unread, archive
+/// and delete, which is what "enabled per the same capability rules as bulk" has to mean
+/// if the two surfaces are never to disagree. The five that are new here are the ones a
+/// SET cannot take: opening a tile, the two un-doings (un-settle, wake) and renaming are
+/// single-agent or lifecycle-inverse actions, and the explicit stop is P2A.5's rule made
+/// reachable — closing a tile must never stop an agent, so there has to be somewhere that
+/// deliberately does.
+///
+/// SETTLE/UN-SETTLE IS ONE SLOT, decided by the rows: `Un-settle` replaces `Settle` once
+/// every target is settled, because both at once would be a menu asking you which
+/// direction you are going. `Snooze` and `Wake` are two items and always both there — see
+/// `belongsInMenu`, which records why the symmetry is only apparent.
+///
+/// AN UNAVAILABLE ITEM IS DISABLED WITH A REASON, the opposite call to `InboxBulkAction`'s
+/// (which hides). Both follow their own packet, and the difference is the surface: the
+/// bulk bar is a 320pt strip with no room to explain a greyed item, and a context menu is
+/// a list with a tooltip per line. Here the reason NAMES THE AGENT that blocks it, which
+/// is the question a hidden item cannot answer for a six-row selection.
+///
+/// NOTHING HERE PERFORMS ANYTHING, same as P3.11: the lifecycle is P4.1's, the rename is
+/// P3.13's, the stop is `AgentSupervisor.stop`'s and the reveal is P3.9's.
+enum InboxRowAction: String, CaseIterable, Equatable {
+    case openInTile
+    case settle
+    case unsettle
+    case snooze
+    case wake
+    case markUnread
+    case rename
+    case stopAgent
+    case archive
+    case delete
+
+    /// The item's words before the count and the submenu arrow are added.
+    ///
+    /// The five that P3.11 also has are spelled the same on purpose, and the equality is
+    /// asserted in `runAgentInboxChecks` rather than left to two literals agreeing — a row
+    /// menu that said "Mark as unread" over a bar that said "Mark Unread" would be two
+    /// vocabularies for one action.
+    var baseTitle: String {
+        switch self {
+        case .openInTile: return "Open in Tile"
+        case .settle: return "Settle"
+        case .unsettle: return "Un-settle"
+        case .snooze: return "Snooze"
+        case .wake: return "Wake"
+        case .markUnread: return "Mark Unread"
+        case .rename: return "Rename"
+        case .stopAgent: return "Stop Agent"
+        case .archive: return "Archive"
+        case .delete: return "Delete"
+        }
+    }
+
+    /// `Snooze` alone: it opens the preset list (P4.5) rather than acting, which is the
+    /// same reason `InboxBulkAction.snooze` carries the arrow.
+    var opensSubmenu: Bool { self == .snooze }
+
+    /// `Settle` for one row, `Settle (3)` for a selection — the packet's rule, so a menu
+    /// raised over a multiple selection says out loud that it is not about the row you
+    /// happened to right-click. The count goes BEFORE the arrow (`Snooze (3) ›`), because
+    /// the arrow is the item's shape and not part of its name.
+    func title(forCount count: Int) -> String {
+        let counted = count > 1 ? "\(baseTitle) (\(count))" : baseTitle
+        return opensSubmenu ? "\(counted) ›" : counted
+    }
+
+    /// Whether ONE row can take this action. Total over the cases, so a new action is a
+    /// compile error here rather than an item that is silently always live.
+    func isAvailable(for row: AgentInboxRow) -> Bool {
+        switch self {
+        // Every row on screen names an agent, and P3.9's reveal attaches a view to one
+        // that has none — so there is no row this cannot be asked of. What it cannot take
+        // is a SET, which `disabledReason` handles: "open" has no plural.
+        case .openInTile: return true
+        case .settle: return InboxBulkAction.settle.isAvailable(for: row)
+        case .unsettle: return InboxBulkAction.isSettled(row)
+        case .snooze: return InboxBulkAction.snooze.isAvailable(for: row)
+        case .wake: return InboxRowAction.isSnoozed(row)
+        case .markUnread: return InboxBulkAction.markUnread.isAvailable(for: row)
+        // The name is on the RECORD, and `AgentSupervisor.archive` deletes the record —
+        // so an archived row has nothing left to rename.
+        case .rename: return !InboxBulkAction.isArchived(row)
+        case .stopAgent: return InboxRowAction.hasTurnInFlight(row)
+        case .archive: return InboxBulkAction.archive.isAvailable(for: row)
+        case .delete: return InboxBulkAction.delete.isAvailable(for: row)
+        }
+    }
+
+    /// The items the menu SHOWS for these agents, in menu order. Empty for no agents,
+    /// which is what a right-click on the background gets.
+    static func menuItems(for rows: [AgentInboxRow]) -> [InboxRowAction] {
+        guard !rows.isEmpty else { return [] }
+        return allCases.filter { $0.belongsInMenu(for: rows) }
+    }
+
+    /// Which half of the ONE pair belongs in the menu. Everything else is unconditional —
+    /// an item you cannot use is greyed, not absent.
+    ///
+    /// SETTLE/UN-SETTLE IS THE ONLY EITHER/OR, and that is the packet's own spelling: it
+    /// writes "Settle / Un-settle" with a slash and "Snooze › · Wake" with the same
+    /// separator as every other item. It is also the only pair where the forward action
+    /// would be a no-op — a settled row has nothing left to settle, while a SNOOZED row can
+    /// perfectly well be snoozed again on a different preset (P4.5), so Snooze stays live
+    /// beside Wake and the menu keeps one shape. (Cross-review caught the first version
+    /// swapping this pair too, which took the preset list away from exactly the rows most
+    /// likely to want a different one.)
+    private func belongsInMenu(for rows: [AgentInboxRow]) -> Bool {
+        switch self {
+        case .settle: return !rows.allSatisfy(InboxBulkAction.isSettled)
+        case .unsettle: return rows.allSatisfy(InboxBulkAction.isSettled)
+        case .openInTile, .snooze, .wake, .markUnread, .rename, .stopAgent, .archive,
+             .delete:
+            return true
+        }
+    }
+
+    /// Why this item is greyed, in the words its tooltip shows — nil when it is live.
+    ///
+    /// The order is the order a reader needs: an action nothing can perform yet is
+    /// disabled for that reason first, because "Ada is still working" would be a lie about
+    /// why Delete is grey while `onRowAction` is nil (the packet's watch-out: do not wire
+    /// an item to nothing silently). Then the arity, then the capability rule — named
+    /// against the FIRST agent in screen order that blocks it, so a selection's greyed
+    /// item answers "which of my six?" instead of posing it.
+    func disabledReason(for rows: [AgentInboxRow], isWired: Bool) -> String? {
+        guard !rows.isEmpty else { return InboxRowAction.noTargetReason }
+        guard isWired else { return InboxRowAction.notWiredReason }
+        if self == .openInTile, rows.count > 1 { return InboxRowAction.oneAtATimeReason }
+        guard let offender = rows.first(where: { !isAvailable(for: $0) }) else { return nil }
+        return "\(offender.title) \(clauseWhenUnavailable(offender))"
+    }
+
+    static let noTargetReason = "No agent is selected."
+    /// Said of settle, snooze, mark-unread, rename, stop, archive and delete for as long
+    /// as no host performs them — the packet's watch-out, discharged in the tooltip.
+    static let notWiredReason = "Not available yet."
+    static let oneAtATimeReason = "Open one agent at a time."
+
+    /// Why this one agent blocks this action, as the tail of a sentence starting with its
+    /// name. Every clause is the rule it comes from, stated the way the rule is stated —
+    /// so the tooltip is the reason and not a restatement of the greying.
+    private func clauseWhenUnavailable(_ row: AgentInboxRow) -> String {
+        switch self {
+        // Unreachable: `openInTile` is available for every row, and the plural case is
+        // answered above. Present because the switch is total, which is what makes a new
+        // action a compile error here.
+        case .openInTile: return "cannot be opened."
+        case .settle:
+            if InboxBulkAction.isBlocked(row) { return "is waiting on you." }
+            return InboxBulkAction.isSettled(row) ? "is already settled." : "is archived."
+        case .unsettle: return "is not settled."
+        case .snooze: return "is archived."
+        case .wake: return "is not snoozed."
+        case .markUnread:
+            return row.attention == .unread ? "is already unread." : "is archived."
+        case .rename: return "is archived."
+        case .stopAgent: return "has no turn in flight."
+        case .archive:
+            return InboxBulkAction.isRunning(row) ? "is still working." : "is already archived."
+        case .delete: return "is still working."
+        }
+    }
+
+    private static func isSnoozed(_ row: AgentInboxRow) -> Bool {
+        switch row.lifecycle {
+        case .snoozed: return true
+        case .active, .settled, .archived: return false
+        }
+    }
+
+    /// The agent has a turn in flight — the only thing `AgentSupervisor.stop` has to
+    /// terminate (`isRunning(_:)` there is `runners[id] != nil`).
+    ///
+    /// THREE STATES, not one: `working` is obvious, and `approval`/`input` are a turn that
+    /// is still running with the adapter holding a request open — `InboxState.state(for:)`
+    /// lets a pending request override a `working` status, so a blocked agent is a live
+    /// one. `ready` is the resting state ("the agent stopped and is waiting on you") and
+    /// `failed` has already ended; neither has a runner to stop, and an item that would do
+    /// nothing must not be live. An archived agent has no record left at all.
+    private static func hasTurnInFlight(_ row: AgentInboxRow) -> Bool {
+        guard !InboxBulkAction.isArchived(row) else { return false }
+        switch row.state {
+        case .working, .approval, .input: return true
+        case .ready, .failed: return false
         }
     }
 }
