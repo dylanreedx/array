@@ -65,7 +65,15 @@ public enum AgentInboxRowBuilder {
             elapsed: state == .working ? elapsed(in: boardRow, now: now) : nil,
             // P2D.4 nests children under their parent. A flat list is depth 0.
             depth: 0,
-            variant: RowVariant.forLifecycle(lifecycle)
+            variant: RowVariant.forLifecycle(lifecycle),
+            // P3.4's frozen order. `distantPast` when the caller passed no context
+            // — such a row sinks to the BOTTOM of the list rather than claiming to
+            // be the newest thing you spawned, which is what a `now` fallback would
+            // do. The index itself always knows the date (both a record and a
+            // terminal descriptor carry one), so this fallback is for a caller that
+            // built rows with no context at all.
+            createdAt: context?.createdAt ?? .distantPast,
+            parentId: context?.parentId
         )
     }
 

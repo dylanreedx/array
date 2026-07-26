@@ -646,6 +646,13 @@ private func runAgentContextSyncBoundaryCheck() {
         scannable["\(agentId).role"] = context.role
         scannable["\(agentId).worktreeBranch"] = context.worktreeBranch
         scannable["\(agentId).checkedOutBranch"] = context.checkedOutBranch
+        // P3.4 added two more. Neither is a string, and neither can be — a spawn
+        // time and a parent's id are the same shapes `AgentActivityEvent` already
+        // syncs — but they are swept in their rendered form anyway, because the
+        // rule this list encodes is "every field of the type", not "every field
+        // that happens to be a String".
+        scannable["\(agentId).createdAt"] = context.createdAt.map { "\($0.timeIntervalSinceReferenceDate)" }
+        scannable["\(agentId).parentId"] = context.parentId?.uuidString
     }
     let compacted = scannable.compactMapValues { $0 }
     let violations = taintCheck(compacted)

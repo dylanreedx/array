@@ -99,11 +99,16 @@ private func runInboxStateTotalityCheck() {
 
 // MARK: - 3 · identity
 
+/// A fixed spawn time for the vocabulary fixtures. P3.4 made `createdAt` a
+/// required fact on every row (it is the frozen list's only sort key); none of the
+/// properties here depend on its value, so one canned date serves them all.
+private let inboxRowSpawnedAt = Date(timeIntervalSinceReferenceDate: 806_700_000)
+
 private func runInboxRowIdentityCheck() {
     let agentId = UUID(uuidString: "3B100000-0000-4000-8000-000000000001")!
     let other = UUID(uuidString: "3B100000-0000-4000-8000-000000000002")!
 
-    let row = AgentInboxRow(id: agentId, title: "Reviewer", state: .ready)
+    let row = AgentInboxRow(id: agentId, title: "Reviewer", state: .ready, createdAt: inboxRowSpawnedAt)
     expect(row.id == agentId, "Identifiable.id is the agent id it was built with, got \(row.id)")
 
     // Everything else moving must NOT move the id: the list diffs on it, and a
@@ -115,23 +120,29 @@ private func runInboxRowIdentityCheck() {
         projectName: "Continuum",
         state: .working,
         attention: .unread,
-        lifecycle: .settled,
+        lifecycle: .settled(at: inboxRowSpawnedAt.addingTimeInterval(60)),
         model: "anthropic/claude-opus-5",
         role: "reviewer",
         branch: "agent/reviewer-1a2b3c4d",
         isIsolated: true,
         elapsed: 42,
         depth: 1,
-        variant: .slim
+        variant: .slim,
+        createdAt: inboxRowSpawnedAt,
+        parentId: other
     )
     expect(moved.id == row.id, "no field but the id changes the id, got \(moved.id) vs \(row.id)")
     expect(moved != row, "two rows that differ in every other field are not equal")
-    expect(AgentInboxRow(id: other, title: "Reviewer", state: .ready) != row,
+    expect(AgentInboxRow(id: other, title: "Reviewer", state: .ready, createdAt: inboxRowSpawnedAt) != row,
            "two rows with different ids are not equal")
 
     // Defaults are the "nothing is known yet" row Phase 3/4 fills in.
     expect(row.attention == .none && row.lifecycle == .active && row.depth == 0 && row.variant == .card,
            "a row defaults to active/unattended/top-level/card, got \(row)")
+    // P3.4: a row is top-level unless it says otherwise, and `createdAt` has no
+    // default at all — the compiler will not let a row exist without a position.
+    expect(row.parentId == nil && row.createdAt == inboxRowSpawnedAt,
+           "a row defaults to top-level and keeps the spawn time it was built with, got \(String(describing: row.parentId))")
     expect(row.elapsed == nil && row.branch == nil && !row.isIsolated,
            "a row defaults to no duration and no branch, got \(row)")
 }
@@ -143,7 +154,7 @@ private func runRowVariantCheck() {
     let expected: [(InboxLifecycle, RowVariant)] = [
         (.active, .card),
         (.snoozed(until: until), .slim),
-        (.settled, .slim),
+        (.settled(at: until), .slim),
         // Archived leaves the list entirely (P4.1: archived != settled), so it has
         // no density of its own to argue about; a card is the honest default for
         // anything that is still being drawn.
@@ -161,7 +172,8 @@ private func runRowVariantCheck() {
             title: "Agent",
             state: state,
             lifecycle: .active,
-            variant: RowVariant.forLifecycle(.active)
+            variant: RowVariant.forLifecycle(.active),
+            createdAt: inboxRowSpawnedAt
         )
         expect(row.variant == .card, "an active \(state.rawValue) row is a full card, got \(row.variant.rawValue)")
     }
@@ -366,7 +378,7 @@ private func runInboxAttentionAxisCheck() {
     var pairs = 0
     for state in InboxState.allCases {
         for attention in InboxAttention.allCases {
-            let row = AgentInboxRow(id: UUID(), title: "Reviewer", state: state, attention: attention)
+            let row = AgentInboxRow(id: UUID(), title: "Reviewer", state: state, attention: attention, createdAt: inboxRowSpawnedAt)
             expect(row.state == state && row.attention == attention,
                    "a row carries \(state.rawValue)/\(attention.rawValue) unchanged, got \(row.state.rawValue)/\(row.attention.rawValue)")
             // The label priority from P3.2, with `(woke)` under it.
@@ -381,11 +393,11 @@ private func runInboxAttentionAxisCheck() {
     // Named cases, so the priority is pinned and not only derived from itself:
     // a working agent whose hand is up still reads "Working" (what it is doing
     // outranks how it got back to you), and only a RESTING woke row reads "Woke".
-    expect(AgentInboxRow(id: UUID(), title: "a", state: .working, attention: .woke).label == "Working",
+    expect(AgentInboxRow(id: UUID(), title: "a", state: .working, attention: .woke, createdAt: inboxRowSpawnedAt).label == "Working",
            "state outranks woke in the label priority")
-    expect(AgentInboxRow(id: UUID(), title: "a", state: .ready, attention: .woke).label == "Woke",
+    expect(AgentInboxRow(id: UUID(), title: "a", state: .ready, attention: .woke, createdAt: inboxRowSpawnedAt).label == "Woke",
            "a resting woke row says so")
-    expect(AgentInboxRow(id: UUID(), title: "a", state: .ready, attention: .unread).label == nil,
+    expect(AgentInboxRow(id: UUID(), title: "a", state: .ready, attention: .unread, createdAt: inboxRowSpawnedAt).label == nil,
            "a resting unread row carries a mark, not a word")
     print("InboxAttention axis measured \(pairs) state/attention pairs, resolve(unread+hand)=\(InboxAttention.resolve(unread: true, raisedHand: true).rawValue)")
 }

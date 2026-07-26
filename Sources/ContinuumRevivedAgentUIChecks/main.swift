@@ -38,4 +38,7 @@ runMetricsChecks()
 // Ticket: docs/38-tickets/90-agent-ux/P3.1-inbox-row-model.md
 runAgentInboxRowChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P3.4-frozen-sort.md
+runInboxSortChecks()
+
 print("ContinuumRevivedAgentUIChecks passed")

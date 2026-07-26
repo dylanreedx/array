@@ -147,8 +147,25 @@ public enum InboxAttention: String, CaseIterable, Equatable, Sendable {
 public enum InboxLifecycle: Equatable, Sendable {
     case active
     case snoozed(until: Date)
-    case settled
+    /// P3.4: settled rows are HISTORY, and history is ordered by when the work
+    /// ended — so the date is carried by the case rather than sitting beside it as
+    /// an optional. A settled row without an end time cannot be constructed, which
+    /// is why `InboxSort` needs no fallback for one. Same shape as
+    /// `snoozed(until:)`.
+    case settled(at: Date)
     case archived
+
+    /// The moment the work ended, for the one lifecycle that has one.
+    ///
+    /// `snoozed` deliberately does not answer: its date is in the FUTURE (when the
+    /// row comes back), and treating it as an end time would sort a snoozed row
+    /// into history ahead of everything that really finished.
+    public var endedAt: Date? {
+        switch self {
+        case .settled(let at): return at
+        case .active, .snoozed, .archived: return nil
+        }
+    }
 }
 
 /// How much room the row gets. Settled and snoozed collapse; everything else is a
@@ -208,6 +225,25 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// 0 for a top-level agent, 1 for a child of one (P2D.4).
     public let depth: Int
     public let variant: RowVariant
+    /// When the agent was SPAWNED — the row's frozen position in the desktop list
+    /// (P3.4), and the one timestamp this type may sort on.
+    ///
+    /// It is the agent's own creation date (`AgentRecord.createdAt`, or a terminal
+    /// session's `TerminalSessionDescriptor.createdAt`), never a last-activity or
+    /// last-updated time: an activity timestamp is exactly what makes a list jump
+    /// while you read it, which is the thing the locked frozen order forbids.
+    ///
+    /// Required, with no default: a row that does not know when its agent started
+    /// has no position, and a defaulted "now" would put every such row at the top
+    /// of the list — the loudest possible way to be wrong.
+    public let createdAt: Date
+    /// The agent that spawned this one (P2D.4), in the same aggregate keyspace as
+    /// `id`. nil for a top-level agent.
+    ///
+    /// `depth` says how deep the row is drawn; this says WHOSE child it is, which
+    /// is what `InboxSort` needs to place a child immediately after its parent —
+    /// a depth alone cannot tell two orchestrators' children apart.
+    public let parentId: UUID?
 
     public init(
         id: UUID,
@@ -222,7 +258,9 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         isIsolated: Bool = false,
         elapsed: TimeInterval? = nil,
         depth: Int = 0,
-        variant: RowVariant = .card
+        variant: RowVariant = .card,
+        createdAt: Date,
+        parentId: UUID? = nil
     ) {
         self.id = id
         self.title = title
@@ -237,6 +275,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.elapsed = elapsed
         self.depth = depth
         self.variant = variant
+        self.createdAt = createdAt
+        self.parentId = parentId
     }
 
     /// The row's ONE label, resolved down the packet's priority:

@@ -62,6 +62,18 @@ public struct AgentRowContext: Equatable, Sendable {
     /// branch". The lookup is I/O, so it is the caller's, not this fold's (this
     /// file is pure — names in, names out).
     public let checkedOutBranch: String?
+    /// P3.4: when the agent was SPAWNED — `AgentRecord.createdAt`, or a terminal
+    /// session's `TerminalSessionDescriptor.createdAt`. The desktop inbox's frozen
+    /// order is keyed on it, and it is the only timestamp this value carries: an
+    /// activity time here would be an invitation to sort on it.
+    ///
+    /// nil only for a caller that built a context by hand; the index always knows
+    /// it, because both of the things it indexes record their own birthday.
+    public let createdAt: Date?
+    /// P2D.4/P3.4: the agent that spawned this one (`AgentRecord.parentAgentID`),
+    /// in the aggregate keyspace the rest of this index uses. nil for a top-level
+    /// agent, and always nil for a terminal session, which nothing spawns.
+    public let parentId: UUID?
 
     /// This agent has a checkout of its own.
     ///
@@ -94,7 +106,9 @@ public struct AgentRowContext: Equatable, Sendable {
         model: String? = nil,
         role: String? = nil,
         worktreeBranch: String? = nil,
-        checkedOutBranch: String? = nil
+        checkedOutBranch: String? = nil,
+        createdAt: Date? = nil,
+        parentId: UUID? = nil
     ) {
         self.workspaceName = workspaceName
         self.zoneName = zoneName
@@ -106,6 +120,8 @@ public struct AgentRowContext: Equatable, Sendable {
         self.role = role
         self.worktreeBranch = worktreeBranch
         self.checkedOutBranch = checkedOutBranch
+        self.createdAt = createdAt
+        self.parentId = parentId
     }
 }
 
@@ -152,7 +168,10 @@ public enum AgentContextIndex {
                 // A terminal session has no branch of its own to report: the
                 // descriptor records a worktree PATH, and this value may not carry
                 // one. Its checkout is reported if the caller read it.
-                checkedOutBranch: checkedOutBranches[descriptor.tileId]
+                checkedOutBranch: checkedOutBranches[descriptor.tileId],
+                // The session's own birthday, which is this agent's: a terminal
+                // session has no record, so its descriptor IS its record.
+                createdAt: descriptor.createdAt
             )
         }
         for record in agents {
@@ -175,7 +194,12 @@ public enum AgentContextIndex {
                 model: record.model,
                 role: record.role,
                 worktreeBranch: record.worktreeBranch,
-                checkedOutBranch: checkedOutBranches[record.id.rawValue]
+                checkedOutBranch: checkedOutBranches[record.id.rawValue],
+                createdAt: record.createdAt,
+                // P2D.4's nesting fact, carried in the aggregate keyspace — the
+                // parent's `AgentID` names a record, and a record's agent identity
+                // is its raw UUID.
+                parentId: record.parentAgentID?.rawValue
             )
         }
         return index

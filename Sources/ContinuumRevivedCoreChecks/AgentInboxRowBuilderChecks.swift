@@ -30,7 +30,8 @@ func runAgentInboxRowBuilderChecks() {
     runInboxRowElapsedCheck()
     runInboxRowBranchCheck()
     runInboxRowPendingRequestCheck()
-    print("AgentInboxRowBuilder checks: coverage/identity, refresh stability, headless rows, title source, terminal sessions, elapsed derivation, branch precedence and the approval/input split passed")
+    runInboxSortDivergesFromBoardOrderCheck()
+    print("AgentInboxRowBuilder checks: coverage/identity, refresh stability, headless rows, title source, terminal sessions, elapsed derivation, branch precedence, the approval/input split and the frozen-vs-attention-first sort divergence passed")
 }
 
 // MARK: - Fixture
@@ -593,4 +594,155 @@ private extension AgentInboxRow {
     /// Colour is the vocabulary's, not the join's — this only asserts the join
     /// landed on a state that has one.
     var accentIsPresent: Bool { state.accent != nil }
+}
+
+// MARK: - 6 · two sorts coexist (P3.4)
+
+// Ticket: docs/38-tickets/90-agent-ux/P3.4-frozen-sort.md
+//
+// `InboxSort` lives in ContinuumRevivedAgentUI, which cannot see
+// `AgentsBoardProjection`. THIS is the one place both orders are visible at once,
+// so it is where "two sorts coexist" is asserted rather than described: the board
+// projection stays attention-first for the phone's glance surface, and the desktop
+// sort is frozen creation order. The check also proves the desktop sort has real
+// spawn times to work with — `createdAt` is joined from the records and
+// descriptors, not defaulted.
+private func runInboxSortDivergesFromBoardOrderCheck() {
+    // Spawn order: headless (oldest) → isolated → tiled (newest). The OLDEST is
+    // the one asking for attention, so the two orders are exact opposites at the
+    // top: a bug that returned the projection's order untouched cannot pass.
+    let agents = [
+        inboxAgentRecord(inboxHeadlessAgentId, name: "Headless Reviewer", spawnedAfter: 0),
+        inboxAgentRecord(inboxIsolatedAgentId, name: "Isolated Builder", spawnedAfter: 100),
+        inboxAgentRecord(inboxTiledAgentId, name: "Record Name", spawnedAfter: 200),
+    ]
+    let index = AgentContextIndex.build(
+        registry: inboxRegistry(),
+        documents: [:],
+        projectCanvases: [:],
+        terminalDescriptors: [],
+        agents: agents
+    )
+    let snapshot = AgentInventory.snapshot(
+        terminalDescriptors: [],
+        liveStatuses: [inboxHeadlessAgentId.rawValue: .needsAttention],
+        agents: agents,
+        activityByAgent: [:],
+        replicaId: inboxReplicaId,
+        now: inboxNow
+    )
+
+    // The join carries each agent's OWN spawn time through to its row. Without
+    // this the frozen sort would be sorting a column of `distantPast`.
+    let rows = AgentInboxRowBuilder.rows(from: snapshot, context: index, now: inboxNow)
+    let createdById = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0.createdAt) })
+    for agent in agents {
+        expect(createdById[agent.id.rawValue] == agent.createdAt,
+               "a row's createdAt is its agent's own, got \(String(describing: createdById[agent.id.rawValue])) for \(agent.displayName)")
+    }
+    expect(Set(createdById.values).count == agents.count,
+           "the fixture's spawn times must be distinct, or the ordering below proves nothing")
+
+    let boardOrder = rows.map(\.id)
+    let frozen = InboxSort.sortForInbox(rows: rows).map(\.id)
+    expect(boardOrder.first == inboxHeadlessAgentId.rawValue,
+           "AgentsBoardProjection stays ATTENTION-FIRST for iOS — the agent asking for you is at the top, got \(boardOrder)")
+    expect(frozen == [inboxTiledAgentId.rawValue, inboxIsolatedAgentId.rawValue, inboxHeadlessAgentId.rawValue],
+           "the desktop sort is frozen creation order, newest first, got \(frozen)")
+    expect(frozen != boardOrder,
+           "the two sorts must actually differ on this fixture — if they agree, only one of them is being tested")
+
+    // And the frozen order does not move when the attention does: hand the loudest
+    // row to the other agent and the desktop list is unchanged while the board
+    // order flips.
+    let quieter = AgentInventory.snapshot(
+        terminalDescriptors: [],
+        liveStatuses: [inboxTiledAgentId.rawValue: .needsAttention],
+        agents: agents,
+        activityByAgent: [:],
+        replicaId: inboxReplicaId,
+        now: inboxNow
+    )
+    let movedRows = AgentInboxRowBuilder.rows(from: quieter, context: index, now: inboxNow)
+    expect(movedRows.map(\.id) != boardOrder,
+           "the board order really did react to the attention moving, got \(movedRows.map(\.id))")
+    expect(InboxSort.sortForInbox(rows: movedRows).map(\.id) == frozen,
+           "the desktop order is unmoved by attention changing hands, got \(InboxSort.sortForInbox(rows: movedRows).map(\.id))")
+
+    // A terminal session has no record; its descriptor is its record, and its
+    // createdAt has to reach the row the same way.
+    let descriptor = inboxTerminalDescriptor()
+    let mixedIndex = AgentContextIndex.build(
+        registry: inboxRegistry(),
+        documents: inboxDocuments(),
+        projectCanvases: [:],
+        terminalDescriptors: [descriptor],
+        agents: agents
+    )
+    let mixed = AgentInventory.snapshot(
+        terminalDescriptors: [descriptor],
+        liveStatuses: [:],
+        agents: agents,
+        activityByAgent: [:],
+        replicaId: inboxReplicaId,
+        now: inboxNow
+    )
+    let terminalRow = AgentInboxRowBuilder.rows(from: mixed, context: mixedIndex, now: inboxNow)
+        .first { $0.id == inboxTerminalTile }
+    expect(terminalRow?.createdAt == descriptor.createdAt,
+           "a terminal session's row is positioned by the session's own createdAt, got \(String(describing: terminalRow?.createdAt))")
+
+    // P2D.4's nesting fact has to survive the join as well, or the desktop sort
+    // has no parent to put a child under. The child is the NEWER of the two, so a
+    // join that dropped `parentAgentID` would sort it above its parent.
+    let parent = inboxAgentRecord(inboxHeadlessAgentId, name: "Orchestrator", spawnedAfter: 0)
+    var child = inboxAgentRecord(inboxIsolatedAgentId, name: "Child", spawnedAfter: 50)
+    child.parentAgentID = parent.id
+    let family = [parent, child]
+    let familyRows = AgentInboxRowBuilder.rows(
+        from: AgentInventory.snapshot(
+            terminalDescriptors: [],
+            liveStatuses: [:],
+            agents: family,
+            activityByAgent: [:],
+            replicaId: inboxReplicaId,
+            now: inboxNow
+        ),
+        context: AgentContextIndex.build(
+            registry: inboxRegistry(),
+            documents: [:],
+            projectCanvases: [:],
+            terminalDescriptors: [],
+            agents: family
+        ),
+        now: inboxNow
+    )
+    let familyById = Dictionary(uniqueKeysWithValues: familyRows.map { ($0.id, $0) })
+    expect(familyById[child.id.rawValue]?.parentId == parent.id.rawValue,
+           "a child's row names its parent in the aggregate keyspace, got \(String(describing: familyById[child.id.rawValue]?.parentId))")
+    expect(familyById[parent.id.rawValue]?.parentId == nil,
+           "a top-level agent's row has no parent, got \(String(describing: familyById[parent.id.rawValue]?.parentId))")
+    expect(InboxSort.sortForInbox(rows: familyRows).map(\.id) == [parent.id.rawValue, child.id.rawValue],
+           "the newer child sorts UNDER its older parent, got \(InboxSort.sortForInbox(rows: familyRows).map(\.id))")
+
+    print("InboxSort divergence measured board=\(boardOrder.map { $0.uuidString.suffix(2) }) frozen=\(frozen.map { $0.uuidString.suffix(2) })")
+}
+
+/// One record, spawned at a stated offset — the fixture above needs distinct
+/// creation times, which `inboxAgents()` (all at `inboxNow`) deliberately does not
+/// provide.
+private func inboxAgentRecord(_ id: AgentID, name: String, spawnedAfter: TimeInterval) -> AgentRecord {
+    AgentRecord(
+        id: id,
+        displayName: name,
+        role: nil,
+        model: "anthropic/claude-opus-5",
+        thinking: "medium",
+        cwd: "/tmp/continuum-inbox-fixture",
+        worktreeBranch: nil,
+        projectId: inboxProjectId,
+        createdAt: inboxNow.addingTimeInterval(spawnedAfter),
+        lastActivityAt: inboxNow.addingTimeInterval(spawnedAfter),
+        tileId: nil
+    )
 }
