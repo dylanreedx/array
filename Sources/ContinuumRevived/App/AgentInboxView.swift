@@ -184,6 +184,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// The rows that HAVE a child on screen, from the sorted list before it was
     /// collapsed — a folded parent must keep the triangle you fold it back with.
     private var parentsWithChildren: Set<UUID> = []
+    // Ticket: docs/38-tickets/90-agent-ux/P2D.5-child-rollup.md
+    /// What is under each parent, measured on the same pre-fold list as
+    /// `parentsWithChildren` and for exactly the same reason: a folded parent's
+    /// children are off screen, so a rollup counted after the fold would report
+    /// nothing at the one moment it is the only thing left to report. DERIVED each
+    /// push, never stored on a row.
+    private var rollupsByParent: [UUID: ChildRollup] = [:]
     // Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
     /// Whether the ⌘-hold hint pills are showing. VIEW-LOCAL and transient, like
     /// hover: it is a fact about the modifier you are holding right now.
@@ -596,6 +603,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // has no children on screen, and a triangle derived from what is on screen
         // would vanish the moment you used it.
         parentsWithChildren = InboxSort.parentIds(in: sorted)
+        // P2D.5: same list, same moment, same reason.
+        rollupsByParent = InboxSort.rollups(in: sorted)
         return InboxSort.visibleRows(sorted, collapsed: collapsedParents)
     }
 
@@ -801,6 +810,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
             ),
             indent: Double(max(0, model.depth)) * AgentInboxView.indentPerLevel,
             disclosure: disclosure(for: model),
+            // P2D.5: handed over for every parent; the cell shows it only while the
+            // group is folded, which is the one moment the children are not on
+            // screen to speak for themselves.
+            rollup: rollupsByParent[model.id],
             // P3.11: EVERY selected row is outlined, not just the last one clicked —
             // `selectedRow` is one index and a range is a set.
             isSelected: tableView.selectedRowIndexes.contains(row),
@@ -1078,7 +1091,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // actions appear the day the host wires them. (Found in cross-review, which
         // pointed out the shipped sidebar would offer five silent no-ops.)
         bulkBar.show(
-            onBulkAction == nil ? [] : InboxBulkAction.available(for: selected),
+            onBulkAction == nil ? [] : InboxBulkAction.available(for: selected, rollups: rollupsByParent),
             selectionCount: selected.count,
             keptBranches: InboxBulkAction.keptBranches(in: selected))
     }
@@ -1093,7 +1106,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     private func performBulkAction(_ action: InboxBulkAction) {
         let selected = selectedRows
         guard selected.count >= AgentInboxView.minimumBulkSelection,
-              InboxBulkAction.available(for: selected).contains(action) else { return }
+              InboxBulkAction.available(for: selected, rollups: rollupsByParent).contains(action)
+        else { return }
         onBulkAction?(action, selected.map(\.id))
     }
 
@@ -1133,7 +1147,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
                 action: #selector(rowMenuPicked(_:)), keyEquivalent: "")
             item.target = self
             item.tag = index
-            let reason = action.disabledReason(for: targets, isWired: isWired(action))
+            let reason = action.disabledReason(
+                for: targets, isWired: isWired(action), rollups: rollupsByParent)
             item.isEnabled = reason == nil
             item.toolTip = reason
             rowMenu.addItem(item)
@@ -1155,7 +1170,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// does nothing.
     private func performRowAction(_ action: InboxRowAction) {
         let targets = rowMenuTargetIds.compactMap { id in rows.first { $0.id == id } }
-        guard action.disabledReason(for: targets, isWired: isWired(action)) == nil else { return }
+        guard action.disabledReason(
+            for: targets, isWired: isWired(action), rollups: rollupsByParent) == nil else { return }
         switch action {
         case .openInTile:
             guard let first = targets.first else { return }
@@ -1572,7 +1588,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 @MainActor
 protocol AgentInboxRowCell: NSTableCellView {
     func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double,
-               disclosure: RowDisclosure, isSelected: Bool, isInteracting: Bool, now: Date)
+               disclosure: RowDisclosure, rollup: ChildRollup?, isSelected: Bool,
+               isInteracting: Bool, now: Date)
 
     /// What the row's disclosure triangle does. Set by the list, which is the only
     /// thing that knows the fold state; a cell with `RowDisclosure.none` never calls
@@ -1809,11 +1826,28 @@ enum InboxBulkAction: String, CaseIterable, Equatable {
     /// has nothing to settle, an already-unread one nothing to mark, and an archived row
     /// is out of the list's lifecycle altogether — the only thing left to do with it is
     /// delete it.
-    func isAvailable(for row: AgentInboxRow) -> Bool {
+    ///
+    /// Ticket: docs/38-tickets/90-agent-ux/P2D.5-child-rollup.md
+    /// `rollups` extends the FIRST of those two rules down the tree: **a parent may
+    /// not be settled while a descendant is blocked or running.** It is the same rule,
+    /// not a new one — settling a group takes the whole group out of the attention
+    /// flow, so a child's unanswered approval is buried exactly as completely as the
+    /// parent's own would be, and this is the collapsed case the rollup line exists
+    /// for. Keyed by row id and DEFAULTED TO EMPTY, so a caller that has no list to
+    /// roll up (a fixture, one row on its own) gets precisely the rule that shipped
+    /// before this ticket.
+    ///
+    /// Only `.settle` consults it. Archive and delete are refused for a RUNNING row,
+    /// and extending those to descendants is P2D.6's question about what a fan-out
+    /// means, not this packet's; the derived lifecycle already keeps a blocked child's
+    /// parent off the shelf without any action rule (`InboxLifecycle.resolve` puts
+    /// blockers above the snooze rung).
+    func isAvailable(for row: AgentInboxRow, rollups: [UUID: ChildRollup] = [:]) -> Bool {
         switch self {
         case .settle:
             return !InboxBulkAction.isBlocked(row) && !InboxBulkAction.isSettled(row)
                 && !InboxBulkAction.isArchived(row)
+                && !(rollups[row.id]?.holdsParentOpen ?? false)
         case .snooze:
             return !InboxBulkAction.isArchived(row)
         case .markUnread:
@@ -1828,9 +1862,13 @@ enum InboxBulkAction: String, CaseIterable, Equatable {
     /// The actions this selection may take, in the menu's order. Empty for an empty
     /// selection — `allSatisfy` is vacuously true over nothing, which would offer every
     /// action to no agents.
-    static func available(for rows: [AgentInboxRow]) -> [InboxBulkAction] {
+    static func available(
+        for rows: [AgentInboxRow], rollups: [UUID: ChildRollup] = [:]
+    ) -> [InboxBulkAction] {
         guard !rows.isEmpty else { return [] }
-        return allCases.filter { action in rows.allSatisfy(action.isAvailable(for:)) }
+        return allCases.filter { action in
+            rows.allSatisfy { action.isAvailable(for: $0, rollups: rollups) }
+        }
     }
 
     /// The branches a destructive action on this selection PUTS AT STAKE, in screen order
@@ -1961,13 +1999,17 @@ enum InboxRowAction: String, CaseIterable, Equatable {
 
     /// Whether ONE row can take this action. Total over the cases, so a new action is a
     /// compile error here rather than an item that is silently always live.
-    func isAvailable(for row: AgentInboxRow) -> Bool {
+    ///
+    /// P2D.5: `rollups` is passed straight through to the bulk rules, because the
+    /// context menu's enablement is specified as "the same capability rules as bulk" —
+    /// a Settle the bar withholds from a parent must be a Settle the menu greys too.
+    func isAvailable(for row: AgentInboxRow, rollups: [UUID: ChildRollup] = [:]) -> Bool {
         switch self {
         // Every row on screen names an agent, and P3.9's reveal attaches a view to one
         // that has none — so there is no row this cannot be asked of. What it cannot take
         // is a SET, which `disabledReason` handles: "open" has no plural.
         case .openInTile: return true
-        case .settle: return InboxBulkAction.settle.isAvailable(for: row)
+        case .settle: return InboxBulkAction.settle.isAvailable(for: row, rollups: rollups)
         case .unsettle: return InboxBulkAction.isSettled(row)
         case .snooze: return InboxBulkAction.snooze.isAvailable(for: row)
         case .wake: return InboxRowAction.isSnoozed(row)
@@ -2017,12 +2059,15 @@ enum InboxRowAction: String, CaseIterable, Equatable {
     /// an item to nothing silently). Then the arity, then the capability rule — named
     /// against the FIRST agent in screen order that blocks it, so a selection's greyed
     /// item answers "which of my six?" instead of posing it.
-    func disabledReason(for rows: [AgentInboxRow], isWired: Bool) -> String? {
+    func disabledReason(
+        for rows: [AgentInboxRow], isWired: Bool, rollups: [UUID: ChildRollup] = [:]
+    ) -> String? {
         guard !rows.isEmpty else { return InboxRowAction.noTargetReason }
         guard isWired else { return InboxRowAction.notWiredReason }
         if self == .openInTile, rows.count > 1 { return InboxRowAction.oneAtATimeReason }
-        guard let offender = rows.first(where: { !isAvailable(for: $0) }) else { return nil }
-        return "\(offender.title) \(clauseWhenUnavailable(offender))"
+        guard let offender = rows.first(where: { !isAvailable(for: $0, rollups: rollups) })
+        else { return nil }
+        return "\(offender.title) \(clauseWhenUnavailable(offender, rollups: rollups))"
     }
 
     static let noTargetReason = "No agent is selected."
@@ -2034,7 +2079,9 @@ enum InboxRowAction: String, CaseIterable, Equatable {
     /// Why this one agent blocks this action, as the tail of a sentence starting with its
     /// name. Every clause is the rule it comes from, stated the way the rule is stated —
     /// so the tooltip is the reason and not a restatement of the greying.
-    private func clauseWhenUnavailable(_ row: AgentInboxRow) -> String {
+    private func clauseWhenUnavailable(
+        _ row: AgentInboxRow, rollups: [UUID: ChildRollup] = [:]
+    ) -> String {
         switch self {
         // Unreachable: `openInTile` is available for every row, and the plural case is
         // answered above. Present because the switch is total, which is what makes a new
@@ -2042,6 +2089,15 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         case .openInTile: return "cannot be opened."
         case .settle:
             if InboxBulkAction.isBlocked(row) { return "is waiting on you." }
+            // P2D.5: named against the GROUP, and after the row's own blocker, because
+            // "Ada is waiting on you" is the truer sentence when both hold. The two
+            // halves are told apart — a reader deciding whether to wait or to answer
+            // something needs to know which.
+            if let rollup = rollups[row.id], rollup.holdsParentOpen {
+                return rollup.needsYou > 0
+                    ? "has work under it waiting on you."
+                    : "has work under it still running."
+            }
             return InboxBulkAction.isSettled(row) ? "is already settled." : "is archived."
         case .unsettle: return "is not settled."
         case .snooze: return "is archived."
@@ -2314,7 +2370,8 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     /// text colours when the appearance moves — an `NSTextField.textColor` is a
     /// resolved colour, and the list above must not reload the table to fix it
     /// (see `AgentInboxView.applyTokens`).
-    private var shown: (row: AgentInboxRow, emphasis: RowEmphasis, disclosure: RowDisclosure)?
+    private var shown: (row: AgentInboxRow, emphasis: RowEmphasis, disclosure: RowDisclosure,
+                        rollup: ChildRollup?)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -2422,10 +2479,20 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     /// and its elapsed time is a number the ROW holds rather than a distance from
     /// the current clock. They are on the shared call so the list can paint either
     /// variant without knowing which it has.
+    ///
+    /// Ticket: docs/38-tickets/90-agent-ux/P2D.5-child-rollup.md
+    /// `rollup` is what is under this row, and it is drawn ONLY while the group is
+    /// FOLDED — an expanded parent's children are on screen saying it themselves, and
+    /// a second copy of what the next three rows already show is noise on the row
+    /// that has the least space to spare. It joins the META LINE rather than taking a
+    /// fourth one: `AgentInboxView.rowHeight` is derived from exactly three lines of
+    /// type, so a new line would clip the card rather than grow it, and every
+    /// geometry gate and PNG baseline in the matrix is measured against that height.
     func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double,
-               disclosure: RowDisclosure = .none, isSelected: Bool = false,
+               disclosure: RowDisclosure = .none, rollup: ChildRollup? = nil,
+               isSelected: Bool = false,
                isInteracting: Bool = false, now: Date = Date()) {
-        shown = (row, emphasis, disclosure)
+        shown = (row, emphasis, disclosure, rollup)
         card.isSelected = isSelected
         leadingInset?.constant = indent
         disclosureButton.show(disclosure)
@@ -2437,7 +2504,9 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         stateLabel.isHidden = row.label == nil
         elapsedLabel.stringValue = AgentInboxCellView.elapsedText(row.elapsed) ?? ""
         elapsedLabel.isHidden = row.elapsed == nil
-        metaLabel.stringValue = AgentInboxCellView.metaText(role: row.role, model: row.model)
+        metaLabel.stringValue = AgentInboxCellView.metaText(
+            role: row.role, model: row.model,
+            rollup: disclosure == .collapsed ? rollup : nil)
         metaLabel.isHidden = metaLabel.stringValue.isEmpty
         branchLabel.stringValue = AgentInboxCellView.branchText(branch: row.branch, isIsolated: row.isIsolated)
         branchLabel.isHidden = branchLabel.stringValue.isEmpty
@@ -2464,7 +2533,7 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         guard let shown else { return }
         apply(shown.row, emphasis: shown.emphasis,
               indent: Double(leadingInset?.constant ?? 0), disclosure: shown.disclosure,
-              isSelected: card.isSelected)
+              rollup: shown.rollup, isSelected: card.isSelected)
     }
 
     @objc private func disclosureClicked() { onToggleDisclosure?() }
@@ -2486,8 +2555,15 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
 
     /// `role · model`, with the separator only where both sides exist. An agent
     /// with neither gets an empty line that is hidden, not a bare "·".
-    static func metaText(role: String?, model: String?) -> String {
-        [role, model].compactMap { $0 }.joined(separator: " · ")
+    ///
+    /// Ticket: docs/38-tickets/90-agent-ux/P2D.5-child-rollup.md
+    /// A folded parent's rollup goes on the FRONT of this line, in the same ` · `
+    /// vocabulary. First, not last, because `metaLabel` truncates by tail on a narrow
+    /// sidebar and the thing that must survive the squeeze is what the fold is
+    /// hiding — an agent's role and model are still on the row's title line's terms,
+    /// but "1 needs you" exists nowhere else while the group is closed.
+    static func metaText(role: String?, model: String?, rollup: ChildRollup? = nil) -> String {
+        [rollup?.summary, role, model].compactMap { $0 }.joined(separator: " · ")
     }
 
     /// The branch line, in `BranchChipNSView`'s vocabulary rather than a second
@@ -2649,8 +2725,31 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
 
     required init?(coder: NSCoder) { return nil }
 
+    /// Ticket: docs/38-tickets/90-agent-ux/P2D.5-child-rollup.md
+    /// `rollup` is ACCEPTED AND NOT DRAWN here. A parked row is one line already
+    /// holding a glyph, a name, a branch and a time, and there is nowhere on it to put
+    /// a tally without pushing one of those four off — but the reason it is SAFE not
+    /// to is the rule this ticket adds, on both paths a row can become parked:
+    ///
+    ///   * BY YOU — `InboxBulkAction.settle.isAvailable(for:rollups:)` withholds Settle
+    ///     from a parent while a descendant is blocked or running, so the action that
+    ///     would collapse the row is not offered while there is something under it to
+    ///     hide. Asserted in section A4b of `runAgentInboxChecks`.
+    ///   * BY DERIVATION — `LifecycleBlockers.includingDescendants` folds a
+    ///     descendant's blockers into the parent's before `InboxLifecycle.resolve` sees
+    ///     them, landing them on the rung that outranks both "I said done" and a
+    ///     snooze, so the resolved lifecycle is `.active` and
+    ///     `RowVariant.forLifecycle(.active)` is a CARD. Asserted directly in
+    ///     `runParentBlockedByDescendantCheck`.
+    ///
+    /// The honest limit, since a comment that overstates is worse than none: NOTHING
+    /// PRODUCES A PARKED ROW YET. `AgentInboxRowBuilder` still hands every row
+    /// `.active` (P4.2 recorded the same gap — the writers of the stored facts are
+    /// P4.3–P4.6), so today the second path is a proof about a function rather than
+    /// about a rendering. When a writer lands, that is the check to look at.
     func apply(_ row: AgentInboxRow, emphasis: RowEmphasis, indent: Double,
-               disclosure: RowDisclosure = .none, isSelected: Bool = false,
+               disclosure: RowDisclosure = .none, rollup: ChildRollup? = nil,
+               isSelected: Bool = false,
                isInteracting: Bool = false, now: Date = Date()) {
         shown = (row, emphasis, disclosure, isInteracting, now)
         card.isSelected = isSelected

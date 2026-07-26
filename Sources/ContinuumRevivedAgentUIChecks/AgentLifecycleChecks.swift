@@ -428,11 +428,115 @@ private func runLifecycleBlockerVocabularyCheck() {
            "no pending request is no blocker")
 }
 
+// Ticket: docs/38-tickets/90-agent-ux/P2D.5-child-rollup.md
+//
+// A PARENT IS NOT SETTLEABLE WHILE ANYTHING UNDER IT IS BLOCKED OR RUNNING — the
+// packet's second half, and deliberately the SAME rule as "a blocker outranks an
+// explicit settle" rather than a new one: a descendant's blockers are folded into
+// the parent's before `resolve` ever runs, so they land on step 1 and everything
+// already proved about that step applies unchanged.
+//
+// THE CONSEQUENCE THAT MAKES THE COLLAPSED ROW SAFE, asserted at the bottom: a
+// parent holding a blocked descendant resolves `.active`, and
+// `RowVariant.forLifecycle(.active)` is a full CARD. So the row that has to show a
+// rollup always has the card's room to show it in, and the one-line parked variant
+// never has to carry one.
+//
+// SIX NEGATIVE TESTS OBSERVED RED at exit 1 against the final code, quoted VERBATIM
+// and reported WHERE THEY LANDED rather than where they were aimed — the set-algebra
+// block runs first, so three of the four mutations below are caught by it before the
+// named witness ever evaluates:
+//   1. `includingDescendants` returning `self` (children ignored) → "any descendant
+//      blocks, not just the first — got 0"
+//   2. …returning `descendants.reduce(.unblocked)` (the agent's own lost) → "an
+//      agent's own blocker survives the rollup — got 0"
+//   3. …folding with `intersection` instead of `union` → "any descendant blocks, not
+//      just the first — got 0"
+//   4. …unioning only `descendants.first` → "any descendant blocks, not just the
+//      first — got 0"
+//   5. mutation 1 AGAIN with the set-algebra block deleted, so the named witness is
+//      the only thing left that can catch it → "a blocked child outranks the parent's
+//      own \"I said done\" — got settled(at: 2026-07-26 20:20:00 +0000)". This is the
+//      one that proves the witness has teeth of its own.
+//   6. `resolve`'s blocker rung made to defer to `.settled` — the P4.2 rung this
+//      whole ticket rides on. It is red one check EARLIER, at P4.2's own table:
+//      "precedence: a settled agent that is waiting on an approval MUST resolve
+//      .active — expected active, resolved settled(…)". The dependency is therefore
+//      guarded by its owner, which is where it belongs.
+private func runParentBlockedByDescendantCheck() {
+    let now = Date(timeIntervalSinceReferenceDate: 806_800_000)
+    let quiet = now.addingTimeInterval(-10_000)
+
+    // The rollup itself, as a set operation: total, associative, idempotent.
+    expect(LifecycleBlockers.unblocked.includingDescendants([]) == .unblocked,
+           "a childless agent's blockers are its own")
+    expect(LifecycleBlockers.pendingApproval.includingDescendants([]) == .pendingApproval,
+           "an agent's own blocker survives the rollup — got \(LifecycleBlockers.pendingApproval.includingDescendants([]).rawValue)")
+    expect(LifecycleBlockers.unblocked.includingDescendants([.unblocked, .unblocked]) == .unblocked,
+           "quiet children add nothing")
+    expect(LifecycleBlockers.unblocked.includingDescendants([.unblocked, .queuedTurn]) == .queuedTurn,
+           "any descendant blocks, not just the first — got \(LifecycleBlockers.unblocked.includingDescendants([.unblocked, .queuedTurn]).rawValue)")
+    expect(LifecycleBlockers.pendingInput.includingDescendants([.sessionRunning])
+           == [.pendingInput, .sessionRunning],
+           "the parent's blockers and its children's are both kept")
+    // Associativity: rolling a chain up one level at a time is the same answer as
+    // one flat call, which is what lets a caller reuse a child's rolled-up set.
+    let grandchild = LifecycleBlockers.pendingApproval
+    let child = LifecycleBlockers.sessionRunning.includingDescendants([grandchild])
+    expect(LifecycleBlockers.unblocked.includingDescendants([child])
+           == LifecycleBlockers.unblocked.includingDescendants([.sessionRunning, grandchild]),
+           "rolling a chain up level by level is the same as one flat roll")
+    expect(child.includingDescendants([child]) == child, "the roll is idempotent")
+
+    // THE NAMED WITNESS: a parent that said "done", with a child that has not.
+    // Every blocker in turn, so a fifth one is covered the moment it is declared.
+    for blocker in LifecycleBlockers.all {
+        let resolved = InboxLifecycle.resolve(
+            override: .settled,
+            blockers: LifecycleBlockers.unblocked.includingDescendants([blocker]),
+            settledAt: quiet, lastActivityAt: quiet, now: now)
+        expect(resolved == .active,
+               "a blocked child outranks the parent's own \"I said done\" — got \(resolved)")
+        // …and the row it produces is a full card, which is the room the rollup line
+        // needs. This is what makes the one-line parked variant's silence honest.
+        expect(RowVariant.forLifecycle(resolved) == .card,
+               "a parent held open by a child is a card, so it has room for its rollup — got \(RowVariant.forLifecycle(resolved).rawValue)")
+    }
+    // A snooze does not hide it either: blockers are above the snooze rung too, so
+    // parking a parent cannot park a child's raised hand with it.
+    let snoozedParent = InboxLifecycle.resolve(
+        override: .settled,
+        blockers: LifecycleBlockers.unblocked.includingDescendants([.pendingApproval]),
+        snoozedUntil: now.addingTimeInterval(3_600), lastActivityAt: quiet, now: now)
+    expect(snoozedParent == .active,
+           "a blocked child pulls a snoozed parent back too — got \(snoozedParent)")
+
+    // WHEN EVERY CHILD SETTLES, THE PARENT BECOMES SETTLEABLE. The packet's third
+    // named case, and the one that proves the rule is not simply "parents never
+    // settle".
+    let allQuiet = InboxLifecycle.resolve(
+        override: .settled,
+        blockers: LifecycleBlockers.unblocked.includingDescendants([.unblocked, .unblocked]),
+        settledAt: quiet, lastActivityAt: quiet, now: now)
+    expect(allQuiet == .settled(at: quiet),
+           "when everything under it is quiet the parent settles as it was told to — got \(allQuiet)")
+    expect(RowVariant.forLifecycle(allQuiet) == .slim,
+           "…and then it collapses like any settled row")
+
+    // The parent's OWN blocker still works with no children at all — the rollup is
+    // an addition to step 1, not a replacement for it.
+    let ownBlocker = InboxLifecycle.resolve(
+        override: .settled, blockers: LifecycleBlockers.pendingApproval.includingDescendants([]),
+        settledAt: quiet, lastActivityAt: quiet, now: now)
+    expect(ownBlocker == .active, "a childless agent's own blocker is unchanged by this ticket")
+}
+
 func runEffectiveLifecycleChecks() {
     runLifecycleBlockerVocabularyCheck()
     runEffectiveLifecycleTableCheck()
     runEffectiveLifecyclePropertyCheck()
-    print("Effective-lifecycle checks: 31 named precedence cases and 1,728 swept combinations passed — a blocker outranks \"I said done\" in every one")
+    runParentBlockedByDescendantCheck()
+    print("Effective-lifecycle checks: 31 named precedence cases, 1,728 swept combinations and the parent/descendant rollup passed — a blocker outranks \"I said done\" in every one, whether it is the agent's own or a child's")
 }
 
 // 1 · The default.

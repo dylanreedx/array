@@ -212,4 +212,58 @@ public enum InboxSort {
     public static func parentIds(in rows: [AgentInboxRow]) -> Set<UUID> {
         Set(rows.filter { $0.depth > 0 }.compactMap(\.parentId))
     }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P2D.5-child-rollup.md
+
+    /// What is under each parent in this list, for the parents that have anything
+    /// under them — the line a COLLAPSED parent keeps so that folding a group does
+    /// not hide the one row that needs a human.
+    ///
+    /// Read off the same list the view draws and BEFORE collapsing it, exactly like
+    /// `parentIds(in:)`, and nested by the same test (`depth > 0` plus a `parentId`
+    /// that is present): a rollup must count what a fold on this row would HIDE, and
+    /// `visibleRows` hides precisely those rows. A child promoted to a root because
+    /// its parent settled into the other block is on screen in its own right, so it
+    /// is nobody's rollup here — the same call the disclosure triangle already makes,
+    /// and the reason the two can never disagree about whether a group exists.
+    ///
+    /// TRANSITIVE, each descendant counted once (see `ChildRollup`): a row's tally
+    /// includes its grandchildren, and a grandchild appears in its parent's rollup
+    /// AND its grandparent's — that is not double-counting, it is two different
+    /// folds hiding the same row. Within one rollup the `visited` walk guarantees
+    /// each descendant is added a single time, so a corrupted `parentId` cycle
+    /// cannot inflate a count or hang the walk (`sortForInbox` already emits every
+    /// row exactly once, and this walks the same edges).
+    ///
+    /// Pure and in this module, so the phone can reuse it and so "what is under this
+    /// row" has one answer.
+    public static func rollups(in rows: [AgentInboxRow]) -> [UUID: ChildRollup] {
+        var childrenOf: [UUID: [AgentInboxRow]] = [:]
+        for row in rows where row.depth > 0 {
+            guard let parentId = row.parentId else { continue }
+            childrenOf[parentId, default: []].append(row)
+        }
+        guard !childrenOf.isEmpty else { return [:] }
+
+        var rollups: [UUID: ChildRollup] = [:]
+        for row in rows where childrenOf[row.id] != nil {
+            var children = 0, working = 0, needsYou = 0, failed = 0
+            var visited: Set<UUID> = [row.id]
+            var queue = childrenOf[row.id] ?? []
+            while let descendant = queue.popLast() {
+                guard visited.insert(descendant.id).inserted else { continue }
+                children += 1
+                switch descendant.state {
+                case .working: working += 1
+                case .approval, .input: needsYou += 1
+                case .failed: failed += 1
+                case .ready: break
+                }
+                queue.append(contentsOf: childrenOf[descendant.id] ?? [])
+            }
+            rollups[row.id] = ChildRollup(
+                children: children, working: working, needsYou: needsYou, failed: failed)
+        }
+        return rollups
+    }
 }

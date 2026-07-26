@@ -147,6 +147,32 @@ public struct LifecycleBlockers: OptionSet, Hashable, Sendable {
         case nil: return .unblocked
         }
     }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P2D.5-child-rollup.md
+
+    /// This agent's blockers TOGETHER WITH ITS DESCENDANTS' — the rule that makes a
+    /// parent un-settleable while anything under it is blocked or running.
+    ///
+    /// It is deliberately a fold into the EXISTING blocker set rather than a new rung
+    /// in `resolve`: "a child is blocked" is not a different kind of fact from "I am
+    /// blocked", it is the same fact seen from one row up, so it earns the same
+    /// precedence — step 1, above an explicit `.settled` — with no second ordering to
+    /// keep in sync. `resolve` is untouched, and everything already proved about it
+    /// (the 31-case table, the 1,728-case sweep) covers the parent case unchanged.
+    ///
+    /// DESCENDANTS, not direct children, matching `ChildRollup`: a collapsed root
+    /// hides its grandchildren too, and settling through a blocked grandchild buries
+    /// it just as completely. Union is associative and idempotent, so composing it
+    /// one level at a time up a chain gives the same answer as one flat call — which
+    /// is what lets a caller reuse a child's already-rolled-up set.
+    ///
+    /// Blockers are NOT derivable from a row's `InboxState` (the reason this takes
+    /// values rather than rows): `.sessionRunning` and `.queuedTurn` are invisible in
+    /// the five-state vocabulary, and they are two of the four things "running" means
+    /// here. Whoever supplies the parent's own blockers supplies its descendants'.
+    public func includingDescendants(_ descendants: [LifecycleBlockers]) -> LifecycleBlockers {
+        descendants.reduce(self) { $0.union($1) }
+    }
 }
 
 extension InboxLifecycle {

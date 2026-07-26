@@ -21018,6 +21018,181 @@ extension AppDelegate {
     try expect(deep.indentsForQA[deep.rowIdsForQA.firstIndex(of: parentRow.id)!] == 0,
                "the folded parent is still a root at the leading edge")
 
+    // MARK: A4b · P2D.5 · a folded parent still says what is under it
+    //
+    // The chain above is folded RIGHT NOW, so the three rows below the top are off
+    // screen — which is exactly the state this ticket exists for. The rollup is read
+    // off the laid-out label, not recomputed, and it is TRANSITIVE: the top of the
+    // chain counts the grandchild and the great-grandchild too, because folding it
+    // hid them too.
+    //
+    // SIX NEGATIVE TESTS OBSERVED RED at exit 1 against the final code, quoted
+    // verbatim — three on the pure suite (`ContinuumRevivedAgentUIChecks`), three here:
+    //
+    //   1. `rollups(in:)` walking only direct children → pure: "a root counts its
+    //      grandchild too, once — got …(children: 1, working: 1, …)". The transitive
+    //      decision is the packet's named watch-out, and this is what pins it.
+    //   2. the walk seeded so the parent is in its own subtree → pure: "a root counts
+    //      its grandchild too, once — got …(children: 3, working: 1, needsYou: 1, …)"
+    //      — the "counted exactly once" half of the same watch-out, and a different
+    //      number from mutation 1, which is why the fixture is three deep.
+    //   3. `rollups(in:)` keyed on `parentId` without the `depth > 0` nesting test →
+    //      pure: "a settled parent whose child was promoted has no group here — got
+    //      […E5: …(children: 1, needsYou: 1, …)]" — the cross-block bug P2D.4's
+    //      cross-review already found in `visibleRows`, which is why this reuses that
+    //      test rather than inventing a second rule.
+    //   4. `rollupsByParent` measured on the COLLAPSED list instead of the sorted one
+    //      → "a folded parent still says what it is hiding, ahead of its own role —
+    //      got 'orchestrator · claude-opus-5'". The line vanishes at the only moment
+    //      it matters; same shape as P2D.4's negative test 4, and the reason both are
+    //      measured pre-fold.
+    //   5. the cell drawing the rollup whatever the disclosure says → "an expanded
+    //      parent's children speak for themselves — got '3 children · 3 working ·
+    //      orchestrator · claude-opus-5'"
+    //   6. `metaText` appending the rollup instead of leading with it → "a folded
+    //      parent still says what it is hiding, ahead of its own role — got
+    //      'orchestrator · claude-opus-5 · 3 children · 3 working'"
+    let foldedTopIndex = deep.rowIdsForQA.firstIndex(of: parentRow.id)!
+    let foldedTopLine = deep.metaLinesForQA[foldedTopIndex]
+    try expect(foldedTopLine == "3 children · 3 working · \(parentRow.role!) · \(parentRow.model!)",
+               "a folded parent still says what it is hiding, ahead of its own role — got '\(foldedTopLine)'")
+    try expect(deep.clickDisclosureForQA(id: parentRow.id), "unfold the chain again")
+    deep.layoutForQA()
+    try expect(deep.metaLinesForQA[foldedTopIndex] == "\(parentRow.role!) · \(parentRow.model!)",
+               "an expanded parent's children speak for themselves — got '\(deep.metaLinesForQA[foldedTopIndex])'")
+    // …and the middle of the chain rolls up only what is under IT, so the tally is
+    // per-fold rather than one number copied down the tree.
+    try expect(deep.clickDisclosureForQA(id: childRow.id), "the middle of the chain must fold too")
+    deep.layoutForQA()
+    let middleIndex = deep.rowIdsForQA.firstIndex(of: childRow.id)!
+    try expect(deep.metaLinesForQA[middleIndex].hasPrefix("2 children · 2 working · "),
+               "the middle of the chain counts only what is below it — got '\(deep.metaLinesForQA[middleIndex])'")
+    // A LEAF NEVER GAINS A LINE IT HAS NO GROUP FOR, which is what makes the tally a
+    // statement rather than decoration on every row.
+    let leafIndex = deep.rowIdsForQA.firstIndex(of: fixture.first { row in
+        row.role != nil && row.model != nil && !fixture.contains { $0.parentId == row.id }
+    }!.id)!
+    try expect(!deep.metaLinesForQA[leafIndex].contains("child"),
+               "a row with no group says nothing about one — got '\(deep.metaLinesForQA[leafIndex])'")
+
+    // THE PACKET'S OWN LINE, on a group that actually needs someone: the state tallies
+    // are read off the descendants' states, and only the non-zero ones are named.
+    let waitingGrandchild = AgentInboxRow(
+        id: grandchild.id, title: grandchild.title, projectName: grandchild.projectName,
+        workspaceName: grandchild.workspaceName, state: .approval, model: grandchild.model,
+        role: grandchild.role, createdAt: grandchild.createdAt, parentId: grandchild.parentId)
+    let waiting = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    waiting.clock = { LabFixtures.inboxNow }
+    waiting.reload(rows: fixture + [waitingGrandchild])
+    let waitingWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    waitingWindow.contentView = waiting
+    waiting.layoutForQA()
+    try expect(waiting.clickDisclosureForQA(id: parentRow.id), "fold the group that is waiting")
+    waiting.layoutForQA()
+    let waitingIndex = waiting.rowIdsForQA.firstIndex(of: parentRow.id)!
+    let waitingLine = waiting.metaLinesForQA[waitingIndex]
+    try expect(waitingLine.hasPrefix("2 children · 1 needs you · 1 working · "),
+               "a fold over an approval says so, loudest tally first — got '\(waitingLine)'")
+    // THE LINE IS NOT CLIPPED AWAY by the card it has to live on: the rollup joins the
+    // meta line rather than taking a fourth one, so the row height must not have moved
+    // and the label must still be laid out with room in it. Asserted numerically —
+    // the runbook forbids certifying a rendering by eye.
+    try expect(waiting.rowHeightsForQA[waitingIndex] == AgentInboxView.rowHeight,
+               "a rollup must not change the card's height — \(waiting.rowHeightsForQA[waitingIndex])pt, wanted \(AgentInboxView.rowHeight)pt")
+
+    // AND THE HALF THAT IS NOT A RENDERING: SETTLING THE PARENT IS REFUSED while
+    // something under it is blocked or running. Through the production predicates the
+    // bulk bar and the context menu both go through, not a re-derivation — and named
+    // in the tooltip, because a greyed item that will not say why is a dead end.
+    //
+    // FOUR MORE NEGATIVE TESTS OBSERVED RED at exit 1, quoted:
+    //   7. the `rollups[row.id]?.holdsParentOpen` term dropped from
+    //      `InboxBulkAction.settle.isAvailable` → "a parent with an approval under it
+    //      may not be settled — got [ContinuumRevived.InboxBulkAction.settle, …snooze,
+    //      …markUnread, …archive, …delete]"
+    //   8. `ChildRollup.holdsParentOpen` written as `needsYou > 0` only (a running
+    //      child left able to be settled through) → "a parent with a working child may
+    //      not be settled either"
+    //   9. …written as `needsAnyone` (a FAILED child folded in) → "a failed child does
+    //      not hold its parent open — the rule is the same one the row answers for
+    //      itself"
+    //  10. `InboxRowAction.settle` not passing `rollups` through to the bulk rule →
+    //      "the menu greys exactly what the bar withholds — got nil"
+    let orchestratorRows = fixture + [waitingGrandchild]
+    let waitingRollups = InboxSort.rollups(in: InboxSort.sortForInbox(rows: orchestratorRows))
+    try expect(waitingRollups[parentRow.id]?.holdsParentOpen == true,
+               "the fixture's orchestrator must actually be held open, or the next lines are vacuous")
+    try expect(!InboxBulkAction.available(for: [parentRow], rollups: waitingRollups).contains(.settle),
+               "a parent with an approval under it may not be settled — got \(InboxBulkAction.available(for: [parentRow], rollups: waitingRollups))")
+    try expect(InboxBulkAction.available(for: [parentRow]).contains(.settle),
+               "…and without the rollup it is settleable, or the term above is not what withheld it")
+    let settleReason = InboxRowAction.settle.disabledReason(
+        for: [parentRow], isWired: true, rollups: waitingRollups)
+    try expect(settleReason == "\(parentRow.title) has work under it waiting on you.",
+               "the menu greys exactly what the bar withholds, and says why — got \(String(describing: settleReason))")
+    // A RUNNING child holds it open too, and says a different sentence.
+    let busyRollups = InboxSort.rollups(in: InboxSort.sortForInbox(rows: fixture + [grandchild]))
+    try expect(!InboxBulkAction.available(for: [parentRow], rollups: busyRollups).contains(.settle),
+               "a parent with a working child may not be settled either")
+    try expect(InboxRowAction.settle.disabledReason(for: [parentRow], isWired: true, rollups: busyRollups)
+                == "\(parentRow.title) has work under it still running.",
+               "…and the tooltip says which of the two it is")
+    // A FAILED child does NOT: a failed row can be settled on its own account, so the
+    // rule must not be stricter about somebody else's row than about your own.
+    let brokenChild = AgentInboxRow(
+        id: grandchild.id, title: grandchild.title, projectName: grandchild.projectName,
+        state: .failed, model: grandchild.model, role: grandchild.role,
+        createdAt: grandchild.createdAt, parentId: parentRow.id)
+    let quietParent = fixture.filter { $0.id != childRow.id } + [brokenChild]
+    let brokenRollups = InboxSort.rollups(in: InboxSort.sortForInbox(rows: quietParent))
+    try expect(brokenRollups[parentRow.id]?.failed == 1 && brokenRollups[parentRow.id]?.children == 1,
+               "the broken-child fixture must leave exactly one failed descendant — got \(String(describing: brokenRollups[parentRow.id]))")
+    try expect(InboxBulkAction.available(for: [parentRow], rollups: brokenRollups).contains(.settle),
+               "a failed child does not hold its parent open — the rule is the same one the row answers for itself")
+    try expect(InboxBulkAction.settle.isAvailable(for: parentRow),
+               "…and the parent was settleable to begin with, or that says nothing")
+
+    // THE RULE OVER ALL FIVE STATES, not just the two the fixture holds. Raised by
+    // cross-review round 2, which pointed out that `holdsParentOpen` counts STATES
+    // while `LifecycleBlockers` has two members (`.sessionRunning`, `.queuedTurn`) no
+    // state can express — a gap that is unclosable here rather than deferred, because
+    // a row carries no blocker facts (P3.1) and nothing in production constructs a
+    // `LifecycleBlockers` at all yet (P4.2 landed `resolve` with no caller). What can
+    // be pinned is the rule as the packet states it, exhaustively.
+    //
+    // ITS FIRST VERSION WAS WRONG AND THE SWEEP SAID SO, which is the reason it is
+    // written this way: it asserted the descendant rule was EQUIVALENT to the row's own
+    // and went red at "a `working` descendant must hold its parent open exactly when a
+    // `working` row holds itself open — descendant true, own false". A `working` row is
+    // settleable on its own account and a `working` CHILD is not — the packet says
+    // "blocked or running" — so the two rules are deliberately asymmetric and the sweep
+    // states the rule per state instead of assuming a symmetry.
+    //
+    // TWO MORE NEGATIVE TESTS OBSERVED RED:
+    //  11. `holdsParentOpen` given an extra `|| failed > 0` → "a failed child does not
+    //      hold its parent open — the rule is the same one the row answers for itself".
+    //      Reported at the named `failed` case above, which runs first — so the sweep's
+    //      OWN teeth were witnessed separately:
+    //  12. `holdsParentOpen` written `children > failed`, which keeps the named failed
+    //      case green and can only be caught here → "a `ready` descendant must not hold
+    //      its parent open — held true".
+    let holdsOpenStates: Set<InboxState> = [.approval, .input, .working]
+    for state in InboxState.allCases {
+        let descendant = AgentInboxRow(
+            id: UUID(uuidString: "00000000-0000-0000-0000-00000000050\(InboxState.allCases.firstIndex(of: state)!)")!,
+            title: "under", state: state,
+            createdAt: LabFixtures.inboxNow, parentId: parentRow.id)
+        let sweptRollups = InboxSort.rollups(
+            in: InboxSort.sortForInbox(rows: [parentRow, descendant]))
+        try expect(sweptRollups[parentRow.id]?.children == 1,
+                   "the \(state.rawValue) sweep must actually nest one descendant — got \(String(describing: sweptRollups[parentRow.id]))")
+        let held = !InboxBulkAction.settle.isAvailable(for: parentRow, rollups: sweptRollups)
+        try expect(held == holdsOpenStates.contains(state),
+                   "a `\(state.rawValue)` descendant \(holdsOpenStates.contains(state) ? "must" : "must not") hold its parent open — held \(held)")
+    }
+
     // A TRIANGLE THAT OUTLIVES ITS CHILDREN (from cross-review). The disclosure is
     // VIEW state, so it is not part of `AgentInboxRow` and the incremental path's
     // value comparison cannot see it move: with the group folded, the child leaving
@@ -22375,6 +22550,6 @@ extension AppDelegate {
                "an id with no agent record must be refused")
 
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary")
     }
 }

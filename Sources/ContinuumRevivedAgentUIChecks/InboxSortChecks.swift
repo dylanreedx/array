@@ -38,6 +38,12 @@ import Foundation
 //   8. A FOLDED GROUP HIDES ITS WHOLE SUBTREE — `visibleRows` drops descendants at
 //      any depth, leaves the other groups alone, and is a no-op for an id that is
 //      nobody's parent here.
+//
+// Ticket: docs/38-tickets/90-agent-ux/P2D.5-child-rollup.md
+//   9. A PARENT'S ROLLUP COUNTS ITS WHOLE SUBTREE, ONCE — `rollups(in:)` agrees
+//      with `parentIds(in:)` about which rows have a group at all, counts a
+//      grandchild in its grandparent's tally, counts nobody twice, and is derived
+//      fresh from the list rather than stored on a row.
 
 func runInboxSortChecks() {
     runInboxFrozenUnderActivityCheck()
@@ -48,7 +54,8 @@ func runInboxSortChecks() {
     runInboxCycleCheck()
     runInboxDepthCheck()
     runInboxCollapseCheck()
-    print("InboxSort checks: frozen under activity (200 trials, status-sorted witness fails), parent/child nesting, lifecycle relocation, history by end time, tie determinism, cycle termination, depth assignment (orphan promoted, chain capped at \(AgentInboxRow.maxDepth)) and subtree collapse passed")
+    runInboxRollupCheck()
+    print("InboxSort checks: frozen under activity (200 trials, status-sorted witness fails), parent/child nesting, lifecycle relocation, history by end time, tie determinism, cycle termination, depth assignment (orphan promoted, chain capped at \(AgentInboxRow.maxDepth)), subtree collapse and transitive child rollup passed")
 }
 
 // MARK: - Fixture
@@ -558,4 +565,125 @@ private func runInboxCollapseCheck() {
            "a settled parent whose child was promoted has no children HERE, so it draws no triangle")
     expect(InboxSort.visibleRows(crossBlock, collapsed: [rowOne]).map(\.id) == crossBlock.map(\.id),
            "folding a settled parent must not hide the live child that was promoted out of its group, got \(InboxSort.visibleRows(crossBlock, collapsed: [rowOne]).map(\.id))")
+}
+
+// MARK: - 9 · The rollup on a collapsed parent
+//
+// Ticket: docs/38-tickets/90-agent-ux/P2D.5-child-rollup.md
+//
+// THE DECISION THE PACKET ASKS TO BE MADE AND ASSERTED: the rollup is TRANSITIVE
+// (a grandchild counts in its grandparent's tally) and each descendant is counted
+// EXACTLY ONCE. The fixture below is built so those are two different failures
+// with two different numbers — a direct-children-only rollup reports 1 where this
+// asserts 2, and a walk that re-visits or includes the parent itself reports 3.
+private func runInboxRollupCheck() {
+    // A three-deep chain (root → child → grandchild) beside a two-deep group, with
+    // every counted state represented and one `ready` descendant that must land in
+    // `children` and in none of the three tallies.
+    let rows = InboxSort.sortForInbox(rows: [
+        sortRow(rowOne, spawnedAfter: 500),
+        sortRow(rowTwo, spawnedAfter: 400, state: .working, parentId: rowOne),
+        sortRow(rowThree, spawnedAfter: 300, state: .approval, parentId: rowTwo),
+        sortRow(rowFour, spawnedAfter: 200),
+        sortRow(rowFive, spawnedAfter: 100, state: .failed, parentId: rowFour),
+    ])
+    // Vacuity: the chain has to actually be three deep, or "transitive" is a claim
+    // about a list that has no grandchild in it.
+    expect(rows.map(\.id) == [rowOne, rowTwo, rowThree, rowFour, rowFive]
+           && rows.map(\.depth) == [0, 1, 2, 0, 1],
+           "the rollup fixture must nest three deep beside a two-deep group — got \(rows.map { ($0.title.suffix(2), $0.depth) })")
+
+    let rollups = InboxSort.rollups(in: rows)
+
+    // A ROLLUP EXISTS FOR EXACTLY THE ROWS THAT DRAW A TRIANGLE. The disclosure and
+    // the rollup answer the same question ("is there a group here"), so they are
+    // pinned to each other rather than left to two derivations agreeing by luck.
+    expect(Set(rollups.keys) == InboxSort.parentIds(in: rows),
+           "a rollup exists for exactly the rows with children here — rollups \(rollups.keys.count), parents \(InboxSort.parentIds(in: rows).count)")
+    expect(rollups[rowThree] == nil && rollups[rowFive] == nil,
+           "a leaf has no rollup at all, rather than a rollup of zero")
+
+    // TRANSITIVE, AND ONCE EACH. `rowOne` has one child and one grandchild.
+    expect(rollups[rowOne] == ChildRollup(children: 2, working: 1, needsYou: 1, failed: 0),
+           "a root counts its grandchild too, once — got \(String(describing: rollups[rowOne]))")
+    expect(rollups[rowTwo] == ChildRollup(children: 1, working: 0, needsYou: 1, failed: 0),
+           "the middle of the chain counts only what is below IT — got \(String(describing: rollups[rowTwo]))")
+    expect(rollups[rowFour] == ChildRollup(children: 1, working: 0, needsYou: 0, failed: 1),
+           "the other group is counted on its own — got \(String(describing: rollups[rowFour]))")
+    // The two folds that hide the grandchild are two different folds, so it is in
+    // both tallies — that is the shape of the thing, not a double count.
+    expect(rollups[rowOne]!.children == rollups[rowTwo]!.children + 1,
+           "the root's tally is its child plus everything the child's tally holds")
+
+    // `needsAnyone` is the one bit a collapsed row is really being asked for, and
+    // `failed` counts toward it: broken work under a fold is the loudest thing a
+    // fold can hide.
+    expect(rollups[rowOne]!.needsAnyone && rollups[rowFour]!.needsAnyone,
+           "a group holding an approval, or a failure, is asking for someone")
+    let quiet = InboxSort.rollups(in: InboxSort.sortForInbox(rows: [
+        sortRow(rowOne, spawnedAfter: 500),
+        sortRow(rowTwo, spawnedAfter: 400, state: .working, parentId: rowOne),
+        sortRow(rowThree, spawnedAfter: 300, state: .ready, parentId: rowOne),
+    ]))
+    expect(quiet[rowOne] == ChildRollup(children: 2, working: 1, needsYou: 0, failed: 0),
+           "a `ready` descendant is a child and nothing else — got \(String(describing: quiet[rowOne]))")
+    expect(!quiet[rowOne]!.needsAnyone,
+           "a group of working and finished agents is not asking for anyone")
+
+    // THE LINE, including the plural and the order. Counts first (it is what says
+    // the fold is hiding anything), then only the non-zero tallies, loudest first.
+    expect(rollups[rowOne]!.summary == "2 children · 1 needs you · 1 working",
+           "the rollup line leads with the count and then the loudest tally — got '\(rollups[rowOne]!.summary)'")
+    expect(rollups[rowTwo]!.summary == "1 child · 1 needs you",
+           "one child is a child — got '\(rollups[rowTwo]!.summary)'")
+    expect(rollups[rowFour]!.summary == "1 child · 1 failed",
+           "a broken descendant is named — got '\(rollups[rowFour]!.summary)'")
+    expect(quiet[rowOne]!.summary == "2 children · 1 working",
+           "a group with nothing to answer says only what it has — got '\(quiet[rowOne]!.summary)'")
+    expect(ChildRollup(children: 3, working: 0, needsYou: 0, failed: 0).summary == "3 children",
+           "a resting group says its size and stops")
+
+    // DERIVED, NEVER STORED. Move one grandchild's state and the ROOT's tally moves
+    // with it, from the same rows — nothing on the row remembers a stale count.
+    let answered = InboxSort.rollups(in: InboxSort.sortForInbox(rows: [
+        sortRow(rowOne, spawnedAfter: 500),
+        sortRow(rowTwo, spawnedAfter: 400, state: .working, parentId: rowOne),
+        sortRow(rowThree, spawnedAfter: 300, state: .ready, parentId: rowTwo),
+        sortRow(rowFour, spawnedAfter: 200),
+        sortRow(rowFive, spawnedAfter: 100, state: .failed, parentId: rowFour),
+    ]))
+    expect(answered[rowOne] == ChildRollup(children: 2, working: 1, needsYou: 0, failed: 0),
+           "answering the grandchild empties the root's `needs you` — got \(String(describing: answered[rowOne]))")
+
+    // A CHILD PROMOTED OUT OF ITS GROUP IS NOBODY'S ROLLUP, the same call
+    // `visibleRows` and `parentIds` make: its parent settled into history, so the
+    // child is a root on screen and counting it under a row it no longer sits with
+    // would report a group that is not there to fold.
+    let crossBlock = InboxSort.sortForInbox(rows: [
+        sortRow(rowOne, spawnedAfter: 400, lifecycle: .settled(at: sortEpoch)),
+        sortRow(rowTwo, spawnedAfter: 300, state: .approval, parentId: rowOne),
+    ])
+    expect(crossBlock.map(\.depth) == [0, 0],
+           "the cross-block fixture must promote the child, got \(crossBlock.map(\.depth))")
+    expect(InboxSort.rollups(in: crossBlock).isEmpty,
+           "a settled parent whose child was promoted has no group here — got \(InboxSort.rollups(in: crossBlock))")
+
+    // AN EMPTY LIST AND A FLAT ONE PRODUCE NOTHING, rather than a map of zeroes the
+    // view would have to filter.
+    expect(InboxSort.rollups(in: []).isEmpty, "no rows, no rollups")
+    expect(InboxSort.rollups(in: InboxSort.sortForInbox(rows: sortFixture())).isEmpty,
+           "a flat list has no groups in it")
+
+    // A CORRUPTED CYCLE TERMINATES AND DOES NOT INFLATE A COUNT. `sortForInbox`
+    // takes the first row of a cycle as a root and nests the rest under it, so a
+    // rollup does exist here — what must not happen is a hang or a row counted twice.
+    let cycle = InboxSort.sortForInbox(rows: [
+        sortRow(rowOne, spawnedAfter: 400, state: .working, parentId: rowTwo),
+        sortRow(rowTwo, spawnedAfter: 300, state: .working, parentId: rowOne),
+    ])
+    let cycleRollups = InboxSort.rollups(in: cycle)
+    expect(cycleRollups.values.allSatisfy { $0.children < cycle.count },
+           "no rollup may count more descendants than there are other rows — got \(cycleRollups)")
+    expect(cycleRollups.values.allSatisfy { $0.children == $0.working + $0.needsYou + $0.failed },
+           "every descendant of a cycle is accounted for exactly once — got \(cycleRollups)")
 }

@@ -228,6 +228,110 @@ public enum RowEmphasis: String, CaseIterable, Equatable, Sendable {
     public var accentOpacity: Double { Opacity.full }
 }
 
+// Ticket: docs/38-tickets/90-agent-ux/P2D.5-child-rollup.md
+/// What is going on UNDER a parent row — the one thing a collapsed parent still
+/// has to be able to say, because folding a group hides exactly the child that
+/// the inbox exists to surface (P2D.4 made the fold able to hide an agent asking
+/// for approval, and said so in as many words).
+///
+/// **TRANSITIVE, and each descendant counted exactly once.** The packet's
+/// watch-out asks for that decision to be made and asserted rather than left
+/// implicit, and the fold is what settles it: `InboxSort.visibleRows` hides a
+/// folded parent's children AND their children, so a rollup that stopped at the
+/// direct children would under-report precisely the rows that vanished. With
+/// `AgentInboxRow.maxDepth == 2` a root can have grandchildren, so this is a live
+/// case and not a hypothetical. `children` is therefore "descendants of this row
+/// in this list", and `runInboxRollupChecks` pins the count against a three-deep
+/// chain where direct-children-only and double-counting give different answers.
+///
+/// DERIVED, NEVER STORED (the packet's other watch-out): there is no rollup field
+/// on `AgentInboxRow`. `InboxSort.rollups(in:)` recomputes it from the list every
+/// time, so it cannot disagree with the rows beside it.
+public struct ChildRollup: Equatable, Sendable {
+    /// Every descendant, counted once. Never zero for a rollup that exists —
+    /// `InboxSort.rollups(in:)` emits an entry only for a row that has one.
+    public let children: Int
+    /// Descendants in `InboxState.working`.
+    public let working: Int
+    /// Descendants in one of the two ACT-NOW states, `approval` and `input` —
+    /// the pair `InboxState.accent` colours as "act now" (P3.2). Read off the
+    /// state axis only: `InboxAttention.unread` is about whether YOU have looked,
+    /// which is not the same question as whether the agent is waiting.
+    public let needsYou: Int
+    /// Descendants in `InboxState.failed`.
+    public let failed: Int
+
+    public init(children: Int, working: Int, needsYou: Int, failed: Int) {
+        self.children = children
+        self.working = working
+        self.needsYou = needsYou
+        self.failed = failed
+    }
+
+    /// True when something down there is yours to deal with. `failed` counts:
+    /// broken work under a folded parent is the loudest thing the fold can hide.
+    public var needsAnyone: Bool { needsYou > 0 || failed > 0 }
+
+    /// True when a descendant is BLOCKED OR RUNNING, which is what makes this row
+    /// un-settleable — the packet's rule, in the rollup's own vocabulary.
+    ///
+    /// `needsYou` is the rollup's spelling of the row predicate "is waiting on you"
+    /// and `working` of "has the next move"; the two together are exactly the
+    /// conditions that already withhold Settle from a row on its own account, now
+    /// asked of everything the row is responsible for.
+    ///
+    /// `failed` is deliberately ABSENT, and the asymmetry with `needsAnyone` is the
+    /// point: a failed agent CAN be settled — nothing is waiting on the answer and no
+    /// turn is in flight — so a failed child must not hold its parent open either, or
+    /// the rule would be stricter about somebody else's row than about your own. It
+    /// still shows in the rollup line, because "1 failed" is worth reading before you
+    /// settle the group.
+    ///
+    /// WHAT THIS DELIBERATELY CANNOT SEE, from cross-review (codex, gpt-5.5, round 2):
+    /// `LifecycleBlockers` has four members and two of them — `.sessionRunning` and
+    /// `.queuedTurn` — are invisible in the five-state vocabulary this counts, so a
+    /// descendant with a queued turn does not hold its parent open here. That is not
+    /// an oversight being deferred, it is the ONLY honest answer available: a row
+    /// carries no blocker facts (P3.1 flattened it to a state), nothing in production
+    /// constructs a `LifecycleBlockers` yet at all (P4.2 landed `resolve` with no
+    /// caller), and inventing the two missing bits from a state would be the exact
+    /// derivation `LifecycleBlockers` documents as lossy.
+    ///
+    /// AND WHERE IT IS DELIBERATELY STRICTER THAN THE ROW'S OWN RULE, by exactly one
+    /// state: a `working` row CAN be settled on its own account (`InboxBulkAction`
+    /// withholds Settle only from `approval`/`input`), but a `working` DESCENDANT holds
+    /// its parent open. That is the packet's own wording — "not settleable while any
+    /// child is blocked **or running**" — and the asymmetry is the difference between
+    /// the two acts: settling your own running row parks one thing you chose to stop
+    /// watching, while settling a parent collapses a group whose output you have not
+    /// seen yet and cannot see, because the fold is what put it out of sight. An
+    /// attempt to write this as an equivalence with the row rule was caught red by the
+    /// state sweep below, which is why the sweep asserts the rule PER STATE rather than
+    /// as a symmetry: `approval`, `input` and `working` hold a parent open; `ready` and
+    /// `failed` do not. All five are gated, so a blocker producer landing later must
+    /// state where it belongs rather than inherit a guess.
+    public var holdsParentOpen: Bool { needsYou > 0 || working > 0 }
+
+    /// The compact secondary line — `"3 children · 1 needs you"`.
+    ///
+    /// The count of descendants is always first, because it is what tells you the
+    /// fold is hiding anything at all. After it, only the NON-ZERO tallies, in
+    /// descending order of what they demand of you: `needs you`, then `failed`,
+    /// then `working`. A resting group therefore reads `"3 children"` and nothing
+    /// more — the same restraint `InboxState.ready` shows by carrying no label.
+    ///
+    /// The separator is ` · `, the same one `AgentInboxCellView.metaText` already
+    /// uses for `role · model`, so the line the rollup joins does not gain a second
+    /// punctuation vocabulary.
+    public var summary: String {
+        var parts = ["\(children) \(children == 1 ? "child" : "children")"]
+        if needsYou > 0 { parts.append("\(needsYou) needs you") }
+        if failed > 0 { parts.append("\(failed) failed") }
+        if working > 0 { parts.append("\(working) working") }
+        return parts.joined(separator: " · ")
+    }
+}
+
 public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// AGGREGATE agent identity — the same `UUID` keyspace as
     /// `AgentsBoardRow.id`, `ActivityLogSnapshot.byAgent`, `AgentContextIndex`
