@@ -206,10 +206,13 @@ extension InboxLifecycle {
     ///      ABOVE the inactivity rung and therefore suppresses auto-settle — the
     ///      reason the override is a tri-state at all (P4.1).
     ///   5. **Inactivity past `autoSettleAfter` → `.settled`.** Reachable only on a
-    ///      `.neutral` override. In SECONDS, so this file needs no calendar; P4.3
-    ///      owns the `autoSettleAfterDays` setting and the conversion. nil means no
-    ///      auto-settle is configured, which is what every caller passes until it
-    ///      lands.
+    ///      `.neutral` override. In SECONDS, so this file needs no calendar; the
+    ///      window is supplied by `AgentAutoSettleConfig` in Core (P4.3:
+    ///      `autoSettleAfterDays`, default 3, clamped to 1–90, `"Off"` = nil), which
+    ///      does the days→seconds conversion. nil means no auto-settle is
+    ///      configured, and the comparison is against `lastActivityAt` — the
+    ///      AGENT's last activity, never when the human last read the row, or
+    ///      looking at a row would keep it alive forever.
     ///   6. Otherwise `.active`.
     ///
     /// WHERE THE SETTLED DATE COMES FROM, since `.settled(at:)` carries one (P3.4

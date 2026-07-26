@@ -220,6 +220,12 @@ public enum SettingsSchema {
                         options: AgentModelConfig.thinkingOptions,
                         default: AgentModelConfig.defaultThinking
                     ),
+                    .choice(
+                        key: AgentAutoSettleConfig.afterDaysKey,
+                        label: "Auto-Settle After (days)",
+                        options: AgentAutoSettleConfig.options,
+                        default: AgentAutoSettleConfig.defaultOption
+                    ),
                     .info(label: "Choose which agent events send a push notification. Security alerts always notify."),
                     .toggle(key: PersistedPushCategoryPreferences.key(for: .approvalRequested), label: "Approval Requests", default: PushCategory.approvalRequested.defaultEnabled),
                     .toggle(key: PersistedPushCategoryPreferences.key(for: .agentWaitingForInput), label: "Waiting for Input", default: PushCategory.agentWaitingForInput.defaultEnabled),
