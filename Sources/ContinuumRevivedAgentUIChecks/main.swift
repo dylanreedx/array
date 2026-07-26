@@ -47,4 +47,7 @@ runInboxScopeChecks()
 // Ticket: docs/38-tickets/90-agent-ux/P4.1-lifecycle-state.md
 runAgentLifecycleChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P4.2-effective-settled.md
+runEffectiveLifecycleChecks()
+
 print("ContinuumRevivedAgentUIChecks passed")
