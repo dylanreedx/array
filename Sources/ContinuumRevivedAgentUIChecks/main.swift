@@ -50,4 +50,7 @@ runAgentLifecycleChecks()
 // Ticket: docs/38-tickets/90-agent-ux/P4.2-effective-settled.md
 runEffectiveLifecycleChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P4.5-snooze-presets.md
+runSnoozePresetChecks()
+
 print("ContinuumRevivedAgentUIChecks passed")
