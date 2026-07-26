@@ -20021,6 +20021,74 @@ extension AppDelegate {
 // row and took the whole list's text with it — `chrome.agentInbox.jumpHints…
 // NSTextField: text rect is flat — luminance spread 0.000 over 2222 px`. The note
 // `BranchChipNSView` already carried about that radius was right.
+// Ticket: docs/38-tickets/90-agent-ux/P3.11-multi-select-bulk.md
+//
+// Section E is the multiple selection and what a SET of rows may do. ELEVEN NEGATIVE
+// TESTS OBSERVED RED at exit 1 with the final code, quoted verbatim:
+//
+//   1. `InboxBulkAction.available` as an OR (`rows.contains { … }`) instead of an AND —
+//      the packet's named regression, "enabling an action when one member cannot take it
+//      must FAIL" → `one blocked member removes Settle from the whole selection — got
+//      ["Settle", "Snooze ›", "Mark Unread", "Archive", "Delete"]`
+//   2. `allowsMultipleSelection = false` → `the list must allow a multiple selection at
+//      all — click, shift-click and ⌘-click are AppKit's once it does`
+//   3. `isSelected`/`isInteracting` read off the single `tableView.selectedRow` index
+//      instead of `selectedRowIndexes` → `a selected row repainted while ANOTHER row is
+//      the last selected is still selected — row 1 text alpha 0.88`.
+//      MEASURED, AND IT CHANGED THE CHECK: the obvious assertion — select two receding
+//      rows, both must be at full strength — is GREEN against this bug. A selection
+//      built one row at a time rebuilds each row at the moment it is itself the
+//      last-selected row (probed: `build row 1 selectedRow 1 set [1]`, then `build row 4
+//      selectedRow 4 set [1, 4]`), so both read full. Only a REPAINT of the row that is
+//      not the last-selected one — an incremental push under a live selection — can tell
+//      the two apart, which is why that step exists.
+//   4. `revealsOnClick` returning true for every modifier → `a shift-click extends the
+//      selection and must not reveal`. Without the gate, building a range walks the
+//      canvas through every row on the way (P3.9 switches workspace and focuses a tile).
+//   5. `updateBulkBar()` dropped from `apply(rows:changed:)` → `an agent that stopped
+//      working gives its selection Delete back — got ["Settle", "Snooze ›", "Mark
+//      Unread"]`. An incremental push keeps the selection and does NOT post a selection
+//      change (probed), so nothing else would refresh the menu.
+//   6. the empty-selection guard dropped from `available(for:)` → `an empty selection may
+//      take nothing — got ["Settle", …, "Delete"]`. `allSatisfy` over nothing is true, so
+//      without it an empty selection is offered everything.
+//   7. `minimumBulkSelection = 1` → `ONE selected row is not a bulk anything — its
+//      actions are P3.12's context menu`
+//   8. the selection/bar teardown dropped from `render` → `…so the bar must come down
+//      with it, rather than offer actions for nothing`. This one needed its own
+//      assertion: `reloadData()` empties the selection without posting a change, while
+//      `deselectAll` (the scope flip, the fold) does — so every other clearing assertion
+//      in this section stays green against it.
+//   9. `keptBranches` ignoring `isIsolated` → `a delete names the isolated agent's branch
+//      as kept — got ["agent/flake-hunt", "main"]`, i.e. the bar claiming it would keep
+//      the project's own checkout.
+//  10. the `onBulkAction == nil` gate removed from `updateBulkBar` → `…but offers nothing
+//      it cannot perform — got ["Settle", "Snooze ›", "Mark Unread", "Archive", "Delete"]`
+//  11. the caption back to `Keeps ⎇ …` — the wording cross-review showed to be a promise
+//      this list cannot make, since `AgentSupervisor.cleanUpWorktree` DELETES a merged
+//      branch → `chrome.agentInbox.bulk-320x652-aqua.png: 986 of 208640 pixels differ
+//      (0.4726%…)`. The committed baseline is what holds the wording; the equality
+//      against `InboxBulkActionBar.keptText` in the check would move with the code.
+//
+// THREE OF FOUR CROSS-REVIEW FINDINGS WERE FIXED and the fourth is answered here:
+//   * the shipped sidebar sets no `onBulkAction`, so the bar would have offered five
+//     silent no-ops → the menu now appears only when a host has wired it (witness 10);
+//   * the caption over-promised (witness 11);
+//   * the gestures are not verified (see the note in the section body — the two
+//     mechanisms a check could drive were tried and neither works headlessly);
+//   * "unavailable actions should be disabled, not hidden" is NOT taken: the packet says
+//     "bulk actions appear only when every selected row can take the action", and five
+//     greyed items in a 320pt sidebar pose a question ("which of my six is blocking
+//     this?") the bar has no room to answer.
+//
+// The VISUAL half is the `chrome.agentInbox.bulk` Lab card (two rows selected, the bar
+// up), which the phase-0 gates hold in both appearances: geometry, contrast, pixel
+// flatness and a committed baseline. Blessing it wrote exactly its own 2 PNGs and moved
+// none of the other 56 — which is the numeric statement of "the bar is an overlay": if it
+// took height off the list, every `chrome.agentInbox…` baseline would have moved. Its
+// first render was red on the geometry gate (`NSPopUpButton spills vertically — frame y
+// 17.0…41.0 outside parent 0…40.0`), fixed by making the control own the bar's vertical
+// and the count label centre on it.
 extension AppDelegate {
     static func runAgentInboxChecks() async throws {
     enum CheckError: Error, CustomStringConvertible {
@@ -21318,7 +21386,304 @@ extension AppDelegate {
     try expect(!revealInbox.areJumpHintsVisibleForQA,
                "⌘ held over a surface the jump cannot reach must not leave pills on the list")
 
+    // MARK: E · multi-select, and what a SET of rows may do (P3.11)
+
+    // E1 · THE PREDICATE, over selection sets. Pure, so it is asserted directly rather
+    // than through the menu — the menu is asserted separately in E2, off the rendered
+    // items, so neither half is checked against itself.
+    let bulkFixture = LabFixtures.inboxRows()
+    let byIdForBulk = Dictionary(uniqueKeysWithValues: bulkFixture.map { ($0.id, $0) })
+    func row(_ index: Int) throws -> AgentInboxRow {
+        guard let row = byIdForBulk[LabFixtures.inboxAgentIds[index]] else {
+            throw CheckError.failed("fixture agent \(index) is missing")
+        }
+        return row
+    }
+    let blockedRow = try row(0)      // approval, and unread
+    let runningRow = try row(1)      // working
+    let failedRow = try row(3)       // failed, isolated on its own branch
+    let quietRow = try row(4)        // ready, read, on the shared checkout
+    try expect(blockedRow.state == .approval && blockedRow.attention == .unread,
+               "setup: agent 0 must be the blocked, unread one — got \(blockedRow.state) / \(blockedRow.attention)")
+    try expect(runningRow.state == .working, "setup: agent 1 must be the running one — got \(runningRow.state)")
+    try expect(failedRow.isIsolated && failedRow.branch != nil,
+               "setup: agent 3 must be isolated on its own branch, or the kept-branch line has nothing to name")
+
+    // A selection every member of which can take everything.
+    try expect(InboxBulkAction.available(for: [failedRow, quietRow]) == InboxBulkAction.allCases,
+               "two settleable rows may take every action — got \(InboxBulkAction.available(for: [failedRow, quietRow]).map(\.title))")
+    // THE AND, one member at a time. Each of these is a set whose OTHER member can take
+    // the action, so what removes it is the one that cannot — which is the whole rule.
+    let withBlocked = InboxBulkAction.available(for: [quietRow, blockedRow])
+    try expect(!withBlocked.contains(.settle),
+               "one blocked member removes Settle from the whole selection — got \(withBlocked.map(\.title))")
+    try expect(!withBlocked.contains(.markUnread),
+               "…and that member is already unread, so Mark Unread goes too — got \(withBlocked.map(\.title))")
+    try expect(withBlocked.contains(.snooze) && withBlocked.contains(.archive) && withBlocked.contains(.delete),
+               "…while a blocked agent can still be snoozed, archived and deleted — got \(withBlocked.map(\.title))")
+    let withRunning = InboxBulkAction.available(for: [quietRow, runningRow])
+    try expect(!withRunning.contains(.archive) && !withRunning.contains(.delete),
+               "archive and delete are disabled while any selected agent is running — got \(withRunning.map(\.title))")
+    try expect(withRunning.contains(.settle) && withRunning.contains(.snooze),
+               "…and the non-destructive actions survive it — got \(withRunning.map(\.title))")
+    // Both at once: the intersection, not the last rule to run.
+    let withBoth = InboxBulkAction.available(for: [quietRow, blockedRow, runningRow])
+    try expect(withBoth == [.snooze],
+               "a blocked member and a running one leave only Snooze — got \(withBoth.map(\.title))")
+    // The lifecycle no-ops, on rows built here because nothing in the fixture is parked.
+    func lifecycled(_ base: AgentInboxRow, _ lifecycle: InboxLifecycle) -> AgentInboxRow {
+        AgentInboxRow(
+            id: base.id, title: base.title, projectName: base.projectName,
+            workspaceName: base.workspaceName, state: base.state, attention: base.attention,
+            lifecycle: lifecycle, model: base.model, role: base.role, branch: base.branch,
+            isIsolated: base.isIsolated, elapsed: base.elapsed, depth: base.depth,
+            variant: RowVariant.forLifecycle(lifecycle), createdAt: base.createdAt,
+            parentId: base.parentId)
+    }
+    let settledRow = lifecycled(quietRow, .settled(at: LabFixtures.inboxNow.addingTimeInterval(-300)))
+    try expect(!InboxBulkAction.available(for: [failedRow, settledRow]).contains(.settle),
+               "an already-settled member has nothing to settle — got \(InboxBulkAction.available(for: [failedRow, settledRow]).map(\.title))")
+    let archivedRow = lifecycled(quietRow, .archived)
+    try expect(InboxBulkAction.available(for: [archivedRow]) == [.delete],
+               "an archived row is out of the lifecycle: only Delete is left — got \(InboxBulkAction.available(for: [archivedRow]).map(\.title))")
+    // Vacuity, and it is not pedantic: `allSatisfy` over an empty selection is TRUE, so
+    // without the guard an empty selection would be offered every action.
+    try expect(InboxBulkAction.available(for: []).isEmpty,
+               "an empty selection may take nothing — got \(InboxBulkAction.available(for: []).map(\.title))")
+    // No rule is inert: every action is offered to some fixture row and withheld from
+    // another, or one of the five above is a statement about nothing.
+    for action in InboxBulkAction.allCases {
+        let candidates = bulkFixture + [settledRow, archivedRow]
+        try expect(candidates.contains { action.isAvailable(for: $0) },
+                   "\(action.title) must be available to some row, or its rule is unreachable")
+        try expect(candidates.contains { !action.isAvailable(for: $0) },
+                   "\(action.title) must be withheld from some row, or its rule is inert")
+    }
+    // What a destructive action KEEPS (P2C.3): the isolated branches, deduplicated and
+    // in screen order. The shared-checkout row contributes nothing — deleting an agent
+    // that never had a worktree keeps no branch of its own.
+    try expect(InboxBulkAction.keptBranches(in: [failedRow, quietRow]) == [failedRow.branch!],
+               "a delete names the isolated agent's branch as kept — got \(InboxBulkAction.keptBranches(in: [failedRow, quietRow]))")
+    try expect(InboxBulkAction.keptBranches(in: [quietRow, runningRow]).isEmpty,
+               "…and names nothing when no selected agent has a checkout of its own")
+
+    // E2 · THE VIEW: two rows selected, both painted as selected, and the bar offering
+    // exactly what the set can take.
+    let bulk = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    bulk.clock = { LabFixtures.inboxNow }
+    var bulkCalls: [(InboxBulkAction, [UUID])] = []
+    bulk.onBulkAction = { bulkCalls.append(($0, $1)) }
+    bulk.reload(rows: bulkFixture)
+    let bulkWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    bulkWindow.contentView = bulk
+    bulk.layoutForQA()
+    try expect(bulk.isMultipleSelectionAllowedForQA,
+               "the list must allow a multiple selection at all — click, shift-click and ⌘-click are AppKit's once it does")
+    try expect(!bulk.isBulkBarVisibleForQA, "no selection, no bar")
+    try expect(bulk.selectRowForQA(id: quietRow.id), "one row must be selectable")
+    bulk.layoutForQA()
+    try expect(!bulk.isBulkBarVisibleForQA,
+               "ONE selected row is not a bulk anything — its actions are P3.12's context menu")
+
+    // BOTH SELECTED ROWS ARE PAINTED AS SELECTED, and the pair is chosen so that is
+    // not free: `working` and a read `ready` are the two states that RECEDE at rest
+    // (P3.5), so each one only reaches full strength by being in the selection. The
+    // first version of this assertion used the `failed` row, which is at full strength
+    // either way — it passed against an `isSelected: tableView.selectedRow == row`,
+    // i.e. against the single-index bug this ticket had to fix.
+    let bulkOrder = bulk.rowIdsForQA
+    guard let recedingA = bulkOrder.firstIndex(of: runningRow.id),
+          let recedingB = bulkOrder.firstIndex(of: quietRow.id) else {
+        throw CheckError.failed("setup: the running and quiet rows must both be on screen")
+    }
+    try expect(bulk.selectRowForQA(id: blockedRow.id), "a third row takes the selection off both")
+    bulk.layoutForQA()
+    for index in [recedingA, recedingB] {
+        try expect(abs(bulk.textAlphasForQA[index] - Opacity.receded) < 0.001,
+                   "setup: row \(index) must recede while unselected, or 'selection clears recession' is vacuous — text alpha \(bulk.textAlphasForQA[index])")
+    }
+    try expect(bulk.selectRowsForQA(ids: [runningRow.id, quietRow.id]),
+               "the two receding rows must be selectable together")
+    bulk.layoutForQA()
+    for index in [recedingA, recedingB] {
+        try expect(abs(bulk.textAlphasForQA[index] - Opacity.full) < 0.001,
+                   "EVERY selected row clears its recession, not just the last one clicked — row \(index) text alpha \(bulk.textAlphasForQA[index])")
+    }
+
+    // …AND IT SURVIVES A REPAINT OF A ROW THAT IS NOT THE LAST ONE SELECTED, which is
+    // the only place the difference shows. MEASURED, because the loop above is not
+    // enough on its own: a selection built one row at a time rebuilds each row at the
+    // moment it is itself `NSTableView.selectedRow` (probed — row 1 was built with
+    // `selectedRow 1 set [1]`, row 4 with `selectedRow 4 set [1, 4]`), so both read full
+    // even against an `isSelected: tableView.selectedRow == row`. A push that repaints
+    // the FIRST of the two while the other is the last-selected is where a single index
+    // gets it wrong.
+    let renamedInSelection = AgentInboxRow(
+        id: runningRow.id, title: runningRow.title, projectName: "renamed-under-selection",
+        workspaceName: runningRow.workspaceName, state: runningRow.state,
+        attention: runningRow.attention, lifecycle: runningRow.lifecycle, model: runningRow.model,
+        role: runningRow.role, branch: runningRow.branch, isIsolated: runningRow.isIsolated,
+        elapsed: runningRow.elapsed, depth: runningRow.depth, variant: runningRow.variant,
+        createdAt: runningRow.createdAt, parentId: runningRow.parentId)
+    bulk.apply(rows: bulkFixture.map { $0.id == renamedInSelection.id ? renamedInSelection : $0 },
+               changed: .empty)
+    bulk.layoutForQA()
+    try expect(bulk.selectedRowIdsForQA.count == 2,
+               "setup: the push must not move the selection — got \(bulk.selectedRowIdsForQA.count)")
+    try expect(abs(bulk.textAlphasForQA[recedingA] - Opacity.full) < 0.001,
+               "a selected row repainted while ANOTHER row is the last selected is still selected — row \(recedingA) text alpha \(bulk.textAlphasForQA[recedingA])")
+
+    try expect(bulk.selectRowsForQA(ids: [failedRow.id, quietRow.id]), "two rows must be selectable")
+    bulk.layoutForQA()
+    let expectedPair = bulkOrder.filter { $0 == failedRow.id || $0 == quietRow.id }
+    try expect(bulk.selectedRowIdsForQA == expectedPair,
+               "both rows are selected, in the order they are ON SCREEN — got \(bulk.selectedRowIdsForQA)")
+    // BOTH rows are painted as selected, which is the half a single `selectedRow` index
+    // could not do: the emphasis and the outline are per-row facts.
+    for id in expectedPair {
+        guard let index = bulkOrder.firstIndex(of: id) else {
+            throw CheckError.failed("a selected row left the list")
+        }
+        try expect(abs(bulk.textAlphasForQA[index] - Opacity.full) < 0.001,
+                   "every selected row clears its recession — row \(index) text alpha \(bulk.textAlphasForQA[index])")
+    }
+    try expect(bulk.isBulkBarVisibleForQA, "two selected rows raise the bar")
+    try expect(bulk.bulkActionTitlesForQA == InboxBulkAction.allCases.map(\.title),
+               "…offering every action, because neither row is blocked or running — got \(bulk.bulkActionTitlesForQA)")
+    try expect(bulk.bulkSelectionTextForQA == InboxBulkActionBar.selectionText(count: 2),
+               "…and saying how many rows it is about — got '\(bulk.bulkSelectionTextForQA)'")
+    try expect(bulk.bulkKeptBranchesTextForQA == InboxBulkActionBar.keptText(branches: [failedRow.branch!]),
+               "…and naming the branch a delete would keep — got '\(bulk.bulkKeptBranchesTextForQA)'")
+    try expect(bulk.bulkKeptBranchesTextForQA.contains(failedRow.branch!),
+               "…which must be the real branch name, not a count — got '\(bulk.bulkKeptBranchesTextForQA)'")
+
+    // Chosen through the control's own target/action, and the ids handed over are the
+    // selection in screen order.
+    try expect(bulk.pickBulkActionForQA(.delete), "Delete must be pickable from the bar's own menu")
+    try expect(bulkCalls.count == 1 && bulkCalls[0].0 == .delete && bulkCalls[0].1 == expectedPair,
+               "picking an action reports it once with both agents — got \(bulkCalls.map { ($0.0.title, $0.1.count) })")
+
+    // EXTEND ONTO A RUNNING AGENT and the destructive half of the menu goes away — the
+    // AND, through the rendered menu this time.
+    try expect(bulk.selectRowsForQA(ids: [failedRow.id, quietRow.id, runningRow.id]),
+               "the running row must be selectable alongside them")
+    bulk.layoutForQA()
+    try expect(bulk.selectedRowIdsForQA.count == 3, "…and all three must be selected — got \(bulk.selectedRowIdsForQA.count)")
+    try expect(bulk.bulkActionTitlesForQA == InboxBulkAction.available(
+                for: [failedRow, quietRow, runningRow]).map(\.title),
+               "the menu is what the SET can take — got \(bulk.bulkActionTitlesForQA)")
+    try expect(!bulk.bulkActionTitlesForQA.contains(InboxBulkAction.delete.title),
+               "…so Delete is gone while one selected agent is running — got \(bulk.bulkActionTitlesForQA)")
+    // …and an action that is not in the menu cannot be fired through the bar either.
+    let callsBeforeRefusal = bulkCalls.count
+    try expect(!bulk.pickBulkActionForQA(.delete), "Delete must not be pickable once it is withheld")
+    try expect(bulkCalls.count == callsBeforeRefusal,
+               "…and must report nothing — \(bulkCalls.count - callsBeforeRefusal) extra call(s)")
+
+    // A PUSH CAN CHANGE WHAT THE SELECTION MAY DO. The bar is up over three rows and one
+    // of them stops working, so Delete comes back without the selection moving.
+    let stopped = AgentInboxRow(
+        id: runningRow.id, title: runningRow.title, projectName: runningRow.projectName,
+        workspaceName: runningRow.workspaceName, state: .ready, attention: .none,
+        lifecycle: runningRow.lifecycle, model: runningRow.model, role: runningRow.role,
+        branch: runningRow.branch, isIsolated: runningRow.isIsolated, elapsed: nil,
+        depth: runningRow.depth, variant: runningRow.variant, createdAt: runningRow.createdAt,
+        parentId: runningRow.parentId)
+    bulk.apply(rows: bulkFixture.map { $0.id == stopped.id ? stopped : $0 },
+               changed: AgentsBoardChangeSet(added: [], updated: [stopped.id], removed: []))
+    bulk.layoutForQA()
+    try expect(bulk.selectedRowIdsForQA.count == 3,
+               "setup: an incremental push must not move the selection — got \(bulk.selectedRowIdsForQA.count)")
+    try expect(bulk.bulkActionTitlesForQA.contains(InboxBulkAction.delete.title),
+               "an agent that stopped working gives its selection Delete back — got \(bulk.bulkActionTitlesForQA)")
+
+    // A WHOLE-LIST PUSH CLEARS IT TOO, and this one needs its own assertion:
+    // `NSTableView.reloadData()` empties the selection WITHOUT posting a selection
+    // change, so nothing else in this section would notice a bar left up over rows that
+    // are no longer selected. (Measured: with the teardown in `render` deleted, every
+    // other clearing assertion here stays green because `deselectAll` does notify.)
+    try expect(bulk.selectRowsForQA(ids: [failedRow.id, quietRow.id]), "two rows must be selectable")
+    bulk.layoutForQA()
+    try expect(bulk.isBulkBarVisibleForQA, "setup: the bar must be up before the push")
+    bulk.reload(rows: bulkFixture)
+    bulk.layoutForQA()
+    try expect(bulk.selectedRowIdsForQA.isEmpty,
+               "a whole-list push empties the selection — \(bulk.selectedRowIdsForQA.count) rows still selected")
+    try expect(!bulk.isBulkBarVisibleForQA,
+               "…so the bar must come down with it, rather than offer actions for nothing")
+
+    // A SCOPE FLIP CLEARS IT (P3.8's rule, now with a real multiple selection behind
+    // it): a bulk action may never reach a row you cannot see.
+    try expect(bulk.selectRowsForQA(ids: [failedRow.id, quietRow.id]), "two rows must be selectable once more")
+    bulk.layoutForQA()
+    try expect(bulk.pickScopeForQA(.project("bannockburn")), "the other project must be pickable")
+    bulk.layoutForQA()
+    try expect(bulk.selectedRowIdsForQA.isEmpty,
+               "a scope change clears a multiple selection — \(bulk.selectedRowIdsForQA.count) rows still selected")
+    try expect(!bulk.isBulkBarVisibleForQA, "…and takes the bar down with it")
+
+    // Folding a group does the same thing, for the same reason — it removes rows.
+    try expect(bulk.pickScopeForQA(.all), "back to every agent")
+    bulk.layoutForQA()
+    let parentId = LabFixtures.inboxAgentIds[5]
+    try expect(bulk.selectRowsForQA(ids: [failedRow.id, quietRow.id]), "two rows must be selectable again")
+    bulk.layoutForQA()
+    try expect(bulk.isBulkBarVisibleForQA, "setup: the bar must be up before the fold")
+    try expect(bulk.clickDisclosureForQA(id: parentId), "the orchestrator's triangle must be clickable")
+    bulk.layoutForQA()
+    try expect(bulk.selectedRowIdsForQA.isEmpty,
+               "folding a group clears the selection — \(bulk.selectedRowIdsForQA.count) rows still selected")
+    try expect(!bulk.isBulkBarVisibleForQA, "…and takes the bar down too")
+
+    // WHAT THIS SECTION DOES NOT VERIFY, stated rather than left to be discovered: the
+    // three GESTURES. `NSTableView.mouseDown` opens a modal tracking loop that runs until
+    // mouse-up, so a headless check cannot synthesize a shift- or ⌘-click, and
+    // `doCommand(by: #selector(NSResponder.moveDownAndModifySelection(_:)))` — tried, with
+    // the list as first responder — does not extend the selection outside a real key
+    // event either (measured: still 1 row selected). What IS exercised is
+    // `selectRowIndexes(_:byExtendingSelection:)`, the API those gestures end in, and
+    // everything downstream of the selection set. That the gestures exist at all is
+    // `allowsMultipleSelection`, asserted above; that they FEEL right is a supervised
+    // manual step, not a matrix leg.
+
+    // AN ACTION THE HOST CANNOT PERFORM IS NOT OFFERED. The app does not wire
+    // `onBulkAction` yet (Phase 4 performs these), and five menu items that answer a
+    // click with nothing would be worse than none.
+    let unwired = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    unwired.clock = { LabFixtures.inboxNow }
+    unwired.reload(rows: bulkFixture)
+    let unwiredWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    unwiredWindow.contentView = unwired
+    unwired.layoutForQA()
+    try expect(unwired.selectRowsForQA(ids: [failedRow.id, quietRow.id]), "two rows must be selectable unwired")
+    unwired.layoutForQA()
+    try expect(unwired.isBulkBarVisibleForQA,
+               "the bar still reports the selection with no handler set — that much is true either way")
+    try expect(unwired.bulkActionTitlesForQA.isEmpty,
+               "…but offers nothing it cannot perform — got \(unwired.bulkActionTitlesForQA)")
+    try expect(unwired.bulkKeptBranchesTextForQA == InboxBulkActionBar.keptText(branches: [failedRow.branch!]),
+               "…and still says what a destructive action would leave — got '\(unwired.bulkKeptBranchesTextForQA)'")
+    try expect(!unwired.pickBulkActionForQA(.delete), "…and nothing is pickable through it")
+
+    // E3 · A MODIFIER-CLICK IS A SELECTION GESTURE, NOT NAVIGATION. Without this, a
+    // shift-click that builds a range would also reveal — and a reveal switches
+    // workspace and focuses a tile (P3.9), so triaging six agents would drag the canvas
+    // through all six.
+    try expect(AgentInboxView.revealsOnClick(modifiers: []), "a bare click reveals")
+    try expect(!AgentInboxView.revealsOnClick(modifiers: [.shift]),
+               "a shift-click extends the selection and must not reveal")
+    try expect(!AgentInboxView.revealsOnClick(modifiers: [.command]),
+               "a ⌘-click toggles a row and must not reveal")
+    try expect(!AgentInboxView.revealsOnClick(modifiers: [.command, .shift]),
+               "…and neither does the pair of them")
+    try expect(AgentInboxView.revealsOnClick(modifiers: [.option]),
+               "⌥ selects nothing, so an ⌥-click is still a plain click")
+
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing")
     }
 }

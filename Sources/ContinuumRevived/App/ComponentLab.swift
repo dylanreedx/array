@@ -492,7 +492,7 @@ enum LabCatalog {
 
             // MARK: 90-agent-ux cards
             branchChipCard, agentInboxCard, agentInboxSelectedCard, agentInboxParkedCard,
-            agentInboxJumpHintsCard
+            agentInboxJumpHintsCard, agentInboxBulkCard
         ]
     }
 
@@ -1460,10 +1460,35 @@ enum LabCatalog {
         )
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.11-multi-select-bulk.md
+    /// The same list with two rows selected: both cards outlined, both at full
+    /// strength, and the bulk bar floating over the bottom of the list. Its baseline
+    /// against `chrome.agentInbox.selected`'s is what holds "the bar is an overlay"
+    /// still in pixels — no row may move between the two.
+    ///
+    /// The two agents are chosen so the bar is FULL: neither is blocked and neither is
+    /// running, so all five actions are offered, and one of them is isolated, so the
+    /// kept-branch line renders too. A pair that could take nothing would render a bar
+    /// with no control in it and hold nothing about the enablement.
+    private static var agentInboxBulkCard: LabEntry {
+        LabEntry(
+            id: "chrome.agentInbox.bulk",
+            category: "Chrome",
+            title: "Agent Inbox - two rows selected",
+            summary: "Two selected rows outlined, with the bulk bar offering the five actions and naming the branch a delete keeps.",
+            content: .staticCard(preferredSize: NSSize(width: 320, height: 620 + AgentInboxView.scopeControlHeight)) {
+                makeAgentInboxPreview(
+                    selecting: nil,
+                    selectingMany: [LabFixtures.inboxAgentIds[3], LabFixtures.inboxAgentIds[4]])
+            }
+        )
+    }
+
     static func makeAgentInboxPreview(
         selecting id: UUID?,
         rows: [AgentInboxRow] = LabFixtures.inboxRows(),
-        jumpHints: Bool = false
+        jumpHints: Bool = false,
+        selectingMany ids: [UUID] = []
     ) -> NSView {
         // P3.8: 620 was the height that fitted this fixture's seven rows. The scope
         // popup sits above them, so the card is that much taller — the alternative is
@@ -1484,6 +1509,17 @@ enum LabCatalog {
         if jumpHints { view.setJumpHintsVisible(true) }
         view.reload(rows: rows)
         if let id { _ = view.selectRowForQA(id: id) }
+        // P3.11: AFTER `reload`, which empties the selection — and through the same
+        // accessor the checks drive, so the card renders the shipped selection path.
+        //
+        // The no-op handler is not decoration: with `onBulkAction` unset the bar shows no
+        // menu at all (see `updateBulkBar` — an action that cannot be performed is not
+        // offered), so a card meant to render the enablement has to be a card a host has
+        // wired. What it renders is the menu, not the handler.
+        if !ids.isEmpty {
+            view.onBulkAction = { _, _ in }
+            _ = view.selectRowsForQA(ids: ids)
+        }
         return view
     }
 
@@ -2166,7 +2202,8 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         // (26 static cards x 2).
         // 54 since P3.7 added `chrome.agentInbox.parked` (27 static cards x 2).
         // 56 since P3.10 added `chrome.agentInbox.jumpHints` (28 static cards x 2).
-        let minimumCardsGated = 56
+        // 58 since P3.11 added `chrome.agentInbox.bulk` (29 static cards x 2).
+        let minimumCardsGated = 58
         let minimumTextRectsPerAppearance = 192
         let minimumBordersPerAppearance = 12
         guard gated >= minimumCardsGated else {

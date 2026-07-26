@@ -113,6 +113,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     private let tableView: NSTableView
     private let column: NSTableColumn
     private let emptyLabel: NSTextField
+    // Ticket: docs/38-tickets/90-agent-ux/P3.11-multi-select-bulk.md
+    private let bulkBar = InboxBulkActionBar()
 
     /// The rows as they are drawn — already through the scope filter (P3.8) and
     /// `InboxSort.sortForInbox`, so index N here is row N on screen and every
@@ -150,9 +152,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// follow it onto a different row.
     private var hoveredRow = -1
     /// The selection as the cells were last painted for it. `selectionDidChange`
-    /// reports the NEW selection only, so the row that just lost it — the one that
-    /// has to start receding again — has to be remembered.
-    private var selectedRowForEmphasis = -1
+    /// reports the NEW selection only, so the rows that just lost it — the ones that
+    /// have to start receding again — have to be remembered.
+    ///
+    /// P3.11 made this a SET rather than one index: with a range selected, the rows
+    /// that changed are the symmetric difference of the two selections, and an
+    /// `Int` could only ever repaint one of them.
+    private var selectedRowsForEmphasis = IndexSet()
     private var trackingArea: NSTrackingArea?
 
     /// The cell currently drawn for each row index, and how many cells this view
@@ -200,6 +206,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// selection would switch workspaces under every arrow key. Arrow-key
     /// navigation is P3.10's ticket and gets its own decision.
     var onRevealRow: ((UUID) -> Void)?
+    // Ticket: docs/38-tickets/90-agent-ux/P3.11-multi-select-bulk.md
+    /// A bulk action was chosen for these agents, in the order they are on screen.
+    ///
+    /// The list DOES NOT perform them: settle, snooze and archive are persisted
+    /// lifecycle facts that do not exist yet (P4.1 owns them, P4.10 owns what the
+    /// selection does afterwards), and read-state lives on `AgentSupervisor` (P3.3).
+    /// What this ticket owns is which actions a selection may take at all — so the
+    /// view resolves that and hands the host the set, which is the same shape
+    /// `onRevealRow` uses for the one-row case.
+    var onBulkAction: ((InboxBulkAction, [UUID]) -> Void)?
     /// The agent open in the focused tile, force-included whatever the scope says
     /// (`InboxScope.filter`). Set by the host on every push; a change re-filters,
     /// and an unchanged value does no work, so this cannot cost the incremental
@@ -254,7 +270,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         tableView.backgroundColor = .clear
         tableView.selectionHighlightStyle = .none
         tableView.allowsEmptySelection = true
-        tableView.allowsMultipleSelection = false
+        // Ticket: docs/38-tickets/90-agent-ux/P3.11-multi-select-bulk.md
+        //
+        // THE GESTURES ARE APPKIT'S, DELIBERATELY. Click, shift-click for a range and
+        // ⌘-click to toggle are what `NSTableView` does once this is true, and it keeps
+        // the selection ANCHOR the packet asks to be stable: a range extends from the
+        // row you last plain-clicked, so a second shift-click re-extends from that same
+        // anchor instead of growing off the previous shift. Reimplementing the three
+        // gestures over `mouseDown` would mean owning that anchor, the autoscroll and
+        // the drag-select — and would take `clickedRow` (and with it P3.9's reveal,
+        // which is asserted through the table's own target/action) out of the path.
+        // What this ticket owns is what a SELECTION SET may do, below.
+        tableView.allowsMultipleSelection = true
         tableView.translatesAutoresizingMaskIntoConstraints = false
 
         column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("agent-inbox-row"))
@@ -279,6 +306,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         addSubview(scopePopUp)
         addSubview(scrollView)
         addSubview(emptyLabel)
+        // P3.11: added LAST, so it draws over the bottom of the list.
+        addSubview(bulkBar)
 
         tableView.dataSource = self
         tableView.delegate = self
@@ -289,6 +318,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         scopePopUp.target = self
         scopePopUp.action = #selector(scopePicked(_:))
         updateScopeMenu()
+        // P3.11: the bar reports the action; resolving WHICH agents it lands on is the
+        // list's, because only the list knows the selection.
+        bulkBar.onAction = { [weak self] action in self?.performBulkAction(action) }
+        bulkBar.setAccessibilityIdentifier("ContinuumAgentInboxBulkBar")
 
         NSLayoutConstraint.activate([
             scopePopUp.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
@@ -303,6 +336,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
             emptyLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.l),
             emptyLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.l),
             emptyLabel.topAnchor.constraint(equalTo: scrollView.topAnchor, constant: Space.l),
+
+            // P3.11: AN OVERLAY ON THE LIST, not a row in a vertical stack with it —
+            // the same call `InboxJumpHintView` records for the hint pill, for a
+            // different reason. A bar that took height off the scroll view would move
+            // every row in the list the moment you selected a second one, so the four
+            // committed `chrome.agentInbox…` baselines would be describing a list whose
+            // geometry depends on the selection. Floating it leaves the rows where they
+            // are and leaves those PNGs alone (it is hidden until 2 rows are selected,
+            // so nothing paints in any of them).
+            bulkBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.s),
+            bulkBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.s),
+            bulkBar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Space.s),
         ])
     }
 
@@ -349,6 +394,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         cellsByRow.removeAll()
         tableView.reloadData()
         updateEmptyState()
+        // P3.11: `reloadData` empties the table's selection, so the bar has to come
+        // down with it — a bar left up over an empty selection offers actions with
+        // nothing to apply them to.
+        selectedRowsForEmphasis = IndexSet()
+        updateBulkBar()
     }
 
     /// Apply a new set of rows knowing WHICH agents moved (P2B.7's change set).
@@ -405,6 +455,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // draw its one collapsed line into a card-sized slot — and keep the slot.
         tableView.noteHeightOfRows(withIndexesChanged: indexes)
         tableView.reloadData(forRowIndexes: indexes, columnIndexes: IndexSet(integer: 0))
+        // P3.11: an incremental apply keeps the selection (the rows are the same agents
+        // in the same order), so what a selected row may DO can change under a bar that
+        // is already up — an agent that just started working must lose Archive.
+        updateBulkBar()
     }
 
     // MARK: - Scope (P3.8)
@@ -439,7 +493,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
             collapsedParents.insert(parentId)
         }
         tableView.deselectAll(nil)
-        selectedRowForEmphasis = -1
+        selectedRowsForEmphasis = IndexSet()
         hoveredRow = -1
         render(visibleRows(from: allRows))
     }
@@ -474,7 +528,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         guard next != scope else { return }
         scope = next
         tableView.deselectAll(nil)
-        selectedRowForEmphasis = -1
+        selectedRowsForEmphasis = IndexSet()
         hoveredRow = -1
         updateScopeMenu()
         render(visibleRows(from: allRows))
@@ -559,7 +613,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
             ),
             indent: Double(max(0, model.depth)) * AgentInboxView.indentPerLevel,
             disclosure: disclosure(for: model),
-            isSelected: tableView.selectedRow == row,
+            // P3.11: EVERY selected row is outlined, not just the last one clicked —
+            // `selectedRow` is one index and a range is a set.
+            isSelected: tableView.selectedRowIndexes.contains(row),
             isInteracting: interacting,
             now: clock()
         )
@@ -576,14 +632,33 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // the one you left, so exactly those two are redrawn — the emphasis is
         // computed when the cell is built. Reloading the whole table here would
         // undo the incremental refresh `apply(rows:changed:)` exists for.
-        let previous = selectedRowForEmphasis
-        selectedRowForEmphasis = tableView.selectedRow
-        redraw(rows: [previous, tableView.selectedRow])
+        // P3.11: the rows that MOVED are the symmetric difference of the two
+        // selections — with a range selected, a single index cannot name them.
+        let previous = selectedRowsForEmphasis
+        selectedRowsForEmphasis = tableView.selectedRowIndexes
+        redraw(rows: Array(previous.symmetricDifference(tableView.selectedRowIndexes)))
+        updateBulkBar()
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.9-reveal-on-click.md
     @objc private func rowClicked(_ sender: Any?) {
+        // P3.11: a shift- or ⌘-click is a SELECTION gesture, not navigation. Without
+        // this, building a range would reveal — and revealing switches workspace and
+        // focuses a tile (P3.9), so triaging six agents would drag the canvas through
+        // all six on the way to acting on them.
+        let modifiers = NSApp.currentEvent?.modifierFlags.intersection(.deviceIndependentFlagsMask) ?? []
+        guard AgentInboxView.revealsOnClick(modifiers: modifiers) else { return }
         reveal(rowAt: tableView.clickedRow)
+    }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P3.11-multi-select-bulk.md
+    /// Whether a click carrying these modifiers means "take me to this agent".
+    ///
+    /// The two that don't are exactly the two the multi-selection is built with. It is
+    /// a test on the SET rather than on `isEmpty` so ⌥-click and ⌃-click — neither of
+    /// which selects anything — still reveal, the same as a bare click.
+    static func revealsOnClick(modifiers: NSEvent.ModifierFlags) -> Bool {
+        modifiers.intersection([.shift, .command]).isEmpty
     }
 
     /// Hand the host the agent on this row. A click on the disclosure triangle
@@ -637,12 +712,60 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         redraw(rows: Array(0..<InboxJump.maximumRows))
     }
 
+    // MARK: - Bulk actions (P3.11)
+
+    /// How many rows have to be selected before the bar appears. TWO, because one
+    /// selected row is not a bulk anything — a single row's actions belong on its own
+    /// context menu (P3.12), and a bar that appeared on every arrow-key press would
+    /// sit over the list for the whole of ordinary keyboard navigation.
+    static let minimumBulkSelection = 2
+
+    /// The selected rows, IN SCREEN ORDER (the frozen one, P3.4) rather than in the
+    /// order they were clicked: the actions apply to a set, and the ids handed to the
+    /// host must not depend on which end of a range you started from.
+    private var selectedRows: [AgentInboxRow] {
+        tableView.selectedRowIndexes.sorted().compactMap { rows.indices.contains($0) ? rows[$0] : nil }
+    }
+
+    /// Show, hide and re-populate the bar for the current selection.
+    private func updateBulkBar() {
+        let selected = selectedRows
+        guard selected.count >= AgentInboxView.minimumBulkSelection else {
+            bulkBar.hide()
+            return
+        }
+        // NO HANDLER, NO MENU. Settle, snooze and archive are Phase 4's to perform, so
+        // the app does not set `onBulkAction` yet — and a control that answers a click
+        // with nothing is worse than no control. With the handler unset the bar still
+        // reports the selection (and what a destructive action would leave), and the
+        // actions appear the day the host wires them. (Found in cross-review, which
+        // pointed out the shipped sidebar would offer five silent no-ops.)
+        bulkBar.show(
+            onBulkAction == nil ? [] : InboxBulkAction.available(for: selected),
+            selectionCount: selected.count,
+            keptBranches: InboxBulkAction.keptBranches(in: selected))
+    }
+
+    /// Hand the host an action and the agents it lands on.
+    ///
+    /// The availability is RE-RESOLVED here rather than trusted from the menu: the bar
+    /// is rebuilt on every selection change, but a push can change a row's state
+    /// (`apply(rows:changed:)` repaints in place without touching the selection) while
+    /// the menu is open — and an action that became unavailable under an open menu must
+    /// not fire.
+    private func performBulkAction(_ action: InboxBulkAction) {
+        let selected = selectedRows
+        guard selected.count >= AgentInboxView.minimumBulkSelection,
+              InboxBulkAction.available(for: selected).contains(action) else { return }
+        onBulkAction?(action, selected.map(\.id))
+    }
+
     /// P3.5's `isInteracting`: hover, selection, or keyboard-active. The last two
     /// are one test rather than two, because arrow-key navigation in an
     /// `NSTableView` IS a selection move — a keyboard-active row and the selected
     /// row are the same row by construction.
     private func isInteracting(row: Int) -> Bool {
-        row == hoveredRow || row == tableView.selectedRow
+        row == hoveredRow || tableView.selectedRowIndexes.contains(row)
     }
 
     /// Rebuild the cells of just these rows, ignoring any that are not on screen.
@@ -811,6 +934,43 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         guard let index = rows.firstIndex(where: { $0.id == id }) else { return false }
         tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
         return true
+    }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P3.11-multi-select-bulk.md
+    /// Select a SET of rows, through the same `selectRowIndexes(byExtendingSelection:)`
+    /// AppKit's own shift- and ⌘-click handling calls — the first id replaces the
+    /// selection and the rest extend it, which is the sequence a range or a run of
+    /// toggles leaves behind. What it cannot reproduce is the mouse tracking itself
+    /// (`NSTableView.mouseDown` runs a modal loop until mouse-up, which has no place in
+    /// a headless check), so the gestures stay AppKit's and everything downstream of the
+    /// selection — emphasis, outline, the bar and its enablement — is the shipped path.
+    @discardableResult
+    func selectRowsForQA(ids: [UUID]) -> Bool {
+        var extending = false
+        for id in ids {
+            guard let index = rows.firstIndex(where: { $0.id == id }) else { return false }
+            tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: extending)
+            extending = true
+        }
+        return true
+    }
+
+    var selectedRowIdsForQA: [UUID] { selectedRows.map(\.id) }
+    var isMultipleSelectionAllowedForQA: Bool { tableView.allowsMultipleSelection }
+    /// Whether the bar is on screen, and what it is OFFERING — read off the rendered
+    /// menu rather than recomputed from `InboxBulkAction.available`, which would assert
+    /// the predicate against itself.
+    var isBulkBarVisibleForQA: Bool { !bulkBar.isHidden }
+    var bulkActionTitlesForQA: [String] { bulkBar.qaActionTitles }
+    var bulkSelectionTextForQA: String { bulkBar.qaSelectionText }
+    var bulkKeptBranchesTextForQA: String { bulkBar.qaKeptText }
+
+    /// Choose a bulk action the way the user does — through the pull-down's own
+    /// target/action, so the check exercises the wiring and not just
+    /// `performBulkAction`.
+    @discardableResult
+    func pickBulkActionForQA(_ action: InboxBulkAction) -> Bool {
+        bulkBar.pickForQA(action)
     }
 
     @discardableResult
@@ -1016,6 +1176,304 @@ final class InboxJumpHintView: NSView, TokenThemed {
     }
 
     var qaChord: String { isHidden ? "" : label.stringValue }
+}
+
+// Ticket: docs/38-tickets/90-agent-ux/P3.11-multi-select-bulk.md
+/// What you can do to a SET of selected rows.
+///
+/// THE RULE, and it is one rule: an action is offered only when EVERY member of the
+/// selection can take it. Six agents that finished together are one gesture; five that
+/// finished and one still asking you for an approval are not, and the answer is to
+/// offer less rather than to settle the one that was waiting. That is why
+/// `available(for:)` is an AND and not a majority, a first-member test or a
+/// best-effort that skips what it cannot do — a bulk action that silently applied to
+/// four of six is the failure mode this shape forbids.
+///
+/// AN ACTION THAT IS UNAVAILABLE IS NOT SHOWN, not shown disabled. The packet says
+/// "bulk actions appear only when every selected row can take the action", and a
+/// greyed row of five items would put the reader in front of a puzzle ("which of my
+/// six is blocking this?") that the bar has no room to answer.
+///
+/// NOTHING HERE PERFORMS ANYTHING. Settle, snooze and archive are persisted lifecycle
+/// facts P4.1 owns and read-state lives on `AgentSupervisor` (P3.3); this ticket is
+/// the enablement and the surface. `AgentInboxView.onBulkAction` is where the host
+/// picks them up.
+enum InboxBulkAction: String, CaseIterable, Equatable {
+    case settle
+    case snooze
+    case markUnread
+    case archive
+    case delete
+
+    /// `Snooze` keeps its `›` because it opens the preset list (P4.5) rather than
+    /// acting — the one item in this menu that is a door.
+    var title: String {
+        switch self {
+        case .settle: return "Settle"
+        case .snooze: return "Snooze ›"
+        case .markUnread: return "Mark Unread"
+        case .archive: return "Archive"
+        case .delete: return "Delete"
+        }
+    }
+
+    /// Whether ONE row can take this action. Total over the cases, so adding an action
+    /// is a compile error here rather than an item that is silently always available.
+    ///
+    /// The two rules the packet states outright:
+    ///
+    ///   * **A blocked row cannot be settled.** `approval` and `input` are the agent
+    ///     waiting on YOU, and the locked decision is that blockers outrank an explicit
+    ///     settle (`_RUNBOOK.md`) — settling one would take the row out of the
+    ///     attention flow while the thing it is asking for is still unanswered. It can
+    ///     still be SNOOZED: deferring a request is a decision, and P4.6 exists exactly
+    ///     for the snoozed agent that raises its hand again.
+    ///   * **A running agent cannot be archived or deleted.** Both are destructive of
+    ///     the row's place in the list, and `working` means the agent has the next move.
+    ///
+    /// The rest are no-op guards, and they are guards rather than nothing because "the
+    /// action is offered" has to mean "it would do something": an already-settled row
+    /// has nothing to settle, an already-unread one nothing to mark, and an archived row
+    /// is out of the list's lifecycle altogether — the only thing left to do with it is
+    /// delete it.
+    func isAvailable(for row: AgentInboxRow) -> Bool {
+        switch self {
+        case .settle:
+            return !InboxBulkAction.isBlocked(row) && !InboxBulkAction.isSettled(row)
+                && !InboxBulkAction.isArchived(row)
+        case .snooze:
+            return !InboxBulkAction.isArchived(row)
+        case .markUnread:
+            return row.attention != .unread && !InboxBulkAction.isArchived(row)
+        case .archive:
+            return !InboxBulkAction.isRunning(row) && !InboxBulkAction.isArchived(row)
+        case .delete:
+            return !InboxBulkAction.isRunning(row)
+        }
+    }
+
+    /// The actions this selection may take, in the menu's order. Empty for an empty
+    /// selection — `allSatisfy` is vacuously true over nothing, which would offer every
+    /// action to no agents.
+    static func available(for rows: [AgentInboxRow]) -> [InboxBulkAction] {
+        guard !rows.isEmpty else { return [] }
+        return allCases.filter { action in rows.allSatisfy(action.isAvailable(for:)) }
+    }
+
+    /// The branches a destructive action on this selection PUTS AT STAKE, in screen order
+    /// and deduplicated: the ones belonging to agents with a checkout of their own.
+    ///
+    /// P2C.3's rule is that an agent's worktree commits are not the app's to throw away,
+    /// and the packet asks for that to be SURFACED rather than merely honoured. Every
+    /// isolated branch is named, not only the ones with unmerged commits, because
+    /// `AgentInboxRow` carries no merge state — P3.1 flattened the row to a branch NAME.
+    ///
+    /// WHICH IS WHY THE CAPTION SAYS WHAT IT SAYS. `AgentSupervisor.cleanUpWorktree` does
+    /// NOT keep every branch: a MERGED one is deleted (`git branch -d`, so nothing is
+    /// lost) and an unmerged one is retained with a reason. So "keeps these branches"
+    /// would be a promise this list cannot make about a branch it cannot inspect. What
+    /// holds for all of them — and is the rule worth surfacing — is that unmerged work
+    /// survives. (Found in cross-review, which caught the caption claiming the stronger
+    /// thing.)
+    static func keptBranches(in rows: [AgentInboxRow]) -> [String] {
+        var seen: Set<String> = []
+        return rows.compactMap { row -> String? in
+            guard row.isIsolated, let branch = row.branch, seen.insert(branch).inserted else { return nil }
+            return branch
+        }
+    }
+
+    /// The agent is waiting on you — the fact `InboxState` splits into two cases
+    /// (P3.2) and the one that outranks a settle.
+    private static func isBlocked(_ row: AgentInboxRow) -> Bool {
+        switch row.state {
+        case .approval, .input: return true
+        case .working, .ready, .failed: return false
+        }
+    }
+
+    private static func isRunning(_ row: AgentInboxRow) -> Bool { row.state == .working }
+
+    private static func isSettled(_ row: AgentInboxRow) -> Bool {
+        switch row.lifecycle {
+        case .settled: return true
+        case .active, .snoozed, .archived: return false
+        }
+    }
+
+    private static func isArchived(_ row: AgentInboxRow) -> Bool {
+        switch row.lifecycle {
+        case .archived: return true
+        case .active, .snoozed, .settled: return false
+        }
+    }
+}
+
+// Ticket: docs/38-tickets/90-agent-ux/P3.11-multi-select-bulk.md
+/// The bar that floats over the bottom of the list while two or more rows are
+/// selected: how many are selected, what can be done to all of them, and what a
+/// destructive action would keep.
+///
+/// A PULL-DOWN, not a row of five buttons. Measured against the sidebar this lives in:
+/// "Settle · Snooze › · Mark Unread · Archive · Delete" does not fit 320pt at
+/// `.token(.label)`, and five truncating buttons is how a control becomes a row of
+/// rects with no glyphs in them — which `UIProbePixels` is right to call flat. The menu
+/// also makes "an unavailable action is not shown" a single fact (the item is not in the
+/// menu) rather than five hidden buttons whose layout has to stay put anyway.
+///
+/// A CARD, like the hint pill: `overlay` fill, `border` outline, `Radius.card`. It floats
+/// rather than taking height off the list for the reason recorded at its constraints —
+/// a bar that pushed the rows would make the list's geometry depend on the selection.
+final class InboxBulkActionBar: NSView, TokenThemed {
+    /// The pull-down's own title, which is item 0 of its menu and never an action.
+    static let menuTitle = "Actions"
+
+    private let countLabel = NSTextField(labelWithString: "")
+    private let actionPopUp = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let keptLabel = NSTextField(labelWithString: "")
+    /// The actions in the menu, parallel to the menu items' tags — the same shape
+    /// `AgentInboxView.scopeEntries` uses, and for the same reason: a tag carries the
+    /// index, so an item's position in the menu is not what identifies it.
+    private var actions: [InboxBulkAction] = []
+    var onAction: ((InboxBulkAction) -> Void)?
+
+    init() {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.borderWidth = 1
+        layer?.cornerRadius = Radius.card
+        isHidden = true
+
+        countLabel.font = .token(.label)
+        countLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        countLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        actionPopUp.font = .token(.label)
+        actionPopUp.translatesAutoresizingMaskIntoConstraints = false
+        actionPopUp.target = self
+        actionPopUp.action = #selector(actionPicked(_:))
+
+        // Middle truncation, the vocabulary the row's own branch line uses: an
+        // `agent/<role>-<slug>` branch is identified by both ends.
+        keptLabel.font = .token(.caption)
+        keptLabel.lineBreakMode = .byTruncatingMiddle
+        keptLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(countLabel)
+        addSubview(actionPopUp)
+        addSubview(keptLabel)
+        NSLayoutConstraint.activate([
+            countLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Inset.row.left),
+            // The POPUP owns the vertical, and the label centres on it — the control is
+            // the taller of the two, so pinning the label's top and centring the popup on
+            // it made the bezel stand 1pt above the bar's own top edge
+            // (`--component-lab-check`: `NSPopUpButton spills vertically — frame y
+            // 17.0…41.0 outside parent 0…40.0`).
+            countLabel.centerYAnchor.constraint(equalTo: actionPopUp.centerYAnchor),
+
+            actionPopUp.leadingAnchor.constraint(greaterThanOrEqualTo: countLabel.trailingAnchor, constant: Space.m),
+            actionPopUp.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Inset.row.right),
+            actionPopUp.topAnchor.constraint(equalTo: topAnchor, constant: Space.s),
+
+            keptLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Inset.row.left),
+            keptLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Inset.row.right),
+            keptLabel.topAnchor.constraint(equalTo: actionPopUp.bottomAnchor, constant: Space.xs),
+            keptLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Space.s),
+        ])
+        applyTokens()
+    }
+
+    required init?(coder: NSCoder) { return nil }
+
+    /// Put the bar up for this selection.
+    ///
+    /// The menu is rebuilt every time rather than diffed: it is at most five items, and
+    /// the alternative is a stale item that fires an action the selection can no longer
+    /// take.
+    func show(_ actions: [InboxBulkAction], selectionCount: Int, keptBranches: [String]) {
+        self.actions = actions
+        let menu = NSMenu()
+        // Item 0 is a pull-down's TITLE and is never chosen — without it the first
+        // action would be the button's label and unpickable. Its tag is -1 because
+        // `NSMenuItem`'s default tag is 0, which is the FIRST ACTION's tag: left at the
+        // default, `selectItem(withTag: 0)` finds this title item instead and the first
+        // action in the menu becomes unreachable.
+        let title = NSMenuItem(title: InboxBulkActionBar.menuTitle, action: nil, keyEquivalent: "")
+        title.tag = -1
+        menu.addItem(title)
+        for (index, action) in actions.enumerated() {
+            let item = NSMenuItem(title: action.title, action: nil, keyEquivalent: "")
+            item.tag = index
+            menu.addItem(item)
+        }
+        actionPopUp.menu = menu
+        // A selection whose members share nothing can take nothing — say the count and
+        // offer no control, rather than an empty menu that reads as a broken one.
+        actionPopUp.isHidden = actions.isEmpty
+        countLabel.stringValue = InboxBulkActionBar.selectionText(count: selectionCount)
+        keptLabel.stringValue = InboxBulkActionBar.keptText(branches: keptBranches)
+        keptLabel.isHidden = keptLabel.stringValue.isEmpty
+        isHidden = false
+        applyTokens()
+    }
+
+    func hide() {
+        isHidden = true
+        actions = []
+    }
+
+    static func selectionText(count: Int) -> String { "\(count) selected" }
+
+    /// `Unmerged work kept: ⎇ agent/one, ⎇ agent/two` — in `BranchChipNSView`'s glyph
+    /// rather than a second vocabulary, so a branch looks the same here as on the row
+    /// above it. Empty for a selection with no isolated agent in it, which hides the line.
+    ///
+    /// The wording is the exact guarantee `AgentSupervisor.cleanUpWorktree` gives — see
+    /// `InboxBulkAction.keptBranches`, which records why the stronger "keeps these
+    /// branches" would be a claim this list cannot make.
+    static func keptText(branches: [String]) -> String {
+        guard !branches.isEmpty else { return "" }
+        return "Unmerged work kept: "
+            + branches.map { "\(BranchChipNSView.branchGlyph) \($0)" }.joined(separator: ", ")
+    }
+
+    @objc private func actionPicked(_ sender: NSPopUpButton) {
+        guard let tag = sender.selectedItem?.tag, actions.indices.contains(tag) else { return }
+        onAction?(actions[tag])
+    }
+
+    func applyTokens() {
+        let theme = effectiveTokenTheme
+        layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
+        layer?.borderColor = LineToken.border.color.cgColor(for: theme)
+        countLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
+        keptLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
+    }
+
+    /// The items the MENU is really carrying, less its title item — rather than
+    /// `actions.map(\.title)`, which would assert the array the menu was built from and
+    /// not the menu.
+    var qaActionTitles: [String] {
+        guard !isHidden, !actionPopUp.isHidden else { return [] }
+        return (actionPopUp.menu?.items ?? []).dropFirst().map(\.title)
+    }
+    var qaSelectionText: String { countLabel.stringValue }
+    var qaKeptText: String { keptLabel.isHidden ? "" : keptLabel.stringValue }
+
+    /// Choose an action through the control's own target/action.
+    @discardableResult
+    func pickForQA(_ action: InboxBulkAction) -> Bool {
+        guard !isHidden, !actionPopUp.isHidden, let index = actions.firstIndex(of: action),
+              actionPopUp.selectItem(withTag: index) else { return false }
+        actionPicked(actionPopUp)
+        return true
+    }
 }
 
 /// The card one row's words sit on: a `tileBody` fill with a `border` outline,

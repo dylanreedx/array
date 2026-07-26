@@ -613,7 +613,12 @@ enum UIProbeAppearance {
         // `LineToken.border` outline. It only paints while the modifier is held, so
         // what puts it under this gate is the `chrome.agentInbox.jumpHints` Lab card
         // — the one probed surface that renders the pills visible.
-        "InboxJumpHintView"
+        "InboxJumpHintView",
+        // P3.11. The bulk-action bar, the same pair as the pill above it:
+        // `SurfaceToken.overlay` fill with a `LineToken.border` outline. It paints only
+        // while two or more rows are selected, so what puts it under this gate is the
+        // `chrome.agentInbox.bulk` Lab card.
+        "InboxBulkActionBar"
     ]
 
     /// Still painting literals, each with the ticket that retires them.
