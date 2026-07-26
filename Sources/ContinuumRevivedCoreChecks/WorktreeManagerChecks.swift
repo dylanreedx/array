@@ -22,6 +22,17 @@ import Foundation
 //   7. `parseWorktreeList` handles a detached HEAD without inventing a branch.
 //   8. A directory that is not a repository is `invalidRepository`, not a raw
 //      git failure.
+//
+// P2C.3 (docs/38-tickets/90-agent-ux/P2C.3-worktree-cleanup.md) adds three more:
+//   9. `isMerged` is true for a branch with no commits of its own and false the
+//      moment it carries one; `deleteBranch` REFUSES an unmerged branch (it is
+//      `git branch -d`, never `-D`), so no caller bug can discard agent commits.
+//  10. `orphans` reports only container worktrees with no known agent behind
+//      them: never the main checkout, never a worktree elsewhere in the repo,
+//      and never a live agent whose recorded `cwd` is the unresolved form of
+//      the path git reports.
+//  11. `repair` deletes a clean orphan, RETAINS a dirty one with a reason, keeps
+//      every branch, and prunes the admin record of one whose directory is gone.
 
 func runWorktreeManagerChecks() {
     do {
@@ -33,7 +44,10 @@ func runWorktreeManagerChecks() {
         try runWorktreeRemoveCheck()
         try runWorktreeListParsingCheck()
         try runWorktreeInvalidRepositoryCheck()
-        print("WorktreeManager checks: slug purity/determinism, add+list, duplicate slug, existing branch, remove, porcelain parsing, and invalid repository passed")
+        try runWorktreeMergedBranchCheck()
+        try runWorktreeOrphanCheck()
+        try runWorktreeRepairCheck()
+        print("WorktreeManager checks: slug purity/determinism, add+list, duplicate slug, existing branch, remove, porcelain parsing, invalid repository, merged-branch deletion, orphan detection, and repair passed")
     } catch {
         fputs("FAIL: WorktreeManager checks failed: \(error)\n", stderr)
         Foundation.exit(1)
@@ -414,4 +428,244 @@ private func runWorktreeInvalidRepositoryCheck() throws {
             throw WorktreeCheckError("expected .invalidRepository for a missing path, got \(error)")
         }
     }
+}
+
+// MARK: - 9. Merged-only branch deletion (P2C.3)
+
+/// The packet's headline prohibition: **never `git branch -D` unmerged work.**
+///
+/// Both safe cases and the unsafe one are exercised on a real repository, in the
+/// order the archive path takes them (remove the checkout, then decide about the
+/// branch), because a branch checked out in a worktree cannot be deleted at all.
+///
+/// Negative test observed red with the final code: with `deleteBranch` shelling
+/// out to `git branch -D` instead of `-d`, this check reported
+///   FAIL: WorktreeManager checks failed: deleteBranch destroyed unmerged branch
+///   agent/carries-a-commit-9dbcd1a1 — `git branch -d` must refuse it
+private func runWorktreeMergedBranchCheck() throws {
+    let repo = try makeWorktreeTempRepo()
+    defer { try? FileManager.default.removeItem(at: repo) }
+    let manager = WorktreeManager()
+
+    // (a) A branch with no commits of its own still points at the commit it was cut
+    // from, so it is merged by definition and safe to delete.
+    let emptySlug = WorktreeManager.slug(role: nil, prompt: "no commits", id: worktreeAgentId("00601"))
+    let empty = try manager.add(repo: repo, slug: emptySlug)
+    let emptyBranch = "agent/\(emptySlug)"
+    try worktreeExpect(
+        try manager.isMerged(repo: repo, branch: emptyBranch),
+        "a branch with no commits of its own reads as unmerged"
+    )
+    try manager.remove(repo: repo, path: empty.path, force: false)
+    try manager.deleteBranch(repo: repo, branch: emptyBranch)
+    try worktreeExpect(
+        !(try manager.branchExists(repo: repo, branch: emptyBranch)),
+        "branch \(emptyBranch) survived deleteBranch"
+    )
+
+    // (b) One commit in the worktree, and the branch must be REFUSED.
+    let workSlug = WorktreeManager.slug(role: nil, prompt: "carries a commit", id: worktreeAgentId("00602"))
+    let work = try manager.add(repo: repo, slug: workSlug)
+    let workBranch = "agent/\(workSlug)"
+    try "the agent's work\n".write(to: work.path.appendingPathComponent("agent.txt"), atomically: true, encoding: .utf8)
+    try runTempGit(["add", "agent.txt"], in: work.path)
+    try runTempGit([
+        "-c", "user.email=qa@continuum.test",
+        "-c", "user.name=Continuum QA",
+        "commit", "-q", "--no-gpg-sign", "-m", "agent work",
+    ], in: work.path)
+    try worktreeExpect(
+        !(try manager.isMerged(repo: repo, branch: workBranch)),
+        "a branch carrying a commit the repository does not have reads as merged"
+    )
+    // Committed, so the tree is clean and `remove` succeeds without force — which is
+    // exactly the packet's "worktree gone but branch retained" case.
+    try manager.remove(repo: repo, path: work.path, force: false)
+    do {
+        try manager.deleteBranch(repo: repo, branch: workBranch)
+        throw WorktreeCheckError("deleteBranch destroyed unmerged branch \(workBranch) — `git branch -d` must refuse it")
+    } catch let error as WorktreeManager.WorktreeError {
+        guard case .gitFailed = error else {
+            throw WorktreeCheckError("expected .gitFailed refusing an unmerged branch, got \(error)")
+        }
+    }
+    try worktreeExpect(
+        try manager.branchExists(repo: repo, branch: workBranch),
+        "the refused deleteBranch still removed \(workBranch)"
+    )
+
+    // (c) Once the repository has the work, the same branch becomes deletable —
+    // proof that (b) refused because of mergedness, not because of the name.
+    try runTempGit([
+        "-c", "user.email=qa@continuum.test",
+        "-c", "user.name=Continuum QA",
+        "merge", "-q", "--no-ff", "--no-gpg-sign", "-m", "merge agent", workBranch,
+    ], in: repo)
+    try worktreeExpect(
+        try manager.isMerged(repo: repo, branch: workBranch),
+        "\(workBranch) still reads as unmerged after being merged into HEAD"
+    )
+    try manager.deleteBranch(repo: repo, branch: workBranch)
+    try worktreeExpect(
+        !(try manager.branchExists(repo: repo, branch: workBranch)),
+        "a merged branch was not deleted"
+    )
+}
+
+// MARK: - 10. Orphan detection (P2C.3)
+
+/// An orphan is a container worktree with no agent record behind it. What must
+/// NEVER be one: the main checkout, a worktree a human put elsewhere in the
+/// repository, or a live agent whose record stores the unresolved form of the path
+/// git reports.
+///
+/// Negative test observed red with the final code: with `orphans` comparing raw
+/// `path` strings instead of `WorktreeManager.resolved`, this check reported
+///   FAIL: WorktreeManager checks failed: expected exactly 1 orphan, got
+///   [".../.worktrees/known-work-28b005bd@agent/known-work-28b005bd",
+///    ".../.worktrees/record-deleted-25b00104@agent/record-deleted-25b00104"]
+/// — the count guard fires before the named LIVE-agent assertion below, which is the
+/// same defect reported at a coarser grain.
+private func runWorktreeOrphanCheck() throws {
+    let repo = try makeWorktreeTempRepo()
+    defer { try? FileManager.default.removeItem(at: repo) }
+    let manager = WorktreeManager()
+
+    let knownSlug = WorktreeManager.slug(role: nil, prompt: "known work", id: worktreeAgentId("00701"))
+    let known = try manager.add(repo: repo, slug: knownSlug)
+    let goneSlug = WorktreeManager.slug(role: nil, prompt: "record deleted", id: worktreeAgentId("00702"))
+    let gone = try manager.add(repo: repo, slug: goneSlug)
+
+    // A worktree inside the repository but NOT under `.worktrees/`: somebody else's,
+    // and not this manager's to classify.
+    let side = repo.appendingPathComponent("side-tree", isDirectory: true)
+    try runTempGit(["worktree", "add", "-q", "-b", "side", side.path], in: repo)
+
+    // The known set holds the path as a RECORD would: the /var form the spawn was
+    // given, not the /private/var form git reports.
+    let orphans = try manager.orphans(repo: repo, knownAgents: [known.path.path])
+    guard orphans.count == 1 else {
+        throw WorktreeCheckError("expected exactly 1 orphan, got \(orphans.map { "\($0.path.path)@\($0.branch ?? "detached")" })")
+    }
+    try worktreeExpect(
+        resolved(orphans[0].path) == resolved(gone.path),
+        "orphans reported \(orphans[0].path.path), expected \(gone.path.path)"
+    )
+    try worktreeExpect(
+        orphans[0].branch == "agent/\(goneSlug)",
+        "the orphan does not name its branch: \(String(describing: orphans[0].branch))"
+    )
+    try worktreeExpect(
+        !orphans.contains(where: { resolved($0.path) == resolved(known.path) }),
+        "orphans reported the LIVE agent at \(resolved(known.path)) — the known set stores the unresolved \(known.path.path) git does not use"
+    )
+
+    // With NO agents known at all, both container worktrees are orphans — and the
+    // main checkout and the side worktree still are not. Without this the check
+    // could pass on an implementation that simply reports one thing.
+    let all = try manager.orphans(repo: repo, knownAgents: [])
+    try worktreeExpect(all.count == 2, "with no known agents both container worktrees are orphans, got \(all.count)")
+    try worktreeExpect(
+        !all.contains(where: { resolved($0.path) == resolved(repo) }),
+        "orphans reported the MAIN checkout \(repo.path)"
+    )
+    try worktreeExpect(
+        !all.contains(where: { resolved($0.path) == resolved(side) }),
+        "orphans reported \(side.path), a worktree outside \(WorktreeManager.containerDirectoryName)/ that no agent created"
+    )
+}
+
+// MARK: - 11. Repair (P2C.3)
+
+/// `repair` frees disk without discarding work: a clean orphan goes, a dirty one is
+/// retained and named, every branch survives, and an orphan whose directory has
+/// already gone is pruned out of git's admin records.
+///
+/// Negative test observed red with the final code: with `repair` passing
+/// `force: true` to `remove`, this check reported
+///   FAIL: WorktreeManager checks failed: repair removed
+///   [".../.worktrees/clean-orphan-67a39cf7", ".../.worktrees/dirty-orphan-66a39b64"],
+///   expected only .../.worktrees/clean-orphan-67a39cf7
+/// — the `removed` list is asserted before the retention guard below, so the dirty
+/// orphan is named there first.
+private func runWorktreeRepairCheck() throws {
+    let repo = try makeWorktreeTempRepo()
+    defer { try? FileManager.default.removeItem(at: repo) }
+    let manager = WorktreeManager()
+
+    let keptSlug = WorktreeManager.slug(role: nil, prompt: "still has an agent", id: worktreeAgentId("00801"))
+    let kept = try manager.add(repo: repo, slug: keptSlug)
+    let cleanSlug = WorktreeManager.slug(role: nil, prompt: "clean orphan", id: worktreeAgentId("00802"))
+    let clean = try manager.add(repo: repo, slug: cleanSlug)
+    let dirtySlug = WorktreeManager.slug(role: nil, prompt: "dirty orphan", id: worktreeAgentId("00803"))
+    let dirty = try manager.add(repo: repo, slug: dirtySlug)
+    try "uncommitted work nobody has seen\n".write(
+        to: dirty.path.appendingPathComponent("README.md"),
+        atomically: true,
+        encoding: .utf8
+    )
+    let vanishedSlug = WorktreeManager.slug(role: nil, prompt: "directory deleted", id: worktreeAgentId("00804"))
+    let vanished = try manager.add(repo: repo, slug: vanishedSlug)
+
+    // The comparable forms are captured while every directory still exists: this
+    // check's own `resolved` is the naive one, and a path that has been deleted
+    // (which is the point of two of these three orphans) cannot be resolved after
+    // the fact. Capturing first keeps the expectation independent of the
+    // canonicalisation the manager itself uses.
+    let expectedClean = resolved(clean.path)
+    let expectedDirty = resolved(dirty.path)
+    let expectedVanished = resolved(vanished.path)
+
+    // Deleted behind git's back: `list` still reports it, and only `prune` clears it.
+    try FileManager.default.removeItem(at: vanished.path)
+
+    let report = try manager.repair(repo: repo, knownAgents: [kept.path.path])
+
+    try worktreeExpect(report.found.count == 3, "repair found \(report.found.count) orphans, expected 3")
+    try worktreeExpect(
+        report.removed.map { WorktreeManager.resolved($0) } == [expectedClean],
+        "repair removed \(report.removed.map(\.path)), expected only \(expectedClean)"
+    )
+    try worktreeExpect(
+        !FileManager.default.fileExists(atPath: clean.path.path),
+        "the clean orphan is still on disk after repair"
+    )
+    try worktreeExpect(
+        report.pruned.map { WorktreeManager.resolved($0) } == [expectedVanished],
+        "repair pruned \(report.pruned.map(\.path)), expected only \(expectedVanished)"
+    )
+    guard report.retained.count == 1, resolved(report.retained[0].path) == expectedDirty else {
+        throw WorktreeCheckError("repair force-removed the dirty orphan \(expectedDirty) — uncommitted work must be retained and reported")
+    }
+    try worktreeExpect(
+        !report.retained[0].reason.isEmpty,
+        "a retained orphan was reported without a reason"
+    )
+    try worktreeExpect(
+        FileManager.default.fileExists(atPath: dirty.path.appendingPathComponent("README.md").path),
+        "the dirty orphan's uncommitted file is gone"
+    )
+
+    // Not one branch was deleted, in any of the three cases.
+    for slug in [cleanSlug, dirtySlug, vanishedSlug] {
+        try worktreeExpect(
+            try manager.branchExists(repo: repo, branch: "agent/\(slug)"),
+            "repair deleted branch agent/\(slug) — it is all that is left of that agent's work"
+        )
+        try worktreeExpect(
+            report.branchesKept.contains("agent/\(slug)"),
+            "repair did not report keeping agent/\(slug): \(report.branchesKept)"
+        )
+    }
+
+    // The live agent is untouched, and git's own view matches the report.
+    try worktreeExpect(
+        FileManager.default.fileExists(atPath: kept.path.appendingPathComponent("README.md").path),
+        "repair damaged the live agent's worktree"
+    )
+    let listed = try manager.list(repo: repo).map { resolved($0.path) }
+    try worktreeExpect(
+        listed.sorted() == [resolved(repo), resolved(kept.path), resolved(dirty.path)].sorted(),
+        "after repair git lists \(listed), expected the main checkout, the live agent, and the retained dirty orphan"
+    )
 }

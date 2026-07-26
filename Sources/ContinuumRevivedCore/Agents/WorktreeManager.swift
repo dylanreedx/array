@@ -197,6 +197,163 @@ public struct WorktreeManager: Sendable {
         _ = try runGit(arguments, repo: repo)
     }
 
+    // MARK: - Cleanup (P2C.3)
+
+    /// True when every commit on `branch` is already reachable from `into`.
+    ///
+    /// This is ONE predicate for both of the packet's safe-to-delete cases: a branch
+    /// with no commits of its own still points at the commit it was cut from, which is
+    /// an ancestor of `HEAD`, so it reads as merged. A branch carrying even one commit
+    /// the main checkout has not seen reads as unmerged, and unmerged work is never
+    /// deleted.
+    public func isMerged(repo: URL, branch: String, into: String = "HEAD") throws -> Bool {
+        do {
+            _ = try runGit(["merge-base", "--is-ancestor", "refs/heads/\(branch)", into], repo: repo)
+            return true
+        } catch let error as WorktreeError {
+            // `--is-ancestor` answers by exit status: 1 with no stderr means "not an
+            // ancestor". Anything else is a real git failure and must not read as
+            // "unmerged" — that would be a false NEGATIVE, which is the safe
+            // direction, but it would also silently hide a broken repository.
+            if case let .gitFailed(_, exitCode, stderr) = error, exitCode == 1, stderr.isEmpty {
+                return false
+            }
+            throw error
+        }
+    }
+
+    /// Delete a branch, refusing anything that is not fully merged.
+    ///
+    /// `git branch -d`, never `-D`. The caller is expected to have checked
+    /// `isMerged` already; using the safe flag anyway means git itself is the second
+    /// guard, so a bug in the caller's check cannot destroy an agent's commits.
+    public func deleteBranch(repo: URL, branch: String) throws {
+        try requireRepository(repo)
+        _ = try runGit(["branch", "-d", branch], repo: repo)
+    }
+
+    /// `git worktree prune` — drops the admin records of worktrees whose directory
+    /// is gone. It does NOT delete any directory, which is why `repair` removes
+    /// first and prunes afterwards.
+    public func prune(repo: URL) throws {
+        try requireRepository(repo)
+        _ = try runGit(["worktree", "prune"], repo: repo)
+    }
+
+    /// A worktree under `.worktrees/` with no live agent behind it.
+    public struct Orphan: Equatable, Sendable {
+        public let path: URL
+        public let branch: String?
+
+        public init(path: URL, branch: String?) {
+            self.path = path
+            self.branch = branch
+        }
+    }
+
+    /// What one `repair` did. Every outcome is named: a caller must be able to say
+    /// which trees went away and which were left alone, and why.
+    public struct RepairReport: Equatable, Sendable {
+        public struct Retained: Equatable, Sendable {
+            public let path: URL
+            public let reason: String
+        }
+
+        public var found: [Orphan] = []
+        /// Checkouts this call deleted from disk.
+        public var removed: [URL] = []
+        /// Orphans whose directory was ALREADY gone, so only git's admin record was
+        /// left to drop. Reported separately from `removed` because nothing was
+        /// deleted here — a report that conflated the two would claim to have freed
+        /// disk it never touched.
+        public var pruned: [URL] = []
+        public var retained: [Retained] = []
+        /// Branches left behind. `repair` NEVER deletes one — see the doc comment.
+        public var branchesKept: [String] = []
+    }
+
+    /// Worktrees under `<repo>/.worktrees/` that no live agent claims.
+    ///
+    /// `knownAgents` is the `cwd` of every agent record the caller still has. Both
+    /// sides are compared symlink-resolved because git reports the RESOLVED path in
+    /// `worktree list --porcelain` while a record stores whatever the spawn was given
+    /// (on macOS a temp root is `/var/...`, a symlink to `/private/var/...`), so a
+    /// literal string compare reports every live agent as an orphan.
+    ///
+    /// Scoped to the container directory on purpose: the main checkout and any
+    /// worktree a human created elsewhere in the repository are NOT this manager's to
+    /// classify, and calling one an orphan would invite `repair` to delete it.
+    public func orphans(repo: URL, knownAgents: Set<String>) throws -> [Orphan] {
+        let known = Set(knownAgents.map { Self.resolved(URL(fileURLWithPath: $0)) })
+        let container = Self.resolved(
+            repo.appendingPathComponent(Self.containerDirectoryName, isDirectory: true)
+        ) + "/"
+        return try list(repo: repo)
+            .filter { !$0.isMain }
+            .filter { Self.resolved($0.path).hasPrefix(container) }
+            .filter { !known.contains(Self.resolved($0.path)) }
+            .map { Orphan(path: $0.path, branch: $0.branch) }
+    }
+
+    /// Report every orphan, remove the ones that can be removed without discarding
+    /// work, then `prune`.
+    ///
+    /// Two deliberate refusals:
+    /// · **No `--force`.** A dirty orphan is retained and reported. There is nobody
+    ///   left to ask whether those edits matter, so guessing is not available.
+    /// · **No branch deletion.** The record that said which agent owned this branch is
+    ///   gone, so the branch is all that is left of its work. Removing the tree frees
+    ///   the disk; the branch is reported for a human.
+    public func repair(repo: URL, knownAgents: Set<String>) throws -> RepairReport {
+        var report = RepairReport()
+        report.found = try orphans(repo: repo, knownAgents: knownAgents)
+        for orphan in report.found {
+            // A directory that is already gone is not handed to `worktree remove`
+            // (which fails on it); the trailing `prune` is what drops its record.
+            guard FileManager.default.fileExists(atPath: orphan.path.path) else {
+                report.pruned.append(orphan.path)
+                if let branch = orphan.branch { report.branchesKept.append(branch) }
+                continue
+            }
+            do {
+                try remove(repo: repo, path: orphan.path, force: false)
+                report.removed.append(orphan.path)
+            } catch {
+                report.retained.append(RepairReport.Retained(
+                    path: orphan.path,
+                    reason: String(describing: error)
+                ))
+            }
+            if let branch = orphan.branch { report.branchesKept.append(branch) }
+        }
+        try prune(repo: repo)
+        return report
+    }
+
+    /// A comparable form of a worktree path.
+    ///
+    /// macOS temp roots live under a `/var` -> `/private/var` symlink, and git reports
+    /// the RESOLVED path for a worktree it can read — so a raw string compare against a
+    /// record's stored `cwd` fails on every agent.
+    ///
+    /// The second half is a measured trap, not defensiveness: `resolvingSymlinksInPath`
+    /// leaves a path that no longer EXISTS alone, and a worktree whose directory has
+    /// been deleted is exactly that case — git echoes the unresolved path it recorded
+    /// at `add` time, which then failed to match the resolved container and made the
+    /// prunable worktree invisible to `orphans` (observed: `repair found 2 orphans,
+    /// expected 3`). Resolving the existing PARENT and re-appending the leaf makes the
+    /// live and the vanished forms comparable.
+    public static func resolved(_ url: URL) -> String {
+        let standardized = url.standardizedFileURL
+        if FileManager.default.fileExists(atPath: standardized.path) {
+            return standardized.resolvingSymlinksInPath().path
+        }
+        return standardized.deletingLastPathComponent()
+            .resolvingSymlinksInPath()
+            .appendingPathComponent(standardized.lastPathComponent)
+            .path
+    }
+
     /// True when `refs/heads/<branch>` resolves.
     public func branchExists(repo: URL, branch: String) throws -> Bool {
         do {

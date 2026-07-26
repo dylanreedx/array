@@ -385,6 +385,198 @@ final class AgentSupervisor {
         for id in Array(runners.keys) { stop(id) }
     }
 
+    // MARK: - Archive / cleanup (P2C.3)
+
+    /// What one `archive` did, so the caller reports facts instead of assuming the
+    /// happy path ran. Every field is a decision that could have gone the other way.
+    struct ArchiveReport {
+        /// True when a prompt was in flight and had to be terminated.
+        var wasRunning = false
+        /// The worktree that is now gone from disk.
+        var worktreeRemoved: URL?
+        /// The worktree still on disk, and why it was left there.
+        var worktreeRetained: (path: URL, reason: String)?
+        /// The branch that was deleted because it held nothing the repo does not have.
+        var branchDeleted: String?
+        /// The branch kept because deleting it would have discarded the agent's
+        /// commits, and why.
+        var branchRetained: (branch: String, reason: String)?
+        /// False only when the store refused; the in-memory record is always dropped.
+        var recordDeleted = false
+
+        var summary: String {
+            var parts: [String] = []
+            if wasRunning { parts.append("stopped a live runner") }
+            if let worktreeRemoved { parts.append("removed \(worktreeRemoved.lastPathComponent)") }
+            if let worktreeRetained { parts.append("kept worktree \(worktreeRetained.path.lastPathComponent) (\(worktreeRetained.reason))") }
+            if let branchDeleted { parts.append("deleted \(branchDeleted)") }
+            if let branchRetained { parts.append("KEPT \(branchRetained.branch) (\(branchRetained.reason))") }
+            if parts.isEmpty { parts.append("nothing to clean up") }
+            return parts.joined(separator: ", ")
+        }
+    }
+
+    /// The agent leaves: its runner stops, its worktree goes away, and its record is
+    /// deleted from memory and from the store.
+    ///
+    /// This is NOT what closing a tile does — that is `detachView` (P2A.5), and the
+    /// locked decision is that closing a tile never ends the work. Only a deliberate
+    /// archive/delete reaches here.
+    ///
+    /// The branch is deleted ONLY when `WorktreeManager.isMerged` says the repository
+    /// already has everything on it. Otherwise the branch is kept and NAMED in the
+    /// report: discarding an agent's commits silently is worse than leaving a branch
+    /// behind for a human to look at. A dirty worktree is likewise retained rather than
+    /// force-removed — the uncommitted edits are work too, and no diff has been
+    /// captured yet (that is P2C.5).
+    ///
+    /// P4.1 owns the `archived` lifecycle state; this is only the cleanup the
+    /// archive/delete action performs.
+    @discardableResult
+    func archive(_ id: AgentID) -> ArchiveReport {
+        var report = ArchiveReport()
+        guard let record = records[id] else {
+            warn("AgentSupervisor.archive: no agent \(id.rawValue.uuidString)")
+            return report
+        }
+        // Stopped BEFORE the record is deleted, and that order is load-bearing: `stop`
+        // delivers `.sessionStateChanged(.stopped)`, which is persist-worthy, so a stop
+        // after the delete would write the record straight back.
+        if runners[id] != nil {
+            report.wasRunning = true
+            stop(id)
+        }
+        // THE DURABLE DELETE COMES FIRST (from the cross-review). Removing a worktree
+        // for a record that is still on disk is the worst combination available: the
+        // next launch restores an agent whose checkout is gone. If the store refuses,
+        // nothing is cleaned up and the agent stays exactly where it was.
+        do {
+            try store.delete(id: id)
+            report.recordDeleted = true
+        } catch {
+            warn("AgentSupervisor.archive: could not delete agent \(id.rawValue.uuidString), so nothing was cleaned up: \(error)")
+            return report
+        }
+        cleanUpWorktree(of: record, into: &report)
+
+        records.removeValue(forKey: id)
+        history.removeValue(forKey: id)
+        for continuation in (subscribers[id] ?? [:]).values { continuation.finish() }
+        subscribers.removeValue(forKey: id)
+        restoredIDs.remove(id)
+        return report
+    }
+
+    /// Removes an isolated agent's checkout, keeping anything unmerged.
+    ///
+    /// The repository is DERIVED from the record: an isolated `cwd` is
+    /// `<repo>/.worktrees/<slug>`, so the repo is two components up. That derivation is
+    /// checked rather than assumed — a record whose `cwd` is not inside the container
+    /// gets nothing removed, because the alternative is running `git worktree remove`
+    /// on somebody's project root.
+    private func cleanUpWorktree(of record: AgentRecord, into report: inout ArchiveReport) {
+        guard let branch = record.worktreeBranch else { return }
+        let worktree = URL(fileURLWithPath: record.cwd, isDirectory: true)
+        let container = worktree.deletingLastPathComponent()
+        guard container.lastPathComponent == WorktreeManager.containerDirectoryName else {
+            report.worktreeRetained = (worktree, "cwd is not inside \(WorktreeManager.containerDirectoryName)/")
+            report.branchRetained = (branch, "the worktree could not be identified")
+            warn("AgentSupervisor.archive: \(record.id.rawValue.uuidString) claims branch \(branch) but its cwd \(record.cwd) is not an agent worktree; leaving both alone")
+            return
+        }
+        let repo = container.deletingLastPathComponent()
+
+        do {
+            // Git's own view: a worktree it no longer knows about must not be handed to
+            // `worktree remove`, which fails on it, and the branch decision below is
+            // still worth making.
+            let known = try worktrees.list(repo: repo).contains {
+                WorktreeManager.resolved($0.path) == WorktreeManager.resolved(worktree)
+            }
+            if known {
+                try worktrees.remove(repo: repo, path: worktree, force: false)
+                report.worktreeRemoved = worktree
+            } else {
+                report.worktreeRetained = (worktree, "git does not know this worktree")
+            }
+        } catch {
+            // `git worktree remove` refuses a dirty tree. Retained, not forced.
+            report.worktreeRetained = (worktree, String(describing: error))
+            report.branchRetained = (branch, "its worktree is still on disk")
+            warn("AgentSupervisor.archive: could not remove worktree \(worktree.path): \(error)")
+            return
+        }
+
+        do {
+            guard try worktrees.isMerged(repo: repo, branch: branch) else {
+                report.branchRetained = (branch, "it has commits the repository does not")
+                return
+            }
+            try worktrees.deleteBranch(repo: repo, branch: branch)
+            report.branchDeleted = branch
+        } catch {
+            report.branchRetained = (branch, String(describing: error))
+            warn("AgentSupervisor.archive: could not delete branch \(branch): \(error)")
+        }
+    }
+
+    /// Worktrees under `<repo>/.worktrees/` with no agent record behind them.
+    ///
+    /// The known set is the union of the live records and everything still in the
+    /// store, which is the load-bearing part: `restore()` MARKS a record whose `cwd` is
+    /// missing and does not adopt it (P2A.7), so an in-memory-only set would call that
+    /// agent's worktree an orphan and `repair` would prune the one thing that could
+    /// still bring it back.
+    func orphanWorktrees(repo: URL) throws -> [WorktreeManager.Orphan] {
+        try worktrees.orphans(repo: repo, knownAgents: knownAgentDirectories())
+    }
+
+    /// Reports the orphans, removes the ones that hold no work, and prunes.
+    func repairWorktrees(repo: URL) throws -> WorktreeManager.RepairReport {
+        try worktrees.repair(repo: repo, knownAgents: knownAgentDirectories())
+    }
+
+    enum CleanupRefusal: Error, CustomStringConvertible {
+        case unreadableAgentStore(String)
+
+        var description: String {
+            switch self {
+            case let .unreadableAgentStore(detail):
+                return "refusing to classify worktrees as orphans: \(detail)"
+            }
+        }
+    }
+
+    /// Every directory an agent record claims, live or stored.
+    ///
+    /// THROWS RATHER THAN NARROWING (from the cross-review). Repair DELETES checkouts,
+    /// so an incomplete known set is not a degraded answer, it is a destructive one:
+    /// every agent missing from it becomes an orphan. Both ways the set can come up
+    /// short are refusals here, not warnings.
+    ///
+    /// The second one is the subtle one. `AgentStore.loadAll` deliberately SKIPS a
+    /// record it cannot decode — correct for the inbox, which must not go down over one
+    /// bad file, and silently wrong for this caller. The `.json` file count is the
+    /// witness that nothing was skipped.
+    private func knownAgentDirectories() throws -> Set<String> {
+        let stored = try store.loadAll()
+        let directory = store.layout.agentsDirectory
+        var files: [URL] = []
+        if FileManager.default.fileExists(atPath: directory.path) {
+            files = try FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ).filter { $0.pathExtension == "json" }
+        }
+        guard files.count == stored.count else {
+            throw CleanupRefusal.unreadableAgentStore(
+                "\(files.count) record file(s) in \(directory.lastPathComponent)/ but only \(stored.count) could be read, so an agent could be mistaken for an orphan"
+            )
+        }
+        return Set(records.values.map(\.cwd)).union(stored.map(\.cwd))
+    }
+
     // MARK: - View binding (P2A.5)
 
     /// Binds an agent to a tile. `AgentRecord.tileId` is WHERE THE AGENT IS BEING
@@ -828,8 +1020,12 @@ func runAgentSupervisorChecks() async throws {
 
     let isolationReport = try await checkIsolatedSpawn(config: config, fail: fail)
 
+    // MARK: 11 · archiving an agent cleans up after it, without losing work (P2C.3)
+
+    let cleanupReport = try await checkArchiveCleanup(config: config, fail: fail)
+
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport)")
 }
 
 /// Gated on `--agent-restore-check` (P2A.7).
@@ -2176,6 +2372,403 @@ private func checkIsolatedSpawn(
 
     supervisor.stopAll()
     return "an isolated spawn ran in .worktrees/\(slug) on \(branch) (git agrees, and that is the branch checked out in the runner's cwd), a non-isolated spawn stayed in the project root with no branch, and two real worktree failures each threw out of spawn leaving no agent"
+}
+
+/// P2C.3 — archiving an agent cleans up after it, and never at the cost of work.
+///
+/// Everything runs against a TEMP `git init` repository (P2C.1's inherited trap: the
+/// real repository is never a `worktree add` target) and a temp `AgentStore`. The
+/// orphan half uses SUCCESSIVE supervisors over that one store, because "the record
+/// is gone" has to be observed by something that never held the record — a supervisor
+/// that spawned the agent could answer from memory.
+///
+/// Eight properties:
+///   1. Archiving an isolated agent with nothing on its branch removes the worktree
+///      AND the branch, and deletes the record from memory and from the store.
+///   2. An UNMERGED commit keeps the branch: the worktree still goes, the branch is
+///      retained and named in the report. This is the packet's headline prohibition.
+///   3. Archiving stops a live runner.
+///   4. A non-isolated agent's archive touches no worktree and no branch.
+///   5. A record claiming a branch whose `cwd` is NOT under `.worktrees/` gets
+///      nothing removed — the fixture is a real worktree a human created elsewhere in
+///      the repository, which the derivation would otherwise hand to
+///      `git worktree remove`.
+///   6. Orphans: a worktree whose record was deleted behind the supervisor's back is
+///      reported and repaired; a STALE record's worktree (the P2A.7 case: `cwd`
+///      missing, so `restore` marks and skips it) is NOT an orphan, because the
+///      record is still in the store.
+///   7. A store that cannot be read completely makes orphan detection and repair
+///      REFUSE, rather than treat the agents it could not read as orphans.
+///   8. A store that cannot delete the record cleans up NOTHING.
+///
+/// Seven negative tests observed red at exit 1 with the final code, each quoted at its
+/// assertion below. One mutation that is deliberately NOT red is recorded at MARK 2:
+/// deleting the branch without the `isMerged` guard is caught by `git branch -d`
+/// instead, and the destructive form of it (`-D`) is red in `runWorktreeMergedBranchCheck`.
+@MainActor
+private func checkArchiveCleanup(
+    config: AgentModelConfig.Resolution,
+    fail: (String) -> Error
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-archive-cleanup-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+    let repo = root.appendingPathComponent("repo", isDirectory: true)
+    try makeIsolatedSpawnRepo(at: repo)
+    let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support", isDirectory: true))
+    let manager = WorktreeManager()
+
+    // Only the agent given a prompt takes a runner, and it holds `run` open until
+    // `stop` arrives — which is how "archive stopped a live runner" is observed as the
+    // runner exiting rather than as a dictionary entry disappearing.
+    let holding = ScriptedAgentRunner(script: [.sessionStateChanged(.running)], holdUntilStopped: true)
+    let queue = ScriptedRunnerQueue([holding])
+    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0) })
+
+    func spawnIsolated(_ prompt: String?, role: String) throws -> (id: AgentID, record: AgentRecord) {
+        let id = try supervisor.spawn(
+            role: role,
+            prompt: prompt,
+            cwd: repo,
+            model: config.model,
+            thinking: config.thinking,
+            isolated: true
+        )
+        guard let record = supervisor.records[id] else {
+            throw fail("the supervisor lost the isolated agent it spawned for \(role)")
+        }
+        return (id, record)
+    }
+
+    // MARK: 1 · nothing on the branch: the worktree AND the branch go
+
+    let clean = try spawnIsolated(nil, role: "clean")
+    guard let cleanBranch = clean.record.worktreeBranch else {
+        throw fail("an isolated agent's record does not name its branch")
+    }
+    let cleanPath = URL(fileURLWithPath: clean.record.cwd, isDirectory: true)
+    let listedBefore = try manager.list(repo: repo).count
+
+    // Negative test observed red with the final code: with `archive` calling only
+    // `store.delete` (no `cleanUpWorktree`) this reported
+    //   FAIL: archiving a clean isolated agent left its worktree on disk: …/.worktrees/clean-…
+    let cleanReport = supervisor.archive(clean.id)
+    guard !FileManager.default.fileExists(atPath: cleanPath.path) else {
+        throw fail("archiving a clean isolated agent left its worktree on disk: \(cleanPath.path)")
+    }
+    guard cleanReport.worktreeRemoved.map({ WorktreeManager.resolved($0) }) == WorktreeManager.resolved(cleanPath) else {
+        throw fail("the report does not name the removed worktree: \(String(describing: cleanReport.worktreeRemoved?.path))")
+    }
+    guard try !manager.branchExists(repo: repo, branch: cleanBranch) else {
+        throw fail("archiving a clean isolated agent left branch \(cleanBranch) behind; it held nothing the repository does not have")
+    }
+    guard cleanReport.branchDeleted == cleanBranch else {
+        throw fail("the report does not name the deleted branch: \(String(describing: cleanReport.branchDeleted))")
+    }
+    guard try manager.list(repo: repo).count == listedBefore - 1 else {
+        throw fail("git still lists the archived agent's worktree")
+    }
+    guard supervisor.records[clean.id] == nil else {
+        throw fail("the archived agent is still in memory")
+    }
+    guard try store.load(id: clean.id) == nil, cleanReport.recordDeleted else {
+        throw fail("the archived agent's record is still in the store")
+    }
+
+    // MARK: 2 · an unmerged commit keeps the branch
+
+    let unmerged = try spawnIsolated(nil, role: "unmerged")
+    guard let unmergedBranch = unmerged.record.worktreeBranch else {
+        throw fail("the unmerged agent's record does not name its branch")
+    }
+    let unmergedPath = URL(fileURLWithPath: unmerged.record.cwd, isDirectory: true)
+    try "the agent's work\n".write(to: unmergedPath.appendingPathComponent("agent.txt"), atomically: true, encoding: .utf8)
+    try runIsolatedSpawnGit(["add", "agent.txt"], in: unmergedPath)
+    try runIsolatedSpawnGit([
+        "-c", "user.email=qa@continuum.test",
+        "-c", "user.name=Continuum QA",
+        "commit", "-q", "--no-gpg-sign", "-m", "agent work",
+    ], in: unmergedPath)
+
+    // TWO INDEPENDENT GUARDS, and the honest note about which one this check catches:
+    // deleting the branch unconditionally here (no `isMerged` guard) is NOT red, because
+    // `WorktreeManager.deleteBranch` is `git branch -d` and git refuses it too — the
+    // branch survives and lands in `branchRetained` carrying git's message instead of
+    // this code's reason. The destructive mutation is `-d` -> `-D` in the manager, and
+    // it is observed red in `runWorktreeMergedBranchCheck`. What the assertions below
+    // do witness is that an unmerged branch survives an archive at all, which is the
+    // packet's done-criterion.
+    let unmergedReport = supervisor.archive(unmerged.id)
+    guard !FileManager.default.fileExists(atPath: unmergedPath.path) else {
+        throw fail("the committed worktree was clean, so archive should have removed it: \(unmergedPath.path)")
+    }
+    guard try manager.branchExists(repo: repo, branch: unmergedBranch) else {
+        throw fail("archiving an agent with an unmerged commit DELETED branch \(unmergedBranch) — its work is gone")
+    }
+    guard unmergedReport.branchRetained?.branch == unmergedBranch, unmergedReport.branchDeleted == nil else {
+        throw fail("the report does not say the branch was kept: deleted=\(String(describing: unmergedReport.branchDeleted)) retained=\(String(describing: unmergedReport.branchRetained?.branch))")
+    }
+    guard let retainedReason = unmergedReport.branchRetained?.reason, !retainedReason.isEmpty else {
+        throw fail("a retained branch was reported without a reason")
+    }
+    // The commit is still reachable, which is the property the branch existing stands
+    // in for.
+    let reachable = try runIsolatedSpawnGit(["log", "--format=%s", "-1", unmergedBranch], in: repo)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard reachable == "agent work" else {
+        throw fail("the retained branch no longer points at the agent's commit: \(reachable)")
+    }
+
+    // MARK: 3 · archive stops a live runner
+
+    let live = try spawnIsolated("work on it", role: "live")
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { holding.runCount == 1 }) else {
+        throw fail("the live agent's prompt never reached a runner")
+    }
+    guard supervisor.isRunning(live.id) else {
+        throw fail("the live agent should have a prompt in flight")
+    }
+    // Negative test observed red with the final code: with the `stop` call removed
+    // from `archive` this reported
+    //   FAIL: archiving a live agent did not stop its runner: run() never returned
+    let liveReport = supervisor.archive(live.id)
+    guard liveReport.wasRunning else {
+        throw fail("the report does not say a live runner was stopped")
+    }
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { holding.completedRuns == 1 }) else {
+        throw fail("archiving a live agent did not stop its runner: run() never returned")
+    }
+    guard !supervisor.isRunning(live.id), supervisor.records[live.id] == nil else {
+        throw fail("the archived live agent is still around")
+    }
+
+    // MARK: 4 · a non-isolated agent's archive touches no git state
+
+    let plainId = supervisor.spawn(
+        role: "plain",
+        prompt: nil,
+        cwd: repo,
+        model: config.model,
+        thinking: config.thinking
+    )
+    let listedBeforePlain = try manager.list(repo: repo)
+    let plainReport = supervisor.archive(plainId)
+    guard plainReport.worktreeRemoved == nil, plainReport.worktreeRetained == nil,
+          plainReport.branchDeleted == nil, plainReport.branchRetained == nil else {
+        throw fail("archiving a non-isolated agent made a worktree decision: \(plainReport.summary)")
+    }
+    guard try manager.list(repo: repo).map({ $0.path.path }) == listedBeforePlain.map({ $0.path.path }) else {
+        throw fail("archiving a non-isolated agent changed the repository's worktrees")
+    }
+    guard FileManager.default.fileExists(atPath: repo.appendingPathComponent("README.md").path) else {
+        throw fail("archiving a non-isolated agent damaged the project root")
+    }
+    guard supervisor.records[plainId] == nil, try store.load(id: plainId) == nil else {
+        throw fail("the archived non-isolated agent's record survived")
+    }
+
+    // MARK: 5 · a branch-claiming record outside .worktrees/ is left alone
+
+    // The fixture is the case that would actually be destroyed: a REAL worktree a
+    // human created two levels down inside the repository, so the `<repo>/.worktrees/
+    // <slug>` derivation would resolve to a genuine repository that genuinely knows
+    // this path — and `git worktree remove` would take it. (A first attempt pointed the
+    // record at the project root; that is not discriminating, because the derived
+    // "repo" is then the temp directory, which is not a repository at all, so the
+    // removal fails for a reason that has nothing to do with the guard.)
+    let manual = repo.appendingPathComponent("manual", isDirectory: true)
+        .appendingPathComponent("tree", isDirectory: true)
+    try runIsolatedSpawnGit(["worktree", "add", "-q", "-b", "manual", manual.path], in: repo)
+
+    // Written straight to the store, so nothing in this process ever spawned it: this
+    // is a hand-edited or migrated record.
+    let mislabelledId = AgentID(rawValue: UUID())
+    let now = Date()
+    try store.upsert(AgentRecord(
+        id: mislabelledId,
+        displayName: "mislabelled",
+        role: "mislabelled",
+        model: config.model,
+        thinking: config.thinking,
+        cwd: manual.path,
+        worktreeBranch: "manual",
+        projectId: nil,
+        createdAt: now,
+        lastActivityAt: now,
+        tileId: nil
+    ))
+    let adopting = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0) })
+    _ = adopting.restore()
+    guard adopting.records[mislabelledId] != nil else {
+        throw fail("the mislabelled record was not adopted, so the guard is untested")
+    }
+    let listedBeforeMislabelled = try manager.list(repo: repo).map { $0.path.path }
+    // Negative test observed red with the final code: with the container check in
+    // `cleanUpWorktree` bypassed this reported
+    //   FAIL: archiving a record that claims a worktree outside .worktrees/ removed
+    //   it: Optional("…/repo/manual/tree")
+    let mislabelledReport = adopting.archive(mislabelledId)
+    guard mislabelledReport.worktreeRemoved == nil else {
+        throw fail("archiving a record that claims a worktree outside \(WorktreeManager.containerDirectoryName)/ removed it: \(String(describing: mislabelledReport.worktreeRemoved?.path))")
+    }
+    guard mislabelledReport.worktreeRetained != nil, mislabelledReport.branchRetained != nil else {
+        throw fail("the mislabelled record was cleaned up silently: \(mislabelledReport.summary)")
+    }
+    guard try manager.list(repo: repo).map({ $0.path.path }) == listedBeforeMislabelled else {
+        throw fail("archiving a mislabelled record changed the repository's worktrees")
+    }
+    guard FileManager.default.fileExists(atPath: manual.appendingPathComponent("README.md").path) else {
+        throw fail("archiving a mislabelled record destroyed the human's worktree at \(manual.path)")
+    }
+    guard try manager.branchExists(repo: repo, branch: "manual") else {
+        throw fail("archiving a mislabelled record deleted the human's branch `manual`")
+    }
+
+    // MARK: 6 · orphans, and what is NOT one
+
+    let orphanSupervisor = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0) })
+    func spawnOn(_ supervisor: AgentSupervisor, role: String) throws -> AgentRecord {
+        let id = try supervisor.spawn(
+            role: role,
+            prompt: nil,
+            cwd: repo,
+            model: config.model,
+            thinking: config.thinking,
+            isolated: true
+        )
+        guard let record = supervisor.records[id] else { throw fail("lost the \(role) agent") }
+        return record
+    }
+    let keptAgent = try spawnOn(orphanSupervisor, role: "kept")
+    let orphanAgent = try spawnOn(orphanSupervisor, role: "orphaned")
+    // Behind the supervisor's back: the record file goes, nothing else does.
+    try store.delete(id: orphanAgent.id)
+
+    // A supervisor that never held either record — it only knows what the store says.
+    let afterRelaunch = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0) })
+    _ = afterRelaunch.restore()
+    let orphans = try afterRelaunch.orphanWorktrees(repo: repo)
+    // Negative test observed red with the final code: with `knownAgentDirectories`
+    // returning `[]` this reported
+    //   FAIL: orphan detection reported 2 worktrees, expected only the one whose
+    //   record was deleted
+    guard orphans.count == 1 else {
+        throw fail("orphan detection reported \(orphans.count) worktrees, expected only the one whose record was deleted: \(orphans.map { $0.path.lastPathComponent })")
+    }
+    guard WorktreeManager.resolved(orphans[0].path) == WorktreeManager.resolved(URL(fileURLWithPath: orphanAgent.cwd)) else {
+        throw fail("orphan detection named \(orphans[0].path.path), expected \(orphanAgent.cwd)")
+    }
+    let repaired = try afterRelaunch.repairWorktrees(repo: repo)
+    guard repaired.removed.count == 1, repaired.retained.isEmpty else {
+        throw fail("repair removed \(repaired.removed.count) and retained \(repaired.retained.count) worktrees, expected 1 and 0")
+    }
+    guard !FileManager.default.fileExists(atPath: orphanAgent.cwd) else {
+        throw fail("repair left the orphan's worktree on disk")
+    }
+    guard FileManager.default.fileExists(atPath: keptAgent.cwd) else {
+        throw fail("repair deleted the LIVE agent's worktree")
+    }
+    if let orphanBranch = orphanAgent.worktreeBranch {
+        guard try manager.branchExists(repo: repo, branch: orphanBranch) else {
+            throw fail("repair deleted branch \(orphanBranch) — it is all that was left of that agent")
+        }
+    }
+
+    // …and a STALE record's worktree is not an orphan. `restore` marks a record whose
+    // `cwd` is missing and does not adopt it (P2A.7), so a known-set built from live
+    // records alone would prune the one thing that could bring that agent back.
+    let staleAgent = try spawnOn(afterRelaunch, role: "stale")
+    try FileManager.default.removeItem(at: URL(fileURLWithPath: staleAgent.cwd))
+    let afterSecondRelaunch = AgentSupervisor(store: store, makeRunner: { ScriptedRunnerQueue([]).next($0) })
+    let restored = afterSecondRelaunch.restore()
+    guard restored.stale.contains(staleAgent.id) else {
+        throw fail("the stale agent was not marked stale, so this case is untested")
+    }
+    // Negative test observed red with the final code: with `knownAgentDirectories`
+    // reading only `records.values` (no `store.loadAll()`) this reported
+    //   FAIL: a STALE agent's worktree was reported as an orphan — its record is
+    //   still in the store
+    let staleOrphans = try afterSecondRelaunch.orphanWorktrees(repo: repo)
+    guard !staleOrphans.contains(where: {
+        WorktreeManager.resolved($0.path) == WorktreeManager.resolved(URL(fileURLWithPath: staleAgent.cwd))
+    }) else {
+        throw fail("a STALE agent's worktree was reported as an orphan — its record is still in the store")
+    }
+    guard try store.load(id: staleAgent.id) != nil else {
+        throw fail("the stale agent's record disappeared from the store")
+    }
+    if let staleBranch = staleAgent.worktreeBranch {
+        guard try manager.branchExists(repo: repo, branch: staleBranch) else {
+            throw fail("the stale agent's branch \(staleBranch) was deleted")
+        }
+    }
+
+    // MARK: 7 · a store it cannot fully read makes orphan detection REFUSE
+
+    // `AgentStore.loadAll` skips a record it cannot decode, which for the inbox is
+    // correct and for a DESTRUCTIVE sweep is a silently narrowed known set: that
+    // agent's worktree would be an orphan and repair would delete it.
+    //
+    // Negative test observed red with the final code: with `knownAgentDirectories`
+    // warning instead of throwing on the count mismatch this reported
+    //   FAIL: a record file that cannot be decoded did not stop orphan detection;
+    //   it reported 0 orphan(s)
+    // — zero, and that is the point: a narrowed known set answers confidently, and the
+    // only thing standing between that answer and a deleted checkout is which
+    // worktrees happen to be on disk at the time.
+    let corrupt = store.layout.agentsDirectory.appendingPathComponent("not-a-record.json")
+    try "{ this is not an AgentRecord".write(to: corrupt, atomically: true, encoding: .utf8)
+    do {
+        let reported = try afterSecondRelaunch.orphanWorktrees(repo: repo)
+        throw fail("a record file that cannot be decoded did not stop orphan detection; it reported \(reported.count) orphan(s)")
+    } catch let refusal as AgentSupervisor.CleanupRefusal {
+        guard case .unreadableAgentStore = refusal else { throw fail("unexpected refusal \(refusal)") }
+    }
+    do {
+        _ = try afterSecondRelaunch.repairWorktrees(repo: repo)
+        throw fail("repair ran against a store it could not fully read")
+    } catch is AgentSupervisor.CleanupRefusal {
+        // Expected: the destructive call refuses on the same grounds.
+    }
+    try FileManager.default.removeItem(at: corrupt)
+    _ = try afterSecondRelaunch.orphanWorktrees(repo: repo)
+
+    // MARK: 8 · a store that refuses the delete cleans up NOTHING
+
+    // The durable record and the worktree must not disagree: if the record survives,
+    // the checkout it names has to survive too, or the next launch restores an agent
+    // whose directory is gone.
+    //
+    // Negative test observed red with the final code: with `archive` cleaning up before
+    // `store.delete` (and not returning on failure) this reported
+    //   FAIL: archive removed the worktree of an agent whose record it could not
+    //   delete: …/.worktrees/undeletable-…
+    let undeletable = try spawnOn(afterSecondRelaunch, role: "undeletable")
+    // A real store failure, not an injected fake: the records directory is made
+    // read-only, so `removeItem` cannot unlink the file while `loadAll` can still read
+    // it. (A first attempt replaced the record file with a directory; `removeItem`
+    // deletes those recursively, so the delete succeeded and the case was vacuous.)
+    let recordsDirectory = store.layout.agentsDirectory
+    try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: recordsDirectory.path)
+    defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: recordsDirectory.path) }
+    let undeletableReport = afterSecondRelaunch.archive(undeletable.id)
+    guard !undeletableReport.recordDeleted else {
+        throw fail("the store reported deleting a record it cannot delete, so this case is untested")
+    }
+    guard undeletableReport.worktreeRemoved == nil else {
+        throw fail("archive removed the worktree of an agent whose record it could not delete: \(String(describing: undeletableReport.worktreeRemoved?.path))")
+    }
+    guard FileManager.default.fileExists(atPath: undeletable.cwd) else {
+        throw fail("the worktree of an agent whose record could not be deleted is gone")
+    }
+    guard afterSecondRelaunch.records[undeletable.id] != nil else {
+        throw fail("a failed archive dropped the agent from memory anyway")
+    }
+
+    supervisor.stopAll()
+    return "archive removed a clean agent's worktree and branch, KEPT the branch of one with an unmerged commit, stopped a live runner, left a non-isolated agent's repo untouched, refused to touch a project root a record wrongly claimed, repaired 1 orphan while leaving a live and a stale agent alone"
 }
 
 /// A temp repository with one commit — `git worktree add` needs a HEAD. The `-c`
