@@ -99,12 +99,46 @@ public enum PendingRequest: String, CaseIterable, Equatable, Sendable {
 
 /// Whether the row is YOURS to look at — a separate axis from `InboxState`,
 /// because a finished-but-unseen agent and one you already reviewed report the
-/// same state and are not the same thing. P3.3 populates it; until then every row
-/// reports `.none`.
+/// same state and are not the same thing.
+///
+/// The two facts behind it are unrelated and can hold at once, which is what
+/// `resolve(unread:raisedHand:)` exists for: a snoozed agent that raised its hand
+/// while you were elsewhere is BOTH woke and unread, and the row has one slot.
+/// Read-state itself is desktop-local (`AgentSupervisor`, P3.3) and never synced —
+/// it is per-human and per-device, so a phone marking a row read is not this Mac
+/// having looked at it.
 public enum InboxAttention: String, CaseIterable, Equatable, Sendable {
     case none
     case unread
     case woke
+
+    /// The rung this axis contributes to the row's label priority, below the four
+    /// coloured states (P3.2) and above `(done)` / the relative timestamp.
+    ///
+    /// **nil for `unread`, deliberately.** Unread is a MARK, not a word: every
+    /// resting row in a busy inbox would otherwise read "Unread", which says
+    /// nothing the absence of a mark does not. `woke` gets a word because it is the
+    /// one thing that put the row back in front of you.
+    public var label: String? {
+        switch self {
+        case .none, .unread: return nil
+        case .woke: return "Woke"
+        }
+    }
+
+    /// True when the row is asking for your eyes at all — the axis reduced to the
+    /// one bit a mark renders.
+    public var isYours: Bool { self != .none }
+
+    /// The single value for a row whose two facts are known independently.
+    ///
+    /// TOTAL and order-independent, so no caller has to remember the precedence:
+    /// `raisedHand` is P4.6's (a snoozed agent's hand), `unread` is P3.3's
+    /// read-state.
+    public static func resolve(unread: Bool, raisedHand: Bool) -> InboxAttention {
+        if raisedHand { return .woke }
+        return unread ? .unread : .none
+    }
 }
 
 /// Settle / snooze / archive (locked decision). P4.1 owns the persisted facts and
@@ -204,6 +238,17 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.depth = depth
         self.variant = variant
     }
+
+    /// The row's ONE label, resolved down the packet's priority:
+    /// `working → approval → input → failed → (woke) → (done) → relative timestamp`.
+    ///
+    /// The head is `InboxState.label` (P3.2, which is why state wins outright); this
+    /// ticket adds the `(woke)` rung under it, so a woke agent that is also working
+    /// still reads "Working" — what it is doing outranks how it got back here. The
+    /// tail is not invented: `(done)` is P4.1's `InboxLifecycle` and the relative
+    /// timestamp is the list view's, so a row with nothing above them says nothing
+    /// rather than guessing at a word.
+    public var label: String? { state.label ?? attention.label }
 
     /// Shown when neither a display name nor a tile title is known — a terminal
     /// session whose tile the sidebar tree does not place, or a caller that built

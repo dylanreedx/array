@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
@@ -677,6 +678,11 @@ final class AgentSupervisor {
         for continuation in (subscribers[id] ?? [:]).values { continuation.finish() }
         subscribers.removeValue(forKey: id)
         restoredIDs.remove(id)
+        // P3.3: the read-state goes with the agent. A stale entry would make a
+        // recycled id read as unread, and a focused-then-archived agent would keep
+        // the focus armed against nothing.
+        unread.remove(id)
+        if focusedAgentID == id { focusedAgentID = nil }
         return report
     }
 
@@ -884,6 +890,63 @@ final class AgentSupervisor {
     /// re-rendering a header does not shell out.
     var qaBranchGitReads: Int { checkedOutBranches.gitReads }
 
+    // MARK: - Read state (P3.3)
+
+    /// Agents that finished a turn while you were looking somewhere else.
+    ///
+    /// LOCAL, AND DELIBERATELY NOT DURABLE OR SYNCED. Not synced because "have I
+    /// read this" is per-human and per-device — a phone opening a row is not this
+    /// Mac having looked at it — and it is I5-irrelevant, so it must never reach a
+    /// payload. Not persisted because nothing writes it to disk: it lives beside
+    /// `records` rather than in `AgentRecord`, which is the type both `AgentStore`
+    /// and the companion publisher serialize. A relaunch therefore starts with
+    /// nothing marked — every restored agent reads `.none` — which is the honest
+    /// answer for a mark that means "finished while you were not looking": nobody
+    /// was looking at anything before this launch, and the desktop transcript does
+    /// not survive either (P2A.7).
+    ///
+    /// WHO FILLS IT, and who does not yet: `deliver` marks, `focus`/`focusTile`
+    /// clear. Nothing in the app calls either yet — the inbox that reads this axis
+    /// is P3.6's list view and the open-a-row path is P3.9's, and the row builder
+    /// (Core) cannot reach a supervisor, so the value is fed to rows from the
+    /// desktop side when that list exists. This ticket owns the fact, not its
+    /// consumers.
+    private var unread: Set<AgentID> = []
+
+    /// The agent the human is looking at, or nil when that is nothing this
+    /// supervisor owns. Read-state is cleared against THIS, not against a hover:
+    /// clearing on hover would empty the inbox by sweeping the mouse across it.
+    private(set) var focusedAgentID: AgentID?
+
+    /// A deliberate focus or open: the tile was activated, or the inbox row was
+    /// revealed (P3.9). Clears the agent's unread mark, and — the half that makes
+    /// the mark mean anything — arms it, so a turn that completes while you are here
+    /// never sets it.
+    ///
+    /// Pass nil when focus leaves for something that is not an agent; from then on a
+    /// completed turn is unread again.
+    func focus(agentID id: AgentID?) {
+        focusedAgentID = id
+        if let id { unread.remove(id) }
+    }
+
+    /// The same thing keyed by TILE, which is how focus actually arrives on the
+    /// desktop (`FocusBroker` speaks tile ids). A tile showing no agent focuses
+    /// nothing rather than leaving the previous agent armed.
+    func focusTile(_ tileId: UUID?) {
+        focus(agentID: tileId.flatMap { agent(forTile: $0) })
+    }
+
+    /// This agent's attention axis, resolved (`InboxAttention.resolve`).
+    ///
+    /// `raisedHand` is P4.6's fact — a snoozed agent putting its hand up — and this
+    /// supervisor does not own snooze, so it is a parameter rather than a nil
+    /// pretending to be an answer. The precedence between the two lives in
+    /// `InboxAttention`, not here.
+    func attention(for id: AgentID, raisedHand: Bool = false) -> InboxAttention {
+        InboxAttention.resolve(unread: unread.contains(id), raisedHand: raisedHand)
+    }
+
     // MARK: - Multicast
 
     /// Snapshot-then-tail, per `ActivityStore.subscribe()`: the buffered history is
@@ -913,6 +976,14 @@ final class AgentSupervisor {
     }
 
     private func deliver(_ event: AgentRuntimeEvent, to id: AgentID) {
+        // P3.3: a COMPLETED TURN is what makes a row unread — the agent stopped and
+        // has something for you. Only that event, and only when you are not already
+        // looking: streamed tokens and item events are the turn still running, and a
+        // turn you watched finish has been read by definition.
+        if case .turnCompleted = event, focusedAgentID != id {
+            unread.insert(id)
+        }
+
         var buffer = history[id] ?? []
         buffer.append(event)
         if buffer.count > Self.replayCap {
@@ -1295,8 +1366,12 @@ func runAgentSupervisorChecks() async throws {
 
     let spawnCallReport = try await checkSpawnFromToolCall(config: config, fail: fail)
 
+    // MARK: 14 · a turn you did not watch is unread, and looking clears it (P3.3)
+
+    let readStateReport = try await checkReadState(config: config, cwd: cwd, fail: fail)
+
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport)")
 }
 
 /// Gated on `--agent-restore-check` (P2A.7).
@@ -3672,6 +3747,192 @@ private func checkBranchChip(
     }
 
     return "a tile names its checkout (isolated \(isolatedChip), shared \(sharedChip), moved \(wanderedChip)), an unbound tile shows none, and 10 re-renders cost 0 git calls"
+}
+
+/// P3.3 — attention is a separate axis from state, and read-state is LOCAL.
+///
+/// Driven through real turns from a `ScriptedRunnerQueue` (one runner per `send`,
+/// because the supervisor makes a new one per prompt), so "a turn completed" is an
+/// event travelling the production `deliver` path rather than a flag set by hand.
+///
+/// Six properties:
+///   1. A turn that completes while you are looking elsewhere leaves the agent
+///      `.unread` — the packet's done-criterion.
+///   2. A deliberate focus clears it to `.none`.
+///   3. A turn completing WHILE FOCUSED never sets it. Without this the mark means
+///      "this agent has ever finished a turn", which is every agent.
+///   4. Focus leaving re-arms it: the next turn is unread again.
+///   5. `focusTile` clears through the tile binding, which is how focus arrives on
+///      the desktop (`FocusBroker` speaks tile ids).
+///   6. IT IS NOT DURABLE AND NOT SYNCED: the agent's persisted record carries no
+///      read-state key, and a second supervisor restoring the same store reports
+///      `.none` for an agent this one holds as unread.
+///
+/// The precedence between `unread` and `woke` is the vocabulary's, checked in
+/// `ContinuumRevivedAgentUIChecks/AgentInboxRowChecks.swift`; what is checked here
+/// is that the supervisor routes its one fact through `InboxAttention.resolve`
+/// rather than answering with a second opinion.
+///
+/// Three negative tests observed red at exit 1 with the final code, each a
+/// production edit to the section above:
+/// · `focus(agentID:)` no longer calling `unread.remove(id)` →
+///   `FAIL: read-state: focusing the agent left it unread`
+/// · `deliver`'s `focusedAgentID != id` guard dropped, so any completed turn marks
+///   the row →
+///   `FAIL: read-state: a turn you watched finish was marked unread — the mark
+///   would then mean `has ever finished a turn``
+/// · `archive` no longer dropping the read-state →
+///   `FAIL: read-state: archiving left focus Optional(…AgentID…) / attention none
+///   behind for a gone agent`
+///
+/// WHAT HAS NO NEGATIVE TEST, honestly: property 6. The forbidden-key scan is
+/// vacuity-guarded on `id` instead — writing a witness for it means adding a
+/// persisted read-state field to `AgentRecord`, which is the bug it exists to
+/// forbid, and the relaunch leg would then be red for the same one reason.
+@MainActor
+private func checkReadState(
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Error
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-read-state-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = AgentStore(applicationSupportDirectory: root)
+
+    let provider = "provider-thread"
+    func turn(_ id: String) -> [AgentRuntimeEvent] {
+        [
+            .turnStarted(threadId: provider, turnId: id),
+            .contentDelta(threadId: provider, turnId: id, streamKind: .assistant, delta: "…"),
+            .turnCompleted(threadId: provider, turnId: id, outcome: .completed, errorMessage: nil),
+            .sessionStateChanged(.ready)
+        ]
+    }
+    let queue = ScriptedRunnerQueue((1 ... 4).map { ScriptedAgentRunner(script: turn("t\($0)")) })
+    let supervisor = AgentSupervisor(store: store, makeRunner: { queue.next($0) })
+
+    let tileId = UUID()
+    let agentId = supervisor.spawn(
+        role: "reviewer",
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking,
+        tileId: tileId
+    )
+    let inbox = EventInbox()
+    let stream = supervisor.events(for: agentId)
+    let task = Task { @MainActor in for await event in stream { inbox.append(event) } }
+    defer { task.cancel() }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { supervisor.subscriberCount(for: agentId) == 1 }) else {
+        throw fail("read-state: the subscriber never registered")
+    }
+
+    var turnsRun = 0
+    func runOneTurn(_ prompt: String) async throws {
+        let before = inbox.events.count
+        supervisor.send(prompt, to: agentId)
+        guard await waitUntil(timeout: 10, pollInterval: 0.02, { inbox.events.count == before + 4 }) else {
+            throw fail("read-state: the turn `\(prompt)` did not complete — \(inbox.events.count - before) of 4 events arrived")
+        }
+        turnsRun += 1
+    }
+
+    // 1 · nothing is unread before anything has happened, and a turn you did not
+    //     watch makes it so.
+    guard supervisor.attention(for: agentId) == .none else {
+        throw fail("read-state: a freshly spawned agent is already \(supervisor.attention(for: agentId).rawValue)")
+    }
+    try await runOneTurn("first prompt")
+    guard supervisor.attention(for: agentId) == .unread else {
+        throw fail("read-state: a turn completed while you were looking elsewhere and the agent reads \(supervisor.attention(for: agentId).rawValue), not unread")
+    }
+    // The axis is routed through the vocabulary, not answered twice: the same
+    // unread agent is `woke` once P4.6's fact holds.
+    guard supervisor.attention(for: agentId, raisedHand: true) == .woke else {
+        throw fail("read-state: a raised hand on an unread agent reads \(supervisor.attention(for: agentId, raisedHand: true).rawValue), not woke")
+    }
+
+    // 2 · a deliberate focus clears it.
+    supervisor.focus(agentID: agentId)
+    guard supervisor.attention(for: agentId) == .none else {
+        throw fail("read-state: focusing the agent left it \(supervisor.attention(for: agentId).rawValue)")
+    }
+
+    // 3 · a turn completing while you are here is not unread.
+    try await runOneTurn("second prompt")
+    guard supervisor.attention(for: agentId) == .none else {
+        throw fail("read-state: a turn you watched finish was marked \(supervisor.attention(for: agentId).rawValue) — the mark would then mean `has ever finished a turn`")
+    }
+
+    // 4 · focus leaves, and the next turn is unread again.
+    supervisor.focus(agentID: nil)
+    try await runOneTurn("third prompt")
+    guard supervisor.attention(for: agentId) == .unread else {
+        throw fail("read-state: focus left and the next turn still reads \(supervisor.attention(for: agentId).rawValue)")
+    }
+
+    // 5 · focus by TILE, which is the shape the desktop's focus actually has.
+    guard supervisor.agent(forTile: tileId) == agentId else {
+        throw fail("read-state: the agent is not bound to its tile, so the tile-keyed focus is untested")
+    }
+    supervisor.focusTile(tileId)
+    guard supervisor.focusedAgentID == agentId, supervisor.attention(for: agentId) == .none else {
+        throw fail("read-state: focusing the agent's TILE left it \(supervisor.attention(for: agentId).rawValue)")
+    }
+    // A tile that shows no agent focuses nothing, rather than leaving the previous
+    // agent armed — otherwise clicking a terminal would keep an agent's turns read.
+    supervisor.focusTile(UUID())
+    guard supervisor.focusedAgentID == nil else {
+        throw fail("read-state: focusing an unrelated tile left \(String(describing: supervisor.focusedAgentID)) armed")
+    }
+    try await runOneTurn("fourth prompt")
+    guard supervisor.attention(for: agentId) == .unread else {
+        throw fail("read-state: a turn after focus moved to another tile reads \(supervisor.attention(for: agentId).rawValue)")
+    }
+
+    // 6 · LOCAL ONLY. Read-state is per-human and per-device, so it may not be in
+    //     the record — the type `AgentStore` writes and the companion publishes.
+    guard let record = supervisor.records[agentId] else {
+        throw fail("read-state: the agent lost its record")
+    }
+    let encoded = try JSONEncoder().encode(record)
+    guard let fields = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
+        throw fail("read-state: the record did not encode as an object")
+    }
+    // Vacuity guard: the scan below only means something if it can see the record's
+    // real keys.
+    guard fields["id"] != nil else {
+        throw fail("read-state: the encoded record has no `id` key, so this scan is blind: \(fields.keys.sorted())")
+    }
+    let forbidden = ["unread", "read", "attention", "focus", "focused", "seen", "viewed"]
+    for key in fields.keys {
+        let lowered = key.lowercased()
+        if let hit = forbidden.first(where: { lowered.contains($0) }) {
+            throw fail("read-state: AgentRecord carries `\(key)` (matches `\(hit)`) — read-state is per-human and per-device and must not be persisted or synced")
+        }
+    }
+    // And the store round-trip says the same thing from the other side: a second
+    // supervisor over the SAME directory restores the agent and knows nothing about
+    // this session's reading.
+    let relaunched = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root), makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    let report = relaunched.restore()
+    guard report.restored.contains(agentId) else {
+        throw fail("read-state: the relaunched supervisor did not restore the agent (restored \(report.restored.count), stale \(report.stale.count)), so the round-trip is untested")
+    }
+    guard relaunched.attention(for: agentId) == .none else {
+        throw fail("read-state: an unread mark survived into a fresh supervisor as \(relaunched.attention(for: agentId).rawValue) — it reached the disk")
+    }
+
+    // Archiving takes the read-state with it.
+    supervisor.focus(agentID: agentId)
+    supervisor.archive(agentId)
+    guard supervisor.focusedAgentID == nil, supervisor.attention(for: agentId) == .none else {
+        throw fail("read-state: archiving left focus \(String(describing: supervisor.focusedAgentID)) / attention \(supervisor.attention(for: agentId).rawValue) behind for a gone agent")
+    }
+
+    return "read-state over \(turnsRun) real turns: unwatched turns read unread, focus (by agent and by tile) clears it, a watched turn never sets it, and it survives neither the record (\(fields.count) keys) nor a relaunch"
 }
 
 /// macOS temp directories live under a `/var` symlink to `/private/var`, and git

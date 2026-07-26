@@ -31,6 +31,14 @@ import Foundation
 //   7. AGREEMENT WITH THE ONE STATUS PRESENTER — where the inbox vocabulary and
 //      P1.8's chip say the same thing they use the same token, and the two places
 //      they deliberately diverge are pinned so neither can drift silently.
+//
+// Ticket: docs/38-tickets/90-agent-ux/P3.3-attention-axis.md
+//   8. ATTENTION IS A SEPARATE AXIS — `resolve` is total over both facts, `woke`
+//      outranks `unread`, and the axis is INDEPENDENT of state: every
+//      (state, attention) pair is constructible, because a finished-but-unseen
+//      agent and one you already reviewed report the same state. The row's label
+//      priority puts the four coloured states above `(woke)`, and `unread`
+//      contributes no word at all.
 
 func runAgentInboxRowChecks() {
     runInboxStateTotalityCheck()
@@ -39,8 +47,10 @@ func runAgentInboxRowChecks() {
     runInboxStateAccentCheck()
     runInboxStatePrecedenceCheck()
     runInboxAccentAgreesWithStatusChipCheck()
+    runInboxAttentionAxisCheck()
     print("AgentInboxRow checks: status totality, unreachable states, stable identity, lifecycle-driven variant, "
-        + "uncoloured resting state, pending-over-status precedence and status-presenter agreement passed")
+        + "uncoloured resting state, pending-over-status precedence, status-presenter agreement "
+        + "and the attention axis passed")
 }
 
 // MARK: - 1 & 2 · totality
@@ -301,4 +311,81 @@ private func runInboxAccentAgreesWithStatusChipCheck() {
     }
     expect(StatusChipPresenter.display(for: .done).accent == AccentToken.accentDone.color,
            "the chip keeps its green done accent — only the inbox drops it")
+}
+
+// MARK: - 8 · attention is a separate axis (P3.3)
+
+/// Two negative tests observed red at exit 1 with the final code, both production
+/// edits:
+/// · `InboxAttention.resolve` answering `unread` first →
+///   `FAIL: woke outranks unread when both hold, got unread`
+/// · `AgentInboxRow.label` reading `attention.label ?? state.label` →
+///   `FAIL: working/woke labels Working, got Woke`
+private func runInboxAttentionAxisCheck() {
+    // A table again, for the same reason the totality check uses one: a switch
+    // here would be the code under test agreeing with itself.
+    let expected: [String: InboxAttention] = [
+        "unseen turn, no hand": .unread,
+        "hand up, seen": .woke,
+        "hand up AND unseen": .woke,
+        "nothing": .none,
+    ]
+    expect(InboxAttention.resolve(unread: true, raisedHand: false) == expected["unseen turn, no hand"],
+           "a completed-and-unviewed agent is unread, got \(InboxAttention.resolve(unread: true, raisedHand: false).rawValue)")
+    expect(InboxAttention.resolve(unread: false, raisedHand: true) == expected["hand up, seen"],
+           "a raised hand is woke, got \(InboxAttention.resolve(unread: false, raisedHand: true).rawValue)")
+    // THE PRECEDENCE the packet pins: both facts hold at once — a snoozed agent
+    // raised its hand while you were elsewhere — and the row has one slot.
+    expect(InboxAttention.resolve(unread: true, raisedHand: true) == expected["hand up AND unseen"],
+           "woke outranks unread when both hold, got \(InboxAttention.resolve(unread: true, raisedHand: true).rawValue)")
+    expect(InboxAttention.resolve(unread: false, raisedHand: false) == expected["nothing"],
+           "an agent you have seen with no hand up is none, got \(InboxAttention.resolve(unread: false, raisedHand: false).rawValue)")
+    // Every case is reachable from the two facts: an unreachable case is a
+    // vocabulary that lies about what the inbox can show.
+    var reachable: Set<InboxAttention> = []
+    for unread in [true, false] {
+        for hand in [true, false] { reachable.insert(InboxAttention.resolve(unread: unread, raisedHand: hand)) }
+    }
+    expect(reachable == Set(InboxAttention.allCases),
+           "resolve reaches every attention case, got \(reachable.map(\.rawValue).sorted())")
+
+    // UNREAD IS A MARK, NOT A WORD. `woke` is the only rung this axis contributes
+    // to the label.
+    expect(InboxAttention.unread.label == nil,
+           "unread contributes no label, got \(InboxAttention.unread.label ?? "nil")")
+    expect(InboxAttention.none.label == nil,
+           "none contributes no label, got \(InboxAttention.none.label ?? "nil")")
+    expect(InboxAttention.woke.label == "Woke",
+           "woke is labelled, got \(InboxAttention.woke.label ?? "nil")")
+    expect(InboxAttention.unread.isYours && InboxAttention.woke.isYours && !InboxAttention.none.isYours,
+           "isYours is exactly the not-none cases")
+
+    // THE AXES ARE INDEPENDENT: every (state, attention) pair is constructible and
+    // neither field moves the other. This is the ticket's whole premise — a
+    // finished-but-unseen agent and one you already reviewed are both `ready`.
+    var pairs = 0
+    for state in InboxState.allCases {
+        for attention in InboxAttention.allCases {
+            let row = AgentInboxRow(id: UUID(), title: "Reviewer", state: state, attention: attention)
+            expect(row.state == state && row.attention == attention,
+                   "a row carries \(state.rawValue)/\(attention.rawValue) unchanged, got \(row.state.rawValue)/\(row.attention.rawValue)")
+            // The label priority from P3.2, with `(woke)` under it.
+            let want = state.label ?? attention.label
+            expect(row.label == want,
+                   "\(state.rawValue)/\(attention.rawValue) labels \(want ?? "nothing"), got \(row.label ?? "nothing")")
+            pairs += 1
+        }
+    }
+    expect(pairs == InboxState.allCases.count * InboxAttention.allCases.count,
+           "every state/attention pair was measured — \(pairs) of \(InboxState.allCases.count * InboxAttention.allCases.count)")
+    // Named cases, so the priority is pinned and not only derived from itself:
+    // a working agent whose hand is up still reads "Working" (what it is doing
+    // outranks how it got back to you), and only a RESTING woke row reads "Woke".
+    expect(AgentInboxRow(id: UUID(), title: "a", state: .working, attention: .woke).label == "Working",
+           "state outranks woke in the label priority")
+    expect(AgentInboxRow(id: UUID(), title: "a", state: .ready, attention: .woke).label == "Woke",
+           "a resting woke row says so")
+    expect(AgentInboxRow(id: UUID(), title: "a", state: .ready, attention: .unread).label == nil,
+           "a resting unread row carries a mark, not a word")
+    print("InboxAttention axis measured \(pairs) state/attention pairs, resolve(unread+hand)=\(InboxAttention.resolve(unread: true, raisedHand: true).rawValue)")
 }
