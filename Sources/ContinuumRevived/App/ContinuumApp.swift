@@ -2797,6 +2797,28 @@ enum ContinuumApp {
     }
 }
 
+// Ticket: docs/38-tickets/90-agent-ux/P3.15-wire-destructive-row-actions.md
+/// What a person is being asked to agree to before an agent is deleted.
+///
+/// Same shape and same seam as `WorkspaceDeleteConfirmationRequest` below, for the
+/// same reason: the decision is separable from the modal that asks for it, so a check
+/// can answer it without an `NSAlert`. The TRAP P3.14 measured is that a provider
+/// returning nil does not decline — it falls through to `runModal()` and wedges a
+/// headless run — so the checks here always answer, and a cancelled action is the
+/// probe that proves the confirmation is load-bearing.
+private struct AgentDeleteConfirmationRequest: Equatable {
+    /// `Delete` or `Archive` — the two verbs do the same cleanup (one
+    /// `AgentSupervisor.archive`) and differ only in what the person is told.
+    let verb: String
+    let agentNames: [String]
+    /// How many of them have a prompt in flight; they are stopped first.
+    let runningCount: Int
+    /// The isolated branches this puts at stake. `InboxBulkAction.keptBranches`'s
+    /// list, and its wording rule too: unmerged work is KEPT, not "these branches are
+    /// kept", because a row cannot know what is merged.
+    let branchesAtStake: [String]
+}
+
 private struct WorkspaceDeleteConfirmationRequest: Equatable {
     let workspaceId: UUID
     let workspaceName: String
@@ -2835,6 +2857,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var workspaceCreatePromptProvider: (() -> String?)?
     private var workspaceRenamePromptProvider: ((String) -> String?)?
     private var workspaceDeleteConfirmationProvider: ((WorkspaceDeleteConfirmationRequest) -> Bool)?
+    /// P3.15: the same seam for deleting an agent.
+    private var agentDeleteConfirmationProvider: ((AgentDeleteConfirmationRequest) -> Bool)?
     private var workspaceManagementMessage: String?
     private var navSelectedZoneId: UUID?
     private var focusHistory = FocusHistory()
@@ -4580,6 +4604,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    /// P3.15 (H5) calls this directly: it is the boot walk's own restore path.
     private func installInitialManagedAgentTile(_ tile: Tile, in canvasView: CanvasNSView) {
         canvasView.install(tileView: ManagedAgentTileNSView(tile: tile), for: tile)
         wireManagedAgentTile(tile.id)
@@ -6320,6 +6345,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.configureInboxRename { [weak self] agentId, name in
             self?.renameAgentFromInbox(agentId, to: name)
         }
+        // P3.15: the row menu and the bulk bar reach the supervisor. Until this call
+        // existed the shipped app assigned neither callback, so every destructive item
+        // was greyed and a stale agent could not be removed by any route.
+        sidebar.configureInboxActions(
+            rowActions: AppDelegate.wiredInboxRowActions,
+            onRowAction: { [weak self] action, rowIds in
+                self?.performInboxRowAction(action, on: rowIds)
+            },
+            bulkActions: AppDelegate.wiredInboxBulkActions,
+            onBulkAction: { [weak self] action, rowIds in
+                self?.performInboxBulkAction(action, on: rowIds)
+            })
     }
 
     private func configureWorkspaceTopBar(_ topBar: WorkspaceTopBarView) {
@@ -6668,6 +6705,184 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard agentSupervisor.rename(agentID: agentId, to: name) else { return false }
         reloadWorkspaceSidebar()
         return true
+    }
+
+    // MARK: - Inbox row and bulk actions (P3.15)
+
+    /// The row-menu items this app performs today.
+    ///
+    /// THE LIST IS SHORT ON PURPOSE. `.snooze` and `.wake` are absent because nothing
+    /// writes `snoozedUntil` yet — P4.6 owns the write and P4.7 the shelf — and an item
+    /// that answers a click with nothing is worse than a greyed one. `.settle`,
+    /// `.unsettle`, `.markUnread` and `.rename` have destinations (P4.1's override,
+    /// P3.3's read-state, `AgentSupervisor.rename`) and are P3.16's to add: one element
+    /// here each, now that the gate is per-action.
+    static let wiredInboxRowActions: Set<InboxRowAction> = [.stopAgent, .archive, .delete]
+    /// The bulk bar's half. No `.stopAgent` — the bar has no such action (`P3.11`'s five
+    /// are settle / snooze / mark-unread / archive / delete).
+    static let wiredInboxBulkActions: Set<InboxBulkAction> = [.archive, .delete]
+
+    /// A row-menu pick, for the agents it was raised over.
+    @discardableResult
+    func performInboxRowAction(_ action: InboxRowAction, on rowIds: [UUID]) -> Bool {
+        switch action {
+        case .stopAgent:
+            return stopAgentsFromInbox(rowIds)
+        case .archive, .delete:
+            return archiveAgentsFromInbox(rowIds, verb: action == .delete ? "Delete" : "Archive")
+        // Greyed by `wiredInboxRowActions` above, so the menu never sends these; the
+        // switch is total so adding a destination is a compile error here rather than a
+        // pick that silently does nothing. `openInTile` has its own path (P3.9).
+        case .openInTile, .settle, .unsettle, .snooze, .wake, .markUnread, .rename:
+            fputs("Inbox action \(action.rawValue) has no host yet (P3.16 / P4.6 / P4.7)\n", stderr)
+            return false
+        }
+    }
+
+    /// A bulk-bar pick. The two destructive verbs are the row menu's, on a set.
+    @discardableResult
+    func performInboxBulkAction(_ action: InboxBulkAction, on rowIds: [UUID]) -> Bool {
+        switch action {
+        case .archive, .delete:
+            return archiveAgentsFromInbox(rowIds, verb: action == .delete ? "Delete" : "Archive")
+        case .settle, .snooze, .markUnread:
+            fputs("Inbox bulk action \(action.rawValue) has no host yet (P3.16 / P4.6 / P4.7)\n", stderr)
+            return false
+        }
+    }
+
+    /// Stop what these agents are doing. Not destructive — the agent stays, its record
+    /// stays, and this is P2A.5's rule made reachable: closing a tile must never stop an
+    /// agent, so somewhere has to deliberately.
+    @discardableResult
+    private func stopAgentsFromInbox(_ rowIds: [UUID]) -> Bool {
+        let running = managedAgents(for: rowIds).filter { agentSupervisor.isRunning($0.id) }
+        guard !running.isEmpty else {
+            setWorkspaceManagementMessage("Nothing to stop — no selected agent has a prompt in flight.")
+            return false
+        }
+        for record in running { agentSupervisor.stop(record.id) }
+        setWorkspaceManagementMessage("Stopped \(countedAgents(running.count)): \(agentNameList(running)).")
+        refreshAgentSurfaces(notify: false)
+        return true
+    }
+
+    /// THE ONE DELETION PATH, for both verbs. `AgentSupervisor.archive` does the whole
+    /// job in an order its own comments call load-bearing (stop, then the durable
+    /// delete, then the worktree, keeping anything unmerged); Delete and Archive differ
+    /// in what the person is told, not in what the app does.
+    @discardableResult
+    private func archiveAgentsFromInbox(_ rowIds: [UUID], verb: String) -> Bool {
+        let targets = managedAgents(for: rowIds)
+        // A terminal-session row is keyed by its TILE and has no record (the split
+        // `revealAgentFromInbox` documents), so there is no agent there to delete. Those
+        // rows are COUNTED rather than quietly dropped: a selection that half-performed
+        // and said "deleted" would be the same over-claim `ArchiveReport` exists to stop.
+        // (Raised in cross-review.)
+        let ignored = rowIds.count - targets.count
+        guard !targets.isEmpty else {
+            setWorkspaceManagementMessage("\(verb) ignored: no managed agent was selected.")
+            return false
+        }
+        let request = AgentDeleteConfirmationRequest(
+            verb: verb,
+            agentNames: targets.map(\.displayName),
+            runningCount: targets.filter { agentSupervisor.isRunning($0.id) }.count,
+            branchesAtStake: targets.compactMap(\.worktreeBranch))
+        guard agentDeleteConfirmationProvider?(request) ?? confirmDeleteAgents(request) else {
+            setWorkspaceManagementMessage(
+                "\(verb) canceled; \(countedAgents(targets.count)) kept.")
+            return false
+        }
+        // The tile is NOT deleted — closing or keeping a tile is P2A.4/P2A.5's decision
+        // and not an inbox action's to make — but the tile is why a deleted record comes
+        // back: wire-up mints a new agent for a `managedAgent` tile it finds none for.
+        // So the tile is marked BEFORE the record goes, and `wireManagedAgentTile` reads
+        // the mark. Measured on the owner's machine: without this, three deleted records
+        // returned on the next launch with brand-new ids.
+        var reports: [AgentSupervisor.ArchiveReport] = []
+        for record in targets {
+            if let tileId = record.tileId { agentSupervisor.suppressAgentRespawn(forTile: tileId) }
+            reports.append(agentSupervisor.archive(record.id))
+        }
+        setWorkspaceManagementMessage(
+            agentArchiveMessage(verb: verb, targets: targets, reports: reports, ignored: ignored))
+        refreshAgentSurfaces(notify: false)
+        return true
+    }
+
+    /// The inbox's aggregate ids resolved to records, in the order they were handed
+    /// over. Ids with no record are dropped — those are terminal-session rows.
+    private func managedAgents(for rowIds: [UUID]) -> [AgentRecord] {
+        rowIds.compactMap { agentSupervisor.records[AgentID(rawValue: $0)] }
+    }
+
+    private func agentNameList(_ records: [AgentRecord]) -> String {
+        records.map(\.displayName).joined(separator: ", ")
+    }
+
+    private func countedAgents(_ count: Int) -> String {
+        "\(count) \(count == 1 ? "agent" : "agents")"
+    }
+
+    /// What actually happened, not what was asked for.
+    ///
+    /// `ArchiveReport` IS THE MESSAGE, not decoration: it reports a branch kept because
+    /// deleting it would discard the agent's commits, and a worktree kept because it was
+    /// dirty. Dropping that says "deleted" while a branch with their work survives. The
+    /// wording follows P3.11's correction — `Unmerged work kept: ⎇ …`, because "keeps
+    /// these branches" claims more than the app can know about a merged one.
+    private func agentArchiveMessage(
+        verb: String, targets: [AgentRecord], reports: [AgentSupervisor.ArchiveReport], ignored: Int
+    ) -> String {
+        // NAMED FROM THE REPORTS, not from what was asked for: a store that refused
+        // leaves its agent exactly where it was, and listing it as deleted would be a
+        // sentence about an agent still in the list. (Raised in cross-review.)
+        let removed = zip(targets, reports).filter { $0.1.recordDeleted }.map(\.0)
+        let stopped = reports.filter(\.wasRunning).count
+        var sentence = "\(verb == "Delete" ? "Deleted" : "Archived") \(countedAgents(removed.count)): \(agentNameList(removed))."
+        if removed.count < targets.count {
+            let kept = targets.filter { record in !removed.contains { $0.id == record.id } }
+            sentence += " \(countedAgents(kept.count)) could not be removed and stayed: \(agentNameList(kept))."
+        }
+        if ignored > 0 {
+            sentence += " \(ignored) selected \(ignored == 1 ? "row is" : "rows are") not a managed agent and \(ignored == 1 ? "was" : "were") left alone."
+        }
+        if stopped > 0 { sentence += " Stopped \(countedAgents(stopped)) mid-turn." }
+        let keptBranches = reports.compactMap { $0.branchRetained?.branch }
+        if !keptBranches.isEmpty {
+            sentence += " Unmerged work kept: \(keptBranches.map { "⎇ \($0)" }.joined(separator: ", "))."
+        }
+        let keptWorktrees = reports.compactMap { $0.worktreeRetained?.path.lastPathComponent }
+        if !keptWorktrees.isEmpty {
+            sentence += " Checkout kept: \(keptWorktrees.joined(separator: ", "))."
+        }
+        let removedBranches = reports.compactMap(\.branchDeleted)
+        if !removedBranches.isEmpty {
+            sentence += " Merged \(removedBranches.count == 1 ? "branch" : "branches") deleted: \(removedBranches.joined(separator: ", "))."
+        }
+        return sentence
+    }
+
+    /// The modal, reached only when no provider answered. Cancel is the DEFAULT button
+    /// (first), the same way `confirmDeleteWorkspace` orders its two.
+    private func confirmDeleteAgents(_ request: AgentDeleteConfirmationRequest) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = request.agentNames.count == 1
+            ? "\(request.verb) “\(request.agentNames[0])”?"
+            : "\(request.verb) \(request.agentNames.count) agents?"
+        var informative = "The agent's record is removed from this Mac. Its tile stays on the canvas and starts a new agent the next time you send a prompt from it."
+        if request.runningCount > 0 {
+            informative += "\n\n\(request.runningCount == 1 ? "One agent has" : "\(request.runningCount) agents have") a prompt in flight and will be stopped first."
+        }
+        if !request.branchesAtStake.isEmpty {
+            informative += "\n\nUnmerged work is kept: \(request.branchesAtStake.map { "⎇ \($0)" }.joined(separator: ", "))."
+        }
+        alert.informativeText = informative
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: request.verb)
+        return alert.runModal() == .alertSecondButtonReturn
     }
 
     /// Frame and focus a tile, switching workspaces first when it lives in another
@@ -8627,6 +8842,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             agentId = agentID
         } else if let existing = supervisor.agent(forTile: tileId) {
             agentId = existing
+        } else if supervisor.isAgentRespawnSuppressed(forTile: tileId) {
+            // P3.15: this tile's agent was DELETED by a person. Restoring the canvas
+            // must not mint a replacement — that is the resurrection measured on the
+            // owner's machine, and it is worse than not deleting at all because it
+            // looks like the delete worked. The tile is left alone (deleting an agent
+            // is not deleting a tile, the inverse of P2A.5's rule that closing a tile
+            // is not deleting an agent), so submitting a prompt in it is how you ask
+            // for an agent here again — deliberately, by a gesture, not by a relaunch.
+            view.onSubmitPrompt = { [weak self, weak view] prompt in
+                guard let self, let view else { return }
+                supervisor.allowAgentRespawn(forTile: tileId)
+                // Re-entrant only if the mark survived the line above, which would
+                // otherwise recurse: the wire-up below replaces this closure.
+                guard !supervisor.isAgentRespawnSuppressed(forTile: tileId) else { return }
+                self.wireManagedAgentTile(tileId)
+                view.onSubmitPrompt?(prompt)
+            }
+            return
         } else {
             agentId = spawnSupervisedAgent(tileId: tileId)
         }
@@ -21602,8 +21835,18 @@ extension AppDelegate {
         .sessionStateChanged(.ready),
     ]
     revealApp.registryStore = revealRegistryStore
+    // P3.15 (H6) needs one agent with a prompt GENUINELY in flight, to prove a delete
+    // stops it before the record goes. Empty until that section fills it, so every
+    // section before H gets exactly the runner it had.
+    final class HoldingTiles { var tiles: Set<UUID> = [] }
+    let holdRunners = HoldingTiles()
     revealApp.agentSupervisor = AgentSupervisor(
-        store: revealAgentStore, makeRunner: { _ in ScriptedAgentRunner(script: turnScript) })
+        store: revealAgentStore,
+        makeRunner: { record in
+            ScriptedAgentRunner(
+                script: turnScript,
+                holdUntilStopped: record.tileId.map { holdRunners.tiles.contains($0) } ?? false)
+        })
     revealApp.agentSupervisor.restore()
     let revealSupervisor = revealApp.agentSupervisor
     try expect(revealSupervisor.records[hereAgent]?.tileId == hereTile
@@ -22011,6 +22254,9 @@ extension AppDelegate {
     bulk.clock = { LabFixtures.inboxNow }
     var bulkCalls: [(InboxBulkAction, [UUID])] = []
     bulk.onBulkAction = { bulkCalls.append(($0, $1)) }
+    // P3.15: this section is about P3.11's availability rules, so every action is
+    // declared wired here and the capability gate itself is section H's.
+    bulk.wiredBulkActions = Set(InboxBulkAction.allCases)
     bulk.reload(rows: bulkFixture)
     let bulkWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
@@ -22335,6 +22581,9 @@ extension AppDelegate {
     var menuCalls: [(InboxRowAction, [UUID])] = []
     menuView.onRevealRow = { menuRevealed.append($0) }
     menuView.onRowAction = { menuCalls.append(($0, $1)) }
+    // P3.15: same as E2 — the menu's shape, targets and capability refusals are what
+    // this section is about, so nothing here is greyed for want of a host.
+    menuView.wiredRowActions = Set(InboxRowAction.allCases)
     menuView.reload(rows: bulkFixture)
     let menuWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
@@ -22641,7 +22890,295 @@ extension AppDelegate {
     try expect(!revealApp.renameAgentFromInbox(UUID(), to: "nowhere"),
                "an id with no agent record must be refused")
 
+    // MARK: H · the destructive actions are actually wired (P3.15)
+
+    // H1 · THE GATE IS PER-ACTION. The defect this ticket fixes is that `isWired` asked
+    // one question for all nine items, so wiring Delete meant also offering a Snooze
+    // that nothing writes (P4.6 owns the write, P4.7 the shelf) — and the app therefore
+    // wired none of them.
+    let gated = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    gated.clock = { LabFixtures.inboxNow }
+    var gatedCalls: [(InboxRowAction, [UUID])] = []
+    gated.onRowAction = { gatedCalls.append(($0, $1)) }
+    gated.onBulkAction = { _, _ in }
+    try expect(InboxRowAction.allCases.allSatisfy { $0 == .openInTile || !gated.isRowActionWiredForQA($0) },
+               "a callback with no capability set wires NOTHING — got \(InboxRowAction.allCases.filter { gated.isRowActionWiredForQA($0) }.map(\.baseTitle))")
+    gated.wiredRowActions = AppDelegate.wiredInboxRowActions
+    gated.wiredBulkActions = AppDelegate.wiredInboxBulkActions
+    for action in [InboxRowAction.delete, .archive, .stopAgent] {
+        try expect(gated.isRowActionWiredForQA(action),
+                   "\(action.baseTitle) is what the owner is blocked on and must be live")
+    }
+    // THE WITNESS FOR THE GATE ITSELF: the two items with nowhere to go stay greyed,
+    // with the reason in their tooltip rather than a click that does nothing.
+    for action in [InboxRowAction.snooze, .wake] {
+        try expect(!gated.isRowActionWiredForQA(action),
+                   "\(action.baseTitle) has no destination until P4.6/P4.7 and must stay greyed")
+        try expect(action.disabledReason(for: [quietRow], isWired: gated.isRowActionWiredForQA(action))
+                    == InboxRowAction.notWiredReason,
+                   "…and say so — got \(String(describing: action.disabledReason(for: [quietRow], isWired: false)))")
+    }
+    // The four with destinations that this ticket deliberately did NOT take (P3.16).
+    for action in [InboxRowAction.settle, .unsettle, .markUnread, .rename] {
+        try expect(!gated.isRowActionWiredForQA(action),
+                   "\(action.baseTitle) is P3.16's to wire, not this ticket's — got wired")
+    }
+    try expect(gated.isBulkActionWiredForQA(.delete) && gated.isBulkActionWiredForQA(.archive)
+                && !gated.isBulkActionWiredForQA(.snooze) && !gated.isBulkActionWiredForQA(.settle)
+                && !gated.isBulkActionWiredForQA(.markUnread),
+               "the bar performs exactly the two destructive verbs today")
+    // …and the gate composes with P3.11's AND rather than replacing it: a running
+    // member still removes Delete from a wired bar.
+    gated.reload(rows: bulkFixture)
+    let gatedWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    gatedWindow.contentView = gated
+    gated.layoutForQA()
+    try expect(gated.selectRowsForQA(ids: [quietRow.id, failedRow.id]), "two stopped agents")
+    gated.layoutForQA()
+    try expect(gated.bulkActionTitlesForQA == [InboxBulkAction.archive, .delete].map(\.title),
+               "a wired bar offers the wired actions and nothing else — got \(gated.bulkActionTitlesForQA)")
+    try expect(gated.selectRowsForQA(ids: [quietRow.id, runningRow.id]), "…now with a running member")
+    gated.layoutForQA()
+    try expect(gated.bulkActionTitlesForQA.isEmpty,
+               "P3.11's intersection still runs underneath the gate — got \(gated.bulkActionTitlesForQA)")
+
+    // H2 · THE SHIPPED APP ASSIGNS THEM. A source scan, for the same reason
+    // `piRunnerConstructionSites` is one — and this is the witness for the ACTUAL bug:
+    // for eleven tickets the row menu and the bulk bar were unreachable in the shipped
+    // app while every functional check passed, because the only assignments in the repo
+    // were in this file's own check functions and a Lab stub. So the scan reads the
+    // PRODUCTION functions only, by name: an assignment anywhere else cannot satisfy it.
+    func productionFunctionBody(_ path: String, _ signature: String) throws -> String {
+        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent(path)
+        guard let source = try? String(contentsOf: url, encoding: .utf8) else {
+            throw CheckError.failed("could not read \(path) — run this check from the repo root")
+        }
+        let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard let start = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == signature }) else {
+            throw CheckError.failed("no `\(signature)` in \(path) — it was renamed or removed, and this scan is now blind")
+        }
+        var body: [String] = []
+        for line in lines[(start + 1)...] {
+            if line == "    }" { break }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("//") { continue }
+            body.append(line)
+        }
+        guard !body.isEmpty else { throw CheckError.failed("`\(signature)` scanned as an empty body") }
+        return body.joined(separator: "\n")
+    }
+    let configureBody = try productionFunctionBody(
+        "Sources/ContinuumRevived/App/ContinuumApp.swift",
+        "private func configureWorkspaceSidebar(_ sidebar: WorkspaceSidebarView) {")
+    try expect(configureBody.contains("sidebar.configureInboxActions("),
+               "the SHIPPED sidebar must be handed the row and bulk actions — this is the eleven-ticket hole")
+    try expect(configureBody.contains("performInboxRowAction") && configureBody.contains("performInboxBulkAction"),
+               "…and they must reach the app's own handlers")
+    let sidebarBody = try productionFunctionBody(
+        "Sources/ContinuumRevived/App/WorkspaceSidebarView.swift",
+        "func configureInboxActions(")
+    for assignment in ["inboxView.onRowAction = onRowAction", "inboxView.onBulkAction = onBulkAction",
+                       "inboxView.wiredRowActions = rowActions", "inboxView.wiredBulkActions = bulkActions"] {
+        try expect(sidebarBody.contains(assignment),
+                   "the sidebar must pass it through — `\(assignment)` is not in configureInboxActions")
+    }
+    // The live view says the same thing, so the scan is not the only evidence.
+    try expect(revealInbox.isRowActionWiredForQA(.delete) && revealInbox.isRowActionWiredForQA(.archive)
+                && revealInbox.isRowActionWiredForQA(.stopAgent),
+               "the SHIPPED sidebar's own list must offer the three live actions")
+    try expect(!revealInbox.isRowActionWiredForQA(.snooze) && !revealInbox.isRowActionWiredForQA(.wake),
+               "…and still grey the two with nowhere to go")
+
+    // FILE EXISTENCE, not a decode: "the record is gone" must not be satisfiable by a
+    // record that is merely unreadable, and must not be defeated by one either.
+    func recordFileOnDisk(_ id: AgentID) -> Bool {
+        FileManager.default.fileExists(atPath: revealAgentStore.layout.agentFile(id: id).path)
+    }
+
+    // H3 · A CANCELLED CONFIRMATION DELETES NOTHING. The safer probe, per P3.14's
+    // measured trap: a provider that returns nil does NOT decline, it falls through to
+    // `NSAlert.runModal()` and wedges a headless run — so every case here answers.
+    var deleteRequests: [AgentDeleteConfirmationRequest] = []
+    revealApp.agentDeleteConfirmationProvider = { request in
+        deleteRequests.append(request)
+        return false
+    }
+    try expect(!revealApp.performInboxRowAction(.delete, on: [noTileAgent.rawValue]),
+               "a cancelled delete reports that it did not happen")
+    try expect(deleteRequests.count == 1 && deleteRequests[0].verb == "Delete"
+                && deleteRequests[0].agentNames == ["no-tile agent"],
+               "…having asked about that agent by name — got \(deleteRequests.map { ($0.verb, $0.agentNames) })")
+    try expect(recordFileOnDisk(noTileAgent),
+               "AND THE RECORD IS STILL ON DISK — a destructive action must not fire unconfirmed")
+    try expect(revealSupervisor.records[noTileAgent] != nil, "…and the agent is still here")
+
+    // H4 · A CONFIRMED DELETE REMOVES THE RECORD FROM DISK, and the row with it.
+    revealApp.agentDeleteConfirmationProvider = { request in
+        deleteRequests.append(request)
+        return true
+    }
+    try expect(revealApp.performInboxRowAction(.delete, on: [noTileAgent.rawValue]),
+               "a confirmed delete performs")
+    try expect(revealSupervisor.records[noTileAgent] == nil,
+               "the agent is gone from the supervisor")
+    // RE-READ FROM DISK, not from the dictionary: the whole defect class here is state
+    // that looks gone and comes back.
+    try expect(!recordFileOnDisk(noTileAgent),
+               "…and its record file is gone from \(revealAgentStore.layout.agentsDirectory.lastPathComponent)/")
+    revealSidebar.inboxForQA.layoutForQA()
+    try expect(!revealInbox.rows.contains { $0.id == noTileAgent.rawValue },
+               "…and the row went with it — got \(revealInbox.titlesForQA)")
+    // A RELAUNCH DOES NOT BRING IT BACK. A second supervisor over the same store, the
+    // way `--agent-restore-check` models a new launch.
+    let afterDelete = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: revealAgentsSupport),
+        makeRunner: { _ in ScriptedAgentRunner(script: turnScript) })
+    afterDelete.restore()
+    try expect(afterDelete.records[noTileAgent] == nil,
+               "a deleted agent stays deleted across a relaunch — got \(afterDelete.records.count) restored records")
+
+    // H5 · A DELETED AGENT'S TILE DOES NOT MINT A REPLACEMENT. This is the case measured
+    // on the owner's machine: the record is derived from the tile, so deleting it alone
+    // made three agents come back on the next launch under brand-new ids. The tile is
+    // NOT deleted (that is not an inbox action's decision, the inverse of P2A.5) — it is
+    // marked, and the mark is durable.
+    guard let doomedTile = revealSupervisor.records[elsewhereAgent]?.tileId,
+          revealApp.canvasView?.tileView(for: doomedTile) is ManagedAgentTileNSView else {
+        throw CheckError.failed("setup: the agent being deleted must hold a managed-agent tile that is really on the canvas — section D spawned one for it")
+    }
+    let recordsBeforeTiled = revealSupervisor.records.count
+    try expect(revealApp.performInboxRowAction(.delete, on: [elsewhereAgent.rawValue]),
+               "delete the tiled agent")
+    try expect(!recordFileOnDisk(elsewhereAgent), "its record leaves disk too")
+    try expect(revealApp.canvasView?.tileView(for: doomedTile) != nil,
+               "THE TILE IS STILL THERE — deleting an agent must not silently destroy a tile you can see")
+    // The mark is on disk, readable by a store this process did not write it through.
+    try expect(AgentStore(applicationSupportDirectory: revealAgentsSupport)
+                .loadDeletedAgentTiles().contains(doomedTile),
+               "the deleted tile is recorded durably")
+    // THE LAUNCH PATH ITSELF. `installInitialManagedAgentTile` is what the boot-time
+    // canvas walk calls for every `.managedAgent` tile it restores (asserted below), and
+    // it installs a FRESH view before wiring — which is what a relaunch does. Called here
+    // rather than re-derived, so the guard is proven where the resurrection happened.
+    // Honest limit, stated rather than papered over: this is the restore path inside one
+    // process, not a second `applicationDidFinishLaunching`.
+    let restoredTile = Tile(
+        id: doomedTile, kind: .managedAgent, title: "elsewhere agent",
+        frame: TileFrame(x: 0, y: 0, width: 320, height: 240),
+        zPosition: .fromLegacyRank(1), runtimeRef: nil,
+        metadata: TileMetadata(launchProfileId: "managed-agent", projectRelativeCwd: "."))
+    revealApp.installInitialManagedAgentTile(restoredTile, in: revealCanvas)
+    try expect(revealSupervisor.agent(forTile: doomedTile) == nil,
+               "re-wiring a deleted agent's tile must not mint a replacement — got \(String(describing: revealSupervisor.agent(forTile: doomedTile)))")
+    try expect(revealSupervisor.records.count == recordsBeforeTiled - 1,
+               "…and no agent anywhere took its place — \(revealSupervisor.records.count) records, expected \(recordsBeforeTiled - 1)")
+    // The one gesture that undoes it: asking that tile for work is asking for an agent.
+    if let revivedView = revealApp.canvasView?.tileView(for: doomedTile) as? ManagedAgentTileNSView {
+        revivedView.onSubmitPrompt?("back to work")
+        try expect(revealSupervisor.agent(forTile: doomedTile) != nil,
+                   "submitting a prompt in that tile is a deliberate request for an agent there")
+        try expect(!AgentStore(applicationSupportDirectory: revealAgentsSupport)
+                    .loadDeletedAgentTiles().contains(doomedTile),
+                   "…and it clears the mark, so the new agent is not suppressed on the next launch")
+    } else {
+        throw CheckError.failed("setup: the deleted agent's tile must still be a managed-agent view")
+    }
+
+    // …and the boot walk is what calls it. Source-scanned for the same reason H2 is: a
+    // launch needs a window, a workspace runtime and a real canvas, so "the restored tile
+    // goes through the function that reads the mark" is otherwise only assertable by
+    // reading the diff.
+    let launchInstaller = try productionFunctionBody(
+        "Sources/ContinuumRevived/App/ContinuumApp.swift",
+        "private func installInitialManagedAgentTile(_ tile: Tile, in canvasView: CanvasNSView) {")
+    try expect(launchInstaller.contains("wireManagedAgentTile(tile.id)"),
+               "the restored-tile installer must go through the wiring that reads the deletion mark")
+    let appSourceForWalk = try String(
+        contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("Sources/ContinuumRevived/App/ContinuumApp.swift"),
+        encoding: .utf8)
+    try expect(appSourceForWalk.contains(
+                "case .managedAgent:\n                    installInitialManagedAgentTile(tile, in: canvasView)"),
+               "…and the boot-time canvas walk must install a restored managed-agent tile through it")
+
+    // H6 · MIXED SELECTIONS ARE NOT HALF-PERFORMED IN SILENCE. A terminal-session row has
+    // no record, so a selection holding one deletes the managed agents and SAYS the other
+    // was left alone. (Raised in cross-review: dropping it quietly is the same over-claim
+    // as dropping a retained branch.)
+    let mixedAgent = AgentID(rawValue: UUID(uuidString: "3B900000-0000-4000-8000-0000000000BA")!)
+    try revealAgentStore.upsert(AgentRecord(
+        id: mixedAgent, displayName: "mixed agent", role: "reviewer",
+        model: "openai-codex/gpt-5.6-sol", thinking: "medium", cwd: hereRoot.path,
+        projectId: hereProjectId, createdAt: now, lastActivityAt: now))
+    revealSupervisor.restore()
+    try expect(revealSupervisor.records[mixedAgent] != nil, "setup: the mixed selection's managed half")
+    try expect(revealApp.performInboxBulkAction(.delete, on: [mixedAgent.rawValue, UUID()]),
+               "a selection with one managed agent in it still performs")
+    try expect(!recordFileOnDisk(mixedAgent), "…on the agent that had a record")
+    let mixedMessage = revealApp.workspaceManagementMessage ?? ""
+    try expect(mixedMessage.contains("not a managed agent") && mixedMessage.contains("left alone"),
+               "…and says out loud that the other row was not acted on — got '\(mixedMessage)'")
+
+    // H7 · A RUNNING AGENT IS STOPPED FIRST, and the order is the point: `stop` delivers
+    // a persist-worthy `.sessionStateChanged(.stopped)`, so a delete-then-stop writes the
+    // record straight back — a resurrection that looks like success.
+    holdRunners.tiles.insert(thereTile)
+    revealSupervisor.send("hold the line", to: thereAgent)
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, { revealSupervisor.isRunning(thereAgent) }) else {
+        throw CheckError.failed("setup: the there-agent must have a prompt in flight, or the stop below proves nothing")
+    }
+    try expect(revealApp.performInboxRowAction(.delete, on: [thereAgent.rawValue]),
+               "delete an agent mid-turn")
+    try expect(!revealSupervisor.isRunning(thereAgent), "its runner is stopped")
+    try expect(deleteRequests.last?.runningCount == 1,
+               "…and the confirmation said so before it happened — got \(String(describing: deleteRequests.last?.runningCount))")
+    // The record must STAY gone: the stopped event lands asynchronously, so this is the
+    // assertion that catches a stop ordered after the durable delete.
+    guard await waitUntil(timeout: 5, pollInterval: 0.05, { !recordFileOnDisk(thereAgent) })
+    else {
+        throw CheckError.failed("a stop after the delete wrote the record straight back — \(thereAgent.rawValue.uuidString).json is on disk again")
+    }
+    let afterRunningDelete = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: revealAgentsSupport),
+        makeRunner: { _ in ScriptedAgentRunner(script: turnScript) })
+    afterRunningDelete.restore()
+    try expect(afterRunningDelete.records[thereAgent] == nil,
+               "…and a relaunch does not restore the agent that was stopped to delete it")
+
+    // H8 · WHAT WAS KEPT IS REPORTED. `ArchiveReport` is the message, not decoration: a
+    // branch retained because deleting it would discard the agent's commits has to be
+    // named, or the app says "deleted" while their work sits on a branch nobody
+    // mentioned. Worded as P3.11 was corrected to word it — kept unmerged work, not a
+    // claim about branches the row cannot inspect.
+    let strandedAgent = AgentID(rawValue: UUID(uuidString: "3B900000-0000-4000-8000-0000000000B9")!)
+    try revealAgentStore.upsert(AgentRecord(
+        id: strandedAgent, displayName: "stranded agent", role: "reviewer",
+        model: "openai-codex/gpt-5.6-sol", thinking: "medium",
+        // A `cwd` that is NOT inside a `.worktrees/` container, which is `archive`'s own
+        // "leave both alone" branch: nothing is removed and both are reported retained.
+        cwd: hereRoot.path, worktreeBranch: "agent/stranded", projectId: hereProjectId,
+        createdAt: now, lastActivityAt: now))
+    let strandedSupervisor = AgentSupervisor(
+        store: revealAgentStore, makeRunner: { _ in ScriptedAgentRunner(script: turnScript) })
+    strandedSupervisor.restore()
+    revealApp.agentSupervisor = strandedSupervisor
+    try expect(revealApp.performInboxRowAction(.delete, on: [strandedAgent.rawValue]),
+               "delete an agent with a branch of its own")
+    let strandedMessage = revealApp.workspaceManagementMessage ?? ""
+    try expect(strandedMessage.contains("agent/stranded"),
+               "the branch that was KEPT must be in what the user is told — got '\(strandedMessage)'")
+    try expect(strandedMessage.contains("Unmerged work kept"),
+               "…in the words P3.11 was corrected to use — got '\(strandedMessage)'")
+    try expect(strandedMessage.contains("stranded agent"),
+               "…beside the agent it belonged to — got '\(strandedMessage)'")
+    try expect(!recordFileOnDisk(strandedAgent),
+               "…and the record still went")
+    revealApp.agentSupervisor = revealSupervisor
+
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live while Snooze and Wake stay greyed with 'Not available yet.', the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's TILE survives while its respawn is durably suppressed so re-wiring mints nothing (and a prompt in that tile deliberately revives it), a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)')")
     }
 }

@@ -307,6 +307,24 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// menu has the room to say why. It also keeps the menu's shape stable, so the day a
     /// host wires this nothing about the menu moves except which items answer.
     var onRowAction: ((InboxRowAction, [UUID]) -> Void)?
+    // Ticket: docs/38-tickets/90-agent-ux/P3.15-wire-destructive-row-actions.md
+    //
+    // WHICH ACTIONS THE HOST ACTUALLY PERFORMS, action by action. `onRowAction` used to
+    // be the whole gate: assigning it un-greyed all nine items at once, including
+    // `snooze` and `wake`, which nothing writes yet (P4.6 owns the write, P4.7 the
+    // shelf). So the callback could not be assigned at all without shipping two menu
+    // items that answer a click with nothing — which is why, for eleven tickets, the
+    // shipped sidebar assigned neither callback and the owner could not delete an agent.
+    //
+    // A capability SET rather than a boolean: an item is live when there is something
+    // to run, and adding a destination later is one element here rather than a new
+    // gate. Empty by default, so a host that assigns the callback and forgets this
+    // greys everything rather than offering silent no-ops.
+    var wiredRowActions: Set<InboxRowAction> = []
+    /// The same, for the bar. P3.11's rule is unchanged underneath it: an action must
+    /// be BOTH available for every selected row (which hides it when it is not) and
+    /// wired here.
+    var wiredBulkActions: Set<InboxBulkAction> = []
     // Ticket: docs/38-tickets/90-agent-ux/P3.13-inline-rename.md
     /// A new name was COMMITTED for this agent — trimmed, non-empty and different
     /// from the one on screen, so a host never has to re-decide any of those.
@@ -1084,14 +1102,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
             bulkBar.hide()
             return
         }
-        // NO HANDLER, NO MENU. Settle, snooze and archive are Phase 4's to perform, so
-        // the app does not set `onBulkAction` yet — and a control that answers a click
-        // with nothing is worse than no control. With the handler unset the bar still
-        // reports the selection (and what a destructive action would leave), and the
-        // actions appear the day the host wires them. (Found in cross-review, which
-        // pointed out the shipped sidebar would offer five silent no-ops.)
+        // NO HANDLER, NO MENU — and, since P3.15, no handler FOR THIS ACTION, no item.
+        // A control that answers a click with nothing is worse than no control (found
+        // in cross-review of P3.11, which pointed out the shipped sidebar would
+        // otherwise offer five silent no-ops). With the handler unset the bar still
+        // reports the selection and what a destructive action would leave; with it set,
+        // the bar offers exactly the intersection of "every selected row can take it"
+        // (P3.11's AND, untouched) and "the host performs it".
         bulkBar.show(
-            onBulkAction == nil ? [] : InboxBulkAction.available(for: selected, rollups: rollupsByParent),
+            offeredBulkActions(for: selected),
             selectionCount: selected.count,
             keptBranches: InboxBulkAction.keptBranches(in: selected))
     }
@@ -1106,9 +1125,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     private func performBulkAction(_ action: InboxBulkAction) {
         let selected = selectedRows
         guard selected.count >= AgentInboxView.minimumBulkSelection,
-              InboxBulkAction.available(for: selected, rollups: rollupsByParent).contains(action)
+              offeredBulkActions(for: selected).contains(action)
         else { return }
         onBulkAction?(action, selected.map(\.id))
+    }
+
+    /// What the bar may offer this selection: P3.11's availability intersection, then
+    /// P3.15's capability gate. One function so the bar it draws and the action it
+    /// performs cannot come apart.
+    private func offeredBulkActions(for selected: [AgentInboxRow]) -> [InboxBulkAction] {
+        guard onBulkAction != nil else { return [] }
+        return InboxBulkAction.available(for: selected, rollups: rollupsByParent)
+            .filter { wiredBulkActions.contains($0) }
     }
 
     // MARK: - Row context menu (P3.12)
@@ -1183,14 +1211,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     }
 
     /// Whether the host can perform this action at all. `openInTile` rides P3.9's
-    /// existing callback and is live today; everything else waits on `onRowAction`.
+    /// existing callback; everything else needs `onRowAction` AND a host that named
+    /// this action in `wiredRowActions` (P3.15) — one gate for all nine is what made
+    /// wiring Delete mean also offering a Snooze that goes nowhere.
     private func isWired(_ action: InboxRowAction) -> Bool {
         switch action {
         case .openInTile: return onRevealRow != nil
         case .settle, .unsettle, .snooze, .wake, .markUnread, .rename, .stopAgent,
              .archive, .delete:
-            return onRowAction != nil
+            return onRowAction != nil && wiredRowActions.contains(action)
         }
+    }
+
+    /// P3.15, for the checks: the shipped list's own answer, so "Snooze is still
+    /// greyed" is asserted against the gate the menu uses rather than a copy of it.
+    func isRowActionWiredForQA(_ action: InboxRowAction) -> Bool { isWired(action) }
+    func isBulkActionWiredForQA(_ action: InboxBulkAction) -> Bool {
+        onBulkAction != nil && wiredBulkActions.contains(action)
     }
 
     /// P3.5's `isInteracting`: hover, selection, or keyboard-active. The last two

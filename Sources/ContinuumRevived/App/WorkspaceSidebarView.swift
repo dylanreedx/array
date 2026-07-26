@@ -244,6 +244,29 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         inboxView.onRevealRow = onReveal
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.15-wire-destructive-row-actions.md
+    /// Where a row-menu or bulk-bar action goes, and WHICH actions the host performs.
+    ///
+    /// Both halves in one call because they are one fact: a callback without the
+    /// capability set un-greys nothing, and a capability set without the callback is a
+    /// promise nobody keeps. The shipped app assigned neither for eleven tickets, so an
+    /// agent could not be deleted by any route; the source scan in
+    /// `--agent-inbox-check` now asserts this call exists in `configureWorkspaceSidebar`.
+    ///
+    /// Passed straight through like the reveal and the rename above: the actions land
+    /// on the supervisor, and only the app holds one.
+    func configureInboxActions(
+        rowActions: Set<InboxRowAction>,
+        onRowAction: @escaping (InboxRowAction, [UUID]) -> Void,
+        bulkActions: Set<InboxBulkAction>,
+        onBulkAction: @escaping (InboxBulkAction, [UUID]) -> Void
+    ) {
+        inboxView.wiredRowActions = rowActions
+        inboxView.onRowAction = onRowAction
+        inboxView.wiredBulkActions = bulkActions
+        inboxView.onBulkAction = onBulkAction
+    }
+
     // Ticket: docs/38-tickets/90-agent-ux/P3.13-inline-rename.md
     /// Where a committed rename goes. Passed straight through like the reveal above:
     /// the name lives on the agent's record, and only the app holds the supervisor

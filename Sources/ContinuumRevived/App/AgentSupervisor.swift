@@ -849,6 +849,42 @@ final class AgentSupervisor {
         return report
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.15-wire-destructive-row-actions.md
+    //
+    // KEPT OUT OF `archive` ON PURPOSE. Archiving is the agent's cleanup and says
+    // nothing about a tile; suppressing a respawn is a statement about the TILE, made
+    // by the surface that deleted the agent. Folding it into `archive` would also make
+    // every internal caller (P2C.3's cleanup, a fan-out teardown) leave tombstones
+    // behind for tiles nobody deleted.
+
+    /// Record that this tile's agent was deleted by a person, so restoring the canvas
+    /// does not mint a replacement (`AppDelegate.wireManagedAgentTile`).
+    func suppressAgentRespawn(forTile tileId: UUID) {
+        var tiles = store.loadDeletedAgentTiles()
+        guard tiles.insert(tileId).inserted else { return }
+        do {
+            try store.setDeletedAgentTiles(tiles)
+        } catch {
+            warn("AgentSupervisor.suppressAgentRespawn: could not record the deletion of tile \(tileId.uuidString): \(error)")
+        }
+    }
+
+    func isAgentRespawnSuppressed(forTile tileId: UUID) -> Bool {
+        store.loadDeletedAgentTiles().contains(tileId)
+    }
+
+    /// The other direction, for the one gesture that undoes it: submitting a prompt in
+    /// a tile whose agent was deleted is asking for an agent there again.
+    func allowAgentRespawn(forTile tileId: UUID) {
+        var tiles = store.loadDeletedAgentTiles()
+        guard tiles.remove(tileId) != nil else { return }
+        do {
+            try store.setDeletedAgentTiles(tiles)
+        } catch {
+            warn("AgentSupervisor.allowAgentRespawn: could not clear the deletion of tile \(tileId.uuidString): \(error)")
+        }
+    }
+
     /// Removes an isolated agent's checkout, keeping anything unmerged.
     ///
     /// The repository is DERIVED from the record: an isolated `cwd` is

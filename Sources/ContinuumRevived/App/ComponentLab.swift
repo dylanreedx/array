@@ -1556,6 +1556,12 @@ enum LabCatalog {
         // wired. What it renders is the menu, not the handler.
         if !ids.isEmpty {
             view.onBulkAction = { _, _ in }
+            // P3.15 made the gate per-action, so the handler alone no longer offers
+            // anything. The card is a render of P3.11's ENABLEMENT — which actions a
+            // selection may take — so it declares every action wired; which of them the
+            // shipped app performs today is `AppDelegate.wiredInboxBulkActions`, and the
+            // baseline for this card must not move when that set grows.
+            view.wiredBulkActions = Set(InboxBulkAction.allCases)
             _ = view.selectRowsForQA(ids: ids)
         }
         return view
