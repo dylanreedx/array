@@ -1269,15 +1269,23 @@ enum ContinuumApp {
         }
 
         if CommandLine.arguments.contains("--agent-inbox-check") {
-            do {
-                _ = NSApplication.shared
-                try AppDelegate.runAgentInboxChecks()
-                print("ContinuumRevivedAgentInboxChecks passed")
-                Foundation.exit(0)
-            } catch {
-                fputs("FAIL: \(error)\n", stderr)
-                Foundation.exit(1)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await AppDelegate.runAgentInboxChecks()
+                    print("ContinuumRevivedAgentInboxChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
             }
+            // P3.9 made this leg async, for the same reason as
+            // `--agent-supervisor-check`: section C runs a real turn to earn the
+            // unread mark it then watches a click clear, and the supervisor delivers
+            // those events via `DispatchQueue.main.async` — only a live main run loop
+            // drains them.
+            NSApp.run()
         }
 
         if CommandLine.arguments.contains("--workspace-sidebar-shell-check") {
@@ -6163,6 +6171,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.configureInboxScope(WorkspaceSidebarConfig.resolveScope()) { scope in
             WorkspaceSidebarConfig.setScope(scope)
         }
+        // P3.9: the inbox is triage, the canvas is depth — a clicked row lands you on
+        // the work.
+        sidebar.configureInboxReveal { [weak self] agentId in
+            self?.revealAgentFromInbox(agentId)
+        }
     }
 
     private func configureWorkspaceTopBar(_ topBar: WorkspaceTopBarView) {
@@ -6446,6 +6459,106 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         jumpToTileFromPalette(tileId)
         navSelectedZoneId = zoneContainingTile(tileId)
         return focusBroker.activeSurface == .tile(tileId) || canvasView.canvasState.lastActiveTileId == tileId
+    }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P3.9-reveal-on-click.md
+    /// Clicking an inbox row takes you to that agent, wherever it is — another
+    /// workspace, or no tile at all.
+    ///
+    /// The id is the inbox's AGGREGATE key (P3.1), which has two halves: a managed
+    /// agent is keyed by its record and a terminal-session agent by its own tile id.
+    /// So a record lookup decides which half this is, exactly the way
+    /// `focusedInboxAgentId()` builds the same key from the other direction.
+    ///
+    /// READING IS FREE (P4.9, and this packet's first trap): the only state this
+    /// changes is the read-mark and where the viewport is pointing. Nothing here
+    /// settles, un-settles, stops, starts or archives anything.
+    @discardableResult
+    func revealAgentFromInbox(_ rowId: UUID) -> Bool {
+        let agentId = AgentID(rawValue: rowId)
+        guard let record = agentSupervisor.records[agentId] else {
+            // A terminal-session agent: the row's id IS its tile. `focusTile` resolves
+            // to no managed agent and therefore disarms the read-mark rather than
+            // leaving the previous agent armed.
+            let revealed = revealTileFromInbox(rowId)
+            if revealed { agentSupervisor.focusTile(rowId) }
+            return revealed
+        }
+        // A tile the agent already has is the tile it is revealed in — spawning a
+        // second one for an agent that has one is the packet's other trap, and
+        // `attach` would silently unbind the first.
+        guard let tileId = record.tileId ?? attachTileToAgentFromInbox(agentId) else { return false }
+        guard revealTileFromInbox(tileId) else { return false }
+        // P3.3: opening a row clears the mark AND arms the focus, so a turn that
+        // completes while you are sitting on the agent is not unread. Only after the
+        // reveal landed — arming focus on an agent you failed to reach would suppress
+        // the next mark for a row you never saw.
+        agentSupervisor.focus(agentID: agentId)
+        // The mark is a fact the rows carry, so the list has to be told; a
+        // cross-workspace reveal has already reloaded, and a same-workspace one has
+        // not.
+        reloadWorkspaceSidebar()
+        return true
+    }
+
+    /// Frame and focus a tile, switching workspaces first when it lives in another
+    /// one. Both halves are the sidebar's existing primitives — this adds no
+    /// navigation of its own, it only supplies the workspace the tree row would have
+    /// carried.
+    @discardableResult
+    private func revealTileFromInbox(_ tileId: UUID) -> Bool {
+        if let workspaceId = workspaceContainingTile(tileId),
+           !switchWorkspaceFromSidebarIfNeeded(workspaceId) { return false }
+        return focusTileFromSidebar(tileId)
+    }
+
+    /// Which workspace holds this tile, from the same fold the sidebar draws
+    /// (`buildWorkspaceSidebarTree`) — so "where is this tile" has one answer on the
+    /// desktop, and a tile reachable from two workspaces resolves to the first, as
+    /// `AgentContextIndex.tilePlacements` already decided for the row's own chip.
+    ///
+    /// nil for a tile the tree does not mention — a tile just spawned into the live
+    /// canvas, before its project's canvas has been re-read — and the caller then
+    /// focuses it where it is rather than refusing.
+    private func workspaceContainingTile(_ tileId: UUID) -> UUID? {
+        guard let tree = try? buildWorkspaceSidebarTree() else { return nil }
+        return tree.workspaces.first { workspace in
+            workspace.zones.contains { $0.tiles.contains { $0.tileId == tileId } }
+        }?.workspaceId
+    }
+
+    /// Gives a headless agent (P2A.6) a view, so there is something to reveal.
+    ///
+    /// The tile is spawned by the same call `agent.newManaged` makes and then wired
+    /// to THIS agent rather than a fresh one — `wireManagedAgentTile` is where
+    /// `supervisor.attach` (P2A.5) lives, so the binding is recorded in one place and
+    /// the tile subscribes to the agent's real stream and replays its history.
+    ///
+    /// WHERE THE TILE LANDS, and the limit on it (raised in cross-review). `tileSpawner`
+    /// is built once at `startWorkspace` against the boot project's store, so EVERY
+    /// spawn surface in the app — ⌘K's new managed agent, a new terminal, a note —
+    /// puts its tile in that one project's canvas. A headless agent whose record names
+    /// a different project therefore gets its view in the active project, not in its
+    /// own. That is the app's existing behaviour rather than something this path
+    /// invents, and giving the agent's own project a tile needs a per-project spawner,
+    /// which is an architectural change no packet has asked for. So it is SAID on
+    /// stderr rather than left silent, and the agent's own record — its cwd, its
+    /// project, the project chip on its row — is untouched: only the view moved.
+    private func attachTileToAgentFromInbox(_ agentId: AgentID) -> UUID? {
+        guard let spawner = tileSpawner else { return nil }
+        if let recordProject = agentSupervisor.records[agentId]?.projectId,
+           let activeProjectId = activeProject?.id, recordProject != activeProjectId {
+            fputs("Reveal from inbox: \(agentId.rawValue.uuidString) belongs to project \(recordProject.uuidString) but its new tile lands in the active project \(activeProjectId.uuidString) — the app spawns into the active project only\n", stderr)
+        }
+        switch spawner.spawnManagedAgent() {
+        case let .spawned(tileId):
+            wireManagedAgentTile(tileId, agentID: agentId)
+            scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "inbox-reveal-attach", debounce: 0.2)
+            return tileId
+        case let .failure(error):
+            fputs("Reveal from inbox: could not attach a tile to \(agentId.rawValue.uuidString): \(error)\n", stderr)
+            return nil
+        }
     }
 
     @objc func toggleWorkspaceSidebarFromMenu(_ sender: Any?) {
@@ -8219,11 +8332,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// compose row to `supervisor.send`, and SUBSCRIBES to
     /// `supervisor.events(for:)` — one consumer among however many, which is what
     /// makes the tile a view rather than the agent's home.
-    private func wireManagedAgentTile(_ tileId: UUID) {
+    ///
+    /// P3.9 passes `agentID` for the one case that has an agent already and no tile
+    /// yet: revealing a headless agent spawns a tile FOR it, so the spawn branch
+    /// below — which would create a second agent over the top of it — must not run.
+    private func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil) {
         guard let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
         let supervisor = agentSupervisor
         let agentId: AgentID
-        if let existing = supervisor.agent(forTile: tileId) {
+        if let agentID {
+            agentId = agentID
+        } else if let existing = supervisor.agent(forTile: tileId) {
             agentId = existing
         } else {
             agentId = spawnSupervisedAgent(tileId: tileId)
@@ -19776,8 +19895,41 @@ extension AppDelegate {
 // leaves this check green (probed over four scope flips, one of them growing the row
 // count). The explicit clear stays for the reason written at `setScope`, and witness
 // 1 is the direction that has teeth — an implementation that RETAINS the selection.
+// Ticket: docs/38-tickets/90-agent-ux/P3.9-reveal-on-click.md
+//
+// Section C is the reveal, and it needs a fixture the other two do not: a real
+// `WorkspaceRuntime` over TWO workspaces (a workspace switch is a runtime
+// operation, and `switchWorkspaceFromSidebarIfNeeded` returns false without one),
+// a real `TileSpawner` (a headless agent's tile is a real tile in a real project
+// canvas) and a real turn (the unread mark is only set by `turnCompleted`
+// arriving while you are looking elsewhere — which is why this leg is now async).
+//
+// SEVEN NEGATIVE TESTS OBSERVED RED at exit 1 with the final code, quoted verbatim:
+//
+//   1. `reveal(rowAt:)` no longer calling `onRevealRow` → `clicking a row focuses
+//      that agent's tile — focus is Optional(…FocusSurfaceID.canvas)`
+//   2. `sidebar.configureInboxReveal { … }` deleted from `configureWorkspaceSidebar`
+//      → the same line. Two edits, one message: the callback and its wiring are one
+//      path, and either half missing means the click reaches nothing.
+//   3. `revealTileFromInbox` focusing without switching workspace first → `clicking
+//      an agent in another workspace switches to it — still in
+//      Optional(3B900000-…-A1)`
+//   4. `agentSupervisor.focus(agentID:)` dropped from the reveal → `opening a row
+//      clears its unread mark — got unread`
+//   5. the `?? attachTileToAgentFromInbox(agentId)` fallback removed, i.e. a
+//      headless agent revealing nothing → `clicking a headless agent must attach a
+//      tile to it — its binding is still nil`
+//   7. `attachTileToAgentFromInbox` refusing an agent whose project is not the active
+//      one → `clicking a headless agent in another project must still attach a tile —
+//      its binding is still nil`. That refusal is the tempting reading of the
+//      cross-review's finding, and it would make the click a no-op for exactly the
+//      agents an orchestrator spawns.
+//   6. `wireManagedAgentTile(tileId, agentID: agentId)` → `wireManagedAgentTile(tileId)`,
+//      the version that spawns a fresh agent for the new tile → the same line as 5,
+//      because the tile is then bound to that brand-new agent and the headless one's
+//      binding never moves. That is the whole reason the parameter exists.
 extension AppDelegate {
-    static func runAgentInboxChecks() throws {
+    static func runAgentInboxChecks() async throws {
     enum CheckError: Error, CustomStringConvertible {
         case failed(String)
         var description: String { switch self { case let .failed(message): return message } }
@@ -20266,7 +20418,7 @@ extension AppDelegate {
 
     // MARK: A4 · P2D.4 · delegated work reads as a tree
     //
-    // SIX NEGATIVE TESTS OBSERVED RED at exit 1 with the final code, quoted
+    // SEVEN NEGATIVE TESTS OBSERVED RED at exit 1 with the final code, quoted
     // verbatim — three on the pure suite (`ContinuumRevivedAgentUIChecks`), three
     // here:
     //
@@ -20638,7 +20790,268 @@ extension AppDelegate {
     try expect(rebuiltByEvent <= 2,
                "one agent's event must not rebuild the whole list — \(rebuiltByEvent) cells were rebuilt")
 
+    // MARK: C · clicking a row takes you to the agent (P3.9)
+
+    func makeProject(id: UUID, name: String, root: URL) -> Project {
+        Project(
+            id: id, name: name, rootPath: root.path, createdAt: now, updatedAt: now,
+            defaultLaunchProfileId: "shell", editorPreference: .auto,
+            settings: ProjectSettings(
+                restorePolicy: .restoreDescriptors,
+                browserStoragePolicy: .perProject,
+                terminalClosePolicy: .askWhenRunning))
+    }
+
+    let revealRoot = fm.temporaryDirectory
+        .appendingPathComponent("continuum-inbox-reveal-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: revealRoot) }
+    let revealSupport = revealRoot.appendingPathComponent("AppSupport", isDirectory: true)
+    let revealAgentsSupport = revealRoot.appendingPathComponent("Agents", isDirectory: true)
+    let hereRoot = revealRoot.appendingPathComponent("Here", isDirectory: true)
+    let thereRoot = revealRoot.appendingPathComponent("There", isDirectory: true)
+    for dir in [revealSupport, revealAgentsSupport, hereRoot, thereRoot] {
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+
+    let hereWorkspace = UUID(uuidString: "3B900000-0000-4000-8000-0000000000A1")!
+    let thereWorkspace = UUID(uuidString: "3B900000-0000-4000-8000-0000000000A2")!
+    let hereProjectId = UUID(uuidString: "3B900000-0000-4000-8000-0000000000D1")!
+    let thereProjectId = UUID(uuidString: "3B900000-0000-4000-8000-0000000000D2")!
+    let hereZone = UUID(uuidString: "3B900000-0000-4000-8000-0000000000C1")!
+    let thereZone = UUID(uuidString: "3B900000-0000-4000-8000-0000000000C2")!
+    let hereTile = UUID(uuidString: "3B900000-0000-4000-8000-0000000000E1")!
+    let thereTile = UUID(uuidString: "3B900000-0000-4000-8000-0000000000E2")!
+
+    let hereProject = makeProject(id: hereProjectId, name: "Here", root: hereRoot)
+    let thereProject = makeProject(id: thereProjectId, name: "There", root: thereRoot)
+    let hereStore = ProjectStore(projectRoot: hereRoot)
+    let thereStore = ProjectStore(projectRoot: thereRoot)
+    try hereStore.saveProject(hereProject)
+    try thereStore.saveProject(thereProject)
+    func agentTile(_ id: UUID, _ title: String) -> Tile {
+        Tile(id: id, kind: .managedAgent, title: title,
+             frame: TileFrame(x: 0, y: 0, width: 320, height: 240),
+             zPosition: .fromLegacyRank(1), runtimeRef: nil,
+             metadata: TileMetadata(launchProfileId: "managed-agent", projectRelativeCwd: "."))
+    }
+    // `lastActiveTileId: nil` in BOTH canvases, and that is load-bearing: a workspace
+    // switch RESTORES the departing/target workspace's last focused tile, so a
+    // canvas that named its agent's tile would focus it for reasons that have
+    // nothing to do with this ticket and every assertion below would be vacuous.
+    try hereStore.saveCanvas(CanvasState(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        tiles: [agentTile(hereTile, "here agent")], groups: [], lastActiveTileId: nil))
+    try thereStore.saveCanvas(CanvasState(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        tiles: [agentTile(thereTile, "there agent")], groups: [], lastActiveTileId: nil))
+
+    let hereDoc = WorkspaceDocument(
+        viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
+        zones: [ZonePlacement(zoneId: hereZone, projectId: hereProjectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 900, height: 600), color: "blue", collapsed: false, hydrationPolicy: .automatic, name: "Here", navKey: "1")],
+        zoneZOrder: [hereZone], lastActiveZoneId: hereZone)
+    let thereDoc = WorkspaceDocument(
+        viewport: CanvasViewport(x: 40, y: 40, zoom: 1),
+        zones: [ZonePlacement(zoneId: thereZone, projectId: thereProjectId, origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 900, height: 600), color: "mint", collapsed: false, hydrationPolicy: .automatic, name: "There", navKey: "2")],
+        zoneZOrder: [thereZone], lastActiveZoneId: thereZone)
+    var revealRegistry = Registry.empty()
+    revealRegistry.lastActiveWorkspaceId = hereWorkspace
+    revealRegistry.lastActiveProjectId = hereProjectId
+    revealRegistry.workspaces = [
+        WorkspaceEntry(id: hereWorkspace, name: "Here Workspace", projectIds: [hereProjectId], createdAt: now, updatedAt: now),
+        WorkspaceEntry(id: thereWorkspace, name: "There Workspace", projectIds: [thereProjectId], createdAt: now, updatedAt: now),
+    ]
+    revealRegistry.projects = [
+        ProjectEntry(id: hereProjectId, name: "Here", rootPath: hereRoot.path, workspaceId: hereWorkspace, lastOpenedAt: now, pinned: false, missing: false),
+        ProjectEntry(id: thereProjectId, name: "There", rootPath: thereRoot.path, workspaceId: thereWorkspace, lastOpenedAt: now, pinned: false, missing: false),
+    ]
+    let revealRegistryStore = RegistryStore(applicationSupportDirectory: revealSupport)
+    try revealRegistryStore.save(revealRegistry)
+    try WorkspaceStore(workspaceId: hereWorkspace, applicationSupportDirectory: revealSupport).save(hereDoc)
+    try WorkspaceStore(workspaceId: thereWorkspace, applicationSupportDirectory: revealSupport).save(thereDoc)
+
+    let hereAgent = AgentID(rawValue: UUID(uuidString: "3B900000-0000-4000-8000-0000000000B1")!)
+    let thereAgent = AgentID(rawValue: UUID(uuidString: "3B900000-0000-4000-8000-0000000000B2")!)
+    let noTileAgent = AgentID(rawValue: UUID(uuidString: "3B900000-0000-4000-8000-0000000000B3")!)
+    let elsewhereAgent = AgentID(rawValue: UUID(uuidString: "3B900000-0000-4000-8000-0000000000B4")!)
+    let revealAgentStore = AgentStore(applicationSupportDirectory: revealAgentsSupport)
+    try revealAgentStore.upsert(AgentRecord(
+        id: hereAgent, displayName: "here agent", role: "reviewer",
+        model: "openai-codex/gpt-5.6-sol", thinking: "medium", cwd: hereRoot.path,
+        projectId: hereProjectId, createdAt: now, lastActivityAt: now, tileId: hereTile))
+    try revealAgentStore.upsert(AgentRecord(
+        id: thereAgent, displayName: "there agent", role: "reviewer",
+        model: "openai-codex/gpt-5.6-sol", thinking: "medium", cwd: thereRoot.path,
+        projectId: thereProjectId, createdAt: now, lastActivityAt: now, tileId: thereTile))
+    try revealAgentStore.upsert(AgentRecord(
+        id: noTileAgent, displayName: "no-tile agent", role: "orchestrator",
+        model: "openai-codex/gpt-5.6-sol", thinking: "medium", cwd: hereRoot.path,
+        projectId: hereProjectId, createdAt: now, lastActivityAt: now))
+    // A headless agent belonging to the OTHER project — the case cross-review
+    // raised: the app has one spawner, bound to the active project, so its view
+    // cannot land in its own project's canvas today.
+    try revealAgentStore.upsert(AgentRecord(
+        id: elsewhereAgent, displayName: "elsewhere agent", role: "orchestrator",
+        model: "openai-codex/gpt-5.6-sol", thinking: "medium", cwd: thereRoot.path,
+        projectId: thereProjectId, createdAt: now, lastActivityAt: now))
+
+    let revealApp = AppDelegate()
+    // A scripted turn, so the unread mark below is EARNED by a completed turn
+    // arriving while focus is elsewhere rather than poked into the supervisor.
+    let turnScript: [AgentRuntimeEvent] = [
+        .turnStarted(threadId: "reveal", turnId: "t1"),
+        .turnCompleted(threadId: "reveal", turnId: "t1", outcome: .completed, errorMessage: nil),
+        .sessionStateChanged(.ready),
+    ]
+    revealApp.registryStore = revealRegistryStore
+    revealApp.agentSupervisor = AgentSupervisor(
+        store: revealAgentStore, makeRunner: { _ in ScriptedAgentRunner(script: turnScript) })
+    revealApp.agentSupervisor.restore()
+    let revealSupervisor = revealApp.agentSupervisor
+    try expect(revealSupervisor.records[hereAgent]?.tileId == hereTile
+                && revealSupervisor.records[thereAgent]?.tileId == thereTile
+                && revealSupervisor.records[noTileAgent]?.tileId == nil,
+               "the three agents must be adopted with the bindings this section is about")
+
+    let browserEngine = BrowserEngineContext()
+    defer { browserEngine.shutdown() }
+    let zoneRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { projectId in
+        if projectId == hereProjectId {
+            return ZoneRuntimeController(projectRoot: hereRoot, projectStore: hereStore, project: hereProject)
+        }
+        if projectId == thereProjectId {
+            return ZoneRuntimeController(projectRoot: thereRoot, projectStore: thereStore, project: thereProject)
+        }
+        throw CheckError.failed("unexpected project id \(projectId)")
+    })
+    let revealRuntime = WorkspaceRuntime(
+        workspaceId: hereWorkspace, document: hereDoc, registry: zoneRegistry,
+        focusBroker: revealApp.focusBroker, registryStore: revealRegistryStore,
+        ghostty: nil, browserEngine: browserEngine)
+    let revealCanvas = CanvasNSView(
+        canvasState: CanvasState(viewport: hereDoc.viewport, tiles: [], groups: [], lastActiveTileId: nil),
+        activeZone: nil, zoneRenderModels: [], showsZoneChrome: false)
+    revealCanvas.frame = NSRect(x: 0, y: 0, width: 1_200, height: 800)
+    revealApp.workspaceRuntime = revealRuntime
+    revealApp.canvasView = revealCanvas
+    try revealRuntime.install(into: revealCanvas, appRegistry: revealRegistry)
+    revealCanvas.layoutSubtreeIfNeeded()
+    revealApp.tileSpawner = TileSpawner(
+        canvasView: revealCanvas, ghostty: nil, browserEngine: browserEngine,
+        projectStore: hereStore, project: hereProject)
+
+    let revealSidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 300, height: 640))
+    revealApp.workspaceSidebarView = revealSidebar
+    // Every agent in the list: this section is about reaching them, and a scope
+    // left over from section B would hide the ones it is about to click.
+    WorkspaceSidebarConfig.setScope(.all, defaults: standardDefaults)
+    revealApp.configureWorkspaceSidebar(revealSidebar)
+
+    // The unread mark, earned: focus is on nothing, so the completed turn marks the
+    // agent. (`--agent-supervisor-check` owns the mark's own rules; here it is the
+    // starting state the click has to clear.)
+    revealSupervisor.send("look away", to: hereAgent)
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, {
+        revealSupervisor.attention(for: hereAgent) == .unread
+    }) else {
+        throw CheckError.failed("setup: the turn never completed, so there is no unread mark for the click to clear")
+    }
+    revealApp.refreshAgentSurfaces(notify: false)
+    revealSidebar.inboxForQA.layoutForQA()
+
+    let revealInbox = revealSidebar.inboxForQA
+    try expect(revealInbox.isClickWiredForQA,
+               "a row is opened by a CLICK — the table must send its single-click action to the list")
+    let revealIds = Set(revealInbox.rowIdsForQA)
+    try expect(revealIds.isSuperset(of: [hereAgent.rawValue, thereAgent.rawValue, noTileAgent.rawValue]),
+               "all three agents must be rows before any of them can be clicked — got \(revealInbox.titlesForQA)")
+    func row(_ id: AgentID) -> AgentInboxRow? { revealInbox.rows.first { $0.id == id.rawValue } }
+    try expect(row(hereAgent)?.attention == .unread,
+               "the here-agent's ROW must carry the unread mark — got \(String(describing: row(hereAgent)?.attention))")
+    let lifecycleBefore = revealInbox.rows.map(\.lifecycle)
+    let runningBefore = revealSupervisor.isRunning(hereAgent)
+    try expect(revealApp.currentWorkspaceIdForSidebar() == hereWorkspace,
+               "setup: the run starts in the here-workspace")
+    try expect(revealApp.focusBroker.activeSurface != .tile(hereTile),
+               "setup: nothing may already be focused on the tile the first click is supposed to reach")
+
+    // 1 · SAME WORKSPACE: the click lands on the tile, and clears the mark.
+    try expect(revealInbox.clickRowForQA(id: hereAgent.rawValue), "the here-agent's row must be clickable")
+    try expect(revealApp.focusBroker.activeSurface == .tile(hereTile),
+               "clicking a row focuses that agent's tile — focus is \(String(describing: revealApp.focusBroker.activeSurface))")
+    try expect(revealApp.currentWorkspaceIdForSidebar() == hereWorkspace,
+               "…without leaving the workspace it is already in")
+    try expect(revealSupervisor.attention(for: hereAgent) == .none,
+               "opening a row clears its unread mark — got \(revealSupervisor.attention(for: hereAgent).rawValue)")
+    revealSidebar.inboxForQA.layoutForQA()
+    // `InboxAttention.none` spelled out: a bare `.none` against an Optional resolves
+    // to `Optional.none`, which is the assertion "there is no such row" — green for
+    // the wrong reason the moment the row disappears.
+    try expect(row(hereAgent)?.attention == InboxAttention.none,
+               "…and the ROW says so on the next push — got \(String(describing: row(hereAgent)?.attention))")
+    // READING IS FREE: the reveal touched no lifecycle and started/stopped nothing.
+    // (P4.1 lands the states this axis will carry; the invariant is asserted now so
+    // it cannot be broken between here and there.)
+    try expect(revealInbox.rows.map(\.lifecycle) == lifecycleBefore,
+               "opening a row must not move any row's lifecycle — \(lifecycleBefore) became \(revealInbox.rows.map(\.lifecycle))")
+    try expect(revealSupervisor.isRunning(hereAgent) == runningBefore,
+               "opening a row must not start or stop the agent's work")
+
+    // 2 · a second click on the same row does NOT hand the agent a second tile.
+    let tilesAfterFirstClick = revealCanvas.canvasState.tiles.count
+    try expect(revealInbox.clickRowForQA(id: hereAgent.rawValue), "the here-agent's row must still be clickable")
+    try expect(revealSupervisor.records[hereAgent]?.tileId == hereTile,
+               "an agent that has a tile is revealed IN it — its binding moved to \(String(describing: revealSupervisor.records[hereAgent]?.tileId))")
+    try expect(revealCanvas.canvasState.tiles.count == tilesAfterFirstClick,
+               "…and no second tile was spawned for it — \(revealCanvas.canvasState.tiles.count) tiles, was \(tilesAfterFirstClick)")
+
+    // 3 · HEADLESS: the click gives it a tile and lands on it, without inventing a
+    //     second agent to put in the tile.
+    let agentsBeforeAttach = revealSupervisor.records.count
+    try expect(revealInbox.clickRowForQA(id: noTileAgent.rawValue), "the headless agent's row must be clickable")
+    guard let attachedTile = revealSupervisor.records[noTileAgent]?.tileId else {
+        throw CheckError.failed("clicking a headless agent must attach a tile to it — its binding is still nil")
+    }
+    try expect(revealSupervisor.agent(forTile: attachedTile) == noTileAgent,
+               "the attached tile shows THAT agent — it shows \(String(describing: revealSupervisor.agent(forTile: attachedTile)))")
+    try expect(revealSupervisor.records.count == agentsBeforeAttach,
+               "attaching a view must not spawn a second agent — \(revealSupervisor.records.count) records, was \(agentsBeforeAttach)")
+    try expect(revealCanvas.tileView(for: attachedTile) is ManagedAgentTileNSView,
+               "the attached view is a managed-agent tile, not an empty placeholder")
+    try expect(revealApp.focusBroker.activeSurface == .tile(attachedTile),
+               "…and the click landed on it — focus is \(String(describing: revealApp.focusBroker.activeSurface))")
+
+    // 3b · a headless agent that belongs to the OTHER project still gets a view and
+    //      still lands — in the ACTIVE project's canvas, which is where the app's one
+    //      spawner puts every tile. Pinned rather than left unstated: the click must
+    //      not become a no-op for the agent an orchestrator is most likely to have
+    //      spawned, and the day a per-project spawner exists, this assertion is the
+    //      one that has to be rewritten.
+    try expect(revealInbox.clickRowForQA(id: elsewhereAgent.rawValue), "the other project's headless row must be clickable")
+    guard let elsewhereTile = revealSupervisor.records[elsewhereAgent]?.tileId else {
+        throw CheckError.failed("clicking a headless agent in another project must still attach a tile — its binding is still nil")
+    }
+    try expect(revealApp.focusBroker.activeSurface == .tile(elsewhereTile),
+               "…and the click lands on it — focus is \(String(describing: revealApp.focusBroker.activeSurface))")
+    try expect(revealCanvas.canvasState.tiles.contains { $0.id == elsewhereTile },
+               "the tile is in the ACTIVE project's canvas, which is the only place this app spawns")
+    let otherProjectTiles = try thereStore.loadCanvas().tiles.map(\.id)
+    try expect(!otherProjectTiles.contains(elsewhereTile),
+               "…and NOT written into the other project's canvas, which nothing here is holding open")
+    try expect(revealSupervisor.records[elsewhereAgent]?.projectId == thereProjectId,
+               "attaching a view must not move the AGENT — its project is still \(String(describing: revealSupervisor.records[elsewhereAgent]?.projectId))")
+    try expect(revealApp.currentWorkspaceIdForSidebar() == hereWorkspace,
+               "…and attaching a view is not a workspace switch")
+
+    // 4 · CROSS-WORKSPACE: the click switches workspace first, then lands.
+    try expect(revealApp.currentWorkspaceIdForSidebar() == hereWorkspace,
+               "setup: the there-agent must be in a workspace we are NOT in, or the switch is untested")
+    try expect(revealInbox.clickRowForQA(id: thereAgent.rawValue), "the there-agent's row must be clickable")
+    try expect(revealApp.currentWorkspaceIdForSidebar() == thereWorkspace,
+               "clicking an agent in another workspace switches to it — still in \(String(describing: revealApp.currentWorkspaceIdForSidebar()))")
+    try expect(revealApp.focusBroker.activeSurface == .tile(thereTile),
+               "…and then lands on its tile — focus is \(String(describing: revealApp.focusBroker.activeSurface))")
+
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; and through the app, the sidebar's default content is \(ids.count) agent rows including a headless one, with the plain shell filtered out and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing")
     }
 }

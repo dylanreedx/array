@@ -1701,7 +1701,10 @@ func runAgentRestoreChecks() async throws {
     }
 
     // …and a restored agent's tile is told to say so.
-    let wiring = try paletteAgentSpawnBranch("private func wireManagedAgentTile(_ tileId: UUID) {")
+    // The signature carries P3.9's `agentID:` — revealing a headless agent wires an
+    // agent that already exists into a fresh tile. Still an EXACT match, so a rename
+    // still turns this scan red rather than blind.
+    let wiring = try paletteAgentSpawnBranch("private func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil) {")
     guard wiring.contains("needsPreviousSessionNotice("), wiring.contains("showPreviousSessionNotice()") else {
         throw fail("wireManagedAgentTile does not place the previous-session notice, so a restored agent renders as a blank tile:\n\(wiring)")
     }

@@ -185,6 +185,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// persists it. Not called for a programmatic `setScope` — restoring a scope at
     /// launch must not write the value back.
     var onScopeChange: ((InboxScope) -> Void)?
+    // Ticket: docs/38-tickets/90-agent-ux/P3.9-reveal-on-click.md
+    /// Clicking a row asks the host to take you to that agent. The list holds NO
+    /// navigation of its own — it hands over the row's aggregate id and the host
+    /// (which is the only thing that knows about workspaces, tiles and the
+    /// supervisor) does the rest.
+    ///
+    /// A CLICK, not a selection change: keyboard navigation through an
+    /// `NSTableView` IS a selection move (see `isInteracting`), so revealing on
+    /// selection would switch workspaces under every arrow key. Arrow-key
+    /// navigation is P3.10's ticket and gets its own decision.
+    var onRevealRow: ((UUID) -> Void)?
     /// The agent open in the focused tile, force-included whatever the scope says
     /// (`InboxScope.filter`). Set by the host on every push; a change re-filters,
     /// and an unchanged value does no work, so this cannot cost the incremental
@@ -267,6 +278,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 
         tableView.dataSource = self
         tableView.delegate = self
+        // P3.9: the table's own single-click action. `clickedRow` is -1 for a click
+        // in the empty space below the rows, which `reveal(rowAt:)` drops.
+        tableView.target = self
+        tableView.action = #selector(rowClicked(_:))
         scopePopUp.target = self
         scopePopUp.action = #selector(scopePicked(_:))
         updateScopeMenu()
@@ -558,6 +573,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         redraw(rows: [previous, tableView.selectedRow])
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.9-reveal-on-click.md
+    @objc private func rowClicked(_ sender: Any?) {
+        reveal(rowAt: tableView.clickedRow)
+    }
+
+    /// Hand the host the agent on this row. A click on the disclosure triangle
+    /// never gets here — the button tracks that mouse itself, so the table's action
+    /// is not sent and folding a group does not also jump the canvas.
+    private func reveal(rowAt index: Int) {
+        guard rows.indices.contains(index) else { return }
+        onRevealRow?(rows[index].id)
+    }
+
     /// P3.5's `isInteracting`: hover, selection, or keyboard-active. The last two
     /// are one test rather than two, because arrow-key navigation in an
     /// `NSTableView` IS a selection move — a keyboard-active row and the selected
@@ -679,6 +707,34 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         guard let index = rows.firstIndex(where: { $0.id == id }),
               let cell = cellsByRow[index] else { return false }
         return cell.clickDisclosureForQA()
+    }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P3.9-reveal-on-click.md
+    /// Click a row the way the user does — the same selection AppKit makes on
+    /// mouse-down, then the same `reveal(rowAt:)` the table's action calls.
+    ///
+    /// The one step it cannot reproduce is `NSTableView.clickedRow`, which AppKit
+    /// only sets while it is dispatching a real mouse event; that link is asserted
+    /// separately by `isClickWiredForQA`, so nothing between the mouse and the host
+    /// callback is left unwitnessed.
+    @discardableResult
+    func clickRowForQA(id: UUID) -> Bool {
+        guard let index = rows.firstIndex(where: { $0.id == id }) else { return false }
+        tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        reveal(rowAt: index)
+        return true
+    }
+
+    /// The table sends its single-click action to this view — the half of the click
+    /// path `clickRowForQA` cannot execute.
+    ///
+    /// `doubleAction` is NOT asserted nil: measured, `NSTableView` reports the plain
+    /// `action` as its `doubleAction` when none was set separately, so a double click
+    /// calls `rowClicked` a second time. Revealing an agent you are already on is
+    /// idempotent, so that is left alone rather than papered over.
+    var isClickWiredForQA: Bool {
+        (tableView.target as? AgentInboxView) === self
+            && tableView.action == #selector(rowClicked(_:))
     }
 
     @discardableResult

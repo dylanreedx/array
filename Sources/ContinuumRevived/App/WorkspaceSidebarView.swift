@@ -257,6 +257,14 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         inboxView.setScope(scope)
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P3.9-reveal-on-click.md
+    /// Where a clicked row goes. Passed straight through, exactly like
+    /// `onSelection` for the tree: the inbox is the sidebar's content, and the
+    /// navigation belongs to the app either way.
+    func configureInboxReveal(_ onReveal: @escaping (UUID) -> Void) {
+        inboxView.onRevealRow = onReveal
+    }
+
     /// The agent open in the focused tile — force-included in the inbox whatever the
     /// scope is, so navigating to an agent can never hide its own row.
     func setInboxOpenAgent(_ id: UUID?) {

@@ -3,7 +3,7 @@
 Durable state. The conversation is NOT the source of truth: this file + `git log` are.
 
 ## heartbeat
-last-touch 2026-07-26T15:40:00Z · ticket P2D.4-parent-child-nesting · attempt 1 · pid loop · status done (d429cbc)
+last-touch 2026-07-26T16:00:00Z · ticket P3.9-reveal-on-click · attempt 1 · pid loop · status implementing
 
 ## tickets
 
