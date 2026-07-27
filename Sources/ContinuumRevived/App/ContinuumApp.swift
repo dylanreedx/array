@@ -24521,8 +24521,212 @@ extension AppDelegate {
     undoHostScript = nil
     undoWindows.removeAll()
 
+    // MARK: L · a lifecycle move crossfades in place (P4.12)
+
+    // The duration first, because every wait below is scaled off it and a value that
+    // drifted out of the packet's band would make the section's timing meaningless.
+    try expect((0.15...0.2).contains(AgentInboxView.crossfadeDuration),
+               "the crossfade must stay in the packet's 150–200ms — got \(AgentInboxView.crossfadeDuration)s")
+
+    var fadeWindows: [NSWindow] = []
+    func makeFadeView(reducedMotion: Bool) -> AgentInboxView {
+        let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+        view.clock = { LabFixtures.inboxNow }
+        view.prefersReducedMotion = { reducedMotion }
+        view.reload(rows: advanceFixture)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = view
+        fadeWindows.append(window)
+        view.layoutForQA()
+        return view
+    }
+    /// The registry the packet asks about: one view per `id:variant`, and never two.
+    func expectOneViewPerKey(_ view: AgentInboxView, _ where_: String) throws {
+        let keys = view.rowViewIdentitiesForQA
+        try expect(Set(keys).count == keys.count,
+                   "\(where_): the list must hold exactly one view per id:variant — got \(keys.sorted())")
+    }
+
+    // SETUP, and its vacuity: settling this agent must really change its variant, and
+    // the two variants must really be two different keys — if either were false every
+    // assertion below would be about a transition that does not happen.
+    let fadeTarget = advance1
+    let fadeSettledRows = advanceSettling([fadeTarget.id])
+    guard let fadeSettledRow = fadeSettledRows.first(where: { $0.id == fadeTarget.id })
+    else { throw CheckError.failed("setup: the settled push must still contain the agent") }
+    try expect(fadeTarget.variant == .card && fadeSettledRow.variant == .slim,
+               "setup: settling must collapse the row (P3.7), or there is nothing to crossfade — got \(fadeTarget.variant) → \(fadeSettledRow.variant)")
+    let fadeCardKey = AgentInboxView.accessibilityIdentifier(for: fadeTarget)
+    let fadeSlimKey = AgentInboxView.accessibilityIdentifier(for: fadeSettledRow)
+    try expect(fadeCardKey != fadeSlimKey,
+               "setup: the key must carry the variant, or one view could serve both shapes and nothing would be replaced")
+
+    // L1 · THE TRANSITION. The card is still on screen at the rect it was drawn at,
+    // the slim row has arrived at its settled position, and the two are distinct views.
+    let fade = makeFadeView(reducedMotion: false)
+    try expect(fade.crossfadingRowCountForQA == 0,
+               "a first render animates nothing — got \(fade.crossfadingRowCountForQA) in flight")
+    try expect(fade.rowViewIdentitiesForQA.contains(fadeCardKey),
+               "setup: the agent must be drawn as a card before it settles — got \(fade.rowViewIdentitiesForQA.sorted())")
+    guard let fadeWasAt = fade.tableRowFrameForQA(id: fadeTarget.id)
+    else { throw CheckError.failed("setup: the agent must have a rect before the move") }
+    fade.apply(rows: fadeSettledRows, changed: .empty)
+    try expect(fade.crossfadingRowCountForQA == 1,
+               "settling one row starts exactly one crossfade — got \(fade.crossfadingRowCountForQA)")
+    let midFadeKeys = fade.rowViewIdentitiesForQA
+    try expect(midFadeKeys.contains(fadeCardKey) && midFadeKeys.contains(fadeSlimKey),
+               "mid-transition BOTH views are on screen — that is what a crossfade is — got \(midFadeKeys.sorted())")
+    try expect(fade.crossfadeGhostFrameForQA(id: fadeTarget.id) == fadeWasAt,
+               "the outgoing card is held EXACTLY where it was drawn, so nothing travels — ghost \(String(describing: fade.crossfadeGhostFrameForQA(id: fadeTarget.id))), was \(fadeWasAt)")
+    // …and "in place" is a claim about a row that MOVED. Without this the assertion
+    // above is satisfied by a transition where the row never went anywhere.
+    try expect(fade.tableRowFrameForQA(id: fadeTarget.id) != fadeWasAt,
+               "setup: settling must move the row to the tail, or 'fades out in place' is a statement about nothing — still at \(fadeWasAt)")
+    try expect((fade.rowViewAlphaForQA(id: fadeTarget.id) ?? 1) < 1,
+               "the arriving row fades UP rather than being cut in at full strength over the ghost — alpha \(String(describing: fade.rowViewAlphaForQA(id: fadeTarget.id)))")
+    try expectOneViewPerKey(fade, "mid-transition")
+
+    let fadeCleared = await waitUntil(timeout: 3, pollInterval: 0.02) {
+        fade.crossfadingRowCountForQA == 0
+    }
+    try expect(fadeCleared, "the crossfade must retire itself; it was still in flight 3s after a \(AgentInboxView.crossfadeDuration)s fade")
+    let fadeKeysAfter = fade.rowViewIdentitiesForQA
+    try expect(!fadeKeysAfter.contains(fadeCardKey),
+               "NO ORPHANED CARD VIEW: the outgoing card is gone from the hierarchy once the fade ends — got \(fadeKeysAfter.sorted())")
+    try expect(fadeKeysAfter.contains(fadeSlimKey),
+               "…and the slim row is the one that is left — got \(fadeKeysAfter.sorted())")
+    try expect(fade.rowViewAlphaForQA(id: fadeTarget.id) == 1,
+               "…at full strength, whether or not the animator ever ran — alpha \(String(describing: fade.rowViewAlphaForQA(id: fadeTarget.id)))")
+    try expectOneViewPerKey(fade, "after the transition")
+
+    // L2 · RAPID SUCCESSIVE MOVES LEAVE NO GHOSTS. Three lifecycle pushes with no wait
+    // between them: the second and third arrive while the first is still fading, which
+    // is exactly the case a row-indexed registry gets wrong (the row moved, so the
+    // second ghost would be filed under a different key and the first stranded).
+    let rapid = makeFadeView(reducedMotion: false)
+    rapid.apply(rows: fadeSettledRows, changed: .empty)
+    try expect(rapid.crossfadingRowCountForQA == 1, "setup: the first move must be in flight")
+    rapid.apply(rows: advanceFixture, changed: .empty)
+    try expect(rapid.crossfadingRowCountForQA == 1,
+               "an un-settle landing mid-fade REPLACES the ghost rather than stacking a second one — got \(rapid.crossfadingRowCountForQA)")
+    try expectOneViewPerKey(rapid, "between two rapid moves")
+    rapid.apply(rows: fadeSettledRows, changed: .empty)
+    try expect(rapid.crossfadingRowCountForQA == 1,
+               "…and so does the third — got \(rapid.crossfadingRowCountForQA)")
+    let rapidCleared = await waitUntil(timeout: 3, pollInterval: 0.02) {
+        rapid.crossfadingRowCountForQA == 0
+    }
+    try expect(rapidCleared, "three moves in a row must still settle to no ghosts — \(rapid.crossfadingRowCountForQA) left in flight")
+    rapid.layoutForQA()
+    let rapidKeys = rapid.rowViewIdentitiesForQA
+    try expect(!rapidKeys.contains(fadeCardKey),
+               "…with no card left behind by any of them — got \(rapidKeys.sorted())")
+    try expectOneViewPerKey(rapid, "after three rapid moves")
+
+    // L2b · THE SAME, DOWN THE INCREMENTAL PATH. A one-agent list settles without its
+    // identity sequence moving, so `apply` reloads the one row rather than re-rendering
+    // — and nothing clears the ghosts on the way through. This is the branch where the
+    // per-agent replacement is the ONLY thing standing between three fast moves and
+    // three cards stacked on the same row.
+    let lone = makeFadeView(reducedMotion: false)
+    lone.reload(rows: [fadeTarget])
+    lone.layoutForQA()
+    let loneBuildsBefore = lone.cellBuildCountForQA
+    lone.apply(rows: [fadeSettledRow], changed: .empty)
+    try expect(lone.cellBuildCountForQA - loneBuildsBefore == 1,
+               "setup: a one-row list must take the INCREMENTAL path, or this repeats L2 — \(lone.cellBuildCountForQA - loneBuildsBefore) cells rebuilt")
+    try expect(lone.crossfadingRowCountForQA == 1,
+               "the incremental path crossfades too — got \(lone.crossfadingRowCountForQA) in flight")
+    lone.apply(rows: [fadeTarget], changed: .empty)
+    lone.apply(rows: [fadeSettledRow], changed: .empty)
+    try expect(lone.crossfadingRowCountForQA == 1,
+               "…and two more moves on top of it still leave one ghost — got \(lone.crossfadingRowCountForQA)")
+    try expectOneViewPerKey(lone, "three incremental moves on one row")
+    let loneCleared = await waitUntil(timeout: 3, pollInterval: 0.02) {
+        lone.crossfadingRowCountForQA == 0
+    }
+    try expect(loneCleared, "…and retire — \(lone.crossfadingRowCountForQA) left in flight")
+    lone.layoutForQA()
+    try expect(lone.rowViewIdentitiesForQA == [fadeSlimKey],
+               "…leaving the one row and nothing else — got \(lone.rowViewIdentitiesForQA.sorted())")
+
+    // L3 · REDUCE MOTION IS AN INSTANT SWAP. Not a shorter fade — no ghost is lifted at
+    // all, so there is no window in which two views are on screen.
+    let still = makeFadeView(reducedMotion: true)
+    still.apply(rows: fadeSettledRows, changed: .empty)
+    // The one branch that lays nothing out on its own: with no ghost lifted there is
+    // no `layoutSubtreeIfNeeded` on the way through, so the table has not been asked
+    // for its views yet — which is itself the instant swap this case is asserting.
+    still.layoutForQA()
+    try expect(still.crossfadingRowCountForQA == 0,
+               "Reduce Motion swaps the row instantly — got \(still.crossfadingRowCountForQA) in flight")
+    let stillKeys = still.rowViewIdentitiesForQA
+    try expect(stillKeys.contains(fadeSlimKey) && !stillKeys.contains(fadeCardKey),
+               "…leaving only the new view — got \(stillKeys.sorted())")
+    try expect(still.rowViewAlphaForQA(id: fadeTarget.id) == 1,
+               "…at full strength with no fade to wait through — alpha \(String(describing: still.rowViewAlphaForQA(id: fadeTarget.id)))")
+    try expectOneViewPerKey(still, "under Reduce Motion")
+
+    // L4 · A FULL RELOAD IS NOT A TRANSITION. Same rows, same variant move, pushed as a
+    // fresh list: the packet's "do not animate during a full reload or on first render".
+    let reloaded = makeFadeView(reducedMotion: false)
+    reloaded.reload(rows: fadeSettledRows)
+    reloaded.layoutForQA()
+    try expect(reloaded.crossfadingRowCountForQA == 0,
+               "a fresh push replaces the list rather than transitioning it — got \(reloaded.crossfadingRowCountForQA) in flight")
+    try expectOneViewPerKey(reloaded, "after a full reload")
+
+    // L5 · A PUSH THAT ONLY TICKED OVER ANIMATES NOTHING. The stream under everything:
+    // an elapsed time moving is a value change on a row whose shape did not move, and a
+    // crossfade keyed on the reload strategy rather than on the variant would fire here
+    // on every event.
+    let churn = makeFadeView(reducedMotion: false)
+    churn.apply(rows: advanceChurning(advance1.id), changed: .empty)
+    try expect(churn.crossfadingRowCountForQA == 0,
+               "a row that only ticked over changes no shape and crossfades nothing — got \(churn.crossfadingRowCountForQA) in flight")
+
+    // L6 · A GHOST IS DROPPED BY THE LIST IT WAS LIFTED FROM. A fresh push mid-fade
+    // replaces every row, so a card still held at its old rect is now painted over a
+    // different agent — it goes with the list rather than waiting out its timer.
+    let stranded = makeFadeView(reducedMotion: false)
+    stranded.apply(rows: fadeSettledRows, changed: .empty)
+    try expect(stranded.crossfadingRowCountForQA == 1, "setup: a fade must be in flight")
+    stranded.reload(rows: advanceFixture)
+    stranded.layoutForQA()
+    try expect(stranded.crossfadingRowCountForQA == 0,
+               "a fresh push drops a ghost held over the list it came from — got \(stranded.crossfadingRowCountForQA)")
+    try expectOneViewPerKey(stranded, "after a reload landed mid-fade")
+
+    // L7 · A ROW WHOSE NEW SHAPE IS NOT ON SCREEN IS A DEPARTURE, NOT A TRANSITION.
+    // The variant diff reads the raw push, where visibility is not decided yet: a
+    // snooze puts this row behind a shelf that is collapsed by default, so there is
+    // nothing arriving for a ghost to cross-fade WITH — and a card left hanging at an
+    // old rect with no counterpart is the stranded ghost, not the animation.
+    let departing = makeFadeView(reducedMotion: false)
+    let departingRows = advanceFixture.map {
+        $0.id == fadeTarget.id
+            ? lifecycled($0, .snoozed(until: LabFixtures.inboxNow.addingTimeInterval(3_600)))
+            : $0
+    }
+    guard let departingRow = departingRows.first(where: { $0.id == fadeTarget.id }),
+          departingRow.variant != fadeTarget.variant
+    else { throw CheckError.failed("setup: the snooze must change the row's variant, or this repeats L5") }
+    departing.apply(rows: departingRows, changed: .empty)
+    departing.layoutForQA()
+    try expect(!departing.rowIdsForQA.contains(fadeTarget.id),
+               "setup: a snooze must take the row behind the collapsed shelf, or its new view IS on screen — got \(departing.rowIdsForQA.count) rows")
+    try expect(departing.crossfadingRowCountForQA == 0,
+               "a crossfade needs two views: a row that left the list is not one — got \(departing.crossfadingRowCountForQA) in flight")
+    try expectOneViewPerKey(departing, "after a row left the list")
+    try expect(!departing.rowViewIdentitiesForQA.contains(fadeCardKey),
+               "…and its card is not left hanging over the rows that closed the gap — got \(departing.rowViewIdentitiesForQA.sorted())")
+
+    fadeWindows.removeAll()
+
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows — a headless one, a tiled one and an orchestrator child — with the plain shell filtered out, the terminal-hosted agent listed for every other surface but not here (P3.16, force-included as the focused tile and still not a row), a legacy managed session no AgentRecord claims left out too, the count of the terminal-hosted ones reaching the list's empty state, and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live while Snooze and Wake stay greyed with 'Not available yet.', the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's TILE survives while its respawn is durably suppressed so re-wiring mints nothing (and a prompt in that tile deliberately revives it), a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)'); and a PAGED settled tail (P4.8): \(InboxSort.settledPageSize) of 30 finished agents on screen under a footer reading '\(pagedFooterTitle)', one press bringing the rest and taking the footer away, and the agent open in the focused tile drawn at 27 of 30 where the page would have ended; and READING IS FREE (P4.9): a settled agent opened by a real click keeps its override, its clear reason, its settle date and its stored record, and survives a second open — while a prompt through the tile's own closure un-settles it in memory and on disk; its SECTION is asserted through `InboxLifecycle.resolve` + `InboxSort.partition` over those records and NOT off the shipped row (`AgentInboxRowBuilder` still hardcodes `.active` — the open finding on P4.3), tail \(afterOpening.settled.count) / active \(afterOpening.active.count) while open, still drawn with the page closed because it is the one you have open, and active \(afterPrompt.active.count) after the prompt; and the POST-ACTION ADVANCE (P4.10): \(advancingRowActions.count) of \(InboxRowAction.allCases.count) row verbs move the cursor, settling row 2 of 5 through its own menu lands on the row that was 3 — with an unrelated push landing first, moving nothing and leaving the advance armed for the one that files — settling the last row falls back to the previous one, a pair settled together clears the whole affected set rather than stopping after the first, a one-row list lands on no selection, Mark Unread arms nothing, a refused action leaves the cursor where it was and is spent rather than firing on the next push, an action on a row that is NOT the cursor arms nothing, a cancelled one whose row merely ticked over is not read as completed, a partial completion that left one target unfiled moves nothing, and — the witness — a person who selected another row while the settle was in flight is left exactly there; and an UNDO TOAST (P4.11): \(undoableRowActions.count) of \(InboxRowAction.allCases.count) row verbs may raise one, a snooze on a keep-active PINNED agent saying '\(undoToastText)' and putting all four stored facts back exactly as captured (the pin included, which a reconstructed undo flattens), a bulk snooze of 3 reporting its count and undoing as ONE call with an already-settled member settled again on its own date, no toast for a refused action, for an archive whose record is gone, for a verb that moves no lifecycle fact, or for a host with no restore path, the second action replacing the first rather than queueing behind it, the card dismissing itself and taking the restore with it, a later lifecycle action retiring a stale card even when it earns none of its own while a non-lifecycle one leaves it alone, and toast and bulk bar laid out clear of each other")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows — a headless one, a tiled one and an orchestrator child — with the plain shell filtered out, the terminal-hosted agent listed for every other surface but not here (P3.16, force-included as the focused tile and still not a row), a legacy managed session no AgentRecord claims left out too, the count of the terminal-hosted ones reaching the list's empty state, and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live while Snooze and Wake stay greyed with 'Not available yet.', the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's TILE survives while its respawn is durably suppressed so re-wiring mints nothing (and a prompt in that tile deliberately revives it), a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)'); and a PAGED settled tail (P4.8): \(InboxSort.settledPageSize) of 30 finished agents on screen under a footer reading '\(pagedFooterTitle)', one press bringing the rest and taking the footer away, and the agent open in the focused tile drawn at 27 of 30 where the page would have ended; and READING IS FREE (P4.9): a settled agent opened by a real click keeps its override, its clear reason, its settle date and its stored record, and survives a second open — while a prompt through the tile's own closure un-settles it in memory and on disk; its SECTION is asserted through `InboxLifecycle.resolve` + `InboxSort.partition` over those records and NOT off the shipped row (`AgentInboxRowBuilder` still hardcodes `.active` — the open finding on P4.3), tail \(afterOpening.settled.count) / active \(afterOpening.active.count) while open, still drawn with the page closed because it is the one you have open, and active \(afterPrompt.active.count) after the prompt; and the POST-ACTION ADVANCE (P4.10): \(advancingRowActions.count) of \(InboxRowAction.allCases.count) row verbs move the cursor, settling row 2 of 5 through its own menu lands on the row that was 3 — with an unrelated push landing first, moving nothing and leaving the advance armed for the one that files — settling the last row falls back to the previous one, a pair settled together clears the whole affected set rather than stopping after the first, a one-row list lands on no selection, Mark Unread arms nothing, a refused action leaves the cursor where it was and is spent rather than firing on the next push, an action on a row that is NOT the cursor arms nothing, a cancelled one whose row merely ticked over is not read as completed, a partial completion that left one target unfiled moves nothing, and — the witness — a person who selected another row while the settle was in flight is left exactly there; and an UNDO TOAST (P4.11): \(undoableRowActions.count) of \(InboxRowAction.allCases.count) row verbs may raise one, a snooze on a keep-active PINNED agent saying '\(undoToastText)' and putting all four stored facts back exactly as captured (the pin included, which a reconstructed undo flattens), a bulk snooze of 3 reporting its count and undoing as ONE call with an already-settled member settled again on its own date, no toast for a refused action, for an archive whose record is gone, for a verb that moves no lifecycle fact, or for a host with no restore path, the second action replacing the first rather than queueing behind it, the card dismissing itself and taking the restore with it, a later lifecycle action retiring a stale card even when it earns none of its own while a non-lifecycle one leaves it alone, and toast and bulk bar laid out clear of each other; and a LIFECYCLE MOVE CROSSFADING IN PLACE (P4.12): a settle holding the outgoing card at the exact rect it was drawn at (\(fadeWasAt)) while the slim row arrives at its settled position and fades up, one view per id:variant throughout, no orphaned card once the \(AgentInboxView.crossfadeDuration)s fade ends, three moves in a row replacing the ghost rather than stacking, Reduce Motion swapping instantly with nothing lifted, and neither a full reload, a first render nor a row that merely ticked over animating anything")
     }
 }
 

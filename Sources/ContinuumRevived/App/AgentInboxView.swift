@@ -118,6 +118,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         }
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P4.12-crossfade-in-place.md
+    /// How long a variant swap crossfades. Short enough that a settle reads as the
+    /// row CHANGING rather than as an animation you sit through — the packet's
+    /// 150–200ms, taken at the middle.
+    static let crossfadeDuration: TimeInterval = 0.18
+
     // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
     /// The room the scope control takes off the top of the list: the popup's own
     /// intrinsic height plus the gap above and below it.
@@ -338,6 +344,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     private var settledMoreCell: AgentInboxSettledMoreView?
     private(set) var cellBuildCountForQA = 0
 
+    // Ticket: docs/38-tickets/90-agent-ux/P4.12-crossfade-in-place.md
+    /// The OUTGOING cell of a row whose variant just moved, still on screen and
+    /// fading out where it stood, keyed by the AGENT it belongs to.
+    ///
+    /// Keyed by agent and not by table row, which is what makes rapid successive
+    /// settles safe: a row's index is a fact about the list it was in, and the list
+    /// changed. Keyed this way a second move on the same agent REPLACES the first
+    /// ghost instead of stacking a second card over it, so however fast the pushes
+    /// arrive there is at most one outgoing view per row.
+    private var crossfadingCells: [UUID: NSView] = [:]
+
     // Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md
     /// The clock a parked row's relative time is read from ("12m ago", "in 2h").
     ///
@@ -348,6 +365,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// number the ROW carries, computed against the caller's `now` by
     /// `AgentInboxRowBuilder`.
     var clock: () -> Date = Date.init
+
+    // Ticket: docs/38-tickets/90-agent-ux/P4.12-crossfade-in-place.md
+    /// Whether the person has asked for less movement. A closure for the reason
+    /// `clock` is one: the answer is a live system setting, and a check has to be
+    /// able to drive BOTH branches — a crossfade is exactly the kind of thing
+    /// Reduce Motion turns off, and a fallback nothing can exercise is a fallback
+    /// nobody knows is broken.
+    var prefersReducedMotion: () -> Bool = {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md
     /// Which agents the list is showing. `.all` at birth and NOT read from
@@ -691,6 +718,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // rename is finished, not thrown away, and this is also the path the host's
         // own re-push takes right after a commit (where it is already a no-op).
         endRename(commit: true)
+        // P4.12: a ghost is a view held at a rect in the list it was lifted from, and
+        // that list is being replaced. Any still fading are dropped here rather than
+        // left to their timers — the row under them is a different agent now.
+        cancelCrossfades()
         setItems(visible)
         cellsByRow.removeAll()
         shelfHeaderCell = nil
@@ -730,7 +761,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // path keeps the selection when the list's identities did not move, and drops
         // it through `render` when they did, so only a value taken here survives both.
         let selectionOnEntry = selectedRows.map(\.id)
+        // P4.12: lifted BEFORE anything is told to the table, and started after —
+        // whichever of the two branches inside `applyRows` ran. Which reload strategy
+        // the list needed is a fact about the LIST; whether a row changed shape is a
+        // fact about the AGENT, and only the second one is what crossfades.
+        // `newRows` RAW and not the drawn list: the diff reads nothing but id and
+        // variant, both of which survive the scope, the sort and the folds untouched
+        // — and `display(from:)` assigns `parentsWithChildren`, so calling it a second
+        // time here would hand `applyRows` its own answer as the previous one and
+        // P2D.4's disclosure-moved rows would go unredrawn.
+        let lifted = liftCrossfadeGhosts(from: rows, to: newRows)
         applyRows(newRows, changed: changed)
+        startCrossfades(lifted)
         completePendingAdvance(selectionOnEntry: selectionOnEntry)
     }
 
@@ -1828,6 +1870,137 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         tableView.reloadData(forRowIndexes: touched, columnIndexes: IndexSet(integer: 0))
     }
 
+    // MARK: - Crossfading a lifecycle move (P4.12)
+
+    /// The outgoing cell of every row whose variant is about to change, lifted out
+    /// of the table and held at the frame it is drawn at RIGHT NOW.
+    ///
+    /// Taken BEFORE the table is told anything, which is the whole of the timing:
+    /// once the rows are replaced the old view is gone from the hierarchy and its
+    /// rect is somebody else's. `makeIfNecessary: false` throughout — a row that is
+    /// scrolled out of view has no view to fade and must not be given one.
+    private func liftCrossfadeGhosts(from previous: [AgentInboxRow], to next: [AgentInboxRow])
+        -> [(id: UUID, view: NSView, frame: NSRect)]
+    {
+        guard !prefersReducedMotion() else { return [] }
+        var variantByPrevious: [UUID: RowVariant] = [:]
+        for row in previous { variantByPrevious[row.id] = row.variant }
+        var lifted: [(id: UUID, view: NSView, frame: NSRect)] = []
+        for row in next {
+            // An agent that was not on screen has no previous variant, so a fresh
+            // push that brings in a whole list crossfades nothing — which is the
+            // packet's "do not animate during a full reload", enforced by the diff
+            // rather than by guessing which reload path is about to run.
+            guard let was = variantByPrevious[row.id], was != row.variant,
+                  let tableRow = tableRowByAgentId[row.id],
+                  let view = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
+            else { continue }
+            lifted.append((row.id, view, tableView.rect(ofRow: tableRow)))
+        }
+        return lifted
+    }
+
+    /// Fade the old view out where it stood, and the new one in where the row now
+    /// is.
+    ///
+    /// NOTHING TRAVELS, and that is the point: these rows are translucent, so a
+    /// card animating down the list to its settled position paints its text over
+    /// every row it crosses. The outgoing card is left at its old frame and fades;
+    /// the slim row appears at its settled position and fades up. The rows between
+    /// them are already where they belong — the list re-laid out instantly, and
+    /// only the two views that swapped are animated.
+    ///
+    /// The ghost is parented to the TABLE and not to this view, so it scrolls with
+    /// the content it belongs to instead of hanging in the sidebar; the clip view
+    /// bounds it, so a ghost lifted from a row you then scroll away from is clipped
+    /// exactly like the row would have been.
+    private func startCrossfades(_ lifted: [(id: UUID, view: NSView, frame: NSRect)]) {
+        guard !lifted.isEmpty else { return }
+        tableView.layoutSubtreeIfNeeded()
+        let drawn = tableRowByAgentId
+        for (id, view, frame) in lifted {
+            // A CROSSFADE NEEDS TWO VIEWS. The diff above reads the raw push, where a
+            // row's id and variant are exact but its VISIBILITY is not: `display` can
+            // take the new row off screen entirely — a snooze into a collapsed shelf,
+            // a settle past the end of the paged tail, a child under a folded parent.
+            // That is a departure, not a transition, and holding a card at an old rect
+            // with nothing arriving to replace it is the stranded ghost this whole
+            // section is about. (Raised in cross-review.)
+            guard let arriving = drawn[id].flatMap({
+                tableView.view(atColumn: 0, row: $0, makeIfNecessary: false)
+            }) else { continue }
+            view.removeFromSuperview()
+            view.frame = frame
+            view.autoresizingMask = []
+            crossfadingCells[id]?.removeFromSuperview()
+            crossfadingCells[id] = view
+            tableView.addSubview(view)
+            // The incoming view fades UP from nothing rather than being cut in over
+            // the ghost: two views at full strength for a frame is the doubled text
+            // the crossfade exists to avoid.
+            arriving.alphaValue = 0
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = AgentInboxView.crossfadeDuration
+                view.animator().alphaValue = 0
+                arriving.animator().alphaValue = 1
+            }
+            // TEARDOWN IS SCHEDULED, not hung off the animation's completion
+            // handler. A completion handler is a promise made by whichever animator
+            // ends up driving the layer, and a ghost left behind because one never
+            // fired is a card painted over the list forever. This fires off the main
+            // queue on its own, and `endCrossfade` is idempotent and identity-checked
+            // so a superseded ghost's timer cannot take a live one down with it.
+            DispatchQueue.main.asyncAfter(deadline: .now() + AgentInboxView.crossfadeDuration) {
+                [weak self] in
+                // The arriving view is put back to full strength here for the same
+                // reason: it was dimmed to 0 by THIS code, so the only thing that may
+                // be trusted to undo that is this code. If the animator never ran, the
+                // row appears at the end of the duration instead of never.
+                //
+                // …UNLESS IT HAS SINCE BECOME A GHOST ITSELF. In a fast card → slim →
+                // card sequence the view this fade was bringing in is the view the next
+                // one is taking out, and a stale timer restoring it to full strength
+                // would pop the outgoing card back into view on its way out. Only a
+                // view nobody is currently fading may be restored. (Raised in
+                // cross-review.)
+                self?.finishArrival(arriving)
+                self?.endCrossfade(id: id, view: view)
+            }
+        }
+    }
+
+    /// Put an incoming view back to full strength, unless it is now on its own way
+    /// out — a view that is currently somebody's ghost belongs to that fade.
+    private func finishArrival(_ view: NSView) {
+        guard !crossfadingCells.values.contains(where: { $0 === view }) else { return }
+        view.alphaValue = 1
+    }
+
+    /// Retire one ghost, if it is still the one that agent owns.
+    private func endCrossfade(id: UUID, view: NSView) {
+        guard crossfadingCells[id] === view else { return }
+        crossfadingCells.removeValue(forKey: id)
+        view.removeFromSuperview()
+    }
+
+    /// Drop every ghost immediately. The list they were lifted out of is gone, so
+    /// there is nothing left for them to be fading away from.
+    private func cancelCrossfades() {
+        for view in crossfadingCells.values { view.removeFromSuperview() }
+        crossfadingCells.removeAll()
+    }
+
+    /// Where each agent is drawn right now, by id — the lookup the crossfade needs
+    /// on both sides of a push, and the one thing `rowIndexByTableRow` cannot
+    /// answer without a linear walk per row.
+    private var tableRowByAgentId: [UUID: Int] {
+        var map: [UUID: Int] = [:]
+        for (index, row) in rows.enumerated() {
+            if let tableRow = tableRow(forRowIndex: index) { map[row.id] = tableRow }
+        }
+        return map
+    }
+
     /// KEYED `id:variant` (P3.7), not by id alone. The two variants are two
     /// different view trees at two different heights, so a lifecycle transition has
     /// to replace the row's view rather than re-dress it: sharing a key across the
@@ -2039,6 +2212,37 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     var shelfHeaderHeightForQA: Double? {
         guard let tableRow = shelfHeaderTableRow else { return nil }
         return Double(tableView.rect(ofRow: tableRow).height - tableView.intercellSpacing.height)
+    }
+    // Ticket: docs/38-tickets/90-agent-ux/P4.12-crossfade-in-place.md
+    /// EVERY row view this list currently has in the table — the cells it is
+    /// drawing plus any outgoing cell still fading — by its `id:variant` identifier.
+    ///
+    /// Read off the view hierarchy and not off `cellsByRow`, deliberately: an
+    /// orphaned card is precisely a view the bookkeeping has forgotten and the
+    /// window is still showing, so a registry that could only see what it remembers
+    /// could not witness one.
+    var rowViewIdentitiesForQA: [String] {
+        tableView.subviews
+            .flatMap { [$0] + $0.subviews }
+            .compactMap { $0.identifier?.rawValue }
+            .filter { $0.hasPrefix("agent-inbox-row-") }
+    }
+    /// How many rows are mid-crossfade right now.
+    var crossfadingRowCountForQA: Int { crossfadingCells.count }
+    /// The strength the INCOMING view of `id` is painted at — 0 while it is fading
+    /// up, 1 once it has arrived, and 1 immediately when the crossfade is off.
+    func rowViewAlphaForQA(id: UUID) -> Double? {
+        tableRowByAgentId[id]
+            .flatMap { tableView.view(atColumn: 0, row: $0, makeIfNecessary: false) }
+            .map { Double($0.alphaValue) }
+    }
+    /// The frame the outgoing view of `id` is held at — the packet's "in place",
+    /// which is only checkable against the rect the row occupied BEFORE the move.
+    func crossfadeGhostFrameForQA(id: UUID) -> NSRect? { crossfadingCells[id]?.frame }
+    /// Where agent `id` is drawn in the table, and the rect it occupies — the
+    /// after-side of the same comparison.
+    func tableRowFrameForQA(id: UUID) -> NSRect? {
+        tableRowByAgentId[id].map { tableView.rect(ofRow: $0) }
     }
     var glyphsForQA: [String] { cells().map(\.qaGlyph) }
     /// A card's elapsed turn time, a parked row's "12m ago" — one accessor,
