@@ -188,6 +188,36 @@ enum LabFixtures {
         }
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
+    /// TWELVE SETTLED AGENTS — the first list in this file long enough to page, so
+    /// the tail's footer is a view that exists at all. Ten are drawn and two are
+    /// held, which is the state the footer only ever renders in.
+    ///
+    /// A separate fixture rather than more rows on `inboxParkedRows()`: that list is
+    /// the subject of two committed baselines whose whole content is the card-vs-slim
+    /// comparison, and lengthening it past the page limit would change both renders
+    /// for a reason that has nothing to do with what they hold.
+    ///
+    /// All settled and nothing else, because the footer is a fact about the tail
+    /// alone — an active block here would only push rows off the bottom of the
+    /// surface, which is where the footer has to be visible.
+    static func inboxPagedRows() -> [AgentInboxRow] {
+        func at(_ minutes: Double) -> Date { epoch.addingTimeInterval(minutes * 60) }
+        return (0..<12).map { index in
+            // Ended one minute apart, newest first, so `mostRecentlyEndedFirst` has a
+            // strict order to put them in and the page is not decided by a tie-break.
+            let ended = at(70 - Double(index))
+            return AgentInboxRow(
+                id: UUID(uuidString: String(format: "00000000-0000-0000-0000-0000000004%02X", index))!,
+                title: "claude · finished run \(index + 1)", projectName: "continuum",
+                workspaceName: "Overnight", state: index == 3 ? .failed : .ready,
+                lifecycle: .settled(at: ended), model: "claude-opus-5",
+                branch: "agent/finished-\(index + 1)",
+                variant: RowVariant.forLifecycle(.settled(at: ended)),
+                createdAt: at(Double(index)))
+        }
+    }
+
     static func sidebarTree() -> SidebarTree {
         let alpha = SidebarZoneRow(
             zoneId: selectedZoneId, name: "continuum-revived", color: "#5B8DEF", navKey: "1", collapsed: false, projectId: UUID(),

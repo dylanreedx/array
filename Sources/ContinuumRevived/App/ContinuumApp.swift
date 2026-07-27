@@ -21508,6 +21508,123 @@ extension AppDelegate {
     try expect(live.relativeTimesForQA[settledIdx] == "5m ago",
                "…and it says when it ended — got '\(live.relativeTimesForQA[settledIdx])'")
 
+    // MARK: A3b · P4.8 · history is paged, and the agent you have open is never paged out
+    //
+    // The split itself is gated purely in `ContinuumRevivedAgentUIChecks`
+    // (`runInboxSettledPagingCheck`). What is asserted here is that the TABLE draws
+    // it: ten settled rows and a footer that says what it is holding, the footer
+    // under the tail rather than anywhere else, pressing it really does produce the
+    // next 25, and the force-included open agent arrives as a ROW you can click —
+    // which is the whole point of the rule, since a row nobody can reach is the same
+    // as no row.
+    //
+    // A SNOOZED ROW IS IN THIS FIXTURE ON PURPOSE: with the shelf's heading on
+    // screen, an agent row's index and its table row differ, so every gesture below
+    // goes through the conversion the way `clickedRow` does.
+    let pagedNow = LabFixtures.inboxNow
+    func pagedRow(_ index: Int, lifecycle: InboxLifecycle) -> AgentInboxRow {
+        AgentInboxRow(
+            id: UUID(uuidString: String(format: "3B409000-0000-4000-8000-%012X", index))!,
+            title: "History \(index)",
+            state: .ready,
+            lifecycle: lifecycle,
+            variant: RowVariant.forLifecycle(lifecycle),
+            // Spawn order is the reverse of end order, so a tail that fell back to
+            // the frozen order would page the OLDEST ten and fail the first line.
+            createdAt: pagedNow.addingTimeInterval(-60 * Double(30 - index)))
+    }
+    let pagedSettled = (0..<30).map {
+        pagedRow($0, lifecycle: .settled(at: pagedNow.addingTimeInterval(-60 * Double($0 + 1))))
+    }
+    let pagedFixture = pagedSettled + [
+        pagedRow(90, lifecycle: .active),
+        pagedRow(91, lifecycle: .snoozed(until: pagedNow.addingTimeInterval(3_600))),
+    ]
+    let paged = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    paged.clock = { pagedNow }
+    let pagedWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    pagedWindow.contentView = paged
+    paged.reload(rows: pagedFixture)
+    paged.layoutForQA()
+
+    let pagedTailTitles = (0..<10).map { "History \($0)" }
+    try expect(paged.rowIdsForQA == [pagedRow(90, lifecycle: .active).id]
+                + pagedSettled.prefix(10).map(\.id),
+               "the list draws the active block and the ten most recently ended — \(paged.rowCountForQA) rows of \(pagedFixture.count)")
+    try expect(paged.settledMoreTitleForQA == AgentInboxSettledMoreView.title(hidden: 20),
+               "the footer says what one press gives you and how much history is behind it — got '\(paged.settledMoreTitleForQA ?? "<none>")'")
+    // THE PACKET'S WORDS, PINNED AS A LITERAL — the step is what the button says it
+    // pages by, and it says so whether or not a full step is left. An earlier
+    // attempt clamped the first number to `hidden`; the packet spells the string
+    // out, so that is the owner's call and not this ticket's.
+    try expect(AgentInboxSettledMoreView.title(hidden: 40) == "Show 25 more (40 settled hidden)",
+               "the footer reads as the packet writes it — got '\(AgentInboxSettledMoreView.title(hidden: 40))'")
+    try expect(paged.settledMoreTitleForQA == "Show 25 more (20 settled hidden)",
+               "…with the same wording when fewer than a step remain — got '\(paged.settledMoreTitleForQA ?? "<none>")'")
+    let pagedFooterTitle = paged.settledMoreTitleForQA ?? "<none>"
+    // LAST ROW IN THE TABLE, and below the shelf's heading: a footer anywhere but
+    // under the tail is pointing at the wrong section.
+    try expect(paged.settledMoreTableRowForQA == paged.rowCountForQA + 1,
+               "the footer is the last row, under the tail — row \(String(describing: paged.settledMoreTableRowForQA)) of \(paged.rowCountForQA + 2)")
+    try expect((paged.shelfHeaderTableRowForQA ?? -1) < (paged.settledMoreTableRowForQA ?? -1),
+               "…and the heading is still its own row, above it — heading \(String(describing: paged.shelfHeaderTableRowForQA)), footer \(String(describing: paged.settledMoreTableRowForQA))")
+    try expect(abs((paged.settledMoreHeightForQA ?? 0) - AgentInboxView.slimRowHeight) < 0.5,
+               "the footer is one slim line — laid out at \(String(describing: paged.settledMoreHeightForQA))pt")
+    // NOT A ROW YOU CAN ACT ON, for the reason the heading is not: exactly two table
+    // rows refuse selection, and they are the two that are not agents.
+    let pagedSelectable = paged.selectableTableRowsForQA
+    try expect(pagedSelectable.indices.filter { !pagedSelectable[$0] }
+                == [paged.shelfHeaderTableRowForQA, paged.settledMoreTableRowForQA].compactMap { $0 },
+               "the heading and the footer are the rows that refuse selection — refusing \(pagedSelectable.indices.filter { !pagedSelectable[$0] })")
+    // The last settled row sits BELOW the heading, where the two index spaces differ.
+    var pagedRevealed: [UUID] = []
+    paged.onRevealRow = { pagedRevealed.append($0) }
+    let lastOnPage = pagedSettled[9].id
+    try expect(paged.clickRowForQA(id: lastOnPage) && pagedRevealed == [lastOnPage],
+               "the row just above the footer reveals its own agent — got \(pagedRevealed)")
+
+    // PRESSING IT ADDS 25 — through the footer's own button, so this exercises the
+    // wiring. Thirty rows, so the second page is the rest of history and the footer
+    // must go away with it.
+    try expect(paged.clickSettledMoreForQA(), "the footer must be clickable")
+    paged.layoutForQA()
+    try expect(paged.settledLimitForQA == InboxSort.settledPageSize + InboxSort.settledPageStep,
+               "…and pages by 25 — the limit is \(paged.settledLimitForQA)")
+    try expect(paged.rowIdsForQA == [pagedRow(90, lifecycle: .active).id] + pagedSettled.map(\.id),
+               "…which brings the rest of history on screen — \(paged.rowCountForQA) rows")
+    try expect(paged.settledMoreTableRowForQA == nil && paged.settledMoreTitleForQA == nil,
+               "…and an exhausted tail keeps no footer that would reveal nothing")
+
+    // THE OPEN AGENT IS NEVER PAGED OUT. Row 27 of history, on a freshly paged list,
+    // and it arrives as a row that clicks and selects like any other.
+    let deepId = pagedSettled[26].id
+    let openPaged = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    openPaged.clock = { pagedNow }
+    let openPagedWindow = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    openPagedWindow.contentView = openPaged
+    openPaged.openAgentId = deepId
+    openPaged.reload(rows: pagedFixture)
+    openPaged.layoutForQA()
+    try expect(!paged.titlesForQA.isEmpty && !pagedTailTitles.isEmpty,
+               "setup: the first page must have drawn rows for the comparison below to mean anything")
+    try expect(openPaged.rowIdsForQA.contains(deepId),
+               "THE PACKET'S WITNESS: the agent open in the focused tile has a row even at 27 of 30 — \(openPaged.rowCountForQA) rows")
+    try expect(openPaged.rowIdsForQA == [pagedRow(90, lifecycle: .active).id]
+                + pagedSettled.prefix(10).map(\.id) + [deepId],
+               "…in its own place in history, and without costing a recent row its slot — got \(openPaged.rowCountForQA) rows")
+    try expect(openPaged.settledMoreTitleForQA == AgentInboxSettledMoreView.title(hidden: 19),
+               "…and the footer counts what is really hidden, one fewer — got '\(openPaged.settledMoreTitleForQA ?? "<none>")'")
+    var openPagedRevealed: [UUID] = []
+    openPaged.onRevealRow = { openPagedRevealed.append($0) }
+    try expect(openPaged.clickRowForQA(id: deepId) && openPagedRevealed == [deepId],
+               "…and it is a row you can click, not a row you can only see — got \(openPagedRevealed)")
+    openPaged.onRevealRow = nil
+    paged.onRevealRow = nil
+
     // MARK: A4 · P2D.4 · delegated work reads as a tree
     //
     // SEVEN NEGATIVE TESTS OBSERVED RED at exit 1 with the final code, quoted
@@ -23613,7 +23730,7 @@ extension AppDelegate {
     revealApp.agentSupervisor = revealSupervisor
 
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows — a headless one, a tiled one and an orchestrator child — with the plain shell filtered out, the terminal-hosted agent listed for every other surface but not here (P3.16, force-included as the focused tile and still not a row), a legacy managed session no AgentRecord claims left out too, the count of the terminal-hosted ones reaching the list's empty state, and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live while Snooze and Wake stay greyed with 'Not available yet.', the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's TILE survives while its respawn is durably suppressed so re-wiring mints nothing (and a prompt in that tile deliberately revives it), a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)')")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows — a headless one, a tiled one and an orchestrator child — with the plain shell filtered out, the terminal-hosted agent listed for every other surface but not here (P3.16, force-included as the focused tile and still not a row), a legacy managed session no AgentRecord claims left out too, the count of the terminal-hosted ones reaching the list's empty state, and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live while Snooze and Wake stay greyed with 'Not available yet.', the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's TILE survives while its respawn is durably suppressed so re-wiring mints nothing (and a prompt in that tile deliberately revives it), a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)'); and a PAGED settled tail (P4.8): \(InboxSort.settledPageSize) of 30 finished agents on screen under a footer reading '\(pagedFooterTitle)', one press bringing the rest and taking the footer away, and the agent open in the focused tile drawn at 27 of 30 where the page would have ended")
     }
 }
 

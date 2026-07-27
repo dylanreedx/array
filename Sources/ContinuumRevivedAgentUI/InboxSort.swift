@@ -341,6 +341,74 @@ public enum InboxSort {
         }
         return parts
     }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
+
+    /// How many settled rows the tail opens with.
+    public static let settledPageSize = 10
+    /// How many more one press of the footer reveals.
+    public static let settledPageStep = 25
+
+    /// The settled tail as it is drawn: the first `limit` rows of it, plus however
+    /// many are being held back.
+    ///
+    /// Paging is a TAIL rule and only a tail rule. The active block and the shelf
+    /// are what you are working on and what is coming back — both are bounded by
+    /// how many agents you have running — while history only grows, so it is the
+    /// one section that can push the list off the screen. Nothing here reads a
+    /// lifecycle: the caller hands over the section `partition` already decided, so
+    /// this cannot become a second opinion about what "settled" means.
+    ///
+    /// ORDER IS THE CALLER'S, as everywhere else in this file. Hand it
+    /// `InboxPartition.settled` and the page is the most recently ENDED rows
+    /// (`mostRecentlyEndedFirst`), which is the order `sortForInbox` put history in
+    /// and the only order in which "the first ten" means "the ten you just
+    /// finished".
+    ///
+    /// THE OPEN AGENT IS ALWAYS IN THE PAGE, wherever it falls. Navigating to a
+    /// settled agent and finding no row for it is the list contradicting the canvas,
+    /// and it is the same force-include `InboxScope.filter` already performs for the
+    /// scope. It is included IN PLACE rather than pulled to the top — its position in
+    /// history is a fact, and moving it would be the tail re-sorting itself around
+    /// what you happen to have open — and it does NOT consume one of the `limit`
+    /// slots, so opening an old agent never pushes a recent one off the list.
+    public static func pageSettled(
+        _ settled: [AgentInboxRow], limit: Int, openAgentId: UUID? = nil
+    ) -> SettledPage {
+        var page = SettledPage()
+        page.shown.reserveCapacity(min(settled.count, max(0, limit)))
+        for (index, row) in settled.enumerated() {
+            if index < limit || row.id == openAgentId {
+                page.shown.append(row)
+            } else {
+                page.hidden += 1
+            }
+        }
+        return page
+    }
+}
+
+// Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
+
+/// One page of the settled tail: what is on screen, and how much of history is not.
+///
+/// The count is carried rather than left to be `settled.count - shown.count` at each
+/// call site, because the force-included open agent makes those two subtractions
+/// differ — and the footer's number has to be the one that says how many rows
+/// pressing it will actually produce.
+public struct SettledPage: Equatable, Sendable {
+    public var shown: [AgentInboxRow]
+    public var hidden: Int
+
+    public init(shown: [AgentInboxRow] = [], hidden: Int = 0) {
+        self.shown = shown
+        self.hidden = hidden
+    }
+
+    /// Whether the tail is holding anything back — the one test for "draw the
+    /// footer", so an exhausted list cannot be left with a control that reveals
+    /// nothing.
+    public var hasMore: Bool { hidden > 0 }
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md

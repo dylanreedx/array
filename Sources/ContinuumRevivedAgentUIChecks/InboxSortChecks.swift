@@ -50,6 +50,11 @@ import Foundation
 //      disjoint, keeps each section's order, counts the shelf by its own contents,
 //      and puts a woken agent back in `active` where a collapsed header cannot
 //      hide it.
+//
+// Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
+//  11. HISTORY IS PAGED, NOT DUMPED — `pageSettled` shows the ten most recently
+//      ended, says how many it is holding, adds 25 per press, and always includes
+//      the agent you have open however deep in history it is.
 
 func runInboxSortChecks() {
     runInboxFrozenUnderActivityCheck()
@@ -62,7 +67,8 @@ func runInboxSortChecks() {
     runInboxCollapseCheck()
     runInboxRollupCheck()
     runInboxPartitionCheck()
-    print("InboxSort checks: frozen under activity (200 trials, status-sorted witness fails), parent/child nesting, lifecycle relocation, history by end time, tie determinism, cycle termination, depth assignment (orphan promoted, chain capped at \(AgentInboxRow.maxDepth)), subtree collapse, transitive child rollup and the three-section partition (exhaustive, disjoint, woken rejoins active) passed")
+    runInboxSettledPagingCheck()
+    print("InboxSort checks: frozen under activity (200 trials, status-sorted witness fails), parent/child nesting, lifecycle relocation, history by end time, tie determinism, cycle termination, depth assignment (orphan promoted, chain capped at \(AgentInboxRow.maxDepth)), subtree collapse, transitive child rollup, the three-section partition (exhaustive, disjoint, woken rejoins active) and settled tail paging (\(InboxSort.settledPageSize) then \(InboxSort.settledPageStep) more, open agent always in the page) passed")
 }
 
 // MARK: - Fixture
@@ -799,4 +805,119 @@ private func runInboxPartitionCheck() {
            "the shelf boundary is `>`, the same one `resolve` uses")
     expect(InboxSort.partition(rows: [], now: now) == InboxPartition(),
            "no rows, no sections")
+}
+
+// Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
+//
+// THE PACKET'S THREE VERIFICATIONS: 30 settled rows show 10 with the right hidden
+// count; expanding adds 25; and the OPEN agent is in the page even when it would be
+// row 27 — the named witness, because a list that hides the agent you just navigated
+// to is contradicting the canvas.
+//
+// Plus the watch-out, which is an ordering one: the tail is paged in
+// most-recently-ended order (P3.4's frozen spawn order is for the live block and
+// must not reach history), and the page is a PREFIX of that order rather than a
+// re-sort of it.
+private func runInboxSettledPagingCheck() {
+    let now = sortEpoch.addingTimeInterval(50_000)
+    // Ids in an order that is neither the expected output nor the array order: the
+    // low byte counts UP while the end times count DOWN, so a page taken in id
+    // order — or one that returned its input untouched — comes out reversed.
+    func settledId(_ index: Int) -> UUID {
+        UUID(uuidString: String(format: "3B408000-0000-4000-8000-%012X", index))!
+    }
+    /// Row `index` ended `index` minutes ago, so index 0 is the newest and the
+    /// expected page is exactly `0..<limit`.
+    func settledRow(_ index: Int) -> AgentInboxRow {
+        let ended = now.addingTimeInterval(-60 * Double(index + 1))
+        return AgentInboxRow(
+            id: settledId(index),
+            title: "S\(index)",
+            state: .ready,
+            lifecycle: .settled(at: ended),
+            variant: RowVariant.forLifecycle(.settled(at: ended)),
+            // Spawn order is the REVERSE of end order, so a page keyed on
+            // `createdAt` would return the oldest ten and fail every line below.
+            createdAt: sortEpoch.addingTimeInterval(Double(index))
+        )
+    }
+
+    // 1 · THIRTY SETTLED ROWS SHOW TEN, and the footer's number is the rest.
+    let thirty = InboxSort.partition(
+        rows: InboxSort.sortForInbox(rows: (0..<30).map(settledRow)), now: now).settled
+    expect(thirty.count == 30 && thirty.map(\.title) == (0..<30).map { "S\($0)" },
+           "setup: the tail arrives most-recently-ended first — got \(thirty.prefix(3).map(\.title))")
+    let first = InboxSort.pageSettled(thirty, limit: InboxSort.settledPageSize)
+    expect(InboxSort.settledPageSize == 10 && InboxSort.settledPageStep == 25,
+           "the packet's two numbers — \(InboxSort.settledPageSize) then \(InboxSort.settledPageStep) more")
+    expect(first.shown.map(\.title) == (0..<10).map { "S\($0)" },
+           "the tail opens with the ten most recently ended — got \(first.shown.map(\.title))")
+    expect(first.hidden == 20 && first.hasMore,
+           "…and says how many it is holding back — \(first.hidden) hidden")
+    expect(first.shown.count + first.hidden == thirty.count,
+           "what is shown plus what is hidden is the whole tail")
+
+    // 2 · EXPANDING ADDS 25. Sixty rows, not thirty: with thirty the step and "the
+    // rest of the list" are the same list, so a page that revealed EVERYTHING on the
+    // first press would pass. Here it must reveal exactly 25 more and keep 25 back.
+    let sixty = InboxSort.partition(
+        rows: InboxSort.sortForInbox(rows: (0..<60).map(settledRow)), now: now).settled
+    let opened = InboxSort.pageSettled(
+        sixty, limit: InboxSort.settledPageSize + InboxSort.settledPageStep)
+    expect(opened.shown.count == 35 && opened.shown.map(\.title) == (0..<35).map { "S\($0)" },
+           "one press adds 25 — \(opened.shown.count) shown, from \(InboxSort.pageSettled(sixty, limit: InboxSort.settledPageSize).shown.count)")
+    expect(opened.hidden == 25,
+           "…and the rest stays behind the footer — \(opened.hidden) hidden")
+    let twice = InboxSort.pageSettled(
+        sixty, limit: InboxSort.settledPageSize + 2 * InboxSort.settledPageStep)
+    expect(twice.shown.count == 60 && twice.hidden == 0 && !twice.hasMore,
+           "…until history runs out, and then there is no footer — \(twice.shown.count) shown, \(twice.hidden) hidden")
+
+    // 3 · THE PACKET'S WITNESS: the open agent is row 27 and is on screen anyway,
+    // in its own place in history, and it costs nobody else their slot.
+    let openId = thirty[26].id
+    let withOpen = InboxSort.pageSettled(
+        thirty, limit: InboxSort.settledPageSize, openAgentId: openId)
+    expect(!first.shown.contains { $0.id == openId },
+           "setup: row 27 must be outside the first page, or this witnesses nothing")
+    expect(withOpen.shown.map(\.title) == (0..<10).map { "S\($0)" } + ["S26"],
+           "THE PACKET'S WITNESS: the agent you have open is in the page wherever it falls — got \(withOpen.shown.map(\.title))")
+    expect(withOpen.hidden == 19,
+           "…and the count is of what is really hidden, one fewer — \(withOpen.hidden)")
+    expect(withOpen.shown.count == first.shown.count + 1,
+           "…and it does not push a recent row out to make room — \(withOpen.shown.count) against \(first.shown.count)")
+    // An open agent already IN the page is not a duplicate, and an open agent that
+    // is not in this tail at all (it is active, or in another scope) changes nothing.
+    let openInPage = InboxSort.pageSettled(
+        thirty, limit: InboxSort.settledPageSize, openAgentId: thirty[3].id)
+    expect(openInPage == first,
+           "an open agent already on the page changes nothing — \(openInPage.shown.count) shown")
+    expect(InboxSort.pageSettled(thirty, limit: InboxSort.settledPageSize, openAgentId: rowOne) == first,
+           "…and an open agent that is not in this tail changes nothing either")
+
+    // 4 · THE WATCH-OUT, both ways. The page is a PREFIX of the order it was handed,
+    // so it cannot re-sort history; and it is only ever handed the tail, so the
+    // frozen order of the live block and the shelf cannot be paged at all.
+    expect(zip(first.shown, thirty).allSatisfy { $0.id == $1.id },
+           "the page is the head of the order it was given, not a re-sort of it")
+    let mixed = InboxSort.sortForInbox(rows: (0..<12).map(settledRow) + [
+        sortRow(rowOne, spawnedAfter: 500, state: .working),
+        sortRow(rowTwo, spawnedAfter: 400, lifecycle: .snoozed(until: now.addingTimeInterval(3_600))),
+    ])
+    let parts = InboxSort.partition(rows: mixed, now: now)
+    let page = InboxSort.pageSettled(parts.settled, limit: InboxSort.settledPageSize)
+    expect(parts.active.map(\.id) == [rowOne] && parts.snoozed.map(\.id) == [rowTwo],
+           "paging the tail leaves the active block and the shelf whole — \(parts.active.count) active, \(parts.snoozed.count) shelved")
+    expect(page.shown.count == 10 && page.hidden == 2,
+           "…and pages only the settled rows of a mixed list — \(page.shown.count) shown of \(parts.settled.count)")
+
+    // Totality at the edges: a tail that fits has no footer, and a limit of nothing
+    // still holds a page's worth of nothing rather than trapping the caller.
+    expect(!InboxSort.pageSettled(Array(thirty.prefix(10)), limit: InboxSort.settledPageSize).hasMore,
+           "a tail that fits draws no footer")
+    expect(InboxSort.pageSettled([], limit: InboxSort.settledPageSize) == SettledPage(),
+           "no history, no page")
+    let none = InboxSort.pageSettled(thirty, limit: 0, openAgentId: openId)
+    expect(none.shown.map(\.title) == ["S26"] && none.hidden == 29,
+           "even at a limit of nothing the open agent is on screen — got \(none.shown.map(\.title))")
 }

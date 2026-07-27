@@ -218,6 +218,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// now is not a fact about an agent, and a persisted one would restore a fold
     /// over work that woke up while the app was closed.
     private var shelfExpanded = false
+    // Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
+    /// How many settled rows the tail is showing. VIEW-LOCAL and back at the first
+    /// page on every launch, for the reason `shelfExpanded` is: how far you have
+    /// paged into history right now is not a fact about an agent, and a persisted
+    /// limit would restore a wall of finished work over the list you opened the app
+    /// to read. Grows by `settledPageStep` per press and never shrinks on its own —
+    /// a page that folded itself back up under a push would take the row you were
+    /// reading with it.
+    private var settledLimit = InboxSort.settledPageSize
     /// The two index maps, built once per push by `setItems` rather than walked per
     /// lookup: `viewFor` asks for one on every cell it builds, and `apply` asks for
     /// one per changed row.
@@ -278,6 +287,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// shift every one of those arrays out of step with `rows`. At most one exists,
     /// so it is a field and not a map.
     private var shelfHeaderCell: AgentInboxShelfHeaderView?
+    // Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
+    /// The settled tail's footer, kept out of `cellsByRow` for the same reason the
+    /// heading is. At most one exists — the tail is one section.
+    private var settledMoreCell: AgentInboxSettledMoreView?
     private(set) var cellBuildCountForQA = 0
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md
@@ -594,6 +607,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         setItems(visible)
         cellsByRow.removeAll()
         shelfHeaderCell = nil
+        settledMoreCell = nil
         tableView.reloadData()
         updateEmptyState()
         // P3.11: `reloadData` empties the table's selection, so the bar has to come
@@ -705,8 +719,31 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
                 built.append(contentsOf: parts.snoozed.map(InboxListItem.agent))
             }
         }
-        built.append(contentsOf: parts.settled.map(InboxListItem.agent))
+        // P4.8: history is PAGED, and the page is taken last — on the rows that
+        // survived the scope, the folds and the section split, so the footer's count
+        // is of rows that pressing it really does produce.
+        let page = InboxSort.pageSettled(
+            parts.settled, limit: settledLimit, openAgentId: openAgentId)
+        built.append(contentsOf: page.shown.map(InboxListItem.agent))
+        if page.hasMore {
+            built.append(.settledMore(hidden: page.hidden))
+        }
         return built
+    }
+
+    // MARK: - The settled tail (P4.8)
+
+    /// Show the next page of history.
+    ///
+    /// A FULL RE-RENDER with the selection and hover dropped, exactly like
+    /// `toggleShelf` and for the same reason: rows appear, so the identity sequence
+    /// changed and every index the old list handed out now names a different agent.
+    func expandSettledTail() {
+        settledLimit += InboxSort.settledPageStep
+        tableView.deselectAll(nil)
+        selectedRowsForEmphasis = IndexSet()
+        hoveredRow = -1
+        render(display(from: allRows))
     }
 
     // MARK: - The shelf (P4.7)
@@ -759,8 +796,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     }
 
     /// The header's table row, or nil when the shelf is empty and draws nothing.
+    ///
+    /// Matched on the CASE and not on "the first row that is not an agent" (P4.8
+    /// puts a second such row at the bottom of the list): a list with a paged tail
+    /// and no shelf would otherwise report the footer's row as the heading's.
     private var shelfHeaderTableRow: Int? {
-        items.firstIndex { $0.agentRow == nil }
+        items.firstIndex { if case .shelfHeader = $0 { return true } else { return false } }
+    }
+
+    /// The settled tail's footer row, or nil when nothing is being held back.
+    private var settledMoreTableRow: Int? {
+        items.firstIndex { if case .settledMore = $0 { return true } else { return false } }
     }
 
     /// What the table draws at this row, or nil for an index outside the list —
@@ -973,12 +1019,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let item = item(at: row) else { return nil }
         guard let model = item.agentRow else {
-            guard case let .shelfHeader(count, isExpanded) = item else { return nil }
-            let header = shelfHeaderCell ?? AgentInboxShelfHeaderView()
-            header.onToggle = { [weak self] in self?.toggleShelf() }
-            header.apply(count: count, isExpanded: isExpanded)
-            shelfHeaderCell = header
-            return header
+            switch item {
+            case .shelfHeader(let count, let isExpanded):
+                let header = shelfHeaderCell ?? AgentInboxShelfHeaderView()
+                header.onToggle = { [weak self] in self?.toggleShelf() }
+                header.apply(count: count, isExpanded: isExpanded)
+                shelfHeaderCell = header
+                return header
+            // P4.8
+            case .settledMore(let hidden):
+                let footer = settledMoreCell ?? AgentInboxSettledMoreView()
+                footer.onPress = { [weak self] in self?.expandSettledTail() }
+                footer.apply(hidden: hidden)
+                settledMoreCell = footer
+                return footer
+            case .agent:
+                return nil
+            }
         }
         // P4.7: the ROW's index, not the table's — the jump chord on this cell is
         // "the Nth agent", and a heading is not one of them. NO `?? 0` FALLBACK: the
@@ -1476,10 +1533,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 
     // MARK: - QA
 
-    /// How many AGENT rows the table is drawing. Measured off the table (P4.7 adds
-    /// one row to it that is not an agent) rather than reported from `rows`, so it
-    /// still witnesses that the model reached the screen.
-    var rowCountForQA: Int { tableView.numberOfRows - (shelfHeaderTableRow == nil ? 0 : 1) }
+    /// How many AGENT rows the table is drawing. Measured off the table (P4.7 and
+    /// P4.8 each add a row to it that is not an agent) rather than reported from
+    /// `rows`, so it still witnesses that the model reached the screen.
+    var rowCountForQA: Int {
+        tableView.numberOfRows - items.filter { $0.agentRow == nil }.count
+    }
     var rowIdsForQA: [UUID] { rows.map(\.id) }
     // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
     /// The heading as RENDERED — its words and which way its triangle points — and
@@ -1503,6 +1562,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     @discardableResult
     func clickShelfDisclosureForQA() -> Bool {
         shelfHeaderCell?.clickDisclosureForQA() ?? false
+    }
+    // Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
+    /// The footer as RENDERED, where it sits, and how far the tail has been paged —
+    /// nil when history fits and no footer is drawn.
+    var settledMoreTitleForQA: String? { settledMoreCell?.qaTitle }
+    var settledMoreTableRowForQA: Int? { settledMoreTableRow }
+    var settledLimitForQA: Int { settledLimit }
+    /// Press it the way the user does — through the footer's own button, so the
+    /// check exercises the wiring and not just `expandSettledTail`.
+    @discardableResult
+    func clickSettledMoreForQA() -> Bool {
+        settledMoreCell?.clickForQA() ?? false
+    }
+    /// The footer's laid-out height, on the same terms as the heading's.
+    var settledMoreHeightForQA: Double? {
+        guard let tableRow = settledMoreTableRow else { return nil }
+        return Double(tableView.rect(ofRow: tableRow).height - tableView.intercellSpacing.height)
     }
     var titlesForQA: [String] { cells().map(\.qaTitle) }
     var stateLabelsForQA: [String] { cells().map(\.qaStateLabel) }
@@ -1897,6 +1973,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 enum InboxListItem {
     case agent(AgentInboxRow)
     case shelfHeader(count: Int, isExpanded: Bool)
+    // Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
+    /// The footer under a paged settled tail. A third KIND of row rather than a
+    /// second use of the heading, for the reason the heading is not an agent: it
+    /// carries a different number (what is hidden, not what a section holds) and it
+    /// does a different thing when you press it.
+    case settledMore(hidden: Int)
 
     /// The agent this row draws, or nil for the heading. The one test the rest of
     /// the view asks, so "is this an agent row" has a single spelling.
@@ -1916,6 +1998,11 @@ enum InboxListItem {
         switch self {
         case .agent(let row): return "agent:\(row.id.uuidString)"
         case .shelfHeader(let count, let isExpanded): return "shelf:\(count):\(isExpanded)"
+        // P4.8: the hidden count is part of the footer's identity for the same
+        // reason the shelf's is part of the heading's — an agent settling while the
+        // tail is paged changes that number and nothing else, and the incremental
+        // path repaints only the agent rows it was told about.
+        case .settledMore(let hidden): return "more:\(hidden)"
         }
     }
 }
@@ -2022,6 +2109,95 @@ final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
 
     var qaTitle: String { label.stringValue }
     var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
+}
+
+// Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
+/// The `Show 25 more (N settled hidden)` footer under a paged settled tail.
+///
+/// The heading's twin, and deliberately built the same way — one line of
+/// `textSecondary` at `.label`, straight on the list rather than in a card, behind a
+/// borderless button that covers the row so the whole line is the target. It has no
+/// triangle: a disclosure says "this section is folded", and history is not folded,
+/// it is PAGED — pressing this reveals a fixed number more and leaves the rest
+/// hidden, and there is no gesture that puts them back.
+@MainActor
+final class AgentInboxSettledMoreView: NSTableCellView, TokenThemed {
+    private let label = NSTextField(labelWithString: "")
+    private let hitButton = NSButton(frame: .zero)
+    var onPress: (() -> Void)?
+
+    /// What the footer says. Both numbers, because they answer different questions:
+    /// how far one press pages, and how much history is behind it.
+    ///
+    /// THE PACKET'S LITERAL WORDING, including the case where fewer than a step
+    /// remain: `Show 25 more (20 settled hidden)`. Clamping the first number to what
+    /// is left reads better and was written that way first — but the packet spells
+    /// this string out, so the clamp is a product change nobody asked for, and it
+    /// belongs to the owner rather than to this ticket. The second number already
+    /// says exactly how many rows a press produces when it is the smaller one.
+    static func title(hidden: Int) -> String {
+        "Show \(InboxSort.settledPageStep) more (\(hidden) settled hidden)"
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+
+        label.font = .token(.label)
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        hitButton.isBordered = false
+        hitButton.title = ""
+        hitButton.target = self
+        hitButton.action = #selector(pressed)
+        hitButton.setAccessibilityRole(.button)
+        hitButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(hitButton)
+        addSubview(label)
+
+        NSLayoutConstraint.activate([
+            hitButton.leadingAnchor.constraint(equalTo: leadingAnchor),
+            hitButton.trailingAnchor.constraint(equalTo: trailingAnchor),
+            hitButton.topAnchor.constraint(equalTo: topAnchor),
+            hitButton.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Inset.row.left),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Inset.row.right),
+            // Centred, for the reason the heading is: one line in a fixed-height
+            // row, and a centre constraint cannot leave the height ambiguous.
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { return nil }
+
+    func apply(hidden: Int) {
+        label.stringValue = AgentInboxSettledMoreView.title(hidden: hidden)
+        hitButton.setAccessibilityLabel(label.stringValue)
+        applyTokens()
+    }
+
+    /// `textSecondary`, like the heading and for the same reason: this is chrome,
+    /// and P3.2 holds this list to three colours that all mean status.
+    func applyTokens() {
+        label.textColor = TextToken.textSecondary.color.nsColor(in: self)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
+    }
+
+    @objc private func pressed() { onPress?() }
+
+    /// Through the button's own target/action, so a check drives the wiring.
+    @discardableResult
+    func clickForQA() -> Bool {
+        hitButton.performClick(nil)
+        return true
+    }
+
+    var qaTitle: String { label.stringValue }
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md

@@ -272,6 +272,14 @@ enum UIProbeAppearance {
             ("appearance.agentInboxShelf", NSSize(width: 320, height: 620 + AgentInboxView.scopeControlHeight), {
                 LabCatalog.makeAgentInboxPreview(selecting: nil, rows: LabFixtures.inboxParkedRows())
             }),
+            // Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
+            // The tail's footer, which exists only while history is longer than a
+            // page — hence a twelve-row settled fixture, and hence a surface of its
+            // own for the reason the shelf above has one: the row sets the two
+            // floors are measured on must not change to make room for it.
+            ("appearance.agentInboxSettledTail", NSSize(width: 320, height: 620 + AgentInboxView.scopeControlHeight), {
+                LabCatalog.makeAgentInboxPreview(selecting: nil, rows: LabFixtures.inboxPagedRows())
+            }),
             ("appearance.canvas", NSSize(width: 700, height: 480), {
                 CanvasNSView(canvasState: CanvasState(
                     viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
