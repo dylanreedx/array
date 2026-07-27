@@ -14,7 +14,16 @@ owner named on sight, both depend only on work that is already `done`, and both 
 Take them in order, then resume at row 49. **Do not pull any further Phase 6 ticket forward** — the
 rest of Phase 6 (`P6.2`–`P6.12`) stays behind Phase 4 and Phase 5 where it can be wired for real.
 
-**Row `48c` (`P3.15-wire-destructive-row-actions`) is the HIGHEST-PRIORITY ticket in this queue.**
+**ROW `48e` (`P4.14-row-status-is-turn-state`) IS NOW THE HIGHEST-PRIORITY TICKET — take it first, ahead
+of any P4 row.** The owner ran a prompt in the shipped build, watched the tile go working → done, and
+the sidebar stayed on "working" permanently. Diagnosed: `ManagedSessionStatus` has no "alive but idle"
+case, `ContinuumApp.agentStatus(for:)` (~4160) maps `.running → .working`, and NOTHING in the app ever
+writes a `ManagedSessionStatus` (repo-wide grep outside checks returns zero) — so the field is written
+once at creation and rendered as "working" forever. The row is showing PROCESS LIVENESS as TURN
+ACTIVITY. The fix is a derivation from the turn state the supervisor already owns, NOT a lazy
+`.stopped` write, which would make a live idle agent indistinguishable from a dead one.
+
+**Row `48c` (`P3.15-wire-destructive-row-actions`) — DONE at `bcb6bc4`.** Kept here for the record:
 The owner cannot delete an agent — at all, by any route. `P2A.7` landed restore-on-relaunch, so every
 record on disk returns every launch, and nothing was ever wired to remove one: the shipped app assigns
 neither `onRowAction` nor `onBulkAction`, so all nine row-menu items are greyed and the bulk bar's menu
@@ -78,6 +87,7 @@ AFTER an action performs. Take `48c` as soon as `48b` commits.
 | 48b | `P6.1-per-agent-model-effort.md` | P2A.3, P0.10 |
 | 48c | `P3.15-wire-destructive-row-actions.md` | P3.12, P2A.7, P4.1 |
 | 48d | `P3.16-inbox-lists-agents-only.md` | P2B.4, P3.1, P3.8 |
+| 48e | `P4.14-row-status-is-turn-state.md` | P2A.3, P2B.4, P4.2 |
 | 49 | `P2D.5-child-rollup.md` | P2D.4, P4.2 |
 | 50 | `P2D.6-fan-out.md` | P2D.5 |
 | 51 | `P3.1-inbox-row-model.md` | P2B.3 |
