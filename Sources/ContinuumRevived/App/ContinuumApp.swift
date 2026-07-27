@@ -23729,8 +23729,180 @@ extension AppDelegate {
                "…and the record still went")
     revealApp.agentSupervisor = revealSupervisor
 
+    // MARK: I · reading is free; only acting un-settles (P4.9)
+    //
+    // Opening settled work to look at it must not resurrect it — otherwise reviewing
+    // your own history un-files everything you filed. The reveal path is P3.9's and
+    // was written for this rule already (`revealAgentFromInbox` attaches a view if
+    // needed, focuses it, clears the read-mark, and touches no lifecycle); what this
+    // section adds is the GATE, driven on a genuinely SETTLED agent. C1's "no
+    // lifecycle moved" assertion runs over section C's agents, every one of which is
+    // `.neutral` — there is nothing there for a reveal to un-settle.
+    //
+    // WHERE THE SECTION PLACEMENT IS ASSERTED, and the honest limit.
+    // `AgentInboxRowBuilder` still hardcodes `InboxLifecycle.active` ("P4 populates
+    // these two"): no authored packet has wired the stored facts onto a row, and that
+    // is the open finding recorded on P4.3. So a shipped row cannot yet say which
+    // section it draws in, and "it stays in the settled tail" is asserted over the two
+    // PRODUCTION functions that decide it — `InboxLifecycle.resolve` (P4.2) and
+    // `InboxSort.partition` (P4.7) — reading the record the REAL reveal left behind.
+    // Everything that acts is the app's own: the click, the attach, the focus, the
+    // prompt. The day the builder is wired, these assertions read the shipped row
+    // instead, with no change to what they mean.
+    //
+    // SO THIS DOES NOT CLAIM THE RENDERED LIST — cross-review pressed exactly here,
+    // and it is right that a UI-level witness is what P4.9 would ideally have. It
+    // cannot exist until something feeds the stored facts to the builder, which needs
+    // `AgentRowContext` to carry them and is the ticket P4.3's review flagged as
+    // unauthored. Doing it inside this packet would be improvising a list-wide
+    // presentation change (rows going slim and into a tail) with no packet, no
+    // baselines and no owner decision, so it is left named rather than smuggled in.
+    // `inboxSections()` duplicating the resolution is the same gap seen from the
+    // other side: there is no production fold to reuse yet.
+    //
+    // TWO NEGATIVE TESTS OBSERVED RED with the final code:
+    //
+    //  1. `revealAgentFromInbox` given an `agentSupervisor.clearSettle(agentID: agentId)`
+    //     beside its `focus` call — the packet's witness, opening promoting the agent
+    //     back into the list — fails with "opening a settled agent must leave it
+    //     settled — got Optional("neutral")".
+    //  2. `InboxLifecycle.resolve`'s rung 3 returning `.active` for a `.settled`
+    //     override, which is what proves the tail assertions below read the production
+    //     resolution and not a hand-placed row. REPORTED WHERE IT LANDS, not where it
+    //     was aimed: the pre-state guard runs first, so it reads "setup: the filed
+    //     agent must be in the settled tail before anyone opens it — … tail []".
+    let settledAgent = AgentID(rawValue: UUID(uuidString: "3B900000-0000-4000-8000-0000000000BF")!)
+    let filedOn = now.addingTimeInterval(-3_600)
+    try revealAgentStore.upsert(AgentRecord(
+        id: settledAgent, displayName: "filed agent", role: "reviewer",
+        model: "openai-codex/gpt-5.6-sol", thinking: "medium", cwd: hereRoot.path,
+        projectId: hereProjectId, createdAt: filedOn, lastActivityAt: filedOn,
+        settledOverride: .settled, settledAt: filedOn))
+    // Adopted from the STORE, like P4.4's own fixtures: a settled agent this process
+    // never settled itself is what a relaunched one is.
+    revealSupervisor.restore()
+    try expect(revealSupervisor.records[settledAgent]?.settledOverride == .settled,
+               "setup: the filed agent must be adopted settled — got \(String(describing: revealSupervisor.records[settledAgent]?.settledOverride.rawValue))")
+    try expect(revealSupervisor.settledOverrideClearReasons[settledAgent] == nil,
+               "setup: adopting a settled agent clears nothing")
+    revealApp.refreshAgentSurfaces(notify: false)
+    revealSidebar.inboxForQA.layoutForQA()
+
+    // The shipped list, with each row's lifecycle resolved from its own record — the
+    // wiring the row builder does not do yet (see the note above). A row with no
+    // record (a terminal session) is left exactly as the app built it.
+    func inboxSections() -> InboxPartition {
+        let resolved = revealInbox.rows.map { row -> AgentInboxRow in
+            guard let record = revealSupervisor.records[AgentID(rawValue: row.id)] else { return row }
+            let lifecycle = InboxLifecycle.resolve(
+                override: record.settledOverride,
+                blockers: revealSupervisor.isRunning(AgentID(rawValue: row.id)) ? .sessionRunning : .unblocked,
+                settledAt: record.settledAt,
+                snoozedUntil: record.snoozedUntil,
+                archivedAt: record.archivedAt,
+                lastActivityAt: record.lastActivityAt,
+                now: now)
+            return AgentInboxRow(
+                id: row.id, title: row.title, projectName: row.projectName,
+                workspaceName: row.workspaceName, state: row.state, attention: row.attention,
+                lifecycle: lifecycle, model: row.model, role: row.role, branch: row.branch,
+                isIsolated: row.isIsolated, elapsed: row.elapsed, depth: row.depth,
+                variant: RowVariant.forLifecycle(lifecycle),
+                createdAt: row.createdAt, parentId: row.parentId)
+        }
+        return InboxSort.partition(rows: InboxSort.sortForInbox(rows: resolved), now: now)
+    }
+    func titles(_ rows: [AgentInboxRow]) -> [String] { rows.map(\.title) }
+
+    let beforeOpening = inboxSections()
+    try expect(beforeOpening.settled.contains { $0.id == settledAgent.rawValue },
+               "setup: the filed agent must be in the settled tail before anyone opens it — active \(titles(beforeOpening.active)), tail \(titles(beforeOpening.settled))")
+
+    // An unread mark it can actually lose, EARNED by a turn finishing while focus is
+    // elsewhere — and earned with an event that is deliberately not activity
+    // (`.turnCompleted` is work ENDING, P4.4), so the setup itself cannot un-settle
+    // the agent this section is about.
+    revealSupervisor.focus(agentID: nil)
+    revealSupervisor.qaDeliver(
+        .turnCompleted(threadId: "filed", turnId: "t1", outcome: .completed, errorMessage: nil),
+        to: settledAgent)
+    try expect(revealSupervisor.attention(for: settledAgent) == .unread,
+               "setup: the filed agent must be unread before the click, or clearing the mark proves nothing")
+    try expect(revealSupervisor.records[settledAgent]?.settledOverride == .settled,
+               "a turn ENDING does not un-settle an agent — got \(String(describing: revealSupervisor.records[settledAgent]?.settledOverride.rawValue))")
+
+    // I1 · OPENING IT. The real click, on the real row, through the app's own reveal.
+    let recordsBeforeOpening = revealSupervisor.records.count
+    try expect(revealInbox.clickRowForQA(id: settledAgent.rawValue),
+               "the filed agent's row must be clickable — rows are \(revealInbox.titlesForQA)")
+    guard let filedTile = revealSupervisor.records[settledAgent]?.tileId else {
+        throw CheckError.failed("opening a settled headless agent must attach a tile to it — its binding is still nil")
+    }
+    try expect(revealApp.focusBroker.activeSurface == .tile(filedTile),
+               "…and the click lands on it — focus is \(String(describing: revealApp.focusBroker.activeSurface))")
+    try expect(revealSupervisor.records.count == recordsBeforeOpening,
+               "…without minting a second agent — \(revealSupervisor.records.count) records, was \(recordsBeforeOpening)")
+    // The half of a reveal that IS allowed to move (the packet's watch-out: clearing
+    // the read-mark is correct and unrelated to lifecycle — do not couple them).
+    try expect(revealSupervisor.attention(for: settledAgent) == InboxAttention.none,
+               "opening a row clears its unread mark — got \(revealSupervisor.attention(for: settledAgent).rawValue)")
+    // …and the half that must not.
+    try expect(revealSupervisor.records[settledAgent]?.settledOverride == .settled,
+               "opening a settled agent must leave it settled — got \(String(describing: revealSupervisor.records[settledAgent]?.settledOverride.rawValue))")
+    try expect(revealSupervisor.settledOverrideClearReasons[settledAgent] == nil,
+               "…with no clear attributed to anyone — got \(String(describing: revealSupervisor.settledOverrideClearReasons[settledAgent]?.rawValue))")
+    try expect(revealSupervisor.records[settledAgent]?.settledAt == filedOn,
+               "…and its settle date untouched — got \(String(describing: revealSupervisor.records[settledAgent]?.settledAt))")
+    // ON DISK TOO: the attach persists the record, so a `.neutral` written by the
+    // reveal would come back un-filed on the next launch even if memory looked right.
+    let storedAfterOpening = try revealAgentStore.load(id: settledAgent)?.settledOverride
+    try expect(storedAfterOpening == .settled,
+               "…and the stored record is still settled — got \(String(describing: storedAfterOpening?.rawValue))")
+
+    // I2 · IT STAYS IN THE TAIL. The packet's witness: opening promoting it into the
+    // active block must FAIL.
+    let afterOpening = inboxSections()
+    try expect(afterOpening.settled.contains { $0.id == settledAgent.rawValue },
+               "an opened settled agent stays in the settled tail — tail is \(titles(afterOpening.settled))")
+    try expect(!afterOpening.active.contains { $0.id == settledAgent.rawValue },
+               "…and is NOT promoted into the active block — active is \(titles(afterOpening.active))")
+    // P4.8: history is paged, and being the agent you have open is exactly what keeps
+    // a filed row reachable — so reading it neither promotes it nor loses it.
+    let pagedWhileOpen = InboxSort.pageSettled(
+        afterOpening.settled, limit: 0, openAgentId: settledAgent.rawValue)
+    try expect(pagedWhileOpen.shown.map(\.id) == [settledAgent.rawValue],
+               "…and the tail still draws the agent you have open even with the page closed — got \(titles(pagedWhileOpen.shown))")
+
+    // I3 · A SECOND OPEN, now that it has a tile: the focus-only path, which is the
+    // one a person takes every time they go back to look at something twice.
+    try expect(revealInbox.clickRowForQA(id: settledAgent.rawValue),
+               "the filed agent's row must still be clickable")
+    try expect(revealSupervisor.records[settledAgent]?.settledOverride == .settled
+                && revealSupervisor.settledOverrideClearReasons[settledAgent] == nil,
+               "re-opening a settled agent must not un-settle it either — got \(String(describing: revealSupervisor.records[settledAgent]?.settledOverride.rawValue))")
+
+    // I4 · ACTING UN-SETTLES IT, through the tile's own production closure — the
+    // prompt path `wireManagedAgentTile` installed, not a direct `send`.
+    guard let filedView = revealCanvas.tileView(for: filedTile) as? ManagedAgentTileNSView,
+          let submitFiledPrompt = filedView.onSubmitPrompt else {
+        throw CheckError.failed("the attached tile must carry the production prompt closure")
+    }
+    submitFiledPrompt("one more thing")
+    try expect(revealSupervisor.records[settledAgent]?.settledOverride == .neutral,
+               "sending a prompt un-settles the agent — got \(String(describing: revealSupervisor.records[settledAgent]?.settledOverride.rawValue))")
+    try expect(revealSupervisor.settledOverrideClearReasons[settledAgent] == .activity,
+               "…attributed to the app's own activity clear — got \(String(describing: revealSupervisor.settledOverrideClearReasons[settledAgent]?.rawValue))")
+    let storedAfterPrompt = try revealAgentStore.load(id: settledAgent)?.settledOverride
+    try expect(storedAfterPrompt == .neutral,
+               "…and it reached the disk (\(String(describing: storedAfterPrompt?.rawValue))), or the agent comes back filed next launch")
+    let afterPrompt = inboxSections()
+    try expect(afterPrompt.active.contains { $0.id == settledAgent.rawValue },
+               "…so the row is back in the active block — active is \(titles(afterPrompt.active))")
+    try expect(!afterPrompt.settled.contains { $0.id == settledAgent.rawValue },
+               "…and out of the tail — tail is \(titles(afterPrompt.settled))")
+
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows — a headless one, a tiled one and an orchestrator child — with the plain shell filtered out, the terminal-hosted agent listed for every other surface but not here (P3.16, force-included as the focused tile and still not a row), a legacy managed session no AgentRecord claims left out too, the count of the terminal-hosted ones reaching the list's empty state, and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live while Snooze and Wake stay greyed with 'Not available yet.', the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's TILE survives while its respawn is durably suppressed so re-wiring mints nothing (and a prompt in that tile deliberately revives it), a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)'); and a PAGED settled tail (P4.8): \(InboxSort.settledPageSize) of 30 finished agents on screen under a footer reading '\(pagedFooterTitle)', one press bringing the rest and taking the footer away, and the agent open in the focused tile drawn at 27 of 30 where the page would have ended")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows — a headless one, a tiled one and an orchestrator child — with the plain shell filtered out, the terminal-hosted agent listed for every other surface but not here (P3.16, force-included as the focused tile and still not a row), a legacy managed session no AgentRecord claims left out too, the count of the terminal-hosted ones reaching the list's empty state, and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live while Snooze and Wake stay greyed with 'Not available yet.', the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's TILE survives while its respawn is durably suppressed so re-wiring mints nothing (and a prompt in that tile deliberately revives it), a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)'); and a PAGED settled tail (P4.8): \(InboxSort.settledPageSize) of 30 finished agents on screen under a footer reading '\(pagedFooterTitle)', one press bringing the rest and taking the footer away, and the agent open in the focused tile drawn at 27 of 30 where the page would have ended; and READING IS FREE (P4.9): a settled agent opened by a real click keeps its override, its clear reason, its settle date and its stored record, and survives a second open — while a prompt through the tile's own closure un-settles it in memory and on disk; its SECTION is asserted through `InboxLifecycle.resolve` + `InboxSort.partition` over those records and NOT off the shipped row (`AgentInboxRowBuilder` still hardcodes `.active` — the open finding on P4.3), tail \(afterOpening.settled.count) / active \(afterOpening.active.count) while open, still drawn with the page closed because it is the one you have open, and active \(afterPrompt.active.count) after the prompt")
     }
 }
 
