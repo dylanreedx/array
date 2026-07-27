@@ -264,6 +264,14 @@ enum UIProbeAppearance {
             ("appearance.agentInbox", NSSize(width: 320, height: 620 + AgentInboxView.scopeControlHeight), {
                 LabCatalog.makeAgentInboxPreview(selecting: LabFixtures.inboxAgentIds[1])
             }),
+            // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
+            // The shelf's heading, which exists only while something is snoozed —
+            // hence the parked fixture, and hence a surface of its own rather than
+            // parked rows pushed into `appearance.agentInbox` above, whose row set
+            // the floors here are measured on.
+            ("appearance.agentInboxShelf", NSSize(width: 320, height: 620 + AgentInboxView.scopeControlHeight), {
+                LabCatalog.makeAgentInboxPreview(selecting: nil, rows: LabFixtures.inboxParkedRows())
+            }),
             ("appearance.canvas", NSSize(width: 700, height: 480), {
                 CanvasNSView(canvasState: CanvasState(
                     viewport: CanvasViewport(x: 0, y: 0, zoom: 1),

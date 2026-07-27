@@ -492,7 +492,8 @@ enum LabCatalog {
 
             // MARK: 90-agent-ux cards
             branchChipCard, agentInboxCard, agentInboxSelectedCard, agentInboxParkedCard,
-            agentInboxJumpHintsCard, agentInboxBulkCard, managedAgentProviderCard
+            agentInboxShelfCard, agentInboxJumpHintsCard, agentInboxBulkCard,
+            managedAgentProviderCard
         ]
     }
 
@@ -1476,6 +1477,28 @@ enum LabCatalog {
             title: "Agent Inbox - settled and snoozed",
             summary: "Two settled rows and one snoozed collapse to ~36pt; ready, failed, working and approval stay cards.",
             content: .staticCard(preferredSize: NSSize(width: 320, height: 620 + AgentInboxView.scopeControlHeight)) {
+                // P4.7 opens the shelf for this card: the collapsed default is
+                // `chrome.agentInbox.shelf`'s subject, and a folded shelf here would
+                // take the snoozed row — the one collapsed row whose glyph carries an
+                // accent — out of the contrast, pixel and baseline sweeps entirely.
+                makeAgentInboxPreview(
+                    selecting: nil, rows: LabFixtures.inboxParkedRows(), expandShelf: true)
+            }
+        )
+    }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
+    /// The same three parked agents with the shelf AS IT SHIPS — collapsed. Its
+    /// baseline against `chrome.agentInbox.parked`'s is the fold: the snoozed row is
+    /// gone, one counted heading stands in its place, and the settled tail below it
+    /// has not moved otherwise.
+    private static var agentInboxShelfCard: LabEntry {
+        LabEntry(
+            id: "chrome.agentInbox.shelf",
+            category: "Chrome",
+            title: "Agent Inbox - shelf collapsed",
+            summary: "The snoozed agent folded behind a counted heading, with the settled tail still below it.",
+            content: .staticCard(preferredSize: NSSize(width: 320, height: 620 + AgentInboxView.scopeControlHeight)) {
                 makeAgentInboxPreview(selecting: nil, rows: LabFixtures.inboxParkedRows())
             }
         )
@@ -1526,6 +1549,7 @@ enum LabCatalog {
         selecting id: UUID?,
         rows: [AgentInboxRow] = LabFixtures.inboxRows(),
         jumpHints: Bool = false,
+        expandShelf: Bool = false,
         selectingMany ids: [UUID] = []
     ) -> NSView {
         // P3.8: 620 was the height that fitted this fixture's seven rows. The scope
@@ -1546,6 +1570,10 @@ enum LabCatalog {
         // scope popup's white bezel and called the label flat).
         if jumpHints { view.setJumpHintsVisible(true) }
         view.reload(rows: rows)
+        // P4.7: AFTER `reload`, through the same method the heading's own button
+        // sends — the shelf is view state, so there is nothing to open until the
+        // list has rows to put on it.
+        if expandShelf { view.toggleShelf() }
         if let id { _ = view.selectRowForQA(id: id) }
         // P3.11: AFTER `reload`, which empties the selection — and through the same
         // accessor the checks drive, so the card renders the shipped selection path.
@@ -2272,7 +2300,8 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         // 54 since P3.7 added `chrome.agentInbox.parked` (27 static cards x 2).
         // 56 since P3.10 added `chrome.agentInbox.jumpHints` (28 static cards x 2).
         // 58 since P3.11 added `chrome.agentInbox.bulk` (29 static cards x 2).
-        let minimumCardsGated = 58
+        // 60 since P4.7 added `chrome.agentInbox.shelf` (30 static cards x 2).
+        let minimumCardsGated = 60
         let minimumTextRectsPerAppearance = 192
         let minimumBordersPerAppearance = 12
         guard gated >= minimumCardsGated else {

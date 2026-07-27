@@ -64,6 +64,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// a P1.4 size move moves both instead of clipping one.
     static var slimRowHeight: Double { Metrics.rowHeight(for: .title, insets: Inset.row) }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
+    /// The `Snoozed (N)` heading's height: the same one line a parked row gets, so
+    /// the shelf costs exactly what one of the rows it is holding would have. Derived
+    /// from `slimRowHeight` rather than restated, so a P1.4 type move moves both.
+    static var shelfHeaderHeight: Double { slimRowHeight }
+
     /// The height a row of this variant gets. The two numbers are far enough apart
     /// (79 vs 35) that the collapse is the visible fact it is meant to be, and the
     /// gap is asserted rather than left to the two derivations happening to differ.
@@ -199,6 +205,24 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// nothing at the one moment it is the only thing left to report. DERIVED each
     /// push, never stored on a row.
     private var rollupsByParent: [UUID: ChildRollup] = [:]
+    // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
+    /// What the table draws, row for row — the agent rows AND the one `Snoozed (N)`
+    /// header between the active block and the settled tail. `rows` is the agent
+    /// half of it, so "row N on screen" is still `rows[N]` for every accessor that
+    /// works in agent terms; the two index spaces meet at `tableRow(forRowIndex:)`
+    /// and `rowIndex(forTableRow:)` and nowhere else.
+    private var items: [InboxListItem] = []
+    /// Whether the shelf is open. VIEW-LOCAL and COLLAPSED BY DEFAULT, exactly like
+    /// `collapsedParents` and for the same reason the packet gives ("local UI state,
+    /// not persisted per-agent"): whether you have the shelf open on this Mac right
+    /// now is not a fact about an agent, and a persisted one would restore a fold
+    /// over work that woke up while the app was closed.
+    private var shelfExpanded = false
+    /// The two index maps, built once per push by `setItems` rather than walked per
+    /// lookup: `viewFor` asks for one on every cell it builds, and `apply` asks for
+    /// one per changed row.
+    private var rowIndexByTableRow: [Int?] = []
+    private var tableRowByRowIndex: [Int] = []
     // Ticket: docs/38-tickets/90-agent-ux/P3.10-jump-shortcuts.md
     /// Whether the ⌘-hold hint pills are showing. VIEW-LOCAL and transient, like
     /// hover: it is a fact about the modifier you are holding right now.
@@ -248,6 +272,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// `makeIfNecessary: true`, which would BUILD one and inflate the very count
     /// the witness is measuring.
     private var cellsByRow: [Int: AgentInboxRowCell] = [:]
+    // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
+    /// The shelf header's view. Kept out of `cellsByRow` on purpose: that map is
+    /// what every per-row QA accessor reads (`cells()`), and a heading in it would
+    /// shift every one of those arrays out of step with `rows`. At most one exists,
+    /// so it is a field and not a map.
+    private var shelfHeaderCell: AgentInboxShelfHeaderView?
     private(set) var cellBuildCountForQA = 0
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md
@@ -548,21 +578,22 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     func reload(rows newRows: [AgentInboxRow]) {
         allRows = newRows
         updateScopeMenu()
-        render(visibleRows(from: newRows))
+        render(display(from: newRows))
     }
 
     /// Draw this list whole. Takes rows that are ALREADY filtered and sorted, which
     /// is why it is private: `reload(rows:)` is the entry point for a fresh push and
     /// takes the unfiltered set, and handing it an already-filtered list would make
     /// the scope narrow itself with every call.
-    private func render(_ visible: [AgentInboxRow]) {
+    private func render(_ visible: [InboxListItem]) {
         // P3.13: a full reload moves every row, so a field left floating would be over
         // a different agent. Committing is the same answer clicking away gives — the
         // rename is finished, not thrown away, and this is also the path the host's
         // own re-push takes right after a commit (where it is already a no-op).
         endRename(commit: true)
-        rows = visible
+        setItems(visible)
         cellsByRow.removeAll()
+        shelfHeaderCell = nil
         tableView.reloadData()
         updateEmptyState()
         // P3.11: `reloadData` empties the table's selection, so the bar has to come
@@ -607,18 +638,22 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // the parent's row and everything about its triangle, so the rows whose
         // control appeared or vanished are stale too. (Found in cross-review.)
         let previousParents = parentsWithChildren
-        let sorted = visibleRows(from: newRows)
-        guard sorted.map(\.id) == rows.map(\.id) else {
-            render(sorted)
+        let next = display(from: newRows)
+        // P4.7: the identity sequence is compared over the DRAWN items, not over the
+        // agent rows — the shelf header is a row in this table, and a snooze that
+        // changed the count in it (or brought the header into existence at all) has
+        // changed the list even when every agent row is where it was.
+        guard next.map(\.identity) == items.map(\.identity) else {
+            render(next)
             return
         }
         let disclosureMoved = previousParents.symmetricDifference(parentsWithChildren)
         let previous = rows
-        rows = sorted
+        setItems(next)
         let indexes = IndexSet(rows.indices.filter {
             changed.touched.contains(rows[$0].id) || rows[$0] != previous[$0]
                 || disclosureMoved.contains(rows[$0].id)
-        })
+        }.compactMap(tableRow(forRowIndex:)))
         guard !indexes.isEmpty else { return }
         // P3.7: a lifecycle move changes the row's VARIANT, and a variant is a
         // different height. `reloadData(forRowIndexes:)` re-asks for the row's VIEW
@@ -640,7 +675,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// The rows this scope leaves on screen, in the frozen order. Filter FIRST, then
     /// sort: the two commute (filtering a permutation and permuting a subset give the
     /// same list), and this way `InboxSort` only ever nests the children it can see.
-    private func visibleRows(from newRows: [AgentInboxRow]) -> [AgentInboxRow] {
+    /// What the table draws for this push: filtered, sorted, folded, then split into
+    /// the three sections with the shelf header between the second and the third.
+    ///
+    /// THE SECTIONS ARE COMPUTED LAST, on the rows that survived the group folds
+    /// (P2D.4). A shelf count taken before them would report a snoozed child that is
+    /// already hidden under its parent, and the header would say it is holding a row
+    /// that unfolding it does not produce.
+    private func display(from newRows: [AgentInboxRow]) -> [InboxListItem] {
         let sorted = InboxSort.sortForInbox(
             rows: InboxScope.filter(rows: newRows, scope: scope, openAgentId: openAgentId))
         // P2D.4: measured on the SORTED list, before the fold — a collapsed parent
@@ -649,7 +691,82 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         parentsWithChildren = InboxSort.parentIds(in: sorted)
         // P2D.5: same list, same moment, same reason.
         rollupsByParent = InboxSort.rollups(in: sorted)
-        return InboxSort.visibleRows(sorted, collapsed: collapsedParents)
+        let visible = InboxSort.visibleRows(sorted, collapsed: collapsedParents)
+        // P4.7. `clock()` and not `Date()`: the same injection point a parked row's
+        // "in 25m" is read from, so a card whose snooze expires between two renders
+        // cannot make a committed baseline flap.
+        let parts = InboxSort.partition(rows: visible, now: clock())
+        var built = parts.active.map(InboxListItem.agent)
+        // NO HEADER FOR AN EMPTY SHELF: "Snoozed (0)" is a line of chrome about
+        // nothing, and it would take a row's worth of a 320pt sidebar to say it.
+        if parts.shelfCount > 0 {
+            built.append(.shelfHeader(count: parts.shelfCount, isExpanded: shelfExpanded))
+            if shelfExpanded {
+                built.append(contentsOf: parts.snoozed.map(InboxListItem.agent))
+            }
+        }
+        built.append(contentsOf: parts.settled.map(InboxListItem.agent))
+        return built
+    }
+
+    // MARK: - The shelf (P4.7)
+
+    /// Open or close the shelf.
+    ///
+    /// A FULL RE-RENDER for the reason `toggleCollapse` records: opening the shelf
+    /// adds rows, so the identity sequence changed and a partial reload against a
+    /// shifted array would repaint one agent's row with another's. Selection and
+    /// hover go with it, because their indexes belong to the list that just went
+    /// away and a bulk action must never reach a row you cannot see.
+    func toggleShelf() {
+        shelfExpanded.toggle()
+        tableView.deselectAll(nil)
+        selectedRowsForEmphasis = IndexSet()
+        hoveredRow = -1
+        render(display(from: allRows))
+    }
+
+    // MARK: - The two index spaces (P4.7)
+
+    /// Take a new drawn model, and build the two index maps WITH it — one
+    /// assignment, so `rows`, `items` and the mapping between them cannot be left
+    /// disagreeing by a path that updated only some of them.
+    private func setItems(_ next: [InboxListItem]) {
+        items = next
+        rows = next.compactMap(\.agentRow)
+        rowIndexByTableRow = []
+        tableRowByRowIndex = []
+        rowIndexByTableRow.reserveCapacity(next.count)
+        for (tableRow, item) in next.enumerated() {
+            guard item.agentRow != nil else {
+                rowIndexByTableRow.append(nil)
+                continue
+            }
+            rowIndexByTableRow.append(tableRowByRowIndex.count)
+            tableRowByRowIndex.append(tableRow)
+        }
+    }
+
+    /// Where agent row `index` sits in the table, or nil if it is not on screen.
+    private func tableRow(forRowIndex index: Int) -> Int? {
+        tableRowByRowIndex.indices.contains(index) ? tableRowByRowIndex[index] : nil
+    }
+
+    /// Which agent row table row `tableRow` is, or nil for the shelf header, for a
+    /// click below the last row (`clickedRow` is -1) and for anything out of range.
+    private func rowIndex(forTableRow tableRow: Int) -> Int? {
+        rowIndexByTableRow.indices.contains(tableRow) ? rowIndexByTableRow[tableRow] : nil
+    }
+
+    /// The header's table row, or nil when the shelf is empty and draws nothing.
+    private var shelfHeaderTableRow: Int? {
+        items.firstIndex { $0.agentRow == nil }
+    }
+
+    /// What the table draws at this row, or nil for an index outside the list —
+    /// including the -1 AppKit reports for a click below the last row.
+    private func item(at tableRow: Int) -> InboxListItem? {
+        items.indices.contains(tableRow) ? items[tableRow] : nil
     }
 
     // MARK: - Nesting (P2D.4)
@@ -671,7 +788,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         tableView.deselectAll(nil)
         selectedRowsForEmphasis = IndexSet()
         hoveredRow = -1
-        render(visibleRows(from: allRows))
+        render(display(from: allRows))
     }
 
     /// Which control a row draws, if any: only a parent with children in this list
@@ -707,7 +824,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         selectedRowsForEmphasis = IndexSet()
         hoveredRow = -1
         updateScopeMenu()
-        render(visibleRows(from: allRows))
+        render(display(from: allRows))
         if notify { onScopeChange?(next) }
     }
 
@@ -826,26 +943,51 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         } else {
             emptyLabel.stringValue = AgentInboxView.emptyMessage
         }
-        emptyLabel.isHidden = !rows.isEmpty
+        // P4.7: `items`, not `rows` — a list holding nothing but a collapsed shelf
+        // still draws its heading, and "No agents in this scope" underneath a
+        // `Snoozed (2)` line would be the list contradicting itself.
+        emptyLabel.isHidden = !items.isEmpty
     }
 
     // MARK: - Table
 
-    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { items.count }
 
     /// P3.7: settled and snoozed collapse, everything else is a full card. The
     /// height is asked of the ROW's variant and of nothing else — the list may not
     /// decide a `ready` or `failed` agent has earned less room, which is the
     /// density mistake the rule exists to forbid.
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        guard rows.indices.contains(row) else { return AgentInboxView.rowHeight }
-        return AgentInboxView.height(for: rows[row].variant)
+        guard let model = item(at: row)?.agentRow else { return AgentInboxView.shelfHeaderHeight }
+        return AgentInboxView.height(for: model.variant)
+    }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
+    /// The shelf header is a HEADING, not a row you can act on. Unselectable, so it
+    /// cannot end up in a multi-selection (P3.11) that a bulk action then tries to
+    /// apply to a section, and so arrow-keying past it does not clear the bar.
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        item(at: row)?.agentRow != nil
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard rows.indices.contains(row) else { return nil }
+        guard let item = item(at: row) else { return nil }
+        guard let model = item.agentRow else {
+            guard case let .shelfHeader(count, isExpanded) = item else { return nil }
+            let header = shelfHeaderCell ?? AgentInboxShelfHeaderView()
+            header.onToggle = { [weak self] in self?.toggleShelf() }
+            header.apply(count: count, isExpanded: isExpanded)
+            shelfHeaderCell = header
+            return header
+        }
+        // P4.7: the ROW's index, not the table's — the jump chord on this cell is
+        // "the Nth agent", and a heading is not one of them. NO `?? 0` FALLBACK: the
+        // conversion is total for an `.agent` item because `setItems` builds both
+        // maps in one pass, so a nil here means the maps disagree with `items` — and
+        // an empty row is a thing the blankness floor can see, where a hint pill
+        // quietly drawn on the wrong row is not. (Raised in cross-review.)
+        guard let index = rowIndex(forTableRow: row) else { return nil }
         cellBuildCountForQA += 1
-        let model = rows[row]
         let interacting = isInteracting(row: row)
         let cell: AgentInboxRowCell
         switch model.variant {
@@ -876,7 +1018,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // P3.10: the hint is set AFTER `apply` and through its own call, because it
         // is an overlay and not part of the row's content — `apply` paints what the
         // agent IS, and a pill is a thing about the keyboard.
-        cell.showJumpHint(jumpHintsVisible ? AgentInboxView.jumpHintText(forRowIndex: row) : nil)
+        cell.showJumpHint(jumpHintsVisible ? AgentInboxView.jumpHintText(forRowIndex: index) : nil)
         cellsByRow[row] = cell
         return cell
     }
@@ -890,7 +1032,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // selections — with a range selected, a single index cannot name them.
         let previous = selectedRowsForEmphasis
         selectedRowsForEmphasis = tableView.selectedRowIndexes
-        redraw(rows: Array(previous.symmetricDifference(tableView.selectedRowIndexes)))
+        redraw(tableRows: Array(previous.symmetricDifference(tableView.selectedRowIndexes)))
         updateBulkBar()
     }
 
@@ -902,7 +1044,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // all six on the way to acting on them.
         let modifiers = NSApp.currentEvent?.modifierFlags.intersection(.deviceIndependentFlagsMask) ?? []
         guard AgentInboxView.revealsOnClick(modifiers: modifiers) else { return }
-        reveal(rowAt: tableView.clickedRow)
+        // P4.7: `clickedRow` is a TABLE row, and the shelf header is one of those —
+        // `rowIndex(forTableRow:)` answers nil for it, so clicking the heading folds
+        // the shelf (its own button) and never reveals an agent.
+        guard let index = rowIndex(forTableRow: tableView.clickedRow) else { return }
+        reveal(rowAt: index)
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.11-multi-select-bulk.md
@@ -946,7 +1092,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // have pressed the chord, and the ⌘ that comes up will come up over the tile
         // the reveal just focused.
         setJumpHintsVisible(false)
-        tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        guard let tableRow = tableRow(forRowIndex: index) else { return false }
+        tableView.selectRowIndexes(IndexSet(integer: tableRow), byExtendingSelection: false)
         reveal(rowAt: index)
         return true
     }
@@ -963,7 +1110,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     func setJumpHintsVisible(_ visible: Bool) {
         guard visible != jumpHintsVisible else { return }
         jumpHintsVisible = visible
-        redraw(rows: Array(0..<InboxJump.maximumRows))
+        // The jumpable rows are the first N AGENT rows, mapped into the table — a
+        // shelf header between them is not a row you can jump to.
+        redraw(tableRows: (0..<InboxJump.maximumRows).compactMap(tableRow(forRowIndex:)))
     }
 
     // MARK: - Inline rename (P3.13)
@@ -978,8 +1127,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // (`revealsOnClick`), and a modified double-click must not start editing a
         // name in the middle of building a range.
         guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty else { return }
-        let index = tableView.clickedRow
-        guard let cell = cellForRow(index) else { return }
+        guard let index = rowIndex(forTableRow: tableView.clickedRow),
+              let cell = cellForRow(index) else { return }
         doubleClick(rowAt: index, pointInCell: cell.convert(event.locationInWindow, from: nil))
     }
 
@@ -1103,16 +1252,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     private func repositionRenameField() {
         guard let field = renameField, let rowId = renamingRowId,
               let index = rows.firstIndex(where: { $0.id == rowId }),
-              let cell = cellsByRow[index] else { return }
+              let tableRow = tableRow(forRowIndex: index),
+              let cell = cellsByRow[tableRow] else { return }
         field.frame = cell.convert(cell.titleFrame, to: self).insetBy(dx: -Space.xs, dy: -Space.xs)
     }
 
     /// The cell drawn for a row, building it if the table has not laid it out yet —
     /// a rename needs the label's real frame, and an unrealised row has none.
     private func cellForRow(_ index: Int) -> AgentInboxRowCell? {
-        guard rows.indices.contains(index) else { return nil }
-        if let cell = cellsByRow[index] { return cell }
-        return tableView.view(atColumn: 0, row: index, makeIfNecessary: true) as? AgentInboxRowCell
+        guard let tableRow = tableRow(forRowIndex: index) else { return nil }
+        if let cell = cellsByRow[tableRow] { return cell }
+        return tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: true) as? AgentInboxRowCell
     }
 
     // MARK: - Bulk actions (P3.11)
@@ -1127,7 +1277,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// order they were clicked: the actions apply to a set, and the ids handed to the
     /// host must not depend on which end of a range you started from.
     private var selectedRows: [AgentInboxRow] {
-        tableView.selectedRowIndexes.sorted().compactMap { rows.indices.contains($0) ? rows[$0] : nil }
+        tableView.selectedRowIndexes.sorted().compactMap { item(at: $0)?.agentRow }
     }
 
     /// Show, hide and re-populate the bar for the current selection.
@@ -1187,14 +1337,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// leaves the menu with no items — AppKit shows nothing for an empty menu, so
     /// right-clicking the background is a no-op rather than a menu about nobody.
     private func targetRows(forClickedRow clicked: Int) -> [AgentInboxRow] {
-        guard rows.indices.contains(clicked) else { return [] }
+        guard rows.indices.contains(clicked), let tableRow = tableRow(forRowIndex: clicked) else {
+            return []
+        }
         let selection = tableView.selectedRowIndexes
-        guard selection.count > 1, selection.contains(clicked) else { return [rows[clicked]] }
+        guard selection.count > 1, selection.contains(tableRow) else { return [rows[clicked]] }
         return selectedRows
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        rebuildRowMenu(for: targetRows(forClickedRow: tableView.clickedRow))
+        rebuildRowMenu(for: targetRows(forClickedRow: rowIndex(forTableRow: tableView.clickedRow) ?? -1))
     }
 
     /// Fill `rowMenu` in for these agents: which items belong at all
@@ -1274,8 +1426,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     }
 
     /// Rebuild the cells of just these rows, ignoring any that are not on screen.
-    private func redraw(rows indexes: [Int]) {
-        let touched = IndexSet(indexes.filter { rows.indices.contains($0) })
+    private func redraw(tableRows indexes: [Int]) {
+        let touched = IndexSet(indexes.filter { items.indices.contains($0) })
         guard !touched.isEmpty else { return }
         tableView.reloadData(forRowIndexes: touched, columnIndexes: IndexSet(integer: 0))
     }
@@ -1319,13 +1471,39 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         guard row != hoveredRow else { return }
         let previous = hoveredRow
         hoveredRow = row
-        redraw(rows: [previous, row])
+        redraw(tableRows: [previous, row])
     }
 
     // MARK: - QA
 
-    var rowCountForQA: Int { tableView.numberOfRows }
+    /// How many AGENT rows the table is drawing. Measured off the table (P4.7 adds
+    /// one row to it that is not an agent) rather than reported from `rows`, so it
+    /// still witnesses that the model reached the screen.
+    var rowCountForQA: Int { tableView.numberOfRows - (shelfHeaderTableRow == nil ? 0 : 1) }
     var rowIdsForQA: [UUID] { rows.map(\.id) }
+    // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
+    /// The heading as RENDERED — its words and which way its triangle points — and
+    /// nil when the shelf is holding nothing and draws no heading at all.
+    var shelfHeaderTitleForQA: String? { shelfHeaderCell?.qaTitle }
+    var shelfHeaderDisclosureForQA: String? { shelfHeaderCell?.qaDisclosureGlyph }
+    var isShelfExpandedForQA: Bool { shelfExpanded }
+    /// Where the heading sits in the table, so a check can assert it is BETWEEN the
+    /// active block and the settled tail rather than merely present.
+    var shelfHeaderTableRowForQA: Int? { shelfHeaderTableRow }
+    /// The answer the shipped delegate gives AppKit for each table row. Asked
+    /// directly, because `selectRowIndexes(_:byExtendingSelection:)` is programmatic
+    /// and does NOT consult the delegate — the same limitation `isClickWiredForQA`
+    /// records for `clickedRow`, so this is the only place the heading's
+    /// unselectability can be witnessed headlessly.
+    var selectableTableRowsForQA: [Bool] {
+        (0..<tableView.numberOfRows).map { self.tableView(tableView, shouldSelectRow: $0) }
+    }
+    /// Open or close the shelf the way the user does — through the heading's own
+    /// button, so the check exercises the wiring and not just `toggleShelf`.
+    @discardableResult
+    func clickShelfDisclosureForQA() -> Bool {
+        shelfHeaderCell?.clickDisclosureForQA() ?? false
+    }
     var titlesForQA: [String] { cells().map(\.qaTitle) }
     var stateLabelsForQA: [String] { cells().map(\.qaStateLabel) }
     var metaLinesForQA: [String] { cells().map(\.qaMeta) }
@@ -1438,7 +1616,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// `height(for:)` returned, measured off the table rather than re-derived from
     /// it (which would witness nothing).
     var rowHeightsForQA: [Double] {
-        (0..<tableView.numberOfRows).map { Double(tableView.rect(ofRow: $0).height - tableView.intercellSpacing.height) }
+        (0..<tableView.numberOfRows)
+            .filter { rowIndex(forTableRow: $0) != nil }
+            .map { Double(tableView.rect(ofRow: $0).height - tableView.intercellSpacing.height) }
+    }
+    /// The heading's laid-out height, on the same terms — P4.7's own row.
+    var shelfHeaderHeightForQA: Double? {
+        guard let tableRow = shelfHeaderTableRow else { return nil }
+        return Double(tableView.rect(ofRow: tableRow).height - tableView.intercellSpacing.height)
     }
     var glyphsForQA: [String] { cells().map(\.qaGlyph) }
     /// A card's elapsed turn time, a parked row's "12m ago" — one accessor,
@@ -1477,7 +1662,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     @discardableResult
     func clickDisclosureForQA(id: UUID) -> Bool {
         guard let index = rows.firstIndex(where: { $0.id == id }),
-              let cell = cellsByRow[index] else { return false }
+              let tableRow = tableRow(forRowIndex: index),
+              let cell = cellsByRow[tableRow] else { return false }
         return cell.clickDisclosureForQA()
     }
 
@@ -1491,9 +1677,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// callback is left unwitnessed.
     @discardableResult
     func clickRowForQA(id: UUID) -> Bool {
-        guard let index = rows.firstIndex(where: { $0.id == id }) else { return false }
-        tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
-        reveal(rowAt: index)
+        guard let index = rows.firstIndex(where: { $0.id == id }),
+              let tableRow = tableRow(forRowIndex: index) else { return false }
+        tableView.selectRowIndexes(IndexSet(integer: tableRow), byExtendingSelection: false)
+        // P4.7: through the table row and back, which is exactly what `rowClicked`
+        // does with `clickedRow` — so a row sitting below the shelf's heading is
+        // revealed through the same conversion the mouse goes through, rather than
+        // by an agent index this accessor happened to already hold.
+        guard let clicked = rowIndex(forTableRow: tableRow) else { return false }
+        reveal(rowAt: clicked)
         return true
     }
 
@@ -1512,8 +1704,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 
     @discardableResult
     func selectRowForQA(id: UUID) -> Bool {
-        guard let index = rows.firstIndex(where: { $0.id == id }) else { return false }
-        tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        guard let index = rows.firstIndex(where: { $0.id == id }),
+              let tableRow = tableRow(forRowIndex: index) else { return false }
+        tableView.selectRowIndexes(IndexSet(integer: tableRow), byExtendingSelection: false)
         return true
     }
 
@@ -1529,8 +1722,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     func selectRowsForQA(ids: [UUID]) -> Bool {
         var extending = false
         for id in ids {
-            guard let index = rows.firstIndex(where: { $0.id == id }) else { return false }
-            tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: extending)
+            guard let index = rows.firstIndex(where: { $0.id == id }),
+                  let tableRow = tableRow(forRowIndex: index) else { return false }
+            tableView.selectRowIndexes(IndexSet(integer: tableRow), byExtendingSelection: extending)
             extending = true
         }
         return true
@@ -1574,8 +1768,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
             rowMenu.update()
             return true
         }
-        guard let index = rows.firstIndex(where: { $0.id == clickedRowId }) else { return false }
-        rebuildRowMenu(for: targetRows(forClickedRow: index))
+        guard let index = rows.firstIndex(where: { $0.id == clickedRowId }),
+              let tableRow = tableRow(forRowIndex: index),
+              let clicked = rowIndex(forTableRow: tableRow) else { return false }
+        rebuildRowMenu(for: targetRows(forClickedRow: clicked))
         // WHAT APPKIT DOES JUST BEFORE IT DRAWS, and the reason it is here rather than in
         // `rebuildRowMenu`: `NSMenu.update()` is the auto-enabling pass, so without it a
         // check reads the `isEnabled` this code set and never the one AppKit would show.
@@ -1618,13 +1814,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// path; only the `NSEvent` is stood in for.
     @discardableResult
     func doubleClickRowForQA(id: UUID, onTitle: Bool) -> Bool {
-        guard let index = rows.firstIndex(where: { $0.id == id }), let cell = cellForRow(index) else {
+        guard let index = rows.firstIndex(where: { $0.id == id }),
+              let tableRow = tableRow(forRowIndex: index),
+              // P4.7: the same table-row round trip `rowDoubleClicked` makes.
+              let clicked = rowIndex(forTableRow: tableRow),
+              let cell = cellForRow(clicked) else {
             return false
         }
         let point = onTitle
             ? NSPoint(x: cell.titleFrame.midX, y: cell.titleFrame.midY)
             : NSPoint(x: cell.bounds.minX + 1, y: cell.bounds.minY + 1)
-        return doubleClick(rowAt: index, pointInCell: point)
+        return doubleClick(rowAt: clicked, pointInCell: point)
     }
     var renamingRowIdForQA: UUID? { renamingRowId }
     /// The field really does report to this view. Asserted separately because the two
@@ -1662,8 +1862,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     @discardableResult
     func hoverRowForQA(id: UUID?) -> Bool {
         guard let id else { setHovered(row: -1); return true }
-        guard let index = rows.firstIndex(where: { $0.id == id }) else { return false }
-        setHovered(row: index)
+        guard let index = rows.firstIndex(where: { $0.id == id }),
+              let tableRow = tableRow(forRowIndex: index) else { return false }
+        setHovered(row: tableRow)
         return true
     }
 
@@ -1680,6 +1881,147 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     private func cells() -> [AgentInboxRowCell] {
         (0..<tableView.numberOfRows).compactMap { cellsByRow[$0] }
     }
+}
+
+// Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
+/// What the table draws at one row: an agent, or the shelf's heading.
+///
+/// A SECOND KIND OF ROW IS THE WHOLE COST OF THIS TICKET, and it is spent here
+/// rather than by faking an agent: P3.16 has just finished making the inbox list
+/// agents and nothing else, and a heading dressed as an `AgentInboxRow` would put a
+/// non-agent back into `rows` — into the selection, the bulk actions, the context
+/// menu and the jump chords. Keeping it a separate case means the heading cannot be
+/// selected, renamed, snoozed or counted by accident; the price is the one index
+/// conversion `tableRow(forRowIndex:)` / `rowIndex(forTableRow:)` performs at the
+/// AppKit boundary.
+enum InboxListItem {
+    case agent(AgentInboxRow)
+    case shelfHeader(count: Int, isExpanded: Bool)
+
+    /// The agent this row draws, or nil for the heading. The one test the rest of
+    /// the view asks, so "is this an agent row" has a single spelling.
+    var agentRow: AgentInboxRow? {
+        guard case let .agent(row) = self else { return nil }
+        return row
+    }
+
+    /// What makes this row THE SAME ROW as the one drawn last push, for
+    /// `apply(rows:changed:)`'s identity comparison.
+    ///
+    /// The count is part of the heading's identity: "Snoozed (2)" becoming
+    /// "Snoozed (3)" is not the same heading, and the incremental path repaints only
+    /// the agent rows it was told about — so a changed count has to fall through to
+    /// a full render or the shelf would go on advertising a number that is wrong.
+    var identity: String {
+        switch self {
+        case .agent(let row): return "agent:\(row.id.uuidString)"
+        case .shelfHeader(let count, let isExpanded): return "shelf:\(count):\(isExpanded)"
+        }
+    }
+}
+
+/// The `Snoozed (N)` heading.
+///
+/// ONE LINE, TWO THINGS: the triangle you open it with and what it is holding.
+/// Deliberately NOT a card — `AgentInboxCardView` is what says "this is an agent",
+/// and a heading that took the card's fill would read as a row you can act on and
+/// would take the selection outline it can never have. The words sit straight on the
+/// list, in `textSecondary` at `.label`, which is the same weight the row metadata
+/// this heading sits between is drawn at.
+///
+/// The triangle is `InboxDisclosureButton`, the control P2D.4 already built for
+/// folding a group: the gesture is the same gesture, so it is the same control and
+/// the same token, rather than a second chevron this view could theme differently.
+/// The whole line is clickable for the same reason a group header usually is — a
+/// 9pt triangle is a small target in a 320pt sidebar — through a second borderless
+/// button behind the text rather than a `mouseDown` override, so the heading answers
+/// the accessibility system as the control it is.
+@MainActor
+final class AgentInboxShelfHeaderView: NSTableCellView, TokenThemed {
+    private let disclosureButton = InboxDisclosureButton()
+    private let label = NSTextField(labelWithString: "")
+    private let hitButton = NSButton(frame: .zero)
+    private var count = 0
+    var onToggle: (() -> Void)?
+
+    /// What the heading says. `(N)` and not "N snoozed": the word is the section and
+    /// the number is what it is holding, which is the order a scanning eye wants them
+    /// in — and it stays one short line at sidebar width however large N gets.
+    static func title(count: Int) -> String { "Snoozed (\(count))" }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+
+        disclosureButton.target = self
+        disclosureButton.action = #selector(toggleClicked)
+
+        label.font = .token(.label)
+        label.lineBreakMode = .byTruncatingTail
+
+        hitButton.isBordered = false
+        hitButton.title = ""
+        hitButton.target = self
+        hitButton.action = #selector(toggleClicked)
+        hitButton.setAccessibilityRole(.button)
+        hitButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(hitButton)
+
+        let line = NSStackView(views: [disclosureButton, label])
+        line.orientation = .horizontal
+        line.alignment = .firstBaseline
+        line.spacing = Space.s
+        line.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(line)
+
+        NSLayoutConstraint.activate([
+            hitButton.leadingAnchor.constraint(equalTo: leadingAnchor),
+            hitButton.trailingAnchor.constraint(equalTo: trailingAnchor),
+            hitButton.topAnchor.constraint(equalTo: topAnchor),
+            hitButton.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            line.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Inset.row.left),
+            line.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Inset.row.right),
+            // Centred rather than pinned top-and-bottom, for the reason
+            // `AgentInboxSlimCellView` records: one line in a fixed-height row, and a
+            // centre constraint cannot leave the height ambiguous.
+            line.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { return nil }
+
+    func apply(count: Int, isExpanded: Bool) {
+        self.count = count
+        label.stringValue = AgentInboxShelfHeaderView.title(count: count)
+        disclosureButton.show(isExpanded ? .expanded : .collapsed)
+        hitButton.setAccessibilityLabel(
+            "\(isExpanded ? "Collapse" : "Expand") \(label.stringValue)")
+        applyTokens()
+    }
+
+    /// `textSecondary`: a heading is chrome, and P3.2 holds this list to three
+    /// colours that all mean status. A snoozed section is not a status.
+    func applyTokens() {
+        label.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        disclosureButton.applyTokens()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
+    }
+
+    @objc private func toggleClicked() { onToggle?() }
+
+    /// Through the triangle's own target/action, so a check drives the wiring.
+    @discardableResult
+    func clickDisclosureForQA() -> Bool {
+        disclosureButton.performClick(nil)
+        return true
+    }
+
+    var qaTitle: String { label.stringValue }
+    var qaDisclosureGlyph: String { disclosureButton.qaGlyph }
 }
 
 // Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md

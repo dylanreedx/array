@@ -21298,6 +21298,87 @@ extension AppDelegate {
     parkedWindow.contentView = parked
     parked.layoutForQA()
 
+    // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
+    //
+    // THE SHELF, ON THE RENDERED LIST, BEFORE P3.7'S ASSERTIONS OPEN IT. This is the
+    // state the list is in when you launch: the snoozed agents are off the list and
+    // the only thing left of them is a counted heading. The pure split is gated in
+    // `InboxSortChecks`; what is asserted here is that the TABLE draws it — the
+    // heading exists, says what it is holding, and sits between the active block and
+    // the settled tail rather than at either end.
+    let shelfIds = parkedSorted.filter {
+        if case .snoozed = $0.lifecycle { return true } else { return false }
+    }.map(\.id)
+    try expect(!shelfIds.isEmpty, "the parked fixture must hold a snoozed row for the shelf to be about")
+    try expect(parked.rowIdsForQA == parkedSorted.map(\.id).filter { !shelfIds.contains($0) },
+               "a collapsed shelf takes its rows off the list and leaves the rest alone — got \(parked.rowCountForQA) rows of \(parkedSorted.count)")
+    try expect(parked.shelfHeaderTitleForQA == AgentInboxShelfHeaderView.title(count: shelfIds.count),
+               "the heading says what it is holding — got '\(parked.shelfHeaderTitleForQA ?? "<none>")'")
+    try expect(parked.shelfHeaderDisclosureForQA == RowDisclosure.collapsed.glyph,
+               "…with the triangle pointing at a closed section — got '\(parked.shelfHeaderDisclosureForQA ?? "<none>")'")
+    try expect(!parked.isShelfExpandedForQA, "the shelf is collapsed by default (the packet's word)")
+    // BETWEEN THE TWO BLOCKS, measured off the table's own row indexes: the heading's
+    // row must be after every active row and before every settled one.
+    let settledIds = Set(parkedSorted.filter {
+        if case .settled = $0.lifecycle { return true } else { return false }
+    }.map(\.id))
+    let headerRow = parked.shelfHeaderTableRowForQA
+    try expect(headerRow == parked.rowIdsForQA.filter { !settledIds.contains($0) }.count,
+               "the heading sits between the active block and the settled tail — row \(String(describing: headerRow)) of \(parked.rowCountForQA + 1)")
+    // A heading is one line, the same room a row it is holding would have taken.
+    try expect(abs((parked.shelfHeaderHeightForQA ?? 0) - AgentInboxView.slimRowHeight) < 0.5,
+               "the heading is one slim line — laid out at \(String(describing: parked.shelfHeaderHeightForQA))pt")
+    // NOT A ROW YOU CAN ACT ON. Asked of the delegate method AppKit consults, since
+    // a programmatic `selectRowIndexes` does not consult it: exactly one table row
+    // refuses selection, and it is the heading's.
+    let selectable = parked.selectableTableRowsForQA
+    try expect(selectable.indices.filter { !selectable[$0] } == [headerRow],
+               "the heading is the one row that refuses selection — refusing rows \(selectable.indices.filter { !selectable[$0] }), heading at \(String(describing: headerRow))")
+    // …and selecting every agent really does leave it out of the selection.
+    _ = parked.selectRowsForQA(ids: parked.rowIdsForQA)
+    try expect(parked.selectedRowCountForQA == parked.rowCountForQA
+                && !parked.selectedRowIdsForQA.isEmpty,
+               "selecting every agent selects no heading — \(parked.selectedRowCountForQA) selected of \(parked.rowCountForQA) rows")
+
+    // THE TWO INDEX SPACES, ON A ROW WHERE THEY DIFFER. The settled tail is drawn
+    // BELOW the heading, so a tail row's table row is one higher than its agent
+    // index — which is the whole risk this ticket carries, and every gesture below
+    // goes through the table row and back the way `clickedRow` does. Without the
+    // conversion each of these lands on the row above. (The gap was raised in
+    // cross-review.)
+    let belowHeader = parkedSorted.last { settledIds.contains($0.id) }!
+    let belowIndex = parked.rowIdsForQA.firstIndex(of: belowHeader.id)!
+    try expect(headerRow.map { belowIndex < $0 } == false,
+               "setup: the row under test must be below the heading — agent index \(belowIndex), heading at \(String(describing: headerRow))")
+    var revealedBelow: [UUID] = []
+    parked.onRevealRow = { revealedBelow.append($0) }
+    try expect(parked.clickRowForQA(id: belowHeader.id) && revealedBelow == [belowHeader.id],
+               "a click below the heading reveals its own agent — got \(revealedBelow)")
+    try expect(parked.selectedRowIdsForQA == [belowHeader.id],
+               "…and selects its own row — got \(parked.selectedRowIdsForQA.count) row(s)")
+    try expect(parked.openRowMenuForQA(clickedRowId: belowHeader.id)
+                && !parked.rowMenuTitlesForQA.isEmpty,
+               "…a right-click below the heading builds a menu")
+    try expect(parked.hoverRowForQA(id: belowHeader.id), "…and it is hoverable")
+    parked.layoutForQA()
+    try expect(parked.doubleClickRowForQA(id: belowHeader.id, onTitle: true)
+                && parked.renamingRowIdForQA == belowHeader.id,
+               "…and a double-click on its name renames IT — got \(String(describing: parked.renamingRowIdForQA))")
+    _ = parked.pressKeyInRenameForQA(#selector(NSResponder.cancelOperation(_:)))
+    _ = parked.hoverRowForQA(id: nil)
+    parked.onRevealRow = nil
+
+    // …AND OPENING IT BRINGS THEM BACK, through the heading's own control. Everything
+    // P3.7 asserts below runs against the OPEN shelf, because the collapsed rows are
+    // the ones this section is about — a check that measured only what a fold leaves
+    // on screen would stop covering the slim variant entirely.
+    try expect(parked.clickShelfDisclosureForQA(), "the heading's triangle must be clickable")
+    parked.layoutForQA()
+    try expect(parked.isShelfExpandedForQA && parked.rowIdsForQA == parkedSorted.map(\.id),
+               "opening the shelf restores every row in the frozen order — got \(parked.rowCountForQA) of \(parkedSorted.count)")
+    try expect(parked.shelfHeaderDisclosureForQA == RowDisclosure.expanded.glyph,
+               "…and the triangle turns — got '\(parked.shelfHeaderDisclosureForQA ?? "<none>")'")
+
     for (index, row) in parkedSorted.enumerated() {
         // THE RULE, checked on the rendered row and not on the model: the variant
         // follows the LIFECYCLE, the cell class the list built matches it, and the

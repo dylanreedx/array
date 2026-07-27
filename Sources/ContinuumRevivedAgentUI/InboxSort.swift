@@ -266,4 +266,116 @@ public enum InboxSort {
         }
         return rollups
     }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
+
+    /// Which of the list's three sections a row belongs to — the same three blocks
+    /// `sortForInbox` already orders by, named so a view can draw a header between
+    /// them.
+    ///
+    /// READ OFF `lifecycle` AND NOTHING ELSE. That is the packet's watch-out
+    /// discharged structurally: a snoozed agent holding a pending approval has
+    /// already been resolved `.active` by `InboxLifecycle.resolve`'s step 1 (a
+    /// blocker outranks the shelf), and P4.6's raised hand withholds the wake-up date
+    /// so the same rung answers. If this looked at `state` or at a pending request it
+    /// would be a SECOND precedence order, free to disagree with the one that is
+    /// proved.
+    public enum InboxSection: String, CaseIterable, Sendable {
+        /// Everything you have not parked — the block the list opens with.
+        case active
+        /// The shelf: parked, coming back, and collapsed behind a counted header.
+        case snoozed
+        /// The tail: work that is over.
+        case settled
+    }
+
+    /// The section this lifecycle draws in at `now`.
+    ///
+    /// `now` is here for ONE case, and it is the packet's "a woken agent must not
+    /// stay hidden behind a collapsed header": a row whose `snoozedUntil` has passed
+    /// since it was built is not on the shelf any more, and returning it to the
+    /// shelf until the next push would hide an agent whose snooze is over. The
+    /// boundary is `>`, the same one `InboxLifecycle.resolve` and
+    /// `raisedHandWhileSnoozed` use, so "snoozed" means one thing across the app.
+    ///
+    /// The other wake — a hand raised while the snooze still holds — never reaches
+    /// here as `.snoozed` at all: `snoozeHonoured` withholds the date, `resolve`
+    /// answers `.active`, and the row arrives in this function already active.
+    ///
+    /// `.archived` is active for the same reason `sortForInbox` leaves it in the live
+    /// block: an archived row has left the list before anything draws it (P4.1), so
+    /// the honest answer is the one that does not invent a section for it.
+    public static func section(for lifecycle: InboxLifecycle, now: Date) -> InboxSection {
+        switch lifecycle {
+        case .snoozed(let until): return until > now ? .snoozed : .active
+        case .settled: return .settled
+        case .active, .archived: return .active
+        }
+    }
+
+    /// The list split into its three sections, IN ORDER within each — active, then
+    /// the shelf, then the settled tail.
+    ///
+    /// EXHAUSTIVE AND DISJOINT by construction: every row is appended to exactly one
+    /// of the three, so `active + snoozed + settled` is a permutation of `rows` and
+    /// the view can concatenate the parts it is showing without a second sort.
+    /// Concatenation is also what makes the sections CONTIGUOUS even when `now` has
+    /// moved a row out of the shelf — `sortForInbox` would still have that row in the
+    /// middle block, and a view that partitioned in place would draw it below the
+    /// header it no longer belongs under.
+    ///
+    /// Order-preserving, so the caller supplies the order: hand it a list from
+    /// `sortForInbox` and each section keeps the frozen order (P3.4) and the nesting
+    /// (P2D.4) it arrived with.
+    ///
+    /// Pure and in this module, so the phone can reuse the split and so "which
+    /// section is this row in" has one answer.
+    public static func partition(rows: [AgentInboxRow], now: Date) -> InboxPartition {
+        var parts = InboxPartition()
+        for row in rows {
+            switch section(for: row.lifecycle, now: now) {
+            case .active: parts.active.append(row)
+            case .snoozed: parts.snoozed.append(row)
+            case .settled: parts.settled.append(row)
+            }
+        }
+        return parts
+    }
+}
+
+// Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
+
+/// The three sections of the inbox, as values — the split `AgentInboxView` draws a
+/// `Snoozed (N)` header into, and the shape a pure check can assert exhaustiveness
+/// and disjointness on without a view.
+public struct InboxPartition: Equatable, Sendable {
+    public var active: [AgentInboxRow]
+    public var snoozed: [AgentInboxRow]
+    public var settled: [AgentInboxRow]
+
+    public init(
+        active: [AgentInboxRow] = [],
+        snoozed: [AgentInboxRow] = [],
+        settled: [AgentInboxRow] = []
+    ) {
+        self.active = active
+        self.snoozed = snoozed
+        self.settled = settled
+    }
+
+    /// Everything, in the order the list draws it with the shelf OPEN. The header
+    /// itself is the view's, not this type's — a count is a fact about the shelf, a
+    /// header is a row on a screen.
+    public var all: [AgentInboxRow] { active + snoozed + settled }
+
+    /// The rows on screen with the shelf in this state — the one place "collapsed
+    /// hides the shelf and nothing else" is written down.
+    public func visible(shelfExpanded: Bool) -> [AgentInboxRow] {
+        shelfExpanded ? all : active + settled
+    }
+
+    /// What the header says it is holding. The count is of the SHELF, never of what
+    /// is on screen, which is the whole point of a collapsed section: "deferred work
+    /// is visible as a count without occupying the list".
+    public var shelfCount: Int { snoozed.count }
 }

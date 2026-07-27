@@ -44,6 +44,12 @@ import Foundation
 //      with `parentIds(in:)` about which rows have a group at all, counts a
 //      grandchild in its grandparent's tally, counts nobody twice, and is derived
 //      fresh from the list rather than stored on a row.
+//
+// Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
+//  10. THE LIST HAS THREE SECTIONS — `partition(rows:now:)` is exhaustive and
+//      disjoint, keeps each section's order, counts the shelf by its own contents,
+//      and puts a woken agent back in `active` where a collapsed header cannot
+//      hide it.
 
 func runInboxSortChecks() {
     runInboxFrozenUnderActivityCheck()
@@ -55,7 +61,8 @@ func runInboxSortChecks() {
     runInboxDepthCheck()
     runInboxCollapseCheck()
     runInboxRollupCheck()
-    print("InboxSort checks: frozen under activity (200 trials, status-sorted witness fails), parent/child nesting, lifecycle relocation, history by end time, tie determinism, cycle termination, depth assignment (orphan promoted, chain capped at \(AgentInboxRow.maxDepth)), subtree collapse and transitive child rollup passed")
+    runInboxPartitionCheck()
+    print("InboxSort checks: frozen under activity (200 trials, status-sorted witness fails), parent/child nesting, lifecycle relocation, history by end time, tie determinism, cycle termination, depth assignment (orphan promoted, chain capped at \(AgentInboxRow.maxDepth)), subtree collapse, transitive child rollup and the three-section partition (exhaustive, disjoint, woken rejoins active) passed")
 }
 
 // MARK: - Fixture
@@ -686,4 +693,110 @@ private func runInboxRollupCheck() {
            "no rollup may count more descendants than there are other rows — got \(cycleRollups)")
     expect(cycleRollups.values.allSatisfy { $0.children == $0.working + $0.needsYou + $0.failed },
            "every descendant of a cycle is accounted for exactly once — got \(cycleRollups)")
+}
+
+// MARK: - 10 · the three sections and the shelf
+//
+// Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
+//
+// THE PACKET'S THREE VERIFICATIONS, in order: the partition is exhaustive and
+// disjoint; a woken agent lands in `active` and not on the shelf (the named
+// witness); and the count the header shows is the shelf's own contents.
+//
+// Plus the watch-out, which is the one that could hide an approval: a snoozed
+// agent with a pending request must not be shelved. It is asserted THROUGH
+// `InboxLifecycle.resolve` rather than by handing this function a `.snoozed` row
+// and hoping — the packet says the partition must RESPECT P4.2's precedence
+// rather than re-decide it, so the check drives the real precedence and then
+// partitions what it produced.
+private func runInboxPartitionCheck() {
+    let now = sortEpoch.addingTimeInterval(10_000)
+    let shelfDate = now.addingTimeInterval(3_600)
+    let rows = InboxSort.sortForInbox(rows: [
+        sortRow(rowOne, spawnedAfter: 500, state: .working),
+        sortRow(rowTwo, spawnedAfter: 400, lifecycle: .snoozed(until: shelfDate)),
+        sortRow(rowThree, spawnedAfter: 300, lifecycle: .settled(at: now.addingTimeInterval(-600))),
+        sortRow(rowFour, spawnedAfter: 200, state: .approval),
+        // Deliberately a much later wake-up than `rowTwo`'s: the expiry case below
+        // moves the clock past one snooze and not the other, so "the shelf emptied"
+        // and "this row woke" are two different failures.
+        sortRow(rowFive, spawnedAfter: 100, lifecycle: .snoozed(until: shelfDate.addingTimeInterval(7_200))),
+    ])
+    let parts = InboxSort.partition(rows: rows, now: now)
+
+    // 1 · EXHAUSTIVE AND DISJOINT, asserted as the two halves they are: every row
+    // is somewhere, and no row is in two places. `all` being a permutation is the
+    // conjunction, and it is checked as a SEQUENCE so the section order is pinned
+    // too — active, then the shelf, then the tail.
+    let sectioned = parts.active + parts.snoozed + parts.settled
+    expect(Set(sectioned.map(\.id)) == Set(rows.map(\.id)),
+           "every row lands in a section — \(sectioned.count) of \(rows.count)")
+    expect(sectioned.count == rows.count && Set(sectioned.map(\.id)).count == sectioned.count,
+           "no row lands in two sections — \(sectioned.count) placements for \(Set(sectioned.map(\.id)).count) rows")
+    expect(parts.all.map(\.id) == [rowOne, rowFour, rowTwo, rowFive, rowThree],
+           "the sections draw active, then the shelf, then the tail — got \(parts.all.map { $0.title.suffix(2) })")
+    // …and each section keeps the order it was handed, so the frozen order (P3.4)
+    // survives the split rather than being re-sorted by it.
+    expect(parts.active.map(\.id) == rows.filter { parts.active.contains($0) }.map(\.id)
+           && parts.snoozed.map(\.id) == [rowTwo, rowFive],
+           "a section preserves the order it arrived in — got \(parts.snoozed.map { $0.title.suffix(2) })")
+
+    // 2 · THE COUNT IS THE SHELF'S CONTENTS, and it is what the header would show
+    // whether or not the shelf is open — a collapsed section reports what it is
+    // holding, not what is on screen.
+    expect(parts.shelfCount == 2 && parts.shelfCount == parts.snoozed.count,
+           "the shelf count is its own contents — \(parts.shelfCount) against \(parts.snoozed.count)")
+    expect(parts.visible(shelfExpanded: false).map(\.id) == [rowOne, rowFour, rowThree],
+           "a collapsed shelf takes its rows off the list and nothing else — got \(parts.visible(shelfExpanded: false).map { $0.title.suffix(2) })")
+    expect(parts.visible(shelfExpanded: true).map(\.id) == parts.all.map(\.id),
+           "…and an open one shows every row, in the same order")
+    expect(parts.visible(shelfExpanded: false).count + parts.shelfCount == rows.count,
+           "what is hidden plus what is shown is the whole list")
+
+    // 3 · A WOKEN AGENT IS IN `active`, NOT ON THE SHELF. Two wakes, because there
+    // are two: the snooze that ran out, and P4.6's raised hand while it had not.
+    let expired = InboxSort.partition(
+        rows: rows, now: shelfDate.addingTimeInterval(120))
+    expect(expired.snoozed.map(\.id) == [rowFive],
+           "a snooze whose moment has passed leaves the shelf — got \(expired.snoozed.map { $0.title.suffix(2) })")
+    expect(expired.active.map(\.id).contains(rowTwo),
+           "…and rejoins the active block, where a collapsed header cannot hide it")
+    expect(!expired.visible(shelfExpanded: false).isEmpty
+           && expired.visible(shelfExpanded: false).map(\.id).contains(rowTwo),
+           "THE PACKET'S WITNESS: a woken agent is on screen with the shelf still folded")
+
+    // The raised hand, driven through the real precedence rather than asserted
+    // here: `snoozeHonoured` withholds the date, `resolve` answers `.active`, and
+    // the row reaches the partition already out of the shelf.
+    let handFacts = SnoozedAgentFacts(
+        snoozedUntil: shelfDate, snoozedAt: now.addingTimeInterval(-60), pending: .approval)
+    let handLifecycle = InboxLifecycle.resolve(
+        override: .neutral,
+        blockers: LifecycleBlockers.forPending(handFacts.pending),
+        snoozedUntil: InboxLifecycle.snoozeHonoured(record: handFacts, now: now),
+        now: now)
+    expect(handLifecycle == .active,
+           "P4.6's raised hand resolves active before the partition sees it — got \(handLifecycle)")
+    expect(InboxSort.section(for: handLifecycle, now: now) == .active,
+           "…so the shelf never gets the chance to hide an agent that is waiting on you")
+    // The negative half, which is what makes the line above mean something: the
+    // SAME snooze with nothing pending really does shelve.
+    let quietLifecycle = InboxLifecycle.resolve(
+        override: .neutral,
+        snoozedUntil: InboxLifecycle.snoozeHonoured(
+            record: SnoozedAgentFacts(snoozedUntil: shelfDate, snoozedAt: now.addingTimeInterval(-60)),
+            now: now),
+        now: now)
+    expect(quietLifecycle == .snoozed(until: shelfDate)
+           && InboxSort.section(for: quietLifecycle, now: now) == .snoozed,
+           "a snooze with nothing waiting on you does shelve — got \(quietLifecycle)")
+
+    // TOTAL over the vocabulary: every lifecycle answers exactly one section, so a
+    // fifth case cannot fall through the view's `switch` into the wrong block.
+    expect(InboxSort.section(for: .archived, now: now) == .active,
+           "an archived row is not a section of its own — it has left the list")
+    expect(InboxSort.section(for: .snoozed(until: now), now: now) == .active,
+           "the shelf boundary is `>`, the same one `resolve` uses")
+    expect(InboxSort.partition(rows: [], now: now) == InboxPartition(),
+           "no rows, no sections")
 }
