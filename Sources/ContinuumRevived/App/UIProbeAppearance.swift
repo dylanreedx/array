@@ -640,7 +640,15 @@ enum UIProbeAppearance {
         // `SurfaceToken.overlay` fill with a `LineToken.border` outline. It paints only
         // while two or more rows are selected, so what puts it under this gate is the
         // `chrome.agentInbox.bulk` Lab card.
-        "InboxBulkActionBar"
+        "InboxBulkActionBar",
+        // P4.11. The undo toast, the third card in that same family and the same pair:
+        // `SurfaceToken.overlay` fill with a `LineToken.border` outline. It is HIDDEN in
+        // every probed surface — an action cannot be performed inside a static render —
+        // and it still reaches this gate, because the walk reads the layer colours a
+        // view painted in `init` whether or not it is on screen. So the fill and the
+        // outline are held to the palette from the first frame; the WORDS on it are
+        // covered by section K of `--agent-inbox-check` rather than by a pixel.
+        "InboxUndoToast"
     ]
 
     /// Still painting literals, each with the ticket that retires them.

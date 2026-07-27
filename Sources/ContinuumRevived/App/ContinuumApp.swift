@@ -24187,8 +24187,342 @@ extension AppDelegate {
     try expect(advanceOnly.selectedRowIdsForQA.isEmpty,
                "with nothing before it and nothing after it the cursor lands nowhere — got \(advanceOnly.selectedRowIdsForQA)")
     advanceHostScript = nil
+
+    // MARK: K · every lifecycle action is reversible, right there (P4.11)
+
+    // THE VERB TABLE FIRST, and totally: which actions may raise a toast at all. The
+    // six that move the four stored lifecycle facts, which is a DIFFERENT set from
+    // P4.10's four — the two un-doings move the same fields and a mis-aimed one is
+    // exactly as annoying to find, while read-state, a rename and a stop move none of
+    // them and a toast for those would be the notification channel the packet forbids.
+    let undoableRowActions = InboxRowAction.allCases.filter { $0.undoVerb != nil }
+    try expect(undoableRowActions == [.settle, .unsettle, .snooze, .wake, .archive, .delete],
+               "only the verbs that move a stored lifecycle fact may raise a toast — got \(undoableRowActions.map(\.baseTitle))")
+    let undoableBulkActions = InboxBulkAction.allCases.filter { $0.undoVerb != nil }
+    try expect(undoableBulkActions == [.settle, .snooze, .archive, .delete],
+               "…and the bar's half says the same over its own five — got \(undoableBulkActions.map(\.title))")
+
+    // THE HOST'S RECORDS, modelled as the four fields and nothing else: this section is
+    // about whether what was captured comes back byte for byte, and `AgentRecord` in a
+    // real store would put a hundred other fields between the question and the answer.
+    // The reader and the writer are the two seams production wires
+    // (`lifecycleFacts` / `onUndoLifecycle`), driven here the way `AgentSupervisor`
+    // would drive them.
+    var undoStore: [UUID: InboxLifecycleSnapshot] = [:]
+    var undoRestores: [[UUID: InboxLifecycleSnapshot]] = []
+    var undoWindows: [NSWindow] = []
+    /// What the host does while the action runs — the same closure-shaped seam section J
+    /// records, because production performs and re-pushes INSIDE the callback.
+    var undoHostScript: (([UUID]) -> Void)?
+    func makeUndoView(rows: [AgentInboxRow], wireUndo: Bool = true) -> AgentInboxView {
+        let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+        view.clock = { LabFixtures.inboxNow }
+        if wireUndo {
+            view.lifecycleFacts = { undoStore[$0] }
+            view.onUndoLifecycle = { restoring in
+                undoRestores.append(restoring)
+                for (id, facts) in restoring { undoStore[id] = facts }
+            }
+        }
+        view.onRowAction = { _, ids in undoHostScript?(ids) }
+        view.onBulkAction = { _, ids in undoHostScript?(ids) }
+        view.wiredRowActions = Set(InboxRowAction.allCases)
+        view.wiredBulkActions = Set(InboxBulkAction.allCases)
+        view.reload(rows: rows)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = view
+        undoWindows.append(window)
+        view.layoutForQA()
+        return view
+    }
+    /// 18:00 local on the fixture's own day, built from calendar components rather than
+    /// by adding seconds — so the expected wording below is the packet's literal
+    /// "until 18:00" and not the formatter's own output compared against itself.
+    guard let undoWakeAt = Calendar.current.date(
+        bySettingHour: 18, minute: 0, second: 0, of: LabFixtures.inboxNow)
+    else { throw CheckError.failed("setup: the fixture day has no 18:00") }
+    let undoSnoozedAt = LabFixtures.inboxNow.addingTimeInterval(-30)
+    /// The host's snooze: both dates written, the override left exactly as it was.
+    func hostSnoozes(_ ids: [UUID]) {
+        for id in ids {
+            guard var facts = undoStore[id] else { continue }
+            facts.snoozedUntil = undoWakeAt
+            facts.snoozedAt = undoSnoozedAt
+            undoStore[id] = facts
+        }
+    }
+
+    // K1 · SNOOZE → UNDO PUTS BACK WHAT WAS THERE, and the agent was `.active`-PINNED.
+    // The packet's witness, and the reason the four values are CAPTURED rather than
+    // reconstructed: "undo a snooze" looks like "clear the two dates and go neutral"
+    // until the person had pinned this row keep-active, at which point reconstructing
+    // throws that decision away and the next inactivity sweep (P4.3) buries the row.
+    let undoPinned = try advanceRow(1)
+    undoStore = [undoPinned.id: InboxLifecycleSnapshot(settledOverride: .active)]
+    let undoCapturedPin = undoStore[undoPinned.id]
+    let undoOne = makeUndoView(rows: advanceFixture)
+    undoHostScript = { ids in
+        hostSnoozes(ids)
+        undoOne.apply(
+            rows: advanceFixture.map {
+                ids.contains($0.id) ? lifecycled($0, .snoozed(until: undoWakeAt)) : $0
+            },
+            changed: .empty)
+    }
+    try expect(undoOne.openRowMenuForQA(clickedRowId: undoPinned.id), "the menu must open over the pinned row")
+    try expect(undoOne.pickRowMenuItemForQA(.snooze),
+               "Snooze must be live — got \(undoOne.rowMenuTitlesForQA) / \(undoOne.rowMenuEnabledForQA)")
+    undoOne.layoutForQA()
+    try expect(undoStore[undoPinned.id]?.snoozedUntil == undoWakeAt,
+               "setup: the host must really have snoozed the agent, or there is nothing to undo")
+    try expect(undoOne.undoToastTextForQA == "Snoozed until 18:00 · Undo",
+               "the toast says what happened and offers the way back — got '\(undoOne.undoToastTextForQA)'")
+    try expect(undoOne.pendingUndoForQA == [undoPinned.id: undoCapturedPin!],
+               "…holding the values as they were BEFORE the action — got \(String(describing: undoOne.pendingUndoForQA))")
+    try expect(undoOne.clickUndoForQA(), "Undo must be pressable")
+    try expect(undoStore[undoPinned.id] == undoCapturedPin,
+               "all four fields come back exactly — got \(String(describing: undoStore[undoPinned.id]))")
+    try expect(undoStore[undoPinned.id]?.settledOverride == .active,
+               "…including the keep-active PIN, which a reconstructed undo would have flattened to neutral")
+    try expect(undoOne.undoToastTextForQA.isEmpty && undoOne.pendingUndoForQA == nil,
+               "…and the toast comes down with the press — got '\(undoOne.undoToastTextForQA)'")
+    try expect(!undoOne.clickUndoForQA(),
+               "a second press does nothing: the restore is spent, and re-applying it would put back facts the first press already restored")
+    try expect(undoRestores.count == 1,
+               "…so the host was asked exactly once — got \(undoRestores.count)")
+
+    // K2 · A BULK ACTION UNDOES AS ONE UNIT, over three agents in three different prior
+    // states — neutral, pinned, and ALREADY SETTLED. The last is the packet's watch-out:
+    // undoing a snooze must not un-settle something that was settled before it.
+    let undoNeutralRow = try advanceRow(1)
+    let undoPinnedRow = try advanceRow(3)
+    let undoSettledRow = try advanceRow(4)
+    let undoSettledOn = LabFixtures.inboxNow.addingTimeInterval(-3_600)
+    let undoTrio = [undoNeutralRow.id, undoPinnedRow.id, undoSettledRow.id]
+    undoStore = [
+        undoNeutralRow.id: InboxLifecycleSnapshot(),
+        undoPinnedRow.id: InboxLifecycleSnapshot(settledOverride: .active),
+        undoSettledRow.id: InboxLifecycleSnapshot(settledOverride: .settled, settledAt: undoSettledOn),
+    ]
+    let undoCapturedTrio = undoStore
+    let undoBulk = makeUndoView(rows: advanceFixture)
+    try expect(undoBulk.selectRowsForQA(ids: undoTrio), "three rows must be selectable together")
+    undoBulk.layoutForQA()
+    undoHostScript = { ids in
+        hostSnoozes(ids)
+        undoBulk.apply(
+            rows: advanceFixture.map {
+                ids.contains($0.id) ? lifecycled($0, .snoozed(until: undoWakeAt)) : $0
+            },
+            changed: .empty)
+    }
+    try expect(undoBulk.pickBulkActionForQA(.snooze),
+               "Snooze must be offered to the three — got \(undoBulk.bulkActionTitlesForQA)")
+    undoBulk.layoutForQA()
+    try expect(undoBulk.undoToastTextForQA == "Snoozed 3 until 18:00 · Undo",
+               "a bulk action reports its count — got '\(undoBulk.undoToastTextForQA)'")
+    try expect(undoBulk.pendingUndoForQA == undoCapturedTrio,
+               "…and holds all three captures, not the first — got \(String(describing: undoBulk.pendingUndoForQA?.count))")
+    try expect(undoBulk.clickUndoForQA(), "Undo must be pressable")
+    try expect(undoRestores.last?.count == 3,
+               "the whole set is restored in ONE call — got \(String(describing: undoRestores.last?.count))")
+    for (id, captured) in undoCapturedTrio {
+        try expect(undoStore[id] == captured,
+                   "every agent in the bulk comes back exactly — \(id) is \(String(describing: undoStore[id]))")
+    }
+    try expect(undoStore[undoSettledRow.id]?.settledOverride == .settled
+                && undoStore[undoSettledRow.id]?.settledAt == undoSettledOn,
+               "…and an agent that was ALREADY SETTLED before the snooze is settled again, with its own date — got \(String(describing: undoStore[undoSettledRow.id]))")
+    try expect(undoStore[undoSettledRow.id]?.snoozedUntil == nil,
+               "…with the snooze this action added taken back off it")
+
+    // K3 · AN ACTION THAT CHANGED NOTHING RAISES NO TOAST. The host refused (a cancelled
+    // Delete is the shipped case), so there is nothing to undo — and a toast with nothing
+    // behind it is the notification channel the packet's watch-out forbids.
+    undoStore = [undoNeutralRow.id: InboxLifecycleSnapshot()]
+    let undoRefused = makeUndoView(rows: advanceFixture)
+    undoHostScript = { _ in undoRefused.apply(rows: advanceFixture, changed: .empty) }
+    try expect(undoRefused.openRowMenuForQA(clickedRowId: undoNeutralRow.id), "the menu must open")
+    try expect(undoRefused.pickRowMenuItemForQA(.snooze), "Snooze must be live")
+    undoRefused.layoutForQA()
+    try expect(undoRefused.undoToastTextForQA.isEmpty && undoRefused.pendingUndoForQA == nil,
+               "a refused action leaves the toast down — got '\(undoRefused.undoToastTextForQA)'")
+
+    // K4 · ARCHIVE RAISES NO TOAST ON THIS APP, and the reason is measured rather than
+    // hardcoded: `AgentSupervisor.archive` takes the record OFF DISK, so the reader can
+    // no longer see the agent and four lifecycle fields cannot put a deleted record
+    // back. The verb exists (K's table above); reversibility is what withholds the card.
+    // The ROW is the ready one: P3.11's rule refuses Archive to a working agent, and
+    // `undoNeutralRow` is mid-turn.
+    undoStore = [undoSettledRow.id: InboxLifecycleSnapshot()]
+    let undoArchive = makeUndoView(rows: advanceFixture)
+    undoHostScript = { ids in
+        for id in ids { undoStore[id] = nil }
+        undoArchive.apply(rows: advanceFixture.filter { !ids.contains($0.id) }, changed: .empty)
+    }
+    try expect(undoArchive.openRowMenuForQA(clickedRowId: undoSettledRow.id), "the menu must open")
+    try expect(undoArchive.pickRowMenuItemForQA(.archive),
+               "Archive must be live on a row that is not working — got \(undoArchive.rowMenuTitlesForQA)")
+    undoArchive.layoutForQA()
+    try expect(undoStore[undoSettledRow.id] == nil,
+               "setup: the archive must really have taken the record away")
+    try expect(undoArchive.undoToastTextForQA.isEmpty && undoArchive.pendingUndoForQA == nil,
+               "an action whose record is gone offers no Undo rather than one that half-works — got '\(undoArchive.undoToastTextForQA)'")
+
+    // K5 · AN ACTION WITH NO VERB RAISES NOTHING even when facts move underneath it —
+    // the table at the top of this section is a gate, not a comment.
+    undoStore = [undoNeutralRow.id: InboxLifecycleSnapshot()]
+    let undoMark = makeUndoView(rows: advanceFixture)
+    undoHostScript = { ids in
+        hostSnoozes(ids)
+        undoMark.apply(rows: advanceFixture, changed: .empty)
+    }
+    try expect(undoMark.openRowMenuForQA(clickedRowId: undoNeutralRow.id), "the menu must open")
+    try expect(undoMark.pickRowMenuItemForQA(.markUnread), "Mark Unread must be live on a read row")
+    undoMark.layoutForQA()
+    try expect(undoStore[undoNeutralRow.id]?.snoozedUntil == undoWakeAt,
+               "setup: the facts must really have moved, or this proves nothing about the verb")
+    try expect(undoMark.undoToastTextForQA.isEmpty,
+               "read-state is not a lifecycle fact, so it raises no toast — got '\(undoMark.undoToastTextForQA)'")
+
+    // K6 · ONE TOAST AT A TIME. The second action replaces the first, and pressing Undo
+    // then restores the SECOND action's capture only — a queue would leave an Undo on
+    // screen for an action two actions ago, whose facts a later action has since moved.
+    undoStore = [
+        undoNeutralRow.id: InboxLifecycleSnapshot(),
+        undoSettledRow.id: InboxLifecycleSnapshot(settledOverride: .active),
+    ]
+    let undoSecondCapture = undoStore[undoSettledRow.id]
+    let undoTwice = makeUndoView(rows: advanceFixture)
+    undoHostScript = { ids in
+        hostSnoozes(ids)
+        undoTwice.apply(
+            rows: advanceFixture.map {
+                undoStore[$0.id]?.snoozedUntil != nil ? lifecycled($0, .snoozed(until: undoWakeAt)) : $0
+            },
+            changed: .empty)
+    }
+    try expect(undoTwice.openRowMenuForQA(clickedRowId: undoNeutralRow.id), "the menu must open")
+    try expect(undoTwice.pickRowMenuItemForQA(.snooze), "Snooze must be live on the first row")
+    undoTwice.layoutForQA()
+    try expect(undoTwice.pendingUndoForQA?.keys.first == undoNeutralRow.id,
+               "setup: the first toast is about the first agent")
+    try expect(undoTwice.openRowMenuForQA(clickedRowId: undoSettledRow.id), "the menu must open again")
+    try expect(undoTwice.pickRowMenuItemForQA(.snooze), "Snooze must be live on the second row")
+    undoTwice.layoutForQA()
+    try expect(undoTwice.pendingUndoForQA == [undoSettledRow.id: undoSecondCapture!],
+               "the second action replaces the first — got \(String(describing: undoTwice.pendingUndoForQA))")
+    try expect(undoTwice.clickUndoForQA(), "Undo must be pressable")
+    try expect(undoRestores.last?.count == 1 && undoStore[undoSettledRow.id] == undoSecondCapture,
+               "…and puts back only what the toast on screen was holding — got \(String(describing: undoRestores.last))")
+    try expect(undoStore[undoNeutralRow.id]?.snoozedUntil == undoWakeAt,
+               "…leaving the first action's snooze exactly where it was")
+
+    // K7 · IT GOES AWAY ON ITS OWN. The real timer, driven at a duration a check can
+    // wait out — and the restore goes with it, so a card that has scrolled out of the
+    // person's attention cannot be pressed a minute later.
+    undoStore = [undoNeutralRow.id: InboxLifecycleSnapshot()]
+    let undoExpiring = makeUndoView(rows: advanceFixture)
+    undoExpiring.undoToastDuration = 0.2
+    undoHostScript = { ids in
+        hostSnoozes(ids)
+        undoExpiring.apply(rows: advanceFixture, changed: .empty)
+    }
+    try expect(undoExpiring.openRowMenuForQA(clickedRowId: undoNeutralRow.id), "the menu must open")
+    try expect(undoExpiring.pickRowMenuItemForQA(.snooze), "Snooze must be live")
+    undoExpiring.layoutForQA()
+    try expect(!undoExpiring.undoToastTextForQA.isEmpty, "setup: the toast must be up before it can expire")
+    let undoExpired = await waitUntil(timeout: 5, pollInterval: 0.05) {
+        undoExpiring.undoToastTextForQA.isEmpty
+    }
+    try expect(undoExpired,
+               "the toast dismisses itself after \(undoExpiring.undoToastDuration)s — got '\(undoExpiring.undoToastTextForQA)'")
+    try expect(undoExpiring.pendingUndoForQA == nil,
+               "…and takes the restore with it, so a stale press cannot fire — got \(String(describing: undoExpiring.pendingUndoForQA))")
+    let undoRestoreCountBeforeStalePress = undoRestores.count
+    try expect(!undoExpiring.clickUndoForQA() && undoRestores.count == undoRestoreCountBeforeStalePress,
+               "…proved: pressing a dismissed toast asks the host for nothing")
+
+    // K8 · NO RESTORE PATH, NO TOAST — which is the shipped sidebar today
+    // (`configureWorkspaceSidebar` wires neither seam), and the same call P3.15 made
+    // for a menu item nothing performs.
+    undoStore = [undoNeutralRow.id: InboxLifecycleSnapshot()]
+    let undoUnwired = makeUndoView(rows: advanceFixture, wireUndo: false)
+    undoHostScript = { ids in
+        hostSnoozes(ids)
+        undoUnwired.apply(rows: advanceFixture, changed: .empty)
+    }
+    try expect(undoUnwired.openRowMenuForQA(clickedRowId: undoNeutralRow.id), "the menu must open")
+    try expect(undoUnwired.pickRowMenuItemForQA(.snooze), "Snooze must be live")
+    undoUnwired.layoutForQA()
+    try expect(undoUnwired.undoToastTextForQA.isEmpty && undoUnwired.pendingUndoForQA == nil,
+               "a host that cannot restore is offered no Undo button — got '\(undoUnwired.undoToastTextForQA)'")
+
+    // K9 · THE TWO CARDS DO NOT OVERLAP. Both float over the bottom of the same list and
+    // both can be up at once: a right-click OUTSIDE the selection acts on the clicked row
+    // (P3.12) while two rows stay selected, so the bar is still up when the toast arrives.
+    undoStore = [undoNeutralRow.id: InboxLifecycleSnapshot()]
+    let undoStacked = makeUndoView(rows: advanceFixture)
+    let undoOtherPair = [try advanceRow(0).id, try advanceRow(2).id]
+    try expect(undoStacked.selectRowsForQA(ids: undoOtherPair),
+               "two other rows must be selectable together")
+    undoStacked.layoutForQA()
+    try expect(undoStacked.isBulkBarVisibleForQA, "setup: two selected rows raise the bar")
+    undoHostScript = { ids in
+        hostSnoozes(ids)
+        undoStacked.apply(rows: advanceFixture, changed: .empty)
+    }
+    try expect(undoStacked.openRowMenuForQA(clickedRowId: undoNeutralRow.id), "the menu must open on a row outside the selection")
+    try expect(undoStacked.pickRowMenuItemForQA(.snooze), "Snooze must be live")
+    undoStacked.layoutForQA()
+    try expect(!undoStacked.undoToastTextForQA.isEmpty, "setup: the toast must be up")
+    try expect(undoStacked.isBulkBarVisibleForQA, "setup: and the bar must still be up beside it")
+    try expect(!undoStacked.undoToastFrameForQA.intersects(undoStacked.bulkBarFrameForQA),
+               "the toast must clear the bulk bar — toast \(undoStacked.undoToastFrameForQA) over bar \(undoStacked.bulkBarFrameForQA)")
+    try expect(undoStacked.undoToastFrameForQA.minY >= undoStacked.bulkBarFrameForQA.maxY,
+               "…by sitting above it, which is the order they arrive in")
+    try expect(undoStacked.bounds.contains(undoStacked.undoToastFrameForQA),
+               "…and the card stays inside the list — toast \(undoStacked.undoToastFrameForQA) in \(undoStacked.bounds)")
+    let undoToastText = undoStacked.undoToastTextForQA
+
+    // K10 · A LIFECYCLE ACTION THAT EARNS NO TOAST STILL TAKES THE OLD ONE DOWN — the
+    // case a replace-on-show rule gets wrong (raised in cross-review). Snooze a row, then
+    // archive it: the second action raises nothing (K4), and a snooze Undo left on screen
+    // would be offering to restore four fields onto a record that no longer exists.
+    // An action that moves no lifecycle fact at all is the other half, and it must NOT
+    // clear the card: the toast is still telling the truth and is still safe to press.
+    undoStore = [undoSettledRow.id: InboxLifecycleSnapshot(), undoNeutralRow.id: InboxLifecycleSnapshot()]
+    let undoStale = makeUndoView(rows: advanceFixture)
+    undoHostScript = { ids in
+        hostSnoozes(ids)
+        undoStale.apply(rows: advanceFixture, changed: .empty)
+    }
+    try expect(undoStale.openRowMenuForQA(clickedRowId: undoSettledRow.id), "the menu must open")
+    try expect(undoStale.pickRowMenuItemForQA(.snooze), "Snooze must be live")
+    undoStale.layoutForQA()
+    try expect(!undoStale.undoToastTextForQA.isEmpty, "setup: the snooze must raise a toast to make stale")
+    try expect(undoStale.openRowMenuForQA(clickedRowId: undoNeutralRow.id), "the menu must open on another row")
+    try expect(undoStale.pickRowMenuItemForQA(.markUnread), "Mark Unread must be live")
+    undoStale.layoutForQA()
+    try expect(!undoStale.undoToastTextForQA.isEmpty,
+               "an action that moves no lifecycle fact leaves the card alone — got '\(undoStale.undoToastTextForQA)'")
+    undoHostScript = { ids in
+        for id in ids { undoStore[id] = nil }
+        undoStale.apply(rows: advanceFixture.filter { !ids.contains($0.id) }, changed: .empty)
+    }
+    try expect(undoStale.openRowMenuForQA(clickedRowId: undoSettledRow.id), "the menu must open again")
+    try expect(undoStale.pickRowMenuItemForQA(.archive), "Archive must be live")
+    undoStale.layoutForQA()
+    try expect(undoStale.undoToastTextForQA.isEmpty && undoStale.pendingUndoForQA == nil,
+               "…but a lifecycle action that earns no toast of its own still retires the stale one — got '\(undoStale.undoToastTextForQA)'")
+
+    undoHostScript = nil
+    undoWindows.removeAll()
+
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows — a headless one, a tiled one and an orchestrator child — with the plain shell filtered out, the terminal-hosted agent listed for every other surface but not here (P3.16, force-included as the focused tile and still not a row), a legacy managed session no AgentRecord claims left out too, the count of the terminal-hosted ones reaching the list's empty state, and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live while Snooze and Wake stay greyed with 'Not available yet.', the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's TILE survives while its respawn is durably suppressed so re-wiring mints nothing (and a prompt in that tile deliberately revives it), a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)'); and a PAGED settled tail (P4.8): \(InboxSort.settledPageSize) of 30 finished agents on screen under a footer reading '\(pagedFooterTitle)', one press bringing the rest and taking the footer away, and the agent open in the focused tile drawn at 27 of 30 where the page would have ended; and READING IS FREE (P4.9): a settled agent opened by a real click keeps its override, its clear reason, its settle date and its stored record, and survives a second open — while a prompt through the tile's own closure un-settles it in memory and on disk; its SECTION is asserted through `InboxLifecycle.resolve` + `InboxSort.partition` over those records and NOT off the shipped row (`AgentInboxRowBuilder` still hardcodes `.active` — the open finding on P4.3), tail \(afterOpening.settled.count) / active \(afterOpening.active.count) while open, still drawn with the page closed because it is the one you have open, and active \(afterPrompt.active.count) after the prompt; and the POST-ACTION ADVANCE (P4.10): \(advancingRowActions.count) of \(InboxRowAction.allCases.count) row verbs move the cursor, settling row 2 of 5 through its own menu lands on the row that was 3 — with an unrelated push landing first, moving nothing and leaving the advance armed for the one that files — settling the last row falls back to the previous one, a pair settled together clears the whole affected set rather than stopping after the first, a one-row list lands on no selection, Mark Unread arms nothing, a refused action leaves the cursor where it was and is spent rather than firing on the next push, an action on a row that is NOT the cursor arms nothing, a cancelled one whose row merely ticked over is not read as completed, a partial completion that left one target unfiled moves nothing, and — the witness — a person who selected another row while the settle was in flight is left exactly there")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows — a headless one, a tiled one and an orchestrator child — with the plain shell filtered out, the terminal-hosted agent listed for every other surface but not here (P3.16, force-included as the focused tile and still not a row), a legacy managed session no AgentRecord claims left out too, the count of the terminal-hosted ones reaching the list's empty state, and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live while Snooze and Wake stay greyed with 'Not available yet.', the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's TILE survives while its respawn is durably suppressed so re-wiring mints nothing (and a prompt in that tile deliberately revives it), a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)'); and a PAGED settled tail (P4.8): \(InboxSort.settledPageSize) of 30 finished agents on screen under a footer reading '\(pagedFooterTitle)', one press bringing the rest and taking the footer away, and the agent open in the focused tile drawn at 27 of 30 where the page would have ended; and READING IS FREE (P4.9): a settled agent opened by a real click keeps its override, its clear reason, its settle date and its stored record, and survives a second open — while a prompt through the tile's own closure un-settles it in memory and on disk; its SECTION is asserted through `InboxLifecycle.resolve` + `InboxSort.partition` over those records and NOT off the shipped row (`AgentInboxRowBuilder` still hardcodes `.active` — the open finding on P4.3), tail \(afterOpening.settled.count) / active \(afterOpening.active.count) while open, still drawn with the page closed because it is the one you have open, and active \(afterPrompt.active.count) after the prompt; and the POST-ACTION ADVANCE (P4.10): \(advancingRowActions.count) of \(InboxRowAction.allCases.count) row verbs move the cursor, settling row 2 of 5 through its own menu lands on the row that was 3 — with an unrelated push landing first, moving nothing and leaving the advance armed for the one that files — settling the last row falls back to the previous one, a pair settled together clears the whole affected set rather than stopping after the first, a one-row list lands on no selection, Mark Unread arms nothing, a refused action leaves the cursor where it was and is spent rather than firing on the next push, an action on a row that is NOT the cursor arms nothing, a cancelled one whose row merely ticked over is not read as completed, a partial completion that left one target unfiled moves nothing, and — the witness — a person who selected another row while the settle was in flight is left exactly there; and an UNDO TOAST (P4.11): \(undoableRowActions.count) of \(InboxRowAction.allCases.count) row verbs may raise one, a snooze on a keep-active PINNED agent saying '\(undoToastText)' and putting all four stored facts back exactly as captured (the pin included, which a reconstructed undo flattens), a bulk snooze of 3 reporting its count and undoing as ONE call with an already-settled member settled again on its own date, no toast for a refused action, for an archive whose record is gone, for a verb that moves no lifecycle fact, or for a host with no restore path, the second action replacing the first rather than queueing behind it, the card dismissing itself and taking the restore with it, a later lifecycle action retiring a stale card even when it earns none of its own while a non-lifecycle one leaves it alone, and toast and bulk bar laid out clear of each other")
     }
 }
 

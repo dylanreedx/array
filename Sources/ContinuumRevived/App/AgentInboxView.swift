@@ -43,6 +43,44 @@ import Foundation
 // something you did, and P3.6's own frozen-order argument applies: the list moves
 // when you act. Nothing folds a group on your behalf.
 
+// Ticket: docs/38-tickets/90-agent-ux/P4.11-undo-toast.md
+/// The four STORED lifecycle facts an undo puts back — `AgentRecord`'s
+/// `settledOverride`, `settledAt`, `snoozedUntil` and `snoozedAt`, named the same
+/// way so the mapping is by eye and cannot be got backwards (the call
+/// `SnoozedAgentFacts` already made in AgentUI).
+///
+/// A CAPTURE, NOT A RECONSTRUCTION, and that is the whole ticket. "Undo a settle"
+/// looks like "set the override back to `.neutral`" until the agent was
+/// `.active`-PINNED before the settle: reconstructing then discards the pin, the
+/// next inactivity sweep buries the row, and the person who pressed Undo has lost
+/// a decision they made rather than got one back. So the values are read BEFORE
+/// the action runs and handed back verbatim; nothing here computes what a prior
+/// state "should" have been.
+///
+/// The list cannot read these itself — they live on `AgentRecord` in Core and only
+/// `AgentSupervisor` may write one — so the host supplies the reader
+/// (`AgentInboxView.lifecycleFacts`) and performs the restore
+/// (`AgentInboxView.onUndoLifecycle`), exactly as it does for every other fact
+/// this view draws.
+struct InboxLifecycleSnapshot: Equatable {
+    var settledOverride: SettledOverride
+    var settledAt: Date?
+    var snoozedUntil: Date?
+    var snoozedAt: Date?
+
+    init(
+        settledOverride: SettledOverride = .neutral,
+        settledAt: Date? = nil,
+        snoozedUntil: Date? = nil,
+        snoozedAt: Date? = nil
+    ) {
+        self.settledOverride = settledOverride
+        self.settledAt = settledAt
+        self.snoozedUntil = snoozedUntil
+        self.snoozedAt = snoozedAt
+    }
+}
+
 @MainActor
 final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate,
                             NSTextFieldDelegate, TokenThemed {
@@ -149,6 +187,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     private let emptyLabel: NSTextField
     // Ticket: docs/38-tickets/90-agent-ux/P3.11-multi-select-bulk.md
     private let bulkBar = InboxBulkActionBar()
+    // Ticket: docs/38-tickets/90-agent-ux/P4.11-undo-toast.md
+    private let undoToast = InboxUndoToast()
+    /// What the toast on screen would put back, keyed by agent. Nil when no toast is
+    /// up — and cleared the instant Undo is pressed, so a second press cannot apply a
+    /// restore twice over facts the first one already changed.
+    private var pendingUndo: [UUID: InboxLifecycleSnapshot]?
+    private var undoToastTimer: Timer?
     // Ticket: docs/38-tickets/90-agent-ux/P3.12-row-context-menu.md
     /// The right-click menu, ONE instance rebuilt per click rather than a fresh menu
     /// per event: it is the table's `menu`, so AppKit owns showing it and this view
@@ -376,6 +421,25 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// be BOTH available for every selected row (which hides it when it is not) and
     /// wired here.
     var wiredBulkActions: Set<InboxBulkAction> = []
+    // Ticket: docs/38-tickets/90-agent-ux/P4.11-undo-toast.md
+    /// This agent's STORED lifecycle facts right now, or nil for an agent the host has
+    /// no record of. Read twice around every lifecycle action — once before it runs, to
+    /// capture what an Undo has to put back, and once after, to find out what the action
+    /// actually did.
+    ///
+    /// A READER, not a copy the view keeps: the four facts live on `AgentRecord` and are
+    /// written by `AgentSupervisor` from paths this list never sees (P4.3's inactivity
+    /// sweep, P4.4's auto-unsettle). A cached snapshot would be an undo that restores
+    /// what was true when the rows were last pushed.
+    var lifecycleFacts: ((UUID) -> InboxLifecycleSnapshot?)?
+    /// Put these agents' captured facts back, exactly as they were. ONE CALL for the
+    /// whole set, because a bulk action undoes as one unit (the packet's rule) and a
+    /// per-agent callback would let half a restore succeed.
+    ///
+    /// The toast is offered only when BOTH this and `lifecycleFacts` are set: an Undo
+    /// button nothing performs is worse than no toast, which is the call P3.15 already
+    /// made for the menu's greyed items.
+    var onUndoLifecycle: (([UUID: InboxLifecycleSnapshot]) -> Void)?
     // Ticket: docs/38-tickets/90-agent-ux/P3.13-inline-rename.md
     /// A new name was COMMITTED for this agent — trimmed, non-empty and different
     /// from the one on screen, so a host never has to re-decide any of those.
@@ -496,6 +560,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         addSubview(emptyLabel)
         // P3.11: added LAST, so it draws over the bottom of the list.
         addSubview(bulkBar)
+        // P4.11: and the toast over the bar, which is the order they arrive in — a
+        // bulk action puts the bar up first and the toast second.
+        addSubview(undoToast)
 
         tableView.dataSource = self
         tableView.delegate = self
@@ -516,6 +583,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // list's, because only the list knows the selection.
         bulkBar.onAction = { [weak self] action in self?.performBulkAction(action) }
         bulkBar.setAccessibilityIdentifier("ContinuumAgentInboxBulkBar")
+        // P4.11: the toast reports the press; what it puts back is the list's, because
+        // only the list holds what was captured at dispatch.
+        undoToast.onUndo = { [weak self] in self?.performUndo() }
+        undoToast.setAccessibilityIdentifier("ContinuumAgentInboxUndoToast")
         // P3.12: the TABLE's menu, not this view's — `NSTableView` sets `clickedRow`
         // before it asks its menu to update, which is the only way the menu knows which
         // row the mouse was over. A menu on the container would have to hit-test the
@@ -557,6 +628,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
             bulkBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.s),
             bulkBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.s),
             bulkBar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Space.s),
+
+            // P4.11: ABOVE THE BAR, not beside it and not under it. Both float over
+            // the bottom of the same list and both can be up at once — a bulk settle
+            // that the advance did not clear the selection for leaves the bar behind
+            // the toast. Anchoring to the bar's top rather than to the view's bottom
+            // makes non-overlap a fact of the layout instead of a timing coincidence,
+            // and the bar is laid out at its full height even while hidden, so the
+            // toast sits in one place whether the bar is showing or not.
+            undoToast.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.s),
+            undoToast.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.s),
+            undoToast.bottomAnchor.constraint(equalTo: bulkBar.topAnchor, constant: -Space.xs),
         ])
     }
 
@@ -1387,7 +1469,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         // rows from inside this call — by the time it returns the affected rows have
         // already left the places the advance is measured from.
         if AgentInboxView.advancesSelection(action) { armAdvance(targetIds: selected.map(\.id)) }
+        // P4.11: captured BEFORE the host runs, for the same reason the advance is
+        // armed here — the action performs inside that call, and afterwards nothing can
+        // say what these agents were.
+        let captured = captureLifecycle(selected.map(\.id))
         onBulkAction?(action, selected.map(\.id))
+        offerUndo(action.undoVerb, capturedInOrder: captured)
         // THE ACTION IS OVER. Whatever it did, it did inside that call — the host
         // performs and re-pushes synchronously — so an advance still armed here is one
         // whose filing never happened (a cancelled Delete, a refusal, a partial run) and
@@ -1476,7 +1563,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
             // P4.10: armed before the host runs, for the reason `performBulkAction`
             // records — a synchronous host has already re-pushed by the time it returns.
             if AgentInboxView.advancesSelection(action) { armAdvance(targetIds: targets.map(\.id)) }
+            // P4.11: captured before the host runs, for the reason `performBulkAction`
+            // records.
+            let captured = captureLifecycle(targets.map(\.id))
             onRowAction?(action, targets.map(\.id))
+            offerUndo(action.undoVerb, capturedInOrder: captured)
             // Retired here for the reason `performBulkAction` records: an advance the
             // action did not land is an advance that never happens.
             pendingAdvance = nil
@@ -1627,6 +1718,100 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 
     /// P4.10, for the checks: whether an advance is waiting on its push.
     var isAdvanceArmedForQA: Bool { pendingAdvance != nil }
+
+    // MARK: - Undo toast (P4.11)
+
+    /// How long the toast stays up. ~6s is the packet's number: long enough to notice a
+    /// mis-aimed snooze on a list you were moving through quickly, short enough that it
+    /// is gone before it becomes furniture. A `var` only so a check can drive the real
+    /// timer instead of waiting six seconds for it.
+    var undoToastDuration: TimeInterval = 6
+
+    /// What these agents are RIGHT NOW, before the action touches them.
+    ///
+    /// Empty when the host cannot both read and restore — with no restore path the
+    /// capture would only pay for a toast whose Undo does nothing, which is the "not an
+    /// undo affordance" failure the packet's watch-out names from the other side.
+    private func captureLifecycle(_ ids: [UUID]) -> [(id: UUID, facts: InboxLifecycleSnapshot)] {
+        guard onUndoLifecycle != nil, let reader = lifecycleFacts else { return [] }
+        return ids.compactMap { id in reader(id).map { (id: id, facts: $0) } }
+    }
+
+    /// Put the toast up for what the action actually did — or leave it down.
+    ///
+    /// REVERSIBILITY IS MEASURED, NOT ASSUMED FROM THE VERB. A target counts only when
+    /// the host can still read it back AND its facts moved:
+    ///
+    ///   * an agent whose facts did not move was refused (a cancelled Delete, an action
+    ///     the host declined) and there is nothing to undo;
+    ///   * an agent the reader no longer knows is GONE, which on this app is what
+    ///     Archive and Delete both do — `AgentSupervisor.archive` removes the record
+    ///     from disk, and four lifecycle fields cannot put a deleted record back. So
+    ///     archiving raises no toast rather than an Undo that would silently half-work.
+    ///
+    /// With nothing reversible left, no toast: the packet's watch-out is that this is an
+    /// undo affordance and not a notification channel, so a toast with nothing behind it
+    /// is exactly what it must not be.
+    private func offerUndo(
+        _ verb: String?, capturedInOrder captured: [(id: UUID, facts: InboxLifecycleSnapshot)]
+    ) {
+        // A NON-LIFECYCLE ACTION LEAVES WHAT IS UP ALONE: marking a row unread or
+        // renaming it moves none of the four fields, so a toast from a moment ago is
+        // still telling the truth and is still safe to press.
+        guard let verb else { return }
+        // ONE TOAST AT A TIME (the packet's rule), and it is retired HERE rather than at
+        // the point a replacement is built. A lifecycle action has just run, so whatever
+        // the previous card was holding is stale whether or not this one earns a card of
+        // its own — and the case that matters is the one that does not: snoozing a row
+        // and then archiving it would otherwise leave the snooze's Undo on screen,
+        // offering to restore four fields onto a record that is gone. (Raised in
+        // cross-review.)
+        dismissUndoToast()
+        guard let reader = lifecycleFacts, !captured.isEmpty else { return }
+        let reversible = captured.compactMap { target -> (id: UUID, facts: InboxLifecycleSnapshot, now: InboxLifecycleSnapshot)? in
+            guard let now = reader(target.id), now != target.facts else { return nil }
+            return (id: target.id, facts: target.facts, now: now)
+        }
+        guard !reversible.isEmpty else { return }
+        pendingUndo = Dictionary(uniqueKeysWithValues: reversible.map { ($0.id, $0.facts) })
+        undoToast.show(InboxUndoToast.message(
+            verb: verb, count: reversible.count,
+            // The wake time is read off what the action LEFT, in screen order — the view
+            // is never told which preset was picked (the menu's `Snooze ›` hands the host
+            // the verb and the host resolves the date, P4.5), so the only place the hour
+            // exists is the record the action wrote.
+            snoozedUntil: reversible.first?.now.snoozedUntil))
+        restartUndoToastTimer()
+    }
+
+    private func restartUndoToastTimer() {
+        undoToastTimer?.invalidate()
+        undoToastTimer = Timer.scheduledTimer(
+            withTimeInterval: undoToastDuration, repeats: false
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.dismissUndoToast() }
+        }
+    }
+
+    private func dismissUndoToast() {
+        undoToastTimer?.invalidate()
+        undoToastTimer = nil
+        pendingUndo = nil
+        undoToast.hide()
+    }
+
+    /// Hand the host back exactly what was captured.
+    ///
+    /// THE WHOLE SET IN ONE CALL, and cleared before the call rather than after: the
+    /// host restores and re-pushes synchronously (the path every other action here
+    /// takes), so a `pendingUndo` still set during that push is one a second press
+    /// arriving from the re-render could spend on facts this restore has already put
+    /// back.
+    private func performUndo() {
+        guard let restoring = pendingUndo else { return }
+        dismissUndoToast()
+        onUndoLifecycle?(restoring)
+    }
 
     /// P3.5's `isInteracting`: hover, selection, or keyboard-active. The last two
     /// are one test rather than two, because arrow-key navigation in an
@@ -1966,6 +2151,20 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// menu rather than recomputed from `InboxBulkAction.available`, which would assert
     /// the predicate against itself.
     var isBulkBarVisibleForQA: Bool { !bulkBar.isHidden }
+    // Ticket: docs/38-tickets/90-agent-ux/P4.11-undo-toast.md
+    /// The toast as RENDERED — empty when it is down.
+    var undoToastTextForQA: String { undoToast.qaText }
+    /// Where it is, so a check can assert it clears the bulk bar rather than assuming
+    /// the constraint does.
+    var undoToastFrameForQA: NSRect { undoToast.frame }
+    var bulkBarFrameForQA: NSRect { bulkBar.frame }
+    /// What an Undo would put back. The captured values themselves, so a check can
+    /// compare them against what was read before the action rather than against what
+    /// the host happened to be handed.
+    var pendingUndoForQA: [UUID: InboxLifecycleSnapshot]? { pendingUndo }
+    /// Press Undo the way the user does, through the toast's own button.
+    @discardableResult
+    func clickUndoForQA() -> Bool { undoToast.clickUndoForQA() }
     var bulkActionTitlesForQA: [String] { bulkBar.qaActionTitles }
     var bulkSelectionTextForQA: String { bulkBar.qaSelectionText }
     var bulkKeptBranchesTextForQA: String { bulkBar.qaKeptText }
@@ -2581,6 +2780,19 @@ enum InboxBulkAction: String, CaseIterable, Equatable {
         }
     }
 
+    // Ticket: docs/38-tickets/90-agent-ux/P4.11-undo-toast.md
+    /// What the toast says this action DID, or nil for an action no undo covers.
+    /// `InboxRowAction.undoVerb` records why the list is what it is.
+    var undoVerb: String? {
+        switch self {
+        case .settle: return InboxUndoToast.settledVerb
+        case .snooze: return InboxUndoToast.snoozedVerb
+        case .archive: return InboxUndoToast.archivedVerb
+        case .delete: return InboxUndoToast.deletedVerb
+        case .markUnread: return nil
+        }
+    }
+
     /// Whether ONE row can take this action. Total over the cases, so adding an action
     /// is a compile error here rather than an item that is silently always available.
     ///
@@ -2761,6 +2973,34 @@ enum InboxRowAction: String, CaseIterable, Equatable {
     /// `Snooze` alone: it opens the preset list (P4.5) rather than acting, which is the
     /// same reason `InboxBulkAction.snooze` carries the arrow.
     var opensSubmenu: Bool { self == .snooze }
+
+    // Ticket: docs/38-tickets/90-agent-ux/P4.11-undo-toast.md
+    /// What the toast says this action DID — past tense, because it has already
+    /// happened by the time the words are on screen — or nil for an action the toast
+    /// stays down for.
+    ///
+    /// THE SIX THAT MOVE LIFECYCLE FACTS, which is not the same set as P4.10's four:
+    /// the two un-doings are here too, because `Un-settle` and `Wake` change the same
+    /// four fields and a mis-aimed one is exactly as annoying to find. `markUnread` is
+    /// read-state (P3.3, not a lifecycle fact), `rename` is the name on the record,
+    /// `stopAgent` ends a turn and `openInTile` is a navigation — none of the four
+    /// fields moves for any of them, so a toast would be a notification, which the
+    /// packet's watch-out forbids.
+    ///
+    /// A verb here is PERMISSION TO OFFER, not a promise: `offerUndo` still measures
+    /// that the action changed something restorable, which is what keeps Archive and
+    /// Delete (whose records are gone) from raising one.
+    var undoVerb: String? {
+        switch self {
+        case .settle: return InboxUndoToast.settledVerb
+        case .unsettle: return InboxUndoToast.unsettledVerb
+        case .snooze: return InboxUndoToast.snoozedVerb
+        case .wake: return InboxUndoToast.wokenVerb
+        case .archive: return InboxUndoToast.archivedVerb
+        case .delete: return InboxUndoToast.deletedVerb
+        case .openInTile, .markUnread, .rename, .stopAgent: return nil
+        }
+    }
 
     /// `Settle` for one row, `Settle (3)` for a selection — the packet's rule, so a menu
     /// raised over a multiple selection says out loud that it is not about the row you
@@ -3074,6 +3314,159 @@ final class InboxBulkActionBar: NSView, TokenThemed {
         guard !isHidden, !actionPopUp.isHidden, let index = actions.firstIndex(of: action),
               actionPopUp.selectItem(withTag: index) else { return false }
         actionPicked(actionPopUp)
+        return true
+    }
+}
+
+// Ticket: docs/38-tickets/90-agent-ux/P4.11-undo-toast.md
+/// What just happened, and the way back — `Snoozed until 18:00 · Undo`.
+///
+/// A CARD LIKE THE BULK BAR, and it floats over the bottom of the list for the same
+/// reason: `overlay` fill, `border` outline, `Radius.card`, taking no height off the
+/// scroll view. Hidden until an action raises it, so no committed baseline paints it.
+///
+/// The separator is the packet's own `·`, in the same middle-dot vocabulary the row's
+/// metadata line already uses, and Undo is a borderless button with a token-coloured
+/// attributed title rather than a bezel — `InboxDisclosureButton` records why (a system
+/// bezel draws a colour this app cannot theme, and P1.7's lint plus P1.6's contrast gate
+/// hold every painted colour here to a token).
+final class InboxUndoToast: NSView, TokenThemed {
+    static let settledVerb = "Settled"
+    static let unsettledVerb = "Un-settled"
+    static let snoozedVerb = "Snoozed"
+    static let wokenVerb = "Woken"
+    static let archivedVerb = "Archived"
+    static let deletedVerb = "Deleted"
+    static let undoTitle = "Undo"
+    static let separator = "·"
+
+    /// 24-hour, POSIX, in the local zone. NOT `DateFormatter.timeStyle = .short`, which
+    /// would render "6:00 PM" on a US locale and "18:00" on a British one — the wording
+    /// is asserted by the checks and would then depend on whose machine ran them, which
+    /// is the same call `AgentInboxView.clock` records for the relative times. The
+    /// packet's own example is 24-hour.
+    private static let wakeTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    /// `Settled`, `Settled 3`, `Snoozed until 18:00`, `Snoozed 3 until 18:00`.
+    ///
+    /// The count is dropped for one agent — "Settled 1" reads like an inventory — and
+    /// the wake time is dropped when the action left none, which is every verb but
+    /// snooze and a snooze whose date the host did not write.
+    static func message(verb: String, count: Int, snoozedUntil: Date?) -> String {
+        var text = count > 1 ? "\(verb) \(count)" : verb
+        if let snoozedUntil {
+            text += " until \(wakeTimeFormatter.string(from: snoozedUntil))"
+        }
+        return text
+    }
+
+    private let messageLabel = NSTextField(labelWithString: "")
+    private let undoButton = NSButton(frame: .zero)
+    var onUndo: (() -> Void)?
+
+    init() {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.borderWidth = 1
+        layer?.cornerRadius = Radius.card
+        isHidden = true
+
+        messageLabel.font = .token(.label)
+        messageLabel.lineBreakMode = .byTruncatingTail
+        messageLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        undoButton.isBordered = false
+        undoButton.bezelStyle = .inline
+        undoButton.setButtonType(.momentaryChange)
+        undoButton.font = .token(.label)
+        undoButton.target = self
+        undoButton.action = #selector(undoPressed)
+        undoButton.setAccessibilityRole(.button)
+        undoButton.setAccessibilityLabel(InboxUndoToast.undoTitle)
+        // The way back must never be the thing a 320pt sidebar truncates away.
+        undoButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        undoButton.setContentHuggingPriority(.required, for: .horizontal)
+        undoButton.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(messageLabel)
+        addSubview(undoButton)
+        NSLayoutConstraint.activate([
+            messageLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Inset.row.left),
+            messageLabel.topAnchor.constraint(equalTo: topAnchor, constant: Space.s),
+            messageLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Space.s),
+
+            // The BUTTON owns the vertical and the label centres on it, the call the
+            // bulk bar's own layout records: the control is the taller of the two, and
+            // centring the taller one on the shorter is what put an `NSPopUpButton`'s
+            // bezel a point outside its parent there.
+            undoButton.leadingAnchor.constraint(
+                greaterThanOrEqualTo: messageLabel.trailingAnchor, constant: Space.s),
+            undoButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Inset.row.right),
+            undoButton.centerYAnchor.constraint(equalTo: messageLabel.centerYAnchor),
+            undoButton.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: Space.xs),
+            undoButton.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -Space.xs),
+        ])
+        applyTokens()
+    }
+
+    required init?(coder: NSCoder) { return nil }
+
+    func show(_ message: String) {
+        messageLabel.stringValue = message
+        isHidden = false
+        applyTokens()
+    }
+
+    func hide() {
+        isHidden = true
+        messageLabel.stringValue = ""
+    }
+
+    /// `textSecondary` for what happened and `textPrimary` for the way back — NOT an
+    /// accent, deliberately. P3.2 holds this list to three colours and all three mean
+    /// status; a fourth on a card that floats over the rows would read as a state. So
+    /// the emphasis is inverted instead: the report is chrome (the same token the shelf
+    /// heading and the paging footer use) and the one thing you can act on is the one
+    /// thing at full strength. Both are documented pairs over `overlay`, so P1.6's
+    /// contrast gate measures them rather than exempting them.
+    func applyTokens() {
+        let theme = effectiveTokenTheme
+        layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
+        layer?.borderColor = LineToken.border.color.cgColor(for: theme)
+        messageLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        undoButton.attributedTitle = NSAttributedString(
+            string: "\(InboxUndoToast.separator) \(InboxUndoToast.undoTitle)",
+            attributes: [
+                .font: NSFont.token(.label),
+                .foregroundColor: TextToken.textPrimary.color.nsColor(in: self),
+            ])
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
+    }
+
+    @objc private func undoPressed() { onUndo?() }
+
+    /// What the card is really saying, both halves of it — read off the views rather
+    /// than off the string it was handed.
+    var qaText: String {
+        guard !isHidden else { return "" }
+        return "\(messageLabel.stringValue) \(undoButton.attributedTitle.string)"
+    }
+
+    /// Press it the way the user does, through the button's own target/action.
+    @discardableResult
+    func clickUndoForQA() -> Bool {
+        guard !isHidden else { return false }
+        undoButton.performClick(nil)
         return true
     }
 }
