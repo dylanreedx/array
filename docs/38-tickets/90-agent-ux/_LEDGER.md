@@ -3,7 +3,7 @@
 Durable state. The conversation is NOT the source of truth: this file + `git log` are.
 
 ## heartbeat
-last-touch 2026-07-27T23:55:00Z · ticket P4.9-reading-is-free · attempt 1 · pid loop · status committed 7dd5062
+last-touch 2026-07-28T01:35:00Z · ticket P4.10-post-action-advance · attempt 1 · pid loop · status matrix-green, cross-review round 3
 
 ## tickets
 

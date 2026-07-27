@@ -589,9 +589,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// frozen desktop order (P3.4) and applying it here is what makes "row N on
     /// screen" and "rows[N]" the same thing for every accessor below.
     func reload(rows newRows: [AgentInboxRow]) {
+        // P4.10: read BEFORE the render, which empties the table's selection — the
+        // advance is validated against the selection the person had when this push
+        // arrived, and by the time `render` returns nobody can tell what that was.
+        let selectionOnEntry = selectedRows.map(\.id)
         allRows = newRows
         updateScopeMenu()
         render(display(from: newRows))
+        completePendingAdvance(selectionOnEntry: selectionOnEntry)
     }
 
     /// Draw this list whole. Takes rows that are ALREADY filtered and sorted, which
@@ -639,6 +644,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// `Equatable` makes exact rather than a guess. (Found in cross-review; the
     /// change-set-only version showed a stale project name after a rename.)
     func apply(rows newRows: [AgentInboxRow], changed: AgentsBoardChangeSet) {
+        // P4.10: the same read `reload(rows:)` makes, and for the same reason — this
+        // path keeps the selection when the list's identities did not move, and drops
+        // it through `render` when they did, so only a value taken here survives both.
+        let selectionOnEntry = selectedRows.map(\.id)
+        applyRows(newRows, changed: changed)
+        completePendingAdvance(selectionOnEntry: selectionOnEntry)
+    }
+
+    private func applyRows(_ newRows: [AgentInboxRow], changed: AgentsBoardChangeSet) {
         // P3.8: the SCOPE decides what is on screen, so the diff is against the
         // filtered list — an agent that arrived in a project you are not scoped to
         // has not changed this list at all. `allRows` and the popup's menu are
@@ -1369,7 +1383,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
         guard selected.count >= AgentInboxView.minimumBulkSelection,
               offeredBulkActions(for: selected).contains(action)
         else { return }
+        // P4.10: armed BEFORE the host runs, because a synchronous host pushes the new
+        // rows from inside this call — by the time it returns the affected rows have
+        // already left the places the advance is measured from.
+        if AgentInboxView.advancesSelection(action) { armAdvance(targetIds: selected.map(\.id)) }
         onBulkAction?(action, selected.map(\.id))
+        // THE ACTION IS OVER. Whatever it did, it did inside that call — the host
+        // performs and re-pushes synchronously — so an advance still armed here is one
+        // whose filing never happened (a cancelled Delete, a refusal, a partial run) and
+        // it must not be left to fire on some later, unrelated push.
+        pendingAdvance = nil
     }
 
     /// What the bar may offer this selection: P3.11's availability intersection, then
@@ -1450,7 +1473,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
             onRevealRow?(first.id)
         case .settle, .unsettle, .snooze, .wake, .markUnread, .rename, .stopAgent,
              .archive, .delete:
+            // P4.10: armed before the host runs, for the reason `performBulkAction`
+            // records — a synchronous host has already re-pushed by the time it returns.
+            if AgentInboxView.advancesSelection(action) { armAdvance(targetIds: targets.map(\.id)) }
             onRowAction?(action, targets.map(\.id))
+            // Retired here for the reason `performBulkAction` records: an advance the
+            // action did not land is an advance that never happens.
+            pendingAdvance = nil
         }
     }
 
@@ -1473,6 +1502,131 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     func isBulkActionWiredForQA(_ action: InboxBulkAction) -> Bool {
         onBulkAction != nil && wiredBulkActions.contains(action)
     }
+
+    // MARK: - Post-action advance (P4.10)
+
+    /// Which verbs move you on.
+    ///
+    /// Settle, snooze and archive FILE the row: the agent leaves the block you are
+    /// working through, so standing still would leave the cursor on something that is
+    /// no longer where you left it. `delete` is in with archive because on this app it
+    /// IS archive — both verbs run `archiveAgentsFromInbox`, and they differ in what
+    /// the person is told, not in what happens to the row.
+    ///
+    /// The rest do not: `unsettle` and `wake` bring a row BACK to where you are,
+    /// `markUnread`, `rename` and `stopAgent` leave it exactly where it was, and
+    /// `openInTile` is a navigation you just made by hand.
+    static func advancesSelection(_ action: InboxRowAction) -> Bool {
+        switch action {
+        case .settle, .snooze, .archive, .delete: return true
+        case .openInTile, .unsettle, .wake, .markUnread, .rename, .stopAgent: return false
+        }
+    }
+
+    /// The bar's half of the same rule, over its own five.
+    static func advancesSelection(_ action: InboxBulkAction) -> Bool {
+        switch action {
+        case .settle, .snooze, .archive, .delete: return true
+        case .markUnread: return false
+        }
+    }
+
+    /// Where a dispatched action will leave the cursor, captured at DISPATCH because
+    /// that is the only moment the affected rows still have their places in the list.
+    private struct PendingAdvance {
+        /// The affected rows AS THEY WERE — which is also the selection, since nothing
+        /// arms unless the two are the same (`armAdvance`). Their lifecycles at dispatch
+        /// are what completion compares against.
+        let targets: [AgentInboxRow]
+        /// Candidate landings in preference order: the rows AFTER the whole affected
+        /// set, nearest first, then the rows before it, nearest first.
+        let candidateIds: [UUID]
+    }
+
+    private var pendingAdvance: PendingAdvance?
+
+    /// Work out where this action should leave the cursor, and hold it until the push
+    /// that carries the action's effect arrives.
+    ///
+    /// ONLY WHAT YOU ARE ON MOVES YOU. The advance arms only when the action's targets
+    /// ARE the selection: a right-click on a row outside the selection acts on that row
+    /// (P3.12's rule) while you are still reading another one, and moving the cursor off
+    /// what you are reading because you filed something else is exactly the yank the goal
+    /// forbids. (Raised in cross-review.) A consequence worth stating: with nothing
+    /// selected, nothing advances — there is no cursor to move.
+    ///
+    /// PAST THE WHOLE AFFECTED SET (the packet's watch-out): the candidates start after
+    /// the LAST selected row, not after the first, so settling three rows does not land
+    /// you on the second of them. Rows between the first and the last that were not
+    /// affected are inside the block and skipped with it.
+    private func armAdvance(targetIds: [UUID]) {
+        pendingAdvance = nil
+        guard !targetIds.isEmpty, targetIds == selectedRows.map(\.id) else { return }
+        let positions = targetIds.compactMap { id in rows.firstIndex { $0.id == id } }.sorted()
+        guard let first = positions.first, let last = positions.last else { return }
+        pendingAdvance = PendingAdvance(
+            targets: positions.map { rows[$0] },
+            candidateIds: rows[(last + 1)...].map(\.id) + rows[..<first].map(\.id).reversed())
+    }
+
+    /// Land the advance armed at dispatch, on the push that carries the filing.
+    ///
+    /// NOT NECESSARILY THE FIRST PUSH. The stream runs under everything: a token
+    /// arriving for some other agent — or, around a Delete, arriving while the
+    /// confirmation sheet is still up — is a push that says nothing about the action,
+    /// and spending the advance on it would mean the real one lands with nothing armed.
+    /// So an unrelated push leaves the advance where it is, and `performRowAction` /
+    /// `performBulkAction` retire it when the action itself is over. (Raised in
+    /// cross-review.)
+    private func completePendingAdvance(selectionOnEntry: [UUID]) {
+        guard let pending = pendingAdvance else { return }
+        // VALIDATED AT COMPLETION, not at dispatch — the packet's one hard rule. If the
+        // selection moved while the action was in flight, the person is somewhere they
+        // chose to be and this may not take them anywhere else. That is a decision, not
+        // a wait: the advance is dropped rather than left armed for the next push.
+        //
+        // THE ROUTE IS COVERED BY THIS SAME LINE, and measured rather than assumed
+        // (cross-review asked for a second check on `openAgentId`): the route only ever
+        // changes through that property, whose `didSet` re-renders the list — and a
+        // render empties the table's selection. So a person who leaves for another
+        // agent's tile mid-action arrives here with a selection that no longer matches,
+        // and is dropped by the guard below. A separate route comparison would be a
+        // second rule nothing could witness.
+        guard selectionOnEntry == pending.targets.map(\.id) else {
+            pendingAdvance = nil
+            return
+        }
+        // …and only if the action REALLY FILED THEM, all of them.
+        //
+        // Filed is tested on the LIFECYCLE and on presence, not on the whole row's
+        // value: every verb that advances (settle / snooze / archive / delete) either
+        // takes the row off the list or moves it to another section, while a streamed
+        // token arriving in the same push changes a row's elapsed time and nothing else.
+        // A value comparison would read that churn as "the action completed" and advance
+        // off a Delete the person had just cancelled. (Raised in cross-review.)
+        //
+        // ALL of them, not any: a partial archive leaves the rows it could not take
+        // where they are, and advancing past the whole set would move the cursor off a
+        // row that is still sitting there unfiled.
+        guard pending.targets.allSatisfy({ target in
+            guard let current = rows.first(where: { $0.id == target.id }) else { return true }
+            return current.lifecycle != target.lifecycle
+        }) else { return }
+        pendingAdvance = nil
+        guard let landing = pending.candidateIds.lazy.compactMap({ id in
+            self.rows.firstIndex { $0.id == id }.flatMap(self.tableRow(forRowIndex:))
+        }).first else {
+            // Nothing before it and nothing after it: the list has run out, and no
+            // selection is the honest answer rather than holding a row that is gone.
+            tableView.deselectAll(nil)
+            return
+        }
+        tableView.selectRowIndexes(IndexSet(integer: landing), byExtendingSelection: false)
+        tableView.scrollRowToVisible(landing)
+    }
+
+    /// P4.10, for the checks: whether an advance is waiting on its push.
+    var isAdvanceArmedForQA: Bool { pendingAdvance != nil }
 
     /// P3.5's `isInteracting`: hover, selection, or keyboard-active. The last two
     /// are one test rather than two, because arrow-key navigation in an

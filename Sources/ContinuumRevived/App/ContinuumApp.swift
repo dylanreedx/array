@@ -23901,8 +23901,294 @@ extension AppDelegate {
     try expect(!afterPrompt.settled.contains { $0.id == settledAgent.rawValue },
                "…and out of the tail — tail is \(titles(afterPrompt.settled))")
 
+    // MARK: J · settling what you are viewing moves you on (P4.10)
+
+    // THE PREDICATE FIRST, and totally: which verbs move the cursor at all. A row
+    // action that files the row advances; one that brings it back, leaves it in place,
+    // or is itself a navigation does not.
+    let advancingRowActions = InboxRowAction.allCases.filter(AgentInboxView.advancesSelection)
+    try expect(advancingRowActions == [.settle, .snooze, .archive, .delete],
+               "only the verbs that FILE a row move you on — got \(advancingRowActions.map(\.baseTitle))")
+    let advancingBulkActions = InboxBulkAction.allCases.filter(AgentInboxView.advancesSelection)
+    try expect(advancingBulkActions == [.settle, .snooze, .archive, .delete],
+               "…and the bar's half says the same — got \(advancingBulkActions.map(\.title))")
+
+    // FIVE ROWS, no parent and no child: this section is about POSITIONS, and a nested
+    // group would make "the row after this one" a fact about the tree instead.
+    let advanceFixture = Array(LabFixtures.inboxRows().prefix(5))
+    let advanceOrder = InboxSort.sortForInbox(rows: advanceFixture).map(\.id)
+    try expect(advanceOrder == advanceFixture.map(\.id),
+               "setup: the five-row fixture must already be in frozen order, or every position below names a different row")
+    func advanceRow(_ index: Int) throws -> AgentInboxRow {
+        guard let row = advanceFixture.first(where: { $0.id == LabFixtures.inboxAgentIds[index] }) else {
+            throw CheckError.failed("fixture agent \(index) is missing from the advance fixture")
+        }
+        return row
+    }
+    let advance0 = try advanceRow(0)   // approval — blocked, so never an action target here
+    let advance1 = try advanceRow(1)   // working
+    let advance2 = try advanceRow(2)   // input
+    let advance3 = try advanceRow(3)   // failed
+    let advance4 = try advanceRow(4)   // ready, and LAST in the list
+
+    var advanceRowCalls: [(InboxRowAction, [UUID])] = []
+    var advanceBulkCalls: [(InboxBulkAction, [UUID])] = []
+    var advanceWindows: [NSWindow] = []
+    /// WHAT THE HOST DOES WHILE THE ACTION RUNS, and the reason every scenario below
+    /// scripts one instead of pushing after the dispatch returned: production performs
+    /// and re-pushes INSIDE the callback (`performInboxRowAction` → `archiveAgentsFromInbox`
+    /// → `refreshAgentSurfaces`, with a confirmation sheet in the middle of it). "While
+    /// the action was in flight" is that closure, so that is where the mid-action pushes,
+    /// the mid-action navigation and the mid-action reads happen here.
+    var advanceHostScript: (() -> Void)?
+    func makeAdvanceView(rows: [AgentInboxRow]) -> AgentInboxView {
+        let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+        view.clock = { LabFixtures.inboxNow }
+        view.onRowAction = { advanceRowCalls.append(($0, $1)); advanceHostScript?() }
+        view.onBulkAction = { advanceBulkCalls.append(($0, $1)); advanceHostScript?() }
+        // Every action declared wired: the capability gate is section H's, and this
+        // section is about where the cursor lands once one of them has run.
+        view.wiredRowActions = Set(InboxRowAction.allCases)
+        view.wiredBulkActions = Set(InboxBulkAction.allCases)
+        view.reload(rows: rows)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = view
+        advanceWindows.append(window)
+        view.layoutForQA()
+        return view
+    }
+    /// The push a host makes after a settle: the same rows, with these ones filed.
+    func advanceSettling(_ ids: [UUID]) -> [AgentInboxRow] {
+        advanceFixture.map {
+            ids.contains($0.id)
+                ? lifecycled($0, .settled(at: LabFixtures.inboxNow.addingTimeInterval(-60)))
+                : $0
+        }
+    }
+    /// A push that says nothing about any action: one agent's turn ticked over. Same
+    /// rows, same order, same lifecycles — the stream under everything.
+    func advanceChurning(_ id: UUID) -> [AgentInboxRow] {
+        advanceFixture.map { row in
+            guard row.id == id else { return row }
+            return AgentInboxRow(
+                id: row.id, title: row.title, projectName: row.projectName,
+                workspaceName: row.workspaceName, state: row.state, attention: row.attention,
+                lifecycle: row.lifecycle, model: row.model, role: row.role, branch: row.branch,
+                isIsolated: row.isIsolated, elapsed: (row.elapsed ?? 0) + 30, depth: row.depth,
+                variant: row.variant, createdAt: row.createdAt, parentId: row.parentId)
+        }
+    }
+    try expect(advanceChurning(advance1.id) != advanceFixture
+                && advanceChurning(advance1.id).map(\.lifecycle) == advanceFixture.map(\.lifecycle),
+               "setup: a churned push must differ in VALUE while filing nothing, or the pushes below prove nothing")
+    /// Settle through the row's own context menu — the shipped path, item enablement
+    /// and all, rather than calling the private dispatch.
+    func settleFromMenu(_ view: AgentInboxView, _ row: AgentInboxRow) throws {
+        try expect(view.openRowMenuForQA(clickedRowId: row.id),
+                   "the menu must open over '\(row.title)'")
+        try expect(view.pickRowMenuItemForQA(.settle),
+                   "Settle must be live on '\(row.title)' — got \(view.rowMenuTitlesForQA) / \(view.rowMenuEnabledForQA)")
+    }
+
+    // J1 · SETTLE ROW 2 OF 5 → the row that was 3, with an unrelated push landing first.
+    // The second half is the case a first-push-wins advance gets wrong (raised in
+    // cross-review): a token arriving for another agent mid-action must neither move the
+    // cursor nor spend the advance the real filing push is waiting to land.
+    let advanceMiddle = makeAdvanceView(rows: advanceFixture)
+    try expect(advanceMiddle.selectRowForQA(id: advance1.id), "the row being viewed must be selectable")
+    try expect(advanceMiddle.selectedRowIdsForQA == [advance1.id],
+               "setup: the cursor starts on the row being settled — got \(advanceMiddle.selectedRowIdsForQA.count) rows")
+    var midFlightSelection: [UUID] = []
+    var midFlightArmed = false
+    advanceHostScript = {
+        advanceMiddle.apply(rows: advanceChurning(advance2.id), changed: .empty)
+        midFlightSelection = advanceMiddle.selectedRowIdsForQA
+        midFlightArmed = advanceMiddle.isAdvanceArmedForQA
+        advanceMiddle.apply(rows: advanceSettling([advance1.id]), changed: .empty)
+    }
+    try settleFromMenu(advanceMiddle, advance1)
+    advanceMiddle.layoutForQA()
+    try expect(advanceRowCalls.last?.0 == .settle && advanceRowCalls.last?.1 == [advance1.id],
+               "the host is asked to settle exactly that agent — got \(String(describing: advanceRowCalls.last?.1.count))")
+    try expect(midFlightSelection == [advance1.id],
+               "a push that files nothing must not move the cursor — got \(midFlightSelection)")
+    try expect(midFlightArmed,
+               "…and must not spend the advance, or the push that carries the filing lands with nothing armed")
+    try expect(advanceMiddle.selectedRowIdsForQA == [advance2.id],
+               "settling row 2 of 5 lands on the row that was 3 — got \(advanceMiddle.selectedRowIdsForQA.map { id in advanceFixture.first { $0.id == id }?.title ?? "none" })")
+    try expect(!advanceMiddle.isAdvanceArmedForQA,
+               "…and the advance is spent, so no later push can move you again")
+
+    // J2 · SETTLE THE LAST ROW → the previous one. The push is order-preserving (a
+    // settled last row is still last), so the selection here is moved by the advance
+    // and by nothing else — `render`'s deselect never runs.
+    let advanceLast = makeAdvanceView(rows: advanceFixture)
+    try expect(advanceLast.rowIdsForQA.last == advance4.id,
+               "setup: agent 4 must be the last row — got \(advanceLast.rowIdsForQA.count) rows")
+    try expect(advanceLast.selectRowForQA(id: advance4.id), "the last row must be selectable")
+    advanceHostScript = { advanceLast.apply(rows: advanceSettling([advance4.id]), changed: .empty) }
+    try settleFromMenu(advanceLast, advance4)
+    advanceLast.layoutForQA()
+    try expect(advanceLast.rowIdsForQA == advanceOrder,
+               "setup: settling the last row must leave the order alone, or this is a test about a re-render — got \(advanceLast.rowIdsForQA.count) rows")
+    try expect(advanceLast.selectedRowIdsForQA == [advance3.id],
+               "nothing follows the last row, so the cursor falls back to the previous one — got \(advanceLast.selectedRowIdsForQA)")
+
+    // J3 · THE WITNESS: navigating away mid-action must not move you. Same dispatch as
+    // J2, same push as J2 — the only difference is that the person selected another row
+    // while it was in flight, and the cursor stays exactly where they put it.
+    let advanceAway = makeAdvanceView(rows: advanceFixture)
+    try expect(advanceAway.selectRowForQA(id: advance4.id), "the last row must be selectable")
+    var navigatedAway = false
+    advanceHostScript = {
+        navigatedAway = advanceAway.selectRowForQA(id: advance0.id)
+        advanceAway.apply(rows: advanceSettling([advance4.id]), changed: .empty)
+    }
+    try settleFromMenu(advanceAway, advance4)
+    advanceAway.layoutForQA()
+    try expect(navigatedAway, "setup: the person must really have moved while the settle was in flight")
+    try expect(advanceAway.selectedRowIdsForQA == [advance0.id],
+               "the selection moved under the action, so its completion must leave the cursor where the person put it — got \(advanceAway.selectedRowIdsForQA)")
+    try expect(advanceAway.selectedRowIdsForQA != [advance3.id],
+               "…and specifically NOT on J2's landing, which is where a dispatch-time decision would have yanked it")
+
+    // J4 · PAST THE WHOLE AFFECTED SET (the packet's watch-out): two non-adjacent rows
+    // settled together land the cursor after the LAST of them, not after the first.
+    let advanceBulk = makeAdvanceView(rows: advanceFixture)
+    try expect(advanceBulk.selectRowsForQA(ids: [advance1.id, advance3.id]),
+               "two rows must be selectable together")
+    advanceBulk.layoutForQA()
+    try expect(advanceBulk.isBulkBarVisibleForQA, "setup: two rows raise the bar")
+    advanceHostScript = { advanceBulk.apply(rows: advanceSettling([advance1.id, advance3.id]), changed: .empty) }
+    try expect(advanceBulk.pickBulkActionForQA(.settle),
+               "Settle must be offered to the pair — got \(advanceBulk.bulkActionTitlesForQA)")
+    advanceBulk.layoutForQA()
+    try expect(advanceBulkCalls.last?.1 == [advance1.id, advance3.id],
+               "the host is asked to settle both, in screen order — got \(String(describing: advanceBulkCalls.last?.1.count))")
+    try expect(advanceBulk.selectedRowIdsForQA == [advance4.id],
+               "the cursor clears the whole affected set — got \(advanceBulk.selectedRowIdsForQA)")
+    try expect(advanceBulk.selectedRowIdsForQA != [advance2.id],
+               "…and not the row after the FIRST of them, which is where advancing one row at a time would stop")
+
+    // J5 · A REFUSED ACTION MOVES NOTHING, AND IS NOT LEFT ARMED. The host declined (a
+    // cancelled Delete is the shipped case) and pushed the list back unchanged, so there
+    // is nothing to advance past — and the advance is retired with the action rather
+    // than waiting to fire on some later push that finally does file the row.
+    let advanceRefused = makeAdvanceView(rows: advanceFixture)
+    try expect(advanceRefused.selectRowForQA(id: advance1.id), "the row must be selectable")
+    advanceHostScript = { advanceRefused.apply(rows: advanceFixture, changed: .empty) }
+    try settleFromMenu(advanceRefused, advance1)
+    advanceRefused.layoutForQA()
+    try expect(advanceRefused.selectedRowIdsForQA == [advance1.id],
+               "an action that changed nothing leaves the cursor on its row — got \(advanceRefused.selectedRowIdsForQA)")
+    try expect(!advanceRefused.isAdvanceArmedForQA,
+               "…and it is dropped, so the next unrelated push cannot move you off the row you are reading")
+    advanceHostScript = nil
+    advanceRefused.apply(rows: advanceSettling([advance1.id]), changed: .empty)
+    advanceRefused.layoutForQA()
+    try expect(advanceRefused.selectedRowIdsForQA != [advance2.id],
+               "…proved: the agent settling later on its own does not land a stale advance")
+
+    // J6 · AN ACTION THAT DOES NOT FILE THE ROW ARMS NOTHING.
+    let advanceMark = makeAdvanceView(rows: advanceFixture)
+    try expect(advanceMark.selectRowForQA(id: advance4.id), "the row must be selectable")
+    var markUnreadArmed = false
+    advanceHostScript = { markUnreadArmed = advanceMark.isAdvanceArmedForQA }
+    try expect(advanceMark.openRowMenuForQA(clickedRowId: advance4.id), "the menu must open")
+    try expect(advanceMark.pickRowMenuItemForQA(.markUnread),
+               "Mark Unread must be live on a read row — got \(advanceMark.rowMenuTitlesForQA)")
+    try expect(!markUnreadArmed,
+               "marking a row unread leaves it where it is, so nothing is armed")
+
+    // J7 · ACTING ON A ROW YOU ARE NOT ON MOVES NOTHING. P3.12 lets a right-click
+    // outside the selection act on the row under the mouse while the cursor stays where
+    // it is — and filing THAT row must not take the person off the one they are reading.
+    // (Raised in cross-review.)
+    let advanceElsewhere = makeAdvanceView(rows: advanceFixture)
+    try expect(advanceElsewhere.selectRowForQA(id: advance0.id), "the row being read must be selectable")
+    var elsewhereArmed = false
+    advanceHostScript = {
+        elsewhereArmed = advanceElsewhere.isAdvanceArmedForQA
+        advanceElsewhere.apply(rows: advanceSettling([advance4.id]), changed: .empty)
+    }
+    try settleFromMenu(advanceElsewhere, advance4)
+    advanceElsewhere.layoutForQA()
+    try expect(advanceRowCalls.last?.1 == [advance4.id],
+               "setup: the menu must act on the clicked row and not on the selection — got \(String(describing: advanceRowCalls.last?.1))")
+    try expect(!elsewhereArmed, "an action on a row that is not the cursor arms nothing")
+    try expect(advanceElsewhere.selectedRowIdsForQA == [advance0.id],
+               "…so the cursor is left on the row being read — got \(advanceElsewhere.selectedRowIdsForQA)")
+
+    // J8 · A CANCELLED ACTION WHOSE ROW MERELY TICKED OVER IS NOT A COMPLETED ONE.
+    // Filed is a LIFECYCLE fact, not "the row's value changed" — otherwise a token
+    // arriving for the very agent you just cancelled a Delete on would advance the
+    // cursor off it. (Raised in cross-review.)
+    let advanceChurn = makeAdvanceView(rows: advanceFixture)
+    try expect(advanceChurn.selectRowForQA(id: advance1.id), "the row must be selectable")
+    advanceHostScript = { advanceChurn.apply(rows: advanceChurning(advance1.id), changed: .empty) }
+    try settleFromMenu(advanceChurn, advance1)
+    advanceChurn.layoutForQA()
+    try expect(advanceChurn.selectedRowIdsForQA == [advance1.id],
+               "a row that ticked over is not a row that was filed — got \(advanceChurn.selectedRowIdsForQA)")
+
+    // J9 · A PARTIAL COMPLETION MOVES NOTHING EITHER: one of the two selected rows was
+    // refused and is still sitting there, so advancing past the pair would take the
+    // cursor off a row that was never filed. The pair is the last two, so the push is
+    // order-preserving and the selection here is untouched rather than re-rendered.
+    // (Raised in cross-review.)
+    let advancePartial = makeAdvanceView(rows: advanceFixture)
+    try expect(advancePartial.selectRowsForQA(ids: [advance3.id, advance4.id]),
+               "the last two rows must be selectable together")
+    advancePartial.layoutForQA()
+    advanceHostScript = { advancePartial.apply(rows: advanceSettling([advance4.id]), changed: .empty) }
+    try expect(advancePartial.pickBulkActionForQA(.settle),
+               "Settle must be offered to the pair — got \(advancePartial.bulkActionTitlesForQA)")
+    advancePartial.layoutForQA()
+    try expect(advancePartial.selectedRowIdsForQA == [advance3.id, advance4.id],
+               "one target left unfiled leaves the cursor on the pair — got \(advancePartial.selectedRowIdsForQA)")
+
+    // J10 · THE ROUTE IS NAVIGATION TOO — and it is the SELECTION rule that catches it.
+    // The packet validates the current selection/route at completion; cross-review asked
+    // whether a route change with an unmoved cursor could slip past. MEASURED HERE: the
+    // route only moves through `openAgentId`, whose `didSet` re-renders the list, and a
+    // render empties the table's selection — so leaving for another agent's tile
+    // mid-action drops the cursor, the selection no longer matches at completion, and
+    // the advance is refused. Both halves are asserted so this stays true if either
+    // moves.
+    let advanceRoute = makeAdvanceView(rows: advanceFixture)
+    try expect(advanceRoute.selectRowForQA(id: advance4.id), "the last row must be selectable")
+    var cursorAfterRouteChange: [UUID] = []
+    advanceHostScript = {
+        advanceRoute.openAgentId = advance2.id
+        cursorAfterRouteChange = advanceRoute.selectedRowIdsForQA
+        advanceRoute.apply(rows: advanceSettling([advance4.id]), changed: .empty)
+    }
+    try settleFromMenu(advanceRoute, advance4)
+    advanceRoute.layoutForQA()
+    try expect(cursorAfterRouteChange.isEmpty,
+               "going to another agent's tile re-renders the list and drops the cursor — got \(cursorAfterRouteChange)")
+    try expect(advanceRoute.selectedRowIdsForQA.isEmpty,
+               "…so the completion finds a selection that is not the one it armed on and lands nowhere — got \(advanceRoute.selectedRowIdsForQA)")
+    try expect(advanceRoute.selectedRowIdsForQA != [advance3.id],
+               "…and specifically not on J2's landing, which is where the person did not ask to be")
+
+    // J11 · …THEN TO NO SELECTION: a one-row list settled has nowhere to go.
+    let advanceOnly = makeAdvanceView(rows: [advance4])
+    try expect(advanceOnly.selectRowForQA(id: advance4.id), "the only row must be selectable")
+    advanceHostScript = {
+        advanceOnly.apply(
+            rows: [lifecycled(advance4, .settled(at: LabFixtures.inboxNow.addingTimeInterval(-60)))],
+            changed: .empty)
+    }
+    try settleFromMenu(advanceOnly, advance4)
+    advanceOnly.layoutForQA()
+    try expect(advanceOnly.selectedRowIdsForQA.isEmpty,
+               "with nothing before it and nothing after it the cursor lands nowhere — got \(advanceOnly.selectedRowIdsForQA)")
+    advanceHostScript = nil
     NSApplication.shared.dockTile.badgeLabel = nil
-    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows — a headless one, a tiled one and an orchestrator child — with the plain shell filtered out, the terminal-hosted agent listed for every other surface but not here (P3.16, force-included as the focused tile and still not a row), a legacy managed session no AgentRecord claims left out too, the count of the terminal-hosted ones reaching the list's empty state, and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live while Snooze and Wake stay greyed with 'Not available yet.', the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's TILE survives while its respawn is durably suppressed so re-wiring mints nothing (and a prompt in that tile deliberately revives it), a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)'); and a PAGED settled tail (P4.8): \(InboxSort.settledPageSize) of 30 finished agents on screen under a footer reading '\(pagedFooterTitle)', one press bringing the rest and taking the footer away, and the agent open in the focused tile drawn at 27 of 30 where the page would have ended; and READING IS FREE (P4.9): a settled agent opened by a real click keeps its override, its clear reason, its settle date and its stored record, and survives a second open — while a prompt through the tile's own closure un-settles it in memory and on disk; its SECTION is asserted through `InboxLifecycle.resolve` + `InboxSort.partition` over those records and NOT off the shipped row (`AgentInboxRowBuilder` still hardcodes `.active` — the open finding on P4.3), tail \(afterOpening.settled.count) / active \(afterOpening.active.count) while open, still drawn with the page closed because it is the one you have open, and active \(afterPrompt.active.count) after the prompt")
+    print("AgentInbox: \(sorted.count) rows in InboxSort's frozen order, all 5 states labelled, emphasis painted per row (receded \(Opacity.receded) / full \(Opacity.full)) with every accent at full strength, hover and selection clearing recession; \(parkedSorted.filter { $0.variant == .slim }.count) parked rows collapsed to \(AgentInboxView.slimRowHeight)pt (glyph, name, branch, relative time; dimmed \(Opacity.receded) at rest and full on hover) with the other \(parkedSorted.filter { $0.variant == .card }.count) left as \(AgentInboxView.rowHeight)pt cards, and a settling row re-heighted in place; 1 cell rebuilt for 1 agent's change and \(withoutOne.count) for a changed agent set; the scope popup offering \(scoped.scopeTitlesForQA.count) scopes (all agents, 2 projects, 2 workspaces), every one of them selecting exactly its own agents, a project and a workspace of the same name kept apart, the open agent surviving a scope that excludes it, the selection cleared by a scope flip while its row stays on screen, and the scope persisted and restored; a spawned child drawn one \(AgentInboxView.indentPerLevel)pt level in and a chain drawn 0/1/2 levels with the great-grandchild held at the cap of \(AgentInboxRow.maxDepth) (= AgentSupervisor.maxSpawnDepth), the disclosure triangle on the \(InboxSort.parentIds(in: sorted).count) parent row only, and a fold hiding the whole subtree, surviving a push about a hidden child and restoring it in place; a FOLDED parent still naming what it hid, transitively and ahead of its own role ('\(foldedTopLine)' at the top of the chain, '\(waitingLine)' over an approval), with the line gone the moment the group is open and the card's height unmoved at \(AgentInboxView.rowHeight)pt, and SETTLE REFUSED on that parent by the same predicates the bar and the menu use ('\(settleReason ?? "")'), offered again once only a failed child is left, and swept over all \(InboxState.allCases.count) states with \(holdsOpenStates.count) of them holding a parent open; and through the app, the sidebar's default content is \(ids.count) agent rows — a headless one, a tiled one and an orchestrator child — with the plain shell filtered out, the terminal-hosted agent listed for every other surface but not here (P3.16, force-included as the focused tile and still not a row), a legacy managed session no AgentRecord claims left out too, the count of the terminal-hosted ones reaching the list's empty state, and the workspace tree built but not shown; and a CLICKED row revealing its agent — the tile focused in place with the unread mark cleared and no lifecycle moved, a second click spawning no second tile, a headless agent handed a managed-agent tile bound to itself (\(revealSupervisor.records.count) records before and after) and focused — including one belonging to another project, whose view lands in the active project's canvas while its own record does not move — and an agent in another workspace switching to \(revealRegistry.workspaces.last?.name ?? "") first and then landing; and ⌘1–⌘9 jumping: \(InboxJump.maximumRows) pills on a 10-row list with none on the tenth and no status label moving a point, ⌘3 and ⌘9 selecting-and-revealing the third and ninth rows on screen, ⌘⇧3 / a bare 3 / ⌘0 revealing nothing, ⌘9 over a five-row list left for its other meaning, the pills coming down on the jump, and through the app the same ⌘ chord jumping only while the list holds first responder — ⌘1 on the canvas still resolving to spawn profile 1, the focused jump landing on its agent's tile with \(tilesBeforeJump) tiles before and after, and the app's own modifier monitor raising the pills on ⌘, dropping them on ⌘⇧, and dropping them when focus leaves with ⌘ still down; and a SELECTION SET: two rows selected are two rows outlined at full strength with a bar offering all \(InboxBulkAction.allCases.count) actions and naming the branch a delete keeps, one row offering none, a blocked member removing Settle and Mark Unread, a running one removing Archive and Delete, the two together leaving only Snooze, an archived row leaving only Delete, an empty selection leaving nothing, every rule reachable and none inert, a withheld action unpickable and silent, a push that stopped an agent handing its selection Delete back, and a scope flip and a fold each clearing the selection and taking the bar down — with shift- and ⌘-clicks revealing nothing; and a ROW CONTEXT MENU of \(InboxRowAction.allCases.count) actions, \(InboxRowAction.menuItems(for: [quietRow]).count) of them offered to any one row (Un-settle replacing Settle on a settled one, the only either/or, with Snooze and Wake both kept), the five shared with the bulk bar spelled the same and answering its own capability rules on all \(menuCandidates.count) candidate rows, a right-click on the background offering nothing, a click outside a selection acting on the clicked row and one inside it on all of it with every title counted, Open in Tile greyed for a plural and live through P3.9's own callback, a blocked member greying Settle with a tooltip naming it, a greyed item unpickable and silent, a stale item refused when the agent started working under the open menu, and the \(InboxRowAction.menuItems(for: [quietRow]).count - 1) actions no host performs yet greyed with 'Not available yet.' rather than wired to nothing; and an INLINE RENAME on the name only — Enter committing, Esc reverting, blur committing, empty/whitespace/unchanged refused, a streamed push about the very agent leaving the half-typed field alone and a list-identity change committing it, and through the app a double-click typed name landing trimmed on the record, on disk, on the row's cell, and back after a relaunch, with a host-local path reduced to '\(AgentSupervisor.sanitizedDisplayName(pathish) ?? "")' before it can reach a synced summary; and the DESTRUCTIVE ACTIONS WIRED (P3.15): the gate is per-action, so \(AppDelegate.wiredInboxRowActions.count) row items and \(AppDelegate.wiredInboxBulkActions.count) bar items are live while Snooze and Wake stay greyed with 'Not available yet.', the shipped sidebar's own list agrees and the production configureWorkspaceSidebar is source-scanned for the assignment that was missing for eleven tickets, a cancelled confirmation leaves the record file on disk, a confirmed one takes it off disk and off the list and a relaunched supervisor does not restore it, a deleted agent's TILE survives while its respawn is durably suppressed so re-wiring mints nothing (and a prompt in that tile deliberately revives it), a mid-turn delete stops the runner first and the record stays gone, a selection holding a row that is not a managed agent performs on the ones that are and says the other was left alone, and a kept branch is named in what the user is told ('\(strandedMessage)'); and a PAGED settled tail (P4.8): \(InboxSort.settledPageSize) of 30 finished agents on screen under a footer reading '\(pagedFooterTitle)', one press bringing the rest and taking the footer away, and the agent open in the focused tile drawn at 27 of 30 where the page would have ended; and READING IS FREE (P4.9): a settled agent opened by a real click keeps its override, its clear reason, its settle date and its stored record, and survives a second open — while a prompt through the tile's own closure un-settles it in memory and on disk; its SECTION is asserted through `InboxLifecycle.resolve` + `InboxSort.partition` over those records and NOT off the shipped row (`AgentInboxRowBuilder` still hardcodes `.active` — the open finding on P4.3), tail \(afterOpening.settled.count) / active \(afterOpening.active.count) while open, still drawn with the page closed because it is the one you have open, and active \(afterPrompt.active.count) after the prompt; and the POST-ACTION ADVANCE (P4.10): \(advancingRowActions.count) of \(InboxRowAction.allCases.count) row verbs move the cursor, settling row 2 of 5 through its own menu lands on the row that was 3 — with an unrelated push landing first, moving nothing and leaving the advance armed for the one that files — settling the last row falls back to the previous one, a pair settled together clears the whole affected set rather than stopping after the first, a one-row list lands on no selection, Mark Unread arms nothing, a refused action leaves the cursor where it was and is spent rather than firing on the next push, an action on a row that is NOT the cursor arms nothing, a cancelled one whose row merely ticked over is not read as completed, a partial completion that left one target unfiled moves nothing, and — the witness — a person who selected another row while the settle was in flight is left exactly there")
     }
 }
 
