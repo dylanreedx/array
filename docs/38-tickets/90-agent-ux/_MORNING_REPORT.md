@@ -1,5 +1,81 @@
 # 90-agent-ux — Morning report
 
+---
+
+# 2026-07-28 — STOPPED: the matrix is no longer reliably green, and no ticket caused it
+
+*Written by the worker iteration that landed `P4.13`. Everything below the next horizontal rule is
+the supervising session's 2026-07-25 narrative, kept as it was.*
+
+## What landed this iteration
+
+| ticket | commit | state |
+|---|---|---|
+| `P4.13-precedence-matrix` | `f62ec6a` | done |
+
+`P4.13` puts every Phase 4 lifecycle rule in one hand-written 15×6 grid — the packet's 90
+combinations — and folds P2D.5's parent/child rule, P4.4's activity-clears-a-settle and P4.6's
+raised hand into it as four passes over that same grid: 450 resolutions, printed as a pass table so
+the matrix log carries the rules. Six negative tests observed red, each **also** run with this
+file's earlier checks commented out, so the matrix is proven to have teeth of its own rather than
+inheriting P4.2's and P4.6's. Detail in the ledger row and the commit body.
+
+Cross-review (codex, gpt-5.5) caught one real gap: the matrix inventory floor for
+`ContinuumRevivedAgentUIChecks` was left at 13 while the target grew to 14, which would have let a
+later deletion of the new call pass the guard. Regenerated to 14; that is the only inventory change.
+
+## Why the loop stopped — one decision, yours
+
+`./scripts/run-matrix.sh` is red at `ContinuumRevivedFileTreeChecks`:
+
+```
+Swift/ErrorType.swift:254: Fatal error: Error raised at top level: timed out waiting for view model snapshot
+```
+
+**It is not this diff and it is not any ticket.** With `P4.13` stashed, the clean tree at `adafe6a`
+fails identically at the same leg. `P4.12` recorded the same leg flaking once, the run before.
+
+Located: `Sources/ContinuumRevivedFileTreeChecks/main.swift:151` gives an **uncapped** view-model
+scan a **2-second** deadline, over a scratch tree that an earlier stage of the same file seeded with
+**50,250 nodes**. What loads the machine is the check itself — every run creates 50k fresh files and
+Spotlight (`mds` / `mds_stores`, ~11% CPU here) indexes them.
+
+Measured tonight: 1 pass in ~8 full matrix runs, and 3 consecutive standalone failures once the
+machine had warmed up. Early in the session the same standalone leg passed twice.
+
+I did not touch it — loosening someone else's deadline to get green is precisely what the runbook
+forbids a worker from deciding alone. The honest fixes, for you to pick:
+
+- give that one wait a budget proportional to its fixture (the 50k-node stage beside it already gets
+  10s) — one line, and it preserves everything the check asserts;
+- scan a smaller root at line 148 instead of the seeded `scratch`; or
+- have the large-scan stage clean up its 50k nodes so nothing indexes them.
+
+## Why stop rather than keep going
+
+Every remaining ticket would verify against a red matrix and either be marked `blocked` for a
+failure that is not its own — **and a blocked ticket is never retried** — or land unverified. The
+program's premise is that the deterministic gates block; with one flapping, the next hours of
+autonomous work would be worth less than the tickets they consumed.
+
+Once that leg is stable the loop relaunches unchanged. Next eligible row is **`P5.1-pi-rpc-client`**
+(row 78, `P2A.3` done); everything ahead of it in the queue is `done`.
+
+## Standing item — now flagged by four tickets
+
+`P4.3`, `P4.9`, `P4.11` and `P4.12` each hit the same hole from a different side: **nothing in
+production consumes P4.1's stored lifecycle facts.** `AgentInboxRowBuilder` still hardcodes
+`InboxLifecycle.active`, `AgentSupervisor` has no settle or snooze writer, and
+`configureWorkspaceSidebar` wires neither the undo seams nor a settle action — so a shipped row
+cannot say which section it draws in, and the only reachable row verbs are the two whose records get
+deleted. `P4.13` makes the *rules* unbreakable; it does not connect them to a row. Closing it wants
+its own packet — `AgentRowContext` carrying the four facts, a persisted supervisor restore path
+answerable to I5, and the settle/snooze writers. It is a list-wide presentation change (rows going
+slim, a settled tail) that deserves baselines and your decision, and four workers have now correctly
+refused to improvise it.
+
+---
+
 Branch `overnight/agent-ux` (worktree `continuum-overnight`). Updated by the supervising session
 2026-07-25 ~12:00Z. Live state is always `_LEDGER.md` + `git log`; this is the narrative.
 
