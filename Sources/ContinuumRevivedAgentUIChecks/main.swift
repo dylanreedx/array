@@ -56,4 +56,7 @@ runSnoozePresetChecks()
 // Ticket: docs/38-tickets/90-agent-ux/P4.6-snooze-raised-hand.md
 runSnoozeRaisedHandChecks()
 
+// Ticket: docs/38-tickets/90-agent-ux/P4.13-precedence-matrix.md
+runPrecedenceMatrixChecks()
+
 print("ContinuumRevivedAgentUIChecks passed")

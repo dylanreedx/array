@@ -761,6 +761,320 @@ func runSnoozeRaisedHandChecks() {
     print("Snooze raised-hand checks: blockers and new failures wake a snoozed agent, a failure the human had already seen does not, and waking withholds the shelf date without clearing the snooze")
 }
 
+// Ticket: docs/38-tickets/90-agent-ux/P4.13-precedence-matrix.md
+//
+// ONE TABLE FOR THE WHOLE LIFECYCLE. Every rule Phase 4 landed is spread over four
+// files and five packets; a change that inverts one of them is only visible today
+// if you know which check to read. This is the single place where the rules are
+// written down as data, one line per combination, and printed as a pass table so
+// the log itself is reviewable.
+//
+// THE GRID is the packet's cross-product, exactly: `settledOverride` {settled,
+// active, neutral} × blocker {none, approval, input, running, queuedTurn} × snooze
+// {none, future, elapsed} × inactivity {fresh, stale} = 3 × 5 × 3 × 2 = 90
+// combinations, laid out as 15 rows (override × blocker) of 6 columns (snooze ×
+// inactivity). Every expectation is HAND-WRITTEN as a token in `precedenceGrid`.
+// That is the difference from P4.2's 1,728-case sweep, which carries an oracle —
+// a re-spelling of the precedence order that would pass against an inverted
+// implementation if the same inversion were made twice. Nothing here re-implements
+// `resolve`; the grid is 90 literal answers.
+//
+// FOUR PASSES over that one grid, which is what folds the rest of Phase 4 into it
+// without a second table to keep in sync:
+//   1 · the blocker is the agent's OWN → the grid.
+//   2 · the blocker belongs to a CHILD (P2D.5), rolled up with
+//       `includingDescendants` → THE SAME GRID. That is the parent/child rule
+//       stated as an identity rather than as a separate list of cases: a
+//       descendant's blocker earns exactly the precedence the agent's own does, so
+//       a parent is not settleable while anything under it is blocked or running.
+//   3 · real activity has just arrived (P4.4) → the row for
+//       `override.afterActivity()` at this snooze's FRESH column, because activity
+//       both clears a settle and makes the agent fresh. Derived from the grid by a
+//       stated row-substitution, not by a second oracle.
+//   4 · the row is carrying a failure while snoozed (P4.6) → an OLD failure (one
+//       the human had already seen when they parked it) resolves as the grid says,
+//       and a NEW one resolves as this row's SNOOZE-ELAPSED column, because
+//       `snoozeHonoured` withholds the shelf date and `resolve` then falls through
+//       exactly as an expired snooze does. Uniform across all six columns: where
+//       the row is not snoozed at all, both answers collapse back onto the grid.
+//
+// WHAT IS NOT AN AXIS HERE, said rather than left as a hole: `archivedAt`. It is
+// rung 0 and it is swept over every other fact by P4.2's 1,728-case pass, and
+// adding it here would double a table whose value is that it fits on a screen.
+//
+// SIX NEGATIVE TESTS — the packet's five named witnesses, plus the other half of
+// the third — each observed red at exit 1 against the final code, quoted VERBATIM
+// and reported WHERE IT LANDED. This file's earlier checks run first and several of
+// them name the same rules, so every mutation was ALSO run with those earlier calls
+// commented out of `main.swift`, to prove this matrix has teeth of its own rather
+// than inheriting theirs:
+//   1. blocker-beats-settle — `resolve`'s step 1 made unreachable → lands first at
+//      P4.2's table ("precedence: a settled agent that is waiting on an approval
+//      MUST resolve .active — expected active, resolved settled(at: 2026-05-09
+//      05:13:20 +0000)"); alone it is red here: "FAIL: P4.13 own blocker · override
+//      settled · blocker approval · snooze none · inactivity fresh — expected
+//      active, resolved settled(at: 2026-05-09 06:03:20 +0000)".
+//   2. the `.active` pin suppresses auto-settle — the pin's rung folded into
+//      `.neutral`'s, so it falls through to the inactivity rung → lands at P4.2's
+//      table ("the keep-active pin suppresses auto-settle — expected active,
+//      resolved settled(at: 2026-05-02 06:13:20 +0000)"); alone it is red here:
+//      "FAIL: P4.13 own blocker · override active · blocker none · snooze none ·
+//      inactivity stale — expected active, resolved settled(at: 2026-05-02 06:13:20
+//      +0000)".
+//   3. activity clears an override — `afterActivity()` reduced to `self` → red HERE
+//      FIRST in both runs; nothing earlier in the matrix catches it: "FAIL: P4.13
+//      activity clears a settle and only a settle · override settled · blocker none
+//      · snooze none · inactivity fresh — expected neutral, got settled".
+//   3b. …and the same rule from the other side, `afterActivity()` returning
+//      `.neutral` for everything, so activity outvotes the keep-active pin → "FAIL:
+//      P4.13 activity clears a settle and only a settle · override active · blocker
+//      none · snooze none · inactivity fresh — expected active, got neutral". Also
+//      red here first. This is the pair that made the expectation stop reading the
+//      substitution out of the function under test.
+//   4. a pre-snooze failure does not wake — the newness test dropped, so any
+//      recorded failure wakes → lands at P4.6's table ("a failure one second BEFORE
+//      the snooze was set stays snoozed — the human saw it and said not now —
+//      expected still snoozed, got woken"); alone it is red here: "FAIL: P4.13
+//      snoozed, failure the human had seen · override settled · blocker none ·
+//      snooze future · inactivity fresh — expected snoozed(until: 2026-05-09
+//      06:43:20 +0000), resolved settled(at: 2026-05-09 06:03:20 +0000)".
+//   5. parent-blocked-by-child — `includingDescendants` returning `self` → lands at
+//      P2D.5's set algebra ("any descendant blocks, not just the first — got 0");
+//      alone it is red here: "FAIL: P4.13 child blocker · override settled · blocker
+//      approval · snooze none · inactivity fresh — expected active, resolved
+//      settled(at: 2026-05-09 06:03:20 +0000)".
+
+/// The human's recorded decision time, distinct from both activity dates so
+/// `settled at the decision` and `settled when the work went quiet` cannot be
+/// confused for one another in an expectation.
+private let decidedAt = now.addingTimeInterval(-600)
+
+/// The rows: override × blocker, in the packet's order.
+private let precedenceRows: [(override: SettledOverride, blocker: String)] = [
+    (.settled, "none"), (.settled, "approval"), (.settled, "input"),
+    (.settled, "running"), (.settled, "queued"),
+    (.active, "none"), (.active, "approval"), (.active, "input"),
+    (.active, "running"), (.active, "queued"),
+    (.neutral, "none"), (.neutral, "approval"), (.neutral, "input"),
+    (.neutral, "running"), (.neutral, "queued"),
+]
+
+/// The columns: snooze × inactivity, in this order —
+/// (none,fresh) (none,stale) (future,fresh) (future,stale) (elapsed,fresh) (elapsed,stale).
+private let precedenceSnoozes: [(name: String, at: Date?)] = [
+    ("none", nil), ("future", inHalfAnHour), ("elapsed", halfAnHourAgo),
+]
+private let precedenceInactivity: [(name: String, at: Date)] = [
+    ("fresh", anHourAgo), ("stale", aWeekAgo),
+]
+
+/// THE MATRIX. One hand-written answer per combination.
+///
+///   A  = active · Zf = snoozed until the stored wake-up
+///   Sd = settled at the human's decision · Sq = settled when the work went quiet
+///
+///                              snooze:  none      future     elapsed
+///                          inactivity: fresh stale fresh stale fresh stale
+private let precedenceGrid: [[String]] = [
+    /* settled · none     */ ["Sd", "Sd", "Zf", "Zf", "Sd", "Sd"],
+    /* settled · approval */ ["A",  "A",  "A",  "A",  "A",  "A"],
+    /* settled · input    */ ["A",  "A",  "A",  "A",  "A",  "A"],
+    /* settled · running  */ ["A",  "A",  "A",  "A",  "A",  "A"],
+    /* settled · queued   */ ["A",  "A",  "A",  "A",  "A",  "A"],
+    /* active  · none     */ ["A",  "A",  "Zf", "Zf", "A",  "A"],
+    /* active  · approval */ ["A",  "A",  "A",  "A",  "A",  "A"],
+    /* active  · input    */ ["A",  "A",  "A",  "A",  "A",  "A"],
+    /* active  · running  */ ["A",  "A",  "A",  "A",  "A",  "A"],
+    /* active  · queued   */ ["A",  "A",  "A",  "A",  "A",  "A"],
+    /* neutral · none     */ ["A",  "Sq", "Zf", "Zf", "A",  "Sq"],
+    /* neutral · approval */ ["A",  "A",  "A",  "A",  "A",  "A"],
+    /* neutral · input    */ ["A",  "A",  "A",  "A",  "A",  "A"],
+    /* neutral · running  */ ["A",  "A",  "A",  "A",  "A",  "A"],
+    /* neutral · queued   */ ["A",  "A",  "A",  "A",  "A",  "A"],
+]
+
+private func precedenceBlockers(_ name: String) -> LifecycleBlockers {
+    switch name {
+    case "none": return .unblocked
+    case "approval": return .pendingApproval
+    case "input": return .pendingInput
+    case "running": return .sessionRunning
+    case "queued": return .queuedTurn
+    default:
+        fputs("FAIL: P4.13 names a blocker the vocabulary does not have — \(name)\n", stderr)
+        Foundation.exit(1)
+    }
+}
+
+/// A token read back as the lifecycle it stands for. `quiet` is the column's
+/// inactivity date, which is what an auto-settle dates itself to.
+private func precedenceLifecycle(_ token: String, quiet: Date) -> InboxLifecycle {
+    switch token {
+    case "A": return .active
+    case "Zf": return .snoozed(until: inHalfAnHour)
+    case "Sd": return .settled(at: decidedAt)
+    case "Sq": return .settled(at: quiet)
+    default:
+        fputs("FAIL: P4.13 grid carries an expectation token nothing decodes — \(token)\n", stderr)
+        Foundation.exit(1)
+    }
+}
+
+private func runPrecedenceMatrixCheck() {
+    // The table's own shape, before any of its answers are believed: the axes are
+    // the packet's, the grid covers them exactly, and no combination is named twice.
+    expect(precedenceRows.count == SettledOverride.allCases.count * (LifecycleBlockers.all.count + 1),
+           "the matrix rows are every override × (every blocker + none) — got \(precedenceRows.count)")
+    expect(precedenceGrid.count == precedenceRows.count,
+           "every row has a line of expectations — \(precedenceRows.count) rows, \(precedenceGrid.count) lines")
+    let columnCount = precedenceSnoozes.count * precedenceInactivity.count
+    expect(columnCount == 6, "snooze × inactivity is six columns — got \(columnCount)")
+    for (index, line) in precedenceGrid.enumerated() {
+        expect(line.count == columnCount,
+               "row \(precedenceRows[index].override.rawValue)/\(precedenceRows[index].blocker) covers every column — got \(line.count)")
+    }
+    var seen = Set<String>()
+    for row in precedenceRows { seen.insert("\(row.override.rawValue)/\(row.blocker)") }
+    expect(seen.count == precedenceRows.count,
+           "no override × blocker combination is named twice — \(precedenceRows.count) rows, \(seen.count) distinct")
+    // Not vacuous: the grid really says all four things, so it cannot have
+    // degenerated into 90 assertions about `.active`.
+    let tokens = Set(precedenceGrid.flatMap { $0 })
+    expect(tokens == ["A", "Zf", "Sd", "Sq"],
+           "the matrix expects every lifecycle the rungs can produce — got \(tokens.sorted())")
+
+    /// The column index for a (snooze, inactivity) pair, in the declared order.
+    func column(snooze: Int, inactivity: Int) -> Int { snooze * precedenceInactivity.count + inactivity }
+    /// The row index for an override with this row's blocker — pass 3's substitution.
+    func row(override: SettledOverride, blocker: String) -> Int {
+        guard let index = precedenceRows.firstIndex(where: { $0.override == override && $0.blocker == blocker })
+        else {
+            fputs("FAIL: P4.13 has no row for \(override.rawValue)/\(blocker)\n", stderr)
+            Foundation.exit(1)
+        }
+        return index
+    }
+
+    var resolutions = 0
+    for (rowIndex, rowSpec) in precedenceRows.enumerated() {
+        let own = precedenceBlockers(rowSpec.blocker)
+        // A settle records the moment it was made; nothing else has one.
+        let settledAt: Date? = rowSpec.override == .settled ? decidedAt : nil
+
+        for (snoozeIndex, snooze) in precedenceSnoozes.enumerated() {
+            for (quietIndex, quiet) in precedenceInactivity.enumerated() {
+                let columnIndex = column(snooze: snoozeIndex, inactivity: quietIndex)
+                let expected = precedenceLifecycle(precedenceGrid[rowIndex][columnIndex], quiet: quiet.at)
+                let facts = "override \(rowSpec.override.rawValue) · blocker \(rowSpec.blocker) · snooze \(snooze.name) · inactivity \(quiet.name)"
+
+                /// One resolution, with whatever this pass varies laid over the row.
+                func resolve(
+                    override: SettledOverride,
+                    blockers: LifecycleBlockers,
+                    settledAt: Date?,
+                    snoozedUntil: Date?,
+                    lastActivityAt: Date
+                ) -> InboxLifecycle {
+                    resolutions += 1
+                    return InboxLifecycle.resolve(
+                        override: override, blockers: blockers, settledAt: settledAt,
+                        snoozedUntil: snoozedUntil, lastActivityAt: lastActivityAt,
+                        autoSettleAfter: threeDays, now: now)
+                }
+
+                // 1 · The agent's own blocker.
+                let mine = resolve(override: rowSpec.override, blockers: own, settledAt: settledAt,
+                                   snoozedUntil: snooze.at, lastActivityAt: quiet.at)
+                expect(mine == expected,
+                       "P4.13 own blocker · \(facts) — expected \(expected), resolved \(mine)")
+
+                // 2 · The same blocker, one row down (P2D.5). A parent that said
+                // "done" over a blocked child is not settleable, and the identity
+                // with pass 1 is the strongest way to say so.
+                let rolled = resolve(override: rowSpec.override,
+                                     blockers: LifecycleBlockers.unblocked.includingDescendants([own]),
+                                     settledAt: settledAt, snoozedUntil: snooze.at,
+                                     lastActivityAt: quiet.at)
+                expect(rolled == expected,
+                       "P4.13 child blocker · \(facts) — expected \(expected), resolved \(rolled)")
+
+                // 3 · Real activity has just arrived (P4.4): the settle is cleared,
+                // the pin is not, and the agent is fresh by definition — so the
+                // answer is this same table read at another row.
+                //
+                // THE RULE IS WRITTEN ON THE EXPECTATION SIDE, not read from
+                // `afterActivity()`: taking the substitution from the function
+                // under test would move the expectation with the mutation, and the
+                // witness would then only catch it by a date coincidence (observed,
+                // before this line was written that way).
+                let clearedByRule: SettledOverride = rowSpec.override == .settled ? .neutral : rowSpec.override
+                expect(rowSpec.override.afterActivity() == clearedByRule,
+                       "P4.13 activity clears a settle and only a settle · \(facts) — expected \(clearedByRule.rawValue), got \(rowSpec.override.afterActivity().rawValue)")
+                expect(rowSpec.override.clearsOnActivity == (clearedByRule != rowSpec.override),
+                       "P4.13 clearsOnActivity agrees with afterActivity · \(facts) — got \(rowSpec.override.clearsOnActivity)")
+                let afterExpected = precedenceLifecycle(
+                    precedenceGrid[row(override: clearedByRule, blocker: rowSpec.blocker)][
+                        column(snooze: snoozeIndex, inactivity: 0)],
+                    quiet: precedenceInactivity[0].at)
+                let after = resolve(override: rowSpec.override.afterActivity(), blockers: own,
+                                    settledAt: settledAt,
+                                    snoozedUntil: snooze.at, lastActivityAt: now)
+                expect(after == afterExpected,
+                       "P4.13 after activity · \(facts) — expected \(afterExpected), resolved \(after)")
+
+                // 4 · Snoozed with a failure (P4.6). Old — one the human had in
+                // front of them when they parked the row — changes nothing. New
+                // pulls the row off the shelf, which is the snooze-elapsed column
+                // of this same row.
+                func shelved(failedAt: Date) -> Date? {
+                    InboxLifecycle.snoozeHonoured(
+                        record: SnoozedAgentFacts(snoozedUntil: snooze.at, snoozedAt: snoozeSet,
+                                                  failedAt: failedAt),
+                        now: now)
+                }
+                let old = resolve(override: rowSpec.override, blockers: own, settledAt: settledAt,
+                                  snoozedUntil: shelved(failedAt: snoozeSet.addingTimeInterval(-1)),
+                                  lastActivityAt: quiet.at)
+                expect(old == expected,
+                       "P4.13 snoozed, failure the human had seen · \(facts) — expected \(expected), resolved \(old)")
+
+                let wokenExpected = precedenceLifecycle(
+                    precedenceGrid[rowIndex][column(snooze: precedenceSnoozes.count - 1, inactivity: quietIndex)],
+                    quiet: quiet.at)
+                let woken = resolve(override: rowSpec.override, blockers: own, settledAt: settledAt,
+                                    snoozedUntil: shelved(failedAt: snoozeSet.addingTimeInterval(1)),
+                                    lastActivityAt: quiet.at)
+                expect(woken == wokenExpected,
+                       "P4.13 snoozed, failure newer than the snooze · \(facts) — expected \(wokenExpected), resolved \(woken)")
+            }
+        }
+    }
+
+    expect(resolutions == 90 * 5,
+           "the matrix resolves all 90 combinations through five passes — got \(resolutions)")
+    printPrecedenceMatrix()
+}
+
+/// The pass table, printed only once every one of its cells has been asserted, so
+/// the log carries the rules in a form a human can review at a glance.
+private func printPrecedenceMatrix() {
+    print("P4.13 precedence matrix — 90 combinations, each resolved five ways (own blocker · child blocker · after activity · snoozed with an old failure · snoozed with a new one)")
+    let columns = precedenceSnoozes.flatMap { snooze in
+        precedenceInactivity.map { "\(snooze.name)/\($0.name)" }
+    }
+    print("  override blocker  | " + columns.map { $0.padding(toLength: 14, withPad: " ", startingAt: 0) }.joined())
+    for (index, rowSpec) in precedenceRows.enumerated() {
+        let label = "  \(rowSpec.override.rawValue.padding(toLength: 8, withPad: " ", startingAt: 0)) \(rowSpec.blocker.padding(toLength: 8, withPad: " ", startingAt: 0))| "
+        print(label + precedenceGrid[index].map { $0.padding(toLength: 14, withPad: " ", startingAt: 0) }.joined())
+    }
+    print("  key: A active · Zf snoozed until the stored wake-up · Sd settled at the human's decision · Sq settled when the work went quiet")
+}
+
+func runPrecedenceMatrixChecks() {
+    runPrecedenceMatrixCheck()
+    print("Precedence-matrix checks: 90 combinations × 5 passes passed — a blocker (the agent's own or a child's) outranks \"I said done\", the keep-active pin outranks auto-settle, activity clears a settle and not a pin, and a snooze only breaks for a failure the human had not already seen")
+}
+
 func runEffectiveLifecycleChecks() {
     runLifecycleBlockerVocabularyCheck()
     runEffectiveLifecycleTableCheck()
