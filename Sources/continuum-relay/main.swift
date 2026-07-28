@@ -9,9 +9,10 @@ import Foundation
 // behind TLS. Tokens: the operator token authorizes the Mac's publish leg
 // and lets it register phone pairing tokens at runtime via POST /v1/tokens.
 //
-//   continuum-relay --port 8787 [--host 0.0.0.0]
-//                   --operator-token <secret>   (or CONTINUUM_RELAY_OPERATOR_TOKEN)
-//                   [--observer-token <secret>]… (dev convenience)
+//   CONTINUUM_RELAY_OPERATOR_TOKEN=<secret> continuum-relay --port 8787
+//                   [--host 0.0.0.0] [--observer-token <secret>]…
+// `--operator-token` remains accepted for compatibility, but the managed dev
+// service uses the environment so credentials never appear in argv.
 
 var host = "127.0.0.1"
 var port: UInt16 = 8787
@@ -19,8 +20,15 @@ var operatorToken = ProcessInfo.processInfo.environment["CONTINUUM_RELAY_OPERATO
 var observerTokens: [String] = []
 
 var arguments = Array(CommandLine.arguments.dropFirst())
+let logTimestamp: @Sendable () -> String = {
+    ISO8601DateFormatter().string(from: Date())
+}
+func writeLine(_ message: String, to handle: FileHandle) {
+    handle.write(Data("\(logTimestamp()) continuum-relay: \(message)\n".utf8))
+}
 func fail(_ message: String) -> Never {
-    FileHandle.standardError.write(Data("continuum-relay: \(message)\n".utf8))
+    // FileHandle writes immediately even when launchd redirects the descriptor.
+    writeLine(message, to: .standardError)
     exit(2)
 }
 while !arguments.isEmpty {
@@ -37,7 +45,7 @@ while !arguments.isEmpty {
     case "--operator-token": operatorToken = value()
     case "--observer-token": observerTokens.append(value())
     case "--help", "-h":
-        print("usage: continuum-relay [--host H] [--port P] --operator-token T [--observer-token T]…")
+        writeLine("usage: CONTINUUM_RELAY_OPERATOR_TOKEN=T continuum-relay [--host H] [--port P] [--observer-token T]…", to: .standardOutput)
         exit(0)
     default: fail("unknown flag \(flag)")
     }
@@ -59,5 +67,7 @@ do {
 } catch {
     fail("could not start: \(error)")
 }
-print("continuum-relay listening on http://\(host):\(server.port) (operator token: \(String(operatorToken.prefix(4)))…, observer tokens seeded: \(observerTokens.count))")
+// Never log even a token prefix: a readiness line is operational evidence and
+// must be safe to retain or paste into a bug report.
+writeLine("ready url=http://\(host):\(server.port) observerTokens=\(observerTokens.count)", to: .standardOutput)
 dispatchMain()

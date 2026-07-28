@@ -713,3 +713,123 @@ do {
 }
 
 print("ContinuumRevivedRelayChecks passed: hub-restart resilience (stale cursor detected at hello, client rejoins fresh)")
+
+// ── Managed local relay: real executable boundary + side-effect-free manager contract ──
+
+func runProcess(_ executable: String, _ arguments: [String], environment: [String: String]? = nil) throws -> (status: Int32, stdout: String, stderr: String) {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    if let environment { process.environment = environment }
+    let stdout = Pipe()
+    let stderr = Pipe()
+    process.standardOutput = stdout
+    process.standardError = stderr
+    try process.run()
+    process.waitUntilExit()
+    return (
+        process.terminationStatus,
+        String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self),
+        String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    )
+}
+
+let projectRoot = FileManager.default.currentDirectoryPath
+let relayExecutable = ProcessInfo.processInfo.environment["CONTINUUM_RELAY_CHECK_BINARY"]
+    ?? URL(fileURLWithPath: projectRoot).appendingPathComponent(".build/debug/continuum-relay").path
+expect(FileManager.default.isExecutableFile(atPath: relayExecutable), "assertion 71: real continuum-relay executable missing at \(relayExecutable); run swift build first")
+
+// 26. Spawn the actual command-line executable with its credential only in
+//     the environment. Port zero makes the process choose a race-free ephemeral
+//     listener. The immediate readiness line gives us that port without sleeps
+//     coupled to machine speed; its contents must remain entirely secret-free.
+do {
+    let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("continuum-relay-process-check-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: temporary) }
+    let stdoutURL = temporary.appendingPathComponent("stdout.log")
+    let stderrURL = temporary.appendingPathComponent("stderr.log")
+    FileManager.default.createFile(atPath: stdoutURL.path, contents: nil)
+    FileManager.default.createFile(atPath: stderrURL.path, contents: nil)
+    let stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
+    let stderrHandle = try FileHandle(forWritingTo: stderrURL)
+    defer { try? stdoutHandle.close(); try? stderrHandle.close() }
+
+    let secret = "relay-process-check-secret-\(UUID().uuidString)"
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: relayExecutable)
+    process.arguments = ["--host", "127.0.0.1", "--port", "0"]
+    var environment = ProcessInfo.processInfo.environment
+    environment["CONTINUUM_RELAY_OPERATOR_TOKEN"] = secret
+    process.environment = environment
+    process.standardOutput = stdoutHandle
+    process.standardError = stderrHandle
+    try process.run()
+    defer {
+        if process.isRunning { process.terminate() }
+        process.waitUntilExit()
+    }
+
+    var readyLine = ""
+    for _ in 0..<100 {
+        let contents = (try? String(contentsOf: stdoutURL, encoding: .utf8)) ?? ""
+        if let line = contents.split(separator: "\n").map(String.init).first(where: { $0.contains("ready url=http://127.0.0.1:") }) {
+            readyLine = line
+            break
+        }
+        if !process.isRunning { break }
+        try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    expect(!readyLine.isEmpty, "assertion 72: subprocess must emit immediate readiness, stderr=\((try? String(contentsOf: stderrURL, encoding: .utf8)) ?? "")")
+    let portText = readyLine.components(separatedBy: "ready url=http://127.0.0.1:").last?.split(separator: " ").first.map(String.init) ?? ""
+    expect(UInt16(portText) != nil, "assertion 73: readiness line must expose its bound ephemeral port, got \(readyLine)")
+    expect(!readyLine.contains(secret) && !readyLine.lowercased().contains("token:"), "assertion 74: readiness line must be secret-free, got \(readyLine)")
+    let health = try await request("GET", "http://127.0.0.1:\(portText)/v1/health")
+    expect(health.status == 200, "assertion 75: real subprocess health → 200, got \(health.status)")
+    let allLogs = ((try? String(contentsOf: stdoutURL, encoding: .utf8)) ?? "") + ((try? String(contentsOf: stderrURL, encoding: .utf8)) ?? "")
+    expect(!allLogs.contains(secret), "assertion 76: real subprocess logs must not contain the operator token")
+    let argv = try runProcess("/bin/ps", ["-p", "\(process.processIdentifier)", "-o", "command="])
+    expect(argv.status == 0 && !argv.stdout.contains(secret) && !argv.stdout.contains("--operator-token"), "assertion 77: managed invocation keeps the token out of argv, got \(argv.stdout)")
+}
+
+// Startup failures use the same unbuffered, timestamped, secret-free path.
+do {
+    var environment = ProcessInfo.processInfo.environment
+    let secret = "relay-failure-check-secret-\(UUID().uuidString)"
+    environment["CONTINUUM_RELAY_OPERATOR_TOKEN"] = secret
+    let failure = try runProcess(relayExecutable, ["--host", "not-an-ipv4-address", "--port", "0"], environment: environment)
+    expect(failure.status == 2 && failure.stderr.contains("could not start: invalidIPv4Host"), "assertion 77b: startup failure must exit 2 with an immediate useful diagnostic, got status=\(failure.status) stderr=\(failure.stderr)")
+    expect(!failure.stderr.contains(secret), "assertion 77c: startup failure diagnostic must be secret-free")
+}
+
+// 27. The manager's LaunchAgent/mode contract is rendered in a hidden,
+//     side-effect-free check seam. This proves exact absolute paths, launchd
+//     supervision/log capture, environment-only auth, and loopback-vs-LAN bind
+//     without loading a job, writing defaults, or touching the user's files.
+do {
+    let script = URL(fileURLWithPath: projectRoot).appendingPathComponent("scripts/relay-dev.sh").path
+    expect(FileManager.default.isExecutableFile(atPath: script), "assertion 78: relay-dev.sh must be executable")
+    let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("continuum-relay-contract-check-\(UUID().uuidString)")
+    let fakeSupport = temporary.appendingPathComponent("Application Support/Continuum/DevRelay").path
+    let fakePlist = temporary.appendingPathComponent("Library/LaunchAgents/com.continuum.revived.relay.dev.plist").path
+    var environment = ProcessInfo.processInfo.environment
+    environment["CONTINUUM_RELAY_DEV_DIR"] = fakeSupport
+    environment["CONTINUUM_RELAY_DEV_PLIST"] = fakePlist
+    environment["CONTINUUM_RELAY_DEV_TEST_TOKEN"] = "contract-only-token"
+
+    let loopback = try runProcess("/bin/bash", [script, "__contract", "loopback"], environment: environment)
+    expect(loopback.status == 0, "assertion 79: loopback plist contract renders, stderr=\(loopback.stderr)")
+    expect(loopback.stdout.contains("<string>127.0.0.1</string>"), "assertion 80: loopback mode binds only 127.0.0.1")
+    expect(loopback.stdout.contains("<key>RunAtLoad</key><true/>") && loopback.stdout.contains("<key>KeepAlive</key><true/>") && loopback.stdout.contains("<key>ThrottleInterval</key><integer>5</integer>"), "assertion 81: plist owns restart-at-login/crash with throttling")
+    expect(loopback.stdout.contains("<key>StandardOutPath</key>") && loopback.stdout.contains("<key>StandardErrorPath</key>"), "assertion 82: plist captures both output streams")
+    expect(loopback.stdout.contains("<key>EnvironmentVariables</key>") && loopback.stdout.contains("contract-only-token"), "assertion 83: plist supplies operator token in the environment")
+    let argumentsRange = loopback.stdout.range(of: "<key>ProgramArguments</key><array>")!.upperBound..<loopback.stdout.range(of: "</array>", range: loopback.stdout.range(of: "<key>ProgramArguments</key><array>")!.upperBound..<loopback.stdout.endIndex)!.lowerBound
+    let argumentsXML = String(loopback.stdout[argumentsRange])
+    expect(argumentsXML.contains(fakeSupport + "/bin/continuum-relay") && !argumentsXML.contains("contract-only-token") && !argumentsXML.contains("operator-token"), "assertion 84: ProgramArguments use the absolute stable binary and contain no credential")
+    expect(!FileManager.default.fileExists(atPath: temporary.path), "assertion 85: contract rendering has no filesystem side effects")
+
+    let lan = try runProcess("/bin/bash", [script, "__contract", "lan"], environment: environment)
+    expect(lan.status == 0 && lan.stdout.contains("<string>0.0.0.0</string>"), "assertion 86: LAN mode is an explicit all-interface bind")
+}
+
+print("ContinuumRevivedRelayChecks passed: managed local relay (real subprocess readiness+health, no token in argv/logs, side-effect-free LaunchAgent and loopback/LAN mode contract)")
