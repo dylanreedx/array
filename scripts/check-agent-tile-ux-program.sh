@@ -256,17 +256,36 @@ mutate_packet_dependency_drift() { sed -i '' 's/^Depends on: P0.1$/Depends on: P
 mutate_packet_dependency_label_removed() { sed -i '' 's/^Depends on: P0.1$/P0.1/' "$DIR/P0.2-agent-content-target.md"; }
 mutate_packet_phase_drift() { sed -i '' 's/^Phase: 1 · /Phase: 3 · /' "$DIR/P1.2-stable-node-identity.md"; }
 mutate_packet_title_drift() { sed -i '' '1s/^# P1.3 /# P1.7 /' "$DIR/P1.3-mutation-patch-vocabulary.md"; }
+mutate_ledger_fields() {
+  local target="$1" state="$2" commit="$3" updated="$4" tmp
+  tmp="${LEDGER}.tmp"
+  awk -F'|' -v OFS='|' -v target="$target" -v state="$state" -v commit="$commit" -v updated="$updated" '
+    {
+      key = $2
+      gsub(/^[[:space:]]*`|`[[:space:]]*$/, "", key)
+      if (key == target) {
+        $3 = " " state " "
+        $4 = " " commit " "
+        $5 = " " updated " "
+        found = 1
+      }
+      print
+    }
+    END { if (!found) exit 1 }
+  ' "$LEDGER" > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$LEDGER"
+}
 mutate_invalid_ledger_state() {
-  sed -i '' 's/`P0.4-transcript-fixture-corpus.md` | pending |/`P0.4-transcript-fixture-corpus.md` | shipped |/' "$LEDGER"
+  mutate_ledger_fields P0.4-transcript-fixture-corpus.md shipped — 2026-07-28T00:00:00Z
 }
 mutate_forged_pending_commit() {
-  sed -i '' 's/`P0.5-compatibility-pipeline-harness.md` | pending | — |/`P0.5-compatibility-pipeline-harness.md` | pending | deadbee |/' "$LEDGER"
+  mutate_ledger_fields P0.5-compatibility-pipeline-harness.md pending deadbee —
 }
 mutate_forged_done_metadata() {
-  sed -i '' 's/`P0.5-compatibility-pipeline-harness.md` | pending | — | — |/`P0.5-compatibility-pipeline-harness.md` | done | garbage | garbage |/' "$LEDGER"
+  mutate_ledger_fields P0.5-compatibility-pipeline-harness.md done garbage garbage
 }
 mutate_invalid_calendar_timestamp() {
-  sed -i '' 's/`P0.5-compatibility-pipeline-harness.md` | pending | — | — |/`P0.5-compatibility-pipeline-harness.md` | blocked | — | 2026-99-99T99:99:99Z |/' "$LEDGER"
+  mutate_ledger_fields P0.5-compatibility-pipeline-harness.md blocked — 2026-99-99T99:99:99Z
 }
 mutate_unwired_matrix_leg() {
   sed -i '' '4c\
