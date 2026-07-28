@@ -122,6 +122,9 @@ run_ios_build() {
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
 run scripts/check-matrix-inventory.sh
+# Program 91 setup: keep the 50-ticket agent-tile queue, dependency order,
+# packet structure, ledger rows, and supervised review gates from drifting.
+run scripts/check-agent-tile-ux-program.sh
 # Ticket P1.7: colour hygiene. A pure grep lint over the view layers, so it runs
 # before the build for the same reason as the inventory guard — a new raw colour
 # should be named in seconds, not after a full build. Red on any raw colour or
