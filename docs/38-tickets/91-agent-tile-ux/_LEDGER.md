@@ -2,7 +2,7 @@
 
 ## heartbeat
 
-last-touch 2026-07-28T04:12:00Z · ticket P0.1-program-contract.md · attempt 1 · pid 25627 · status blocked-review-provider
+last-touch 2026-07-28T04:48:16Z · ticket P0.1-program-contract.md · attempt 1 recovery · pid — · status done
 
 ## states
 
@@ -10,7 +10,7 @@ last-touch 2026-07-28T04:12:00Z · ticket P0.1-program-contract.md · attempt 1 
 
 | Ticket | State | Commit | Updated | Note |
 |---|---|---|---|---|
-| `P0.1-program-contract.md` | blocked | — | 2026-07-28T04:12:00Z | Implementation complete and green, but the independent review provider is down, so nothing was committed. `codex exec` rejects every model this account can reach: configured `gpt-5.6-sol` → 400 "requires a newer version of Codex"; `gpt-5.6`, `gpt-5.6-codex`, `gpt-5.5-codex`, `gpt-5.2-codex`, `gpt-5.1-codex`, `gpt-5` → 400 "not supported when using Codex with a ChatGPT account". `codex login status` = logged in; `codex doctor` = auth configured, current 0.135.0, 0.145.0 available. Auth is fine; the CLI is stale, which is a supervisor-side precondition, not an implementation failure. Per the runbook the missing reviewer fails closed, so the check-script work was reverted from the tree and preserved as a patch outside the checkout at `~/.pi/agent-tile-ux-runs/continuum-overnight/run-20260727T233225/preserved/P0.1-check-script.patch` (377 lines) with provider evidence beside it. That work was verified before revert: `./scripts/check-agent-tile-ux-program.sh` exit 0 with `self-test: ok (14 negative cases red, live program untouched)`; `swift build` exit 0; `CONTINUUM_SKIP_SURFACE_CHECKS=1 ./scripts/run-matrix.sh` exit 0 (Matrix passed, no inventory growth, no leg removed); program dir sha before/after self-test identical (`bc8184b6…`). Negative witness: deleting the `is pending but records commit` assertion made the run go red with `case 'forged commit on a pending row' passed the check but must fail` / `1 of 14 case(s) did not go red as required`, exit 1; restored byte-identical from a /tmp copy. Recovery: upgrade codex (`npm i -g @openai/codex@latest`), `git apply` the preserved patch, re-run the review, then set this row `pending`. |
+| `P0.1-program-contract.md` | done | this commit | 2026-07-28T04:48:16Z | Recovered the worker's preserved patch after upgrading Codex CLI 0.135.0 → 0.145.0. The guard now cross-validates the fixed packet header, exact dependency grammar/order/uniqueness, ledger state metadata with real BSD-date UTC validation, 50 packet/ledger rows, three supervised gates, and a fail-fast script-relative matrix invocation locked at executable line 4; 25 isolated negative mutations must all go red while the live program remains untouched. Negative witness from the worker and recovery: deleting forged-pending protection failed; independent Codex review then found and drove fixes for misleading header text, regex/trailing/duplicate dependencies, swallowed/disabled matrix calls, malformed done metadata, and invalid calendar timestamps. Final `./scripts/check-agent-tile-ux-program.sh`, `swift build`, matrix inventory, and full headless `run-matrix.sh` passed; matrix artifact `qa-runs/20260728T044806Z/app-bundle/manifest.json`. Codex 0.145 final review: APPROVE. |
 | `P0.2-agent-content-target.md` | pending | — | — | — |
 | `P0.3-semantic-tile-tokens.md` | pending | — | — | — |
 | `P0.4-transcript-fixture-corpus.md` | pending | — | — | — |

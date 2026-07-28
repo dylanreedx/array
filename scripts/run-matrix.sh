@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+"$(dirname "$0")/check-agent-tile-ux-program.sh" --check
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT_DIR"
 
