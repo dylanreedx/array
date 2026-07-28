@@ -10,6 +10,7 @@ let package = Package(
     products: [
         .executable(name: "continuum-revived", targets: ["ContinuumRevived"]),
         .executable(name: "ContinuumRevivedPaletteChecks", targets: ["ContinuumRevivedPaletteChecks"]),
+        .library(name: "ContinuumRevivedAgentContent", targets: ["ContinuumRevivedAgentContent"]),
         .library(name: "ContinuumRevivedAgentUI", targets: ["ContinuumRevivedAgentUI"]),
         .library(name: "ContinuumRevivedCore", targets: ["ContinuumRevivedCore"]),
         .library(name: "ContinuumRevivedSync", targets: ["ContinuumRevivedSync"])
@@ -29,6 +30,17 @@ let package = Package(
         // coupled to storage/sync/registry logic.
         .target(
             name: "ContinuumRevivedAgentUI"
+        ),
+        // Ticket 91/P0.2: the platform-neutral home for the agent transcript's
+        // semantic document and (from P2.1 on) its Markdown parser. Foundation
+        // only and deliberately NO dependencies: the direction is
+        // Core → AgentContent, never the reverse, and no AppKit/SwiftUI or
+        // visual token may ever reach the semantic tree. Adding a dependency
+        // here that names another Continuum target or GhosttyKit is caught by
+        // ContinuumRevivedAgentContentChecks, which also scans the sources for
+        // a forbidden `import`.
+        .target(
+            name: "ContinuumRevivedAgentContent"
         ),
         .target(
             name: "ContinuumRevivedCore",
@@ -121,6 +133,14 @@ let package = Package(
         .executableTarget(
             name: "ContinuumRevivedAgentUIChecks",
             dependencies: ["ContinuumRevivedAgentUI"]
+        ),
+        // Ticket 91/P0.2: the fast semantic-content leg. Depends on
+        // AgentContent ALONE — that is the gate: if the semantic tree ever
+        // reaches into Core, Sync, AgentUI or GhosttyKit, this executable stops
+        // compiling instead of the coupling being caught in review.
+        .executableTarget(
+            name: "ContinuumRevivedAgentContentChecks",
+            dependencies: ["ContinuumRevivedAgentContent"]
         ),
         .executableTarget(
             name: "ContinuumRevivedSyncChecks",

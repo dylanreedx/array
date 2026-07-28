@@ -141,6 +141,12 @@ run swift run ContinuumRevivedCoreChecks
 # cannot compile here. StatusChip's assertions moved here from
 # ContinuumRevivedCoreChecks unchanged.
 run swift run ContinuumRevivedAgentUIChecks
+# Ticket 91/P0.2: the semantic agent-content module's own leg. It links
+# AgentContent alone, so it proves the dependency direction the same way the
+# AgentUI leg does, and it scans the module's sources and both manifest target
+# blocks so a forbidden import or declared dependency is red before it is ever
+# used. Fast and pure: no app bundle, no display, no provider process.
+run swift run ContinuumRevivedAgentContentChecks
 run swift run ContinuumRevivedSyncChecks
 # Ticket 86 (D4-R1): relay hub core — auth/scope, lossless catch-up, I5 gate.
 run swift run ContinuumRevivedRelayChecks

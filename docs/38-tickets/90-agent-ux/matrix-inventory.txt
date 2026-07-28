@@ -131,6 +131,7 @@ leg run scripts/check-color-hygiene.sh
 leg run scripts/check-matrix-inventory.sh
 leg run scripts/check-root-docs.sh
 leg run swift build
+leg run swift run ContinuumRevivedAgentContentChecks
 leg run swift run ContinuumRevivedAgentUIChecks
 leg run swift run ContinuumRevivedCoreChecks
 leg run swift run ContinuumRevivedFileTreeChecks
@@ -270,6 +271,7 @@ bundle-check --delete-confirm-policy-defaults-check
 bundle-check --file-tree-boot-persistence-check
 bundle-check --menu-contract-check
 bundle-check --palette-duplicate-root-check
+count ContinuumRevivedAgentContentChecks 4
 count ContinuumRevivedAgentUIChecks 14
 count ContinuumRevivedCoreChecks 31
 count ContinuumRevivedFileTreeChecks 0
