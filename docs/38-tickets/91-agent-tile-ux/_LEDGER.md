@@ -2,7 +2,7 @@
 
 ## heartbeat
 
-last-touch — · ticket — · attempt 0 · pid — · status not-started
+last-touch 2026-07-28T04:12:00Z · ticket P0.1-program-contract.md · attempt 1 · pid 25627 · status blocked-review-provider
 
 ## states
 
@@ -10,7 +10,7 @@ last-touch — · ticket — · attempt 0 · pid — · status not-started
 
 | Ticket | State | Commit | Updated | Note |
 |---|---|---|---|---|
-| `P0.1-program-contract.md` | pending | — | — | — |
+| `P0.1-program-contract.md` | blocked | — | 2026-07-28T04:12:00Z | Implementation complete and green, but the independent review provider is down, so nothing was committed. `codex exec` rejects every model this account can reach: configured `gpt-5.6-sol` → 400 "requires a newer version of Codex"; `gpt-5.6`, `gpt-5.6-codex`, `gpt-5.5-codex`, `gpt-5.2-codex`, `gpt-5.1-codex`, `gpt-5` → 400 "not supported when using Codex with a ChatGPT account". `codex login status` = logged in; `codex doctor` = auth configured, current 0.135.0, 0.145.0 available. Auth is fine; the CLI is stale, which is a supervisor-side precondition, not an implementation failure. Per the runbook the missing reviewer fails closed, so the check-script work was reverted from the tree and preserved as a patch outside the checkout at `~/.pi/agent-tile-ux-runs/continuum-overnight/run-20260727T233225/preserved/P0.1-check-script.patch` (377 lines) with provider evidence beside it. That work was verified before revert: `./scripts/check-agent-tile-ux-program.sh` exit 0 with `self-test: ok (14 negative cases red, live program untouched)`; `swift build` exit 0; `CONTINUUM_SKIP_SURFACE_CHECKS=1 ./scripts/run-matrix.sh` exit 0 (Matrix passed, no inventory growth, no leg removed); program dir sha before/after self-test identical (`bc8184b6…`). Negative witness: deleting the `is pending but records commit` assertion made the run go red with `case 'forged commit on a pending row' passed the check but must fail` / `1 of 14 case(s) did not go red as required`, exit 1; restored byte-identical from a /tmp copy. Recovery: upgrade codex (`npm i -g @openai/codex@latest`), `git apply` the preserved patch, re-run the review, then set this row `pending`. |
 | `P0.2-agent-content-target.md` | pending | — | — | — |
 | `P0.3-semantic-tile-tokens.md` | pending | — | — | — |
 | `P0.4-transcript-fixture-corpus.md` | pending | — | — | — |
