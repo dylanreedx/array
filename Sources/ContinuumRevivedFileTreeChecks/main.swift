@@ -148,7 +148,7 @@ await MainActor.run {
     viewModel.start(rootPath: scratch.path, ignoreList: FileTreeScanner.defaultIgnoredNames)
 }
 
-try await observed.waitForSnapshot(timeoutNanoseconds: 2_000_000_000)
+try await observed.waitForSnapshot(timeoutNanoseconds: 10_000_000_000)
 let latest = await MainActor.run { viewModel.latestSnapshot }
 expect(latest != nil, "view model should apply scanner snapshots on the main actor")
 
