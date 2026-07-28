@@ -10052,4 +10052,9 @@ runRoleRegistryChecks()
 // window that lets the inbox drain itself, and the rule it feeds.
 runAgentAutoSettleConfigChecks()
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P0.4-transcript-fixture-corpus.md —
+// the Core-side reader for the one transcript corpus: one home, the ids Core
+// depends on, the sentinel boundary, and the delta sequence P0.5 replays.
+runAgentTranscriptFixtureChecks()
+
 print("ContinuumRevivedCoreChecks passed")
