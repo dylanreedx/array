@@ -75,6 +75,30 @@ public enum Radius {
     public static let pill = 999.0
 }
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P0.3-semantic-tile-tokens.md
+/// The v2 tile's radii. Additive: `Radius` keeps its shipped values (card 6,
+/// container 10) so nothing already adopting it moves, and `runAgentTileTokenChecks`
+/// asserts that preservation rather than trusting it.
+///
+/// The bands come from `_DESIGN.md` §11 — tile ≈12, composer 10–12, artifact
+/// 8–10 — and the values are the ones inside those bands that also land on
+/// `Space.grid` and keep the nesting rule `Radius` established: a container's
+/// radius exceeds the radius of whatever nests inside it. The tile contains the
+/// composer, the composer and the transcript contain artifacts, and an artifact
+/// may still contain a `Radius.card` (6), so the whole ladder is strictly
+/// decreasing: 12 > 10 > 8 > 6.
+public enum AgentTileRadius {
+    /// The tile itself.
+    public static let tile = 12.0
+    /// The composer's field surface.
+    public static let composer = 10.0
+    /// A structured artifact: tool call, plan, diff, fenced code.
+    public static let artifact = 8.0
+
+    /// Outermost-first, for the checks that gate the nesting rule.
+    public static let ladder: [Double] = [tile, composer, artifact]
+}
+
 /// The two padding shapes. Collapsing today's 3/6/8/10/12 into exactly two is
 /// the ticket: a card is generous on all four edges, a row is compact
 /// vertically and keeps the card's horizontal rhythm so text left-aligns down

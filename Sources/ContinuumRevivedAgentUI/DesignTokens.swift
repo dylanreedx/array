@@ -209,6 +209,246 @@ public enum LineToken: String, CaseIterable, Sendable {
     }
 }
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P0.3-semantic-tile-tokens.md
+//
+// The v2 agent tile's own vocabulary: five surfaces the shipped palette has no
+// name for (a composer field, a structured artifact, a fenced-code interior, a
+// selected row, a hovered row) and the four LINE ROLES `_DESIGN.md` §11 splits
+// meaning from decoration with.
+//
+// WHY THESE ARE NEW TYPES RATHER THAN NEW CASES. `SurfaceToken`/`LineToken` are
+// pinned by P1.3 down to a 22-token count, a 104-pair set and a per-token
+// worst-ratio table. Growing those enums would move numbers in
+// `DesignTokenChecks`/`TokenContrastChecks`, which this packet's file fence does
+// not include and which no v2 ticket has earned the right to renumber. So the
+// tile ladder is ADDITIVE and gated by its own pair set (`AgentTileTokens`),
+// leaving every shipped floor exactly where it is. The two sets merge into one
+// when the live tile migrates and the compatibility path is removed.
+//
+// NOTHING ADOPTS THESE HERE, by packet instruction ("no baseline moves"): P3.x
+// renderers and P4.x composer do the adopting.
+//
+// THE LINE-ROLE SPLIT is the point of the ticket. The prior pass applied WCAG
+// 1.4.11's 3:1 non-text floor to every edge, including decorative ones, which is
+// why the transcript reads as a stack of boxed cards. `_DESIGN.md` §11 splits:
+//
+//   decorativeHairline — containment and section separation. Conveys no state,
+//                        bounds no control, so 1.4.11 does not reach it. EXEMPT,
+//                        and measurably so: it does NOT clear 3:1 on any tile
+//                        surface (1.02–1.37:1), which is exactly why a semantic
+//                        role aliased onto it would be invisible as state.
+//   controlBoundary    — the outline of an interactive shape. Gated at 3.0.
+//   focusRing          — keyboard focus and selection. State-bearing, gated 3.0.
+//   attention          — approval, error, warning. Gated at the TEXT floor 4.5,
+//                        not 3.0, because the same accent labels the state in
+//                        words as well as drawing the ring (P1.6 made that call
+//                        for the approval dock; it holds here).
+//
+// Each role's colour IS a P1.3 token, never a fresh value: controlBoundary is
+// `border`, focusRing is `borderStrong`, attention takes its hue from the status
+// accent it reports, and only the decorative role resolves to the one exempt
+// token, `separator`. So every role is already gated on the eleven shipped
+// surfaces by P1.3's own sweep, and this file only has to gate it on the five new
+// ones. `runAgentTileTokenChecks` asserts that mapping by value, both themes,
+// which is what makes "a semantic line cannot be aliased to the hairline" a
+// measurement rather than a naming convention.
+//
+// MEASURED WORST CASE over the five new surfaces (pinned to ±0.01 in
+// `runAgentTileTokenChecks`, so a value tweak that still clears the floor goes
+// red until this table is updated):
+//
+//   foreground                 light            dark            floor
+//   textPrimary               13.98            11.20             4.5
+//   textSecondary              5.56             6.04             4.5
+//   controlBoundary            3.27             3.18             3.0
+//   focusRing                  6.42             5.64             3.0
+//   attention(approval)        5.23             6.92             4.5
+//   attention(error)           4.90             5.42             4.5
+//
+// The worst background is `rowSelected` in BOTH themes for every one of them —
+// it is the darkest light surface and the lightest dark one, i.e. the end of this
+// ladder — which is what makes "clears its worst case" mean "clears all five".
+//
+// HOW THE SURFACE VALUES WERE CHOSEN. Light luminance runs 0.767–0.920 and dark
+// 0.011–0.035, so every one is unambiguously a light surface under Aqua and a dark
+// one under dark (the rule P1.3 applies to `SurfaceToken`, asserted here too).
+// Where they land relative to the SHIPPED ladder, stated precisely because the
+// obvious claim — "all five sit inside it" — is FALSE and was caught in review:
+//
+//   * `composer`/`artifact`/`rowHover` do sit inside it, between `tileBody`
+//     (light 0.963466 / dark 0.008454) and the card fills.
+//   * `codeSubdued` light is 0.827565, a hair BELOW the shipped light floor
+//     `canvas` at 0.829723. Deliberate: a fenced-code interior is the most
+//     recessed thing in a tile, and it is still 15.01:1 under `textPrimary`.
+//   * `rowSelected` is past BOTH shipped ends — 0.767396 light against the
+//     shipped light minimum (`canvas`, 0.829723) and 0.035147 dark against the
+//     shipped dark maximum (`cardUserMessage`, 0.028849; `overlay.dark` is
+//     0.022002, so the dark extreme is a card fill, not the overlay). Also
+//     deliberate, and
+//     structural rather than incidental: a selected row has to out-step every card
+//     fill, which is exactly why it is every foreground's worst background in the
+//     pinned table above. `runAgentTileTokenChecks` asserts that extremity over
+//     all sixteen surfaces, so the pins cannot silently start describing a
+//     different surface. Note that this narrows an older claim without editing
+//     it: `SurfaceToken.canvas` is documented above as "the darkest/lightest
+//     extreme", and it remains exactly that for the ELEVEN shipped surfaces and
+//     for P1.3's own pinned table. Across all sixteen it is `rowSelected`, and
+//     P1.3's numbers are untouched because its pair set does not include these
+//     surfaces.
+//
+// `rowSelected`/`rowHover` are steps AWAY from `tileBody` measured against it:
+// 1.24/1.46:1 selected versus 1.06/1.10:1 hover (light/dark). Hover is
+// deliberately a whisper — it is transient pointer feedback — and selection is
+// deliberately the stronger step; neither carries state alone, since a selected
+// row also draws `focusRing`.
+
+/// The v2 tile's surfaces. Additive to `SurfaceToken`: these are the fills the
+/// shipped palette has no name for, and every one carries a light and a dark leaf.
+public enum AgentSurfaceRole: String, CaseIterable, Sendable {
+    /// The composer's editing field — a real surface, not a bezelled `NSTextField`.
+    case composer
+    /// A structured block's container: tool call, plan, diff, approval.
+    case artifact
+    /// A fenced code interior. Recedes rather than shouts: routine work should
+    /// not out-contrast the prose around it.
+    case codeSubdued
+    /// A selected transcript row. Paired with `focusRing`, never the sole cue.
+    case rowSelected
+    /// A hovered transcript row. Transient pointer feedback only.
+    case rowHover
+
+    public var color: TokenColor {
+        switch self {
+        case .composer: return TokenColor(light: srgb(0xF4F6FA), dark: srgb(0x1A1F28))
+        case .artifact: return TokenColor(light: srgb(0xEDF0F5), dark: srgb(0x1E2430))
+        case .codeSubdued: return TokenColor(light: srgb(0xE7EBF1), dark: srgb(0x171C24))
+        case .rowSelected: return TokenColor(light: srgb(0xD8E4F6), dark: srgb(0x2B3547))
+        case .rowHover: return TokenColor(light: srgb(0xF2F4F7), dark: srgb(0x1B2028))
+        }
+    }
+
+    /// The two row emphases, and the surface they are a step away from. Held as
+    /// data so the "a selection you cannot see" failure is assertable.
+    public static let rowEmphases: [AgentSurfaceRole] = [.rowSelected, .rowHover]
+    /// What a row emphasis is measured against: a row sits on the tile body.
+    public static let rowBase: SurfaceToken = .tileBody
+}
+
+/// What a line MEANS, which is what decides whether WCAG 1.4.11 reaches it.
+/// Every role's colour is a P1.3 token — see the note above.
+public enum AgentLineRole: String, CaseIterable, Sendable {
+    /// Decorative containment and section separation. Not state-bearing.
+    case decorativeHairline
+    /// The boundary of an interactive shape.
+    case controlBoundary
+    /// Keyboard focus and selection.
+    case focusRing
+    /// Approval, error, warning.
+    case attention
+
+    public var color: TokenColor {
+        switch self {
+        case .decorativeHairline: return LineToken.separator.color
+        case .controlBoundary: return LineToken.border.color
+        case .focusRing: return LineToken.borderStrong.color
+        // The primary attention hue. An attention line takes the hue of the
+        // status it reports — see `attentionAccents`.
+        case .attention: return AccentToken.accentApproval.color
+        }
+    }
+
+    /// `nil` means exempt, and an exemption must say why. Same contract as
+    /// `LineToken.contrastFloor`, deliberately: one rule for lines, applied to
+    /// meaning instead of to every edge.
+    public var contrastFloor: Double? {
+        switch self {
+        case .decorativeHairline: return nil
+        case .controlBoundary, .focusRing: return DesignTokens.lineFloor
+        // The text floor, not the line floor: this accent is also the label
+        // colour for the same state.
+        case .attention: return DesignTokens.textFloor
+        }
+    }
+
+    public var exemptionReason: String? {
+        switch self {
+        case .controlBoundary, .focusRing, .attention: return nil
+        case .decorativeHairline:
+            return "Purely decorative: contains and separates content that is "
+                + "already delineated by `controlBoundary`, conveys no state, and "
+                + "bounds no control. WCAG 1.4.11 does not reach it — and it "
+                + "measurably does not clear 3:1 on any tile surface, which is "
+                + "why no state-bearing role may resolve to this value."
+        }
+    }
+
+    /// True when this role is meaning-bearing and therefore gated.
+    public var isSemantic: Bool { contrastFloor != nil }
+
+    /// The accents an attention line may take its hue from: an approval waiting
+    /// on you, and an error. Both are gated on every tile surface, so a warning
+    /// ring cannot be introduced later at an unmeasured hue.
+    public static let attentionAccents: [AccentToken] = [.accentApproval, .accentFailed]
+}
+
+/// The v2 tile's pair set. Separate from `DesignTokens.documentedPairs` on
+/// purpose (see the note above): this gates the FIVE NEW surfaces, and the
+/// shipped eleven remain P1.3's to gate.
+public enum AgentTileTokens {
+    /// Text that is painted on a tile surface. `textOnAccent` is absent for the
+    /// same reason it is absent from `SurfaceToken` pairs — it is white on
+    /// near-white anywhere but an accent fill.
+    public static let surfaceTextTokens: [TextToken] = [.textPrimary, .textSecondary]
+
+    /// Every pair the tile ladder claims is legal, derived from the roles' own
+    /// declarations. Adding a surface or a role without pairing it is therefore
+    /// impossible, and an exempt role contributes nothing rather than a floor of 1.
+    public static var documentedPairs: [TokenPair] {
+        var pairs: [TokenPair] = []
+        for surface in AgentSurfaceRole.allCases {
+            for text in surfaceTextTokens {
+                pairs.append(TokenPair(
+                    foreground: text.rawValue, background: surface.rawValue,
+                    color: text.color, backgroundColor: surface.color,
+                    floor: DesignTokens.textFloor))
+            }
+            for role in AgentLineRole.allCases {
+                guard let floor = role.contrastFloor else { continue }
+                if role == .attention {
+                    for accent in AgentLineRole.attentionAccents {
+                        pairs.append(TokenPair(
+                            foreground: "\(role.rawValue)(\(accent.rawValue))",
+                            background: surface.rawValue,
+                            color: accent.color, backgroundColor: surface.color, floor: floor))
+                    }
+                } else {
+                    pairs.append(TokenPair(
+                        foreground: role.rawValue, background: surface.rawValue,
+                        color: role.color, backgroundColor: surface.color, floor: floor))
+                }
+            }
+        }
+        return pairs
+    }
+
+    /// The decorative roles, each with its reason. A list rather than an absence,
+    /// so an exemption is visible and countable.
+    public static var decorativeExemptions: [(role: AgentLineRole, reason: String)] {
+        AgentLineRole.allCases.compactMap { role in
+            guard role.contrastFloor == nil, let reason = role.exemptionReason else { return nil }
+            return (role, reason)
+        }
+    }
+
+    /// How far a row emphasis is from the row's own base surface, as a ratio the
+    /// same evaluator measures. A selection that equals `tileBody` is invisible.
+    public static func rowEmphasisRatio(_ role: AgentSurfaceRole, theme: TokenTheme) -> Double {
+        WCAGContrast.ratio(
+            role.color.resolved(for: theme),
+            AgentSurfaceRole.rowBase.color.resolved(for: theme))
+    }
+}
+
 /// Status accents. One per state, hue stable across themes.
 public enum AccentToken: String, CaseIterable, Sendable {
     case accentWorking
