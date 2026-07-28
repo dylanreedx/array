@@ -147,8 +147,8 @@ Runtime artifacts live outside source control under:
   logs/iter-*.log
 ```
 
-The control script records the active supervisor PID and latest run path under
-`.pi/agent-tile-ux-loop/`.
+The control script records the active supervisor PID and latest run path outside the repository under
+`~/.pi/agent-tile-ux-loop-control/continuum-overnight/`, so preflight observability never dirties the checkout.
 
 ## 15–20 minute supervisor protocol
 

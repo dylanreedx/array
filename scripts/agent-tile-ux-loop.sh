@@ -20,7 +20,7 @@ CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"
 CLAUDE_EFFORT="${CLAUDE_EFFORT:-medium}"
 ROOT_PI_DIR="${ROOT_PI_DIR:-$HOME/.pi}"
 BACKUP_DIR="${BACKUP_DIR:-$HOME/continuum-backups}"
-CONTROL_DIR="${CONTROL_DIR:-.pi/agent-tile-ux-loop}"
+CONTROL_DIR="${CONTROL_DIR:-$ROOT_PI_DIR/agent-tile-ux-loop-control/$(basename "$(git rev-parse --show-toplevel)")}"
 
 export CONTINUUM_SKIP_SURFACE_CHECKS="${CONTINUUM_SKIP_SURFACE_CHECKS:-1}"
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-0}"
