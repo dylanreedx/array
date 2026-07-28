@@ -234,7 +234,7 @@ $(cat "$PROMPT_FILE")"
 }
 
 validate_iteration_commit() {
-  local before_head="$1" token="$2" ticket changed allowed path subject count state
+  local before_head="$1" token="$2" ticket changed allowed path fence fence_prefix fence_suffix middle path_allowed subject count state
   ticket="${token#LOOP: CONTINUE }"
   ticket="${ticket#skipped:}"
   case "$ticket" in P*.md) ;; *) echo "invalid ticket in CONTINUE token: $ticket" >&2; return 1 ;; esac
@@ -263,7 +263,31 @@ validate_iteration_commit() {
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     [ "$path" = "$LEDGER_FILE" ] && continue
-    printf '%s\n' "$allowed" | grep -Fqx "$path" || {
+    path_allowed=0
+    while IFS= read -r fence; do
+      [ -n "$fence" ] || continue
+      case "$fence" in
+        *'*'*)
+          # Packet fences currently permit one pathname-style `*` for a
+          # direct-child family such as Fixtures/*.md. Unlike a bare `case`
+          # glob, this deliberately refuses to let `*` cross `/`.
+          fence_prefix="${fence%%\**}"
+          fence_suffix="${fence#*\*}"
+          case "$fence_suffix" in *'*'*) continue ;; esac
+          case "$path" in
+            "$fence_prefix"*"$fence_suffix")
+              middle="${path#"$fence_prefix"}"
+              middle="${middle%"$fence_suffix"}"
+              case "$middle" in */*) ;; *) path_allowed=1; break ;; esac
+              ;;
+          esac
+          ;;
+        *) [ "$path" = "$fence" ] && { path_allowed=1; break; } ;;
+      esac
+    done <<FENCES
+$allowed
+FENCES
+    [ "$path_allowed" = 1 ] || {
       echo "ticket commit changed path outside packet fence: $path" >&2; return 1;
     }
   done <<EOF
