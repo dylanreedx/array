@@ -10057,4 +10057,10 @@ runAgentAutoSettleConfigChecks()
 // depends on, the sentinel boundary, and the delta sequence P0.5 replays.
 runAgentTranscriptFixtureChecks()
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P0.5-compatibility-pipeline-harness.md —
+// the corpus replayed on the real translator → remap → projection path, and the
+// exact transcript today's pipeline produces from it. The floor the semantic
+// document is migrated against.
+runAgentTranscriptCompatibilityChecks()
+
 print("ContinuumRevivedCoreChecks passed")

@@ -37,6 +37,51 @@ public struct ManagedTranscriptCard: Codable, Equatable, Sendable {
     }
 }
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P0.5-compatibility-pipeline-harness.md
+//
+// The migration seam, and nothing more than a seam.
+//
+// Two transcript projections exist during the 91 program: the card model below,
+// and the semantic document P1.x builds in `ContinuumRevivedAgentContent`. Both
+// consume the SAME `AgentRuntimeEvent` stream plus the same locally-authored
+// echoes (a user prompt and a notice are not provider events — see
+// `appendUserPrompt`). So the compatibility harness that replays a fixture must
+// be able to drive either one without knowing which it holds; that is this
+// protocol's whole job. It deliberately declares no document, block, patch or
+// parser type: P0.5 gates the floor, it does not build the new model.
+public protocol AgentTranscriptProjecting {
+    init(threadId: String)
+    mutating func ingest(_ event: AgentRuntimeEvent)
+    mutating func appendUserPrompt(_ text: String)
+    mutating func appendNotice(id: String, title: String, text: String)
+    var currentStatus: AgentStatus { get }
+    var activeToolCount: Int { get }
+    /// The ordered, view-free description the compatibility floor is stated in.
+    var compatibilityRows: [AgentTranscriptCompatibilityRow] { get }
+}
+
+/// One row of a transcript projection, reduced to what the migration floor is
+/// allowed to depend on: order, identity, visible body, and completion status.
+///
+/// `kind` is a string key rather than `ManagedTranscriptCardKind` because the
+/// document projection's block vocabulary is a different and larger one. The
+/// floor pins the keys today's pipeline produces; it does not require the new
+/// model to adopt this enum. Temporary by construction — it retires with the
+/// compatibility-removal ticket.
+public struct AgentTranscriptCompatibilityRow: Equatable, Sendable {
+    public var id: String
+    public var kind: String
+    public var body: String
+    public var status: ItemStatus?
+
+    public init(id: String, kind: String, body: String, status: ItemStatus? = nil) {
+        self.id = id
+        self.kind = kind
+        self.body = body
+        self.status = status
+    }
+}
+
 public struct ManagedAgentTranscriptModel: Equatable, Sendable {
     public private(set) var threadId: String
     public private(set) var cards: [ManagedTranscriptCard] = []
@@ -174,5 +219,17 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
     private func indexOfCard(id: String?) -> Int? {
         guard let id else { return nil }
         return cards.firstIndex { $0.id == id }
+    }
+}
+
+extension ManagedAgentTranscriptModel: AgentTranscriptProjecting {
+    /// Card order, ids, bodies, and completion status — the shape of what the
+    /// tile shows today, with the presentation-only fields (title, itemKind)
+    /// left out so the floor does not freeze presentation choices the 91 program
+    /// is explicitly allowed to change.
+    public var compatibilityRows: [AgentTranscriptCompatibilityRow] {
+        cards.map {
+            AgentTranscriptCompatibilityRow(id: $0.id, kind: $0.kind.rawValue, body: $0.body, status: $0.status)
+        }
     }
 }
