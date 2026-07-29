@@ -572,6 +572,10 @@ runAgentContentPlatformNeutralityChecks()
 runAgentContentManifestChecks()
 runAgentContentBuiltModuleChecks()
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P1.1-document-schema.md —
+// the platform-neutral semantic document vocabulary and its exact JSON shape.
+runDocumentSchemaChecks()
+
 // Ticket: docs/38-tickets/91-agent-tile-ux/P0.4-transcript-fixture-corpus.md —
 // the canonical corpus every later parser, reducer, renderer and migration
 // ticket reads from, held to its own declarations, hygiene and I5 rules.
