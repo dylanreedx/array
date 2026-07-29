@@ -2,8 +2,7 @@
 
 ## Program boundary
 
-This is a new program in its own folder. It borrows the durable queue/ledger/fresh-worker shape from
-`90-agent-ux`, but it does not reuse that queue, mutate its ledger, or restart its loop.
+This program has its own queue/ledger/fresh-worker loop. `90-agent-ux` remains the runtime/RPC/session capability owner: queue 91 does not mutate or restart it, but consumes the provider-neutral seams its compiled work established.
 
 Read in order:
 
@@ -18,12 +17,12 @@ Exactly one ticket is implemented per iteration and per commit.
 ## Preconditions before any loop start
 
 - Branch is `overnight/agent-ux`.
-- No other implementation agent or loop is editing this checkout.
-- The working tree and index are clean.
+- No other implementation agent or loop is editing tracked files in this checkout.
+- The working tree and index have no changes except owner-authorized untracked `website/` and root `array-logo*.svg`; any tracked website change is dirty and fatal.
 - The relay/FileTree/document setup work has already been preserved separately.
 - `docs/38-tickets/91-agent-tile-ux/STOP` is absent.
-- `swift build` and the current headless matrix are green.
-- `claude` and `codex` CLIs are authenticated; missing review provider fails closed for that ticket.
+- `swift build` and the current headless matrix are green with the built-in Retina display as Main; display topology drift is an environment stop, never a reason to bless baselines.
+- Pi exposes authenticated `openai-codex/gpt-5.6-sol` and `gpt-5.6-luna`; workers alternate at medium thinking and the opposite model performs read-only review.
 
 Never set `ALLOW_DIRTY=1` for a real run. The loop is an exclusive writer to this checkout.
 
@@ -40,6 +39,11 @@ Never set `ALLOW_DIRTY=1` for a real run. The loop is an exclusive writer to thi
 - No visible `NSPopUpButton`, rounded-bezel `NSTextField`, or stock dropdown in the v2 tile.
 - Light/dark, keyboard accessibility, VoiceOver, Reduce Motion, and selection/copy are first-class.
 - I5 remains absolute: no transcript/prompt/path/tool argument/PID/secret crosses phone sync.
+- The canvas is the session switcher; one tile is one interactive session and detach never stops it.
+- Provider todo/plan state is passive, explicit, bounded, read-only, and mirrored in tile/FileTree; never infer it from prose or create a second task manager.
+- Continuum adds no approval gate; explicit provider-enforced requests are exceptional, compact, and nonmodal.
+- Queue 91 advertises only compiled capabilities owned by queue 90; missing capability blocks rather than being simulated.
+- No context tile.
 - Deterministic gates block. Visual taste is decided only at supervised rows.
 
 ## Ticket selection
@@ -62,7 +66,7 @@ state is `pending`.
 3. Implement only the file-fenced behavior.
 4. Add focused deterministic assertions and at least one named negative witness.
 5. Run focused checks, `swift build`, then the headless matrix.
-6. Run independent read-only diff review.
+6. Save the staged diff and run the opposite GPT-5.6 Sol/Luna model at medium as an independent read-only review; preserve its session and final verdict under the task directory.
 7. Resolve findings or record a concrete reason they do not apply.
 8. Mark the ledger row `done` with `this commit`, real timestamp, verification summary, and known limits.
 9. Commit exactly one ticket with `type(agent-tile): summary`; no AI attribution; never push. The
@@ -145,7 +149,23 @@ Runtime artifacts live outside source control under:
   events.jsonl
   report.md
   logs/iter-*.log
+  tasks/iteration-NNN/
+    task.json
+    worker-session/*.jsonl
+    stdout.log
+    stderr.log
+    staged.diff
+    review-request.md
+    reviewer-session/*.jsonl
+    review-final.md
+    review-stderr.log
+    control-token.txt
+    result.json
 ```
+
+A ticket is not accepted without these durable worker/reviewer artifacts and an exact
+`DECISION: APPROVE`. Provider/network failures including DNS `ENOTFOUND` are retried only when HEAD
+and every non-ignored path are unchanged; dirty or committed failures stop for inspection.
 
 The control script records the active supervisor PID and latest run path outside the repository under
 `~/.pi/agent-tile-ux-loop-control/continuum-overnight/`, so preflight observability never dirties the checkout.
@@ -162,7 +182,7 @@ cd /Users/dylan/Documents/personal/continuum-overnight
 Then inspect, in this order:
 
 1. **Control process:** loop PID alive? expected branch? one loop only?
-2. **Iteration process:** current Claude PID/children alive? elapsed time below 2.5h watchdog?
+2. **Iteration process:** current Pi worker PID/children alive? elapsed time below 2.5h watchdog?
 3. **Durable state:** `status.json`, latest `events.jsonl`, ledger state, current ticket.
 4. **Progress signals:** iteration-log mtime/size, tracked source mtime epoch, HEAD movement,
    build/test/edit subprocesses.
@@ -180,7 +200,7 @@ inside timeout. Leave it alone. Low CPU alone is not stale.
 **Stale candidate** — all of the following:
 
 - ledger/telemetry/source/log progress older than 35 minutes;
-- no `swift-build`, `swift-frontend`, `run-matrix`, `xcodebuild`, `codex`, editor/helper child, or
+- no `swift-build`, `swift-frontend`, `run-matrix`, `xcodebuild`, Pi reviewer, editor/helper child, or
   active review subprocess;
 - iteration output is not growing;
 - no recent HEAD change;
@@ -191,7 +211,7 @@ and let the harness stop. Do not immediately launch a second writer.
 
 **Failed/stopped cleanly** — status says stopped and tree is clean. Diagnose reason:
 
-- provider quota: restart after reset;
+- clean provider quota/DNS/connect failure: retry within the bounded window;
 - supervised-required: perform that review, do not restart past it;
 - queue-drained: finish;
 - malformed output or one-off environment failure: restart from same pending ticket;

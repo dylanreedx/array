@@ -38,6 +38,17 @@ check_program() {
     [ -f "$f" ] || fail "missing $f"
   done
 
+  grep -Fq '**The canvas is the session switcher.**' "$DIR/_DESIGN.md" || fail "design lost canvas/session ownership"
+  grep -Fq '**Provider current work is passive and read-only.**' "$DIR/_DESIGN.md" || fail "design lost passive current-work rule"
+  grep -Fq '**Autonomy is the default.**' "$DIR/_DESIGN.md" || fail "design regained a Continuum approval gate"
+  grep -Fq '**No context tile.**' "$DIR/_DESIGN.md" || fail "design regained a context tile"
+  grep -Fq '`P5.3-provider-current-work-projection.md`' "$QUEUE" || fail "queue lost provider current-work projection"
+  grep -Fq 'openai-codex/gpt-5.6-sol openai-codex/gpt-5.6-luna' scripts/agent-tile-ux-loop.sh || fail "loop lost Sol/Luna worker pair"
+  grep -Fq 'PI_THINKING="${PI_THINKING:-medium}"' scripts/agent-tile-ux-loop.sh || fail "loop lost medium thinking default"
+  grep -Fq 'ENOTFOUND' scripts/agent-tile-ux-loop.sh || fail "loop lost DNS provider-failure classification"
+  grep -Fq 'reviewer-session' scripts/agent-tile-ux-loop.sh || fail "loop lost durable reviewer sessions"
+  grep -Fq 'DECISION: APPROVE' scripts/agent-tile-ux-loop.sh || fail "loop lost independent approval gate"
+
   rows="$(grep -E '^\| [0-9]+ \| `P[0-9]+\.[0-9]+-[^`]+\.md` \|' "$QUEUE" 2>/dev/null || true)"
   count="$(printf '%s\n' "$rows" | grep -c '^|' | tr -d ' ')"
   [ "$count" = 50 ] || fail "expected 50 queue rows, found $count"

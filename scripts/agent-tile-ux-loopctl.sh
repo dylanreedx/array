@@ -27,6 +27,13 @@ json_string() {
   sed -nE "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"([^\"]*)\".*/\1/p" "$file" 2>/dev/null | head -1
 }
 
+unexpected_status() {
+  git status --porcelain | awk '
+    $1 == "??" && ($2 == "website/" || $2 ~ /^array-logo[^/]*\.svg$/) { next }
+    { print }
+  '
+}
+
 descendant_pids() {
   local queue="$1" next="" parent child
   while [ -n "$queue" ]; do
@@ -58,7 +65,7 @@ work_descendant_process_table() {
     command="$(ps -o command= -p "$pid" 2>/dev/null || true)"
     row="$(ps -o pid=,ppid=,etime=,%cpu=,comm=,command= -p "$pid" 2>/dev/null || true)"
     case "$base" in
-      swift-build|swift-frontend|swiftc|swift|xcodebuild|codex|continuum-revived|ContinuumRevived*Checks)
+      swift-build|swift-frontend|swiftc|swift|xcodebuild|pi|codex|continuum-revived|ContinuumRevived*Checks)
         [ -n "$row" ] && printf '%s\n' "$row" ;;
       bash|zsh|sh|env)
         case "$command" in
@@ -77,10 +84,10 @@ start_loop() {
   local branch
   branch="$(git branch --show-current)"
   [ "$branch" = "$EXPECTED_BRANCH" ] || { echo "wrong branch: $branch" >&2; return 2; }
-  [ -z "$(git status --porcelain)" ] || { echo "refusing dirty tree/index" >&2; git status --short >&2; return 2; }
-  if pgrep -f 'agent-(ux|tile-ux)-loop\.sh|claude -p.*agent-tile-ux' >/dev/null 2>&1; then
+  [ -z "$(unexpected_status)" ] || { echo "refusing non-website dirty tree/index" >&2; unexpected_status >&2; return 2; }
+  if pgrep -f 'agent-(ux|tile-ux)-loop\.sh|pi .*agent-tile-' >/dev/null 2>&1; then
     echo "another agent UX loop/worker appears active; refusing a second writer" >&2
-    pgrep -fl 'agent-(ux|tile-ux)-loop\.sh|claude -p.*agent-tile-ux' >&2 || true
+    pgrep -fl 'agent-(ux|tile-ux)-loop\.sh|pi .*agent-tile-' >&2 || true
     return 2
   fi
   : > "$SUPERVISOR_LOG"
@@ -106,7 +113,7 @@ status_loop() {
   echo "branch:  $(git branch --show-current)"
   echo "loop:    $(pid_live && echo "running pid=$loop_pid" || echo stopped)"
   echo "STOP:    $([ -f "$STOP_FILE" ] && echo present || echo absent)"
-  echo "tree:    $([ -z "$(git status --porcelain)" ] && echo clean || echo DIRTY)"
+  echo "tree:    $([ -z "$(unexpected_status)" ] && echo clean-except-authorized-untracked-website || echo DIRTY)"
   echo "run:     ${run:-none}"
 
   [ -n "$run" ] || return 10
@@ -192,9 +199,9 @@ status_loop() {
     return 0
   fi
 
-  if [ -n "$(git status --porcelain)" ]; then
+  if [ -n "$(unexpected_status)" ]; then
     echo "result:  STOPPED DIRTY — preserve and inspect before restart"
-    git status --short | sed 's/^/         /'
+    unexpected_status | sed 's/^/         /'
     return 12
   fi
   local reason
@@ -228,7 +235,7 @@ restart_loop() {
     echo "refusing restart: loop process is still live; use stop and wait" >&2
     return 2
   fi
-  [ -z "$(git status --porcelain)" ] || { echo "refusing restart: tree/index dirty" >&2; return 2; }
+  [ -z "$(unexpected_status)" ] || { echo "refusing restart: non-website tree/index dirty" >&2; return 2; }
   [ ! -f "$STOP_FILE" ] || { echo "refusing restart: STOP present; review then arm" >&2; return 2; }
   start_loop
 }

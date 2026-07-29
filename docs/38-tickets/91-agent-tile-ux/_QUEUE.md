@@ -54,6 +54,6 @@ on that review.
 | 45 | `P4.10-composer-supervised-review.md` | P4.9 | supervised |
 | 46 | `P5.1-agent-tile-header-shell.md` | P4.10 | autonomous |
 | 47 | `P5.2-capability-driven-turn-states.md` | P5.1 | autonomous |
-| 48 | `P5.3-pending-action-dock.md` | P5.2 | autonomous |
+| 48 | `P5.3-provider-current-work-projection.md` | P5.2 | autonomous |
 | 49 | `P5.4-live-tile-migration.md` | P5.3 | autonomous |
 | 50 | `P5.5-final-supervised-acceptance.md` | P5.4 | supervised |

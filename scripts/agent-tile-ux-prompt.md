@@ -43,7 +43,7 @@ Read the selected packet completely, then inspect every named production seam.
 - No visible Aqua dropdown, `NSPopUpButton`, or rounded-bezel text field in v2 tile UI.
 - Preserve light/dark, keyboard/VoiceOver/Reduce Motion, stable IDs, incremental updates, and I5.
 - Do not modify queue/design/runbook/loop/prompt/check machinery from a normal ticket.
-- Do not touch relay, FileTree, old 90-agent-ux ledger/queue, stashes, worktrees, or unrelated files.
+- Do not touch relay, old 90-agent-ux ledger/queue, stashes, worktrees, or unrelated files. FileTree/agent-inbox files are allowed only when the selected packet explicitly fences them.
 
 If compiled reality contradicts the packet or a locked decision, mark it `blocked` with concrete
 evidence in the ledger, commit that ledger-only record as `docs(agent-tile): block <ticket>`, and end
@@ -68,10 +68,28 @@ run by this loop).
 
 ## Independent review
 
-Stage only the ticket diff temporarily for review, inspect staged paths, then run a read-only Codex
-review against the packet. Resolve correctness/architecture/verification findings. If Codex is
-unavailable, fail closed: leave the ticket uncommitted, mark it blocked with provider evidence, and
-emit skipped. Do not treat the implementing model as its own independent reviewer.
+Stage only the ticket diff temporarily and inspect the staged paths. Save the exact review input:
+
+```bash
+git diff --cached --binary > "$TASK_DIR/staged.diff"
+cat > "$TASK_DIR/review-request.md" <<EOF
+Review the staged implementation for the selected agent-tile packet. Read the packet, design,
+runbook, staged.diff, and relevant production files. Be strict about scope, architecture, proof,
+gate weakening, and ledger honesty. You are read-only. End with exactly DECISION: APPROVE or
+DECISION: REWORK.
+EOF
+pi --no-approve --model "$REVIEW_MODEL" --thinking "$REVIEW_THINKING" \
+  --tools read,grep,find,ls --session-dir "$TASK_DIR/reviewer-session" \
+  --name "agent-tile-review" --mode text -p @"$TASK_DIR/review-request.md" \
+  > "$TASK_DIR/review-final.md" 2> "$TASK_DIR/review-stderr.log"
+```
+
+The review model is the opposite Sol/Luna model selected by the harness. Read
+`$TASK_DIR/review-final.md`; resolve every correctness/architecture/verification finding and rerun
+review until its final line is exactly `DECISION: APPROVE`. Never edit a reviewer artifact. The
+harness requires the staged diff, nonempty reviewer session log, and approval before accepting the
+commit. If the reviewer is unavailable, fail closed and leave the work for recovery; do not call the
+implementing model its own independent reviewer.
 
 ## Commit and record
 

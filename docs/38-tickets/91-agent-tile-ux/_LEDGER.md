@@ -57,6 +57,6 @@ last-touch 2026-07-29T02:44:00Z · ticket P0.5-compatibility-pipeline-harness.md
 | `P4.10-composer-supervised-review.md` | pending | — | — | — |
 | `P5.1-agent-tile-header-shell.md` | pending | — | — | — |
 | `P5.2-capability-driven-turn-states.md` | pending | — | — | — |
-| `P5.3-pending-action-dock.md` | pending | — | — | — |
+| `P5.3-provider-current-work-projection.md` | pending | — | — | — |
 | `P5.4-live-tile-migration.md` | pending | — | — | — |
 | `P5.5-final-supervised-acceptance.md` | pending | — | — | — |

@@ -16,14 +16,13 @@ MAX_PROVIDER_FAILURES="${MAX_PROVIDER_FAILURES:-6}"
 ITER_TIMEOUT_SECONDS="${ITER_TIMEOUT_SECONDS:-9000}"
 TELEMETRY_SECONDS="${TELEMETRY_SECONDS:-60}"
 QUOTA_SLEEP_SECONDS="${QUOTA_SLEEP_SECONDS:-300}"
-CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"
-CLAUDE_EFFORT="${CLAUDE_EFFORT:-medium}"
+PI_WORKER_MODELS="${PI_WORKER_MODELS:-openai-codex/gpt-5.6-sol openai-codex/gpt-5.6-luna}"
+PI_THINKING="${PI_THINKING:-medium}"
 ROOT_PI_DIR="${ROOT_PI_DIR:-$HOME/.pi}"
 BACKUP_DIR="${BACKUP_DIR:-$HOME/continuum-backups}"
 CONTROL_DIR="${CONTROL_DIR:-$ROOT_PI_DIR/agent-tile-ux-loop-control/$(basename "$(git rev-parse --show-toplevel)")}"
 
 export CONTINUUM_SKIP_SURFACE_CHECKS="${CONTINUUM_SKIP_SURFACE_CHECKS:-1}"
-export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-0}"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 REPO_NAME="$(basename "$REPO_ROOT")"
@@ -37,6 +36,7 @@ STATUS_FILE="$RUN_DIR/status.json"
 TELEMETRY_FILE="$RUN_DIR/telemetry.json"
 EVENTS_FILE="$RUN_DIR/events.jsonl"
 REPORT_FILE="$RUN_DIR/report.md"
+TASKS_DIR="$RUN_DIR/tasks"
 
 ITERATION=0
 ITERATION_PID=""
@@ -44,13 +44,36 @@ ITERATION_LOG=""
 STOP_REASON="running"
 PROVIDER_FAILURES=0
 
-mkdir -p "$LOG_DIR" "$RUN_ROOT" "$BACKUP_DIR" "$CONTROL_DIR"
+mkdir -p "$LOG_DIR" "$TASKS_DIR" "$RUN_ROOT" "$BACKUP_DIR" "$CONTROL_DIR"
 ln -sfn "$RUN_DIR" "$RUN_ROOT/latest" 2>/dev/null || true
 printf '%s\n' "$RUN_DIR" > "$CONTROL_DIR/latest-run.txt"
 printf '%s\n' "$$" > "$CONTROL_DIR/loop.pid"
 
 now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g'; }
+
+# Owner-authorized website work may coexist only while it remains untracked.
+# Every tracked change, including anything below website/, remains visible/fatal.
+unexpected_status() {
+  git status --porcelain | awk '
+    $1 == "??" && ($2 == "website/" || $2 ~ /^array-logo[^/]*\.svg$/) { next }
+    { print }
+  '
+}
+
+worker_model_for_iteration() {
+  local models=($PI_WORKER_MODELS) count index
+  count=${#models[@]}; [ "$count" -gt 0 ] || return 1
+  index=$(( (ITERATION - 1) % count ))
+  printf '%s\n' "${models[$index]}"
+}
+
+review_model_for_worker() {
+  case "$1" in
+    *gpt-5.6-sol) printf '%s\n' openai-codex/gpt-5.6-luna ;;
+    *) printf '%s\n' openai-codex/gpt-5.6-sol ;;
+  esac
+}
 
 atomic_write() {
   local target="$1" tmp
@@ -72,7 +95,7 @@ ledger_heartbeat() {
 write_status() {
   local state="$1" reason="${2:-$STOP_REASON}" head dirty
   head="$(git rev-parse HEAD 2>/dev/null || true)"
-  dirty=false; [ -n "$(git status --porcelain 2>/dev/null)" ] && dirty=true
+  dirty=false; [ -n "$(unexpected_status 2>/dev/null)" ] && dirty=true
   atomic_write "$STATUS_FILE" <<EOF
 {
   "state": "$(json_escape "$state")",
@@ -119,7 +142,7 @@ write_telemetry() {
     child_list="$(pgrep -P "$ITERATION_PID" 2>/dev/null | tr '\n' ',' | sed 's/,$//' || true)"
   fi
   head="$(git rev-parse HEAD 2>/dev/null || true)"
-  dirty=false; [ -n "$(git status --porcelain 2>/dev/null)" ] && dirty=true
+  dirty=false; [ -n "$(unexpected_status 2>/dev/null)" ] && dirty=true
   atomic_write "$TELEMETRY_FILE" <<EOF
 {
   "observedAt": "$(now_utc)",
@@ -181,26 +204,47 @@ preflight() {
   [ ! -f "$STOP_FILE" ] || { echo "program STOP is present: $STOP_FILE" >&2; return 1; }
   [ "$BRANCH" = "$EXPECTED_BRANCH" ] || { echo "expected $EXPECTED_BRANCH, got $BRANCH" >&2; return 1; }
   [ "$BRANCH" != main ] || { echo "refusing main" >&2; return 1; }
-  [ -z "$(git status --porcelain)" ] || { echo "working tree/index is dirty" >&2; git status --short >&2; return 1; }
-  command -v claude >/dev/null 2>&1 || { echo "claude CLI missing" >&2; return 1; }
-  command -v codex >/dev/null 2>&1 || { echo "codex CLI missing (review fails closed)" >&2; return 1; }
+  [ -z "$(unexpected_status)" ] || { echo "working tree/index has non-website changes" >&2; unexpected_status >&2; return 1; }
+  command -v pi >/dev/null 2>&1 || { echo "pi CLI missing" >&2; return 1; }
+  pi --list-models gpt-5.6 2>/dev/null | grep -Fq gpt-5.6-sol || { echo "gpt-5.6-sol unavailable" >&2; return 1; }
+  pi --list-models gpt-5.6 2>/dev/null | grep -Fq gpt-5.6-luna || { echo "gpt-5.6-luna unavailable" >&2; return 1; }
+  if [ -f /tmp/list-displays.swift ]; then
+    display_state="$(swift /tmp/list-displays.swift 2>/dev/null || true)"
+    printf '%s\n' "$display_state" | grep -Eq 'builtin=true main=true' || {
+      echo "built-in Retina display must be Main for deterministic UI baselines" >&2; return 1;
+    }
+  fi
   return 0
 }
 
 run_iteration() {
-  local output="$1" prompt watchdog="" monitor="" rc
+  local output="$1" prompt watchdog="" monitor="" rc worker_model review_model task_dir session_dir stdout_log stderr_log
+  worker_model="$(worker_model_for_iteration)" || return 1
+  review_model="$(review_model_for_worker "$worker_model")"
+  task_dir="$TASKS_DIR/iteration-$(printf '%03d' "$ITERATION")"
+  session_dir="$task_dir/worker-session"
+  stdout_log="$task_dir/stdout.log"
+  stderr_log="$task_dir/stderr.log"
+  mkdir -p "$session_dir" "$task_dir/reviewer-session"
+  cat > "$task_dir/task.json" <<EOF
+{"iteration":$ITERATION,"workerModel":"$(json_escape "$worker_model")","reviewModel":"$(json_escape "$review_model")","thinking":"$(json_escape "$PI_THINKING")","startedAt":"$(now_utc)","beforeHead":"$(git rev-parse HEAD)"}
+EOF
   prompt="[agent-tile-ux harness]
 QUEUE_FILE=$QUEUE_FILE
 LEDGER_FILE=$LEDGER_FILE
 RUN_DIR=$RUN_DIR
+TASK_DIR=$task_dir
 EXPECTED_BRANCH=$BRANCH
 EXPECTED_COMMIT_GRANULARITY=one-ticket-per-commit
+WORKER_MODEL=$worker_model
+REVIEW_MODEL=$review_model
+REVIEW_THINKING=$PI_THINKING
 
 $(cat "$PROMPT_FILE")"
 
-  local args=(-p --dangerously-skip-permissions --model "$CLAUDE_MODEL")
-  [ -n "$CLAUDE_EFFORT" ] && args+=(--effort "$CLAUDE_EFFORT")
-  claude "${args[@]}" "$prompt" > "$output" 2>&1 &
+  pi --approve --model "$worker_model" --thinking "$PI_THINKING" \
+    --session-dir "$session_dir" --name "agent-tile-$ITERATION" --mode text -p "$prompt" \
+    > "$stdout_log" 2> "$stderr_log" &
   ITERATION_PID=$!
   write_status running "iteration-$ITERATION"
   write_telemetry
@@ -217,7 +261,7 @@ $(cat "$PROMPT_FILE")"
     (
       sleep "$ITER_TIMEOUT_SECONDS"
       if kill -0 "$ITERATION_PID" 2>/dev/null; then
-        echo "[loop] iteration timeout after ${ITER_TIMEOUT_SECONDS}s" >> "$output"
+        echo "[loop] iteration timeout after ${ITER_TIMEOUT_SECONDS}s" >> "$stderr_log"
         kill -TERM "$ITERATION_PID" 2>/dev/null || true
         sleep 15
         kill -KILL "$ITERATION_PID" 2>/dev/null || true
@@ -228,13 +272,16 @@ $(cat "$PROMPT_FILE")"
   wait "$ITERATION_PID"; rc=$?
   [ -n "$monitor" ] && kill "$monitor" 2>/dev/null || true
   [ -n "$watchdog" ] && kill "$watchdog" 2>/dev/null || true
+  cat "$stdout_log" "$stderr_log" > "$output"
+  printf '{"iteration":%s,"workerModel":"%s","reviewModel":"%s","thinking":"%s","finishedAt":"%s","exitCode":%s}\n' \
+    "$ITERATION" "$(json_escape "$worker_model")" "$(json_escape "$review_model")" "$(json_escape "$PI_THINKING")" "$(now_utc)" "$rc" > "$task_dir/result.json"
   ITERATION_PID=""
   write_telemetry
   return "$rc"
 }
 
 validate_iteration_commit() {
-  local before_head="$1" token="$2" ticket changed allowed path fence fence_prefix fence_suffix middle path_allowed subject count state
+  local before_head="$1" token="$2" ticket changed allowed path fence fence_prefix fence_suffix middle path_allowed subject count state task_dir
   ticket="${token#LOOP: CONTINUE }"
   ticket="${ticket#skipped:}"
   case "$ticket" in P*.md) ;; *) echo "invalid ticket in CONTINUE token: $ticket" >&2; return 1 ;; esac
@@ -248,6 +295,15 @@ validate_iteration_commit() {
   }
 
   state="$(grep -F "| \`$ticket\` |" "$LEDGER_FILE" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$3); print $3}')"
+  task_dir="$TASKS_DIR/iteration-$(printf '%03d' "$ITERATION")"
+  [ -s "$task_dir/review-final.md" ] || { echo "missing durable independent review" >&2; return 1; }
+  [ -s "$task_dir/staged.diff" ] || { echo "missing staged review diff" >&2; return 1; }
+  find "$task_dir/reviewer-session" -type f -size +0c -print -quit 2>/dev/null | grep -q . || {
+    echo "missing reviewer session log" >&2; return 1;
+  }
+  grep -Eq '^DECISION: APPROVE$' "$task_dir/review-final.md" || {
+    echo "independent review did not approve" >&2; return 1;
+  }
   case "$token:$state" in
     *skipped:*:blocked) ;;
     *skipped:*) echo "skipped ticket must be ledger state blocked, got $state" >&2; return 1 ;;
@@ -309,7 +365,7 @@ write_telemetry
 write_report
 
 echo "[loop] agent-tile UX start: $RUN_DIR"
-echo "[loop] branch=$BRANCH model=$CLAUDE_MODEL effort=$CLAUDE_EFFORT"
+echo "[loop] branch=$BRANCH models=$PI_WORKER_MODELS thinking=$PI_THINKING"
 
 for ITERATION in $(seq 1 "$MAX_ITER"); do
   if [ -f "$STOP_FILE" ]; then stop_run stop-file; break; fi
@@ -321,15 +377,16 @@ for ITERATION in $(seq 1 "$MAX_ITER"); do
   run_iteration "$ITERATION_LOG"; rc=$?
 
   token="$(tr -d '\140' < "$ITERATION_LOG" | grep -oE 'LOOP: (CONTINUE|STOP)[^[:cntrl:]]*' | tail -1 || true)"
+  printf '%s\n' "${token:-none}" > "$TASKS_DIR/iteration-$(printf '%03d' "$ITERATION")/control-token.txt"
   append_event iteration-end "rc=$rc token=${token:-none}"
   echo "[loop] iteration=$ITERATION rc=$rc token='${token:-none}' log=$ITERATION_LOG"
   tail -4 "$ITERATION_LOG" 2>/dev/null | sed 's/^/[iter] /'
 
   if grep -q '\[loop\] iteration timeout' "$ITERATION_LOG"; then stop_run iteration-timeout; break; fi
 
-  if grep -qiE 'usage limit|session limit|rate limit|status code 429|overloaded|quota' "$ITERATION_LOG"; then
+  if grep -qiE 'usage limit|session limit|rate limit|status code 429|overloaded|quota|ENOTFOUND|unable to connect|connection (reset|refused)|network error|fetch failed' "$ITERATION_LOG"; then
     PROVIDER_FAILURES=$((PROVIDER_FAILURES + 1))
-    if [ -n "$(git status --porcelain)" ]; then stop_run dirty-after-provider-failure; break; fi
+    if [ -n "$(unexpected_status)" ]; then stop_run dirty-after-provider-failure; break; fi
     if [ "$(git rev-parse HEAD)" != "$BEFORE_ITERATION_HEAD" ]; then stop_run provider-failure-after-unvalidated-commit; break; fi
     if [ "$PROVIDER_FAILURES" -ge "$MAX_PROVIDER_FAILURES" ]; then stop_run provider-failure-window; break; fi
     append_event provider-backoff "failure $PROVIDER_FAILURES sleeping ${QUOTA_SLEEP_SECONDS}s"
@@ -342,12 +399,12 @@ for ITERATION in $(seq 1 "$MAX_ITER"); do
 
   case "$token" in
     "LOOP: CONTINUE"*)
-      if [ -n "$(git status --porcelain)" ]; then stop_run dirty-after-continue; break; fi
+      if [ -n "$(unexpected_status)" ]; then stop_run dirty-after-continue; break; fi
       if ! validate_iteration_commit "$BEFORE_ITERATION_HEAD" "$token"; then stop_run invalid-ticket-commit; break; fi
       git bundle create "$BACKUP_DIR/continuum-agent-tile-rolling.bundle" --all >/dev/null 2>&1 || true
       append_event continue "$token" ;;
     "LOOP: STOP"*)
-      if [ -n "$(git status --porcelain)" ]; then stop_run dirty-after-stop; break; fi
+      if [ -n "$(unexpected_status)" ]; then stop_run dirty-after-stop; break; fi
       if [ "$(git rev-parse HEAD)" != "$BEFORE_ITERATION_HEAD" ]; then stop_run unexpected-commit-before-stop; break; fi
       stop_run "${token#LOOP: STOP }"
       break ;;

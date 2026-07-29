@@ -1,14 +1,13 @@
 # 91-agent-tile-ux — extensible transcript and composer
 
-Status: authored, not started
+Status: P0 contract and compatibility foundation complete; semantic implementation next
 Owner direction: conversation-first, keyboard-first, visually quiet, highly extensible
-Predecessor: `docs/38-tickets/90-agent-ux/` (do not merge the queues)
+Runtime prerequisite: `docs/38-tickets/90-agent-ux/` owns provider/RPC/session capabilities; this queue consumes compiled seams without mutating that queue
 
 ## 1. Product thesis
 
 An agent tile is not a chat bubble stack and not a terminal emulator. It is a durable view onto an
-agent: conversation, structured work, pending decisions, and the command surface used to steer that
-work. Its transcript and composer must be able to grow for years without turning
+agent: conversation, structured work, passive provider-current-work state, exceptional provider-enforced needs, and the command surface used to steer that work. Its transcript and composer must be able to grow for years without turning
 `ManagedAgentTileNSView` into one giant switch statement.
 
 The target should feel closer to a polished Claude Code pane than a conventional messenger:
@@ -49,6 +48,18 @@ These decisions are instructions, not suggestions for ticket workers.
    not cross desktop→phone sync. Only the existing derived metadata projection may cross.
 10. **No compatibility cliff.** `ManagedTranscriptCard` remains available as a temporary projection
     until the real tile is completely migrated and the compatibility-removal ticket lands.
+11. **The canvas is the session switcher.** One agent tile is one interactive session view. Spatial
+    focus and arrangement replace an in-tile session picker; detach never stops the agent.
+12. **Provider current work is passive and read-only.** Consume only explicit provider todo/plan
+    state, show active item/progress in the tile and FileTree agent index, optionally disclose detail,
+    and never infer a plan from prose or create another task manager.
+13. **Autonomy is the default.** Continuum adds no approval gate. A provider-enforced request is a
+    compact, exceptional, nonmodal state sourced from an explicit request event.
+14. **Capabilities are factual.** Queue 90 owns runtime/RPC/session capability. Queue 91 displays
+    only capability exposed at the compiled provider-neutral seam and marks a missing prerequisite
+    blocked rather than simulating it.
+15. **No context tile.** Transcript, current work, and composer belong in the session tile; do not
+    create a linked context surface.
 
 ## 3. Current pipeline and its limit
 
@@ -95,7 +106,7 @@ AgentBlockRendererRegistry
         ├── code block
         ├── tool + command output
         ├── plan + diff
-        ├── approval + question
+        ├── exceptional provider request + question
         ├── error + notice
         └── unknown fallback
 ```
@@ -109,6 +120,9 @@ ComposerTextView (NSTextView engine)
   → suggestion providers
   → AgentComposerIntent [send, stop, steer, queue, command]
   → AgentTileActionSink / AgentSupervisor
+
+Only intents supported by explicit compiled capabilities are advertised. Send/Stop are not evidence
+that Steer/Queue exists; unsupported future intents remain unavailable rather than being simulated.
 ```
 
 ## 5. Module and file boundaries
