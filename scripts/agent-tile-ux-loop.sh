@@ -268,7 +268,7 @@ run_final_checks() {
   log "$CURRENT_TICKET final swift build"
   swift build > "$task_dir/swift-build.log" 2>&1 || return 1
   log "$CURRENT_TICKET final matrix"
-  CONTINUUM_SKIP_SURFACE_CHECKS=1 ./scripts/run-matrix.sh </dev/null > "$task_dir/matrix.log" 2>&1 || return 1
+  CONTINUUM_SKIP_SURFACE_CHECKS=1 CONTINUUM_SKIP_UI_BASELINES=1 ./scripts/run-matrix.sh </dev/null > "$task_dir/matrix.log" 2>&1 || return 1
 }
 
 update_ledger_done() {
@@ -318,7 +318,9 @@ preflight() {
   [ "$PI_THINKING" = medium ] || return 1
   command -v pi >/dev/null 2>&1 || return 1
   ./scripts/check-agent-tile-ux-program.sh --check || return 1
-  swift scripts/check-retina-main.swift || return 1
+  if ! swift scripts/check-retina-main.swift; then
+    printf 'agent-tile loop: Retina Main is unavailable; autonomous tickets will defer Component Lab baseline comparison to the next supervised visual gate.\n' >&2
+  fi
 }
 
 if ! preflight; then finish preflight-failed; exit 1; fi

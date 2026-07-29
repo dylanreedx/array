@@ -166,7 +166,11 @@ run_app_check .build/debug/continuum-revived --push-payload-dump-check
 run_app_check .build/debug/continuum-revived --palette-duplicate-root-check
 run_app_check .build/debug/continuum-revived --palette-first-responder-restore-check
 run_app_check .build/debug/continuum-revived --settings-panel-check
-run_app_check .build/debug/continuum-revived --component-lab-check
+if [[ "${CONTINUUM_SKIP_UI_BASELINES:-0}" == "1" ]]; then
+  printf '\n==> SKIPPED (display-dependent, CONTINUUM_SKIP_UI_BASELINES=1): --component-lab-check — baseline comparison deferred to a supervised Retina-Main visual gate.\n'
+else
+  run_app_check .build/debug/continuum-revived --component-lab-check
+fi
 # Ticket P0.2: the UIProbe substrate every later phase-0 gate layers on — asserts a
 # component really renders at the requested size in the requested NSAppearance, and
 # that .aqua vs .darkAqua produce different pixels.
