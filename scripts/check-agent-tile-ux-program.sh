@@ -45,13 +45,15 @@ check_program() {
   grep -Fq '`P5.3-provider-current-work-projection.md`' "$QUEUE" || fail "queue lost provider current-work projection"
   grep -Fq 'openai-codex/gpt-5.6-sol openai-codex/gpt-5.6-luna' scripts/agent-tile-ux-loop.sh || fail "loop lost Sol/Luna worker pair"
   grep -Fq 'PI_THINKING="${PI_THINKING:-medium}"' scripts/agent-tile-ux-loop.sh || fail "loop lost medium thinking default"
-  grep -Fq 'ENOTFOUND' scripts/agent-tile-ux-loop.sh || fail "loop lost DNS provider-failure classification"
-  grep -Fq 'reviewer-session' scripts/agent-tile-ux-loop.sh || fail "loop lost durable reviewer sessions"
+  grep -Fq 'MAX_REPAIR_PASSES="${MAX_REPAIR_PASSES:-2}"' scripts/agent-tile-ux-loop.sh || fail "loop lost bounded repair budget"
+  grep -Fq 'reviewer-session-' scripts/agent-tile-ux-loop.sh || fail "loop lost durable reviewer sessions"
   grep -Fq 'DECISION: APPROVE' scripts/agent-tile-ux-loop.sh || fail "loop lost independent approval gate"
-  grep -Fq 'cmp -s "$task_dir/staged.diff" "$final_diff"' scripts/agent-tile-ux-loop.sh || fail "loop lost reviewed-commit equality gate"
   grep -Fq 'first_eligible_ticket' scripts/agent-tile-ux-loop.sh || fail "loop lost first-eligible enforcement"
-  grep -Fq 'authorized_untracked_fingerprint' scripts/agent-tile-ux-loop.sh || fail "loop lost website retry fingerprint"
+  grep -Fq 'run_final_checks' scripts/agent-tile-ux-loop.sh || fail "loop lost harness-owned final checks"
+  grep -Fq 'update_ledger_done' scripts/agent-tile-ux-loop.sh || fail "loop lost targeted harness-owned ledger update"
   grep -Fq 'swift scripts/check-retina-main.swift' scripts/agent-tile-ux-loop.sh || fail "loop lost mandatory durable display preflight"
+  grep -Fq 'The shell harness—not you—owns queue selection, ledger state' scripts/agent-tile-ux-prompt.md || fail "worker regained queue or ledger ownership"
+  grep -Fq 'Never run `git add`, `git commit`' scripts/agent-tile-ux-prompt.md || fail "worker prompt lost git prohibition"
 
   rows="$(grep -E '^\| [0-9]+ \| `P[0-9]+\.[0-9]+-[^`]+\.md` \|' "$QUEUE" 2>/dev/null || true)"
   count="$(printf '%s\n' "$rows" | grep -c '^|' | tr -d ' ')"
@@ -155,6 +157,7 @@ EOF
   [ "$ledger_count" = 50 ] || fail "expected 50 ledger rows, found $ledger_count"
 
   seen_ledger=""
+  in_progress_count=0
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     lfile="$(printf '%s' "$row" | awk -F'|' '{gsub(/^[ \t]*`|`[ \t]*$/,"",$2); print $2}')"
@@ -172,6 +175,7 @@ EOF
         [ "$lupdated" = "—" ] || fail "$lfile is pending but records date [$lupdated]"
         ;;
       in-progress)
+        in_progress_count=$((in_progress_count + 1))
         [ "$lcommit" = "—" ] || fail "$lfile is in-progress but records commit [$lcommit]"
         valid_utc_timestamp "$lupdated" || fail "$lfile is in-progress without a real ISO UTC update: [$lupdated]"
         ;;
@@ -188,6 +192,7 @@ EOF
   done <<EOF
 $ledger_rows
 EOF
+  [ "$in_progress_count" -le 1 ] || fail "ledger has $in_progress_count in-progress rows; at most one is valid"
 
   # This leg may not quietly remove itself: it has to stay wired into the matrix
   # and stay recorded in the committed matrix inventory.
@@ -302,6 +307,10 @@ mutate_forged_done_metadata() {
 mutate_invalid_calendar_timestamp() {
   mutate_ledger_fields P0.5-compatibility-pipeline-harness.md blocked — 2026-99-99T99:99:99Z
 }
+mutate_multiple_in_progress_rows() {
+  mutate_ledger_fields P1.4-document-reducer.md in-progress — 2026-07-29T10:00:00Z
+  mutate_ledger_fields P1.5-runtime-event-projection.md in-progress — 2026-07-29T10:00:01Z
+}
 mutate_unwired_matrix_leg() {
   sed -i '' '4c\
 # agent-tile program check removed
@@ -415,6 +424,8 @@ self_test() {
     "is done without the required 'this commit' marker" mutate_forged_done_metadata
   run_case 'invalid calendar timestamp' \
     'is blocked without a real ISO UTC update' mutate_invalid_calendar_timestamp
+  run_case 'multiple in-progress rows' \
+    'ledger has 2 in-progress rows; at most one is valid' mutate_multiple_in_progress_rows
   run_case 'unwired matrix prefix' \
     'locked executable prefix' mutate_unwired_matrix_leg
   run_case 'nonblocking matrix prefix' \

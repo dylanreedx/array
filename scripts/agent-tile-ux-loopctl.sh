@@ -1,32 +1,25 @@
 #!/usr/bin/env bash
-# Conservative lifecycle and liveness view for agent-tile-ux-loop.sh.
+# Small lifecycle wrapper for agent-tile-ux-loop.sh.
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 PROGRAM_DIR="${PROGRAM_DIR:-docs/38-tickets/91-agent-tile-ux}"
-STOP_FILE="${STOP_FILE:-$PROGRAM_DIR/STOP}"
+STOP_FILE="$PROGRAM_DIR/STOP"
+EXPECTED_BRANCH="${EXPECTED_BRANCH:-overnight/agent-ux}"
 ROOT_PI_DIR="${ROOT_PI_DIR:-$HOME/.pi}"
 CONTROL_DIR="${CONTROL_DIR:-$ROOT_PI_DIR/agent-tile-ux-loop-control/$(basename "$(git rev-parse --show-toplevel)")}"
 LOOP_SCRIPT="${LOOP_SCRIPT:-./scripts/agent-tile-ux-loop.sh}"
 SUPERVISOR_LOG="$CONTROL_DIR/supervisor.log"
-EXPECTED_BRANCH="${EXPECTED_BRANCH:-overnight/agent-ux}"
-STALE_SECONDS="${STALE_SECONDS:-2100}"
-
 mkdir -p "$CONTROL_DIR"
 
 pid_value() { [ -f "$CONTROL_DIR/loop.pid" ] && cat "$CONTROL_DIR/loop.pid" 2>/dev/null || true; }
-pid_live() { local p; p="$(pid_value)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
+pid_live() { local pid; pid="$(pid_value)"; [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; }
 latest_run() { [ -f "$CONTROL_DIR/latest-run.txt" ] && cat "$CONTROL_DIR/latest-run.txt" 2>/dev/null || true; }
-json_number() {
-  local file="$1" key="$2"
-  sed -nE "s/.*\"$key\"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p" "$file" 2>/dev/null | head -1
-}
 json_string() {
   local file="$1" key="$2"
   sed -nE "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"([^\"]*)\".*/\1/p" "$file" 2>/dev/null | head -1
 }
-
 unexpected_status() {
   git status --porcelain | awk '
     $1 == "??" && ($2 == "website/" || $2 ~ /^array-logo.*[.]svg$/) { next }
@@ -34,231 +27,70 @@ unexpected_status() {
   '
 }
 
-descendant_pids() {
-  local queue="$1" next="" parent child
-  while [ -n "$queue" ]; do
-    next=""
-    for parent in $queue; do
-      for child in $(pgrep -P "$parent" 2>/dev/null || true); do
-        printf '%s\n' "$child"
-        next="$next $child"
-      done
-    done
-    queue="$next"
-  done
-}
-
-descendant_process_table() {
-  local root="$1" pid
-  [ -n "$root" ] || return 0
-  for pid in $(descendant_pids "$root"); do
-    ps -o pid=,ppid=,etime=,%cpu=,comm=,command= -p "$pid" 2>/dev/null || true
-  done
-}
-
-work_descendant_process_table() {
-  local root="$1" pid comm base command row
-  [ -n "$root" ] || return 0
-  for pid in $(descendant_pids "$root"); do
-    comm="$(ps -o comm= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)"
-    base="${comm##*/}"
-    command="$(ps -o command= -p "$pid" 2>/dev/null || true)"
-    row="$(ps -o pid=,ppid=,etime=,%cpu=,comm=,command= -p "$pid" 2>/dev/null || true)"
-    case "$base" in
-      swift-build|swift-frontend|swiftc|swift|xcodebuild|pi|codex|continuum-revived|ContinuumRevived*Checks)
-        [ -n "$row" ] && printf '%s\n' "$row" ;;
-      bash|zsh|sh|env)
-        case "$command" in
-          *scripts/run-matrix.sh*|*scripts/check-*.sh*) [ -n "$row" ] && printf '%s\n' "$row" ;;
-        esac ;;
-    esac
-  done
-}
-
 start_loop() {
-  if pid_live; then echo "agent-tile loop already running (pid $(pid_value))"; return 0; fi
-  if [ -f "$STOP_FILE" ]; then
-    echo "refusing start: $STOP_FILE is present; run '$0 arm' after reviewing preconditions" >&2
-    return 2
-  fi
-  local branch
-  branch="$(git branch --show-current)"
-  [ "$branch" = "$EXPECTED_BRANCH" ] || { echo "wrong branch: $branch" >&2; return 2; }
-  [ -z "$(unexpected_status)" ] || { echo "refusing non-website dirty tree/index" >&2; unexpected_status >&2; return 2; }
-  if pgrep -f 'scripts/agent-(ux|tile-ux)-loop\.sh' >/dev/null 2>&1; then
-    echo "another agent UX loop appears active; refusing a second writer" >&2
-    pgrep -fl 'scripts/agent-(ux|tile-ux)-loop\.sh' >&2 || true
-    return 2
-  fi
+  if pid_live; then echo "already running: pid $(pid_value)"; return 0; fi
+  [ ! -f "$STOP_FILE" ] || { echo "STOP is present; run '$0 arm' first" >&2; return 2; }
+  [ "$(git branch --show-current)" = "$EXPECTED_BRANCH" ] || { echo "wrong branch" >&2; return 2; }
+  [ -z "$(unexpected_status)" ] || { echo "tracked/non-authorized changes present" >&2; unexpected_status >&2; return 2; }
   : > "$SUPERVISOR_LOG"
   nohup caffeinate -is "$LOOP_SCRIPT" >> "$SUPERVISOR_LOG" 2>&1 &
-  local launcher=$!
-  printf '%s\n' "$launcher" > "$CONTROL_DIR/launcher.pid"
+  printf '%s\n' "$!" > "$CONTROL_DIR/launcher.pid"
   sleep 3
   if pid_live; then
-    echo "started agent-tile UX loop (pid $(pid_value))"
+    echo "started: pid $(pid_value)"
     echo "log: $SUPERVISOR_LOG"
-    return 0
+  else
+    echo "loop did not stay up" >&2
+    tail -60 "$SUPERVISOR_LOG" >&2 || true
+    return 3
   fi
-  echo "loop did not stay up; inspect $SUPERVISOR_LOG" >&2
-  tail -30 "$SUPERVISOR_LOG" >&2 || true
-  return 3
 }
 
 status_loop() {
-  local run status telemetry loop_pid now log_epoch source_epoch log_age source_age progress_age iter_pid resampled_iter_pid descendants
-  local resampled_log_epoch resampled_source_epoch resampled_log_age resampled_source_age resampled_progress_age
-  run="$(latest_run)"; loop_pid="$(pid_value)"; now="$(date +%s)"
-  echo "program: 91-agent-tile-ux"
-  echo "branch:  $(git branch --show-current)"
-  echo "loop:    $(pid_live && echo "running pid=$loop_pid" || echo stopped)"
-  echo "STOP:    $([ -f "$STOP_FILE" ] && echo present || echo absent)"
-  echo "tree:    $([ -z "$(unexpected_status)" ] && echo clean-except-authorized-untracked-website || echo DIRTY)"
-  echo "run:     ${run:-none}"
-
-  [ -n "$run" ] || return 10
-  status="$run/status.json"; telemetry="$run/telemetry.json"
-  if [ -f "$status" ]; then
-    echo "state:   $(json_string "$status" state) / $(json_string "$status" reason)"
-    echo "iter:    $(json_number "$status" iteration) pid=$(json_string "$status" iterationPid)"
-    echo "updated: $(json_string "$status" updatedAt)"
-  else
-    echo "state:   missing status.json"
-  fi
-
-  log_epoch="$(json_number "$telemetry" iterationLogMtime)"
-  source_epoch="$(json_number "$telemetry" newestTrackedSourceMtime)"
-  if [ -z "$log_epoch" ] || [ -z "$source_epoch" ]; then
-    echo "signals: unavailable/incomplete telemetry — stale classification withheld"
-    progress_age=0
-  else
-    log_age=$((now - log_epoch)); source_age=$((now - source_epoch))
-    progress_age="$log_age"; [ "$source_age" -lt "$progress_age" ] && progress_age="$source_age"
-    echo "signals: iteration-log-age=${log_age}s tracked-source-age=${source_age}s"
-  fi
-  echo "ledger:  $(grep '^last-touch ' "$PROGRAM_DIR/_LEDGER.md" 2>/dev/null | tail -1)"
-
-  iter_pid="$(json_string "$status" iterationPid)"
-  descendants="$(descendant_process_table "$iter_pid")"
-  local work_children
-  # Inspect only real descendants, never the Claude root whose argv contains
-  # the entire prompt. Native workers are classified from a separately read
-  # `comm` basename; only known shell wrappers inspect descendant-scoped argv.
-  work_children="$(work_descendant_process_table "$iter_pid")"
-  # Descendant discovery and `ps` are snapshots. Before returning the dangerous
-  # stale classification, take a second sample so a just-spawned build/review
-  # child cannot be missed by one parent/child race. If the loop advanced to a
-  # new iteration during that second, withhold stale instead of inspecting an
-  # obsolete PID tree.
-  if pid_live && [ "$progress_age" -gt "$STALE_SECONDS" ] && [ -z "$work_children" ]; then
-    sleep 1
-    resampled_iter_pid="$(json_string "$status" iterationPid)"
-    if [ "$resampled_iter_pid" != "$iter_pid" ]; then
-      iter_pid="$resampled_iter_pid"
-      progress_age=0
-      echo "signals: iteration changed during stale resample; stale classification withheld"
-    fi
-    descendants="$(descendant_process_table "$iter_pid")"
-    work_children="$(work_descendant_process_table "$iter_pid")"
-    resampled_iter_pid="$(json_string "$status" iterationPid)"
-    if [ "$resampled_iter_pid" != "$iter_pid" ]; then
-      iter_pid="$resampled_iter_pid"
-      progress_age=0
-      descendants="$(descendant_process_table "$iter_pid")"
-      work_children="$(work_descendant_process_table "$iter_pid")"
-      echo "signals: iteration changed during descendant snapshot; stale classification withheld"
-    fi
-    # A short-lived check can start and finish between process snapshots while
-    # still advancing durable telemetry. Re-read both progress clocks before
-    # allowing the stale result.
-    resampled_log_epoch="$(json_number "$telemetry" iterationLogMtime)"
-    resampled_source_epoch="$(json_number "$telemetry" newestTrackedSourceMtime)"
-    if [ -n "$resampled_log_epoch" ] && [ -n "$resampled_source_epoch" ]; then
-      resampled_log_age=$((now - resampled_log_epoch))
-      resampled_source_age=$((now - resampled_source_epoch))
-      resampled_progress_age="$resampled_log_age"
-      [ "$resampled_source_age" -lt "$resampled_progress_age" ] && resampled_progress_age="$resampled_source_age"
-      [ "$resampled_progress_age" -lt "$progress_age" ] && progress_age="$resampled_progress_age"
-    fi
-  fi
-  if [ -n "$work_children" ]; then
-    echo "work:    active build/test/review child"
-    printf '%s\n' "$work_children" | sed 's/^/         /'
-  else
-    echo "work:    no build/test/review child observed"
-  fi
-
-  if pid_live; then
-    if [ "$progress_age" -gt "$STALE_SECONDS" ] && [ -z "$work_children" ] && [ "$(json_string "$status" iterationPid)" = "$iter_pid" ]; then
-      echo "result:  STALE CANDIDATE — inspect iteration log and child tree; do not blind-restart"
-      echo "descendants:"
-      printf '%s\n' "$descendants" | sed 's/^/         /'
-      return 11
-    fi
-    echo "result:  running; progress or quiet-within-threshold"
-    return 0
-  fi
-
+  local run status pid child
+  run="$(latest_run)"; pid="$(pid_value)"
+  echo "branch: $(git branch --show-current)"
+  echo "loop:   $(pid_live && echo "running pid=$pid" || echo stopped)"
+  echo "STOP:   $([ -f "$STOP_FILE" ] && echo present || echo absent)"
   if [ -n "$(unexpected_status)" ]; then
-    echo "result:  STOPPED DIRTY — preserve and inspect before restart"
-    unexpected_status | sed 's/^/         /'
-    return 12
+    echo "tree:   DIRTY"
+    unexpected_status | sed 's/^/        /'
+  else
+    echo "tree:   clean except authorized untracked website/logos"
   fi
-  local reason
-  reason="$(json_string "$status" reason)"
-  case "$reason" in
-    supervised-required:*) echo "result:  supervised review required"; return 20 ;;
-    queue-drained) echo "result:  queue drained"; return 0 ;;
-    *) echo "result:  stopped cleanly; inspect reason before restart"; return 10 ;;
-  esac
-}
-
-stop_loop() {
-  touch "$STOP_FILE"
-  echo "stop requested through $STOP_FILE; current iteration may finish before exit"
-}
-
-arm_loop() {
-  if pid_live; then echo "refusing to arm while loop is running" >&2; return 2; fi
-  rm -f "$STOP_FILE"
-  echo "program armed; STOP removed"
-}
-
-restart_loop() {
-  if pid_live; then
-    local iter run status iter_pid
-    run="$(latest_run)"; status="$run/status.json"; iter_pid="$(json_string "$status" iterationPid)"
-    if [ -n "$iter_pid" ] && kill -0 "$iter_pid" 2>/dev/null; then
-      echo "refusing restart: iteration child $iter_pid is live" >&2
-      return 2
-    fi
-    echo "refusing restart: loop process is still live; use stop and wait" >&2
-    return 2
+  echo "run:    ${run:-none}"
+  [ -n "$run" ] || return 0
+  status="$run/status.json"
+  echo "state:  $(json_string "$status" state) / $(json_string "$status" detail)"
+  echo "ticket: $(json_string "$status" ticket)"
+  echo "head:   $(json_string "$status" head)"
+  echo "update: $(json_string "$status" updatedAt)"
+  child="$(json_string "$status" childPid)"
+  if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
+    echo "child:  $(ps -o pid=,ppid=,etime=,%cpu=,comm= -p "$child" 2>/dev/null)"
+    pgrep -P "$child" 2>/dev/null | while read -r descendant; do
+      ps -o pid=,ppid=,etime=,%cpu=,comm= -p "$descendant" 2>/dev/null | sed 's/^/        /'
+    done
+  else
+    echo "child:  none active"
   fi
-  [ -z "$(unexpected_status)" ] || { echo "refusing restart: non-website tree/index dirty" >&2; return 2; }
-  [ ! -f "$STOP_FILE" ] || { echo "refusing restart: STOP present; review then arm" >&2; return 2; }
-  start_loop
+  echo "recent:"
+  tail -12 "$run/events.log" 2>/dev/null | sed 's/^/        /' || true
 }
 
 show_logs() {
   local run
   run="$(latest_run)"
-  if [ "${1:-}" = "--follow" ]; then tail -F "$SUPERVISOR_LOG"; return; fi
-  echo "== supervisor =="; tail -80 "$SUPERVISOR_LOG" 2>/dev/null || true
-  if [ -n "$run" ]; then
-    echo "== latest iteration =="
-    local latest
-    latest="$(find "$run/logs" -type f -name 'iter-*.log' -print 2>/dev/null | sort -V | tail -1)"
-    [ -n "$latest" ] && tail -120 "$latest" || true
-  fi
+  if [ "${1:-}" = --follow ]; then tail -F "$SUPERVISOR_LOG"; return; fi
+  tail -100 "$SUPERVISOR_LOG" 2>/dev/null || true
+  [ -z "$run" ] || find "$run/tasks" -type f \( -name 'worker-*.md' -o -name 'review-final-*.md' \) -print | sort | tail -6
 }
 
 case "${1:-status}" in
-  start) start_loop ;;
+  arm) rm -f "$STOP_FILE"; echo "armed" ;;
+  start|restart) start_loop ;;
   status) status_loop ;;
-  stop) stop_loop ;;
-  arm) arm_loop ;;
-  restart) restart_loop ;;
+  stop) touch "$STOP_FILE"; echo "STOP armed; loop exits between tickets" ;;
   logs) show_logs "${2:-}" ;;
-  *) echo "usage: $0 {arm|start|status|logs [--follow]|stop|restart}" >&2; exit 2 ;;
+  *) echo "usage: $0 {arm|start|restart|status|logs [--follow]|stop}" >&2; exit 2 ;;
 esac

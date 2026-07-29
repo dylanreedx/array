@@ -48,33 +48,31 @@ Never set `ALLOW_DIRTY=1` for a real run. The loop is an exclusive writer to thi
 
 ## Ticket selection
 
-The worker selects the first `_QUEUE.md` row whose dependencies are all `done` and whose ledger
-state is `pending`.
+The shell harness selects the first `_QUEUE.md` row whose dependencies are all `done` and whose
+ledger state is `pending`. The selected ticket is passed explicitly to a worker.
 
-- `done` requires both ledger state and a matching commit.
+- `done` requires both ledger state and a matching local commit.
 - `blocked` is never retried automatically.
-- `in-progress` from a dead iteration is not automatically reset; the supervisor inspects it.
-- If the first eligible row is `supervised`, emit
-  `LOOP: STOP supervised-required:<ticket>` without editing it.
+- If the first eligible row is `supervised`, the harness stops without editing it.
 - Do not skip a supervised row to work ahead: later density and integration decisions depend on it.
-- Queue, packet, runbook, prompt, and loop machinery are immutable to ticket workers.
+- Workers cannot select tickets or edit queue, ledger, packet, runbook, prompt, or loop machinery.
 
 ## Per-ticket workflow
 
-1. Mark the selected row `in-progress`; update the heartbeat using real UTC.
-2. Read the packet fully and inspect every named production seam before editing.
-3. Implement only the file-fenced behavior.
-4. Add focused deterministic assertions and at least one named negative witness.
-5. Run focused checks, `swift build`, then the headless matrix.
-6. Save the staged diff and run the opposite GPT-5.6 Sol/Luna model at medium as an independent read-only review; preserve its session and final verdict under the task directory.
-7. Resolve findings or record a concrete reason they do not apply.
-8. Mark the ledger row `done` with `this commit`, real timestamp, verification summary, and known limits.
-9. Commit exactly one ticket with a concrete accepted type such as `feat(agent-tile): summary`,
-   `fix(agent-tile): summary`, or `test(agent-tile): summary`; never use the literal placeholder
-   `type`. No AI attribution; never push. The harness ties the sole commit after the prior HEAD to
-   the first eligible ticket/token and mechanically checks its paths, subject, ledger state, exact
-   reviewed diff, opposite-model metadata, and final approval line.
-10. Emit exactly one final `LOOP:` control line.
+1. The harness selects one eligible autonomous ticket and records it outside the repository.
+2. One worker implements only fenced production/check files, runs focused checks plus `swift build`,
+   and returns `WORKER: READY`; it cannot stage, commit, edit the ledger, or run the full matrix.
+3. The harness rejects commits or out-of-fence paths immediately.
+4. The opposite GPT-5.6 Sol/Luna model performs one bounded read-only review. Only correctness,
+   architecture, privacy, scope, or unproved done-criteria findings block.
+5. At most two focused repair passes are allowed. Each is followed by another independent review;
+   a third `REWORK` stops and preserves the ticket instead of churning indefinitely.
+6. After approval, the harness runs `swift build` and the headless matrix exactly once against the
+   final candidate.
+7. The harness alone updates exactly the selected ledger row, stages validated paths, and creates one
+   local `feat(agent-tile): …` commit. It never pushes.
+8. Any malformed result, failed final check, scope violation, worker commit, or exhausted review
+   budget stops with the work preserved for direct inspection.
 
 ## Verification rules
 
@@ -119,13 +117,12 @@ runs are inspected.
 
 - Local commits only; never push.
 - No branch switching, rebase, merge, worktree creation, stash deletion, or shared-history rewrite.
-- One ticket per commit, including its ledger update.
-- The worker may stage only its ticket paths plus ledger. Before commit it must inspect the entire
-  staged set.
-- A supervisor never commits while a worker is alive and never touches the index underneath it.
-- The harness rejects zero/multiple commits, a non-`type(agent-tile):` subject, no ledger update,
-  ledger state other than `done`/explicit `blocked`, or any changed path outside the packet file list.
-- Existing unrelated work is a hard preflight stop, not permission to absorb it.
+- One ticket per harness-owned commit, including one mechanically targeted ledger update.
+- Workers and reviewers never stage or commit. The harness refuses any worker-created commit.
+- The harness stages only already validated packet paths plus `_LEDGER.md` after final checks pass.
+- A supervisor never edits or commits while a worker/reviewer is alive.
+- Existing unrelated tracked work is a hard preflight stop, not permission to absorb it. Authorized
+  untracked `website/` and root logo drafts remain ignored and unstaged.
 
 ## Loop control
 
@@ -147,87 +144,45 @@ Runtime artifacts live outside source control under:
 ```text
 .pi/agent-tile-ux-runs/<repo>/run-<timestamp>/
   status.json
-  telemetry.json
-  events.jsonl
-  report.md
-  logs/iter-*.log
-  tasks/iteration-NNN/
+  events.log
+  tasks/iteration-NNN-<ticket>/
     task.json
-    worker-session/*.jsonl
-    stdout.log
-    stderr.log
-    staged.diff
-    review-request.md
-    reviewer-session/*.jsonl
-    review-final.md
-    review-stderr.log
-    control-token.txt
-    result.json
+    worker-session-N/*.jsonl
+    worker-N.md
+    candidate-N.diff
+    review-request-N.md
+    reviewer-session-N/*.jsonl
+    review-final-N.md
+    swift-build.log
+    matrix.log
+    final.diff
+    commit.log
 ```
 
-A ticket is not accepted without these durable worker/reviewer artifacts, an exact final-line
-`DECISION: APPROVE`, and byte-identical reviewed/committed diffs. Provider/network failures including
-DNS `ENOTFOUND` are retried only when HEAD, every non-ignored path, and the launch-time inventory
-fingerprint of authorized untracked website/logo work are unchanged; dirty or committed failures
-stop for inspection.
+A ticket is accepted only after a durable opposite-model `DECISION: APPROVE`, final build/matrix
+success, harness-owned ledger update, and local commit. A provider failure stops; dirty work is
+preserved rather than automatically recovered in another writer.
 
-The control script records the active supervisor PID and latest run path outside the repository under
-`~/.pi/agent-tile-ux-loop-control/continuum-overnight/`, so preflight observability never dirties the checkout.
+The control script records the loop PID and latest run path outside the repository under
+`~/.pi/agent-tile-ux-loop-control/continuum-overnight/`, so observability never dirties the checkout.
 
-## 15–20 minute supervisor protocol
+## Direct supervisor protocol
 
-The future supervising session should wake every 15–20 minutes while the loop is active and run:
+While the loop is active, the supervising session runs:
 
 ```bash
 cd /Users/dylan/Documents/personal/continuum-overnight
 ./scripts/agent-tile-ux-loopctl.sh status
 ```
 
-Then inspect, in this order:
+Inspect the actual loop/child PID, current ticket and phase, recent `events.log`, changed paths, and
+latest worker/reviewer output. Do not launch monitoring agents or infer staleness from CPU alone.
+Intervene only for a dead child, malformed result, out-of-fence edit, failed final check, exhausted
+review budget, supervised gate, or explicit provider failure.
 
-1. **Control process:** loop PID alive? expected branch? one loop only?
-2. **Iteration process:** current Pi worker PID/children alive? elapsed time below 2.5h watchdog?
-3. **Durable state:** `status.json`, latest `events.jsonl`, ledger state, current ticket.
-4. **Progress signals:** iteration-log mtime/size, tracked source mtime epoch, HEAD movement,
-   build/test/edit subprocesses.
-5. **Safety:** tree/index state and whether changed files fit the current packet.
-6. **Provider:** quota/rate-limit/reset evidence versus malformed output or local failure.
-
-### Classify before acting
-
-**Progressing** — any strong signal: recent source/check write, active build/test, iteration output
-movement, heartbeat phase change, or new commit. Leave it alone.
-
-**Quiet but plausible** — worker is reading/planning/reviewing; under 35 minutes without writes and
-inside timeout. Leave it alone. Low CPU alone is not stale.
-
-**Stale candidate** — all of the following:
-
-- ledger/telemetry/source/log progress older than 35 minutes;
-- no `swift-build`, `swift-frontend`, `run-matrix`, `xcodebuild`, Pi reviewer, editor/helper child, or
-  active review subprocess;
-- iteration output is not growing;
-- no recent HEAD change;
-- process is alive but effectively idle, or child disappeared while loop still claims running.
-
-Only then may the supervisor terminate the iteration child. Terminate gracefully, capture artifacts,
-and let the harness stop. Do not immediately launch a second writer.
-
-**Failed/stopped cleanly** — status says stopped and tree is clean. Diagnose reason:
-
-- clean provider quota/DNS/connect failure: retry within the bounded window;
-- supervised-required: perform that review, do not restart past it;
-- queue-drained: finish;
-- malformed output or one-off environment failure: restart from same pending ticket;
-- repeated failure: leave stopped and inspect logs.
-
-**Stopped dirty** — never restart. Record `git status`, staged paths, diff summary, current ticket,
-iteration log, and child exit. Preserve the work. Either resume/recover that ticket with one agent or
-revert only after explicit human review. Never use `git reset --hard`/`git clean -fd` as generic
-supervision.
-
-**Wrong-file edits or gate weakening** — stop the loop, preserve evidence, and review before any
-commit. The loop is not allowed to “finish and see.”
+A stopped dirty run is never restarted. Preserve and inspect it directly; never use broad reset,
+clean, stash, or a second recovery writer. A stopped clean provider failure may be restarted from the
+same pending ticket after confirming no child remains.
 
 ## Restart procedure
 
@@ -236,7 +191,7 @@ A safe automatic restart requires all of:
 - no live iteration or review child;
 - clean worktree and index;
 - current branch unchanged;
-- ledger has no unexplained `in-progress` row;
+- ledger has no `in-progress` row (runtime state lives outside the repository);
 - STOP absent;
 - last stop reason is recoverable.
 
@@ -247,10 +202,6 @@ Then:
 sleep 5
 ./scripts/agent-tile-ux-loopctl.sh status
 ```
-
-If the ledger says `in-progress` after a dead clean iteration, inspect the ticket and git log. Reset
-that row to `pending` only when no matching work/commit exists, and record the recovery note. Do not
-mark it `blocked`: supervisor termination is not an implementation failure.
 
 ## Supervised review procedure
 
@@ -269,12 +220,11 @@ At P3.12, P4.10, and P5.5:
 - queue drained;
 - supervised ticket ready;
 - dependency chain blocked;
-- iteration watchdog elapsed;
-- repeated provider failure window;
-- malformed/missing LOOP token;
-- dirty-tree preflight;
-- wrong branch;
-- explicit program STOP;
-- supervisor identifies stale/wrong-scope/gate-weakening work.
+- worker/provider failure or malformed worker result;
+- independent review remains `REWORK` after two repair passes;
+- final build or matrix failure;
+- dirty-tree or wrong-branch preflight;
+- worker commit or out-of-fence change;
+- explicit program STOP.
 
 A stop is an observable state, not an invitation to silently respawn forever.

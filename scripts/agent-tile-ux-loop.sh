@@ -1,62 +1,43 @@
 #!/usr/bin/env bash
-# Fresh-worker loop for docs/38-tickets/91-agent-tile-ux.
-# Start/stop/status through scripts/agent-tile-ux-loopctl.sh, not ad-hoc nohup.
+# Sequential worker/reviewer loop for docs/38-tickets/91-agent-tile-ux.
+# The harness owns selection, scope validation, final checks, ledger, and commits.
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 PROGRAM_DIR="${PROGRAM_DIR:-docs/38-tickets/91-agent-tile-ux}"
-PROMPT_FILE="${PROMPT_FILE:-scripts/agent-tile-ux-prompt.md}"
-QUEUE_FILE="${QUEUE_FILE:-$PROGRAM_DIR/_QUEUE.md}"
-LEDGER_FILE="${LEDGER_FILE:-$PROGRAM_DIR/_LEDGER.md}"
-STOP_FILE="${STOP_FILE:-$PROGRAM_DIR/STOP}"
+QUEUE_FILE="$PROGRAM_DIR/_QUEUE.md"
+LEDGER_FILE="$PROGRAM_DIR/_LEDGER.md"
+PROMPT_FILE="scripts/agent-tile-ux-prompt.md"
+STOP_FILE="$PROGRAM_DIR/STOP"
 EXPECTED_BRANCH="${EXPECTED_BRANCH:-overnight/agent-ux}"
 MAX_ITER="${MAX_ITER:-60}"
-MAX_PROVIDER_FAILURES="${MAX_PROVIDER_FAILURES:-6}"
-ITER_TIMEOUT_SECONDS="${ITER_TIMEOUT_SECONDS:-9000}"
-TELEMETRY_SECONDS="${TELEMETRY_SECONDS:-60}"
-QUOTA_SLEEP_SECONDS="${QUOTA_SLEEP_SECONDS:-300}"
+MAX_REPAIR_PASSES="${MAX_REPAIR_PASSES:-2}"
 PI_WORKER_MODELS="${PI_WORKER_MODELS:-openai-codex/gpt-5.6-sol openai-codex/gpt-5.6-luna}"
 PI_THINKING="${PI_THINKING:-medium}"
 ROOT_PI_DIR="${ROOT_PI_DIR:-$HOME/.pi}"
-BACKUP_DIR="${BACKUP_DIR:-$HOME/continuum-backups}"
 CONTROL_DIR="${CONTROL_DIR:-$ROOT_PI_DIR/agent-tile-ux-loop-control/$(basename "$(git rev-parse --show-toplevel)")}"
-
-export CONTINUUM_SKIP_SURFACE_CHECKS="${CONTINUUM_SKIP_SURFACE_CHECKS:-1}"
-
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-REPO_NAME="$(basename "$REPO_ROOT")"
-BRANCH="$(git branch --show-current)"
-START_HEAD="$(git rev-parse HEAD)"
+RUN_ROOT="${RUN_ROOT:-$ROOT_PI_DIR/agent-tile-ux-runs/$(basename "$(git rev-parse --show-toplevel)")}"
 STAMP="$(date +%Y%m%dT%H%M%S)"
-RUN_ROOT="${RUN_ROOT:-$ROOT_PI_DIR/agent-tile-ux-runs/$REPO_NAME}"
 RUN_DIR="$RUN_ROOT/run-$STAMP"
-LOG_DIR="$RUN_DIR/logs"
-STATUS_FILE="$RUN_DIR/status.json"
-TELEMETRY_FILE="$RUN_DIR/telemetry.json"
-EVENTS_FILE="$RUN_DIR/events.jsonl"
-REPORT_FILE="$RUN_DIR/report.md"
 TASKS_DIR="$RUN_DIR/tasks"
-
+STATUS_FILE="$RUN_DIR/status.json"
+EVENTS_FILE="$RUN_DIR/events.log"
+CURRENT_TICKET=""
+CURRENT_CHILD=""
 ITERATION=0
-ITERATION_PID=""
-ITERATION_LOG=""
-ITERATION_ACTIVITY_FILE=""
-EXPECTED_ITERATION_TICKET=""
-AUTHORIZED_UNTRACKED_BASELINE=""
+START_HEAD="$(git rev-parse HEAD)"
 STOP_REASON="running"
-PROVIDER_FAILURES=0
 
-mkdir -p "$LOG_DIR" "$TASKS_DIR" "$RUN_ROOT" "$BACKUP_DIR" "$CONTROL_DIR"
-ln -sfn "$RUN_DIR" "$RUN_ROOT/latest" 2>/dev/null || true
+mkdir -p "$CONTROL_DIR" "$TASKS_DIR"
 printf '%s\n' "$RUN_DIR" > "$CONTROL_DIR/latest-run.txt"
 printf '%s\n' "$$" > "$CONTROL_DIR/loop.pid"
+ln -sfn "$RUN_DIR" "$RUN_ROOT/latest" 2>/dev/null || true
 
 now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g'; }
+log() { printf '[%s] %s\n' "$(now_utc)" "$*" | tee -a "$EVENTS_FILE"; }
 
-# Owner-authorized website work may coexist only while it remains untracked.
-# Every tracked change, including anything below website/, remains visible/fatal.
 unexpected_status() {
   git status --porcelain | awk '
     $1 == "??" && ($2 == "website/" || $2 ~ /^array-logo.*[.]svg$/) { next }
@@ -64,14 +45,51 @@ unexpected_status() {
   '
 }
 
-authorized_untracked_fingerprint() {
+changed_paths() {
   {
-    find website -type f -exec stat -f '%N|%z|%m' {} + 2>/dev/null || true
-    find website -type l -exec stat -f '%N|%Y' {} + 2>/dev/null || true
-    for file in array-logo*.svg; do
-      [ -f "$file" ] && stat -f '%N|%z|%m' "$file"
-    done
-  } | LC_ALL=C sort | shasum -a 256 | awk '{print $1}'
+    git diff --name-only
+    git diff --cached --name-only
+    git ls-files --others --exclude-standard
+  } | LC_ALL=C sort -u | awk '
+    /^website\// { next }
+    /^array-logo.*[.]svg$/ { next }
+    NF { print }
+  '
+}
+
+write_status() {
+  local state="$1" detail="${2:-}"
+  cat > "$STATUS_FILE.tmp" <<EOF
+{
+  "state": "$(json_escape "$state")",
+  "detail": "$(json_escape "$detail")",
+  "updatedAt": "$(now_utc)",
+  "iteration": $ITERATION,
+  "ticket": "$(json_escape "$CURRENT_TICKET")",
+  "loopPid": "$$",
+  "childPid": "$(json_escape "$CURRENT_CHILD")",
+  "startHead": "$START_HEAD",
+  "head": "$(git rev-parse HEAD)"
+}
+EOF
+  mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+}
+
+finish() {
+  STOP_REASON="$1"
+  write_status stopped "$STOP_REASON"
+  log "stopped: $STOP_REASON"
+}
+
+cleanup() {
+  rm -f "$CONTROL_DIR/loop.pid"
+}
+trap cleanup EXIT
+trap 'touch "$STOP_FILE"; log "termination requested; STOP armed"' INT TERM
+
+ledger_state() {
+  local file="$1"
+  grep -F "| \`$file\` |" "$LEDGER_FILE" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$3); print $3}'
 }
 
 ledger_state_for_id() {
@@ -86,7 +104,7 @@ first_eligible_ticket() {
     [ -n "$row" ] || continue
     file="$(printf '%s' "$row" | awk -F'|' '{gsub(/^[ \t]*`|`[ \t]*$/,"",$3); print $3}')"
     deps="$(printf '%s' "$row" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$4); print $4}')"
-    state="$(grep -F "| \`$file\` |" "$LEDGER_FILE" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$3); print $3}')"
+    state="$(ledger_state "$file")"
     [ "$state" = pending ] || continue
     eligible=1
     if [ "$deps" != "—" ]; then
@@ -104,392 +122,262 @@ EOF
   return 1
 }
 
-worker_model_for_iteration() {
-  local models=($PI_WORKER_MODELS) count index
-  count=${#models[@]}; [ "$count" -gt 0 ] || return 1
-  index=$(( (ITERATION - 1) % count ))
+queue_execution() {
+  local file="$1"
+  grep -F "| \`$file\` |" "$QUEUE_FILE" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$5); print $5}'
+}
+
+packet_files() {
+  local ticket="$1"
+  sed -n '/^## Files$/,/^The file fence/p' "$PROGRAM_DIR/$ticket" |
+    sed -nE 's/^- `([^`]+)`.*/\1/p'
+}
+
+path_allowed() {
+  local path="$1" ticket="$2" fence prefix suffix middle
+  while IFS= read -r fence; do
+    [ -n "$fence" ] || continue
+    case "$fence" in
+      *'*'*)
+        prefix="${fence%%\**}"; suffix="${fence#*\*}"
+        case "$suffix" in *'*'*) continue ;; esac
+        case "$path" in
+          "$prefix"*"$suffix")
+            middle="${path#"$prefix"}"; middle="${middle%"$suffix"}"
+            case "$middle" in */*) ;; *) return 0 ;; esac
+            ;;
+        esac
+        ;;
+      *) [ "$path" = "$fence" ] && return 0 ;;
+    esac
+  done <<EOF
+$(packet_files "$ticket")
+EOF
+  return 1
+}
+
+validate_scope() {
+  local ticket="$1" path count=0
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    count=$((count + 1))
+    path_allowed "$path" "$ticket" || {
+      echo "out-of-fence path: $path" >&2
+      return 1
+    }
+  done <<EOF
+$(changed_paths)
+EOF
+  [ "$count" -gt 0 ] || { echo "worker produced no ticket changes" >&2; return 1; }
+}
+
+worker_model() {
+  local models=($PI_WORKER_MODELS) index
+  index=$(( (ITERATION - 1) % ${#models[@]} ))
   printf '%s\n' "${models[$index]}"
 }
 
-review_model_for_worker() {
+review_model() {
   case "$1" in
     *gpt-5.6-sol) printf '%s\n' openai-codex/gpt-5.6-luna ;;
     *) printf '%s\n' openai-codex/gpt-5.6-sol ;;
   esac
 }
 
-atomic_write() {
-  local target="$1" tmp
-  tmp="$(mktemp "${target}.tmp.XXXXXX")" || return 1
-  cat > "$tmp"
-  mv "$tmp" "$target"
-}
-
-append_event() {
-  local kind="$1" message="${2:-}"
-  printf '{"ts":"%s","event":"%s","iteration":%s,"message":"%s"}\n' \
-    "$(now_utc)" "$(json_escape "$kind")" "$ITERATION" "$(json_escape "$message")" >> "$EVENTS_FILE"
-}
-
-ledger_heartbeat() {
-  grep '^last-touch ' "$LEDGER_FILE" 2>/dev/null | tail -1 || true
-}
-
-write_status() {
-  local state="$1" reason="${2:-$STOP_REASON}" head dirty
-  head="$(git rev-parse HEAD 2>/dev/null || true)"
-  dirty=false; [ -n "$(unexpected_status 2>/dev/null)" ] && dirty=true
-  atomic_write "$STATUS_FILE" <<EOF
-{
-  "state": "$(json_escape "$state")",
-  "reason": "$(json_escape "$reason")",
-  "updatedAt": "$(now_utc)",
-  "repo": "$(json_escape "$REPO_NAME")",
-  "branch": "$(json_escape "$BRANCH")",
-  "startHead": "$(json_escape "$START_HEAD")",
-  "currentHead": "$(json_escape "$head")",
-  "dirty": $dirty,
-  "iteration": $ITERATION,
-  "iterationPid": "$(json_escape "$ITERATION_PID")",
-  "iterationLog": "$(json_escape "$ITERATION_LOG")",
-  "providerFailures": $PROVIDER_FAILURES,
-  "runDir": "$(json_escape "$RUN_DIR")",
-  "ledgerHeartbeat": "$(json_escape "$(ledger_heartbeat)")"
-}
-EOF
-}
-
-newest_source_epoch() {
-  local newest=0 file stamp
-  while IFS= read -r file; do
-    [ -f "$file" ] || continue
-    case "$file" in
-      Sources/*|Package.swift|scripts/run-matrix.sh)
-        stamp="$(stat -f %m "$file" 2>/dev/null || echo 0)"
-        [ "$stamp" -gt "$newest" ] && newest="$stamp" ;;
-    esac
-  done <<EOF
-$({ git ls-files; find Sources -type f -print 2>/dev/null; } | sort -u)
-EOF
-  printf '%s\n' "$newest"
-}
-
-write_telemetry() {
-  local log_epoch=0 log_size=0 child_list head dirty
-  local activity_file="${ITERATION_ACTIVITY_FILE:-$ITERATION_LOG}"
-  if [ -n "$activity_file" ] && [ -f "$activity_file" ]; then
-    log_epoch="$(stat -f %m "$activity_file" 2>/dev/null || echo 0)"
-    log_size="$(stat -f %z "$activity_file" 2>/dev/null || echo 0)"
-  fi
-  child_list=""
-  if [ -n "$ITERATION_PID" ]; then
-    child_list="$(pgrep -P "$ITERATION_PID" 2>/dev/null | tr '\n' ',' | sed 's/,$//' || true)"
-  fi
-  head="$(git rev-parse HEAD 2>/dev/null || true)"
-  dirty=false; [ -n "$(unexpected_status 2>/dev/null)" ] && dirty=true
-  atomic_write "$TELEMETRY_FILE" <<EOF
-{
-  "observedAt": "$(now_utc)",
-  "loopPid": $$,
-  "iterationPid": "$(json_escape "$ITERATION_PID")",
-  "childPids": "$(json_escape "$child_list")",
-  "iterationLogMtime": $log_epoch,
-  "iterationLogBytes": $log_size,
-  "newestTrackedSourceMtime": $(newest_source_epoch),
-  "head": "$(json_escape "$head")",
-  "dirty": $dirty,
-  "ledgerHeartbeat": "$(json_escape "$(ledger_heartbeat)")"
-}
-EOF
-}
-
-write_report() {
-  atomic_write "$REPORT_FILE" <<EOF
-# Agent-tile UX loop report
-
-- State: \`$STOP_REASON\`
-- Run: \`$RUN_DIR\`
-- Branch: \`$BRANCH\`
-- Start HEAD: \`$START_HEAD\`
-- Current HEAD: \`$(git rev-parse HEAD 2>/dev/null || true)\`
-- Iterations: \`$ITERATION\`
-- Provider failures: \`$PROVIDER_FAILURES\`
-- Updated: \`$(now_utc)\`
-
-## Commits since start
-
-$(git log --oneline "$START_HEAD"..HEAD 2>/dev/null || true)
-
-## Control tokens
-
-$(find "$LOG_DIR" -type f -name 'iter-*.log' -print 2>/dev/null | sort | xargs grep -hE 'LOOP: (CONTINUE|STOP)' 2>/dev/null || true)
-EOF
-}
-
-stop_run() {
-  STOP_REASON="$1"
-  append_event stop "$STOP_REASON"
-  write_status stopped "$STOP_REASON"
-  write_telemetry
-  write_report
-}
-
-cleanup() {
-  rm -f "$CONTROL_DIR/loop.pid"
-}
-trap cleanup EXIT
-trap 'touch "$STOP_FILE"; append_event signal "termination requested"' INT TERM
-
-preflight() {
-  [ -f "$PROMPT_FILE" ] || { echo "missing prompt: $PROMPT_FILE" >&2; return 1; }
-  [ -f "$QUEUE_FILE" ] || { echo "missing queue: $QUEUE_FILE" >&2; return 1; }
-  [ -f "$LEDGER_FILE" ] || { echo "missing ledger: $LEDGER_FILE" >&2; return 1; }
-  ./scripts/check-agent-tile-ux-program.sh || { echo "agent-tile program structure is invalid" >&2; return 1; }
-  [ ! -f "$STOP_FILE" ] || { echo "program STOP is present: $STOP_FILE" >&2; return 1; }
-  [ "$BRANCH" = "$EXPECTED_BRANCH" ] || { echo "expected $EXPECTED_BRANCH, got $BRANCH" >&2; return 1; }
-  [ "$BRANCH" != main ] || { echo "refusing main" >&2; return 1; }
-  [ -z "$(unexpected_status)" ] || { echo "working tree/index has non-website changes" >&2; unexpected_status >&2; return 1; }
-  [ "$PI_WORKER_MODELS" = "openai-codex/gpt-5.6-sol openai-codex/gpt-5.6-luna" ] || {
-    echo "PI_WORKER_MODELS override is forbidden" >&2; return 1;
-  }
-  [ "$PI_THINKING" = medium ] || { echo "PI_THINKING must be medium" >&2; return 1; }
-  command -v pi >/dev/null 2>&1 || { echo "pi CLI missing" >&2; return 1; }
-  pi --list-models gpt-5.6 2>/dev/null | grep -Fq gpt-5.6-sol || { echo "gpt-5.6-sol unavailable" >&2; return 1; }
-  pi --list-models gpt-5.6 2>/dev/null | grep -Fq gpt-5.6-luna || { echo "gpt-5.6-luna unavailable" >&2; return 1; }
-  swift scripts/check-retina-main.swift || return 1
-  AUTHORIZED_UNTRACKED_BASELINE="$(authorized_untracked_fingerprint)"
-  [ -n "$AUTHORIZED_UNTRACKED_BASELINE" ] || { echo "authorized untracked fingerprint failed" >&2; return 1; }
-  printf '%s\n' "$AUTHORIZED_UNTRACKED_BASELINE" > "$RUN_DIR/authorized-untracked-start.sha256"
-  return 0
-}
-
-run_iteration() {
-  local output="$1" prompt watchdog="" monitor="" rc worker_model review_model task_dir session_dir stdout_log stderr_log
-  worker_model="$(worker_model_for_iteration)" || return 1
-  review_model="$(review_model_for_worker "$worker_model")"
-  task_dir="$TASKS_DIR/iteration-$(printf '%03d' "$ITERATION")"
-  session_dir="$task_dir/worker-session"
-  stdout_log="$task_dir/stdout.log"
-  stderr_log="$task_dir/stderr.log"
-  ITERATION_ACTIVITY_FILE="$stdout_log"
-  mkdir -p "$session_dir" "$task_dir/reviewer-session"
-  cat > "$task_dir/task.json" <<EOF
-{"iteration":$ITERATION,"ticket":"$(json_escape "$EXPECTED_ITERATION_TICKET")","workerModel":"$(json_escape "$worker_model")","reviewModel":"$(json_escape "$review_model")","thinking":"$(json_escape "$PI_THINKING")","startedAt":"$(now_utc)","beforeHead":"$(git rev-parse HEAD)"}
-EOF
-  prompt="[agent-tile-ux harness]
-QUEUE_FILE=$QUEUE_FILE
-LEDGER_FILE=$LEDGER_FILE
-RUN_DIR=$RUN_DIR
+run_worker() {
+  local ticket="$1" model="$2" task_dir="$3" pass="$4" review_file="${5:-}"
+  local session_dir="$task_dir/worker-session-$pass" output="$task_dir/worker-$pass.md" rc token prompt
+  mkdir -p "$session_dir"
+  prompt="$(cat <<EOF
+[agent-tile harness]
+TICKET=$ticket
+PACKET=$PROGRAM_DIR/$ticket
 TASK_DIR=$task_dir
-EXPECTED_BRANCH=$BRANCH
-EXPECTED_COMMIT_GRANULARITY=one-ticket-per-commit
-WORKER_MODEL=$worker_model
-REVIEW_MODEL=$review_model
-REVIEW_THINKING=$PI_THINKING
+PASS=$pass
+EOF
+)"
+  if [ -n "$review_file" ]; then
+    prompt="$prompt
+This is a repair pass. Address only blocking findings in $review_file."
+  fi
+  prompt="$prompt
 
 $(cat "$PROMPT_FILE")"
 
-  pi --approve --model "$worker_model" --thinking "$PI_THINKING" \
-    --session-dir "$session_dir" --name "agent-tile-$ITERATION" --mode text -p "$prompt" \
-    > "$stdout_log" 2> "$stderr_log" &
-  ITERATION_PID=$!
-  write_status running "iteration-$ITERATION"
-  write_telemetry
+  log "$ticket worker pass $pass ($model)"
+  pi --approve --model "$model" --thinking "$PI_THINKING" \
+    --session-dir "$session_dir" --name "agent-tile-$ITERATION-worker-$pass" --mode text -p "$prompt" \
+    > "$output" 2> "$task_dir/worker-$pass.stderr" &
+  CURRENT_CHILD=$!
+  write_status running "worker-pass-$pass"
+  wait "$CURRENT_CHILD"; rc=$?
+  CURRENT_CHILD=""
+  write_status running "worker-pass-$pass-finished"
+  [ "$rc" -eq 0 ] || return "$rc"
 
-  (
-    while kill -0 "$ITERATION_PID" 2>/dev/null; do
-      sleep "$TELEMETRY_SECONDS"
-      kill -0 "$ITERATION_PID" 2>/dev/null || break
-      write_telemetry
-    done
-  ) & monitor=$!
-
-  if [ "$ITER_TIMEOUT_SECONDS" -gt 0 ]; then
-    (
-      sleep "$ITER_TIMEOUT_SECONDS"
-      if kill -0 "$ITERATION_PID" 2>/dev/null; then
-        echo "[loop] iteration timeout after ${ITER_TIMEOUT_SECONDS}s" >> "$stderr_log"
-        kill -TERM "$ITERATION_PID" 2>/dev/null || true
-        sleep 15
-        kill -KILL "$ITERATION_PID" 2>/dev/null || true
-      fi
-    ) & watchdog=$!
-  fi
-
-  wait "$ITERATION_PID"; rc=$?
-  [ -n "$monitor" ] && kill "$monitor" 2>/dev/null || true
-  [ -n "$watchdog" ] && kill "$watchdog" 2>/dev/null || true
-  cat "$stdout_log" "$stderr_log" > "$output"
-  printf '{"iteration":%s,"workerModel":"%s","reviewModel":"%s","thinking":"%s","finishedAt":"%s","exitCode":%s}\n' \
-    "$ITERATION" "$(json_escape "$worker_model")" "$(json_escape "$review_model")" "$(json_escape "$PI_THINKING")" "$(now_utc)" "$rc" > "$task_dir/result.json"
-  ITERATION_PID=""
-  write_telemetry
-  return "$rc"
-}
-
-validate_iteration_commit() {
-  local before_head="$1" token="$2" ticket changed allowed path fence fence_prefix fence_suffix middle path_allowed subject count state task_dir review_final review_last review_model session_file final_diff
-  ticket="${token#LOOP: CONTINUE }"
-  ticket="${ticket#skipped:}"
-  case "$ticket" in P*.md) ;; *) echo "invalid ticket in CONTINUE token: $ticket" >&2; return 1 ;; esac
-  [ -f "$PROGRAM_DIR/$ticket" ] || { echo "token names missing packet: $ticket" >&2; return 1; }
-  [ "$ticket" = "$EXPECTED_ITERATION_TICKET" ] || {
-    echo "token ticket $ticket is not first eligible $EXPECTED_ITERATION_TICKET" >&2; return 1;
-  }
-
-  count="$(git rev-list --count "$before_head"..HEAD)"
-  [ "$count" = 1 ] || { echo "iteration must create exactly one commit, created $count" >&2; return 1; }
-  subject="$(git log -1 --format=%s)"
-  printf '%s\n' "$subject" | grep -Eq '^(feat|fix|refactor|test|docs|chore|perf)\(agent-tile\): .+' || {
-    echo "invalid ticket commit subject: $subject" >&2; return 1;
-  }
-
-  state="$(grep -F "| \`$ticket\` |" "$LEDGER_FILE" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$3); print $3}')"
-  task_dir="$TASKS_DIR/iteration-$(printf '%03d' "$ITERATION")"
-  review_final="$(find "$task_dir" -maxdepth 1 -type f -name 'review-final*.md' -print 2>/dev/null | while IFS= read -r f; do printf '%s %s\n' "$(stat -f %m "$f")" "$f"; done | sort -n | tail -1 | cut -d' ' -f2-)"
-  [ -n "$review_final" ] && [ -s "$review_final" ] || { echo "missing durable independent review" >&2; return 1; }
-  review_last="$(awk 'NF { line=$0 } END { print line }' "$review_final")"
-  [ "$review_last" = "DECISION: APPROVE" ] || { echo "latest independent review did not approve" >&2; return 1; }
-  [ -s "$task_dir/staged.diff" ] || { echo "missing staged review diff" >&2; return 1; }
-  final_diff="$(mktemp "$RUN_DIR/final-diff.XXXXXX")" || return 1
-  git diff --binary "$before_head"..HEAD > "$final_diff"
-  cmp -s "$task_dir/staged.diff" "$final_diff" || { rm -f "$final_diff"; echo "reviewed diff differs from committed diff" >&2; return 1; }
-  rm -f "$final_diff"
-  review_model="$(review_model_for_worker "$(worker_model_for_iteration)")"
-  session_file="$(find "$task_dir/reviewer-session" -type f -name '*.jsonl' -size +0c -print -quit 2>/dev/null)"
-  [ -n "$session_file" ] || { echo "missing reviewer session log" >&2; return 1; }
-  grep -R -Fq '"type":"model_change"' "$task_dir/reviewer-session" &&
-    grep -R -Fq "\"modelId\":\"${review_model##*/}\"" "$task_dir/reviewer-session" || {
-      echo "reviewer session used wrong model" >&2; return 1;
-    }
-  grep -R -Fq '"type":"thinking_level_change"' "$task_dir/reviewer-session" &&
-    grep -R -Fq '"thinkingLevel":"medium"' "$task_dir/reviewer-session" || {
-      echo "reviewer session did not use medium thinking" >&2; return 1;
-    }
-  case "$token:$state" in
-    *skipped:*:blocked) ;;
-    *skipped:*) echo "skipped ticket must be ledger state blocked, got $state" >&2; return 1 ;;
-    *:done) ;;
-    *) echo "completed ticket must be ledger state done, got $state" >&2; return 1 ;;
+  token="$(awk 'NF { line=$0 } END { print line }' "$output")"
+  case "$token" in
+    'WORKER: READY') return 0 ;;
+    'WORKER: BLOCKED '*) echo "$token" >&2; return 20 ;;
+    *) echo "malformed worker result: ${token:-empty}" >&2; return 21 ;;
   esac
-
-  allowed="$(sed -n '/^## Files$/,/^The file fence/p' "$PROGRAM_DIR/$ticket" | sed -nE 's/^- `([^`]+)`.*/\1/p')"
-  changed="$(git diff-tree --no-commit-id --name-only -r HEAD)"
-  printf '%s\n' "$changed" | grep -Fqx "$LEDGER_FILE" || {
-    echo "ticket commit did not update $LEDGER_FILE" >&2; return 1;
-  }
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    [ "$path" = "$LEDGER_FILE" ] && continue
-    path_allowed=0
-    while IFS= read -r fence; do
-      [ -n "$fence" ] || continue
-      case "$fence" in
-        *'*'*)
-          # Packet fences currently permit one pathname-style `*` for a
-          # direct-child family such as Fixtures/*.md. Unlike a bare `case`
-          # glob, this deliberately refuses to let `*` cross `/`.
-          fence_prefix="${fence%%\**}"
-          fence_suffix="${fence#*\*}"
-          case "$fence_suffix" in *'*'*) continue ;; esac
-          case "$path" in
-            "$fence_prefix"*"$fence_suffix")
-              middle="${path#"$fence_prefix"}"
-              middle="${middle%"$fence_suffix"}"
-              case "$middle" in */*) ;; *) path_allowed=1; break ;; esac
-              ;;
-          esac
-          ;;
-        *) [ "$path" = "$fence" ] && { path_allowed=1; break; } ;;
-      esac
-    done <<FENCES
-$allowed
-FENCES
-    [ "$path_allowed" = 1 ] || {
-      echo "ticket commit changed path outside packet fence: $path" >&2; return 1;
-    }
-  done <<EOF
-$changed
-EOF
-  return 0
 }
 
-if ! preflight; then
-  stop_run preflight-failed
-  exit 1
-fi
-if [ "${AGENT_TILE_PREFLIGHT_ONLY:-0}" = 1 ]; then
-  stop_run preflight-ok
-  exit 0
-fi
+run_review() {
+  local ticket="$1" model="$2" task_dir="$3" round="$4"
+  local diff="$task_dir/candidate-$round.diff" request="$task_dir/review-request-$round.md"
+  local output="$task_dir/review-final-$round.md" session="$task_dir/reviewer-session-$round" rc
+  git diff --binary > "$diff"
+  cat > "$request" <<EOF
+Review the candidate implementation for $ticket.
 
-git bundle create "$BACKUP_DIR/continuum-agent-tile-$STAMP-start.bundle" --all >/dev/null 2>&1 || \
-  append_event backup-warning "start bundle failed"
-append_event start "$RUN_DIR"
+Read:
+- $PROGRAM_DIR/$ticket
+- $PROGRAM_DIR/_DESIGN.md
+- $PROGRAM_DIR/_RUNBOOK.md
+- $diff
+- relevant production files needed to understand the changed seams
+
+Be strict about correctness, packet architecture, privacy, file scope, deterministic proof, and gate
+weakening. Report only blocking issues: behavior that can be wrong, architecture that violates a
+locked decision, unsafe handling, or a named done criterion left unproved. Do not request stylistic
+cleanup or unrelated hardening. Give at most five blocking findings. You are read-only.
+
+End with exactly DECISION: APPROVE or DECISION: REWORK.
+EOF
+  mkdir -p "$session"
+  log "$ticket review round $round ($model)"
+  pi --no-approve --model "$model" --thinking "$PI_THINKING" --tools read,grep,find,ls \
+    --session-dir "$session" --name "agent-tile-$ITERATION-review-$round" --mode text -p "@$request" \
+    > "$output" 2> "$task_dir/review-$round.stderr" &
+  CURRENT_CHILD=$!
+  write_status running "review-round-$round"
+  wait "$CURRENT_CHILD"; rc=$?
+  CURRENT_CHILD=""
+  write_status running "review-round-$round-finished"
+  [ "$rc" -eq 0 ] || return 30
+  case "$(awk 'NF { line=$0 } END { print line }' "$output")" in
+    'DECISION: APPROVE') return 0 ;;
+    'DECISION: REWORK') return 10 ;;
+    *) return 31 ;;
+  esac
+}
+
+run_final_checks() {
+  local task_dir="$1"
+  log "$CURRENT_TICKET final swift build"
+  swift build > "$task_dir/swift-build.log" 2>&1 || return 1
+  log "$CURRENT_TICKET final matrix"
+  CONTINUUM_SKIP_SURFACE_CHECKS=1 ./scripts/run-matrix.sh </dev/null > "$task_dir/matrix.log" 2>&1 || return 1
+}
+
+update_ledger_done() {
+  local ticket="$1" task_dir="$2" timestamp tmp note
+  timestamp="$(now_utc)"
+  tmp="$LEDGER_FILE.tmp"
+  note="Harness-owned completion: focused worker checks, independent opposite-model review, swift build, and final matrix passed. Evidence: $task_dir."
+  awk -F'|' -v OFS='|' -v ticket="$ticket" -v timestamp="$timestamp" -v note="$note" '
+    /^last-touch / {
+      print "last-touch " timestamp " · ticket " ticket " · attempt 1 · pid — · status done"
+      next
+    }
+    {
+      key=$2
+      gsub(/^[[:space:]]*`|`[[:space:]]*$/, "", key)
+      if (key == ticket) {
+        state=$3; gsub(/^[[:space:]]+|[[:space:]]+$/, "", state)
+        if (state != "pending") exit 42
+        $3=" done "; $4=" this commit "; $5=" " timestamp " "; $6=" " note " "
+        found++
+      }
+      print
+    }
+    END { if (found != 1) exit 43 }
+  ' "$LEDGER_FILE" > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$LEDGER_FILE"
+}
+
+stage_and_commit() {
+  local ticket="$1" task_dir="$2" path slug subject
+  while IFS= read -r path; do
+    [ -n "$path" ] && git add -A -- "$path"
+  done <<EOF
+$(changed_paths)
+EOF
+  git diff --cached --binary > "$task_dir/final.diff"
+  slug="${ticket#*-}"; slug="${slug%.md}"; slug="${slug//-/ }"
+  subject="feat(agent-tile): $slug"
+  git commit -m "$subject" > "$task_dir/commit.log" 2>&1
+}
+
+preflight() {
+  [ "$(git branch --show-current)" = "$EXPECTED_BRANCH" ] || { echo "wrong branch" >&2; return 1; }
+  [ ! -f "$STOP_FILE" ] || { echo "STOP is present" >&2; return 1; }
+  [ -z "$(unexpected_status)" ] || { echo "tracked/non-authorized changes present" >&2; unexpected_status >&2; return 1; }
+  [ "$PI_WORKER_MODELS" = 'openai-codex/gpt-5.6-sol openai-codex/gpt-5.6-luna' ] || return 1
+  [ "$PI_THINKING" = medium ] || return 1
+  command -v pi >/dev/null 2>&1 || return 1
+  ./scripts/check-agent-tile-ux-program.sh --check || return 1
+  swift scripts/check-retina-main.swift || return 1
+}
+
+if ! preflight; then finish preflight-failed; exit 1; fi
+if [ "${AGENT_TILE_PREFLIGHT_ONLY:-0}" = 1 ]; then finish preflight-ok; exit 0; fi
+
+log "started at $START_HEAD"
 write_status running starting
-write_telemetry
-write_report
-
-echo "[loop] agent-tile UX start: $RUN_DIR"
-echo "[loop] branch=$BRANCH models=$PI_WORKER_MODELS thinking=$PI_THINKING"
 
 for ITERATION in $(seq 1 "$MAX_ITER"); do
-  if [ -f "$STOP_FILE" ]; then stop_run stop-file; break; fi
+  [ ! -f "$STOP_FILE" ] || { finish stop-file; break; }
+  [ -z "$(unexpected_status)" ] || { finish dirty-before-ticket; break; }
 
-  ITERATION_LOG="$LOG_DIR/iter-$STAMP-$ITERATION.log"
-  BEFORE_ITERATION_HEAD="$(git rev-parse HEAD)"
-  EXPECTED_ITERATION_TICKET="$(first_eligible_ticket || true)"
-  append_event iteration-start "$ITERATION"
-  write_status running "iteration-$ITERATION"
-  run_iteration "$ITERATION_LOG"; rc=$?
-
-  token="$(awk 'NF { line=$0 } END { print line }' "$ITERATION_LOG")"
-  token_count="$(grep -Ec '^LOOP: (CONTINUE (skipped:)?P[0-9]+[.][0-9]+-[^ ]+[.]md|STOP [^ ]+)$' "$ITERATION_LOG" || true)"
-  if [ "$token_count" != 1 ] || ! printf '%s\n' "$token" | grep -Eq '^LOOP: (CONTINUE (skipped:)?P[0-9]+[.][0-9]+-[^ ]+[.]md|STOP [^ ]+)$'; then
-    token=""
+  CURRENT_TICKET="$(first_eligible_ticket || true)"
+  if [ -z "$CURRENT_TICKET" ]; then
+    if grep -q '| pending |' "$LEDGER_FILE"; then finish dependencies-blocked; else finish queue-drained; fi
+    break
   fi
-  printf '%s\n' "${token:-none}" > "$TASKS_DIR/iteration-$(printf '%03d' "$ITERATION")/control-token.txt"
-  append_event iteration-end "rc=$rc token=${token:-none}"
-  echo "[loop] iteration=$ITERATION rc=$rc token='${token:-none}' log=$ITERATION_LOG"
-  tail -4 "$ITERATION_LOG" 2>/dev/null | sed 's/^/[iter] /'
+  if [ "$(queue_execution "$CURRENT_TICKET")" = supervised ]; then
+    finish "supervised-required:$CURRENT_TICKET"
+    break
+  fi
 
-  if grep -q '\[loop\] iteration timeout' "$ITERATION_LOG"; then stop_run iteration-timeout; break; fi
+  task_dir="$TASKS_DIR/iteration-$(printf '%03d' "$ITERATION")-$CURRENT_TICKET"
+  mkdir -p "$task_dir"
+  before_head="$(git rev-parse HEAD)"
+  model="$(worker_model)"
+  reviewer="$(review_model "$model")"
+  printf '{"ticket":"%s","worker":"%s","reviewer":"%s","startedAt":"%s","beforeHead":"%s"}\n' \
+    "$CURRENT_TICKET" "$model" "$reviewer" "$(now_utc)" "$before_head" > "$task_dir/task.json"
 
-  if grep -qiE 'usage limit|session limit|rate limit|status code 429|overloaded|quota|ENOTFOUND|unable to connect|connection (reset|refused)|network error|fetch failed' "$ITERATION_LOG"; then
-    PROVIDER_FAILURES=$((PROVIDER_FAILURES + 1))
-    if [ -n "$(unexpected_status)" ]; then stop_run dirty-after-provider-failure; break; fi
-    if [ "$(authorized_untracked_fingerprint)" != "$AUTHORIZED_UNTRACKED_BASELINE" ]; then
-      stop_run authorized-untracked-changed-after-provider-failure; break
+  if ! run_worker "$CURRENT_TICKET" "$model" "$task_dir" 1; then finish "worker-failed:$CURRENT_TICKET"; break; fi
+  [ "$(git rev-parse HEAD)" = "$before_head" ] || { finish "worker-committed:$CURRENT_TICKET"; break; }
+  if ! validate_scope "$CURRENT_TICKET"; then finish "scope-failed:$CURRENT_TICKET"; break; fi
+
+  approved=0
+  for round in $(seq 1 $((MAX_REPAIR_PASSES + 1))); do
+    run_review "$CURRENT_TICKET" "$reviewer" "$task_dir" "$round"
+    review_rc=$?
+    if [ "$review_rc" -eq 0 ]; then approved=1; break; fi
+    if [ "$review_rc" -ne 10 ]; then finish "reviewer-failed:$CURRENT_TICKET"; break 2; fi
+    [ "$round" -le "$MAX_REPAIR_PASSES" ] || break
+    if ! run_worker "$CURRENT_TICKET" "$model" "$task_dir" $((round + 1)) "$task_dir/review-final-$round.md"; then
+      finish "repair-failed:$CURRENT_TICKET"; break 2
     fi
-    if [ "$(git rev-parse HEAD)" != "$BEFORE_ITERATION_HEAD" ]; then stop_run provider-failure-after-unvalidated-commit; break; fi
-    if [ "$PROVIDER_FAILURES" -ge "$MAX_PROVIDER_FAILURES" ]; then stop_run provider-failure-window; break; fi
-    append_event provider-backoff "failure $PROVIDER_FAILURES sleeping ${QUOTA_SLEEP_SECONDS}s"
-    sleep "$QUOTA_SLEEP_SECONDS"
-    continue
-  fi
+    [ "$(git rev-parse HEAD)" = "$before_head" ] || { finish "worker-committed:$CURRENT_TICKET"; break 2; }
+    if ! validate_scope "$CURRENT_TICKET"; then finish "scope-failed:$CURRENT_TICKET"; break 2; fi
+  done
+  [ "$approved" = 1 ] || { finish "review-rework-limit:$CURRENT_TICKET"; break; }
 
-  PROVIDER_FAILURES=0
-  if [ -z "$token" ]; then stop_run harness-malformed-output; break; fi
+  if ! run_final_checks "$task_dir"; then finish "final-check-failed:$CURRENT_TICKET"; break; fi
+  [ "$(git rev-parse HEAD)" = "$before_head" ] || { finish "unexpected-commit:$CURRENT_TICKET"; break; }
+  if ! validate_scope "$CURRENT_TICKET"; then finish "scope-failed-after-checks:$CURRENT_TICKET"; break; fi
+  if ! update_ledger_done "$CURRENT_TICKET" "$task_dir"; then finish "ledger-update-failed:$CURRENT_TICKET"; break; fi
+  if ! stage_and_commit "$CURRENT_TICKET" "$task_dir"; then finish "commit-failed:$CURRENT_TICKET"; break; fi
+  if [ -n "$(unexpected_status)" ]; then finish "dirty-after-commit:$CURRENT_TICKET"; break; fi
 
-  case "$token" in
-    "LOOP: CONTINUE"*)
-      if [ -n "$(unexpected_status)" ]; then stop_run dirty-after-continue; break; fi
-      if ! validate_iteration_commit "$BEFORE_ITERATION_HEAD" "$token"; then stop_run invalid-ticket-commit; break; fi
-      git bundle create "$BACKUP_DIR/continuum-agent-tile-rolling.bundle" --all >/dev/null 2>&1 || true
-      append_event continue "$token" ;;
-    "LOOP: STOP"*)
-      if [ -n "$(unexpected_status)" ]; then stop_run dirty-after-stop; break; fi
-      if [ "$(git rev-parse HEAD)" != "$BEFORE_ITERATION_HEAD" ]; then stop_run unexpected-commit-before-stop; break; fi
-      stop_run "${token#LOOP: STOP }"
-      break ;;
-    *) stop_run unrecognized-loop-token; break ;;
-  esac
-  write_status running "post-iteration-$ITERATION"
-  write_report
+  log "$CURRENT_TICKET committed as $(git rev-parse --short HEAD)"
+  write_status running "ticket-complete"
 done
 
-if [ "$STOP_REASON" = running ]; then stop_run max-iterations; fi
-
-echo "[loop] finished: $STOP_REASON"
-echo "[loop] status: $STATUS_FILE"
-echo "[loop] report: $REPORT_FILE"
+if [ "$STOP_REASON" = running ]; then finish max-iterations; fi
+printf '%s\n' "$STOP_REASON" > "$RUN_DIR/result.txt"
