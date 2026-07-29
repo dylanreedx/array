@@ -48,6 +48,9 @@ func runMutationVocabularyChecks() {
         .unknownEntry(entryID: entryID, operation: .appendMarkup),
         .unknownBlock(blockID: blockA, operation: .completeBlock),
         .duplicateNodeID(id: blockA),
+        .entryFinished(entryID: entryID, operation: .appendMarkup),
+        .duplicateFinish(entryID: entryID),
+        .statusUnavailable(blockID: blockA),
         .invalidStatusTransition(blockID: blockA, from: .completed, to: .inProgress),
         .documentVersionOverflow(current: .max),
         .nodeRevisionOverflow(id: blockA, current: .max),
@@ -114,5 +117,5 @@ func runMutationVocabularyChecks() {
         }
     } catch { fail("empty-patch overflow returned an unexpected error: \(error)") }
 
-    print("Mutation vocabulary checks passed: 6 mutations, 7 explicit errors, deterministic stable-ID patches")
+    print("Mutation vocabulary checks passed: 6 mutations, 10 explicit errors, deterministic stable-ID patches")
 }

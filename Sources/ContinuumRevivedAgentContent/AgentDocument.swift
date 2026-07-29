@@ -51,12 +51,20 @@ public struct AgentSourceRange: Codable, Equatable, Sendable {
     }
 }
 
+/// Semantic streaming state persisted in the document so reducing can resume
+/// deterministically from any snapshot.
+public enum AgentEntryLifecycle: Codable, Equatable, Sendable {
+    case open(markupBlockID: AgentNodeID?)
+    case finished
+}
+
 /// One provider/local item in transcript order.
 public struct AgentEntry: Identifiable, Codable, Equatable, Sendable {
     public let id: AgentNodeID
     public var revision: UInt64
     public var role: AgentEntryRole
     public var provenance: AgentProvenance
+    public var lifecycle: AgentEntryLifecycle
     public var blocks: [AgentBlock]
 
     public init(
@@ -64,13 +72,30 @@ public struct AgentEntry: Identifiable, Codable, Equatable, Sendable {
         revision: UInt64 = 0,
         role: AgentEntryRole,
         provenance: AgentProvenance,
+        lifecycle: AgentEntryLifecycle = .open(markupBlockID: nil),
         blocks: [AgentBlock] = []
     ) {
         self.id = id
         self.revision = revision
         self.role = role
         self.provenance = provenance
+        self.lifecycle = lifecycle
         self.blocks = blocks
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, revision, role, provenance, lifecycle, blocks
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(AgentNodeID.self, forKey: .id)
+        revision = try container.decode(UInt64.self, forKey: .revision)
+        role = try container.decode(AgentEntryRole.self, forKey: .role)
+        provenance = try container.decode(AgentProvenance.self, forKey: .provenance)
+        lifecycle = try container.decodeIfPresent(AgentEntryLifecycle.self, forKey: .lifecycle)
+            ?? .open(markupBlockID: nil)
+        blocks = try container.decode([AgentBlock].self, forKey: .blocks)
     }
 }
 
@@ -84,6 +109,28 @@ public struct AgentDocument: Codable, Equatable, Sendable {
         self.entries = entries
     }
 
+    private enum CodingKeys: String, CodingKey { case version, entries }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.version = try container.decode(UInt64.self, forKey: .version)
+        self.entries = try container.decode([AgentEntry].self, forKey: .entries)
+        for entry in entries {
+            if case let .open(markupBlockID?) = entry.lifecycle {
+                guard entry.blocks.last?.id == markupBlockID,
+                      entry.blocks.last?.kind == .paragraph,
+                      entry.blocks.last.map({ if case .paragraph = $0.payload { return true }; return false }) == true
+                else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .entries,
+                        in: container,
+                        debugDescription: "open markup must identify the entry's final paragraph"
+                    )
+                }
+            }
+        }
+    }
+
     /// Identity errors are explicit so a bad projection cannot silently make
     /// renderer reuse position-based again.
     public enum IdentityValidationError: Error, Equatable, Sendable {
@@ -92,6 +139,7 @@ public struct AgentDocument: Codable, Equatable, Sendable {
         case changedWithoutRevision(id: AgentNodeID, revision: UInt64, path: String)
         case unchangedWithRevisionChange(id: AgentNodeID, previous: UInt64, current: UInt64, path: String)
         case nodeTypeChanged(id: AgentNodeID, path: String)
+        case invalidOpenMarkup(entryID: AgentNodeID, blockID: AgentNodeID)
     }
 
     /// Validates uniqueness and revision transitions against the previous
@@ -123,6 +171,12 @@ public struct AgentDocument: Codable, Equatable, Sendable {
             nodes.append((entry.id, entry.revision, entryPath, false))
             for (blockIndex, block) in entry.blocks.enumerated() {
                 try visit(block: block, path: "\(entryPath).blocks[\(blockIndex)]")
+            }
+            if case let .open(markupBlockID?) = entry.lifecycle {
+                guard entry.blocks.last?.id == markupBlockID,
+                      entry.blocks.last?.kind == .paragraph,
+                      entry.blocks.last.map({ if case .paragraph = $0.payload { return true }; return false }) == true
+                else { throw IdentityValidationError.invalidOpenMarkup(entryID: entry.id, blockID: markupBlockID) }
             }
         }
 
@@ -187,7 +241,7 @@ public struct AgentDocument: Codable, Equatable, Sendable {
 
 private extension AgentEntry {
     func visibleContentEquals(current: AgentEntry) -> Bool {
-        role == current.role && blocks.count == current.blocks.count && zip(blocks, current.blocks).allSatisfy { $0.visibleContentEquals(current: $1) }
+        role == current.role && lifecycle == current.lifecycle && blocks.count == current.blocks.count && zip(blocks, current.blocks).allSatisfy { $0.visibleContentEquals(current: $1) }
     }
 }
 

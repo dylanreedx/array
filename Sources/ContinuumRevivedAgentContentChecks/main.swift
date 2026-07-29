@@ -584,6 +584,10 @@ runNodeIdentityChecks()
 // the only content write vocabulary and stable-ID document patch contract.
 runMutationVocabularyChecks()
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P1.4-document-reducer.md —
+// pure indexed mutation application and reconstructible entry lifecycle.
+runDocumentReducerChecks()
+
 // Ticket: docs/38-tickets/91-agent-tile-ux/P0.4-transcript-fixture-corpus.md —
 // the canonical corpus every later parser, reducer, renderer and migration
 // ticket reads from, held to its own declarations, hygiene and I5 rules.
