@@ -56,7 +56,7 @@ json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g'; }
 # Every tracked change, including anything below website/, remains visible/fatal.
 unexpected_status() {
   git status --porcelain | awk '
-    $1 == "??" && ($2 == "website/" || $2 ~ /^array-logo[^/]*\.svg$/) { next }
+    $1 == "??" && ($2 == "website/" || $2 ~ /^array-logo.*[.]svg$/) { next }
     { print }
   '
 }

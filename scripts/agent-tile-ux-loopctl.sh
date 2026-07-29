@@ -29,7 +29,7 @@ json_string() {
 
 unexpected_status() {
   git status --porcelain | awk '
-    $1 == "??" && ($2 == "website/" || $2 ~ /^array-logo[^/]*\.svg$/) { next }
+    $1 == "??" && ($2 == "website/" || $2 ~ /^array-logo.*[.]svg$/) { next }
     { print }
   '
 }
