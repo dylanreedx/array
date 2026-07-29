@@ -580,6 +580,10 @@ runDocumentSchemaChecks()
 // stable child identity, duplicate paths, and revision transitions.
 runNodeIdentityChecks()
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P1.3-mutation-patch-vocabulary.md —
+// the only content write vocabulary and stable-ID document patch contract.
+runMutationVocabularyChecks()
+
 // Ticket: docs/38-tickets/91-agent-tile-ux/P0.4-transcript-fixture-corpus.md —
 // the canonical corpus every later parser, reducer, renderer and migration
 // ticket reads from, held to its own declarations, hygiene and I5 rules.
