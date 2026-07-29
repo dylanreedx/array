@@ -90,3 +90,68 @@ func runAgentTranscriptProjectionChecks() {
 
     print("Agent transcript projection checks passed: six compatibility kinds, stable provenance, stream boundaries, command/error typing, and thread filter")
 }
+
+func runLocalTranscriptNodeChecks() {
+    let promptID = AgentNodeID(rawValue: "submission:local-42")!
+    let noticeID = AgentNodeID(rawValue: "notice:previous-session")!
+    var projection = AgentTranscriptProjection(threadId: "local-node-thread")
+    let providerEvent = AgentRuntimeEvent.sessionStateChanged(.running)
+    projection.ingest(providerEvent)
+    let providerHistoryBeforeLocalNodes = projection.events
+
+    let promptPatches = try! projection.appendUserPrompt(id: promptID, text: "Explain the failing guard.")
+    expect(promptPatches.count == 3,
+           "P1.6 a local prompt must expose each incremental reducer patch")
+    expect(promptPatches[0].inserted == [promptID],
+           "P1.6 the caller submission ID must be the inserted user entry ID")
+    expect(zip(promptPatches, promptPatches.dropFirst()).allSatisfy { $0.toVersion == $1.fromVersion },
+           "P1.6 local prompt patches must form a contiguous version chain")
+
+    let prompt = projection.document.entries.first!
+    expect(prompt.id == promptID && prompt.role == .user,
+           "P1.6 a prompt must remain distinguishable as user-authored without presentation color")
+    expect(prompt.provenance == .localPrompt(promptID: promptID.rawValue),
+           "P1.6 a prompt must retain local provenance keyed by the caller submission ID")
+    expect(prompt.blocks.first?.id == promptID.childID(stableKey: "prompt"),
+           "P1.6 prompt block identity must derive from the submission ID, not transcript count")
+
+    // Required negative witness: retrying the same submission ID with different
+    // text must neither append a second entry nor replace the accepted body.
+    let retryPatches = try! projection.appendUserPrompt(id: promptID, text: "DUPLICATE BODY")
+    expect(retryPatches.isEmpty && projection.document.entries.count == 1,
+           "P1.6 duplicate local submission IDs must be semantic no-ops")
+    expect(projection.compatibilityRows.map(\.body) == ["Explain the failing guard."],
+           "P1.6 a duplicate submission must not append or overwrite prompt content")
+
+    let noticePatches = try! projection.appendNotice(
+        id: noticeID,
+        title: "previous session",
+        body: "Earlier transcript content is unavailable."
+    )
+    expect(noticePatches.count == 3 && projection.document.entries.count == 2,
+           "P1.6 a local notice must insert one semantic entry through incremental patches")
+    let notice = projection.document.entries[1]
+    expect(notice.role == .system && notice.provenance == .localNotice(reason: noticeID.rawValue),
+           "P1.6 Continuum notices must retain local notice provenance")
+    expect(notice.blocks.first?.kind == .notice,
+           "P1.6 a local notice must remain typed instead of collapsing into assistant prose")
+    if case .heading(level: 3, content: [.text("previous session")])? = notice.blocks.first?.children.first?.payload {
+        // Exact semantic title shape verified.
+    } else {
+        expect(false, "P1.6 a local notice must preserve its title as semantic heading content")
+    }
+
+    let noticeRetry = try! projection.appendNotice(
+        id: noticeID,
+        title: "changed title",
+        body: "DUPLICATE NOTICE"
+    )
+    expect(noticeRetry.isEmpty && projection.document.entries.count == 2,
+           "P1.6 the previous-session notice must remain idempotent when tile wiring repeats")
+    expect(projection.events == providerHistoryBeforeLocalNodes && projection.events == [providerEvent],
+           "P1.6 locally authored prompts and notices must leave existing provider event history unchanged")
+    expect(projection.rejectedMutationCount == 0,
+           "P1.6 valid local node APIs must not hide rejected reducer mutations")
+
+    print("Local transcript node checks passed: caller IDs, semantic roles/provenance, notice title, idempotent retries, and provider-history isolation")
+}

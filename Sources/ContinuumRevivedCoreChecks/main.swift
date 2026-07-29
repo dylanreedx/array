@@ -21,6 +21,11 @@ if CommandLine.arguments.contains("--agent-transcript-projection-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--local-transcript-node-check") {
+    runLocalTranscriptNodeChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-transcript-compatibility-check") {
     runAgentTranscriptCompatibilityChecks()
     Foundation.exit(0)
@@ -10068,5 +10073,9 @@ runAgentTranscriptCompatibilityChecks()
 // Ticket: docs/38-tickets/91-agent-tile-ux/P1.5-runtime-event-projection.md —
 // runtime events projected into the platform-neutral semantic document.
 runAgentTranscriptProjectionChecks()
+
+// Ticket: docs/38-tickets/91-agent-tile-ux/P1.6-local-user-notice-nodes.md —
+// local authorship, caller-owned stable IDs, retries, and provider-history isolation.
+runLocalTranscriptNodeChecks()
 
 print("ContinuumRevivedCoreChecks passed")

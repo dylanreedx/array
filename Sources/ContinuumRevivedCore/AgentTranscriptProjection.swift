@@ -130,31 +130,86 @@ public struct AgentTranscriptProjection: Sendable {
         }
     }
 
-    public mutating func appendUserPrompt(_ text: String) {
-        apply(closeStreamingRun())
-        localSequence += 1
-        let entryID = makeID(scope: "local-prompt", providerID: String(localSequence))
-        compatibilityIDs[entryID] = "user-\(document.entries.count + 1)"
-        apply([
-            .beginEntry(id: entryID, role: .user, provenance: .localPrompt(promptID: String(localSequence))),
-            .appendMarkup(entryID: entryID, delta: text),
-            .finishEntry(id: entryID)
+    /// Adds a locally submitted prompt without forging a provider event.
+    ///
+    /// The caller owns `id` (normally from its submission record), so retries
+    /// are idempotent and inserting unrelated transcript entries cannot change
+    /// prompt identity. A local entry is assembled from several reducer
+    /// mutations; each returned patch is therefore one real version step and
+    /// must be applied in order by an incremental consumer.
+    @discardableResult
+    public mutating func appendUserPrompt(
+        id: AgentNodeID,
+        text: String
+    ) throws -> [AgentDocumentPatch] {
+        guard !document.entries.contains(where: { $0.id == id }) else { return [] }
+
+        var patches = try applyReturningPatches(closeStreamingRun())
+        compatibilityIDs[id] = id.rawValue
+        let blockID = childID(of: id, key: "prompt")
+        patches += try applyReturningPatches([
+            .beginEntry(id: id, role: .user, provenance: .localPrompt(promptID: id.rawValue)),
+            .upsertStructured(entryID: id, block: AgentBlock(
+                id: blockID, kind: .paragraph, payload: .paragraph([.text(text)])
+            )),
+            .finishEntry(id: id)
         ])
+        return patches
     }
 
-    public mutating func appendNotice(id: String, title _: String, text: String) {
-        let entryID = makeID(scope: "notice", providerID: id)
-        guard !document.entries.contains(where: { $0.id == entryID }) else { return }
-        apply(closeStreamingRun())
-        compatibilityIDs[entryID] = id
-        let blockID = childID(of: entryID, key: "notice")
-        apply([
-            .beginEntry(id: entryID, role: .system, provenance: .localNotice(reason: id)),
-            .upsertStructured(entryID: entryID, block: AgentBlock(
-                id: blockID, kind: .notice, payload: .notice(.init(message: [.text(text)]))
+    /// Adds an idempotent Continuum-authored notice. The heading child keeps
+    /// the title semantic while the notice payload remains the compatibility
+    /// body projected by the temporary card path.
+    @discardableResult
+    public mutating func appendNotice(
+        id: AgentNodeID,
+        title: String,
+        body: String
+    ) throws -> [AgentDocumentPatch] {
+        guard !document.entries.contains(where: { $0.id == id }) else { return [] }
+
+        var patches = try applyReturningPatches(closeStreamingRun())
+        compatibilityIDs[id] = id.rawValue
+        let blockID = childID(of: id, key: "notice")
+        let titleID = childID(of: blockID, key: "title")
+        patches += try applyReturningPatches([
+            .beginEntry(id: id, role: .system, provenance: .localNotice(reason: id.rawValue)),
+            .upsertStructured(entryID: id, block: AgentBlock(
+                id: blockID,
+                kind: .notice,
+                payload: .notice(.init(message: [.text(body)])),
+                children: [AgentBlock(
+                    id: titleID,
+                    kind: .heading,
+                    payload: .heading(level: 3, content: [.text(title)])
+                )]
             )),
-            .finishEntry(id: entryID)
+            .finishEntry(id: id)
         ])
+        return patches
+    }
+
+    // Compatibility APIs remain until the card projection is removed.
+    public mutating func appendUserPrompt(_ text: String) {
+        localSequence += 1
+        let entryID = makeID(scope: "local-prompt", providerID: String(localSequence))
+        let compatibilityID = "user-\(document.entries.count + 1)"
+        do {
+            _ = try appendUserPrompt(id: entryID, text: text)
+            compatibilityIDs[entryID] = compatibilityID
+        } catch {
+            rejectedMutationCount += 1
+        }
+    }
+
+    public mutating func appendNotice(id: String, title: String, text: String) {
+        let entryID = makeID(scope: "notice", providerID: id)
+        do {
+            _ = try appendNotice(id: entryID, title: title, body: text)
+            compatibilityIDs[entryID] = id
+        } catch {
+            rejectedMutationCount += 1
+        }
     }
 
     private mutating func markupMutations(
@@ -266,6 +321,16 @@ public struct AgentTranscriptProjection: Sendable {
             do { try reducer.apply(mutation) }
             catch { rejectedMutationCount += 1 }
         }
+    }
+
+    private mutating func applyReturningPatches(
+        _ mutations: [AgentDocumentMutation]
+    ) throws -> [AgentDocumentPatch] {
+        var patches: [AgentDocumentPatch] = []
+        for mutation in mutations {
+            patches.append(try reducer.apply(mutation))
+        }
+        return patches
     }
 }
 
