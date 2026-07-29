@@ -576,6 +576,10 @@ runAgentContentBuiltModuleChecks()
 // the platform-neutral semantic document vocabulary and its exact JSON shape.
 runDocumentSchemaChecks()
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P1.2-stable-node-identity.md —
+// stable child identity, duplicate paths, and revision transitions.
+runNodeIdentityChecks()
+
 // Ticket: docs/38-tickets/91-agent-tile-ux/P0.4-transcript-fixture-corpus.md —
 // the canonical corpus every later parser, reducer, renderer and migration
 // ticket reads from, held to its own declarations, hygiene and I5 rules.
