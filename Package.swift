@@ -45,6 +45,7 @@ let package = Package(
         .target(
             name: "ContinuumRevivedCore",
             dependencies: [
+                "ContinuumRevivedAgentContent",
                 "ContinuumRevivedAgentUI",
                 .product(name: "GRDB", package: "GRDB.swift")
             ]
@@ -126,7 +127,7 @@ let package = Package(
             name: "ContinuumRevivedCoreChecks",
             // Ticket 07 (convergence fuzz) drives materialize/compact/applySnapshot
             // from the op-log core, which lives in ContinuumRevivedSync.
-            dependencies: ["ContinuumRevivedAgentUI", "ContinuumRevivedCore", "ContinuumRevivedSync"]
+            dependencies: ["ContinuumRevivedAgentContent", "ContinuumRevivedAgentUI", "ContinuumRevivedCore", "ContinuumRevivedSync"]
         ),
         // Ticket P1.1: depends on AgentUI ALONE, so a token reaching back into
         // Core fails to compile here rather than being caught in review.

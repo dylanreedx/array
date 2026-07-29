@@ -23,13 +23,10 @@ import Foundation
 // without this file's expectations changing in the same commit, which is a
 // reviewable diff instead of a silent regression.
 //
-// What this file is NOT: it does not build, name, or reserve any part of the
-// semantic document. `projectionsUnderTest` is the seam — P1.5 appends the
-// document projection to that one array and every script below runs against it,
+// What this file is NOT: it does not define or reserve any part of the semantic
+// document. `transcriptProjectionsUnderTest` is the seam: both shipped
+// projections are registered there and every corpus script runs against both,
 // with `transcriptSnapshotDivergences` reporting any field that disagrees.
-// Because there is exactly one projection today, that parity comparison would be
-// vacuous, so it is exercised against a deliberately-divergent stub in leg 3;
-// the comparator is proven now, and the second real projection arrives later.
 
 // MARK: - the floor's vocabulary
 
@@ -171,12 +168,15 @@ struct TranscriptProjectionUnderTest: Sendable {
     static let cardModel = Self(name: "ManagedAgentTranscriptModel") {
         TranscriptCompatibilityHarness.replay($0, into: ManagedAgentTranscriptModel.self)
     }
+
+    static let semanticDocument = Self(name: "AgentTranscriptProjection") {
+        TranscriptCompatibilityHarness.replay($0, into: AgentTranscriptProjection.self)
+    }
 }
 
-/// THE SEAM. P1.5 appends its document projection here; nothing else in this
-/// file changes, and every script below immediately runs against both with
-/// per-field parity reporting.
-let transcriptProjectionsUnderTest: [TranscriptProjectionUnderTest] = [.cardModel]
+/// THE migration seam. Keep both production projections on the same translated
+/// corpus until the compatibility-removal ticket retires the card model.
+let transcriptProjectionsUnderTest: [TranscriptProjectionUnderTest] = [.cardModel, .semanticDocument]
 
 // MARK: - a stub that disagrees, so the parity comparison is not vacuous today
 
@@ -534,12 +534,11 @@ func runAgentTranscriptCompatibilityChecks() {
                "streamed assistant text must reach the transcript verbatim; \(sentinel) was dropped on the way")
     }
 
-    // MARK: 3 · the parity seam, proven on a projection that disagrees
+    // MARK: 3 · the parity comparator, proven on a projection that disagrees
     //
-    // `transcriptProjectionsUnderTest` holds one projection today, so comparing
-    // its members to each other proves nothing. What must work on the day P1.5
-    // appends the document projection is the COMPARATOR, so it is run here
-    // against a stub built to fail exactly the two ways the floor cares about.
+    // The two production projections are compared in leg 4. The deliberately
+    // divergent projection additionally proves that the comparator itself bites
+    // on the two regressions named by the compatibility floor.
     let divergentScripts = [scripts.twoTurns, scripts.preToolProseToolPostToolProse]
     for script in divergentScripts {
         let reference = cards.replay(script)
@@ -560,10 +559,7 @@ func runAgentTranscriptCompatibilityChecks() {
     expect(transcriptSnapshotDivergences(reference: cards, script: scripts.preToolProseToolPostToolProse).isEmpty,
            "the comparator reported a difference between two replays of the same projection — it is not deterministic")
 
-    // MARK: 4 · every registered projection agrees
-    //
-    // Vacuous while the array holds one entry, by design: this is the loop P1.5
-    // turns on, and leg 3 is what proves it will bite.
+    // MARK: 4 · every registered production projection agrees
     for script in floors.map(\.0) {
         let snapshots = transcriptProjectionsUnderTest.map { ($0.name, $0.replay(script)) }
         guard let (referenceName, referenceSnapshot) = snapshots.first else {
@@ -578,6 +574,10 @@ func runAgentTranscriptCompatibilityChecks() {
     }
     expect(transcriptProjectionsUnderTest.contains(where: { $0.name == TranscriptProjectionUnderTest.cardModel.name }),
            "the card model must stay registered until the compatibility-removal ticket: it is the floor everything else is compared to")
+    expect(transcriptProjectionsUnderTest.contains(where: { $0.name == TranscriptProjectionUnderTest.semanticDocument.name }),
+           "the semantic document projection must stay registered beside the card model")
+    expect(transcriptProjectionsUnderTest.count == 2,
+           "the compatibility corpus must exercise exactly the card and semantic production projections")
 
     print("Agent transcript compatibility checks passed: \(floors.count) replayed script(s) on the real translator→remap→projection path, \(transcriptProjectionsUnderTest.count) registered projection(s), tool arguments absent from every row, comparator proven against a divergent stub")
 }

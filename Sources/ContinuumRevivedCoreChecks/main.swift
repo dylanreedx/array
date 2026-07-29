@@ -16,6 +16,16 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+if CommandLine.arguments.contains("--agent-transcript-projection-check") {
+    runAgentTranscriptProjectionChecks()
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--agent-transcript-compatibility-check") {
+    runAgentTranscriptCompatibilityChecks()
+    Foundation.exit(0)
+}
+
 func runAsyncCheck(_ body: @escaping @Sendable () async throws -> Void) throws {
     let semaphore = DispatchSemaphore(value: 0)
     final class Box: @unchecked Sendable {
@@ -7517,18 +7527,10 @@ do {
 }
 
 // Mechanical CI guard: ContinuumRevivedCore's target declaration in
-// Package.swift may only carry the GRDB dependency required by ticket 54 and
-// the ContinuumRevivedAgentUI dependency required by ticket P1.1.
-// The op-log layer remains pure Swift; the GRDB dependency belongs to the auth
-// store, and AgentUI is a first-party Foundation-only target (the shared
-// agent-UI/token module), so Core stays pure Swift either way. Both are kept
-// explicit here so arbitrary Core dependencies do not creep in silently.
-//
-// P1.1 note: the direction is Core → AgentUI, never the reverse — AgentUI owns
-// `AgentStatus` and the presenters keyed on it, and importing Core from there is
-// a hard compile error (SwiftPM: "circular dependency between modules"). This
-// assertion is still exact string equality over the whole dependency list, so
-// adding a third dependency turns it red exactly as before.
+// Package.swift carries only GRDB plus the two Foundation-only semantic and
+// presentation modules required by P1.1 and P1.5. The directions are
+// Core → AgentUI and Core → AgentContent, never the reverse; either reverse
+// import is a SwiftPM cycle. Exact equality keeps arbitrary dependencies red.
 do {
     let path = "Package.swift"
     guard let source = try? String(contentsOfFile: path, encoding: .utf8) else {
@@ -7542,10 +7544,10 @@ do {
     }
     let declaration = String(source[targetStart.lowerBound..<syncComment.lowerBound])
     let compactDeclaration = declaration.filter { !$0.isWhitespace }
-    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:["ContinuumRevivedAgentUI",.product(name:"GRDB",package:"GRDB.swift")]),"#
+    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:["ContinuumRevivedAgentContent","ContinuumRevivedAgentUI",.product(name:"GRDB",package:"GRDB.swift")]),"#
     expect(compactDeclaration == expectedDeclaration,
-           "dependencies guard: ContinuumRevivedCore target must include exactly ContinuumRevivedAgentUI and the GRDB product dependency, found: \(declaration)")
-    print("dependencies guard: ContinuumRevivedCore target has only the AgentUI + GRDB dependencies")
+           "dependencies guard: ContinuumRevivedCore target must include exactly AgentContent, AgentUI, and GRDB, found: \(declaration)")
+    print("dependencies guard: ContinuumRevivedCore target has only AgentContent + AgentUI + GRDB dependencies")
 }
 
 // MARK: - Ticket 08: Sync/observation type split (ActivityStore)
@@ -10062,5 +10064,9 @@ runAgentTranscriptFixtureChecks()
 // exact transcript today's pipeline produces from it. The floor the semantic
 // document is migrated against.
 runAgentTranscriptCompatibilityChecks()
+
+// Ticket: docs/38-tickets/91-agent-tile-ux/P1.5-runtime-event-projection.md —
+// runtime events projected into the platform-neutral semantic document.
+runAgentTranscriptProjectionChecks()
 
 print("ContinuumRevivedCoreChecks passed")
