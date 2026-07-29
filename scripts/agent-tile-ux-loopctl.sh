@@ -85,9 +85,9 @@ start_loop() {
   branch="$(git branch --show-current)"
   [ "$branch" = "$EXPECTED_BRANCH" ] || { echo "wrong branch: $branch" >&2; return 2; }
   [ -z "$(unexpected_status)" ] || { echo "refusing non-website dirty tree/index" >&2; unexpected_status >&2; return 2; }
-  if pgrep -f 'agent-(ux|tile-ux)-loop\.sh|pi .*agent-tile-' >/dev/null 2>&1; then
-    echo "another agent UX loop/worker appears active; refusing a second writer" >&2
-    pgrep -fl 'agent-(ux|tile-ux)-loop\.sh|pi .*agent-tile-' >&2 || true
+  if pgrep -f 'scripts/agent-(ux|tile-ux)-loop\.sh' >/dev/null 2>&1; then
+    echo "another agent UX loop appears active; refusing a second writer" >&2
+    pgrep -fl 'scripts/agent-(ux|tile-ux)-loop\.sh' >&2 || true
     return 2
   fi
   : > "$SUPERVISOR_LOG"

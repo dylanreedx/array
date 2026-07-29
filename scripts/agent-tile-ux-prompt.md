@@ -85,10 +85,12 @@ pi --no-approve --model "$REVIEW_MODEL" --thinking "$REVIEW_THINKING" \
 ```
 
 The review model is the opposite Sol/Luna model selected by the harness. Read
-`$TASK_DIR/review-final.md`; resolve every correctness/architecture/verification finding and rerun
-review until its final line is exactly `DECISION: APPROVE`. Never edit a reviewer artifact. The
-harness requires the staged diff, nonempty reviewer session log, and approval before accepting the
-commit. If the reviewer is unavailable, fail closed and leave the work for recovery; do not call the
+`$TASK_DIR/review-final.md`; resolve every correctness/architecture/verification finding. After any
+source, check, inventory, or ledger change, restage everything, overwrite `$TASK_DIR/staged.diff`,
+and rerun the reviewer, overwriting `$TASK_DIR/review-final.md`, until its final nonblank line is
+exactly `DECISION: APPROVE`. Never edit a reviewer verdict or create a numbered substitute. The
+harness compares the reviewed diff byte-for-byte with the sole final commit and verifies the
+reviewer's model and thinking metadata. If the reviewer is unavailable, fail closed and leave the work for recovery; do not call the
 implementing model its own independent reviewer.
 
 ## Commit and record
@@ -96,7 +98,7 @@ implementing model its own independent reviewer.
 Only after focused checks, build, matrix, and review are clear:
 
 - one ticket per local commit;
-- message `type(agent-tile): summary`;
+- message must use one real Conventional Commit type accepted by the harness, for example `feat(agent-tile): summary`, `fix(agent-tile): summary`, or `test(agent-tile): summary`; never use the literal placeholder `type`;
 - no AI attribution or Co-Authored-By;
 - include the ticket's ledger update in the same commit;
 - never push.

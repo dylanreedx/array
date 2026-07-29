@@ -69,9 +69,11 @@ state is `pending`.
 6. Save the staged diff and run the opposite GPT-5.6 Sol/Luna model at medium as an independent read-only review; preserve its session and final verdict under the task directory.
 7. Resolve findings or record a concrete reason they do not apply.
 8. Mark the ledger row `done` with `this commit`, real timestamp, verification summary, and known limits.
-9. Commit exactly one ticket with `type(agent-tile): summary`; no AI attribution; never push. The
-   harness ties the sole commit after the prior HEAD to the token and mechanically checks its paths,
-   subject, and ledger state (a commit cannot contain its own final SHA).
+9. Commit exactly one ticket with a concrete accepted type such as `feat(agent-tile): summary`,
+   `fix(agent-tile): summary`, or `test(agent-tile): summary`; never use the literal placeholder
+   `type`. No AI attribution; never push. The harness ties the sole commit after the prior HEAD to
+   the first eligible ticket/token and mechanically checks its paths, subject, ledger state, exact
+   reviewed diff, opposite-model metadata, and final approval line.
 10. Emit exactly one final `LOOP:` control line.
 
 ## Verification rules
@@ -163,9 +165,11 @@ Runtime artifacts live outside source control under:
     result.json
 ```
 
-A ticket is not accepted without these durable worker/reviewer artifacts and an exact
-`DECISION: APPROVE`. Provider/network failures including DNS `ENOTFOUND` are retried only when HEAD
-and every non-ignored path are unchanged; dirty or committed failures stop for inspection.
+A ticket is not accepted without these durable worker/reviewer artifacts, an exact final-line
+`DECISION: APPROVE`, and byte-identical reviewed/committed diffs. Provider/network failures including
+DNS `ENOTFOUND` are retried only when HEAD, every non-ignored path, and the launch-time inventory
+fingerprint of authorized untracked website/logo work are unchanged; dirty or committed failures
+stop for inspection.
 
 The control script records the active supervisor PID and latest run path outside the repository under
 `~/.pi/agent-tile-ux-loop-control/continuum-overnight/`, so preflight observability never dirties the checkout.

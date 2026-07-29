@@ -34,7 +34,7 @@ valid_utc_timestamp() {
 }
 
 check_program() {
-  for f in "$DIR/_DESIGN.md" "$DIR/_RUNBOOK.md" "$QUEUE" "$LEDGER" scripts/agent-tile-ux-prompt.md scripts/agent-tile-ux-loop.sh scripts/agent-tile-ux-loopctl.sh; do
+  for f in "$DIR/_DESIGN.md" "$DIR/_RUNBOOK.md" "$QUEUE" "$LEDGER" scripts/agent-tile-ux-prompt.md scripts/agent-tile-ux-loop.sh scripts/agent-tile-ux-loopctl.sh scripts/check-retina-main.swift; do
     [ -f "$f" ] || fail "missing $f"
   done
 
@@ -48,6 +48,10 @@ check_program() {
   grep -Fq 'ENOTFOUND' scripts/agent-tile-ux-loop.sh || fail "loop lost DNS provider-failure classification"
   grep -Fq 'reviewer-session' scripts/agent-tile-ux-loop.sh || fail "loop lost durable reviewer sessions"
   grep -Fq 'DECISION: APPROVE' scripts/agent-tile-ux-loop.sh || fail "loop lost independent approval gate"
+  grep -Fq 'cmp -s "$task_dir/staged.diff" "$final_diff"' scripts/agent-tile-ux-loop.sh || fail "loop lost reviewed-commit equality gate"
+  grep -Fq 'first_eligible_ticket' scripts/agent-tile-ux-loop.sh || fail "loop lost first-eligible enforcement"
+  grep -Fq 'authorized_untracked_fingerprint' scripts/agent-tile-ux-loop.sh || fail "loop lost website retry fingerprint"
+  grep -Fq 'swift scripts/check-retina-main.swift' scripts/agent-tile-ux-loop.sh || fail "loop lost mandatory durable display preflight"
 
   rows="$(grep -E '^\| [0-9]+ \| `P[0-9]+\.[0-9]+-[^`]+\.md` \|' "$QUEUE" 2>/dev/null || true)"
   count="$(printf '%s\n' "$rows" | grep -c '^|' | tr -d ' ')"
@@ -340,7 +344,7 @@ self_test() {
   cp "$INVENTORY" "$base/$INVENTORY"
   cp "$MATRIX" "$base/$MATRIX"
   cp "$0" "$base/scripts/check-agent-tile-ux-program.sh"
-  cp scripts/agent-tile-ux-prompt.md scripts/agent-tile-ux-loop.sh scripts/agent-tile-ux-loopctl.sh "$base/scripts/"
+  cp scripts/agent-tile-ux-prompt.md scripts/agent-tile-ux-loop.sh scripts/agent-tile-ux-loopctl.sh scripts/check-retina-main.swift "$base/scripts/"
   chmod +x "$base/scripts/check-agent-tile-ux-program.sh"
 
   run_case() {

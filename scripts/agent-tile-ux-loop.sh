@@ -41,6 +41,9 @@ TASKS_DIR="$RUN_DIR/tasks"
 ITERATION=0
 ITERATION_PID=""
 ITERATION_LOG=""
+ITERATION_ACTIVITY_FILE=""
+EXPECTED_ITERATION_TICKET=""
+AUTHORIZED_UNTRACKED_BASELINE=""
 STOP_REASON="running"
 PROVIDER_FAILURES=0
 
@@ -59,6 +62,46 @@ unexpected_status() {
     $1 == "??" && ($2 == "website/" || $2 ~ /^array-logo.*[.]svg$/) { next }
     { print }
   '
+}
+
+authorized_untracked_fingerprint() {
+  {
+    find website -type f -exec stat -f '%N|%z|%m' {} + 2>/dev/null || true
+    find website -type l -exec stat -f '%N|%Y' {} + 2>/dev/null || true
+    for file in array-logo*.svg; do
+      [ -f "$file" ] && stat -f '%N|%z|%m' "$file"
+    done
+  } | LC_ALL=C sort | shasum -a 256 | awk '{print $1}'
+}
+
+ledger_state_for_id() {
+  local id="$1"
+  grep -E "^\| \`$id-[^\`]+\.md\` \|" "$LEDGER_FILE" | head -1 |
+    awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$3); print $3}'
+}
+
+first_eligible_ticket() {
+  local row file deps state dep eligible old_ifs
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    file="$(printf '%s' "$row" | awk -F'|' '{gsub(/^[ \t]*`|`[ \t]*$/,"",$3); print $3}')"
+    deps="$(printf '%s' "$row" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$4); print $4}')"
+    state="$(grep -F "| \`$file\` |" "$LEDGER_FILE" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$3); print $3}')"
+    [ "$state" = pending ] || continue
+    eligible=1
+    if [ "$deps" != "—" ]; then
+      old_ifs="$IFS"; IFS=','
+      for dep in $deps; do
+        dep="$(printf '%s' "$dep" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        [ "$(ledger_state_for_id "$dep")" = done ] || eligible=0
+      done
+      IFS="$old_ifs"
+    fi
+    [ "$eligible" = 1 ] && { printf '%s\n' "$file"; return 0; }
+  done <<EOF
+$(grep -E '^\| [0-9]+ \| `P[0-9]+\.[0-9]+-[^`]+\.md` \|' "$QUEUE_FILE" || true)
+EOF
+  return 1
 }
 
 worker_model_for_iteration() {
@@ -133,9 +176,10 @@ EOF
 
 write_telemetry() {
   local log_epoch=0 log_size=0 child_list head dirty
-  if [ -n "$ITERATION_LOG" ] && [ -f "$ITERATION_LOG" ]; then
-    log_epoch="$(stat -f %m "$ITERATION_LOG" 2>/dev/null || echo 0)"
-    log_size="$(stat -f %z "$ITERATION_LOG" 2>/dev/null || echo 0)"
+  local activity_file="${ITERATION_ACTIVITY_FILE:-$ITERATION_LOG}"
+  if [ -n "$activity_file" ] && [ -f "$activity_file" ]; then
+    log_epoch="$(stat -f %m "$activity_file" 2>/dev/null || echo 0)"
+    log_size="$(stat -f %z "$activity_file" 2>/dev/null || echo 0)"
   fi
   child_list=""
   if [ -n "$ITERATION_PID" ]; then
@@ -205,15 +249,17 @@ preflight() {
   [ "$BRANCH" = "$EXPECTED_BRANCH" ] || { echo "expected $EXPECTED_BRANCH, got $BRANCH" >&2; return 1; }
   [ "$BRANCH" != main ] || { echo "refusing main" >&2; return 1; }
   [ -z "$(unexpected_status)" ] || { echo "working tree/index has non-website changes" >&2; unexpected_status >&2; return 1; }
+  [ "$PI_WORKER_MODELS" = "openai-codex/gpt-5.6-sol openai-codex/gpt-5.6-luna" ] || {
+    echo "PI_WORKER_MODELS override is forbidden" >&2; return 1;
+  }
+  [ "$PI_THINKING" = medium ] || { echo "PI_THINKING must be medium" >&2; return 1; }
   command -v pi >/dev/null 2>&1 || { echo "pi CLI missing" >&2; return 1; }
   pi --list-models gpt-5.6 2>/dev/null | grep -Fq gpt-5.6-sol || { echo "gpt-5.6-sol unavailable" >&2; return 1; }
   pi --list-models gpt-5.6 2>/dev/null | grep -Fq gpt-5.6-luna || { echo "gpt-5.6-luna unavailable" >&2; return 1; }
-  if [ -f /tmp/list-displays.swift ]; then
-    display_state="$(swift /tmp/list-displays.swift 2>/dev/null || true)"
-    printf '%s\n' "$display_state" | grep -Eq 'builtin=true main=true' || {
-      echo "built-in Retina display must be Main for deterministic UI baselines" >&2; return 1;
-    }
-  fi
+  swift scripts/check-retina-main.swift || return 1
+  AUTHORIZED_UNTRACKED_BASELINE="$(authorized_untracked_fingerprint)"
+  [ -n "$AUTHORIZED_UNTRACKED_BASELINE" ] || { echo "authorized untracked fingerprint failed" >&2; return 1; }
+  printf '%s\n' "$AUTHORIZED_UNTRACKED_BASELINE" > "$RUN_DIR/authorized-untracked-start.sha256"
   return 0
 }
 
@@ -225,9 +271,10 @@ run_iteration() {
   session_dir="$task_dir/worker-session"
   stdout_log="$task_dir/stdout.log"
   stderr_log="$task_dir/stderr.log"
+  ITERATION_ACTIVITY_FILE="$stdout_log"
   mkdir -p "$session_dir" "$task_dir/reviewer-session"
   cat > "$task_dir/task.json" <<EOF
-{"iteration":$ITERATION,"workerModel":"$(json_escape "$worker_model")","reviewModel":"$(json_escape "$review_model")","thinking":"$(json_escape "$PI_THINKING")","startedAt":"$(now_utc)","beforeHead":"$(git rev-parse HEAD)"}
+{"iteration":$ITERATION,"ticket":"$(json_escape "$EXPECTED_ITERATION_TICKET")","workerModel":"$(json_escape "$worker_model")","reviewModel":"$(json_escape "$review_model")","thinking":"$(json_escape "$PI_THINKING")","startedAt":"$(now_utc)","beforeHead":"$(git rev-parse HEAD)"}
 EOF
   prompt="[agent-tile-ux harness]
 QUEUE_FILE=$QUEUE_FILE
@@ -281,11 +328,14 @@ $(cat "$PROMPT_FILE")"
 }
 
 validate_iteration_commit() {
-  local before_head="$1" token="$2" ticket changed allowed path fence fence_prefix fence_suffix middle path_allowed subject count state task_dir
+  local before_head="$1" token="$2" ticket changed allowed path fence fence_prefix fence_suffix middle path_allowed subject count state task_dir review_final review_last review_model session_file final_diff
   ticket="${token#LOOP: CONTINUE }"
   ticket="${ticket#skipped:}"
   case "$ticket" in P*.md) ;; *) echo "invalid ticket in CONTINUE token: $ticket" >&2; return 1 ;; esac
   [ -f "$PROGRAM_DIR/$ticket" ] || { echo "token names missing packet: $ticket" >&2; return 1; }
+  [ "$ticket" = "$EXPECTED_ITERATION_TICKET" ] || {
+    echo "token ticket $ticket is not first eligible $EXPECTED_ITERATION_TICKET" >&2; return 1;
+  }
 
   count="$(git rev-list --count "$before_head"..HEAD)"
   [ "$count" = 1 ] || { echo "iteration must create exactly one commit, created $count" >&2; return 1; }
@@ -296,14 +346,26 @@ validate_iteration_commit() {
 
   state="$(grep -F "| \`$ticket\` |" "$LEDGER_FILE" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$3); print $3}')"
   task_dir="$TASKS_DIR/iteration-$(printf '%03d' "$ITERATION")"
-  [ -s "$task_dir/review-final.md" ] || { echo "missing durable independent review" >&2; return 1; }
+  review_final="$(find "$task_dir" -maxdepth 1 -type f -name 'review-final*.md' -print 2>/dev/null | while IFS= read -r f; do printf '%s %s\n' "$(stat -f %m "$f")" "$f"; done | sort -n | tail -1 | cut -d' ' -f2-)"
+  [ -n "$review_final" ] && [ -s "$review_final" ] || { echo "missing durable independent review" >&2; return 1; }
+  review_last="$(awk 'NF { line=$0 } END { print line }' "$review_final")"
+  [ "$review_last" = "DECISION: APPROVE" ] || { echo "latest independent review did not approve" >&2; return 1; }
   [ -s "$task_dir/staged.diff" ] || { echo "missing staged review diff" >&2; return 1; }
-  find "$task_dir/reviewer-session" -type f -size +0c -print -quit 2>/dev/null | grep -q . || {
-    echo "missing reviewer session log" >&2; return 1;
-  }
-  grep -Eq '^DECISION: APPROVE$' "$task_dir/review-final.md" || {
-    echo "independent review did not approve" >&2; return 1;
-  }
+  final_diff="$(mktemp "$RUN_DIR/final-diff.XXXXXX")" || return 1
+  git diff --binary "$before_head"..HEAD > "$final_diff"
+  cmp -s "$task_dir/staged.diff" "$final_diff" || { rm -f "$final_diff"; echo "reviewed diff differs from committed diff" >&2; return 1; }
+  rm -f "$final_diff"
+  review_model="$(review_model_for_worker "$(worker_model_for_iteration)")"
+  session_file="$(find "$task_dir/reviewer-session" -type f -name '*.jsonl' -size +0c -print -quit 2>/dev/null)"
+  [ -n "$session_file" ] || { echo "missing reviewer session log" >&2; return 1; }
+  grep -R -Fq '"type":"model_change"' "$task_dir/reviewer-session" &&
+    grep -R -Fq "\"modelId\":\"${review_model##*/}\"" "$task_dir/reviewer-session" || {
+      echo "reviewer session used wrong model" >&2; return 1;
+    }
+  grep -R -Fq '"type":"thinking_level_change"' "$task_dir/reviewer-session" &&
+    grep -R -Fq '"thinkingLevel":"medium"' "$task_dir/reviewer-session" || {
+      echo "reviewer session did not use medium thinking" >&2; return 1;
+    }
   case "$token:$state" in
     *skipped:*:blocked) ;;
     *skipped:*) echo "skipped ticket must be ledger state blocked, got $state" >&2; return 1 ;;
@@ -356,6 +418,10 @@ if ! preflight; then
   stop_run preflight-failed
   exit 1
 fi
+if [ "${AGENT_TILE_PREFLIGHT_ONLY:-0}" = 1 ]; then
+  stop_run preflight-ok
+  exit 0
+fi
 
 git bundle create "$BACKUP_DIR/continuum-agent-tile-$STAMP-start.bundle" --all >/dev/null 2>&1 || \
   append_event backup-warning "start bundle failed"
@@ -372,11 +438,16 @@ for ITERATION in $(seq 1 "$MAX_ITER"); do
 
   ITERATION_LOG="$LOG_DIR/iter-$STAMP-$ITERATION.log"
   BEFORE_ITERATION_HEAD="$(git rev-parse HEAD)"
+  EXPECTED_ITERATION_TICKET="$(first_eligible_ticket || true)"
   append_event iteration-start "$ITERATION"
   write_status running "iteration-$ITERATION"
   run_iteration "$ITERATION_LOG"; rc=$?
 
-  token="$(tr -d '\140' < "$ITERATION_LOG" | grep -oE 'LOOP: (CONTINUE|STOP)[^[:cntrl:]]*' | tail -1 || true)"
+  token="$(awk 'NF { line=$0 } END { print line }' "$ITERATION_LOG")"
+  token_count="$(grep -Ec '^LOOP: (CONTINUE (skipped:)?P[0-9]+[.][0-9]+-[^ ]+[.]md|STOP [^ ]+)$' "$ITERATION_LOG" || true)"
+  if [ "$token_count" != 1 ] || ! printf '%s\n' "$token" | grep -Eq '^LOOP: (CONTINUE (skipped:)?P[0-9]+[.][0-9]+-[^ ]+[.]md|STOP [^ ]+)$'; then
+    token=""
+  fi
   printf '%s\n' "${token:-none}" > "$TASKS_DIR/iteration-$(printf '%03d' "$ITERATION")/control-token.txt"
   append_event iteration-end "rc=$rc token=${token:-none}"
   echo "[loop] iteration=$ITERATION rc=$rc token='${token:-none}' log=$ITERATION_LOG"
@@ -387,6 +458,9 @@ for ITERATION in $(seq 1 "$MAX_ITER"); do
   if grep -qiE 'usage limit|session limit|rate limit|status code 429|overloaded|quota|ENOTFOUND|unable to connect|connection (reset|refused)|network error|fetch failed' "$ITERATION_LOG"; then
     PROVIDER_FAILURES=$((PROVIDER_FAILURES + 1))
     if [ -n "$(unexpected_status)" ]; then stop_run dirty-after-provider-failure; break; fi
+    if [ "$(authorized_untracked_fingerprint)" != "$AUTHORIZED_UNTRACKED_BASELINE" ]; then
+      stop_run authorized-untracked-changed-after-provider-failure; break
+    fi
     if [ "$(git rev-parse HEAD)" != "$BEFORE_ITERATION_HEAD" ]; then stop_run provider-failure-after-unvalidated-commit; break; fi
     if [ "$PROVIDER_FAILURES" -ge "$MAX_PROVIDER_FAILURES" ]; then stop_run provider-failure-window; break; fi
     append_event provider-backoff "failure $PROVIDER_FAILURES sleeping ${QUOTA_SLEEP_SECONDS}s"
