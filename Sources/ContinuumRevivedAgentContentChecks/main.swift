@@ -649,6 +649,10 @@ runHeadingBlockChecks()
 // nested list/item/quote structure, ordered starts, and bounded depth.
 runListQuoteRuleBlockChecks()
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P2.6-link-policy.md —
+// semantic link parsing and pure, safe activation classification.
+runLinkPolicyChecks()
+
 // Ticket: docs/38-tickets/91-agent-tile-ux/P2.2-inline-markup-runs.md —
 // exact semantic inline AST, merged text, and lossless unsupported fallback.
 runInlineMarkupChecks()

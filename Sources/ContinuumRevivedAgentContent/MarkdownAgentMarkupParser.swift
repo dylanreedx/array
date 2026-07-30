@@ -306,6 +306,18 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
         if let code = markup as? InlineCode { return .code(code.code) }
         if markup is SoftBreak { return .softBreak }
         if markup is LineBreak { return .hardBreak }
+        if let link = markup as? Link {
+            return .link(
+                destination: link.destination ?? "",
+                title: link.title,
+                children: convertInlineChildren(
+                    link,
+                    source: source,
+                    depth: depth + 1,
+                    diagnostics: &diagnostics
+                )
+            )
+        }
 
         if depth < Self.maximumInlineDepth, markup is Emphasis {
             return .emphasis(convertInlineChildren(markup, source: source, depth: depth + 1, diagnostics: &diagnostics))

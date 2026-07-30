@@ -493,16 +493,16 @@ func runInlineMarkupChecks() {
     expect(inlinePlainText(actual) == "Escaped *stars*; strong with nested emphasis and literal * code.\nsoft continuation\nhard continuation\nafter hard",
            "plain-text projection must preserve readable source content modulo Markdown delimiters")
 
-    let unsupportedSource = "pré [label](https://example.invalid/path) post"
+    let unsupportedSource = "pré ![diagram *alt*](asset.png \"preview\") post"
     let unsupported = parser.parse(unsupportedSource, entryID: entryID, previous: parse.blocks)
     expect(paragraphInlines(unsupported, "unsupported inline source") == [.text(unsupportedSource)],
            "an unsupported inline node must preserve its exact literal spelling and merge with adjacent text")
-    expect(unsupported.diagnostics.map(\.code) == ["markdown.unsupported-inline"],
-           "an unsupported inline node must emit one structural diagnostic")
-    expect(!unsupported.diagnostics.map(\.code).contains(where: { $0.contains("example") || $0.contains("label") }),
+    expect(unsupported.diagnostics == [.init(severity: .warning, code: "markdown.unsupported-inline")],
+           "an unsupported inline node must emit one body-free structural diagnostic")
+    expect(!unsupported.diagnostics.map(\.code).contains(where: { $0.contains("asset") || $0.contains("diagram") }),
            "inline diagnostics must not carry source text or destinations")
     expect(unsupported.blocks[0].id == parse.blocks[0].id,
-           "adding inline semantics must not replace the existing paragraph identity")
+           "adding unsupported inline syntax must not replace the existing paragraph identity")
 
     let deepSource = String(repeating: "*", count: 130) + "x" + String(repeating: "*", count: 130)
     let deep = parser.parse(deepSource, entryID: entryID, previous: unsupported.blocks)
