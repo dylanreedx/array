@@ -2,7 +2,7 @@
 
 ## heartbeat
 
-last-touch 2026-07-30T02:15:10Z · ticket P2.3-paragraph-heading-blocks.md · attempt 1 · pid — · status done
+last-touch 2026-07-30T02:38:13Z · ticket P2.4-list-quote-rule-blocks.md · attempt 1 · pid — · status done
 
 ## states
 
@@ -27,7 +27,7 @@ last-touch 2026-07-30T02:15:10Z · ticket P2.3-paragraph-heading-blocks.md · at
 | `P2.1-markdown-parser-seam.md` | done | this commit | 2026-07-30T01:47:44Z | Added the owned `AgentMarkupParsing` seam and exact reviewed `swift-markdown` 0.8.0 pin, with `Markdown` and its AST confined to one unconditional production adapter. Plain CommonMark becomes one stable semantic paragraph; valid 512-byte entry IDs receive deterministic compact child IDs; unsupported nonempty structure remains losslessly opaque with body-free owned diagnostics rather than disappearing. Manifest/import checks enforce the source, exact pin, dependency direction, and adapter-only import. The fence was narrowly expanded and committed first as `35ea98f` because P1.7’s isolated negative-witness package copies the whole AgentContent target and therefore needed the same compile-enforced dependency; no adjacent production or UX scope was added. The required final-code witness appended `!` to AST-derived text, exited 1 at the exact paragraph assertion, restored SHA-256 `6057b0954d01517ba79ced30335317eabad2ee51e53f64de61671f19b9f7c12f`, and reran AgentContent checks green (`negative-witness-final-markdown-parser.log`). Complete diff includes all three new files. `swift build` and `CONTINUUM_SKIP_SURFACE_CHECKS=1 CONTINUUM_SKIP_UI_BASELINES=1 ./scripts/run-matrix.sh </dev/null` passed; artifact `qa-runs/20260730T014658Z/app-bundle/manifest.json`, with no display or baseline changed. Inventory changed only `ContinuumRevivedAgentContentChecks` 11 → 12. Luna medium source review and final evidence adjudication both returned `DECISION: APPROVE`. |
 | `P2.2-inline-markup-runs.md` | done | this commit | 2026-07-30T01:58:31Z | Harness-owned completion: focused worker checks, independent opposite-model review, swift build, and final matrix passed. Evidence: /Users/dylan/.pi/agent-tile-ux-runs/continuum-overnight/run-20260729T214814/tasks/iteration-001-P2.2-inline-markup-runs.md. |
 | `P2.3-paragraph-heading-blocks.md` | done | this commit | 2026-07-30T02:15:10Z | Harness-owned completion: focused worker checks, independent opposite-model review, swift build, and final matrix passed. Evidence: /Users/dylan/.pi/agent-tile-ux-runs/continuum-overnight/run-20260729T214814/tasks/iteration-002-P2.3-paragraph-heading-blocks.md. |
-| `P2.4-list-quote-rule-blocks.md` | pending | — | — | — |
+| `P2.4-list-quote-rule-blocks.md` | done | this commit | 2026-07-30T02:38:13Z | Harness-owned completion: focused worker checks, independent opposite-model review, swift build, and final matrix passed. Evidence: /Users/dylan/.pi/agent-tile-ux-runs/continuum-overnight/run-20260729T214814/tasks/iteration-003-P2.4-list-quote-rule-blocks.md. |
 | `P2.5-fenced-code-blocks.md` | pending | — | — | — |
 | `P2.6-link-policy.md` | pending | — | — | — |
 | `P2.7-partial-streaming-markdown.md` | pending | — | — | — |

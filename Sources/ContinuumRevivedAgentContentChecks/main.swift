@@ -645,6 +645,10 @@ runMarkupParserChecks()
 // paragraphs and heading hierarchy become distinct semantic blocks.
 runHeadingBlockChecks()
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P2.4-list-quote-rule-blocks.md —
+// nested list/item/quote structure, ordered starts, and bounded depth.
+runListQuoteRuleBlockChecks()
+
 // Ticket: docs/38-tickets/91-agent-tile-ux/P2.2-inline-markup-runs.md —
 // exact semantic inline AST, merged text, and lossless unsupported fallback.
 runInlineMarkupChecks()
