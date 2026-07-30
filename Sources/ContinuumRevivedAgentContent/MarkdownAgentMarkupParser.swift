@@ -17,53 +17,55 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
         guard !source.isEmpty else { return AgentMarkupParse(blocks: []) }
 
         let document = Document(parsing: source)
-        guard document.childCount == 1,
-              let paragraph = document.child(at: 0) as? Paragraph
-        else {
-            let blockID = previous.first(where: { block in
-                guard block.kind == .unknown else { return false }
-                if case .opaque = block.payload { return true }
-                return false
-            })?.id ?? blockID(entryID: entryID, stableKey: "markdown.unsupported")
+        var diagnostics: [AgentMarkupDiagnostic] = []
+        var blocks: [AgentBlock] = []
+        var occurrences: [AgentBlockKind: Int] = [:]
 
-            return AgentMarkupParse(
-                blocks: [
-                    AgentBlock(
-                        id: blockID,
-                        kind: .unknown,
-                        payload: .opaque(.init(
-                            debugLabel: "markdown.unsupported-structure",
-                            value: .string(source)
-                        ))
-                    )
-                ],
-                diagnostics: [.init(severity: .warning, code: "markdown.unsupported-structure")]
-            )
+        for child in document.children {
+            let kind: AgentBlockKind
+            let payload: AgentBlockPayload
+            switch child {
+            case let paragraph as Paragraph:
+                kind = .paragraph
+                payload = .paragraph(convertChildren(
+                    paragraph, source: source, depth: 0, diagnostics: &diagnostics
+                ))
+            case let heading as Heading:
+                kind = .heading
+                // swift-markdown accepts levels beyond HTML's six headings;
+                // AgentContent keeps that boundary explicit for renderers.
+                let level = UInt8(min(max(heading.level, 1), 6))
+                payload = .heading(level: level, content: convertChildren(
+                    heading, source: source, depth: 0, diagnostics: &diagnostics
+                ))
+            default:
+                kind = .unknown
+                payload = .opaque(.init(
+                    debugLabel: "markdown.unsupported-structure",
+                    // Preserve only this child, not the complete document. A
+                    // mixed document must keep each semantic block boundary
+                    // intact for rendering and plain-text copy.
+                    value: .string(literalSource(for: child, in: source)
+                        .map { $0.trimmingCharacters(in: .newlines) } ?? "")
+                ))
+                diagnostics.append(.init(severity: .warning, code: "markdown.unsupported-structure"))
+            }
+
+            let occurrence = occurrences[kind, default: 0]
+            occurrences[kind] = occurrence + 1
+            let positionalID: AgentNodeID? = blocks.count < previous.count && previous[blocks.count].kind == kind
+                ? previous[blocks.count].id
+                : nil
+            let legacyID: AgentNodeID? = blocks.isEmpty
+                ? previous.first(where: { $0.kind == kind })?.id
+                : nil
+            let id = positionalID
+                ?? legacyID
+                ?? blockID(entryID: entryID, stableKey: "markdown.\(kind.rawValue).\(occurrence)")
+            blocks.append(AgentBlock(id: id, kind: kind, payload: payload))
         }
 
-        let blockID = previous.first(where: { block in
-            guard block.kind == .paragraph else { return false }
-            if case .paragraph = block.payload { return true }
-            return false
-        })?.id ?? blockID(entryID: entryID, stableKey: "markdown.paragraph")
-
-        var diagnostics: [AgentMarkupDiagnostic] = []
-        let inlines = convertChildren(
-            paragraph,
-            source: source,
-            depth: 0,
-            diagnostics: &diagnostics
-        )
-        return AgentMarkupParse(
-            blocks: [
-                AgentBlock(
-                    id: blockID,
-                    kind: .paragraph,
-                    payload: .paragraph(inlines)
-                )
-            ],
-            diagnostics: diagnostics
-        )
+        return AgentMarkupParse(blocks: blocks, diagnostics: diagnostics)
     }
 
     private func convertChildren(

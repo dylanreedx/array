@@ -39,33 +39,86 @@ func runMarkupParserChecks() {
     expect(longScopeRepeated.blocks.first?.id == longScope.blocks.first?.id,
            "the compact parser ID for a long entry scope must be deterministic")
 
-    let unsupportedSource = "# Heading"
-    let unsupported = parser.parse(unsupportedSource, entryID: entryID, previous: first.blocks)
-    expect(unsupported.blocks.count == 1,
-           "unsupported Markdown structure must remain present as one semantic block")
-    guard let opaque = unsupported.blocks.first else { fail("unsupported Markdown fallback block is missing") }
-    expect(opaque.kind == .unknown,
-           "the paragraph-only seam must not flatten a Markdown heading into prose")
-    expect(opaque.payload == .opaque(.init(
-        debugLabel: "markdown.unsupported-structure",
-        value: .string(unsupportedSource)
-    )), "unsupported Markdown fallback must preserve the exact source losslessly")
-    expect(unsupported.diagnostics.map(\.code) == ["markdown.unsupported-structure"],
-           "unsupported Markdown structure must produce one owned diagnostic")
+    let structuredSource = "# Heading\n\nFirst paragraph.\n\nSecond paragraph."
+    let structured = parser.parse(structuredSource, entryID: entryID, previous: [])
+    expect(structured.diagnostics.isEmpty, "paragraphs and headings must parse without diagnostics")
+    expect(structured.blocks.count == 3, "blank lines must separate two paragraphs without spacer blocks")
+    expect(structured.blocks.map(\.kind) == [.heading, .paragraph, .paragraph],
+           "Markdown block order must preserve heading and paragraph semantics")
+    guard case let .heading(level, content) = structured.blocks[0].payload else {
+        fail("ATX heading payload is missing")
+    }
+    expect(level == 1 && content == [.text("Heading")],
+           "ATX heading must preserve level and inline content")
+    expect(structured.blocks[1].id != structured.blocks[2].id,
+           "two paragraphs must receive distinct stable semantic IDs")
+    let reparsedStructured = parser.parse(structuredSource, entryID: entryID, previous: structured.blocks)
+    expect(reparsedStructured.blocks.map(\.id) == structured.blocks.map(\.id),
+           "reparsing two paragraphs and their heading must preserve every stable block ID")
 
-    let unsupportedRepeated = parser.parse(
-        "# Heading extended",
-        entryID: entryID,
-        previous: unsupported.blocks
-    )
-    expect(unsupportedRepeated.blocks.first?.id == opaque.id,
-           "reparsing unsupported Markdown must preserve its previous stable semantic ID")
+    let mixedUnsupportedSource = "# Heading\n\n---\n\nBody paragraph."
+    let mixedUnsupported = parser.parse(mixedUnsupportedSource, entryID: entryID, previous: [])
+    expect(mixedUnsupported.blocks.count == 3 && mixedUnsupported.blocks.map(\.kind) == [.heading, .unknown, .paragraph],
+           "unsupported structures in mixed Markdown must remain one block between neighboring semantic blocks")
+    guard case let .opaque(mixedPayload) = mixedUnsupported.blocks[1].payload else {
+        fail("mixed unsupported structure payload is missing")
+    }
+    expect(mixedPayload.value == .string("---"),
+           "unsupported structure must preserve only its child literal, not the complete document")
+
+    let setext = parser.parse("Setext title\n===\nBody", entryID: entryID, previous: [])
+    guard case let .heading(setextLevel, setextContent) = setext.blocks.first?.payload else {
+        fail("setext heading payload is missing")
+    }
+    expect(setextLevel == 1 && setextContent == [.text("Setext title")],
+           "setext heading must map to level one with inline content")
+
+    let encoded = try? JSONEncoder().encode(structured.blocks[0])
+    let decoded = encoded.flatMap { try? JSONDecoder().decode(AgentBlock.self, from: $0) }
+    expect(decoded == structured.blocks[0], "heading level and inline content must survive JSON round-trip")
+    expect(inlinePlainText(content) == "Heading", "heading plain-text copy must expose only readable inline content")
+
+    let unsupportedSource = "---"
+    let unsupported = parser.parse(unsupportedSource, entryID: entryID, previous: [])
+    guard let opaque = unsupported.blocks.first else { fail("unsupported Markdown fallback block is missing") }
+    expect(opaque.kind == .unknown && unsupported.diagnostics.map(\.code) == ["markdown.unsupported-structure"],
+           "unsupported structure must remain an opaque diagnosed semantic block")
+    expect(opaque.payload == .opaque(.init(
+        debugLabel: "markdown.unsupported-structure", value: .string(unsupportedSource)
+    )), "unsupported Markdown fallback must preserve the exact source losslessly")
 
     // Required negative witness observed red against this final check: changing
-    // the adapter's paragraph payload to `.paragraph([.text(paragraph.plainText + "!")])`
-    // made `plain source must produce one exact AgentInline.text run` fail with
-    // exit 1. Restoring the exact AST-derived text returned the leg to green.
-    print("Markup parser checks passed: owned seam converts one plain CommonMark paragraph to a stable semantic block and diagnoses unsupported structure")
+    // the Heading conversion to `.paragraph` made the exact `[.heading, .paragraph,
+    // .paragraph]` assertion fail with exit 1. Restoring semantic heading blocks
+    // returned the leg to green.
+    print("Markup parser checks passed: paragraphs, ATX/setext headings, stable IDs, round-trip, plain-text copy, and diagnosed fallback")
+}
+
+func runHeadingBlockChecks() {
+    let parser = MarkdownAgentMarkupParser()
+    let entryID = parserID("entry:heading-blocks")
+    let parsed = parser.parse("## Section\n\nOne paragraph.\n\nTwo paragraphs.", entryID: entryID, previous: [])
+    expect(parsed.diagnostics.isEmpty, "heading block corpus must be diagnostic-free")
+    expect(parsed.blocks.map(\.kind) == [.heading, .paragraph, .paragraph],
+           "heading and paragraph blocks must preserve source order")
+    guard case let .heading(level, inline) = parsed.blocks[0].payload else {
+        fail("heading block payload is missing")
+    }
+    expect(level == 2 && inline == [.text("Section")],
+           "heading block must preserve its level and inline content")
+    expect(parsed.blocks[1].id != parsed.blocks[2].id,
+           "separate paragraphs must never share a semantic block ID")
+
+    let roundTrip = try? JSONDecoder().decode(
+        AgentBlock.self,
+        from: JSONEncoder().encode(parsed.blocks[0])
+    )
+    expect(roundTrip == parsed.blocks[0], "heading block JSON round-trip must preserve hierarchy")
+    expect(inlinePlainText(inline) == "Section", "heading plain-text copy must omit Markdown markers")
+
+    // Required negative witness: changing Heading's payload to paragraph makes
+    // the exact kind/level assertions above fail with exit 1.
+    print("Heading block checks passed: hierarchy, paragraph separation, stable IDs, JSON round-trip, and plain-text copy")
 }
 
 private func paragraphInlines(_ parse: AgentMarkupParse, _ context: String) -> [AgentInline] {

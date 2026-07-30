@@ -641,6 +641,10 @@ runTranscriptFixtureCorpusChecks()
 // owned parser result and the sole swift-markdown production adapter.
 runMarkupParserChecks()
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P2.3-paragraph-heading-blocks.md —
+// paragraphs and heading hierarchy become distinct semantic blocks.
+runHeadingBlockChecks()
+
 // Ticket: docs/38-tickets/91-agent-tile-ux/P2.2-inline-markup-runs.md —
 // exact semantic inline AST, merged text, and lossless unsupported fallback.
 runInlineMarkupChecks()
