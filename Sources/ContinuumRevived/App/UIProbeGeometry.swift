@@ -365,12 +365,13 @@ enum UIProbeGeometry {
         let userPromptRows = try checkUserPromptRenderer()
         let codeRows = try checkCodeBlockRenderer()
         let operationRows = try checkToolAndCommandRenderers()
+        let exceptionalRows = try checkExceptionalRenderers()
         guard tightestDockSlack.isFinite else {
             throw fail("the approval dock was never measured — the fixture no longer opens an approval, so the derived height is ungated")
         }
         print(String(
-            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 8-dimensional measurement key gated; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, and %d tool/command states preserve scoped disclosure at 320pt with copy and inert controls; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
-            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), proseRows, userPromptRows, codeRows, operationRows,
+            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 8-dimensional measurement key gated; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, and %d exceptional states preserve request identity and opaque privacy at 320pt; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
+            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), proseRows, userPromptRows, codeRows, operationRows, exceptionalRows,
             narrowestCardRatio, ApprovalDockView.preferredHeight, tightestDockSlack
         ))
     }
@@ -928,6 +929,188 @@ enum UIProbeGeometry {
         }
         return presentations.count + 4
     }
+
+    /// P3.9 gate for explicit provider requests, exceptional content, and the
+    /// mandatory payload-blind fallback through production reusable hosts.
+    private static func checkExceptionalRenderers() throws -> Int {
+        func id(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+        func visibleStrings(in view: NSView) -> [String] {
+            let own: [String]
+            if let field = view as? NSTextField { own = [field.stringValue] }
+            else if let button = view as? NSButton { own = [button.title, button.toolTip ?? ""] }
+            else if let text = view as? NSTextView { own = [text.string] }
+            else { own = [] }
+            return own + view.subviews.flatMap(visibleStrings)
+        }
+        let registry = AgentBlockRendererRegistry.production
+        let futureKind = AgentBlockKind(rawValue: "provider.future-request-shaped")!
+        guard try registry.renderer(for: .approval) is ApprovalRenderer,
+              try registry.renderer(for: .question) is QuestionRenderer,
+              try registry.renderer(for: .error) is ErrorNoticeRenderer,
+              try registry.renderer(for: .notice) is ErrorNoticeRenderer,
+              try registry.renderer(for: .unknown) is AgentUnknownBlockRenderer,
+              try registry.renderer(for: futureKind) is AgentUnknownBlockRenderer else {
+            throw fail("exceptional semantic families did not resolve to production renderers/fallback")
+        }
+
+        var actions: [AgentRenderAction] = []
+        let context = AgentRenderContext(
+            actions: AgentRenderActions { actions.append($0) },
+            tokens: .transcript,
+            appearance: .dark
+        )
+        let approval = AgentBlock(
+            id: id("approval-first"), revision: 1, kind: .approval,
+            payload: .approval(.init(
+                requestID: "provider-request-approve",
+                prompt: [.text("Allow the provider-enforced operation?")],
+                status: .pending,
+                choices: ["Approve", "Deny"]
+            ))
+        )
+        let approvalHost = AgentBlockHostView()
+        let approvalHeight = try approvalHost.measuredHeight(for: approval, width: 320, context: context)
+        approvalHost.frame = NSRect(x: 0, y: 0, width: 320, height: approvalHeight)
+        try approvalHost.apply(block: approval, context: context)
+        approvalHost.layoutSubtreeIfNeeded()
+        guard let approvalView = approvalHost.rendererView as? AgentRequestView,
+              approvalView.choiceButtons.count == 2,
+              approvalView.accessibilityRole() == .group,
+              approvalView.choiceButtons.allSatisfy({ $0.frame.maxY <= approvalView.bounds.maxY + 0.5 }) else {
+            throw fail("explicit approval did not render bounded custom choices and accessibility")
+        }
+        let staleApprovalButton = approvalView.choiceButtons[0]
+        staleApprovalButton.performClick(nil)
+        guard actions.count == 1,
+              case .submitResponse(requestID: "provider-request-approve", value: "Approve") = actions[0] else {
+            throw fail("approval response lost its opaque provider request identity")
+        }
+
+        let secondApproval = AgentBlock(
+            id: id("approval-second"), revision: 1, kind: .approval,
+            payload: .approval(.init(
+                requestID: "provider-request-second",
+                prompt: [.text("A different explicit request")],
+                status: .inProgress,
+                choices: ["Continue"]
+            ))
+        )
+        try approvalHost.apply(block: secondApproval, context: context)
+        staleApprovalButton.performClick(nil)
+        guard actions.count == 1,
+              let secondApprovalView = approvalHost.rendererView as? AgentRequestView,
+              secondApprovalView.choiceButtons.count == 1 else {
+            throw fail("detached approval choice retained an active prior-request capability")
+        }
+        secondApprovalView.choiceButtons[0].performClick(nil)
+        guard actions.count == 2,
+              case .submitResponse(requestID: "provider-request-second", value: "Continue") = actions[1] else {
+            throw fail("reused approval host did not route only the current request")
+        }
+
+        let resolvedApproval = AgentBlock(
+            id: secondApproval.id, revision: 2, kind: .approval,
+            payload: .approval(.init(
+                requestID: "provider-request-second",
+                prompt: [.text("A different explicit request")],
+                status: .completed,
+                choices: ["Continue"]
+            ))
+        )
+        let staleResolvedButton = secondApprovalView.choiceButtons[0]
+        try approvalHost.apply(block: resolvedApproval, context: context)
+        staleResolvedButton.performClick(nil)
+        guard actions.count == 2,
+              (approvalHost.rendererView as? AgentRequestView)?.choiceButtons.isEmpty == true else {
+            throw fail("resolved approval retained a response control or stale choice action")
+        }
+
+        let question = AgentBlock(
+            id: id("question-history"), revision: 1, kind: .question,
+            payload: .question(.init(
+                prompt: [.text("Readable historical question without a request capability")],
+                status: .pending,
+                choices: ["Must not become an action"]
+            ))
+        )
+        let questionHost = AgentBlockHostView()
+        try questionHost.apply(block: question, context: context)
+        guard let questionView = questionHost.rendererView as? AgentRequestView,
+              questionView.choiceButtons.isEmpty,
+              visibleStrings(in: questionView).contains(where: { $0.contains("Readable historical question") }) else {
+            throw fail("request-less question fabricated an action or lost readable history")
+        }
+
+        let errorBlock = AgentBlock(
+            id: id("recoverable-error"), revision: 1, kind: .error,
+            payload: .error(.init(message: "The provider connection closed.", code: "transport.closed", isRecoverable: true))
+        )
+        let errorHost = AgentBlockHostView()
+        let errorHeight = try errorHost.measuredHeight(for: errorBlock, width: 320, context: context)
+        errorHost.frame = NSRect(x: 0, y: 0, width: 320, height: errorHeight)
+        try errorHost.apply(block: errorBlock, context: context)
+        errorHost.layoutSubtreeIfNeeded()
+        guard let errorView = errorHost.rendererView as? AgentErrorNoticeView,
+              !errorView.retryButton.isHidden, !errorView.copyButton.isHidden,
+              errorView.retryButton.frame.maxY <= errorView.bounds.maxY + 0.5,
+              errorView.accessibilityLabel() == "Error" else {
+            throw fail("recoverable error lost bounded retry/copy actions or accessibility")
+        }
+        let staleRetry = errorView.retryButton
+        let staleCopy = errorView.copyButton
+        staleRetry.performClick(nil)
+        staleCopy.performClick(nil)
+        guard actions.count == 4,
+              case .retry(blockID: errorBlock.id) = actions[2],
+              case .copy(blockID: errorBlock.id) = actions[3] else {
+            throw fail("error controls did not emit block-scoped retry and copy intents")
+        }
+
+        let notice = AgentBlock(
+            id: id("ordinary-notice"), revision: 1, kind: .notice,
+            payload: .notice(.init(message: [.text("Provider session resumed.")], status: .completed))
+        )
+        try errorHost.apply(block: notice, context: context)
+        staleRetry.performClick(nil)
+        staleCopy.performClick(nil)
+        guard actions.count == 4,
+              let noticeView = errorHost.rendererView as? AgentErrorNoticeView,
+              noticeView.retryButton.isHidden, noticeView.copyButton.isHidden,
+              visibleStrings(in: noticeView).contains("Provider session resumed.") else {
+            throw fail("notice acquired error actions or detached error controls remained active")
+        }
+
+        let secret = "OPAQUE-SENTINEL-PRIVATE-ARGUMENT"
+        let unknown = AgentBlock(
+            id: id("unknown-provider-block"), revision: 1, kind: futureKind,
+            payload: .opaque(.init(
+                debugLabel: "approval: \(secret)",
+                value: .object(["requestID": .string(secret), "markdown": .string("- [ ] Approve")])
+            ))
+        )
+        let unknownHost = AgentBlockHostView()
+        try unknownHost.apply(block: unknown, context: context)
+        guard let unknownView = unknownHost.rendererView as? AgentUnknownBlockView,
+              unknownView.summaryLabel.stringValue == "Unsupported content: provider.future-request-shaped",
+              unknownView.accessibilityLabel() == "Unsupported content: provider.future-request-shaped",
+              !visibleStrings(in: unknownView).contains(where: { $0.contains(secret) || $0.contains("Approve") }),
+              unknownView.subviews.compactMap({ $0 as? NSButton }).isEmpty,
+              actions.count == 4 else {
+            throw fail("unknown fallback exposed opaque/request-shaped data or fabricated an action")
+        }
+
+        let legacyRequest = try JSONDecoder().decode(
+            AgentRequestPayload.self,
+            from: Data(#"{"prompt":[{"text":{"_0":"legacy"}}],"status":"pending","choices":[]}"#.utf8)
+        )
+        guard legacyRequest.requestID == nil else {
+            throw fail("request payload did not preserve backward decoding without request identity")
+        }
+        return 6
+    }
+
+    // Negative witness (P3.9): mutate the unknown fallback summary to include
+    // opaque debugLabel; the sentinel privacy assertion above must fail.
 
     // Negative witness (P3.7): the coordinator records a final-code mutation of
     // the completed-tool default and the real geometry assertion beside this gate.

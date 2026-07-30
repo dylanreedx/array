@@ -53,6 +53,12 @@ final class AgentBlockRendererRegistry {
                     try registry.register(PlanRenderer(), for: kind)
                 } else if kind == .diff {
                     try registry.register(DiffSummaryRenderer(), for: kind)
+                } else if kind == .approval {
+                    try registry.register(ApprovalRenderer(), for: kind)
+                } else if kind == .question {
+                    try registry.register(QuestionRenderer(), for: kind)
+                } else if kind == .error || kind == .notice {
+                    try registry.register(ErrorNoticeRenderer(kind: kind), for: kind)
                 } else {
                     try registry.register(
                         AgentDeferredBlockRenderer(

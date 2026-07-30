@@ -210,14 +210,33 @@ public struct AgentDiffPayload: Codable, Equatable, Sendable {
 }
 
 public struct AgentRequestPayload: Codable, Equatable, Sendable {
+    /// Opaque provider request identity. Without it a request remains readable
+    /// history but cannot acquire response controls.
+    public var requestID: String?
     public var prompt: [AgentInline]
     public var status: AgentItemStatus
     public var choices: [String]
 
-    public init(prompt: [AgentInline], status: AgentItemStatus, choices: [String] = []) {
+    public init(
+        requestID: String? = nil,
+        prompt: [AgentInline],
+        status: AgentItemStatus,
+        choices: [String] = []
+    ) {
+        self.requestID = requestID
         self.prompt = prompt
         self.status = status
         self.choices = choices
+    }
+
+    private enum CodingKeys: String, CodingKey { case requestID, prompt, status, choices }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        requestID = try values.decodeIfPresent(String.self, forKey: .requestID)
+        prompt = try values.decode([AgentInline].self, forKey: .prompt)
+        status = try values.decode(AgentItemStatus.self, forKey: .status)
+        choices = try values.decodeIfPresent([String].self, forKey: .choices) ?? []
     }
 }
 

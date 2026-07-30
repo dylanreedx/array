@@ -9,7 +9,8 @@ enum AgentRenderAction {
     case copy(blockID: AgentNodeID)
     case activateLink(blockID: AgentNodeID, url: URL)
     case openDiff(blockID: AgentNodeID)
-    case submitResponse(blockID: AgentNodeID, value: String)
+    case retry(blockID: AgentNodeID)
+    case submitResponse(requestID: String, value: String)
 }
 
 struct AgentRenderActions {
@@ -178,31 +179,5 @@ final class AgentDeferredBlockRenderer: AgentBlockRendering {
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
         view.setAccessibilityLabel(safeLabel)
-    }
-}
-
-/// Mandatory safe renderer for unregistered extension/provider kinds. Its label
-/// is intentionally generic: even a debug label can contain untrusted detail.
-@MainActor
-final class AgentUnknownBlockRenderer: AgentBlockRendering {
-    let kind: AgentBlockKind = .unknown
-
-    func makeView() -> NSView {
-        let view = NSView(frame: .zero)
-        view.setAccessibilityElement(true)
-        view.setAccessibilityRole(.group)
-        return view
-    }
-
-    func update(view: NSView, block: AgentBlock, context: AgentRenderContext) {
-        updateAccessibility(view: view, block: block, context: context)
-    }
-
-    func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
-        24
-    }
-
-    func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
-        view.setAccessibilityLabel("Unsupported agent content")
     }
 }
