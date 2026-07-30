@@ -41,13 +41,17 @@ final class AgentBlockRendererRegistry {
             // 3 renderer tickets replace these deferred renderers one kind at a
             // time; transcript hosts and tiles remain kind-agnostic.
             for kind in builtInKinds where kind != .unknown {
-                try registry.register(
-                    AgentDeferredBlockRenderer(
-                        kind: kind,
-                        safeLabel: "Agent \(kind.rawValue) content"
-                    ),
-                    for: kind
-                )
+                if AssistantProseRenderer.supportedKinds.contains(kind) {
+                    try registry.register(AssistantProseRenderer(kind: kind), for: kind)
+                } else {
+                    try registry.register(
+                        AgentDeferredBlockRenderer(
+                            kind: kind,
+                            safeLabel: "Agent \(kind.rawValue) content"
+                        ),
+                        for: kind
+                    )
+                }
             }
             try registry.setFallback(AgentUnknownBlockRenderer())
             try registry.freeze()

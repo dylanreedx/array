@@ -361,15 +361,108 @@ enum UIProbeGeometry {
             throw fail("probed \(probed) width/appearance pairs, expected \(probeWidths.count * 2)")
         }
         try checkReusableAgentBlockHost()
+        let proseRows = try checkAssistantProseRenderer()
         guard tightestDockSlack.isFinite else {
             throw fail("the approval dock was never measured — the fixture no longer opens an approval, so the derived height is ungated")
         }
         print(String(
-            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 6-dimensional measurement key gated; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
-            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), narrowestCardRatio,
+            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 6-dimensional measurement key gated; assistant prose wraps %d semantic rows at 320pt without clipping/ambiguity; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
+            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), proseRows, narrowestCardRatio,
             ApprovalDockView.preferredHeight, tightestDockSlack
         ))
     }
+
+    /// Deterministic P3.3 gate over the real renderer and reusable host seam.
+    private static func checkAssistantProseRenderer() throws -> Int {
+        func id(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+        func paragraph(_ value: String, _ text: String) -> AgentBlock {
+            AgentBlock(id: id(value), revision: 1, kind: .paragraph, payload: .paragraph([.text(text)]))
+        }
+
+        let heading = AgentBlock(
+            id: id("prose-heading"), revision: 1, kind: .heading,
+            payload: .heading(level: 2, content: [.text("Implementation notes")])
+        )
+        let item = AgentBlock(
+            id: id("prose-item"), revision: 1, kind: .listItem, payload: .listItem,
+            children: [paragraph(
+                "prose-item-text",
+                "Keep semantic identity stable while this deliberately long list item wraps at the narrow reading width."
+            )]
+        )
+        let list = AgentBlock(
+            id: id("prose-list"), revision: 1, kind: .list,
+            payload: .list(AgentListPayload(ordered: false)), children: [item]
+        )
+        let quote = AgentBlock(
+            id: id("prose-quote"), revision: 1, kind: .quote, payload: .quote,
+            children: [heading, paragraph(
+                "prose-paragraph",
+                "Assistant prose is the quiet reading path and must wrap cleanly without becoming a decorative card at 320 points."
+            ), list]
+        )
+
+        for kind in AssistantProseRenderer.supportedKinds {
+            guard try AgentBlockRendererRegistry.production.renderer(for: kind) is AssistantProseRenderer else {
+                throw fail("production registry did not select AssistantProseRenderer for \(kind.rawValue)")
+            }
+        }
+        let context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
+
+        let host = AgentBlockHostView()
+        let height = try host.measuredHeight(for: quote, width: 320, context: context)
+        guard height > CGFloat(Metrics.lineHeight(for: .body)) * 3 else {
+            throw fail("assistant prose narrow fixture did not wrap; measured only \(height)pt")
+        }
+        host.frame = NSRect(x: 0, y: 0, width: 320, height: height)
+        try host.apply(block: quote, context: context)
+        host.layoutSubtreeIfNeeded()
+        guard let prose = host.rendererView as? AssistantProseView else {
+            throw fail("assistant prose registry did not vend AssistantProseView")
+        }
+        guard prose.textFields.count == 3, prose.textFields.allSatisfy(\.isSelectable) else {
+            throw fail("assistant prose did not expose three selectable semantic rows")
+        }
+        guard prose.isFlipped,
+              zip(prose.textFields, prose.textFields.dropFirst()).allSatisfy({
+                  $0.frame.minY < $1.frame.minY
+              }) else {
+            throw fail("assistant prose did not preserve semantic rows in visual top-to-bottom order")
+        }
+        let headingRole = NSAccessibility.Role(rawValue: "AXHeading")
+        let listItemRole = NSAccessibility.Role(rawValue: "AXListItem")
+        guard prose.textFields.contains(where: { $0.accessibilityRole() == headingRole }),
+              prose.textFields.contains(where: { $0.accessibilityRole() == listItemRole }) else {
+            throw fail("assistant prose lost heading or list-item accessibility semantics")
+        }
+        let requiredInset = CGFloat(Inset.card.left)
+        guard AssistantProseView.horizontalReadingInset == requiredInset,
+              prose.textFields.allSatisfy({
+                  $0.frame.minX == requiredInset
+                      && $0.frame.maxX <= prose.bounds.maxX - requiredInset + 0.5
+                      && $0.frame.maxY <= prose.bounds.maxY + 0.5
+              }) else {
+            throw fail("assistant prose rows clipped or escaped the horizontal reading inset at 320pt")
+        }
+        try expectNoAmbiguousLayout([(host, "prose host"), (prose, "prose view")], label: "assistant prose@320pt")
+
+        let listHost = AgentBlockHostView()
+        let listHeight = try listHost.measuredHeight(for: list, width: 320, context: context)
+        listHost.frame = NSRect(x: 0, y: 0, width: 320, height: listHeight)
+        try listHost.apply(block: list, context: context)
+        listHost.layoutSubtreeIfNeeded()
+        guard let listView = listHost.rendererView as? AssistantProseView,
+              listView.accessibilityRole() == .list else {
+            throw fail("assistant prose list root did not expose the list accessibility role")
+        }
+        return prose.textFields.count + listView.textFields.count
+    }
+
+    // Negative witness (P3.3, exercised 2026-07-30): changed
+    // `horizontalReadingInset` to 0, rebuilt, then ran
+    // `.build/debug/continuum-revived --ui-geometry-check`; exit 1:
+    // "FAIL: assistant prose rows clipped or escaped the horizontal reading inset
+    // at 320pt". The mutation was then reverted and the same check passed.
 
     /// Deterministic P3.2 gate. A durable final-code mutation witness is recorded
     /// by the coordinator alongside this check's positive evidence.

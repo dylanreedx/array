@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import ContinuumRevivedFileTree
@@ -1392,8 +1393,43 @@ enum UIProbeAppearance {
 
     // MARK: - Entry point
 
+    /// P3.3: assistant prose inherits tileBody instead of painting a card. The
+    /// same real renderer view is updated across both themes so stale text color
+    /// and accidental layer decoration are both observable.
+    private static func runAssistantProseAppearanceCheck() throws -> Int {
+        let block = AgentBlock(
+            id: AgentNodeID(rawValue: "appearance-assistant-prose")!, revision: 1, kind: .paragraph,
+            payload: .paragraph([.text("A quiet selectable assistant response")])
+        )
+        let renderer = AssistantProseRenderer(kind: .paragraph)
+        guard let view = renderer.makeView() as? AssistantProseView else {
+            throw fail("assistant prose renderer did not vend AssistantProseView")
+        }
+        var assertions = 0
+        for theme in [TokenTheme.light, .dark] {
+            let context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: theme)
+            renderer.update(view: view, block: block, context: context)
+            renderer.updateAccessibility(view: view, block: block, context: context)
+            guard view.layer == nil, !view.wantsLayer else {
+                throw fail("assistant prose paints a layer instead of inheriting tileBody in \(theme)")
+            }
+            guard view.textFields.count == 1, let field = view.textFields.first,
+                  field.isSelectable, !field.isBordered, !field.drawsBackground else {
+                throw fail("assistant prose added title/card chrome or lost selectable text in \(theme)")
+            }
+            let actual = field.textColor?.usingColorSpace(.sRGB)
+            let expected = TextToken.textPrimary.color.nsColor(for: theme).usingColorSpace(.sRGB)
+            guard actual == expected else {
+                throw fail("assistant prose primary text token mismatch in \(theme)")
+            }
+            assertions += 3
+        }
+        return assertions
+    }
+
     /// Called from `UIProbe.runUIProbeChecks` (`--ui-probe-check`).
     static func runAppearanceChecks() throws {
+        let proseAssertions = try runAssistantProseAppearanceCheck()
         let sweep = try runProductionSweep()
         let hostile = try runHostileCurrentAppearanceCheck()
         let witness = try runTokenFixtureCheck()
@@ -1408,6 +1444,7 @@ enum UIProbeAppearance {
         guard NSApp?.appearance?.name == .darkAqua else {
             throw fail("appearance checks leaked '\(NSApp?.appearance?.name.rawValue ?? "nil")' onto NSApp")
         }
+        print("UIProbeAppearance: \(proseAssertions) assistant-prose assertions hold tileBody inheritance, primary text, selection, and no card chrome in both appearances")
         print("UIProbeAppearance: \(sweep.views) TokenThemed views, \(sweep.slots) layer colours sentinelled and re-applied across a live flip (\(sweep.changed) re-resolved to a different value); \(hostile) hostile-current-appearance assertions held; token fixture holds both leaves; stale-fixture witness failed as required")
         print("UIProbeAppearance: witness message — \(witness)")
     }
