@@ -43,6 +43,8 @@ final class AgentBlockRendererRegistry {
             for kind in builtInKinds where kind != .unknown {
                 if AssistantProseRenderer.supportedKinds.contains(kind) {
                     try registry.register(AssistantProseRenderer(kind: kind), for: kind)
+                } else if kind == .fencedCode {
+                    try registry.register(CodeBlockRenderer(), for: kind)
                 } else {
                     try registry.register(
                         AgentDeferredBlockRenderer(

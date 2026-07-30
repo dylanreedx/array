@@ -363,12 +363,13 @@ enum UIProbeGeometry {
         try checkReusableAgentBlockHost()
         let proseRows = try checkAssistantProseRenderer()
         let userPromptRows = try checkUserPromptRenderer()
+        let codeRows = try checkCodeBlockRenderer()
         guard tightestDockSlack.isFinite else {
             throw fail("the approval dock was never measured — the fixture no longer opens an approval, so the derived height is ungated")
         }
         print(String(
-            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 7-dimensional measurement key gated; assistant prose wraps %d semantic rows and user prompt wraps %d semantic rows at 320pt without clipping/ambiguity or bubble narrowing; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
-            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), proseRows, userPromptRows,
+            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 7-dimensional measurement key gated; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, and fenced code preserves %d exact lines at 320pt with in-place streaming, dual-axis scrolling, capped height, copy, and inert controls; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
+            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), proseRows, userPromptRows, codeRows,
             narrowestCardRatio, ApprovalDockView.preferredHeight, tightestDockSlack
         ))
     }
@@ -566,6 +567,154 @@ enum UIProbeGeometry {
             ))
         }
     }
+
+    /// Deterministic P3.6 gate over the real TextKit code surface. This is direct
+    /// renderer coverage while the transcript collection integration remains a
+    /// later ticket; it still uses the frozen renderer protocol and semantic AST.
+    private static func checkCodeBlockRenderer() throws -> Int {
+        let id = AgentNodeID(rawValue: "code-block-geometry")!
+        let original = "let greeting = \"hello\"\n    print(greeting)\n"
+        let streamed = original + "\n"
+        guard try AgentBlockRendererRegistry.production.renderer(for: .fencedCode) is CodeBlockRenderer else {
+            throw fail("production registry did not resolve CodeBlockRenderer for fenced code")
+        }
+
+        var copiedActions: [AgentNodeID] = []
+        let context = AgentRenderContext(
+            actions: AgentRenderActions { action in
+                if case let .copy(blockID) = action { copiedActions.append(blockID) }
+            }, tokens: .transcript, appearance: .dark
+        )
+        let open = AgentBlock(
+            id: id, revision: 1, kind: .fencedCode,
+            payload: .fencedCode(.init(language: "swift", code: original, isComplete: false))
+        )
+        let revised = AgentBlock(
+            id: id, revision: 2, kind: .fencedCode,
+            payload: .fencedCode(.init(language: "swift", code: streamed, isComplete: false))
+        )
+        let host = AgentBlockHostView()
+        host.frame = NSRect(x: 0, y: 0, width: 320, height: 160)
+        try host.apply(block: open, context: context)
+        guard let view = host.rendererView as? CodeBlockView else {
+            throw fail("production block host did not vend CodeBlockView for fenced code")
+        }
+        host.layoutSubtreeIfNeeded()
+        let textIdentity = ObjectIdentifier(view.codeTextView)
+        view.codeTextView.setSelectedRange(NSRange(location: 4, length: 8))
+        try host.apply(block: revised, context: context)
+        guard ObjectIdentifier(view.codeTextView) == textIdentity,
+              view.codeTextView.string == streamed,
+              view.codeTextView.selectedRange() == NSRange(location: 4, length: 8) else {
+            throw fail("one-character fenced-code update recreated TextKit, changed bytes, or lost selection")
+        }
+        let expectedSpan = HighlightSpan(range: NSRange(location: 0, length: (streamed as NSString).length))
+        guard view.codeTextView.appliedSpans == [expectedSpan] else {
+            throw fail("plain code highlighter did not cover the exact UTF-16 code range")
+        }
+
+        struct HostileCodeHighlighter: CodeHighlighting {
+            func spans(language: String?, code: String) -> [HighlightSpan] {
+                let length = (code as NSString).length
+                return [
+                    HighlightSpan(range: NSRange(location: -1, length: 1)),
+                    HighlightSpan(range: NSRange(location: 0, length: -1)),
+                    HighlightSpan(range: NSRange(location: length, length: 1)),
+                    HighlightSpan(range: NSRange(location: Int.max, length: 1)),
+                ]
+            }
+        }
+        let hostileTextView = CodeTextView(highlighter: HostileCodeHighlighter())
+        hostileTextView.apply(code: original, language: "swift", context: context)
+        guard hostileTextView.appliedSpans.isEmpty, hostileTextView.string == original else {
+            throw fail("code highlighter accepted a negative, overflowing, or out-of-bounds span")
+        }
+        guard view.streamingLabel.isHidden == false,
+              !view.codeTextView.string.contains("Streaming"),
+              view.languageLabel.stringValue == "swift" else {
+            throw fail("incomplete fenced code changed code bytes or lost its subtle state/language labels")
+        }
+
+        var appearanceFills: [NSColor] = []
+        for (name, theme) in [(NSAppearance.Name.aqua, TokenTheme.light), (.darkAqua, .dark)] {
+            view.appearance = NSAppearance(named: name)
+            view.applyTokens()
+            guard let fill = view.layer?.backgroundColor.flatMap(NSColor.init(cgColor:)),
+                  let textColor = view.codeTextView.textColor,
+                  fill.isEqual(context.tokens.codeSurface.color.nsColor(for: theme)),
+                  textColor.isEqual(context.tokens.primaryText.color.nsColor(for: theme)) else {
+                throw fail("code block did not repaint token fill/text for \(name.rawValue)")
+            }
+            appearanceFills.append(fill)
+        }
+        guard appearanceFills.count == 2, !appearanceFills[0].isEqual(appearanceFills[1]) else {
+            throw fail("code block light/dark appearance flip retained a stale surface")
+        }
+
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("continuum.code-block-check.\(UUID().uuidString)"))
+        view.copyEntireBlock(to: pasteboard)
+        guard pasteboard.string(forType: .string) == streamed else {
+            throw fail("copy affordance did not preserve indentation or trailing newline bytes")
+        }
+        let buttonTitles = view.subviews.compactMap({ ($0 as? NSButton)?.title })
+        guard view.copyButton.isBordered == false,
+              view.copyButton.accessibilityLabel() == "Copy code",
+              buttonTitles.allSatisfy({ $0 != "Execute" }) else {
+            throw fail("code block exposed Aqua/Execute chrome or lost the named copy action")
+        }
+        view.copyButton.performClick(nil)
+        guard NSPasteboard.general.string(forType: .string) == streamed,
+              copiedActions == [id] else {
+            throw fail("visible copy affordance did not preserve exact code or report its semantic action")
+        }
+
+        let longLine = String(repeating: "0123456789", count: 100)
+        let longCode = (0..<80).map { "\($0): \(longLine)" }.joined(separator: "\n") + "\n"
+        let longBlock = AgentBlock(
+            id: id, revision: 3, kind: .fencedCode,
+            payload: .fencedCode(.init(language: nil, code: longCode, isComplete: true))
+        )
+        let height = try host.measuredHeight(for: longBlock, width: 320, context: context)
+        guard CodeBlockView.maximumExpandedHeight == 320, height == 320 else {
+            throw fail("long fenced code was not capped at 320.0pt (measured \(height))")
+        }
+        host.frame = NSRect(x: 0, y: 0, width: 320, height: height)
+        try host.apply(block: longBlock, context: context)
+        host.layoutSubtreeIfNeeded()
+        view.layoutSubtreeIfNeeded()
+        guard view.scrollView.hasHorizontalScroller, view.scrollView.hasVerticalScroller,
+              view.codeTextView.frame.width > view.scrollView.contentSize.width,
+              view.codeTextView.frame.height > view.scrollView.contentSize.height,
+              view.streamingLabel.isHidden,
+              view.codeTextView.string == longCode else {
+            throw fail("long fenced code did not retain exact bytes inside dual-axis internal scrolling")
+        }
+        guard view.accessibilityRole() == .group,
+              view.accessibilityLabel() == "Code block",
+              view.accessibilityChildren()?.contains(where: { ($0 as? NSButton)?.accessibilityLabel() == "Copy code" }) == true else {
+            throw fail("code block accessibility lost its semantic group or copy action")
+        }
+        try expectNoAmbiguousLayout(
+            [(view, "code block"), (view.scrollView, "code scroll view")], label: "code block@320pt"
+        )
+        guard view.languageLabel.frame.minX >= view.bounds.minX,
+              view.copyButton.frame.maxX <= view.bounds.maxX,
+              view.scrollView.frame.maxY <= view.bounds.maxY else {
+            throw fail("code block header or scroll viewport clipped at 320pt")
+        }
+        guard copiedActions == [id] else {
+            throw fail("code block reported an unexpected agent action during layout")
+        }
+        return longCode.reduce(into: 1) { count, character in
+            if character == "\n" { count += 1 }
+        }
+    }
+
+    // Negative witness (P3.6, exercised 2026-07-30): changed
+    // `CodeBlockView.maximumExpandedHeight` to 640, rebuilt, then ran
+    // `.build/debug/continuum-revived --ui-geometry-check`; exit 1:
+    // "FAIL: long fenced code was not capped at 320.0pt (measured 640.0)".
+    // The mutation was reverted and the same check passed.
 
     // Negative witness (P3.4, exercised 2026-07-30): changed
     // `UserPromptView.layout()` to right-align `proseView` at 72% of the surface,
