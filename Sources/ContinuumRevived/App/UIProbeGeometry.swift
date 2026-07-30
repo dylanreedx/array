@@ -1,4 +1,6 @@
 import AppKit
+import ContinuumRevivedAgentContent
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
 /// Geometry assertions over a `UIProbe`-rendered tree — layout bugs caught with
@@ -358,14 +360,142 @@ enum UIProbeGeometry {
         guard probed == probeWidths.count * 2 else {
             throw fail("probed \(probed) width/appearance pairs, expected \(probeWidths.count * 2)")
         }
+        try checkReusableAgentBlockHost()
         guard tightestDockSlack.isFinite else {
             throw fail("the approval dock was never measured — the fixture no longer opens an approval, so the derived height is ungated")
         }
         print(String(
-            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
+            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 6-dimensional measurement key gated; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
             probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), narrowestCardRatio,
             ApprovalDockView.preferredHeight, tightestDockSlack
         ))
+    }
+
+    /// Deterministic P3.2 gate. A durable final-code mutation witness is recorded
+    /// by the coordinator alongside this check's positive evidence.
+    private static func checkReusableAgentBlockHost() throws {
+        let renderer = BlockHostProbeRenderer(kind: .paragraph)
+        let headingRenderer = BlockHostProbeRenderer(kind: .heading)
+        let registry = AgentBlockRendererRegistry()
+        try registry.register(renderer, for: .paragraph)
+        try registry.register(headingRenderer, for: .heading)
+        try registry.setFallback(AgentUnknownBlockRenderer())
+        try registry.freeze()
+
+        var actions: [String] = []
+        func context(_ name: String, appearance: TokenTheme) -> AgentRenderContext {
+            AgentRenderContext(
+                actions: AgentRenderActions { action in
+                    if case let .copy(blockID) = action { actions.append("\(name):\(blockID.rawValue)") }
+                },
+                tokens: .transcript,
+                appearance: appearance
+            )
+        }
+        let firstID = AgentNodeID(rawValue: "geometry-host-first")!
+        let secondID = AgentNodeID(rawValue: "geometry-host-second")!
+        let first = AgentBlock(id: firstID, revision: 1, kind: .paragraph, payload: .paragraph([.text("first")]))
+        let revised = AgentBlock(id: firstID, revision: 2, kind: .paragraph, payload: .paragraph([.text("revised")]))
+        let second = AgentBlock(id: secondID, revision: 1, kind: .paragraph, payload: .paragraph([.text("second")]))
+        let changedKind = AgentBlock(
+            id: secondID, revision: 2, kind: .heading,
+            payload: .heading(level: 2, content: [.text("second heading")])
+        )
+        let dark = context("old", appearance: .dark)
+
+        let host = AgentBlockHostView(registry: registry)
+        try host.apply(block: first, context: dark)
+        guard let initialView = host.rendererView else { throw fail("block host did not install a renderer view") }
+        let initialIdentity = ObjectIdentifier(initialView)
+        try host.apply(block: revised, context: dark)
+        guard host.rendererView.map(ObjectIdentifier.init) == initialIdentity else {
+            throw fail("same block ID/kind revision update replaced its renderer view")
+        }
+
+        host.setInteractionState(hovered: true, selected: true, disclosureExpanded: true)
+        let staleView = initialView
+        try host.apply(block: second, context: context("new", appearance: .dark))
+        guard let replacement = host.rendererView as? BlockHostProbeView,
+              ObjectIdentifier(replacement) != initialIdentity else {
+            throw fail("reusing a block host for another ID retained its renderer view")
+        }
+        guard replacement.renderedText == "second",
+              replacement.textField.stringValue != "revised" else {
+            throw fail("reusing a block host left stale text in its renderer view: \(replacement.renderedText)")
+        }
+        guard !host.isBlockHovered, !host.isBlockSelected, !host.isDisclosureExpanded else {
+            throw fail("reusing a block host leaked hover, selection, or disclosure state")
+        }
+        guard staleView.accessibilityLabel() == nil, staleView.superview == nil else {
+            throw fail("reusing a block host left stale accessibility content or its old view behind")
+        }
+        (staleView as? BlockHostProbeView)?.invokeCopy()
+        guard actions.isEmpty else {
+            throw fail("a detached renderer view retained an active action: \(actions)")
+        }
+        replacement.invokeCopy()
+        guard actions == ["new:\(secondID.rawValue)"] else {
+            throw fail("reusing a block host retained a stale render action: \(actions)")
+        }
+
+        host.setInteractionState(hovered: true, selected: true, disclosureExpanded: true)
+        let preKindChangeIdentity = ObjectIdentifier(replacement)
+        try host.apply(block: changedKind, context: context("heading", appearance: .dark))
+        guard let headingView = host.rendererView as? BlockHostProbeView,
+              ObjectIdentifier(headingView) != preKindChangeIdentity,
+              host.representedKind == .heading,
+              headingView.renderedText == "second heading" else {
+            throw fail("same-ID kind change did not replace and refresh its renderer view")
+        }
+        guard !host.isBlockHovered, !host.isBlockSelected, !host.isDisclosureExpanded else {
+            throw fail("same-ID kind change leaked hover, selection, or disclosure state")
+        }
+        replacement.invokeCopy()
+        guard actions == ["new:\(secondID.rawValue)"] else {
+            throw fail("a kind-superseded renderer view retained an active action: \(actions)")
+        }
+        headingView.invokeCopy()
+        guard actions == ["new:\(secondID.rawValue)", "heading:\(secondID.rawValue)"] else {
+            throw fail("same-ID kind change retained a stale render action: \(actions)")
+        }
+
+        let firstAsHeading = AgentBlock(
+            id: firstID, revision: 1, kind: .heading,
+            payload: .heading(level: 2, content: [.text("first heading")])
+        )
+        let cache = AgentBlockMeasurementCache()
+        _ = cache.height(for: first, width: 100.1, context: dark, renderer: renderer)
+        _ = cache.height(for: first, width: 100.2, context: dark, renderer: renderer)
+        _ = cache.height(for: first, width: 101.2, context: dark, renderer: renderer)
+        _ = cache.height(for: revised, width: 101.2, context: dark, renderer: renderer)
+        _ = cache.height(for: revised, width: 101.2, context: context("light", appearance: .light), renderer: renderer)
+        _ = cache.height(
+            for: revised, width: 101.2, context: dark,
+            contentSizePolicy: AgentContentSizePolicy(scaleBucket: 125), renderer: renderer
+        )
+        _ = cache.height(for: firstAsHeading, width: 100.1, context: dark, renderer: headingRenderer)
+        try expectIsolatedBlockMeasurements(
+            cacheCount: cache.cachedMeasurementCount,
+            rendererCount: renderer.measureCount + headingRenderer.measureCount
+        )
+
+        host.resetForReuse()
+        guard host.rendererView == nil, host.representedID == nil, host.representedRevision == nil else {
+            throw fail("resetForReuse retained represented block state")
+        }
+        headingView.invokeCopy()
+        guard actions == ["new:\(secondID.rawValue)", "heading:\(secondID.rawValue)"] else {
+            throw fail("resetForReuse left its detached renderer action active: \(actions)")
+        }
+    }
+
+    private static func expectIsolatedBlockMeasurements(
+        cacheCount: Int,
+        rendererCount: Int
+    ) throws {
+        guard cacheCount == 6, rendererCount == 6 else {
+            throw fail("block measurement cache collapsed ID/kind/revision/width/appearance/content-size keys (cache \(cacheCount), renderer \(rendererCount), expected 6)")
+        }
     }
 
     // MARK: - The derived approval-dock height (P1.10)
@@ -478,4 +608,76 @@ enum UIProbeGeometry {
     // the fill-ratio gate first, and no edit found so far makes the scoped
     // transcript column report ambiguity without also breaking a stronger
     // assertion. It is kept as a cheap structural assertion, not a proven gate.
+}
+
+@MainActor
+private final class BlockHostProbeView: NSView {
+    let textField = NSTextField(labelWithString: "")
+    var blockID: AgentNodeID?
+    var actions: AgentRenderActions = .disabled
+    var renderedText: String {
+        get { textField.stringValue }
+        set { textField.stringValue = newValue }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        textField.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(textField)
+        NSLayoutConstraint.activate([
+            textField.leadingAnchor.constraint(equalTo: leadingAnchor),
+            textField.trailingAnchor.constraint(equalTo: trailingAnchor),
+            textField.topAnchor.constraint(equalTo: topAnchor),
+            textField.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func invokeCopy() {
+        guard let blockID else { return }
+        actions.perform(.copy(blockID: blockID))
+    }
+}
+
+@MainActor
+private final class BlockHostProbeRenderer: AgentBlockRendering {
+    let kind: AgentBlockKind
+    private(set) var measureCount = 0
+
+    init(kind: AgentBlockKind) {
+        self.kind = kind
+    }
+
+    func makeView() -> NSView {
+        let view = BlockHostProbeView(frame: .zero)
+        view.setAccessibilityElement(true)
+        view.setAccessibilityRole(.group)
+        return view
+    }
+
+    func update(view: NSView, block: AgentBlock, context: AgentRenderContext) {
+        guard let view = view as? BlockHostProbeView else { return }
+        view.blockID = block.id
+        view.actions = context.actions
+        switch block.payload {
+        case let .paragraph(content), let .heading(_, content):
+            view.renderedText = content.compactMap { inline in
+                if case let .text(text) = inline { return text }
+                return nil
+            }.joined()
+        default:
+            view.renderedText = "unexpected payload"
+        }
+    }
+
+    func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
+        measureCount += 1
+        return width + CGFloat(block.revision) + CGFloat(context.appearance == .dark ? 1 : 2)
+    }
+
+    func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
+        view.setAccessibilityLabel("probe \(block.id.rawValue) revision \(block.revision)")
+    }
 }
