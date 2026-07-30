@@ -138,7 +138,7 @@ final class CommandOutputView: NSView {
             y: (Self.rowHeight - buttonSide) / 2,
             width: buttonSide, height: buttonSide
         )
-        let statusWidth = min(statusLabel.intrinsicContentSize.width, max(0, bounds.width * 0.42))
+        let statusWidth = min(ceil(statusLabel.intrinsicContentSize.width) + CGFloat(Space.s), max(0, bounds.width * 0.46))
         statusLabel.frame = NSRect(
             x: max(iconView.frame.maxX, bounds.maxX - inset - statusWidth),
             y: (Self.rowHeight - statusLabel.intrinsicContentSize.height) / 2,

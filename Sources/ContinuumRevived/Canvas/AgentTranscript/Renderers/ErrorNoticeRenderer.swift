@@ -85,7 +85,7 @@ final class AgentErrorNoticeView: NSView {
         statusLabel.font = NSFont.token(.caption)
         messageLabel.font = NSFont.token(.body)
         messageLabel.maximumNumberOfLines = 5
-        messageLabel.lineBreakMode = .byTruncatingTail
+        messageLabel.lineBreakMode = .byWordWrapping
         messageLabel.isSelectable = true
         metadataLabel.font = NSFont.token(.captionMono)
         metadataLabel.lineBreakMode = .byTruncatingTail
@@ -155,7 +155,9 @@ final class AgentErrorNoticeView: NSView {
     override func layout() {
         super.layout()
         let inset = Self.horizontalInset
-        let statusWidth = statusLabel.isHidden ? 0 : min(statusLabel.intrinsicContentSize.width, max(0, bounds.width * 0.34))
+        let statusWidth = statusLabel.isHidden
+            ? 0
+            : min(ceil(statusLabel.intrinsicContentSize.width) + CGFloat(Space.s), max(0, bounds.width * 0.40))
         statusLabel.frame = NSRect(
             x: max(inset, bounds.width - inset - statusWidth),
             y: (Self.headerHeight - statusLabel.intrinsicContentSize.height) / 2,

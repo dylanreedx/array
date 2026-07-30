@@ -58,7 +58,7 @@ final class AgentDiffSummaryView: NSView {
         countsLabel.lineBreakMode = .byTruncatingTail
         summaryLabel.font = NSFont.token(.body)
         summaryLabel.maximumNumberOfLines = 2
-        summaryLabel.lineBreakMode = .byTruncatingTail
+        summaryLabel.lineBreakMode = .byWordWrapping
         summaryLabel.isSelectable = true
         overflowLabel.font = NSFont.token(.caption)
         openReviewButton.target = self
@@ -111,7 +111,7 @@ final class AgentDiffSummaryView: NSView {
     override func layout() {
         super.layout()
         let inset = Self.horizontalInset
-        let countsWidth = min(countsLabel.intrinsicContentSize.width, max(0, bounds.width * 0.46))
+        let countsWidth = min(ceil(countsLabel.intrinsicContentSize.width) + CGFloat(Space.s), max(0, bounds.width * 0.50))
         countsLabel.frame = NSRect(
             x: max(inset, bounds.width - inset - countsWidth),
             y: (Self.headerHeight - countsLabel.intrinsicContentSize.height) / 2,

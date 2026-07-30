@@ -69,7 +69,7 @@ final class ToolCallView: NSView {
         statusLabel.lineBreakMode = .byTruncatingTail
         summaryLabel.font = NSFont.token(.body)
         summaryLabel.maximumNumberOfLines = 4
-        summaryLabel.lineBreakMode = .byTruncatingTail
+        summaryLabel.lineBreakMode = .byWordWrapping
         summaryLabel.isSelectable = true
 
         addSubview(disclosureButton)
@@ -128,7 +128,7 @@ final class ToolCallView: NSView {
             y: (Self.rowHeight - buttonSide) / 2,
             width: buttonSide, height: buttonSide
         )
-        let statusWidth = min(statusLabel.intrinsicContentSize.width, max(0, bounds.width * 0.34))
+        let statusWidth = min(ceil(statusLabel.intrinsicContentSize.width) + CGFloat(Space.s), max(0, bounds.width * 0.40))
         statusLabel.frame = NSRect(
             x: max(iconView.frame.maxX, bounds.maxX - inset - statusWidth),
             y: (Self.rowHeight - statusLabel.intrinsicContentSize.height) / 2,

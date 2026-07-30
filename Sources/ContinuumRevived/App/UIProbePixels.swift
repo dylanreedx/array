@@ -490,6 +490,34 @@ enum UIProbePixels {
             )
         }
 
+        // P3.12 production transcript review states. Pixel floors are per render,
+        // so an empty active/failure/request state cannot hide behind mixed prose.
+        var transcriptReview = Sweep()
+        let reviewStates: [(AgentTranscriptReviewState, Double)] = [
+            (.mixed, 320), (.activeTool, 480), (.failedTool, 480), (.approval, 480),
+        ]
+        for (state, width) in reviewStates {
+            for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+                let size = NSSize(width: width, height: 720)
+                let theme: TokenTheme = appearanceName == .darkAqua ? .dark : .light
+                let label = "semanticTranscript.\(state.rawValue).\(appearanceName.rawValue)"
+                let probe = try UIProbe.render(
+                    UIProbe.Spec(id: label, size: size, appearance: appearanceName)
+                ) {
+                    LabCatalog.makeTranscriptReviewSurface(state: state, size: size, theme: theme)
+                }
+                let metrics = VisualSnapshot.metrics(of: probe.hostRep)
+                guard !metrics.isBlank else {
+                    throw fail("\(label): semantic transcript review bitmap is blank")
+                }
+                let stateSweep = try sweep(probe, label: label)
+                guard stateSweep.textProbes >= 2 else {
+                    throw fail("\(label): only \(stateSweep.textProbes) visible text rect(s), needs >= 2")
+                }
+                transcriptReview.merge(stateSweep)
+            }
+        }
+
         guard NSApp.appearance?.name == .darkAqua else {
             throw fail("probing mutated NSApp.appearance to '\(NSApp.appearance?.name.rawValue ?? "nil")'")
         }
@@ -505,6 +533,10 @@ enum UIProbePixels {
         print(String(
             format: "UIProbePixels: prose presentation gated in both appearances; tightest user-vs-assistant fill luminance delta %.3f, needs >= %.3f",
             tightestProseDelta, minimumProseFillLuminanceDelta
+        ))
+        print(String(
+            format: "UIProbePixels: semantic transcript review gated %d visible text rects across mixed/narrow, active, failed, and approval states in both appearances (worst spread %.3f)",
+            transcriptReview.textProbes, transcriptReview.worstText.spread
         ))
     }
 

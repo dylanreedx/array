@@ -24,6 +24,11 @@ enum LabContent {
     /// `preferredSize` fixes the render size (centered); nil pins it to fill.
     case staticCard(preferredSize: NSSize?, make: () -> NSView)
 
+    /// A supervised design-review surface. It remains interactive in Component
+    /// Lab but has its own width/appearance baseline sweep, so it cannot silently
+    /// alter the legacy static-card baseline catalogue.
+    case reviewSurface(preferredSize: NSSize, make: () -> NSView)
+
     /// A live, interactive canvas you operate for real (spawn / drag / resize /
     /// zoom). `configure` seeds the initial tiles; the sandbox always provides a
     /// spawn toolbar + zoom controls. Fills the host.
@@ -45,6 +50,14 @@ struct LabEntry {
     let content: LabContent
 }
 
+enum AgentTranscriptReviewState: String, CaseIterable {
+    case mixed
+    case long
+    case activeTool = "active-tool"
+    case failedTool = "failed-tool"
+    case approval
+}
+
 // MARK: - Fixtures
 
 /// Canned models so cards render with realistic data and zero app state.
@@ -58,6 +71,161 @@ enum LabFixtures {
     /// 12 characters from `PairingAlphabet.symbols`, so the pairing card renders
     /// realistic — and identical — data on every draw.
     static let pairingCredential = "K7M2QRTX9BDH"
+
+    static func transcriptReviewDocument(_ state: AgentTranscriptReviewState) -> AgentDocument {
+        func id(_ suffix: String) -> AgentNodeID {
+            AgentNodeID(rawValue: "review-\(state.rawValue)-\(suffix)")!
+        }
+        func paragraph(_ suffix: String, _ inlines: [AgentInline]) -> AgentBlock {
+            AgentBlock(id: id(suffix), revision: 1, kind: .paragraph, payload: .paragraph(inlines))
+        }
+        func entry(_ suffix: String, role: AgentEntryRole, blocks: [AgentBlock]) -> AgentEntry {
+            AgentEntry(
+                id: id("entry-\(suffix)"), revision: 1, role: role,
+                provenance: role == .user
+                    ? .localPrompt(promptID: "review-\(state.rawValue)")
+                    : .providerItem(provider: "fixture", itemID: suffix),
+                lifecycle: .finished, blocks: blocks
+            )
+        }
+
+        let user = entry("user", role: .user, blocks: [paragraph("user-prompt", [
+            .text("Make transcript streaming feel calm and readable, keep semantic copy exact, and preserve keyboard access."),
+        ])])
+        let assistantProse: [AgentBlock] = [
+            AgentBlock(
+                id: id("heading"), revision: 1, kind: .heading,
+                payload: .heading(level: 2, content: [.text("A quieter transcript architecture")])
+            ),
+            paragraph("prose", [
+                .text("I separated the provider stream from presentation, so "),
+                .strong([.text("prose remains the reading path")]),
+                .text(" while tools and artifacts keep explicit structure. The list updates by stable identity instead of rebuilding every row."),
+            ]),
+            AgentBlock(
+                id: id("list"), revision: 1, kind: .list,
+                payload: .list(.init(ordered: false)), children: [
+                    AgentBlock(
+                        id: id("list-item-1"), revision: 1, kind: .listItem, payload: .listItem,
+                        children: [paragraph("list-item-1-text", [.text("Native selection and dual-format copy remain available.")])]
+                    ),
+                    AgentBlock(
+                        id: id("list-item-2"), revision: 1, kind: .listItem, payload: .listItem,
+                        children: [paragraph("list-item-2-text", [.text("Completed operations recede; active and failed work stay legible.")])]
+                    ),
+                ]
+            ),
+            AgentBlock(
+                id: id("quote"), revision: 1, kind: .quote, payload: .quote,
+                children: [paragraph("quote-text", [.text("The transcript should read like a document, not a wall of cards.")])]
+            ),
+            AgentBlock(
+                id: id("code"), revision: 1, kind: .fencedCode,
+                payload: .fencedCode(.init(
+                    language: "swift",
+                    code: "let shouldStick = wasNearBottom && !hasTextSelection\napply(latestSnapshot)\n",
+                    isComplete: true
+                ))
+            ),
+        ]
+        let completedTool = AgentBlock(
+            id: id("tool-completed"), revision: 1, kind: .toolCall,
+            payload: .toolCall(.init(
+                name: "Read transcript model", summary: "Inspected the reducer and renderer boundaries.", status: .completed
+            ))
+        )
+        let plan = AgentBlock(
+            id: id("plan"), revision: 1, kind: .plan,
+            payload: .plan(.init(
+                title: "Transcript review", status: .inProgress, steps: [
+                    .init(title: "Stabilize semantic identity", status: .completed),
+                    .init(title: "Review visual hierarchy", detail: "Owner review is the active gate.", status: .inProgress),
+                    .init(title: "Build the native composer", status: .pending),
+                ]
+            ))
+        )
+        let diff = AgentBlock(
+            id: id("diff"), revision: 1, kind: .diff,
+            payload: .diff(.init(
+                text: "opaque compatibility text",
+                summary: "Refined transcript presentation",
+                files: [
+                    .init(displayName: "AgentTranscriptListView.swift", addedLineCount: 84, removedLineCount: 19),
+                    .init(displayName: "AssistantProseRenderer.swift", addedLineCount: 31, removedLineCount: 8),
+                ], canOpenReview: true
+            ))
+        )
+        let notice = AgentBlock(
+            id: id("notice"), revision: 1, kind: .notice,
+            payload: .notice(.init(message: [.text("Streaming complete · 5,000 deltas coalesced without moving the reader.")], status: .completed))
+        )
+        let activeTool = AgentBlock(
+            id: id("tool-active"), revision: 1, kind: .toolCall,
+            payload: .toolCall(.init(
+                name: "Run matrix", summary: "Building and checking the app bundle. This detail stays open while work is active.", status: .inProgress
+            ))
+        )
+        let activeOutput = AgentBlock(
+            id: id("output-active"), revision: 1, kind: .commandOutput,
+            payload: .commandOutput(.init(text: "[42/57] Compiling AgentTranscriptListView.swift\n", status: .inProgress))
+        )
+        let failedTool = AgentBlock(
+            id: id("tool-failed"), revision: 1, kind: .toolCall,
+            payload: .toolCall(.init(
+                name: "Verify snapshots", summary: "The light appearance snapshot changed unexpectedly.", status: .failed
+            ))
+        )
+        let failedOutput = AgentBlock(
+            id: id("output-failed"), revision: 1, kind: .commandOutput,
+            payload: .commandOutput(.init(
+                text: "FAIL: transcript review baseline differs at 320 pt\n", exitCode: 1, status: .failed
+            ))
+        )
+        let error = AgentBlock(
+            id: id("error"), revision: 1, kind: .error,
+            payload: .error(.init(
+                message: "The candidate snapshot does not match the approved transcript baseline.",
+                code: "snapshot_mismatch", isRecoverable: true
+            ))
+        )
+        let approval = AgentBlock(
+            id: id("approval"), revision: 1, kind: .approval,
+            payload: .approval(.init(
+                requestID: "provider-command-git-push",
+                prompt: [
+                    .text("The provider paused before running "),
+                    .code("git push origin overnight/agent-ux"),
+                    .text(". This writes commits to the remote repository. Continue?")
+                ],
+                status: .pending,
+                choices: ["Allow once", "Decline"]
+            ))
+        )
+
+        let assistantBlocks: [AgentBlock]
+        switch state {
+        case .mixed:
+            assistantBlocks = assistantProse + [completedTool, plan, diff, notice]
+        case .activeTool:
+            assistantBlocks = [paragraph("active-intro", [.text("The checks are still running; routine detail remains structured and readable.")]), activeTool, activeOutput]
+        case .failedTool:
+            assistantBlocks = [paragraph("failed-intro", [.text("One visual check needs attention before this phase can close.")]), failedTool, failedOutput, error]
+        case .approval:
+            assistantBlocks = [
+                paragraph("approval-intro", [.text("A provider-enforced request pauses only this turn. Its context and available choices stay inline.")]),
+                approval,
+            ]
+        case .long:
+            let continuation = (1...12).map { index in
+                paragraph(
+                    "continuation-\(index)",
+                    [.text("Review note \(index): stable semantic rows preserve reading position while additional provider output arrives.")]
+                )
+            }
+            assistantBlocks = assistantProse + [completedTool, plan, diff, activeTool, activeOutput, failedTool, failedOutput, error, approval] + continuation + [notice]
+        }
+        return AgentDocument(version: 1, entries: [user, entry("assistant", role: .assistant, blocks: assistantBlocks)])
+    }
 
     static func tile(kind: TileKind, title: String) -> Tile {
         Tile(
@@ -505,6 +673,83 @@ final class LabSandboxContext: NSObject {
     @objc private func zoomResetClicked() { setZoom(1) }
 }
 
+@MainActor
+final class AgentTranscriptReviewSurface: NSView {
+    static let contentInset = CGFloat(Space.l)
+
+    let state: AgentTranscriptReviewState
+    let transcript: AgentTranscriptListView
+    private(set) var renderError: Error?
+    private var positionedInitialViewport = false
+
+    init(state: AgentTranscriptReviewState, size: NSSize, theme: TokenTheme) {
+        self.state = state
+        transcript = AgentTranscriptListView(renderContext: AgentRenderContext(
+            actions: .disabled, tokens: .transcript, appearance: theme
+        ))
+        super.init(frame: NSRect(origin: .zero, size: size))
+        wantsLayer = true
+        addSubview(transcript)
+        transcript.frame = bounds.insetBy(dx: Self.contentInset, dy: Self.contentInset)
+        transcript.layoutSubtreeIfNeeded()
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Transcript design review, \(state.rawValue)")
+        applyTheme(theme)
+
+        let document = LabFixtures.transcriptReviewDocument(state)
+        do {
+            try transcript.apply(
+                document: document,
+                patch: AgentDocumentPatch(
+                    fromVersion: 0, toVersion: document.version,
+                    inserted: document.entries.flatMap(\.blocks).map(\.id)
+                )
+            )
+        } catch {
+            renderError = error
+        }
+        needsLayout = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var isFlipped: Bool { true }
+
+    override func layout() {
+        super.layout()
+        transcript.frame = bounds.insetBy(dx: Self.contentInset, dy: Self.contentInset)
+        transcript.layoutSubtreeIfNeeded()
+        transcript.collectionView.layoutSubtreeIfNeeded()
+        guard !positionedInitialViewport else { return }
+        positionedInitialViewport = true
+        if state == .mixed || state == .long {
+            transcript.scrollView.contentView.scroll(to: .zero)
+            transcript.scrollView.reflectScrolledClipView(transcript.scrollView.contentView)
+        } else {
+            transcript.jumpToLatest()
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        let theme = effectiveTokenTheme
+        applyTheme(theme)
+        do {
+            try transcript.updateRenderContext(AgentRenderContext(
+                actions: .disabled, tokens: .transcript, appearance: theme
+            ))
+        } catch {
+            renderError = error
+        }
+    }
+
+    private func applyTheme(_ theme: TokenTheme) {
+        layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(for: theme)
+    }
+}
+
 // MARK: - Catalog
 
 @MainActor
@@ -516,6 +761,7 @@ enum LabCatalog {
             notifyCategoriesCard, agentAdapterProjectionCard, managedSessionRecordCard,
             sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher,
             sidebarLiveCard, activityDockCard, sidebarSelectedCard, managedAgentCard,
+            transcriptReviewCard,
 
             // MARK: night3-C cards
             managedAgentApprovalDockCard, managedAgentUserInputCard, newTileCwdPolicyCard,
@@ -1389,6 +1635,26 @@ enum LabCatalog {
         )
     }
 
+    private static var transcriptReviewCard: LabEntry {
+        LabEntry(
+            id: "agent.transcript.review",
+            category: "Managed Agent",
+            title: "Semantic Transcript — Supervised Review",
+            summary: "The complete mixed semantic transcript. Scroll, select, copy, and inspect hierarchy before composer work begins.",
+            content: .reviewSurface(preferredSize: NSSize(width: 640, height: 720)) {
+                AgentTranscriptReviewSurface(state: .long, size: NSSize(width: 640, height: 720), theme: .dark)
+            }
+        )
+    }
+
+    static func makeTranscriptReviewSurface(
+        state: AgentTranscriptReviewState,
+        size: NSSize,
+        theme: TokenTheme
+    ) -> AgentTranscriptReviewSurface {
+        AgentTranscriptReviewSurface(state: state, size: size, theme: theme)
+    }
+
     private static var managedAgentApprovalDockCard: LabEntry {
         LabEntry(
             id: "managed-agent.approval-dock",
@@ -2022,6 +2288,8 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         switch entry.content {
         case let .staticCard(preferredSize, make):
             Self.place(make(), in: host, preferredSize: preferredSize)
+        case let .reviewSurface(preferredSize, make):
+            Self.place(make(), in: host, preferredSize: preferredSize)
         case let .canvasSandbox(configure):
             let sandbox = LabSandboxContext(env: env)
             configure(sandbox)
@@ -2503,12 +2771,102 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
     }
 
+    private static func runTranscriptReviewCheck(fail: (String) -> Error) throws {
+        func descendants(in view: NSView) -> [NSView] {
+            [view] + view.subviews.flatMap(descendants)
+        }
+        let expectedMinimumRows: [AgentTranscriptReviewState: Int] = [
+            .mixed: 10, .long: 28, .activeTool: 4, .failedTool: 5, .approval: 3,
+        ]
+        for state in AgentTranscriptReviewState.allCases {
+            let size = NSSize(width: state == .long ? 320 : 480, height: 720)
+            let surface = LabCatalog.makeTranscriptReviewSurface(state: state, size: size, theme: .dark)
+            let host = NSView(frame: surface.frame)
+            host.addSubview(surface)
+            surface.needsLayout = true
+            surface.layout()
+            surface.transcript.layout()
+            surface.transcript.collectionView.layout()
+            host.layoutSubtreeIfNeeded()
+            surface.layoutSubtreeIfNeeded()
+            surface.transcript.layoutSubtreeIfNeeded()
+            surface.transcript.collectionView.layoutSubtreeIfNeeded()
+            let views = descendants(in: surface)
+            let hasSelectableText = views.contains {
+                ($0 as? NSTextView)?.isSelectable == true || ($0 as? NSTextField)?.isSelectable == true
+            }
+            let virtualizationHolds = state != .long
+                || surface.transcript.qaLiveHostCount < surface.transcript.qaSemanticRowCount
+            guard surface.renderError == nil,
+                  surface.transcript.qaSemanticRowCount >= expectedMinimumRows[state, default: .max],
+                  surface.transcript.qaLiveHostCount > 0,
+                  virtualizationHolds,
+                  hasSelectableText,
+                  !views.contains(where: { $0 is NSPopUpButton }) else {
+                throw fail(
+                    "semantic transcript \(state.rawValue) failed review fixture: rows "
+                        + "\(surface.transcript.qaSemanticRowCount), live \(surface.transcript.qaLiveHostCount), "
+                        + "selectable \(hasSelectableText), error \(String(describing: surface.renderError))"
+                )
+            }
+            switch state {
+            case .mixed:
+                guard let plan = views.compactMap({ $0 as? AgentPlanView }).first,
+                      plan.statusLabel.frame.width >= plan.statusLabel.intrinsicContentSize.width,
+                      plan.rowViews.count >= 2,
+                      plan.rowViews[1].subviews.count == 2,
+                      plan.rowViews[1].subviews[1].frame.minY >= plan.rowViews[1].subviews[0].frame.maxY,
+                      let diff = views.compactMap({ $0 as? AgentDiffSummaryView }).first,
+                      diff.countsLabel.frame.width >= diff.countsLabel.intrinsicContentSize.width,
+                      diff.summaryLabel.lineBreakMode == .byWordWrapping else {
+                    throw fail("mixed transcript review state clipped status text or detached plan/diff detail order")
+                }
+            case .long:
+                guard surface.transcript.collectionView.frame.height > surface.transcript.scrollView.contentView.bounds.height else {
+                    throw fail("long transcript review fixture does not overflow its viewport")
+                }
+            case .activeTool:
+                guard let tool = views.compactMap({ $0 as? ToolCallView }).first,
+                      let output = views.compactMap({ $0 as? CommandOutputView }).first,
+                      tool.summaryLabel.lineBreakMode == .byWordWrapping,
+                      tool.statusLabel.frame.width >= tool.statusLabel.intrinsicContentSize.width,
+                      output.statusLabel.frame.width >= output.statusLabel.intrinsicContentSize.width else {
+                    throw fail("active-tool transcript review state clipped status or multiline structured work")
+                }
+            case .failedTool:
+                guard let tool = views.compactMap({ $0 as? ToolCallView }).first,
+                      let error = views.compactMap({ $0 as? AgentErrorNoticeView }).first,
+                      tool.summaryLabel.lineBreakMode == .byWordWrapping,
+                      error.messageLabel.lineBreakMode == .byWordWrapping,
+                      error.statusLabel.frame.width >= error.statusLabel.intrinsicContentSize.width else {
+                    throw fail("failed-tool transcript review state clipped failure hierarchy")
+                }
+            case .approval:
+                guard let request = views.compactMap({ $0 as? AgentRequestView }).first,
+                      request.promptLabel.lineBreakMode == .byWordWrapping,
+                      request.promptLabel.stringValue.contains("writes commits to the remote repository"),
+                      request.statusLabel.frame.width >= request.statusLabel.intrinsicContentSize.width,
+                      request.choiceButtons.map(\.title) == ["Allow once", "Decline"],
+                      request.choiceButtons.allSatisfy({
+                          !$0.isBordered
+                              && $0.accessibilityRole() == .button
+                              && $0.layer?.backgroundColor != nil
+                              && $0.layer?.cornerRadius == CGFloat(Radius.card)
+                              && $0.layer?.masksToBounds == false
+                      }) else {
+                    throw fail("approval transcript review state lost its explicit contextual custom request controls")
+                }
+            }
+        }
+    }
+
     static func runSelfCheck() throws {
         func fail(_ message: String) -> Error {
             NSError(domain: "ComponentLab", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
         }
         _ = NSApplication.shared
         try runPlanAndDiffRendererCheck(fail: fail)
+        try runTranscriptReviewCheck(fail: fail)
 
         let panel = ComponentLabPanel(env: LabEnvironment(ghostty: nil, browserEngine: nil))
         panel.show(near: nil)
@@ -2519,6 +2877,10 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         // loop), so just assert they're catalogued.
         for id in ["panel.palette", "panel.settings", "panel.projectPicker"] {
             guard entries.contains(where: { $0.id == id }) else { throw fail("missing launcher entry \(id)") }
+        }
+        guard let transcriptEntry = entries.first(where: { $0.id == "agent.transcript.review" }),
+              case .reviewSurface = transcriptEntry.content else {
+            throw fail("missing supervised semantic transcript review surface")
         }
         guard let agentKindEntry = entries.first(where: { $0.id == "agent.kind" }),
               case let .staticCard(_, makeAgentKindView) = agentKindEntry.content else {

@@ -90,7 +90,7 @@ final class AgentPlanView: NSView {
     override func layout() {
         super.layout()
         let inset = Self.horizontalInset
-        let statusWidth = min(statusLabel.intrinsicContentSize.width, max(0, bounds.width * 0.34))
+        let statusWidth = min(ceil(statusLabel.intrinsicContentSize.width) + CGFloat(Space.s), max(0, bounds.width * 0.40))
         statusLabel.frame = NSRect(
             x: max(inset, bounds.width - inset - statusWidth),
             y: (Self.headerHeight - statusLabel.intrinsicContentSize.height) / 2,
@@ -153,7 +153,7 @@ final class AgentPlanView: NSView {
     private func rebuildRows() {
         rowViews.forEach { $0.removeFromSuperview() }
         rowViews = rows.map { row in
-            let container = NSView(frame: .zero)
+            let container = AgentPlanRowView(frame: .zero)
             let status = row.step.status.agentToolStatusPresentation
             let title = NSTextField(labelWithString: "\(row.ordinal)  \(status.glyph) \(Self.safeSingleLine(row.step.title, fallback: "Step"))")
             title.font = NSFont.token(.label)
@@ -165,7 +165,7 @@ final class AgentPlanView: NSView {
                 let detailLabel = NSTextField(wrappingLabelWithString: detail)
                 detailLabel.font = NSFont.token(.caption)
                 detailLabel.maximumNumberOfLines = 2
-                detailLabel.lineBreakMode = .byTruncatingTail
+                detailLabel.lineBreakMode = .byWordWrapping
                 detailLabel.isSelectable = true
                 container.addSubview(detailLabel)
             }
@@ -214,4 +214,9 @@ final class AgentPlanView: NSView {
     private static func safeDetail(_ value: String?) -> String? {
         value?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+}
+
+@MainActor
+private final class AgentPlanRowView: NSView {
+    override var isFlipped: Bool { true }
 }

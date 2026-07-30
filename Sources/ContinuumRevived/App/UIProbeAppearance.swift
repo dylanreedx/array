@@ -1550,8 +1550,70 @@ enum UIProbeAppearance {
         return assertions
     }
 
+    /// P3.12: the complete review surface must actually carry light/dark tokens
+    /// through the production transcript host, not only through isolated renderers.
+    private static func runTranscriptReviewAppearanceCheck() throws -> Int {
+        func descendants(in view: NSView) -> [NSView] {
+            [view] + view.subviews.flatMap(descendants)
+        }
+        var digests: [String] = []
+        var assertions = 0
+        for (appearance, theme) in [
+            (NSAppearance.Name.aqua, TokenTheme.light),
+            (.darkAqua, .dark),
+        ] {
+            let size = NSSize(width: 480, height: 720)
+            let label = "semantic-transcript-review-\(UITourCheck.shortName(appearance))"
+            let probe = try UIProbe.render(
+                UIProbe.Spec(id: label, size: size, appearance: appearance)
+            ) {
+                LabCatalog.makeTranscriptReviewSurface(state: .mixed, size: size, theme: theme)
+            }
+            guard let surface = probe.view as? AgentTranscriptReviewSurface else {
+                throw fail("\(label) did not vend AgentTranscriptReviewSurface")
+            }
+            let views = descendants(in: surface)
+            let expectedBackground = SurfaceToken.tileBody.color.nsColor(for: theme).usingColorSpace(.sRGB)
+            let actualBackground = surface.layer?.backgroundColor.flatMap(NSColor.init(cgColor:))?.usingColorSpace(.sRGB)
+            let contrast = try UIProbeContrast.evaluate(probe)
+            guard surface.renderError == nil,
+                  surface.effectiveAppearance.name == appearance,
+                  actualBackground == expectedBackground,
+                  views.contains(where: { $0 is UserPromptView }),
+                  views.contains(where: { $0 is AssistantProseView }),
+                  !views.contains(where: { $0 is NSPopUpButton }),
+                  contrast.measured > 0,
+                  contrast.failures.isEmpty else {
+                throw fail(
+                    "\(label) lost theme, semantic prose roles, custom-only controls, or contrast: "
+                        + contrast.failures.joined(separator: "; ")
+                )
+            }
+            let assistant = views.compactMap { $0 as? AssistantProseView }.first
+            let user = views.compactMap { $0 as? UserPromptView }.first
+            guard assistant?.wantsLayer == false,
+                  assistant?.layer?.backgroundColor == nil,
+                  assistant?.layer?.borderWidth == 0,
+                  user?.layer?.borderWidth == 0,
+                  user?.accessibilityLabel() == "You" else {
+                throw fail(
+                    "\(label) quiet hierarchy mismatch: assistant layer \(String(describing: assistant?.layer)), "
+                        + "wantsLayer \(String(describing: assistant?.wantsLayer)), user border "
+                        + "\(String(describing: user?.layer?.borderWidth)), label \(String(describing: user?.accessibilityLabel()))"
+                )
+            }
+            digests.append(probe.hostDigest)
+            assertions += 11
+        }
+        guard Set(digests).count == 2 else {
+            throw fail("semantic transcript review surface rendered identical light/dark pixels")
+        }
+        return assertions
+    }
+
     /// Called from `UIProbe.runUIProbeChecks` (`--ui-probe-check`).
     static func runAppearanceChecks() throws {
+        let transcriptReviewAssertions = try runTranscriptReviewAppearanceCheck()
         let proseAssertions = try runAssistantProseAppearanceCheck()
         let richInlineAssertions = try runRichInlineTextCheck()
         let userAssertions = try runUserPromptAppearanceCheck()
@@ -1569,6 +1631,7 @@ enum UIProbeAppearance {
         guard NSApp?.appearance?.name == .darkAqua else {
             throw fail("appearance checks leaked '\(NSApp?.appearance?.name.rawValue ?? "nil")' onto NSApp")
         }
+        print("UIProbeAppearance: \(transcriptReviewAssertions) semantic-transcript review assertions hold real light/dark propagation, quiet prose hierarchy, accessibility authorship, and custom-only controls")
         print("UIProbeAppearance: \(proseAssertions) assistant-prose assertions hold tileBody inheritance, primary text, selection, and no card chrome in both appearances")
         print("UIProbeAppearance: \(richInlineAssertions) rich-inline assertions hold nested native styles, link policy, theme repaint, and dual-format copy; unsafe-link negative witness remained inactive")
         print("UIProbeAppearance: \(userAssertions) user-prompt assertions hold quiet fill, semantic radius, primary text, selection, no visual metadata, and non-color accessibility authorship in both appearances")

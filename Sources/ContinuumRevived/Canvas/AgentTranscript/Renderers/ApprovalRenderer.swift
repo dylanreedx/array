@@ -49,7 +49,7 @@ final class AgentRequestView: NSView {
     private(set) var titleLabel = NSTextField(labelWithString: "")
     private(set) var statusLabel = NSTextField(labelWithString: "")
     private(set) var promptLabel = NSTextField(wrappingLabelWithString: "")
-    private(set) var choiceButtons: [NSButton] = []
+    private(set) var choiceButtons: [AgentRequestChoiceButton] = []
     private(set) var requestID: String?
 
     private var generation: UInt64 = 0
@@ -67,7 +67,7 @@ final class AgentRequestView: NSView {
         statusLabel.lineBreakMode = .byTruncatingTail
         promptLabel.font = NSFont.token(.body)
         promptLabel.maximumNumberOfLines = 4
-        promptLabel.lineBreakMode = .byTruncatingTail
+        promptLabel.lineBreakMode = .byWordWrapping
         promptLabel.isSelectable = true
         addSubview(titleLabel)
         addSubview(statusLabel)
@@ -108,7 +108,7 @@ final class AgentRequestView: NSView {
     override func layout() {
         super.layout()
         let inset = Self.horizontalInset
-        let statusWidth = min(statusLabel.intrinsicContentSize.width, max(0, bounds.width * 0.34))
+        let statusWidth = min(ceil(statusLabel.intrinsicContentSize.width) + CGFloat(Space.s), max(0, bounds.width * 0.40))
         statusLabel.frame = NSRect(
             x: max(inset, bounds.width - inset - statusWidth),
             y: (Self.headerHeight - statusLabel.intrinsicContentSize.height) / 2,
@@ -146,7 +146,7 @@ final class AgentRequestView: NSView {
         statusLabel.textColor = status == .failed
             ? AgentLineRole.attention.color.nsColor(for: theme)
             : context.tokens.secondaryText.color.nsColor(for: theme)
-        choiceButtons.forEach { $0.contentTintColor = context.tokens.primaryText.color.nsColor(for: theme) }
+        choiceButtons.forEach { $0.applyTokens(theme: theme) }
     }
 
     static func measuredHeight(payload: AgentRequestPayload, width: CGFloat) -> CGFloat {
@@ -196,6 +196,9 @@ final class AgentRequestView: NSView {
 @MainActor
 final class AgentRequestChoiceButton: NSButton {
     var actionToken: AnyObject?
+    private var hovered = false
+    private var theme: TokenTheme = .dark
+    private var tracking: NSTrackingArea?
 
     init(title: String) {
         super.init(frame: .zero)
@@ -204,6 +207,10 @@ final class AgentRequestChoiceButton: NSButton {
         bezelStyle = .inline
         focusRingType = .exterior
         font = NSFont.token(.label)
+        wantsLayer = true
+        layer?.cornerRadius = CGFloat(Radius.card)
+        // Keep the AppKit exterior keyboard focus ring outside the rounded fill.
+        layer?.masksToBounds = false
         setButtonType(.momentaryChange)
         setAccessibilityRole(.button)
         setAccessibilityLabel(title)
@@ -212,6 +219,42 @@ final class AgentRequestChoiceButton: NSButton {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let next = NSTrackingArea(
+            rect: bounds,
+            options: [.activeInKeyWindow, .mouseEnteredAndExited],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(next)
+        tracking = next
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hovered = true
+        applyFill()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hovered = false
+        applyFill()
+    }
+
+    func applyTokens(theme: TokenTheme) {
+        self.theme = theme
+        contentTintColor = TextToken.textPrimary.color.nsColor(for: theme)
+        applyFill()
+    }
+
+    private func applyFill() {
+        // Choice order is provider data, not recommendation semantics: every idle
+        // choice receives equal emphasis and hover alone uses the selected fill.
+        let surface = hovered ? AgentSurfaceRole.rowSelected.color : SurfaceToken.overlay.color
+        layer?.backgroundColor = surface.cgColor(for: theme)
+    }
 }
 
 func agentPlainText(_ inlines: [AgentInline]) -> String {

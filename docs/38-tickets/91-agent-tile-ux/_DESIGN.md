@@ -60,6 +60,17 @@ These decisions are instructions, not suggestions for ticket workers.
     blocked rather than simulating it.
 15. **No context tile.** Transcript, current work, and composer belong in the session tile; do not
     create a linked context surface.
+16. **Soft hierarchy, not perimeter borders everywhere.** Sidebar/inbox rows and idle tile surfaces
+    use spacing, typography, and quiet fills for grouping. A strong outline is reserved for actual
+    keyboard focus, selection, or exceptional attention; selected rows must remain unmistakable in
+    both appearances without turning every unselected row into a grey box.
+17. **Needs-attention must reveal the real request.** A status label is never the whole approval UX.
+    An explicit provider-enforced request resolves to one compact transcript request surface with
+    the provider prompt/context and clearly labelled choice buttons. The tile and agent index may
+    point to that request, but may not invent a second dock, modal, or Continuum approval policy.
+18. **Custom controls must feel designed, not merely de-Aqua'd.** Composer inputs, model/effort
+    choices, completion surfaces, and their focus/selection states use friendly Continuum spacing,
+    shape, motion, and contrast while retaining native editing, keyboard, and accessibility engines.
 
 ## 3. Current pipeline and its limit
 

@@ -45,6 +45,8 @@ enum UITourCheck {
     static let tileWidths: [Double] = [TileGeometry.minimumSize(for: .managedAgent).width, 640, 900]
 
     static let tileHeight: Double = 560
+    static let transcriptReviewWidths: [Double] = [320, 480, 640, 900]
+    static let transcriptReviewHeight: Double = 720
 
     static let appearances: [NSAppearance.Name] = [.aqua, .darkAqua]
 
@@ -125,6 +127,18 @@ enum UITourCheck {
             for prompt in UIProbeGeometry.scrollWitnessPrompts { view.appendUserPrompt(prompt) }
         }
         return view
+    }
+
+    static func makeSemanticTranscript(
+        state: AgentTranscriptReviewState,
+        size: NSSize,
+        appearance: NSAppearance.Name
+    ) -> AgentTranscriptReviewSurface {
+        LabCatalog.makeTranscriptReviewSurface(
+            state: state,
+            size: size,
+            theme: appearance == .darkAqua ? .dark : .light
+        )
     }
 
     /// Every `ManagedTranscriptCardKind`, one card each, through the real
@@ -217,6 +231,32 @@ enum UITourCheck {
                         appearance: appearance, make: { makeTile(state: state, size: size) }
                     ))
                 }
+            }
+        }
+
+        // P3.12's review set: the complete mixed reading path at every named
+        // width, then long/active/failed/approval focus states at the reference
+        // width. Every shot is paired across appearances.
+        for width in transcriptReviewWidths {
+            let size = NSSize(width: width, height: transcriptReviewHeight)
+            for appearance in appearances {
+                shots.append(Shot(
+                    surface: "semantic-transcript", state: AgentTranscriptReviewState.mixed.rawValue,
+                    size: size, appearance: appearance,
+                    make: { makeSemanticTranscript(state: .mixed, size: size, appearance: appearance) }
+                ))
+            }
+        }
+        for state in [
+            AgentTranscriptReviewState.long, .activeTool, .failedTool, .approval,
+        ] {
+            let size = NSSize(width: 480, height: transcriptReviewHeight)
+            for appearance in appearances {
+                shots.append(Shot(
+                    surface: "semantic-transcript", state: state.rawValue,
+                    size: size, appearance: appearance,
+                    make: { makeSemanticTranscript(state: state, size: size, appearance: appearance) }
+                ))
             }
         }
 
