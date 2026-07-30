@@ -761,7 +761,7 @@ enum LabCatalog {
             notifyCategoriesCard, agentAdapterProjectionCard, managedSessionRecordCard,
             sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher,
             sidebarLiveCard, activityDockCard, sidebarSelectedCard, managedAgentCard,
-            transcriptReviewCard,
+            transcriptReviewCard, composerReviewCard,
 
             // MARK: night3-C cards
             managedAgentApprovalDockCard, managedAgentUserInputCard, newTileCwdPolicyCard,
@@ -1653,6 +1653,18 @@ enum LabCatalog {
         theme: TokenTheme
     ) -> AgentTranscriptReviewSurface {
         AgentTranscriptReviewSurface(state: state, size: size, theme: theme)
+    }
+
+    private static var composerReviewCard: LabEntry {
+        LabEntry(
+            id: "agent.composer.review",
+            category: "Managed Agent",
+            title: "Agent Composer — Isolated Shell",
+            summary: "Native multiline editing under custom Continuum chrome. Type, select, paste, and undo without migrating the live tile.",
+            content: .reviewSurface(preferredSize: NSSize(width: 480, height: 96)) {
+                AgentComposerView(frame: NSRect(x: 0, y: 0, width: 480, height: 96))
+            }
+        )
     }
 
     private static var managedAgentApprovalDockCard: LabEntry {
@@ -2881,6 +2893,32 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard let transcriptEntry = entries.first(where: { $0.id == "agent.transcript.review" }),
               case .reviewSurface = transcriptEntry.content else {
             throw fail("missing supervised semantic transcript review surface")
+        }
+        guard let composerEntry = entries.first(where: { $0.id == "agent.composer.review" }),
+              case let .reviewSurface(composerSize, makeComposerView) = composerEntry.content,
+              let composer = makeComposerView() as? AgentComposerView else {
+            throw fail("missing isolated custom composer review surface")
+        }
+        composer.frame = NSRect(origin: .zero, size: composerSize)
+        let composerHost = NSView(frame: composer.frame)
+        composerHost.addSubview(composer)
+        composerHost.layoutSubtreeIfNeeded()
+        composer.layoutSubtreeIfNeeded()
+        func descendants(in view: NSView) -> [NSView] {
+            [view] + view.subviews.flatMap(descendants)
+        }
+        let composerDescendants = descendants(in: composer)
+        guard composer.scrollView.borderType == .noBorder,
+              !composer.scrollView.drawsBackground,
+              composer.textView.isEditable,
+              composer.textView.isSelectable,
+              composer.textView.allowsUndo,
+              composer.textView.accessibilityRole() == .textArea,
+              composer.textView.frame.width > 0,
+              composer.textView.frame.height > 0,
+              !composerDescendants.contains(where: { $0 is NSPopUpButton }),
+              !composerDescendants.compactMap({ $0 as? NSTextField }).contains(where: { $0.isBezeled }) else {
+            throw fail("isolated composer review surface lost native editing, document geometry, or custom-only chrome")
         }
         guard let agentKindEntry = entries.first(where: { $0.id == "agent.kind" }),
               case let .staticCard(_, makeAgentKindView) = agentKindEntry.content else {

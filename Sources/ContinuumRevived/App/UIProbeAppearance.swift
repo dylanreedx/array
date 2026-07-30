@@ -285,6 +285,12 @@ enum UIProbeAppearance {
                 CanvasNSView(canvasState: CanvasState(
                     viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
                     tiles: [], groups: [], lastActiveTileId: nil))
+            }),
+            // P4.1: isolated until tile integration. It still belongs in the live
+            // appearance sweep so its custom fill/focus boundary cannot retain a
+            // stale light- or dark-theme CGColor.
+            ("appearance.agentComposer", NSSize(width: 480, height: 72), {
+                AgentComposerView(frame: NSRect(x: 0, y: 0, width: 480, height: 72))
             })
         ]
         // Read out of the source, not typed here: every declared conformer must show
@@ -1611,8 +1617,142 @@ enum UIProbeAppearance {
         return assertions
     }
 
+    /// P4.1: the composer keeps native NSTextView behavior under custom chrome,
+    /// binds editing state through a draft value, and exposes distinct empty,
+    /// focused, and selected-text states in both appearances.
+    private static func runComposerShellAppearanceCheck() throws -> Int {
+        func descendants(in view: NSView) -> [NSView] {
+            [view] + view.subviews.flatMap(descendants)
+        }
+        func expectCustomChrome(_ composer: AgentComposerView, label: String) throws {
+            guard composer.scrollView.borderType == .noBorder,
+                  !composer.scrollView.drawsBackground,
+                  !composer.textView.drawsBackground,
+                  !descendants(in: composer).contains(where: { $0 is NSPopUpButton }),
+                  descendants(in: composer).compactMap({ $0 as? NSTextField }).allSatisfy({ !$0.isBezeled }) else {
+                throw fail("\(label) exposed stock scroll, popup, or bezel chrome")
+            }
+        }
+        var assertions = 0
+        for (appearance, theme) in [
+            (NSAppearance.Name.aqua, TokenTheme.light),
+            (.darkAqua, .dark),
+        ] {
+            let label = "composer-shell-\(UITourCheck.shortName(appearance))"
+            let probe = try UIProbe.render(
+                UIProbe.Spec(id: label, size: NSSize(width: 480, height: 72), appearance: appearance)
+            ) {
+                AgentComposerView(frame: NSRect(x: 0, y: 0, width: 480, height: 72))
+            }
+            guard let composer = probe.view as? AgentComposerView else {
+                throw fail("\(label) did not vend AgentComposerView")
+            }
+            probe.host.layoutSubtreeIfNeeded()
+
+            try expectCustomChrome(composer, label: label)
+            guard composer.qaPlaceholderVisible,
+                  composer.textView.isEditable,
+                  composer.textView.isSelectable,
+                  composer.textView.allowsUndo,
+                  composer.textView.accessibilityRole() == .textArea,
+                  composer.textView.accessibilityLabel() == "Agent prompt",
+                  composer.scrollView.hasVerticalScroller,
+                  composer.textView.frame.width > 0,
+                  composer.textView.frame.height >= composer.scrollView.contentSize.height,
+                  composer.layer?.cornerRadius == AgentComposerView.cornerRadius,
+                  composer.layer?.borderWidth == AgentComposerView.idleBorderWidth,
+                  composer.layer?.backgroundColor == AgentSurfaceRole.composer.color.cgColor(for: theme),
+                  composer.layer?.borderColor == AgentLineRole.decorativeHairline.color.cgColor(for: theme) else {
+                throw fail("\(label) lost the empty custom shell, native text area, or quiet token surface")
+            }
+            assertions += 18
+
+            // Required negative witness: mutate the final composer instance back to
+            // stock scroll chrome and prove the same production assertion turns red.
+            composer.scrollView.borderType = .bezelBorder
+            var stockChromeWitness: String?
+            do {
+                try expectCustomChrome(composer, label: "\(label).stockChromeWitness")
+            } catch let error as AppearanceError {
+                stockChromeWitness = error.message
+            }
+            composer.scrollView.borderType = .noBorder
+            guard let stockChromeWitness, stockChromeWitness.contains("exposed stock scroll") else {
+                throw fail("\(label) stock-scroll negative witness did not fail the custom-chrome assertion")
+            }
+            assertions += 1
+
+            var observed: [AgentComposerDraft] = []
+            composer.onDraftChange = { observed.append($0) }
+            composer.apply(AgentComposerDraft(
+                text: "Select this prompt", selection: NSRange(location: 7, length: 4), revision: 40
+            ))
+            guard !composer.qaPlaceholderVisible,
+                  composer.textView.string == "Select this prompt",
+                  composer.textView.selectedRange() == NSRange(location: 7, length: 4),
+                  observed.isEmpty,
+                  composer.draft.revision == 40,
+                  composer.textView.selectedTextAttributes[.backgroundColor] as? NSColor
+                    == AgentSurfaceRole.rowSelected.color.nsColor(for: theme) else {
+                throw fail("\(label) draft binding or selected-text state did not survive model application")
+            }
+            assertions += 6
+
+            guard probe.window.makeFirstResponder(composer.textView), composer.isEditorFocused,
+                  composer.layer?.borderWidth == AgentComposerView.focusedBorderWidth,
+                  composer.layer?.borderColor == AgentLineRole.focusRing.color.cgColor(for: theme) else {
+                throw fail("\(label) custom focus ring did not replace the quiet decorative boundary")
+            }
+            assertions += 3
+
+            composer.textView.insertText("edited", replacementRange: composer.textView.selectedRange())
+            guard observed.last?.text == "Select edited prompt",
+                  observed.last?.selection == composer.textView.selectedRange(),
+                  observed.last?.revision == 41 else {
+                throw fail("\(label) editing bypassed the draft text/selection/revision binding")
+            }
+            assertions += 3
+
+            // The probe drives NSTextView synchronously, without the AppKit event
+            // boundary that normally closes the preceding typing undo group. Start
+            // the paste assertion from the already-verified edited draft so one
+            // undo deterministically exercises only the paste operation.
+            composer.textView.undoManager?.removeAllActions()
+            composer.textView.breakUndoCoalescing()
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(" pasted", forType: .string)
+            composer.textView.paste(nil)
+            guard composer.textView.string == "Select edited pasted prompt",
+                  composer.textView.undoManager != nil else {
+                throw fail("\(label) native paste or undo manager is unavailable")
+            }
+            composer.textView.undoManager?.undo()
+            guard composer.textView.string == "Select edited prompt" else {
+                throw fail("\(label) native undo did not remove only the pasted edit — got '\(composer.textView.string)'")
+            }
+            assertions += 3
+
+            let manyLines = (1...12).map { "line \($0)" }.joined(separator: "\n")
+            composer.apply(AgentComposerDraft(
+                text: manyLines, selection: NSRange(location: (manyLines as NSString).length, length: 0), revision: 50
+            ))
+            let lineHeight = composer.textView.layoutManager?.defaultLineHeight(
+                for: composer.textView.font ?? .token(.body)
+            ) ?? 17
+            guard composer.textView.frame.height > composer.scrollView.contentSize.height,
+                  composer.intrinsicContentSize.height <= lineHeight * CGFloat(AgentComposerView.maximumVisibleLines)
+                    + (AgentComposerView.internalPadding * 2) else {
+                throw fail("\(label) multiline editor did not grow its document or cap the shell at eight visible lines")
+            }
+            assertions += 2
+        }
+        return assertions
+    }
+
     /// Called from `UIProbe.runUIProbeChecks` (`--ui-probe-check`).
     static func runAppearanceChecks() throws {
+        let composerAssertions = try runComposerShellAppearanceCheck()
         let transcriptReviewAssertions = try runTranscriptReviewAppearanceCheck()
         let proseAssertions = try runAssistantProseAppearanceCheck()
         let richInlineAssertions = try runRichInlineTextCheck()
@@ -1631,6 +1771,7 @@ enum UIProbeAppearance {
         guard NSApp?.appearance?.name == .darkAqua else {
             throw fail("appearance checks leaked '\(NSApp?.appearance?.name.rawValue ?? "nil")' onto NSApp")
         }
+        print("UIProbeAppearance: \(composerAssertions) custom-composer assertions hold native editing, draft binding, empty/focus/selection states, paste/undo, accessibility, and light/dark tokens; stock-scroll-border mutation was rejected by the final custom-chrome assertion")
         print("UIProbeAppearance: \(transcriptReviewAssertions) semantic-transcript review assertions hold real light/dark propagation, quiet prose hierarchy, accessibility authorship, and custom-only controls")
         print("UIProbeAppearance: \(proseAssertions) assistant-prose assertions hold tileBody inheritance, primary text, selection, and no card chrome in both appearances")
         print("UIProbeAppearance: \(richInlineAssertions) rich-inline assertions hold nested native styles, link policy, theme repaint, and dual-format copy; unsafe-link negative witness remained inactive")
