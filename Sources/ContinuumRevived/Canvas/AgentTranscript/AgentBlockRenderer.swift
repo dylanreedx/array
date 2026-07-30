@@ -13,6 +13,90 @@ enum AgentRenderAction {
 
 struct AgentRenderActions {
     let perform: (AgentRenderAction) -> Void
+    private let disclosureState: (AgentNodeID, Bool) -> Bool
+    private let setDisclosureState: (AgentNodeID, Bool) -> Void
+    private let presentationRevisionValue: (AgentNodeID) -> UInt64
+    private let invalidatePresentationValue: (AgentNodeID) -> Void
+
+    init(_ perform: @escaping (AgentRenderAction) -> Void) {
+        self.init(
+            perform: perform,
+            disclosureState: { _, defaultValue in defaultValue },
+            setDisclosureState: { _, _ in },
+            presentationRevision: { _ in 0 },
+            invalidatePresentation: { _ in }
+        )
+    }
+
+    init(
+        perform: @escaping (AgentRenderAction) -> Void,
+        disclosureState: @escaping (AgentNodeID, Bool) -> Bool,
+        setDisclosureState: @escaping (AgentNodeID, Bool) -> Void,
+        presentationRevision: @escaping (AgentNodeID) -> UInt64,
+        invalidatePresentation: @escaping (AgentNodeID) -> Void
+    ) {
+        self.perform = perform
+        self.disclosureState = disclosureState
+        self.setDisclosureState = setDisclosureState
+        presentationRevisionValue = presentationRevision
+        invalidatePresentationValue = invalidatePresentation
+    }
+
+    func isExpanded(blockID: AgentNodeID, default defaultValue: Bool) -> Bool {
+        disclosureState(blockID, defaultValue)
+    }
+
+    func setExpanded(_ expanded: Bool, blockID: AgentNodeID) {
+        setDisclosureState(blockID, expanded)
+        invalidatePresentationValue(blockID)
+    }
+
+    func presentationRevision(blockID: AgentNodeID) -> UInt64 {
+        presentationRevisionValue(blockID)
+    }
+
+    func addingPresentationInvalidation(
+        _ additional: @escaping (AgentNodeID) -> Void
+    ) -> AgentRenderActions {
+        AgentRenderActions(
+            perform: perform,
+            disclosureState: disclosureState,
+            setDisclosureState: setDisclosureState,
+            presentationRevision: presentationRevisionValue,
+            invalidatePresentation: { blockID in
+                invalidatePresentationValue(blockID)
+                additional(blockID)
+            }
+        )
+    }
+
+    func gated(
+        while isActive: @escaping () -> Bool,
+        perform replacement: @escaping (AgentRenderAction) -> Void
+    ) -> AgentRenderActions {
+        AgentRenderActions(
+            perform: { action in
+                guard isActive() else { return }
+                replacement(action)
+            },
+            disclosureState: { blockID, defaultValue in
+                guard isActive() else { return defaultValue }
+                return disclosureState(blockID, defaultValue)
+            },
+            setDisclosureState: { blockID, expanded in
+                guard isActive() else { return }
+                setDisclosureState(blockID, expanded)
+            },
+            presentationRevision: { blockID in
+                guard isActive() else { return 0 }
+                return presentationRevisionValue(blockID)
+            },
+            invalidatePresentation: { blockID in
+                guard isActive() else { return }
+                invalidatePresentationValue(blockID)
+            }
+        )
+    }
 
     @MainActor static let disabled = AgentRenderActions { _ in }
 }

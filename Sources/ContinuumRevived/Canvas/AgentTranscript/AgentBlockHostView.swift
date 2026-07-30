@@ -73,11 +73,17 @@ final class AgentBlockHostView: NSView {
         // superseded revisions cannot act on a block the host no longer represents.
         actionGeneration &+= 1
         let generation = actionGeneration
-        var gatedContext = context
-        gatedContext.actions = AgentRenderActions { [weak self] action in
-            guard self?.actionGeneration == generation else { return }
-            context.actions.perform(action)
+        let hostActions = context.actions.addingPresentationInvalidation { [weak self] blockID in
+            guard let self, representedID == blockID else { return }
+            measurementCache.invalidate(id: blockID)
+            invalidateIntrinsicContentSize()
+            needsLayout = true
         }
+        var gatedContext = context
+        gatedContext.actions = hostActions.gated(
+            while: { [weak self] in self?.actionGeneration == generation },
+            perform: context.actions.perform
+        )
         renderer.update(view: rendererView, block: block, context: gatedContext)
         renderer.updateAccessibility(view: rendererView, block: block, context: gatedContext)
     }

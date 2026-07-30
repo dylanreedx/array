@@ -20,6 +20,7 @@ struct AgentBlockMeasureKey: Hashable {
     let widthBucket: Int
     let appearance: TokenTheme
     let contentSizePolicy: AgentContentSizePolicy
+    let presentationRevision: UInt64
 }
 
 /// Width-aware renderer measurement cache. Measurements are semantic-revision
@@ -47,7 +48,8 @@ final class AgentBlockMeasurementCache {
             width: width,
             appearance: context.appearance,
             entryRole: entryRole,
-            contentSizePolicy: contentSizePolicy
+            contentSizePolicy: contentSizePolicy,
+            presentationRevision: context.actions.presentationRevision(blockID: block.id)
         )
         if let cached = heights[key] { return cached }
         let measured = max(0, renderer.measure(block: block, width: width, context: context))
@@ -70,7 +72,8 @@ final class AgentBlockMeasurementCache {
         width: CGFloat,
         appearance: TokenTheme,
         entryRole: AgentEntryRole,
-        contentSizePolicy: AgentContentSizePolicy
+        contentSizePolicy: AgentContentSizePolicy,
+        presentationRevision: UInt64
     ) -> AgentBlockMeasureKey {
         let finiteWidth = width.isFinite ? max(0, width) : 0
         return AgentBlockMeasureKey(
@@ -80,7 +83,8 @@ final class AgentBlockMeasurementCache {
             revision: block.revision,
             widthBucket: Int((finiteWidth / widthQuantum).rounded()),
             appearance: appearance,
-            contentSizePolicy: contentSizePolicy
+            contentSizePolicy: contentSizePolicy,
+            presentationRevision: presentationRevision
         )
     }
 }

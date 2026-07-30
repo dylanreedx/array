@@ -45,6 +45,10 @@ final class AgentBlockRendererRegistry {
                     try registry.register(AssistantProseRenderer(kind: kind), for: kind)
                 } else if kind == .fencedCode {
                     try registry.register(CodeBlockRenderer(), for: kind)
+                } else if kind == .toolCall {
+                    try registry.register(ToolCallRenderer(), for: kind)
+                } else if kind == .commandOutput {
+                    try registry.register(CommandOutputRenderer(), for: kind)
                 } else {
                     try registry.register(
                         AgentDeferredBlockRenderer(

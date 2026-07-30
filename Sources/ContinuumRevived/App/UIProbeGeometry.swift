@@ -364,12 +364,13 @@ enum UIProbeGeometry {
         let proseRows = try checkAssistantProseRenderer()
         let userPromptRows = try checkUserPromptRenderer()
         let codeRows = try checkCodeBlockRenderer()
+        let operationRows = try checkToolAndCommandRenderers()
         guard tightestDockSlack.isFinite else {
             throw fail("the approval dock was never measured — the fixture no longer opens an approval, so the derived height is ungated")
         }
         print(String(
-            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 7-dimensional measurement key gated; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, and fenced code preserves %d exact lines at 320pt with in-place streaming, dual-axis scrolling, capped height, copy, and inert controls; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
-            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), proseRows, userPromptRows, codeRows,
+            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 8-dimensional measurement key gated; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, and %d tool/command states preserve scoped disclosure at 320pt with copy and inert controls; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
+            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), proseRows, userPromptRows, codeRows, operationRows,
             narrowestCardRatio, ApprovalDockView.preferredHeight, tightestDockSlack
         ))
     }
@@ -716,6 +717,221 @@ enum UIProbeGeometry {
     // "FAIL: long fenced code was not capped at 320.0pt (measured 640.0)".
     // The mutation was reverted and the same check passed.
 
+    /// Deterministic P3.7 gate through the frozen production registry and
+    /// default host. Agent identity is bound inside action capabilities, never
+    /// exposed to the renderer context or semantic document.
+    private static func checkToolAndCommandRenderers() throws -> Int {
+        func id(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+        func visibleStrings(in view: NSView) -> [String] {
+            let own: [String]
+            if let field = view as? NSTextField {
+                own = [field.stringValue]
+            } else if let button = view as? NSButton {
+                own = [button.title, button.toolTip ?? ""]
+            } else if let text = view as? NSTextView {
+                own = [text.string]
+            } else {
+                own = []
+            }
+            return own + view.subviews.flatMap(visibleStrings)
+        }
+
+        guard try AgentBlockRendererRegistry.production.renderer(for: .toolCall) is ToolCallRenderer,
+              try AgentBlockRendererRegistry.production.renderer(for: .commandOutput) is CommandOutputRenderer else {
+            throw fail("production registry did not resolve tool and command-output renderers")
+        }
+
+        let agentA = AgentID(rawValue: UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!)
+        let agentB = AgentID(rawValue: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!)
+        let store = DisclosureStateStore()
+        var semanticActions: [AgentRenderAction] = []
+        var presentationInvalidations: [AgentNodeID] = []
+        let actionsA = store.renderActions(
+            for: agentA,
+            perform: { semanticActions.append($0) },
+            invalidatePresentation: { presentationInvalidations.append($0) }
+        )
+        let actionsB = store.renderActions(for: agentB)
+        let contextA = AgentRenderContext(actions: actionsA, tokens: .transcript, appearance: .dark)
+        let contextB = AgentRenderContext(actions: actionsB, tokens: .transcript, appearance: .dark)
+
+        let secret = "PRIVATE-RAW-ARGUMENT-CWD"
+        let toolID = id("tool-operation")
+        let completedTool = AgentBlock(
+            id: toolID, revision: 1, kind: .toolCall,
+            payload: .toolCall(.init(
+                name: "Read files\nignored provider detail",
+                summary: "Inspected the semantic renderer files.",
+                arguments: .object(["cwd": .string(secret)]),
+                status: .completed
+            ))
+        )
+        let collapsedHeight: CGFloat
+        let toolHost = AgentBlockHostView()
+        collapsedHeight = try toolHost.measuredHeight(for: completedTool, width: 320, context: contextA)
+        toolHost.frame = NSRect(x: 0, y: 0, width: 320, height: collapsedHeight)
+        try toolHost.apply(block: completedTool, context: contextA)
+        toolHost.layoutSubtreeIfNeeded()
+        guard let toolView = toolHost.rendererView as? ToolCallView,
+              collapsedHeight == ToolCallView.rowHeight,
+              !toolView.isExpanded,
+              toolView.summaryLabel.isHidden,
+              toolView.titleLabel.stringValue == "Read files",
+              toolView.statusLabel.stringValue == "✓ Completed",
+              !visibleStrings(in: toolView).contains(where: { $0.contains(secret) }) else {
+            throw fail("routine tool did not collapse safely with textual completed status or exposed raw arguments")
+        }
+
+        toolView.disclosureButton.performClick(nil)
+        let keyA = ToolDisclosureKey(agentID: agentA, blockID: toolID)
+        guard toolView.isExpanded, store.explicitState(for: keyA) == true else {
+            throw fail("tool disclosure did not persist its explicit expanded state")
+        }
+        guard presentationInvalidations == [toolID],
+              toolHost.measurementCache.cachedMeasurementCount == 0 else {
+            throw fail("tool disclosure toggle did not notify layout or evict its cached measurement")
+        }
+        let expandedHeight = try toolHost.measuredHeight(for: completedTool, width: 320, context: contextA)
+        toolHost.frame.size.height = expandedHeight
+        toolHost.layoutSubtreeIfNeeded()
+        toolView.layoutSubtreeIfNeeded()
+        guard expandedHeight > collapsedHeight,
+              toolHost.measurementCache.cachedMeasurementCount == 1,
+              toolView.summaryLabel.frame.maxY <= toolView.bounds.maxY + 0.5 else {
+            throw fail("live tool disclosure did not remeasure and lay out its expanded summary")
+        }
+
+        let recreatedHost = AgentBlockHostView()
+        recreatedHost.frame = NSRect(x: 0, y: 0, width: 320, height: expandedHeight)
+        try recreatedHost.apply(block: completedTool, context: contextA)
+        guard let recreatedView = recreatedHost.rendererView as? ToolCallView,
+              recreatedView.isExpanded, !recreatedView.summaryLabel.isHidden else {
+            throw fail("explicit disclosure did not survive renderer-view recreation for the same block")
+        }
+
+        let otherAgentHost = AgentBlockHostView()
+        try otherAgentHost.apply(block: completedTool, context: contextB)
+        guard let otherAgentView = otherAgentHost.rendererView as? ToolCallView,
+              !otherAgentView.isExpanded,
+              store.explicitState(for: ToolDisclosureKey(agentID: agentB, blockID: toolID)) == nil else {
+            throw fail("tool disclosure leaked across agents sharing a block ID")
+        }
+
+        let otherToolID = id("tool-operation-other")
+        let otherTool = AgentBlock(
+            id: otherToolID, revision: 1, kind: .toolCall,
+            payload: .toolCall(.init(name: "Search", summary: "Found matches", status: .completed))
+        )
+        let staleView = recreatedView
+        try recreatedHost.apply(block: otherTool, context: contextA)
+        guard let otherView = recreatedHost.rendererView as? ToolCallView, !otherView.isExpanded else {
+            throw fail("reused tool host carried disclosure state to another block")
+        }
+        staleView.disclosureButton.performClick(nil)
+        guard store.explicitState(for: keyA) == true else {
+            throw fail("detached tool view retained an active disclosure capability")
+        }
+        try recreatedHost.apply(block: completedTool, context: contextA)
+        guard (recreatedHost.rendererView as? ToolCallView)?.isExpanded == true else {
+            throw fail("tool disclosure did not restore after host reuse returned to the block")
+        }
+
+        let failedTool = AgentBlock(
+            id: id("tool-failed"), revision: 1, kind: .toolCall,
+            payload: .toolCall(.init(name: "Compile", summary: "Compiler returned an error.", status: .failed))
+        )
+        let failedToolHost = AgentBlockHostView()
+        try failedToolHost.apply(block: failedTool, context: contextA)
+        guard let failedToolView = failedToolHost.rendererView as? ToolCallView,
+              failedToolView.isExpanded,
+              failedToolView.statusLabel.stringValue == "! Failed",
+              !failedToolView.summaryLabel.isHidden else {
+            throw fail("failed tool did not expand by default with glyph-and-text status")
+        }
+
+        let outputID = id("command-output")
+        let output = "line one\n    indented result\n"
+        let failedOutput = AgentBlock(
+            id: outputID, revision: 1, kind: .commandOutput,
+            payload: .commandOutput(.init(text: output, exitCode: 7, status: .failed))
+        )
+        let outputHost = AgentBlockHostView()
+        let outputHeight = try outputHost.measuredHeight(for: failedOutput, width: 320, context: contextA)
+        outputHost.frame = NSRect(x: 0, y: 0, width: 320, height: outputHeight)
+        try outputHost.apply(block: failedOutput, context: contextA)
+        outputHost.layoutSubtreeIfNeeded()
+        guard let outputView = outputHost.rendererView as? CommandOutputView,
+              outputView.isExpanded,
+              !outputView.scrollView.isHidden,
+              outputView.statusLabel.stringValue == "! Failed, exit 7",
+              outputView.outputTextView.string == output else {
+            throw fail("failed command output lost exact text, expansion, or glyph-and-text exit status")
+        }
+        let pasteboard = NSPasteboard(name: .init("continuum.command-output-check.\(UUID().uuidString)"))
+        outputView.copyEntireOutput(to: pasteboard)
+        guard pasteboard.string(forType: .string) == output else {
+            throw fail("command-output copy changed indentation or trailing newline")
+        }
+
+        let longOutput = (0..<100).map { "line \($0) " + String(repeating: "x", count: 80) }.joined(separator: "\n") + "\n"
+        let longFailedOutput = AgentBlock(
+            id: outputID, revision: 2, kind: .commandOutput,
+            payload: .commandOutput(.init(text: longOutput, exitCode: 7, status: .failed))
+        )
+        let cappedHeight = try outputHost.measuredHeight(for: longFailedOutput, width: 320, context: contextA)
+        let expectedCap = CommandOutputView.rowHeight
+            + CGFloat(Space.xxl + Space.xs)
+            + CommandOutputView.maximumOutputHeight
+            + CommandOutputView.outputBottomInset
+        guard cappedHeight == expectedCap else {
+            throw fail("command output exceeded its capped detail height: \(cappedHeight) vs \(expectedCap)")
+        }
+        outputHost.frame = NSRect(x: 0, y: 0, width: 320, height: cappedHeight)
+        try outputHost.apply(block: longFailedOutput, context: contextA)
+        outputHost.layoutSubtreeIfNeeded()
+        outputView.layoutSubtreeIfNeeded()
+        guard outputView.outputTextView.string == longOutput,
+              outputView.scrollView.hasVerticalScroller,
+              outputView.scrollView.hasHorizontalScroller,
+              outputView.outputTextView.frame.height > outputView.scrollView.contentSize.height else {
+            throw fail("long command output did not preserve exact text inside capped scrolling")
+        }
+
+        let completedOutput = AgentBlock(
+            id: id("command-output-complete"), revision: 1, kind: .commandOutput,
+            payload: .commandOutput(.init(text: "ok\n", exitCode: 0, status: .completed))
+        )
+        let completedOutputHost = AgentBlockHostView()
+        let completedOutputHeight = try completedOutputHost.measuredHeight(
+            for: completedOutput, width: 320, context: contextA
+        )
+        try completedOutputHost.apply(block: completedOutput, context: contextA)
+        guard let completedOutputView = completedOutputHost.rendererView as? CommandOutputView,
+              completedOutputHeight == CommandOutputView.rowHeight,
+              !completedOutputView.isExpanded,
+              completedOutputView.scrollView.isHidden,
+              completedOutputView.copyButton.isHidden,
+              completedOutputView.statusLabel.stringValue == "✓ Completed, exit 0" else {
+            throw fail("routine completed command output did not collapse with textual exit status")
+        }
+
+        let presentations: [(AgentItemStatus, String, String)] = [
+            (.pending, "○", "Pending"), (.inProgress, "◐", "In progress"),
+            (.completed, "✓", "Completed"), (.failed, "!", "Failed"),
+            (.cancelled, "–", "Cancelled"), (.interrupted, "!", "Interrupted"),
+        ]
+        guard presentations.allSatisfy({ item in
+            let value = item.0.agentToolStatusPresentation
+            return value.glyph == item.1 && value.label == item.2
+        }), semanticActions.isEmpty, presentationInvalidations == [toolID] else {
+            throw fail("tool statuses lost non-color semantics or disclosure emitted an agent action/stale layout invalidation")
+        }
+        return presentations.count + 4
+    }
+
+    // Negative witness (P3.7): the coordinator records a final-code mutation of
+    // the completed-tool default and the real geometry assertion beside this gate.
+
     // Negative witness (P3.4, exercised 2026-07-30): changed
     // `UserPromptView.layout()` to right-align `proseView` at 72% of the surface,
     // rebuilt, then ran `.build/debug/continuum-revived --ui-geometry-check`;
@@ -845,7 +1061,7 @@ enum UIProbeGeometry {
         rendererCount: Int
     ) throws {
         guard cacheCount == 6, rendererCount == 6 else {
-            throw fail("block measurement cache collapsed ID/kind/entry-role/revision/width/appearance/content-size keys (cache \(cacheCount), renderer \(rendererCount), expected 6)")
+            throw fail("block measurement cache collapsed ID/kind/entry-role/revision/width/appearance/content-size/presentation-revision keys (cache \(cacheCount), renderer \(rendererCount), expected 6)")
         }
     }
 
