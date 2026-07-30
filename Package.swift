@@ -16,7 +16,10 @@ let package = Package(
         .library(name: "ContinuumRevivedSync", targets: ["ContinuumRevivedSync"])
     ],
     dependencies: [
-        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1")
+        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
+        // Reviewed source: https://github.com/swiftlang/swift-markdown/tree/0.8.0
+        // Apache-2.0 with Runtime Library Exception: LICENSE.txt at that tag.
+        .package(url: "https://github.com/swiftlang/swift-markdown.git", exact: "0.8.0")
     ],
     targets: [
         .binaryTarget(
@@ -32,15 +35,18 @@ let package = Package(
             name: "ContinuumRevivedAgentUI"
         ),
         // Ticket 91/P0.2: the platform-neutral home for the agent transcript's
-        // semantic document and (from P2.1 on) its Markdown parser. Foundation
-        // only and deliberately NO dependencies: the direction is
+        // semantic document and Markdown parser. Foundation plus the reviewed
+        // swift-markdown adapter dependency only: the direction is
         // Core → AgentContent, never the reverse, and no AppKit/SwiftUI or
         // visual token may ever reach the semantic tree. Adding a dependency
         // here that names another Continuum target or GhosttyKit is caught by
         // ContinuumRevivedAgentContentChecks, which also scans the sources for
         // a forbidden `import`.
         .target(
-            name: "ContinuumRevivedAgentContent"
+            name: "ContinuumRevivedAgentContent",
+            dependencies: [
+                .product(name: "Markdown", package: "swift-markdown")
+            ]
         ),
         .target(
             name: "ContinuumRevivedCore",

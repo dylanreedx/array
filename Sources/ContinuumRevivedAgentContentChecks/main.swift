@@ -326,7 +326,8 @@ func runAgentContentPlatformNeutralityChecks() {
     // ticket's job and a visible, reviewed diff. It is deliberately NOT
     // pre-authorised here — a gate that already permits a dependency nobody has
     // reviewed is not a gate.
-    let allowedImports: Set<String> = ["Foundation"]
+    let allowedImports: Set<String> = ["Foundation", "Markdown"]
+    let markdownAdapter = "MarkdownAgentMarkupParser.swift"
 
     // `import struct Foundation.Data` — the kind specifier sits between the
     // keyword and the module path.
@@ -373,8 +374,13 @@ func runAgentContentPlatformNeutralityChecks() {
                 guard let module = path.first else {
                     fail("an `import` in \(url.lastPathComponent) is followed by something this scan cannot read — extend it, do not bypass it")
                 }
-                guard !allowedImports.contains(module) else { continue }
-                offendingImports.append("\(url.lastPathComponent): import \(path.joined(separator: "."))")
+                guard allowedImports.contains(module) else {
+                    offendingImports.append("\(url.lastPathComponent): import \(path.joined(separator: "."))")
+                    continue
+                }
+                if module == "Markdown", url.lastPathComponent != markdownAdapter {
+                    offendingImports.append("\(url.lastPathComponent): import Markdown (only \(markdownAdapter) may see the third-party AST)")
+                }
             }
         }
     }
@@ -385,7 +391,7 @@ func runAgentContentPlatformNeutralityChecks() {
     expect(offendingImports.isEmpty,
            "AgentContent must stay platform-neutral (allowed: \(allowedImports.sorted().joined(separator: ", "))) — forbidden import(s): \(offendingImports)")
 
-    print("AgentContent import checks passed: \(scannedImports) import(s) across \(scannedFiles) source file(s) are within {\(allowedImports.sorted().joined(separator: ", "))}")
+    print("AgentContent import checks passed: \(scannedImports) import(s) across \(scannedFiles) source file(s) are within {\(allowedImports.sorted().joined(separator: ", "))}, with Markdown confined to \(markdownAdapter)")
 }
 
 func runAgentContentManifestChecks() {
@@ -438,10 +444,41 @@ func runAgentContentManifestChecks() {
         fail("`swift package dump-package` exited \(process.terminationStatus): \(errorText)")
     }
     guard let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let targets = manifest["targets"] as? [[String: Any]]
+          let targets = manifest["targets"] as? [[String: Any]],
+          let dependencies = manifest["dependencies"] as? [[String: Any]]
     else {
-        fail("`swift package dump-package` produced no decodable target list — the manifest gate must be repaired, not bypassed")
+        fail("`swift package dump-package` produced no decodable target/dependency list — the manifest gate must be repaired, not bypassed")
     }
+
+    let markdownDependencies: [[String: Any]] = dependencies.compactMap { dependency in
+        guard let sourceControls = dependency["sourceControl"] as? [[String: Any]] else { return nil }
+        return sourceControls.first { $0["identity"] as? String == "swift-markdown" }
+    }
+    expect(markdownDependencies.count == 1,
+           "the evaluated package must declare exactly one swift-markdown source dependency")
+    if let dependency = markdownDependencies.first {
+        let requirement = dependency["requirement"] as? [String: Any]
+        let exact = requirement?["exact"] as? [String]
+        let location = dependency["location"] as? [String: Any]
+        let remotes = location?["remote"] as? [[String: Any]]
+        expect(exact == ["0.8.0"], "swift-markdown must remain exactly pinned to reviewed version 0.8.0")
+        expect(remotes?.first?["urlString"] as? String == "https://github.com/swiftlang/swift-markdown.git",
+               "swift-markdown must come from the reviewed swiftlang source")
+    }
+
+    let resolvedURL = repoRoot.appendingPathComponent("Package.resolved")
+    guard let resolvedData = try? Data(contentsOf: resolvedURL),
+          let resolved = try? JSONSerialization.jsonObject(with: resolvedData) as? [String: Any],
+          let pins = resolved["pins"] as? [[String: Any]],
+          let markdownPin = pins.first(where: { $0["identity"] as? String == "swift-markdown" }),
+          let pinState = markdownPin["state"] as? [String: Any]
+    else {
+        fail("Package.resolved must contain the reviewed swift-markdown pin")
+    }
+    expect(markdownPin["location"] as? String == "https://github.com/swiftlang/swift-markdown.git" &&
+           pinState["version"] as? String == "0.8.0" &&
+           pinState["revision"] as? String == "3c6f9523da3a1ec2fd829673e472d95b8097a3b8",
+           "Package.resolved swift-markdown source/version/revision differs from the reviewed 0.8.0 pin")
 
     /// Asserts a target's evaluated description is EXACTLY `expected`. Every key
     /// is compared, and an unexpected key is a failure rather than something to
@@ -465,13 +502,12 @@ func runAgentContentManifestChecks() {
         }
     }
 
-    // AgentContent depends on NOTHING and configures nothing. P2.1 may add
-    // Apple's swift-markdown — deliberately, in that ticket, by extending this
-    // expectation under review.
+    // AgentContent depends on the reviewed swift-markdown product and configures
+    // nothing else. Exact package version/source are pinned in Package.resolved.
     expectTarget("ContinuumRevivedAgentContent", matches: [
         "name": "ContinuumRevivedAgentContent",
         "type": "regular",
-        "dependencies": [],
+        "dependencies": [["product": ["Markdown", "swift-markdown", NSNull(), NSNull()]]],
         "settings": [],
         "exclude": [],
         "resources": [],
@@ -491,7 +527,7 @@ func runAgentContentManifestChecks() {
     ])
 
     try? FileManager.default.removeItem(at: scratch)
-    print("AgentContent manifest checks passed: SwiftPM's evaluated package has AgentContent depending on nothing and its check leg on AgentContent alone, across \(targets.count) targets")
+    print("AgentContent manifest checks passed: SwiftPM's evaluated package confines swift-markdown to AgentContent and its check leg depends on AgentContent alone, across \(targets.count) targets")
 }
 
 func runAgentContentBuiltModuleChecks() {
@@ -600,5 +636,9 @@ runDiagnosticsChecks()
 // the canonical corpus every later parser, reducer, renderer and migration
 // ticket reads from, held to its own declarations, hygiene and I5 rules.
 runTranscriptFixtureCorpusChecks()
+
+// Ticket: docs/38-tickets/91-agent-tile-ux/P2.1-markdown-parser-seam.md —
+// owned parser result and the sole swift-markdown production adapter.
+runMarkupParserChecks()
 
 print("ContinuumRevivedAgentContentChecks passed")

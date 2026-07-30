@@ -46,8 +46,16 @@ private func verifyUnsafeFallbackNegativeWitness() {
         let package = Package(
             name: "UnknownNodeNegativeWitness",
             platforms: [.macOS(.v13)],
+            dependencies: [
+                .package(url: "https://github.com/swiftlang/swift-markdown.git", exact: "0.8.0")
+            ],
             targets: [
-                .target(name: "ContinuumRevivedAgentContent"),
+                .target(
+                    name: "ContinuumRevivedAgentContent",
+                    dependencies: [
+                        .product(name: "Markdown", package: "swift-markdown")
+                    ]
+                ),
                 .executableTarget(name: "UnsafeFallbackWitness", dependencies: ["ContinuumRevivedAgentContent"])
             ]
         )
