@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
@@ -1841,8 +1842,133 @@ func runAgentSupervisorChecks() async throws {
 
     let rowStatusReport = try await AppDelegate.checkRowStatusIsTurnState(config: config, cwd: cwd, fail: fail)
 
+    // MARK: 18 · every semantic kind has one frozen renderer, with a safe fallback (91/P3.1)
+
+    let rendererReport = try checkAgentBlockRendererRegistry(fail: fail)
+
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport)")
+}
+
+@MainActor
+private func checkAgentBlockRendererRegistry<Failure: Error>(
+    fail: (String) -> Failure
+) throws -> String {
+    let registry = AgentBlockRendererRegistry.production
+    guard registry.isFrozen else {
+        throw fail("production block renderer registry is not frozen after bootstrap")
+    }
+    guard Set(AgentBlockRendererRegistry.builtInKinds).count == 16 else {
+        throw fail("block renderer built-in fixture is incomplete or duplicated: \(AgentBlockRendererRegistry.builtInKinds.map(\.rawValue))")
+    }
+
+    var identities = Set<ObjectIdentifier>()
+    for kind in AgentBlockRendererRegistry.builtInKinds {
+        guard registry.registrationCount(for: kind) == 1 else {
+            throw fail("block kind '\(kind.rawValue)' did not resolve exactly once")
+        }
+        identities.insert(ObjectIdentifier(try registry.renderer(for: kind)))
+    }
+    // Fifteen bootstrap renderers plus the one fallback. This catches an
+    // accidental many-kinds-to-one registration shortcut as well as omissions.
+    guard identities.count == AgentBlockRendererRegistry.builtInKinds.count else {
+        throw fail("built-in block kinds resolved to \(identities.count) renderer instances, expected 16")
+    }
+
+    let futureKind = AgentBlockKind(rawValue: "provider.future-card.v3")!
+    let unknown = try registry.renderer(for: .unknown)
+    guard ObjectIdentifier(try registry.renderer(for: futureKind)) == ObjectIdentifier(unknown) else {
+        throw fail("an unregistered provider kind did not resolve to the mandatory unknown fallback")
+    }
+
+    // Malformed bootstraps must hit their named errors. The ownership witness is
+    // important: dictionary registration may not override the renderer's own
+    // declaration, nor reuse that renderer for another semantic family.
+    let duplicate = AgentBlockRendererRegistry()
+    try duplicate.register(
+        AgentDeferredBlockRenderer(kind: .paragraph, safeLabel: "first"),
+        for: .paragraph
+    )
+    do {
+        try duplicate.register(
+            AgentDeferredBlockRenderer(kind: .paragraph, safeLabel: "second"),
+            for: .paragraph
+        )
+        throw fail("duplicate-registration witness did not fail")
+    } catch let error as AgentBlockRendererRegistryError {
+        guard error == .duplicateKind(.paragraph) else {
+            throw fail("duplicate-registration witness failed with unnamed error: \(error)")
+        }
+    }
+
+    let mismatched = AgentBlockRendererRegistry()
+    let paragraphRenderer = AgentDeferredBlockRenderer(kind: .paragraph, safeLabel: "paragraph")
+    do {
+        try mismatched.register(paragraphRenderer, for: .heading)
+        throw fail("renderer-ownership witness did not fail")
+    } catch let error as AgentBlockRendererRegistryError {
+        guard error == .mismatchedKind(expected: .heading, declared: .paragraph) else {
+            throw fail("renderer-ownership witness failed with unnamed error: \(error)")
+        }
+    }
+
+    let missingFallback = AgentBlockRendererRegistry()
+    do {
+        try missingFallback.freeze()
+        throw fail("missing-fallback witness did not fail")
+    } catch let error as AgentBlockRendererRegistryError {
+        guard error == .missingFallback else {
+            throw fail("missing-fallback witness failed with unnamed error: \(error)")
+        }
+    }
+
+    do {
+        try registry.register(
+            AgentDeferredBlockRenderer(kind: futureKind, safeLabel: "late"),
+            for: futureKind
+        )
+        throw fail("frozen-registry witness did not fail")
+    } catch let error as AgentBlockRendererRegistryError {
+        guard error == .registryFrozen else {
+            throw fail("frozen-registry witness failed with wrong error: \(error)")
+        }
+    }
+
+    let sourceRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        .appendingPathComponent("Sources/ContinuumRevived/Canvas")
+    let switchScanPaths = [
+        sourceRoot.appendingPathComponent("AgentTranscript"),
+        sourceRoot.appendingPathComponent("ManagedAgentTileNSView.swift")
+    ]
+    var scanned = 0
+    for path in switchScanPaths {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path.path, isDirectory: &isDirectory) else { continue }
+        let files: [URL]
+        if isDirectory.boolValue {
+            files = (FileManager.default.enumerator(at: path, includingPropertiesForKeys: nil)?
+                .compactMap { $0 as? URL }
+                .filter { $0.pathExtension == "swift" }) ?? []
+        } else {
+            files = [path]
+        }
+        for file in files {
+            scanned += 1
+            let source = try String(contentsOf: file, encoding: .utf8)
+            let blockKindSwitch = source.range(
+                of: #"switch\s+block\s*\.\s*kind"#,
+                options: .regularExpression
+            ) != nil
+            guard !blockKindSwitch else {
+                throw fail("\(file.lastPathComponent) switches on AgentBlockKind instead of resolving through the registry")
+            }
+        }
+    }
+    guard scanned >= 3 else {
+        throw fail("renderer kind-switch source check scanned only \(scanned) files")
+    }
+
+    return "renderer registry: 16 unique built-ins, ownership/duplicate/missing/frozen witnesses named, unknown fallback shared, \(scanned) tile/transcript sources free of block-kind switches"
 }
 
 /// Gated on `--agent-restore-check` (P2A.7).
