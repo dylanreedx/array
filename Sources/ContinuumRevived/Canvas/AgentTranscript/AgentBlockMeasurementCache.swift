@@ -15,6 +15,7 @@ struct AgentContentSizePolicy: Hashable {
 struct AgentBlockMeasureKey: Hashable {
     let id: AgentNodeID
     let kind: AgentBlockKind
+    let entryRole: AgentEntryRole
     let revision: UInt64
     let widthBucket: Int
     let appearance: TokenTheme
@@ -37,6 +38,7 @@ final class AgentBlockMeasurementCache {
         for block: AgentBlock,
         width: CGFloat,
         context: AgentRenderContext,
+        entryRole: AgentEntryRole = .assistant,
         contentSizePolicy: AgentContentSizePolicy = .standard,
         renderer: any AgentBlockRendering
     ) -> CGFloat {
@@ -44,6 +46,7 @@ final class AgentBlockMeasurementCache {
             block: block,
             width: width,
             appearance: context.appearance,
+            entryRole: entryRole,
             contentSizePolicy: contentSizePolicy
         )
         if let cached = heights[key] { return cached }
@@ -66,12 +69,14 @@ final class AgentBlockMeasurementCache {
         block: AgentBlock,
         width: CGFloat,
         appearance: TokenTheme,
+        entryRole: AgentEntryRole,
         contentSizePolicy: AgentContentSizePolicy
     ) -> AgentBlockMeasureKey {
         let finiteWidth = width.isFinite ? max(0, width) : 0
         return AgentBlockMeasureKey(
             id: block.id,
             kind: block.kind,
+            entryRole: entryRole,
             revision: block.revision,
             widthBucket: Int((finiteWidth / widthQuantum).rounded()),
             appearance: appearance,

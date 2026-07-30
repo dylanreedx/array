@@ -15,6 +15,7 @@ final class AgentBlockHostView: NSView {
     private(set) var rendererView: NSView?
     private(set) var representedID: AgentNodeID?
     private(set) var representedKind: AgentBlockKind?
+    private(set) var representedRole: AgentEntryRole?
     private(set) var representedRevision: UInt64?
     private(set) var reuseGeneration: UInt64 = 0
 
@@ -35,14 +36,19 @@ final class AgentBlockHostView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func apply(block: AgentBlock, context: AgentRenderContext) throws {
+    func apply(
+        block: AgentBlock,
+        entryRole: AgentEntryRole = .assistant,
+        context: AgentRenderContext
+    ) throws {
         let needsCleanView = rendererView == nil
             || representedID != block.id
             || representedKind != block.kind
+            || representedRole != entryRole
 
         if needsCleanView {
             resetRenderedState(incrementGeneration: representedID != nil)
-            let resolved = try registry.renderer(for: block.kind)
+            let resolved = try registry.renderer(for: block.kind, entryRole: entryRole)
             let view = resolved.makeView()
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
@@ -59,6 +65,7 @@ final class AgentBlockHostView: NSView {
         guard let renderer, let rendererView else { return }
         representedID = block.id
         representedKind = block.kind
+        representedRole = entryRole
         representedRevision = block.revision
 
         // A renderer may retain its action closure in controls or custom views.
@@ -77,15 +84,17 @@ final class AgentBlockHostView: NSView {
 
     func measuredHeight(
         for block: AgentBlock,
+        entryRole: AgentEntryRole = .assistant,
         width: CGFloat,
         context: AgentRenderContext,
         contentSizePolicy: AgentContentSizePolicy = .standard
     ) throws -> CGFloat {
-        let renderer = try registry.renderer(for: block.kind)
+        let renderer = try registry.renderer(for: block.kind, entryRole: entryRole)
         return measurementCache.height(
             for: block,
             width: width,
             context: context,
+            entryRole: entryRole,
             contentSizePolicy: contentSizePolicy,
             renderer: renderer
         )
@@ -115,6 +124,7 @@ final class AgentBlockHostView: NSView {
         rendererView = nil
         representedID = nil
         representedKind = nil
+        representedRole = nil
         representedRevision = nil
         isBlockHovered = false
         isBlockSelected = false

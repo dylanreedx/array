@@ -362,13 +362,14 @@ enum UIProbeGeometry {
         }
         try checkReusableAgentBlockHost()
         let proseRows = try checkAssistantProseRenderer()
+        let userPromptRows = try checkUserPromptRenderer()
         guard tightestDockSlack.isFinite else {
             throw fail("the approval dock was never measured — the fixture no longer opens an approval, so the derived height is ungated")
         }
         print(String(
-            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 6-dimensional measurement key gated; assistant prose wraps %d semantic rows at 320pt without clipping/ambiguity; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
-            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), proseRows, narrowestCardRatio,
-            ApprovalDockView.preferredHeight, tightestDockSlack
+            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 7-dimensional measurement key gated; assistant prose wraps %d semantic rows and user prompt wraps %d semantic rows at 320pt without clipping/ambiguity or bubble narrowing; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
+            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), proseRows, userPromptRows,
+            narrowestCardRatio, ApprovalDockView.preferredHeight, tightestDockSlack
         ))
     }
 
@@ -463,6 +464,114 @@ enum UIProbeGeometry {
     // `.build/debug/continuum-revived --ui-geometry-check`; exit 1:
     // "FAIL: assistant prose rows clipped or escaped the horizontal reading inset
     // at 320pt". The mutation was then reverted and the same check passed.
+
+    /// Deterministic P3.4 gate over the semantic user surface at the program's
+    /// narrowest required transcript width.
+    private static func checkUserPromptRenderer() throws -> Int {
+        func id(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+        func paragraph(_ value: String, _ text: String) -> AgentBlock {
+            AgentBlock(id: id(value), revision: 1, kind: .paragraph, payload: .paragraph([.text(text)]))
+        }
+
+        let prompt = AgentBlock(
+            id: id("user-prompt-root"), revision: 1, kind: .quote, payload: .quote,
+            children: [
+                paragraph("user-prompt-first", "Please review the semantic transcript implementation and keep the response within the existing architecture."),
+                paragraph("user-prompt-second", "Also preserve this second Markdown paragraph so multiline prompts remain selectable and readable at narrow widths."),
+            ]
+        )
+        guard try AgentBlockRendererRegistry.production.renderer(
+            for: prompt.kind, entryRole: .user
+        ) is UserPromptRenderer else {
+            throw fail("production role-aware registry did not select UserPromptRenderer for user quote")
+        }
+        guard try AgentBlockRendererRegistry.production.renderer(
+            for: prompt.kind, entryRole: .assistant
+        ) is AssistantProseRenderer else {
+            throw fail("production role-aware registry replaced assistant quote with the user surface")
+        }
+        let context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark)
+        let host = AgentBlockHostView()
+        let height = try host.measuredHeight(
+            for: prompt, entryRole: .user, width: 320, context: context
+        )
+        let assistantHeight = try host.measuredHeight(
+            for: prompt, entryRole: .assistant, width: 320, context: context
+        )
+        guard height > CGFloat(Metrics.lineHeight(for: .body)) * 4,
+              height == assistantHeight + UserPromptView.verticalInset * 2,
+              host.measurementCache.cachedMeasurementCount == 2 else {
+            throw fail("user/assistant role-aware measurement did not wrap or isolate cache entries (user \(height), assistant \(assistantHeight), cache \(host.measurementCache.cachedMeasurementCount))")
+        }
+
+        host.frame = NSRect(x: 0, y: 0, width: 320, height: height)
+        try host.apply(block: prompt, entryRole: .user, context: context)
+        host.layoutSubtreeIfNeeded()
+        guard let view = host.rendererView as? UserPromptView else {
+            throw fail("production block host did not select UserPromptView for a user entry")
+        }
+
+        guard view.accessibilityRole() == .group, view.accessibilityLabel() == "You" else {
+            throw fail("user prompt did not expose the nonvisual You role label")
+        }
+        guard view.proseView.textFields.count == 2,
+              view.proseView.textFields.allSatisfy(\.isSelectable),
+              view.proseView.textFields.allSatisfy({ !$0.stringValue.contains("You ·") && $0.stringValue != "You" }) else {
+            throw fail("user prompt lost a semantic Markdown row, selection, or drew a permanent You metadata caption")
+        }
+        guard view.proseView.frame.minX == view.bounds.minX else {
+            throw fail("user prompt became right-aligned instead of sharing the prose leading edge")
+        }
+        try expectUserPromptReadableMeasure(
+            proseWidth: view.proseView.frame.width, surfaceWidth: view.bounds.width
+        )
+        let inset = AssistantProseView.horizontalReadingInset
+        guard view.proseView.textFields.allSatisfy({
+            $0.frame.minX == inset && $0.frame.maxX <= view.proseView.bounds.maxX - inset + 0.5
+                && $0.frame.maxY <= view.proseView.bounds.maxY + 0.5
+        }) else {
+            throw fail("user prompt does not share assistant prose's readable width or clips multiline content")
+        }
+        guard abs(view.proseView.frame.minY - UserPromptView.verticalInset) <= 0.5,
+              abs(view.bounds.maxY - view.proseView.frame.maxY - UserPromptView.verticalInset) <= 0.5 else {
+            throw fail("user prompt did not apply its modest symmetric vertical inset")
+        }
+        try expectNoAmbiguousLayout(
+            [(view, "user prompt"), (view.proseView, "user prompt prose")], label: "user prompt@320pt"
+        )
+        try expectNoClipping(view, label: "user prompt@320pt")
+
+        let userViewIdentity = ObjectIdentifier(view)
+        try host.apply(block: prompt, entryRole: .assistant, context: context)
+        guard let assistantView = host.rendererView as? AssistantProseView,
+              ObjectIdentifier(assistantView) != userViewIdentity,
+              host.representedRole == .assistant,
+              assistantView.accessibilityLabel() == nil else {
+            throw fail("same block did not replace its user renderer when entry role changed to assistant")
+        }
+
+        return view.proseView.textFields.count
+    }
+
+    private static func expectUserPromptReadableMeasure(
+        proseWidth: CGFloat,
+        surfaceWidth: CGFloat
+    ) throws {
+        guard surfaceWidth > 0 else { throw fail("user prompt surface has zero width") }
+        let ratio = proseWidth / surfaceWidth
+        guard ratio >= 0.99 else {
+            throw fail(String(
+                format: "user prompt became a narrow bubble: prose spans %.3f of its %.0fpt surface",
+                ratio, surfaceWidth
+            ))
+        }
+    }
+
+    // Negative witness (P3.4, exercised 2026-07-30): changed
+    // `UserPromptView.layout()` to right-align `proseView` at 72% of the surface,
+    // rebuilt, then ran `.build/debug/continuum-revived --ui-geometry-check`;
+    // exit 1: "FAIL: user prompt became right-aligned instead of sharing the prose
+    // leading edge". The mutation was then reverted and the same check passed.
 
     /// Deterministic P3.2 gate. A durable final-code mutation witness is recorded
     /// by the coordinator alongside this check's positive evidence.
@@ -587,7 +696,7 @@ enum UIProbeGeometry {
         rendererCount: Int
     ) throws {
         guard cacheCount == 6, rendererCount == 6 else {
-            throw fail("block measurement cache collapsed ID/kind/revision/width/appearance/content-size keys (cache \(cacheCount), renderer \(rendererCount), expected 6)")
+            throw fail("block measurement cache collapsed ID/kind/entry-role/revision/width/appearance/content-size keys (cache \(cacheCount), renderer \(rendererCount), expected 6)")
         }
     }
 

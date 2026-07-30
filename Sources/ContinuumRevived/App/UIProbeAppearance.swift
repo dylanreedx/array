@@ -1427,9 +1427,56 @@ enum UIProbeAppearance {
         return assertions
     }
 
+    /// P3.4: the user role is a quiet Continuum surface, with authorship in the
+    /// accessibility tree rather than a permanent visual metadata row.
+    private static func runUserPromptAppearanceCheck() throws -> Int {
+        let block = AgentBlock(
+            id: AgentNodeID(rawValue: "appearance-user-prompt")!, revision: 1, kind: .paragraph,
+            payload: .paragraph([.text("A selectable user prompt without a speaker caption")])
+        )
+        let renderer = UserPromptRenderer(kind: .paragraph)
+        guard let view = renderer.makeView() as? UserPromptView else {
+            throw fail("user prompt renderer did not vend UserPromptView")
+        }
+        let assistant = AssistantProseRenderer(kind: .paragraph).makeView()
+        var assertions = 0
+        for theme in [TokenTheme.light, .dark] {
+            let context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: theme)
+            renderer.update(view: view, block: block, context: context)
+            renderer.updateAccessibility(view: view, block: block, context: context)
+
+            let actualFill = view.layer?.backgroundColor.flatMap(NSColor.init(cgColor:))?.usingColorSpace(.sRGB)
+            let expectedFill = UserPromptView.fillToken.color.nsColor(for: theme).usingColorSpace(.sRGB)
+            guard actualFill == expectedFill, view.layer?.borderWidth == 0 else {
+                throw fail("user prompt quiet fill/outline mismatch in \(theme)")
+            }
+            guard view.layer?.cornerRadius == UserPromptView.cornerRadius,
+                  UserPromptView.cornerRadius == CGFloat(AgentTileRadius.artifact) else {
+                throw fail("user prompt did not use the semantic artifact radius role")
+            }
+            guard view.accessibilityRole() == .group, view.accessibilityLabel() == "You",
+                  assistant.accessibilityLabel() == nil else {
+                throw fail("user and assistant entries are not distinguishable without color in \(theme)")
+            }
+            guard view.proseView.textFields.count == 1, let field = view.proseView.textFields.first,
+                  field.isSelectable, !field.isBordered, !field.drawsBackground,
+                  field.stringValue == "A selectable user prompt without a speaker caption" else {
+                throw fail("user prompt added visual title/status chrome or lost selectable semantic text in \(theme)")
+            }
+            let actualText = field.textColor?.usingColorSpace(.sRGB)
+            let expectedText = TextToken.textPrimary.color.nsColor(for: theme).usingColorSpace(.sRGB)
+            guard actualText == expectedText else {
+                throw fail("user prompt primary text token mismatch in \(theme)")
+            }
+            assertions += 5
+        }
+        return assertions
+    }
+
     /// Called from `UIProbe.runUIProbeChecks` (`--ui-probe-check`).
     static func runAppearanceChecks() throws {
         let proseAssertions = try runAssistantProseAppearanceCheck()
+        let userAssertions = try runUserPromptAppearanceCheck()
         let sweep = try runProductionSweep()
         let hostile = try runHostileCurrentAppearanceCheck()
         let witness = try runTokenFixtureCheck()
@@ -1445,6 +1492,7 @@ enum UIProbeAppearance {
             throw fail("appearance checks leaked '\(NSApp?.appearance?.name.rawValue ?? "nil")' onto NSApp")
         }
         print("UIProbeAppearance: \(proseAssertions) assistant-prose assertions hold tileBody inheritance, primary text, selection, and no card chrome in both appearances")
+        print("UIProbeAppearance: \(userAssertions) user-prompt assertions hold quiet fill, semantic radius, primary text, selection, no visual metadata, and non-color accessibility authorship in both appearances")
         print("UIProbeAppearance: \(sweep.views) TokenThemed views, \(sweep.slots) layer colours sentinelled and re-applied across a live flip (\(sweep.changed) re-resolved to a different value); \(hostile) hostile-current-appearance assertions held; token fixture holds both leaves; stale-fixture witness failed as required")
         print("UIProbeAppearance: witness message — \(witness)")
     }
