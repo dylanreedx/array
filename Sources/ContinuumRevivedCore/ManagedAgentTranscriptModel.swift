@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import Foundation
 
@@ -83,153 +84,99 @@ public struct AgentTranscriptCompatibilityRow: Equatable, Sendable {
 }
 
 public struct ManagedAgentTranscriptModel: Equatable, Sendable {
-    public private(set) var threadId: String
-    public private(set) var cards: [ManagedTranscriptCard] = []
-    public private(set) var currentStatus: AgentStatus = .configuring
-    public private(set) var events: [AgentRuntimeEvent] = []
+    public var threadId: String { semanticProjection.threadId }
+    public var document: AgentDocument { semanticProjection.document }
+    public var cards: [ManagedTranscriptCard] {
+        ManagedTranscriptCardProjection.project(
+            document,
+            itemKindsByItemID: legacyItemKindsByItemID,
+            itemStatusesByItemID: legacyItemStatusesByItemID
+        )
+    }
+    public var currentStatus: AgentStatus { semanticProjection.currentStatus }
+    public var events: [AgentRuntimeEvent] { semanticProjection.events }
+    public var activeToolCount: Int { semanticProjection.activeToolCount }
 
-    private var activeToolCardIdsByItemId: [String: String] = [:]
-    private var lastAssistantCardId: String?
-    private var lastReasoningCardId: String?
-    /// Bound on retained raw events. Status is derived from recent activity, so
-    /// a window is sufficient — without this, a long-lived agent grows the
-    /// array without limit and re-scans all of it on every ingest.
-    private static let eventWindow = 400
+    /// The semantic projection is the only mutable transcript owner. Legacy
+    /// cards are rebuilt on read from its document; there is no second array to
+    /// update, reconcile, or accidentally leave stale.
+    private var semanticProjection: AgentTranscriptProjection
+    /// Temporary compatibility metadata for a distinction the P1 semantic
+    /// tool-call payload does not encode. This is not a second transcript:
+    /// identity, order, title, body, and lifecycle remain document-derived.
+    private var legacyItemKindsByItemID: [String: ItemKind] = [:]
+    /// Diff and error payloads cannot represent completion status in the P1
+    /// semantic schema. Retain that temporary legacy display metadata beside
+    /// item kind while the card renderer remains live; transcript content and
+    /// lifecycle are still owned exclusively by the document.
+    private var legacyItemStatusesByItemID: [String: ItemStatus] = [:]
+    private var hasSeenTurnStart = false
 
     public init(threadId: String) {
-        self.threadId = threadId
+        semanticProjection = AgentTranscriptProjection(threadId: threadId)
     }
 
-    public var activeToolCount: Int { activeToolCardIdsByItemId.count }
-
     public mutating func ingest(_ event: AgentRuntimeEvent) {
-        events.append(event)
-        if events.count > Self.eventWindow { events.removeFirst(events.count - Self.eventWindow) }
-        currentStatus = deriveAgentStatus(signals: deriveStatusSignals(from: events, threadId: threadId, engineStatus: .idle))
-
         switch event {
-        case .turnStarted(let tid, _) where tid == threadId:
-            // Each turn's assistant text is its own card. Without this reset,
-            // a new turn's deltas append to the previous turn's card and the
-            // whole conversation renders as one concatenated blob.
-            endStreamingRuns()
-        case .contentDelta(let tid, _, let streamKind, let delta) where tid == threadId:
-            ingestContentDelta(streamKind: streamKind, delta: delta)
-        case .itemStarted(let tid, let itemId, let kind, let title) where tid == threadId:
-            ingestItemStarted(itemId: itemId, kind: kind, title: title)
-        case .itemCompleted(let tid, let itemId, let kind, let status) where tid == threadId:
-            ingestItemCompleted(itemId: itemId, kind: kind, status: status)
-        case .turnCompleted(let tid, _, _, _) where tid == threadId:
-            endStreamingRuns()
+        case .itemStarted(let tid, let itemID, let kind, _) where tid == threadId:
+            legacyItemKindsByItemID[itemID] = kind
+            legacyItemStatusesByItemID[itemID] = .inProgress
+        case .itemCompleted(let tid, let itemID, let kind, let status) where tid == threadId:
+            legacyItemKindsByItemID[itemID] = kind
+            legacyItemStatusesByItemID[itemID] = status
         default:
             break
         }
+        if case .turnStarted(let tid, _) = event, tid == threadId {
+            hasSeenTurnStart = true
+        }
+        // The legacy bootstrap path emitted adjacent assistant deltas with
+        // synthetic, differing turn IDs before the first real turnStarted.
+        // Normalize only that historical prefix so it remains one semantic
+        // entry/card; real provider turns retain their provider identity.
+        if !hasSeenTurnStart,
+           case .contentDelta(let tid, _, let streamKind, let delta) = event,
+           tid == threadId {
+            semanticProjection.ingest(.contentDelta(
+                threadId: tid,
+                turnId: "compatibility-bootstrap",
+                streamKind: streamKind,
+                delta: delta
+            ))
+        } else {
+            semanticProjection.ingest(event)
+        }
     }
 
-    /// Appends the prompt the USER just submitted as its own card. Not an
-    /// AgentRuntimeEvent: providers never emit user text, so a local echo must
-    /// not ride the provider channel. Ends any open run so the agent's reply
-    /// starts a fresh card below.
     public mutating func appendUserPrompt(_ text: String) {
-        endStreamingRuns()
-        cards.append(ManagedTranscriptCard(
-            id: "user-\(cards.count + 1)", kind: .userMessage, title: "you", body: text))
-        endStreamingRuns()
+        semanticProjection.appendUserPrompt(text)
     }
 
-    /// Appends a locally-authored note — text no provider emitted, so it must not
-    /// ride the provider channel either (same reasoning as `appendUserPrompt`).
-    /// P2A.7's "previous session" placeholder is the one caller. Idempotent on `id`,
-    /// because the tile can be re-wired to the same agent and a placeholder that
-    /// stacks up would be its own bug.
     public mutating func appendNotice(id: String, title: String, text: String) {
-        guard !cards.contains(where: { $0.id == id }) else { return }
-        endStreamingRuns()
-        cards.append(ManagedTranscriptCard(id: id, kind: .message, title: title, body: text))
-        endStreamingRuns()
+        semanticProjection.appendNotice(id: id, title: title, text: text)
     }
 
-    /// End any open assistant/reasoning card run so the NEXT delta starts a new
-    /// card. Called at turn boundaries and whenever a different card kind is
-    /// inserted — otherwise post-tool narration would append to the pre-tool
-    /// assistant card and render above the tool call (out of order).
-    private mutating func endStreamingRuns() {
-        lastAssistantCardId = nil
-        lastReasoningCardId = nil
-    }
-
-    private mutating func ingestContentDelta(streamKind: ContentStreamKind, delta: String) {
-        switch streamKind {
-        case .assistant:
-            lastReasoningCardId = nil
-            if let index = indexOfCard(id: lastAssistantCardId) {
-                cards[index].body += delta
-            } else {
-                let id = "assistant-\(cards.count + 1)"
-                cards.append(ManagedTranscriptCard(id: id, kind: .message, title: "assistant", body: delta))
-                lastAssistantCardId = id
-            }
-        case .reasoning:
-            lastAssistantCardId = nil
-            if let index = indexOfCard(id: lastReasoningCardId) {
-                cards[index].body += delta
-            } else {
-                let id = "reasoning-\(cards.count + 1)"
-                cards.append(ManagedTranscriptCard(id: id, kind: .message, title: "reasoning", body: delta))
-                lastReasoningCardId = id
-            }
-        case .commandOutput:
-            endStreamingRuns()
-            let id = "output-\(cards.count + 1)"
-            cards.append(ManagedTranscriptCard(id: id, kind: .toolCall, title: "command output", body: delta, itemKind: .commandExecution, status: .inProgress))
-        }
-    }
-
-    private mutating func ingestItemStarted(itemId: String, kind: ItemKind, title: String?) {
-        // A tool/diff/plan/error card breaks any open assistant/reasoning run,
-        // so subsequent narration forms a NEW card below this one.
-        endStreamingRuns()
-        let cardKind: ManagedTranscriptCardKind
-        switch kind {
-        case .plan:
-            cardKind = .plan
-        case .fileChange:
-            cardKind = .diff
-        case .error:
-            cardKind = .error
-        default:
-            cardKind = .toolCall
-        }
-        let displayTitle = title ?? kind.rawValue
-        let card = ManagedTranscriptCard(id: itemId, kind: cardKind, title: displayTitle, itemKind: kind, status: .inProgress)
-        cards.append(card)
-        if cardKind == .toolCall || cardKind == .diff || cardKind == .plan {
-            activeToolCardIdsByItemId[itemId] = itemId
-        }
-    }
-
-    private mutating func ingestItemCompleted(itemId: String, kind: ItemKind, status: ItemStatus) {
-        if let index = indexOfCard(id: activeToolCardIdsByItemId[itemId] ?? itemId) {
-            cards[index].status = status
-            cards[index].itemKind = kind
-        }
-        activeToolCardIdsByItemId.removeValue(forKey: itemId)
-    }
-
-    private func indexOfCard(id: String?) -> Int? {
-        guard let id else { return nil }
-        return cards.firstIndex { $0.id == id }
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.threadId == rhs.threadId
+            && lhs.document == rhs.document
+            && lhs.currentStatus == rhs.currentStatus
+            && lhs.events == rhs.events
+            && lhs.activeToolCount == rhs.activeToolCount
+            && lhs.legacyItemKindsByItemID == rhs.legacyItemKindsByItemID
+            && lhs.legacyItemStatusesByItemID == rhs.legacyItemStatusesByItemID
+            && lhs.hasSeenTurnStart == rhs.hasSeenTurnStart
     }
 }
 
 extension ManagedAgentTranscriptModel: AgentTranscriptProjecting {
-    /// Card order, ids, bodies, and completion status — the shape of what the
-    /// tile shows today, with the presentation-only fields (title, itemKind)
-    /// left out so the floor does not freeze presentation choices the 91 program
-    /// is explicitly allowed to change.
     public var compatibilityRows: [AgentTranscriptCompatibilityRow] {
         cards.map {
-            AgentTranscriptCompatibilityRow(id: $0.id, kind: $0.kind.rawValue, body: $0.body, status: $0.status)
+            AgentTranscriptCompatibilityRow(
+                id: $0.id,
+                kind: $0.kind.rawValue,
+                body: $0.body,
+                status: $0.status
+            )
         }
     }
 }

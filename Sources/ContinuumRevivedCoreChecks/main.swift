@@ -31,6 +31,11 @@ if CommandLine.arguments.contains("--agent-transcript-compatibility-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--managed-transcript-card-projection-check") {
+    runManagedTranscriptCardProjectionChecks()
+    Foundation.exit(0)
+}
+
 func runAsyncCheck(_ body: @escaping @Sendable () async throws -> Void) throws {
     let semaphore = DispatchSemaphore(value: 0)
     final class Box: @unchecked Sendable {
@@ -10069,6 +10074,11 @@ runAgentTranscriptFixtureChecks()
 // exact transcript today's pipeline produces from it. The floor the semantic
 // document is migrated against.
 runAgentTranscriptCompatibilityChecks()
+
+// Ticket: docs/38-tickets/91-agent-tile-ux/P1.9-card-compatibility-projection.md —
+// the temporary semantic-document → legacy-card adapter and its one-way
+// source-of-truth witness.
+runManagedTranscriptCardProjectionChecks()
 
 // Ticket: docs/38-tickets/91-agent-tile-ux/P1.5-runtime-event-projection.md —
 // runtime events projected into the platform-neutral semantic document.

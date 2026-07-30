@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
@@ -159,6 +160,120 @@ enum TranscriptCompatibilityHarness {
     }
 }
 
+/// Check-only presentation seam. Keeping it separate from
+/// `AgentTranscriptProjecting.compatibilityRows` prevents P1.9 card chrome from
+/// expanding P1.5's content-only compatibility contract.
+private protocol LegacyCardPresentationProjecting: AgentTranscriptProjecting {
+    var legacyPresentationCards: [ManagedTranscriptCard] { get }
+}
+
+extension ManagedAgentTranscriptModel: LegacyCardPresentationProjecting {
+    fileprivate var legacyPresentationCards: [ManagedTranscriptCard] { cards }
+}
+
+/// Frozen copy of the pre-P1.9 card reducer. It is check-only and intentionally
+/// does not call either the semantic reducer or the compatibility adapter: P1.9
+/// can compare the new path with an independent old baseline rather than
+/// comparing the semantic projection with itself.
+private struct LegacyCardBaseline: LegacyCardPresentationProjecting {
+    private let threadId: String
+    private var cards: [ManagedTranscriptCard] = []
+    private var events: [AgentRuntimeEvent] = []
+    private var status: AgentStatus = .configuring
+    private var activeByItemID: [String: String] = [:]
+    private var lastAssistantID: String?
+    private var lastReasoningID: String?
+
+    init(threadId: String) { self.threadId = threadId }
+
+    var currentStatus: AgentStatus { status }
+    var activeToolCount: Int { activeByItemID.count }
+    var compatibilityRows: [AgentTranscriptCompatibilityRow] {
+        cards.map { .init(id: $0.id, kind: $0.kind.rawValue, body: $0.body, status: $0.status) }
+    }
+    var legacyPresentationCards: [ManagedTranscriptCard] { cards }
+
+    mutating func ingest(_ event: AgentRuntimeEvent) {
+        events.append(event)
+        if events.count > 400 { events.removeFirst(events.count - 400) }
+        status = deriveAgentStatus(
+            signals: deriveStatusSignals(from: events, threadId: threadId, engineStatus: .idle)
+        )
+        switch event {
+        case .turnStarted(let tid, _) where tid == threadId,
+             .turnCompleted(let tid, _, _, _) where tid == threadId:
+            endRuns()
+        case .contentDelta(let tid, _, let stream, let delta) where tid == threadId:
+            ingest(stream: stream, delta: delta)
+        case .itemStarted(let tid, let itemID, let kind, let title) where tid == threadId:
+            endRuns()
+            let cardKind: ManagedTranscriptCardKind
+            switch kind {
+            case .plan: cardKind = .plan
+            case .fileChange: cardKind = .diff
+            case .error: cardKind = .error
+            default: cardKind = .toolCall
+            }
+            cards.append(.init(id: itemID, kind: cardKind, title: title ?? kind.rawValue,
+                               itemKind: kind, status: .inProgress))
+            if cardKind == .toolCall || cardKind == .diff || cardKind == .plan {
+                activeByItemID[itemID] = itemID
+            }
+        case .itemCompleted(let tid, let itemID, let kind, let status) where tid == threadId:
+            if let index = cards.firstIndex(where: { $0.id == (activeByItemID[itemID] ?? itemID) }) {
+                cards[index].status = status
+                cards[index].itemKind = kind
+            }
+            activeByItemID.removeValue(forKey: itemID)
+        default: break
+        }
+    }
+
+    mutating func appendUserPrompt(_ text: String) {
+        endRuns()
+        cards.append(.init(id: "user-\(cards.count + 1)", kind: .userMessage, title: "you", body: text))
+    }
+
+    mutating func appendNotice(id: String, title: String, text: String) {
+        guard !cards.contains(where: { $0.id == id }) else { return }
+        endRuns()
+        cards.append(.init(id: id, kind: .message, title: title, body: text))
+    }
+
+    private mutating func endRuns() {
+        lastAssistantID = nil
+        lastReasoningID = nil
+    }
+
+    private mutating func ingest(stream: ContentStreamKind, delta: String) {
+        switch stream {
+        case .assistant:
+            lastReasoningID = nil
+            if let id = lastAssistantID, let index = cards.firstIndex(where: { $0.id == id }) {
+                cards[index].body += delta
+            } else {
+                let id = "assistant-\(cards.count + 1)"
+                cards.append(.init(id: id, kind: .message, title: "assistant", body: delta))
+                lastAssistantID = id
+            }
+        case .reasoning:
+            lastAssistantID = nil
+            if let id = lastReasoningID, let index = cards.firstIndex(where: { $0.id == id }) {
+                cards[index].body += delta
+            } else {
+                let id = "reasoning-\(cards.count + 1)"
+                cards.append(.init(id: id, kind: .message, title: "reasoning", body: delta))
+                lastReasoningID = id
+            }
+        case .commandOutput:
+            endRuns()
+            cards.append(.init(id: "output-\(cards.count + 1)", kind: .toolCall,
+                               title: "command output", body: delta,
+                               itemKind: .commandExecution, status: .inProgress))
+        }
+    }
+}
+
 /// A projection the floor is asserted against, wrapped in a closure so the array
 /// below can hold heterogeneous types without existential mutation.
 struct TranscriptProjectionUnderTest: Sendable {
@@ -174,8 +289,9 @@ struct TranscriptProjectionUnderTest: Sendable {
     }
 }
 
-/// THE migration seam. Keep both production projections on the same translated
-/// corpus until the compatibility-removal ticket retires the card model.
+/// THE P0.5/P1.5 migration seam. Its snapshot intentionally excludes card-only
+/// presentation fields so the semantic projection can satisfy the older
+/// content compatibility floor.
 let transcriptProjectionsUnderTest: [TranscriptProjectionUnderTest] = [.cardModel, .semanticDocument]
 
 // MARK: - a stub that disagrees, so the parity comparison is not vacuous today
@@ -580,6 +696,191 @@ func runAgentTranscriptCompatibilityChecks() {
            "the compatibility corpus must exercise exactly the card and semantic production projections")
 
     print("Agent transcript compatibility checks passed: \(floors.count) replayed script(s) on the real translator→remap→projection path, \(transcriptProjectionsUnderTest.count) registered projection(s), tool arguments absent from every row, comparator proven against a divergent stub")
+}
+
+// MARK: - P1.9 semantic document → legacy card projection
+
+/// P1.9 compares the frozen card reducer with the semantic-backed card model on
+/// presentation too. This is deliberately separate from
+/// `TranscriptCompatibilitySnapshot.capture`, whose P1.5 contract is the older
+/// content-only floor shared with `AgentTranscriptProjection`.
+private struct LegacyCardPresentationSnapshot: Equatable, Sendable {
+    var content: TranscriptCompatibilitySnapshot
+    var titles: [String?]
+    var itemKinds: [ItemKind?]
+
+    static func capture(_ projection: some LegacyCardPresentationProjecting) -> Self {
+        let cards = projection.legacyPresentationCards
+        return Self(
+            content: .capture(projection),
+            titles: cards.map(\.title),
+            itemKinds: cards.map(\.itemKind)
+        )
+    }
+}
+
+private func replayLegacyCardPresentation<Projection: LegacyCardPresentationProjecting>(
+    _ script: TranscriptCompatibilityScript,
+    into _: Projection.Type
+) -> LegacyCardPresentationSnapshot {
+    var translator = PiEventTranslator()
+    var projection = Projection(threadId: TranscriptCompatibilityHarness.tileThread)
+    for step in script.steps {
+        switch step {
+        case .providerLine(let line):
+            for event in translator.translate(line: line) {
+                projection.ingest(event.withThreadId(TranscriptCompatibilityHarness.tileThread))
+            }
+        case .userPrompt(let text): projection.appendUserPrompt(text)
+        case .notice(let id, let title, let text):
+            projection.appendNotice(id: id, title: title, text: text)
+        }
+    }
+    return .capture(projection)
+}
+
+private func legacyCardPresentationDivergences(
+    _ lhs: LegacyCardPresentationSnapshot,
+    _ rhs: LegacyCardPresentationSnapshot
+) -> [String] {
+    var result = transcriptSnapshotDivergences(lhs.content, rhs.content)
+    if lhs.titles != rhs.titles { result.append("titles \(lhs.titles) vs \(rhs.titles)") }
+    if lhs.itemKinds != rhs.itemKinds { result.append("itemKinds \(lhs.itemKinds) vs \(rhs.itemKinds)") }
+    return result
+}
+
+func runManagedTranscriptCardProjectionChecks() {
+    func id(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+    func entry(
+        _ value: String,
+        role: AgentEntryRole = .system,
+        itemID: String? = nil,
+        block: AgentBlock
+    ) -> AgentEntry {
+        AgentEntry(
+            id: id(value),
+            role: role,
+            provenance: itemID.map { .providerItem(provider: "fixture", itemID: $0) }
+                ?? (role == .user ? .localPrompt(promptID: value) : .localNotice(reason: value)),
+            lifecycle: .finished,
+            blocks: [block]
+        )
+    }
+
+    let document = AgentDocument(entries: [
+        entry("assistant-entry", role: .assistant, itemID: "turn-1", block: AgentBlock(
+            id: id("assistant-block"), kind: .paragraph,
+            payload: .paragraph([
+                .text("read "), .emphasis([.text("carefully")]), .softBreak,
+                .strong([.text("then "), .code("ship")]),
+                .link(destination: "https://example.invalid/secret", title: nil, children: [.text(" the label")])
+            ])
+        )),
+        entry("user-entry", role: .user, block: AgentBlock(
+            id: id("user-block"), kind: .paragraph, payload: .paragraph([.text("please proceed")])
+        )),
+        entry("tool-entry", itemID: "tool-1", block: AgentBlock(
+            id: id("tool-block"), kind: .toolCall,
+            payload: .toolCall(.init(name: "swift build", status: .completed))
+        )),
+        entry("plan-entry", itemID: "plan-1", block: AgentBlock(
+            id: id("plan-block"), kind: .plan,
+            payload: .plan(.init(title: "Implementation plan", status: .inProgress))
+        )),
+        entry("diff-entry", itemID: "diff-1", block: AgentBlock(
+            id: id("diff-block"), kind: .diff, payload: .diff(.init(text: "Sources/Thing.swift"))
+        )),
+        entry("error-entry", itemID: "error-1", block: AgentBlock(
+            id: id("error-block"), kind: .error, payload: .error(.init(message: "compile failed"))
+        ))
+    ])
+
+    let cards = ManagedTranscriptCardProjection.project(
+        document,
+        itemKindsByItemID: ["tool-1": .commandExecution]
+    )
+    expect(cards.map(\.kind) == [.message, .userMessage, .toolCall, .plan, .diff, .error],
+           "P1.9: semantic entries must project into all six legacy card kinds in document order")
+    expect(cards.map(\.id) == ["assistant-1", "user-2", "tool-1", "plan-1", "diff-1", "error-1"],
+           "P1.9: compatibility ids must remain positional for prose and provider-owned for structured items")
+    expect(cards[0].body == "read carefully then ship the label",
+           "P1.9: rich inline marks flatten to readable plain text in the legacy card")
+    expect(!cards[0].body.contains("https://example.invalid/secret"),
+           "P1.9 negative witness: compatibility flattening must not leak a link destination the old body never displayed")
+    expect(cards[2].title == "swift build"
+               && cards[2].itemKind == .commandExecution
+               && cards[2].status == .completed,
+           "P1.9: structured title, concrete item kind, and lifecycle survive the compatibility projection")
+
+    // Unlike P1.5's content-only snapshot, this P1.9-only replay freezes the
+    // complete legacy card presentation against an independent pre-P1.9 reducer.
+    let presentationCorpus = [
+        TranscriptCompatibilityScripts.preToolProseToolPostToolProse,
+        TranscriptCompatibilityScripts.twoTurns,
+        TranscriptCompatibilityScripts.turnStartWithoutPreviousEnd,
+        TranscriptCompatibilityScripts.userPromptThenReply,
+        TranscriptCompatibilityScripts.activeTool,
+        TranscriptCompatibilityScripts.failedTool,
+        TranscriptCompatibilityScripts.reasoningAndAssistant,
+        TranscriptCompatibilityScripts.streamedMessage,
+        TranscriptCompatibilityScripts.repeatedNotice
+    ]
+    for script in presentationCorpus {
+        let baseline = replayLegacyCardPresentation(script, into: LegacyCardBaseline.self)
+        let projected = replayLegacyCardPresentation(script, into: ManagedAgentTranscriptModel.self)
+        let divergences = legacyCardPresentationDivergences(projected, baseline)
+        expect(divergences.isEmpty,
+               "P1.9 presentation parity moved on \(script.name): \(divergences.joined(separator: "; "))")
+    }
+
+    // This assertion is the dual-write witness: cards are read again from the
+    // semantic document after each event. A retained card array, or projection
+    // from the pre-delta snapshot, leaves the body at "one" and turns it red.
+    var model = ManagedAgentTranscriptModel(threadId: "P19-source-of-truth")
+    model.ingest(.contentDelta(
+        threadId: "P19-source-of-truth", turnId: "turn-1", streamKind: .assistant, delta: "one"
+    ))
+    let firstDocument = model.document
+    model.ingest(.contentDelta(
+        threadId: "P19-source-of-truth", turnId: "turn-1", streamKind: .assistant, delta: " two"
+    ))
+    expect(model.document != firstDocument && model.cards.single?.body == "one two",
+           "P1.9 negative witness: cards must be freshly derived from the updated semantic document, not independently mutated or cached")
+
+    var structuredModel = ManagedAgentTranscriptModel(threadId: "P19-item-kind")
+    structuredModel.ingest(.itemStarted(
+        threadId: "P19-item-kind", itemId: "command-1", kind: .commandExecution, title: "swift build"
+    ))
+    expect(structuredModel.cards.single?.itemKind == .commandExecution,
+           "P1.9: the legacy card subtitle requires the concrete runtime ItemKind")
+
+    // Diff and error payloads have no semantic status field in the P1 schema.
+    // Exercise every legacy terminal value through the live model so lifecycle
+    // inference cannot silently turn them all into completed/failed.
+    let terminalStatuses: [ItemStatus] = [.completed, .failed, .declined]
+    for kind in [ItemKind.fileChange, .error] {
+        for expectedStatus in terminalStatuses {
+            let itemID = "\(kind.rawValue)-\(expectedStatus.rawValue)"
+            let threadID = "P19-status-\(itemID)"
+            var statusModel = ManagedAgentTranscriptModel(threadId: threadID)
+            statusModel.ingest(.itemStarted(
+                threadId: threadID, itemId: itemID, kind: kind, title: itemID
+            ))
+            expect(statusModel.cards.single?.status == .inProgress,
+                   "P1.9: \(kind.rawValue) must begin in progress")
+            statusModel.ingest(.itemCompleted(
+                threadId: threadID, itemId: itemID, kind: kind, status: expectedStatus
+            ))
+            expect(statusModel.cards.single?.status == expectedStatus,
+                   "P1.9: \(kind.rawValue) completion must preserve \(expectedStatus.rawValue), got \(String(describing: statusModel.cards.single?.status))")
+        }
+    }
+
+    print("Managed transcript card projection checks passed: six legacy kinds, plain-text loss contract, concrete item kind, exact diff/error statuses, and semantic-source negative witness")
+}
+
+private extension Array {
+    var single: Element? { count == 1 ? self[0] : nil }
 }
 
 /// Two replays of the same projection must produce the same snapshot.
