@@ -2,9 +2,9 @@ import AppKit
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 
-/// Temporary plain-text renderer for the semantic prose families. Rich inline
-/// styling is deliberately deferred: this view consumes the owned semantic tree
-/// and never parses Markdown or provider text itself.
+/// Native semantic prose renderer. Container traversal stays here while each
+/// inline row is delegated to TextKit without reparsing Markdown or provider
+/// text.
 @MainActor
 final class AssistantProseRenderer: AgentBlockRendering {
     static let supportedKinds: Set<AgentBlockKind> = [.paragraph, .heading, .list, .listItem, .quote]
@@ -26,7 +26,7 @@ final class AssistantProseRenderer: AgentBlockRendering {
     }
 
     func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
-        AssistantProseView.measuredHeight(for: block, width: width)
+        AssistantProseView.measuredHeight(for: block, width: width, context: context)
     }
 
     func updateAccessibility(view: NSView, block: AgentBlock, context: AgentRenderContext) {
@@ -35,25 +35,31 @@ final class AssistantProseRenderer: AgentBlockRendering {
     }
 }
 
-/// A borderless, fill-less reading surface. Each semantic block gets a native
-/// selectable text field; the temporary flattening is replaced by the rich
-/// inline renderer without changing the registry or host contract.
+/// A borderless, fill-less reading surface. Each semantic row gets one native
+/// selectable TextKit view while list/quote order and accessibility remain owned
+/// by the semantic container traversal.
 @MainActor
 final class AssistantProseView: NSView {
     static let horizontalReadingInset: CGFloat = CGFloat(Inset.card.left)
     private static let blockSpacing = CGFloat(Space.m)
 
-    private(set) var textFields: [NSTextField] = []
+    private(set) var textFields: [RichInlineTextView] = []
     private var rows: [Row] = []
+    private var renderContext = AgentRenderContext(
+        actions: .disabled,
+        tokens: .transcript,
+        appearance: .dark
+    )
 
     private static let headingRole = NSAccessibility.Role(rawValue: "AXHeading")
     private static let listItemRole = NSAccessibility.Role(rawValue: "AXListItem")
 
     private struct Row {
-        let text: String
+        let blockID: AgentNodeID
+        let runs: [AgentInline]
         let role: NSAccessibility.Role
         let headingLevel: Int?
-        let font: NSFont
+        let textRole: TextRole
     }
 
     override init(frame frameRect: NSRect) {
@@ -70,23 +76,18 @@ final class AssistantProseView: NSView {
     override var isFlipped: Bool { true }
 
     func apply(block: AgentBlock, context: AgentRenderContext) {
+        renderContext = context
         textFields.forEach { $0.removeFromSuperview() }
         rows = Self.rows(for: block)
         textFields = rows.map { row in
-            let field = NSTextField(wrappingLabelWithString: row.text)
-            field.font = row.font
-            field.textColor = context.tokens.primaryText.color.nsColor(for: context.appearance)
-            field.isSelectable = true
-            field.isBordered = false
-            field.drawsBackground = false
-            field.maximumNumberOfLines = 0
-            field.lineBreakMode = .byWordWrapping
-            field.setAccessibilityElement(true)
-            field.setAccessibilityRole(row.role)
-            field.setAccessibilityLabel(row.text)
-            if let level = row.headingLevel { field.setAccessibilityValue(level) }
-            addSubview(field)
-            return field
+            let view = RichInlineTextView(frame: .zero)
+            view.apply(runs: row.runs, blockID: row.blockID, context: context, textRole: row.textRole)
+            view.setAccessibilityElement(true)
+            view.setAccessibilityRole(row.role)
+            view.setAccessibilityLabel(view.string)
+            if let level = row.headingLevel { view.setAccessibilityValue(level) }
+            addSubview(view)
+            return view
         }
         identifier = NSUserInterfaceItemIdentifier("agent.assistantProse.\(block.id.rawValue)")
         applyContainerAccessibility(for: block)
@@ -109,43 +110,58 @@ final class AssistantProseView: NSView {
         let availableWidth = max(1, bounds.width - Self.horizontalReadingInset * 2)
         var y = bounds.minY
         for (index, pair) in zip(rows, textFields).enumerated() {
-            let height = Self.textHeight(pair.0.text, font: pair.0.font, width: availableWidth)
-            pair.1.preferredMaxLayoutWidth = availableWidth
+            let height = RichInlineTextView.measuredHeight(
+                for: pair.0.runs,
+                width: availableWidth,
+                context: renderContext,
+                textRole: pair.0.textRole
+            )
             pair.1.frame = NSRect(x: Self.horizontalReadingInset, y: y, width: availableWidth, height: height)
             y += height
             if index + 1 < rows.count { y += Self.blockSpacing }
         }
     }
 
-    static func measuredHeight(for block: AgentBlock, width: CGFloat) -> CGFloat {
+    static func measuredHeight(
+        for block: AgentBlock,
+        width: CGFloat,
+        context: AgentRenderContext
+    ) -> CGFloat {
         let rows = rows(for: block)
         guard !rows.isEmpty else { return 0 }
         let availableWidth = max(1, width - horizontalReadingInset * 2)
-        let text = rows.reduce(CGFloat.zero) { $0 + textHeight($1.text, font: $1.font, width: availableWidth) }
+        let text = rows.reduce(CGFloat.zero) {
+            $0 + RichInlineTextView.measuredHeight(
+                for: $1.runs,
+                width: availableWidth,
+                context: context,
+                textRole: $1.textRole
+            )
+        }
         return ceil(text + CGFloat(max(0, rows.count - 1)) * blockSpacing)
     }
 
-    private static func textHeight(_ text: String, font: NSFont, width: CGFloat) -> CGFloat {
-        let value = text.isEmpty ? " " : text
-        let rect = (value as NSString).boundingRect(
-            with: NSSize(width: width, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font]
-        )
-        return max(ceil(rect.height), ceil(font.ascender - font.descender + font.leading))
-    }
-
     private static func rows(for block: AgentBlock, listDepth: Int = 0, itemNumber: Int? = nil) -> [Row] {
-        let body = NSFont.token(.body)
         switch block.payload {
         case let .paragraph(content):
             let prefix = itemPrefix(depth: listDepth, number: itemNumber)
-            return [Row(text: prefix + plainText(content), role: itemNumber == nil ? .staticText : listItemRole,
-                        headingLevel: nil, font: body)] + block.children.flatMap { rows(for: $0, listDepth: listDepth) }
+            let runs = prefix.isEmpty ? content : [.text(prefix)] + content
+            return [Row(
+                blockID: block.id,
+                runs: runs,
+                role: itemNumber == nil ? .staticText : listItemRole,
+                headingLevel: nil,
+                textRole: .body
+            )] + block.children.flatMap { rows(for: $0, listDepth: listDepth) }
         case let .heading(level, content):
             let clampedLevel = max(1, min(6, Int(level)))
-            return [Row(text: plainText(content), role: headingRole, headingLevel: clampedLevel, font: .token(.title))]
-                + block.children.flatMap { rows(for: $0, listDepth: listDepth) }
+            return [Row(
+                blockID: block.id,
+                runs: content,
+                role: headingRole,
+                headingLevel: clampedLevel,
+                textRole: .title
+            )] + block.children.flatMap { rows(for: $0, listDepth: listDepth) }
         case let .list(payload):
             let start = payload.start ?? 1
             return block.children.enumerated().flatMap { index, child in
@@ -154,15 +170,28 @@ final class AssistantProseView: NSView {
         case .listItem:
             let prefix = itemPrefix(depth: listDepth, number: itemNumber)
             if block.children.isEmpty {
-                return [Row(text: prefix, role: listItemRole, headingLevel: nil, font: body)]
+                return [Row(
+                    blockID: block.id,
+                    runs: [.text(prefix)],
+                    role: listItemRole,
+                    headingLevel: nil,
+                    textRole: .body
+                )]
             }
             return block.children.enumerated().flatMap { index, child in
                 let childNumber = index == 0 ? itemNumber : nil
                 return rows(for: child, listDepth: listDepth, itemNumber: childNumber)
             }
         case .quote:
-            let children = block.children.flatMap { rows(for: $0, listDepth: listDepth) }
-            return children.map { Row(text: "› " + $0.text, role: $0.role, headingLevel: $0.headingLevel, font: $0.font) }
+            return block.children.flatMap { rows(for: $0, listDepth: listDepth) }.map { row in
+                Row(
+                    blockID: row.blockID,
+                    runs: [.text("› ")] + row.runs,
+                    role: row.role,
+                    headingLevel: row.headingLevel,
+                    textRole: row.textRole
+                )
+            }
         default:
             return block.children.flatMap { rows(for: $0, listDepth: listDepth) }
         }
@@ -172,17 +201,5 @@ final class AssistantProseView: NSView {
         guard let number else { return "" }
         let indentation = String(repeating: "  ", count: max(0, depth - 1))
         return indentation + (number == 0 ? "• " : "\(number). ")
-    }
-
-    private static func plainText(_ content: [AgentInline]) -> String {
-        content.map { inline in
-            switch inline {
-            case let .text(text), let .code(text): return text
-            case let .emphasis(children), let .strong(children): return plainText(children)
-            case let .link(_, _, children): return plainText(children)
-            case .softBreak: return " "
-            case .hardBreak: return "\n"
-            }
-        }.joined()
     }
 }

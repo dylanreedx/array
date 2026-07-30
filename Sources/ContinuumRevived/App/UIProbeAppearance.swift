@@ -1427,6 +1427,83 @@ enum UIProbeAppearance {
         return assertions
     }
 
+    /// P3.5: semantic inline runs resolve into one native selectable text layout.
+    /// This checks nested traits, safe/display-only links, theme repainting, and
+    /// both pasteboard representations without involving a Markdown parser.
+    private static func runRichInlineTextCheck() throws -> Int {
+        let blockID = AgentNodeID(rawValue: "appearance-rich-inline")!
+        let runs: [AgentInline] = [
+            .text("plain "),
+            .strong([.text("bold "), .emphasis([.text("italic")])]),
+            .text(" "), .code("code"), .text(" "),
+            .link(destination: "https://example.com/docs", title: "Docs", children: [.text("safe")]),
+            .text(" "),
+            .link(destination: "file:///Users/example/private.txt", title: nil, children: [.text("local")]),
+            .hardBreak, .text("next"), .softBreak, .text("soft")
+        ]
+        var activated: [URL] = []
+        let actions = AgentRenderActions { action in
+            if case let .activateLink(_, url) = action { activated.append(url) }
+        }
+        let lightContext = AgentRenderContext(actions: actions, tokens: .transcript, appearance: .light)
+        let view = RichInlineTextView(frame: NSRect(x: 0, y: 0, width: 420, height: 100))
+        view.apply(runs: runs, blockID: blockID, context: lightContext)
+
+        guard view.isSelectable, !view.isEditable, !view.drawsBackground,
+              view.string == "plain bold italic code safe local\nnext soft" else {
+            throw fail("rich inline text lost native selection or semantic visible text")
+        }
+        let attributed = view.textStorage!
+        let boldIndex = (view.string as NSString).range(of: "bold").location
+        let italicIndex = (view.string as NSString).range(of: "italic").location
+        let codeIndex = (view.string as NSString).range(of: "code").location
+        guard let boldFont = attributed.attribute(.font, at: boldIndex, effectiveRange: nil) as? NSFont,
+              boldFont.fontDescriptor.symbolicTraits.contains(.bold),
+              let italicFont = attributed.attribute(.font, at: italicIndex, effectiveRange: nil) as? NSFont,
+              italicFont.fontDescriptor.symbolicTraits.contains([.bold, .italic]),
+              let codeFont = attributed.attribute(.font, at: codeIndex, effectiveRange: nil) as? NSFont,
+              codeFont.isFixedPitch,
+              attributed.attribute(.backgroundColor, at: codeIndex, effectiveRange: nil) != nil else {
+            throw fail("rich inline nested strong/emphasis/code traits did not compose")
+        }
+        guard view.linkRanges.count == 2,
+              view.linkRanges[0].disposition == .openExternally,
+              view.linkRanges[1].disposition == .displayOnly,
+              view.activateLink(at: view.linkRanges[0].range.location),
+              !view.activateLink(at: view.linkRanges[1].range.location),
+              activated.map(\URL.absoluteString) == ["https://example.com/docs"] else {
+            throw fail("rich inline unsafe-link negative witness: display-only file link activated or safe link did not")
+        }
+
+        let lightColor = attributed.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        let originalRanges = view.linkRanges
+        view.applyTheme(.dark)
+        let darkColor = view.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        guard lightColor?.usingColorSpace(.sRGB) != darkColor?.usingColorSpace(.sRGB),
+              view.linkRanges == originalRanges,
+              view.string == "plain bold italic code safe local\nnext soft" else {
+            throw fail("rich inline theme repaint changed semantic output or retained stale colors")
+        }
+
+        view.setSelectedRange(NSRange(location: 0, length: (view.string as NSString).length))
+        view.copy(nil)
+        guard NSPasteboard.general.string(forType: .string) == view.string,
+              NSPasteboard.general.string(forType: RichInlineTextView.markdownPasteboardType) ==
+                "plain **bold *italic*** `code` [safe](https://example.com/docs \"Docs\") [local](file:///Users/example/private.txt)  \nnext\nsoft" else {
+            throw fail("rich inline copy did not provide exact plain-text and Markdown pasteboard forms")
+        }
+
+        let partial = (view.string as NSString).range(of: "old italic code sa")
+        view.setSelectedRange(partial)
+        view.copy(nil)
+        guard NSPasteboard.general.string(forType: .string) == "old italic code sa",
+              NSPasteboard.general.string(forType: RichInlineTextView.markdownPasteboardType) ==
+                "**old *italic*** `code` [sa](https://example.com/docs \"Docs\")" else {
+            throw fail("rich inline partial selection lost intersecting Markdown semantics")
+        }
+        return 9
+    }
+
     /// P3.4: the user role is a quiet Continuum surface, with authorship in the
     /// accessibility tree rather than a permanent visual metadata row.
     private static func runUserPromptAppearanceCheck() throws -> Int {
@@ -1476,6 +1553,7 @@ enum UIProbeAppearance {
     /// Called from `UIProbe.runUIProbeChecks` (`--ui-probe-check`).
     static func runAppearanceChecks() throws {
         let proseAssertions = try runAssistantProseAppearanceCheck()
+        let richInlineAssertions = try runRichInlineTextCheck()
         let userAssertions = try runUserPromptAppearanceCheck()
         let sweep = try runProductionSweep()
         let hostile = try runHostileCurrentAppearanceCheck()
@@ -1492,6 +1570,7 @@ enum UIProbeAppearance {
             throw fail("appearance checks leaked '\(NSApp?.appearance?.name.rawValue ?? "nil")' onto NSApp")
         }
         print("UIProbeAppearance: \(proseAssertions) assistant-prose assertions hold tileBody inheritance, primary text, selection, and no card chrome in both appearances")
+        print("UIProbeAppearance: \(richInlineAssertions) rich-inline assertions hold nested native styles, link policy, theme repaint, and dual-format copy; unsafe-link negative witness remained inactive")
         print("UIProbeAppearance: \(userAssertions) user-prompt assertions hold quiet fill, semantic radius, primary text, selection, no visual metadata, and non-color accessibility authorship in both appearances")
         print("UIProbeAppearance: \(sweep.views) TokenThemed views, \(sweep.slots) layer colours sentinelled and re-applied across a live flip (\(sweep.changed) re-resolved to a different value); \(hostile) hostile-current-appearance assertions held; token fixture holds both leaves; stale-fixture witness failed as required")
         print("UIProbeAppearance: witness message — \(witness)")

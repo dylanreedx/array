@@ -1,0 +1,221 @@
+import AppKit
+import ContinuumRevivedAgentContent
+import ContinuumRevivedAgentUI
+
+/// Resolves semantic inline meaning into AppKit attributes. The semantic runs stay
+/// untouched, so changing `theme` only rebuilds presentation and never reparses
+/// provider text.
+@MainActor
+enum AgentTextStyleResolver {
+    struct LinkRange: Equatable {
+        let range: NSRange
+        let destination: String
+        let title: String?
+        let disposition: AgentLinkDisposition
+    }
+
+    struct Result {
+        let attributedString: NSAttributedString
+        let links: [LinkRange]
+        let markdown: String
+    }
+
+    private struct Marks {
+        var emphasis = false
+        var strong = false
+        var code = false
+    }
+
+    static func attributedString(
+        for runs: [AgentInline],
+        theme: TokenTheme,
+        tokens: AgentRenderTokens = .transcript,
+        textRole: TextRole = .body
+    ) -> NSAttributedString {
+        resolve(runs, theme: theme, tokens: tokens, textRole: textRole).attributedString
+    }
+
+    /// Serializes exactly the selected visible UTF-16 range while retaining any
+    /// semantic wrappers that intersect it. This keeps partial native selections
+    /// useful to Markdown-aware paste destinations instead of degrading them to
+    /// plain text.
+    static func markdown(for runs: [AgentInline], selectedRange: NSRange) -> String {
+        guard selectedRange.length > 0 else { return "" }
+        var location = 0
+        return selectedMarkdown(runs, selection: selectedRange, location: &location)
+    }
+
+    static func resolve(
+        _ runs: [AgentInline],
+        theme: TokenTheme,
+        tokens: AgentRenderTokens = .transcript,
+        textRole: TextRole = .body
+    ) -> Result {
+        let output = NSMutableAttributedString()
+        var links: [LinkRange] = []
+        var markdown = ""
+        append(runs, marks: Marks(), theme: theme, tokens: tokens, textRole: textRole,
+               output: output, links: &links, markdown: &markdown)
+        return Result(attributedString: NSAttributedString(attributedString: output), links: links, markdown: markdown)
+    }
+
+    private static func append(
+        _ runs: [AgentInline],
+        marks: Marks,
+        theme: TokenTheme,
+        tokens: AgentRenderTokens,
+        textRole: TextRole,
+        output: NSMutableAttributedString,
+        links: inout [LinkRange],
+        markdown: inout String
+    ) {
+        for run in runs {
+            switch run {
+            case let .text(text):
+                appendText(text, marks: marks, theme: theme, tokens: tokens, textRole: textRole, output: output)
+                markdown += escapeMarkdown(text)
+            case let .code(text):
+                var nested = marks
+                nested.code = true
+                appendText(text, marks: nested, theme: theme, tokens: tokens, textRole: textRole, output: output)
+                markdown += "`" + text.replacingOccurrences(of: "`", with: "\\`") + "`"
+            case let .emphasis(children):
+                var nested = marks
+                nested.emphasis = true
+                markdown += "*"
+                append(children, marks: nested, theme: theme, tokens: tokens, textRole: textRole,
+                       output: output, links: &links, markdown: &markdown)
+                markdown += "*"
+            case let .strong(children):
+                var nested = marks
+                nested.strong = true
+                markdown += "**"
+                append(children, marks: nested, theme: theme, tokens: tokens, textRole: textRole,
+                       output: output, links: &links, markdown: &markdown)
+                markdown += "**"
+            case let .link(destination, title, children):
+                let start = output.length
+                var labelMarkdown = ""
+                append(children, marks: marks, theme: theme, tokens: tokens, textRole: textRole,
+                       output: output, links: &links, markdown: &labelMarkdown)
+                let range = NSRange(location: start, length: output.length - start)
+                let disposition = AgentLinkPolicy.disposition(for: destination)
+                if range.length > 0 {
+                    output.addAttributes([
+                        .underlineStyle: NSUnderlineStyle.single.rawValue,
+                        .agentLinkDestination: destination
+                    ], range: range)
+                    if disposition == .openExternally || disposition == .openInternally {
+                        output.addAttribute(.link, value: destination, range: range)
+                    }
+                    links.append(LinkRange(range: range, destination: destination, title: title,
+                                           disposition: disposition))
+                }
+                markdown += "[\(labelMarkdown)](\(destination)"
+                if let title { markdown += " \"\(title.replacingOccurrences(of: "\"", with: "\\\""))\"" }
+                markdown += ")"
+            case .softBreak:
+                appendText(" ", marks: marks, theme: theme, tokens: tokens, textRole: textRole, output: output)
+                markdown += "\n"
+            case .hardBreak:
+                appendText("\n", marks: marks, theme: theme, tokens: tokens, textRole: textRole, output: output)
+                markdown += "  \n"
+            }
+        }
+    }
+
+    private static func selectedMarkdown(
+        _ runs: [AgentInline],
+        selection: NSRange,
+        location: inout Int
+    ) -> String {
+        var markdown = ""
+        for run in runs {
+            switch run {
+            case let .text(text):
+                markdown += selectedText(text, selection: selection, location: &location, escape: true)
+            case let .code(text):
+                let selected = selectedText(text, selection: selection, location: &location, escape: false)
+                if !selected.isEmpty {
+                    markdown += "`" + selected.replacingOccurrences(of: "`", with: "\\`") + "`"
+                }
+            case let .emphasis(children):
+                let selected = selectedMarkdown(children, selection: selection, location: &location)
+                if !selected.isEmpty { markdown += "*\(selected)*" }
+            case let .strong(children):
+                let selected = selectedMarkdown(children, selection: selection, location: &location)
+                if !selected.isEmpty { markdown += "**\(selected)**" }
+            case let .link(destination, title, children):
+                let selected = selectedMarkdown(children, selection: selection, location: &location)
+                if !selected.isEmpty {
+                    markdown += "[\(selected)](\(destination)"
+                    if let title {
+                        markdown += " \"\(title.replacingOccurrences(of: "\"", with: "\\\""))\""
+                    }
+                    markdown += ")"
+                }
+            case .softBreak:
+                if NSLocationInRange(location, selection) { markdown += "\n" }
+                location += 1 // A soft break is rendered as one space.
+            case .hardBreak:
+                if NSLocationInRange(location, selection) { markdown += "  \n" }
+                location += 1
+            }
+        }
+        return markdown
+    }
+
+    private static func selectedText(
+        _ text: String,
+        selection: NSRange,
+        location: inout Int,
+        escape: Bool
+    ) -> String {
+        let value = text as NSString
+        let runRange = NSRange(location: location, length: value.length)
+        location += value.length
+        let intersection = NSIntersectionRange(runRange, selection)
+        guard intersection.length > 0 else { return "" }
+        let localRange = NSRange(location: intersection.location - runRange.location, length: intersection.length)
+        let selected = value.substring(with: localRange)
+        return escape ? escapeMarkdown(selected) : selected
+    }
+
+    private static func appendText(
+        _ text: String,
+        marks: Marks,
+        theme: TokenTheme,
+        tokens: AgentRenderTokens,
+        textRole: TextRole,
+        output: NSMutableAttributedString
+    ) {
+        var font = NSFont.token(marks.code ? .bodyMono : textRole)
+        var traits: NSFontTraitMask = []
+        if marks.strong { traits.insert(.boldFontMask) }
+        if marks.emphasis { traits.insert(.italicFontMask) }
+        if !traits.isEmpty { font = NSFontManager.shared.convert(font, toHaveTrait: traits) }
+
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: tokens.primaryText.color.nsColor(for: theme)
+        ]
+        if marks.code {
+            attributes[.backgroundColor] = tokens.codeSurface.color.nsColor(for: theme)
+        }
+        output.append(NSAttributedString(string: text, attributes: attributes))
+    }
+
+    private static func escapeMarkdown(_ text: String) -> String {
+        var escaped = text
+        for character in ["\\", "`", "*", "_", "[", "]"] {
+            escaped = escaped.replacingOccurrences(of: character, with: "\\" + character)
+        }
+        return escaped
+    }
+}
+
+extension NSAttributedString.Key {
+    /// Metadata for display-only as well as activatable links. Unlike `.link`,
+    /// this key does not grant activation behavior.
+    static let agentLinkDestination = NSAttributedString.Key("continuum.agentLinkDestination")
+}
