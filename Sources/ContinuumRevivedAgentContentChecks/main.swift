@@ -657,4 +657,9 @@ runLinkPolicyChecks()
 // exact semantic inline AST, merged text, and lossless unsupported fallback.
 runInlineMarkupChecks()
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P2.7-partial-streaming-markdown.md —
+// lossless source accumulation, every scalar split, AST convergence, and
+// parser-request coalescing independent from source accumulation.
+runStreamingMarkupChecks()
+
 print("ContinuumRevivedAgentContentChecks passed")

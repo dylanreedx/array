@@ -41,17 +41,20 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
         diagnostics: inout [AgentMarkupDiagnostic]
     ) -> [AgentBlock] {
         var blocks: [AgentBlock] = []
-        var occurrences: [String: Int] = [:]
+        var occurrences: [AgentBlockKind: Int] = [:]
 
         for child in parent.children {
             let kind = blockKind(for: child)
-            let fingerprint = sourceFingerprint(literalSource(for: child, in: source) ?? kind.rawValue)
-            let occurrenceKey = "\(kind.rawValue).\(fingerprint)"
-            let occurrence = occurrences[occurrenceKey, default: 0]
-            occurrences[occurrenceKey] = occurrence + 1
+            // A content fingerprint makes the final identity depend on which
+            // prefix happened to be parsed first: reconciliation retains that
+            // provisional ID forever. A structural occurrence key converges to
+            // the same final tree for every streaming split while the identity
+            // reconciler below still preserves completed siblings that move.
+            let occurrence = occurrences[kind, default: 0]
+            occurrences[kind] = occurrence + 1
             let id = blockID(
                 entryID: scopeID,
-                stableKey: "markdown.\(kind.rawValue).\(fingerprint).\(occurrence)"
+                stableKey: "markdown.\(kind.rawValue).\(occurrence)"
             )
             blocks.append(convertBlock(
                 child,
@@ -80,6 +83,11 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
             }
         }
 
+        // Exact completed-node matches own their previous identities before a
+        // newly inserted positional node is considered. Structural generated
+        // IDs can otherwise collide when a sibling is inserted before one of
+        // those matches, making the newcomer appear to steal the old node.
+        var reservedIDs = Set(exactMatches.values.map { previous[$0].id })
         return current.indices.map { currentIndex in
             if let previousIndex = exactMatches[currentIndex] {
                 return adoptingIdentity(current[currentIndex], from: previous[previousIndex])
@@ -88,6 +96,7 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
                !reservedPrevious.contains(currentIndex),
                previous[currentIndex].kind == current[currentIndex].kind {
                 reservedPrevious.insert(currentIndex)
+                reservedIDs.insert(previous[currentIndex].id)
                 return adoptingIdentity(current[currentIndex], from: previous[currentIndex])
             }
             if currentIndex == current.startIndex,
@@ -95,9 +104,18 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
                    !reservedPrevious.contains($0) && previous[$0].kind == current[currentIndex].kind
                }) {
                 reservedPrevious.insert(previousIndex)
+                reservedIDs.insert(previous[previousIndex].id)
                 return adoptingIdentity(current[currentIndex], from: previous[previousIndex])
             }
-            return current[currentIndex]
+            var block = current[currentIndex]
+            if reservedIDs.contains(block.id) {
+                block = replacingIdentity(
+                    block,
+                    with: blockID(entryID: block.id, stableKey: "inserted.\(currentIndex)")
+                )
+            }
+            reservedIDs.insert(block.id)
+            return block
         }
     }
 
@@ -115,6 +133,17 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
             sourceRange: block.sourceRange,
             payload: block.payload,
             children: reconcileIdentities(block.children, with: previous.children)
+        )
+    }
+
+    private func replacingIdentity(_ block: AgentBlock, with id: AgentNodeID) -> AgentBlock {
+        AgentBlock(
+            id: id,
+            revision: block.revision,
+            kind: block.kind,
+            sourceRange: block.sourceRange,
+            payload: block.payload,
+            children: block.children
         )
     }
 
@@ -460,14 +489,6 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
             output += codeLines[index] + physical.ending
         }
         return CodeConversion(language: language, code: output, isComplete: complete, diagnostic: false)
-    }
-
-    private func sourceFingerprint(_ value: String) -> String {
-        var hash: UInt64 = 0xcbf29ce484222325
-        for byte in value.utf8 {
-            hash = (hash ^ UInt64(byte)) &* 0x100000001b3
-        }
-        return String(format: "%016llx", hash)
     }
 
     private func blockID(entryID: AgentNodeID, stableKey: String) -> AgentNodeID {
