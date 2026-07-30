@@ -16,11 +16,13 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
     ) -> AgentMarkupParse {
         guard !source.isEmpty else { return AgentMarkupParse(blocks: []) }
 
-        let document = Document(parsing: source)
+        let sourceMap = SourceMap(source: source)
+        let document = Document(parsing: sourceMap.normalized)
         var diagnostics: [AgentMarkupDiagnostic] = []
         let blocks = convertBlocks(
             document,
             source: source,
+            sourceMap: sourceMap,
             scopeID: entryID,
             previous: previous,
             depth: 0,
@@ -32,6 +34,7 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
     private func convertBlocks(
         _ parent: Markup,
         source: String,
+        sourceMap: SourceMap,
         scopeID: AgentNodeID,
         previous: [AgentBlock],
         depth: Int,
@@ -55,6 +58,7 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
                 kind: kind,
                 id: id,
                 source: source,
+                sourceMap: sourceMap,
                 previous: nil,
                 depth: depth,
                 diagnostics: &diagnostics
@@ -122,6 +126,7 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
         case is ListItem: return .listItem
         case is BlockQuote: return .quote
         case is ThematicBreak: return .thematicBreak
+        case is CodeBlock: return .fencedCode
         default: return .unknown
         }
     }
@@ -131,6 +136,7 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
         kind: AgentBlockKind,
         id: AgentNodeID,
         source: String,
+        sourceMap: SourceMap,
         previous: AgentBlock?,
         depth: Int,
         diagnostics: inout [AgentMarkupDiagnostic]
@@ -164,6 +170,7 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
                 children: convertBlocks(
                     ordered,
                     source: source,
+                    sourceMap: sourceMap,
                     scopeID: id,
                     previous: previous?.children ?? [],
                     depth: depth + 1,
@@ -178,6 +185,7 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
                 children: convertBlocks(
                     unordered,
                     source: source,
+                    sourceMap: sourceMap,
                     scopeID: id,
                     previous: previous?.children ?? [],
                     depth: depth + 1,
@@ -191,6 +199,7 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
             var children = convertBlocks(
                 item,
                 source: source,
+                sourceMap: sourceMap,
                 scopeID: id,
                 previous: previous?.children ?? [],
                 depth: depth + 1,
@@ -222,6 +231,7 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
                 children: convertBlocks(
                     quote,
                     source: source,
+                    sourceMap: sourceMap,
                     scopeID: id,
                     previous: previous?.children ?? [],
                     depth: depth + 1,
@@ -230,6 +240,20 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
             )
         case is ThematicBreak:
             return AgentBlock(id: id, kind: .thematicBreak, payload: .thematicBreak)
+        case let codeBlock as CodeBlock:
+            let conversion = codePayload(for: codeBlock, sourceMap: sourceMap)
+            if conversion.diagnostic {
+                diagnostics.append(.init(severity: .warning, code: "markdown.code-source-alignment"))
+            }
+            return AgentBlock(
+                id: id,
+                kind: .fencedCode,
+                payload: .fencedCode(.init(
+                    language: conversion.language,
+                    code: conversion.code,
+                    isComplete: conversion.isComplete
+                ))
+            )
         default:
             diagnostics.append(.init(severity: .warning, code: "markdown.unsupported-structure"))
             return opaqueBlock(
@@ -308,32 +332,122 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
     }
 
     private func literalSource(for markup: Markup, in source: String) -> String? {
+        let map = SourceMap(source: source)
         guard let range = markup.range,
-              let lower = sourceIndex(line: range.lowerBound.line, column: range.lowerBound.column, in: source),
-              let upper = sourceIndex(line: range.upperBound.line, column: range.upperBound.column, in: source),
+              let lower = sourceIndex(line: range.lowerBound.line, column: range.lowerBound.column, in: map),
+              let upper = sourceIndex(line: range.upperBound.line, column: range.upperBound.column, in: map),
               lower <= upper
         else { return nil }
         return String(source[lower..<upper])
     }
 
+    private func line(_ lines: [SourceLine], _ index: Int) -> SourceLine? {
+        lines.indices.contains(index) ? lines[index] : nil
+    }
+
     /// swift-markdown columns are one-based UTF-8 byte offsets.
-    private func sourceIndex(line targetLine: Int, column: Int, in source: String) -> String.Index? {
-        guard targetLine >= 1, column >= 1 else { return nil }
-        var line = 1
-        var lineStart = source.utf8.startIndex
-        var cursor = lineStart
-        while line < targetLine, cursor < source.utf8.endIndex {
-            if source.utf8[cursor] == 0x0A {
-                line += 1
-                lineStart = source.utf8.index(after: cursor)
+    private func sourceIndex(line targetLine: Int, column: Int, in map: SourceMap) -> String.Index? {
+        guard targetLine >= 1, column >= 1, let line = line(map.lines, targetLine - 1) else { return nil }
+        let offset = column - 1
+        guard offset <= line.contentByteRange.count else { return nil }
+        return String.Index(map.source.utf8.index(map.source.utf8.startIndex, offsetBy: line.contentByteRange.lowerBound + offset), within: map.source)
+    }
+
+    private struct SourceLine {
+        let text: String
+        let ending: String
+        let contentByteRange: Range<Int>
+    }
+
+    private struct SourceMap {
+        let source: String
+        let lines: [SourceLine]
+        let normalized: String
+
+        init(source: String) {
+            self.source = source
+            var lines: [SourceLine] = []
+            var normalizedBytes: [UInt8] = []
+            let bytes = Array(source.utf8)
+            var start = 0
+            var i = 0
+            while i < bytes.count {
+                let endingStart = i
+                if bytes[i] == 0x0D || bytes[i] == 0x0A {
+                    if bytes[i] == 0x0D && i + 1 < bytes.count && bytes[i + 1] == 0x0A { i += 2 } else { i += 1 }
+                    let content = Array(bytes[start..<endingStart])
+                    let ending = String(decoding: bytes[endingStart..<i], as: UTF8.self)
+                    lines.append(SourceLine(text: String(decoding: content, as: UTF8.self), ending: ending, contentByteRange: start..<endingStart))
+                    normalizedBytes.append(contentsOf: content); normalizedBytes.append(0x0A)
+                    start = i
+                } else { i += 1 }
             }
-            cursor = source.utf8.index(after: cursor)
+            let content = Array(bytes[start..<bytes.count])
+            lines.append(SourceLine(text: String(decoding: content, as: UTF8.self), ending: "", contentByteRange: start..<bytes.count))
+            normalizedBytes.append(contentsOf: content)
+            self.lines = lines
+            self.normalized = String(decoding: normalizedBytes, as: UTF8.self)
         }
-        guard line == targetLine,
-              let byteIndex = source.utf8.index(lineStart, offsetBy: column - 1, limitedBy: source.utf8.endIndex),
-              let index = String.Index(byteIndex, within: source)
-        else { return nil }
-        return index
+    }
+
+    private struct CodeConversion {
+        let language: String?
+        let code: String
+        let isComplete: Bool
+        let diagnostic: Bool
+    }
+
+    private func codePayload(for block: CodeBlock, sourceMap: SourceMap) -> CodeConversion {
+        let language = block.language.flatMap { raw -> String? in
+            let token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                .split(whereSeparator: { $0 == " " || $0 == "\t" }).first.map(String.init) ?? ""
+            return token.isEmpty || token.hasPrefix("{") ? nil : token.lowercased()
+        }
+        guard let range = block.range,
+              let lower = line(sourceMap.lines, range.lowerBound.line - 1),
+              line(sourceMap.lines, range.upperBound.line - 1) != nil
+        else { return CodeConversion(language: language, code: block.code, isComplete: true, diagnostic: true) }
+
+        // An empty cmark code string has no semantic content lines. Splitting it
+        // with empty subsequences would invent one line and align the closer as
+        // though it were body content.
+        let codeLines: [String]
+        if block.code.isEmpty {
+            codeLines = []
+        } else {
+            let rawCodeLines = block.code.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            codeLines = block.code.hasSuffix("\n") ? Array(rawCodeLines.dropLast()) : rawCodeLines
+        }
+        let lowerColumn = max(0, range.lowerBound.column - 1)
+        let marker = lower.text.utf8.dropFirst(min(lowerColumn, lower.text.utf8.count)).first
+        let fenced = marker == 0x60 || marker == 0x7E
+        let spanCount = range.upperBound.line - range.lowerBound.line + 1
+        let expectedCompleteSpan = codeLines.count + (fenced ? 2 : 0)
+        let expectedIncompleteSpan = codeLines.count + (fenced ? 1 : 0)
+        let complete = !fenced || spanCount == expectedCompleteSpan
+        // The source range must describe exactly the semantic body plus its
+        // structural fence lines (or the opening fence for an incomplete block).
+        // Never attach endings from a guessed subset of a malformed range.
+        let alignmentIsValid = fenced
+            ? spanCount == expectedCompleteSpan || spanCount == expectedIncompleteSpan
+            : spanCount == expectedCompleteSpan
+        guard alignmentIsValid else {
+            return CodeConversion(language: language, code: block.code, isComplete: complete, diagnostic: true)
+        }
+        let firstContent = range.lowerBound.line + (fenced ? 1 : 0)
+        let selectedCount = codeLines.count
+        guard firstContent + selectedCount - 1 <= range.upperBound.line || selectedCount == 0 else {
+            return CodeConversion(language: language, code: block.code, isComplete: complete, diagnostic: true)
+        }
+        var output = ""
+        for index in 0..<selectedCount {
+            let lineNumber = firstContent + index
+            guard let physical = line(sourceMap.lines, lineNumber - 1) else {
+                return CodeConversion(language: language, code: block.code, isComplete: complete, diagnostic: true)
+            }
+            output += codeLines[index] + physical.ending
+        }
+        return CodeConversion(language: language, code: output, isComplete: complete, diagnostic: false)
     }
 
     private func sourceFingerprint(_ value: String) -> String {

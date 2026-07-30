@@ -2,7 +2,7 @@
 
 ## heartbeat
 
-last-touch 2026-07-30T02:38:13Z · ticket P2.4-list-quote-rule-blocks.md · attempt 1 · pid — · status done
+last-touch 2026-07-30T03:39:52Z · ticket P2.5-fenced-code-blocks.md · attempt 1 · pid — · status done
 
 ## states
 
@@ -28,7 +28,7 @@ last-touch 2026-07-30T02:38:13Z · ticket P2.4-list-quote-rule-blocks.md · atte
 | `P2.2-inline-markup-runs.md` | done | this commit | 2026-07-30T01:58:31Z | Harness-owned completion: focused worker checks, independent opposite-model review, swift build, and final matrix passed. Evidence: /Users/dylan/.pi/agent-tile-ux-runs/continuum-overnight/run-20260729T214814/tasks/iteration-001-P2.2-inline-markup-runs.md. |
 | `P2.3-paragraph-heading-blocks.md` | done | this commit | 2026-07-30T02:15:10Z | Harness-owned completion: focused worker checks, independent opposite-model review, swift build, and final matrix passed. Evidence: /Users/dylan/.pi/agent-tile-ux-runs/continuum-overnight/run-20260729T214814/tasks/iteration-002-P2.3-paragraph-heading-blocks.md. |
 | `P2.4-list-quote-rule-blocks.md` | done | this commit | 2026-07-30T02:38:13Z | Harness-owned completion: focused worker checks, independent opposite-model review, swift build, and final matrix passed. Evidence: /Users/dylan/.pi/agent-tile-ux-runs/continuum-overnight/run-20260729T214814/tasks/iteration-003-P2.4-list-quote-rule-blocks.md. |
-| `P2.5-fenced-code-blocks.md` | pending | — | — | — |
+| `P2.5-fenced-code-blocks.md` | done | this commit | 2026-07-30T03:39:52Z | Added first-class fenced and indented code payloads with normalized non-executable language metadata, explicit streaming completion, and stable identity when an open fence closes. After three autonomous repair rounds exposed exact-source edge cases, supervised recovery replaced ad hoc fence/container parsing with a coherent strategy: swift-markdown parses a normalized-line-ending shadow, cmark owns CommonMark de-indentation/container/tab semantics, and a UTF-8 physical-line map restores original LF/CR/CRLF/mixed endings without inventing an EOF newline. Exact checks cover long/embedded/invalid fences, empty fences, open fences, CR/CRLF/mixed and multiple CR-only blocks, quote/list nesting, allowed fence indentation, tabs/partial content indentation, attributes, and alignment fallback; unexpected alignment preserves semantic code and emits only body-free `markdown.code-source-alignment`. The required final-code witness changed the converted semantic kind to unknown, exited 1 at the exact first-class fenced-code assertion, restored SHA-256 `9f021952a68dc2992a733aa7d6086397a6cbbbda13f215bcd4db9ed3fb40ef28`, and reran AgentContent checks green (`negative-witness-final-fenced-code.log`). Sol medium approved the complete final candidate and evidence. `swift build` and `CONTINUUM_SKIP_SURFACE_CHECKS=1 CONTINUUM_SKIP_UI_BASELINES=1 ./scripts/run-matrix.sh </dev/null` passed; artifact `qa-runs/20260730T033842Z/app-bundle/manifest.json`, with no display or baseline changed. Inventory count was unchanged because P2.5 extended the existing parser check function. |
 | `P2.6-link-policy.md` | pending | — | — | — |
 | `P2.7-partial-streaming-markdown.md` | pending | — | — | — |
 | `P2.8-ast-identity-reconciliation.md` | pending | — | — | — |

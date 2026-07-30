@@ -56,6 +56,126 @@ func runMarkupParserChecks() {
     expect(reparsedStructured.blocks.map(\.id) == structured.blocks.map(\.id),
            "reparsing two paragraphs and their heading must preserve every stable block ID")
 
+    let closedCodeSource = "Before\n\n````Swift {.source-only}\nline 1  \n`` inside\nline 3\n````\n\nAfter"
+    let closedCode = parser.parse(closedCodeSource, entryID: entryID, previous: [])
+    expect(closedCode.diagnostics.isEmpty && closedCode.blocks.map(\.kind) == [.paragraph, .fencedCode, .paragraph],
+           "fenced code must be a first-class block between surrounding paragraphs")
+    guard case let .fencedCode(closedPayload) = closedCode.blocks[1].payload else {
+        fail("closed fenced code payload is missing")
+    }
+    expect(closedPayload.language == "swift" && closedPayload.isComplete,
+           "language must normalize independently from fence attributes and closed fences must be complete")
+    expect(closedPayload.code == "line 1  \n`` inside\nline 3\n",
+           "fenced code must preserve trailing spaces, embedded shorter fences, and terminal newline exactly")
+
+    let emptyClosedFences: [(String, String)] = [
+        ("```\n```\n", "LF with final ending"),
+        ("```\n```", "LF without final ending"),
+        ("```\r```\r", "CR with final ending")
+    ]
+    for (emptySource, label) in emptyClosedFences {
+        let emptyParse = parser.parse(emptySource, entryID: entryID, previous: [])
+        guard case let .fencedCode(emptyPayload) = emptyParse.blocks.first?.payload else {
+            fail("empty closed fence payload is missing (\(label))")
+        }
+        expect(emptyParse.diagnostics.isEmpty && emptyPayload.code.isEmpty && emptyPayload.isComplete,
+               "empty closed fence must have empty complete code for \(label), got \(emptyPayload) / \(emptyParse.diagnostics)")
+    }
+
+    let openCodeSource = "Before\n\n```python\nprint(1)\npartial"
+    let openCode = parser.parse(openCodeSource, entryID: entryID, previous: [])
+    guard case let .fencedCode(openPayload) = openCode.blocks[1].payload else {
+        fail("open fenced code payload is missing")
+    }
+    expect(openPayload.language == "python" && !openPayload.isComplete && openPayload.code == "print(1)\npartial",
+           "an unclosed streaming fence must remain visible as incomplete code with exact source and no invented newline")
+    let closedStreaming = parser.parse(openCodeSource + "\n```\n", entryID: entryID, previous: openCode.blocks)
+    guard case let .fencedCode(closedStreamingPayload) = closedStreaming.blocks[1].payload else {
+        fail("streaming fence did not remain a code block after closure")
+    }
+    expect(closedStreaming.blocks[1].id == openCode.blocks[1].id && closedStreamingPayload.isComplete,
+           "closing a streaming fence must preserve its block ID and mark it complete")
+
+    let indentedCodeSource = "    first line  \n    second line\n\nAfter"
+    let indentedCode = parser.parse(indentedCodeSource, entryID: entryID, previous: [])
+    guard case let .fencedCode(indentedPayload) = indentedCode.blocks[0].payload else {
+        fail("indented code payload is missing")
+    }
+    expect(indentedPayload.language == nil && indentedPayload.isComplete && indentedPayload.code == "first line  \nsecond line\n",
+           "indented code must map to the same semantic payload without trimming code bytes")
+
+    let intentionallyIndented = parser.parse("        eight-space content\n    four-space content", entryID: entryID, previous: [])
+    guard case let .fencedCode(intentionallyIndentedPayload) = intentionallyIndented.blocks[0].payload else {
+        fail("intentionally indented code payload is missing")
+    }
+    expect(intentionallyIndentedPayload.code == "    eight-space content\nfour-space content",
+           "indented code must preserve the four spaces that belong to content on an eight-space source line")
+
+    let quotedCode = parser.parse("> ```swift\n> quoted code\n> ```", entryID: entryID, previous: [])
+    guard case let .fencedCode(quotedPayload) = quotedCode.blocks[0].children.first?.payload else {
+        fail("quoted fenced code payload is missing")
+    }
+    expect(quotedPayload.language == "swift" && quotedPayload.isComplete && quotedPayload.code == "quoted code\n",
+           "fenced code inside a block quote must remove container prefixes without treating the closer as code")
+
+    let crOnlyCode = parser.parse("```swift\rcode\r```", entryID: entryID, previous: [])
+    guard case let .fencedCode(crOnlyPayload) = crOnlyCode.blocks[0].payload else {
+        fail("CR-only fenced code payload is missing")
+    }
+    expect(crOnlyPayload.language == "swift" && crOnlyPayload.isComplete && crOnlyPayload.code == "code\r",
+           "CR-only fenced code must retain its content and authored line ending")
+
+    let crlf = parser.parse("```swift\r\nvalue\r\n```", entryID: entryID, previous: [])
+    guard case let .fencedCode(crlfPayload) = crlf.blocks.first?.payload else { fail("CRLF fenced code payload is missing") }
+    expect(crlfPayload.isComplete && crlfPayload.code == "value\r\n", "CRLF code must preserve its authored ending")
+
+    let mixed = parser.parse("```\r\none\rtwo\nthree\r\n```", entryID: entryID, previous: [])
+    guard case let .fencedCode(mixedPayload) = mixed.blocks.first?.payload else { fail("mixed-ending fenced code payload is missing") }
+    expect(mixedPayload.code == "one\rtwo\nthree\r\n" && mixedPayload.isComplete, "mixed line endings must align with semantic code lines")
+
+    let twoCROnly = parser.parse("```\rone\r```\r\r````\rtwo\r````", entryID: entryID, previous: [])
+    let crOnlyPayloads = allBlocks(twoCROnly.blocks).compactMap { block -> AgentCodePayload? in
+        guard case let .fencedCode(payload) = block.payload else { return nil }; return payload
+    }
+    expect(crOnlyPayloads.count == 2 && crOnlyPayloads.map(\.code) == ["one\r", "two\r"] && crOnlyPayloads.allSatisfy(\.isComplete), "distinct CR-only fences must not share source recovery")
+
+    let indentedFence = parser.parse("  ```\n  value\n  ```", entryID: entryID, previous: [])
+    guard case let .fencedCode(indentedFencePayload) = indentedFence.blocks.first?.payload else { fail("indented fence payload is missing") }
+    expect(indentedFencePayload.code == "value\n" && indentedFencePayload.isComplete, "up-to-three-space fence indentation must be structural")
+
+    let tabCode = parser.parse("\tvalue\n\t  retained", entryID: entryID, previous: [])
+    guard case let .fencedCode(tabPayload) = tabCode.blocks.first?.payload else { fail("tab-indented code payload is missing") }
+    expect(tabPayload.code == "value\n  retained", "tab indentation must be de-indented while retaining content indentation")
+
+    let nestedFence = parser.parse("- item\n\n  ```swift\n  value\n  ```\n\n> > ```\n> > quoted\n> > ```", entryID: entryID, previous: [])
+    let nestedPayloads = allBlocks(nestedFence.blocks).compactMap { block -> AgentCodePayload? in
+        guard case let .fencedCode(payload) = block.payload else { return nil }; return payload
+    }
+    expect(nestedPayloads.map(\.code) == ["value\n", "quoted\n"] && nestedPayloads.allSatisfy(\.isComplete), "list and multi-level quote fences must remove container syntax")
+
+    let incompleteCRLF = parser.parse("```swift\r\nvalue", entryID: entryID, previous: [])
+    guard case let .fencedCode(incompleteCRLFPayload) = incompleteCRLF.blocks.first?.payload else { fail("incomplete CRLF fence payload is missing") }
+    expect(!incompleteCRLFPayload.isComplete && incompleteCRLFPayload.code == "value", "incomplete CRLF fences must not invent an EOF newline")
+
+    let fourSpaceCloserSource = "```\nbody\n    ```"
+    let fourSpaceCloser = parser.parse(fourSpaceCloserSource, entryID: entryID, previous: [])
+    guard case let .fencedCode(fourSpaceCloserPayload) = fourSpaceCloser.blocks[0].payload else {
+        fail("a four-space closer corpus must remain a code block")
+    }
+    expect(!fourSpaceCloserPayload.isComplete && fourSpaceCloserPayload.code == "body\n    ```",
+           "a closer indented four spaces is code content, not a valid fence closer")
+
+    let attributesOnly = parser.parse("```{#source-only .swift}\nlet value = 1\n```", entryID: entryID, previous: [])
+    guard case let .fencedCode(attributesOnlyPayload) = attributesOnly.blocks[0].payload else {
+        fail("attributes-only fence payload is missing")
+    }
+    expect(attributesOnlyPayload.language == nil,
+           "brace-only fence attributes must never become language metadata")
+
+    // Required negative witness observed red against this final check: mutating
+    // the code conversion to `.unknown` made the fenced-code kind assertion fail
+    // with exit 1. Restoring the typed conversion returned the leg to green.
+
     let mixedUnsupportedSource = "# Heading\n\n---\n\nBody paragraph."
     let mixedUnsupported = parser.parse(mixedUnsupportedSource, entryID: entryID, previous: [])
     expect(mixedUnsupported.blocks.count == 3 && mixedUnsupported.blocks.map(\.kind) == [.heading, .thematicBreak, .paragraph],
