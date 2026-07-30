@@ -166,29 +166,6 @@ public struct AgentNoticePayload: Codable, Equatable, Sendable {
     }
 }
 
-/// Codable/Sendable JSON-shaped storage for provider data that has no semantic
-/// type yet. It deliberately cannot hold `Any`, closures, or platform objects.
-public indirect enum AgentOpaqueValue: Codable, Equatable, Sendable {
-    case null
-    case bool(Bool)
-    case integer(Int64)
-    case number(Double)
-    case string(String)
-    case array([AgentOpaqueValue])
-    case object([String: AgentOpaqueValue])
-}
-
-public struct AgentOpaquePayload: Codable, Equatable, Sendable {
-    /// Safe, user-facing-neutral diagnostic name; renderers must not dump `value`.
-    public var debugLabel: String
-    public var value: AgentOpaqueValue
-
-    public init(debugLabel: String, value: AgentOpaqueValue) {
-        self.debugLabel = debugLabel
-        self.value = value
-    }
-}
-
 /// Typed built-in content. Container block structure lives in `children`, so
 /// list items and quotes do not encode nested blocks into strings.
 public enum AgentBlockPayload: Codable, Equatable, Sendable {

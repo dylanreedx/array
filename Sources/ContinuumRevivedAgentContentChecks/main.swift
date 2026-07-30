@@ -588,6 +588,10 @@ runMutationVocabularyChecks()
 // pure indexed mutation application and reconstructible entry lifecycle.
 runDocumentReducerChecks()
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P1.7-unknown-node-forward-compat.md —
+// lossless opaque JSON and payload-safe fallback behavior.
+runUnknownNodeChecks()
+
 // Ticket: docs/38-tickets/91-agent-tile-ux/P0.4-transcript-fixture-corpus.md —
 // the canonical corpus every later parser, reducer, renderer and migration
 // ticket reads from, held to its own declarations, hygiene and I5 rules.
