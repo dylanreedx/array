@@ -592,6 +592,10 @@ runDocumentReducerChecks()
 // lossless opaque JSON and payload-safe fallback behavior.
 runUnknownNodeChecks()
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P1.8-content-diagnostics.md —
+// structural, body-free diagnostics and invariant validation.
+runDiagnosticsChecks()
+
 // Ticket: docs/38-tickets/91-agent-tile-ux/P0.4-transcript-fixture-corpus.md —
 // the canonical corpus every later parser, reducer, renderer and migration
 // ticket reads from, held to its own declarations, hygiene and I5 rules.
