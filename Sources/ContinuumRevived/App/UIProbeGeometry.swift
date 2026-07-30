@@ -361,6 +361,7 @@ enum UIProbeGeometry {
             throw fail("probed \(probed) width/appearance pairs, expected \(probeWidths.count * 2)")
         }
         try checkReusableAgentBlockHost()
+        let transcriptLiveHosts = try checkTranscriptCollectionList()
         let proseRows = try checkAssistantProseRenderer()
         let userPromptRows = try checkUserPromptRenderer()
         let codeRows = try checkCodeBlockRenderer()
@@ -370,11 +371,150 @@ enum UIProbeGeometry {
             throw fail("the approval dock was never measured — the fixture no longer opens an approval, so the derived height is ungated")
         }
         print(String(
-            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 8-dimensional measurement key gated; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, and %d exceptional states preserve request identity and opaque privacy at 320pt; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
-            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), proseRows, userPromptRows, codeRows, operationRows, exceptionalRows,
+            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 8-dimensional measurement key gated; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, and %d exceptional states preserve request identity and opaque privacy at 320pt; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
+            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), transcriptLiveHosts, proseRows, userPromptRows, codeRows, operationRows, exceptionalRows,
             narrowestCardRatio, ApprovalDockView.preferredHeight, tightestDockSlack
         ))
     }
+
+    /// Deterministic P3.10 gate over the real diffable collection seam. The
+    /// viewport is deliberately tiny relative to the 10,000-row document, so a
+    /// permanent-view implementation fails by a measured live-host count.
+    private static func checkTranscriptCollectionList() throws -> Int {
+        func id(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+        func block(_ index: Int, revision: UInt64 = 1) -> AgentBlock {
+            AgentBlock(
+                id: id("collection-block-\(index)"), revision: revision,
+                kind: AgentBlockKind(rawValue: "fixture-opaque")!,
+                payload: .opaque(AgentOpaquePayload(debugLabel: "row-\(index)", value: .null))
+            )
+        }
+
+        let blocks = (0..<10_000).map { block($0) }
+        let entry = AgentEntry(
+            id: id("collection-entry"), revision: 1, role: .assistant,
+            provenance: .localNotice(reason: "geometry fixture"), blocks: blocks
+        )
+        let document = AgentDocument(version: 1, entries: [entry])
+        let initialPatch = try AgentDocumentPatch(
+            fromVersion: 0, toVersion: 1, inserted: blocks.map(\.id)
+        )
+
+        let list = AgentTranscriptListView()
+        if ProcessInfo.processInfo.environment["CONTINUUM_P3_10_NEGATIVE_WITNESS"] == "1" {
+            list.qaRetainHostForEverySemanticRow = true
+        }
+        list.frame = NSRect(x: 0, y: 0, width: 320, height: 240)
+        let host = NSView(frame: list.frame)
+        host.addSubview(list)
+        list.autoresizingMask = [.width, .height]
+        try list.apply(document: document, patch: initialPatch)
+        host.layoutSubtreeIfNeeded()
+        list.collectionView.layoutSubtreeIfNeeded()
+
+        guard list.qaSemanticRowCount == 10_000 else {
+            throw fail("transcript collection holds \(list.qaSemanticRowCount) semantic rows, expected 10000")
+        }
+        let live = list.qaLiveHostCount
+        guard live > 0, live < 100 else {
+            throw fail("transcript collection created \(live) live hosts for 10000 rows in a 240pt viewport")
+        }
+        try fills(
+            child: list.collectionView, parent: list.scrollView.contentView,
+            minRatio: 0.99, label: "transcript collection width pin"
+        )
+
+        func expectPreserved(
+            _ before: [AgentNodeID: ObjectIdentifier],
+            label: String
+        ) throws {
+            guard !before.isEmpty else { throw fail("\(label): no materialized hosts to compare") }
+            let after = list.qaRepresentedHostIdentities
+            let replaced = before.compactMap { id, identity in
+                after[id] == identity ? nil : id.rawValue
+            }
+            guard replaced.isEmpty else {
+                throw fail("\(label): replaced stable-ID hosts \(replaced.sorted().joined(separator: ","))")
+            }
+        }
+
+        // Prove the content-only update against every currently represented host,
+        // not one hand-picked sibling. The revised host must also update in place.
+        let initialIdentities = list.qaRepresentedHostIdentities
+        guard initialIdentities.count >= 2 else {
+            throw fail("transcript collection materialized only \(initialIdentities.count) stable-ID hosts")
+        }
+        let firstID = blocks[0].id
+        guard initialIdentities[firstID] != nil else {
+            throw fail("transcript collection did not materialize its first stable-ID host")
+        }
+        var revisedBlocks = blocks
+        revisedBlocks[0] = block(0, revision: 2)
+        var revisedEntry = AgentEntry(
+            id: entry.id, revision: 2, role: entry.role,
+            provenance: entry.provenance, blocks: revisedBlocks
+        )
+        try list.apply(
+            document: AgentDocument(version: 2, entries: [revisedEntry]),
+            patch: try AgentDocumentPatch(fromVersion: 1, toVersion: 2, updated: [firstID, entry.id])
+        )
+        list.collectionView.layoutSubtreeIfNeeded()
+        try expectPreserved(initialIdentities, label: "one-block transcript update")
+
+        // Exercise the collection item's actual reset/rebind path with a retained
+        // offscreen item. The next update therefore proves identity for every
+        // visible host and for a host that crossed the reuse boundary.
+        let middleUpdateIndex = 5_000
+        let middleID = blocks[middleUpdateIndex].id
+        try list.qaExerciseReuseBoundary(from: firstID, to: middleID)
+        let middleIdentities = list.qaRepresentedHostIdentities
+        guard middleIdentities[middleID] != nil else {
+            throw fail("transcript collection did not retain the offscreen reuse witness")
+        }
+
+        revisedBlocks[middleUpdateIndex] = block(middleUpdateIndex, revision: 2)
+        revisedEntry = AgentEntry(
+            id: entry.id, revision: 3, role: entry.role,
+            provenance: entry.provenance, blocks: revisedBlocks
+        )
+        try list.apply(
+            document: AgentDocument(version: 3, entries: [revisedEntry]),
+            patch: try AgentDocumentPatch(fromVersion: 2, toVersion: 3, updated: [middleID, entry.id])
+        )
+        list.collectionView.layoutSubtreeIfNeeded()
+        try expectPreserved(middleIdentities, label: "offscreen-boundary one-block update")
+
+        // A structural append outside the viewport must retain the reused
+        // offscreen host and add exactly one semantic row without eager views.
+        let appended = block(10_000)
+        revisedBlocks.append(appended)
+        revisedEntry = AgentEntry(
+            id: entry.id, revision: 4, role: entry.role,
+            provenance: entry.provenance, blocks: revisedBlocks
+        )
+        let beforeStructure = list.qaRepresentedHostIdentities
+        try list.apply(
+            document: AgentDocument(version: 4, entries: [revisedEntry]),
+            patch: try AgentDocumentPatch(fromVersion: 3, toVersion: 4, inserted: [appended.id])
+        )
+        list.collectionView.layoutSubtreeIfNeeded()
+        guard list.qaSemanticRowCount == 10_001,
+              list.qaRepresentedHostIdentities[middleID] == beforeStructure[middleID] else {
+            throw fail("offscreen structural append lost semantic data or replaced the reused offscreen host")
+        }
+
+        guard list.qaLiveHostCount < 100 else {
+            throw fail("incremental transcript updates retained \(list.qaLiveHostCount) live hosts")
+        }
+        return live
+    }
+
+    // Negative witness (P3.10, exercised 2026-07-30):
+    // `CONTINUUM_P3_10_NEGATIVE_WITNESS=1 .build/debug/continuum-revived --ui-geometry-check`
+    // retained one host per semantic row, directly recreating the forbidden
+    // permanent-stack architecture; exit 1:
+    // "FAIL: transcript collection created 10005 live hosts for 10000 rows in a
+    // 240pt viewport". The injection was then disabled and the same check passed.
 
     /// Deterministic P3.3 gate over the real renderer and reusable host seam.
     private static func checkAssistantProseRenderer() throws -> Int {

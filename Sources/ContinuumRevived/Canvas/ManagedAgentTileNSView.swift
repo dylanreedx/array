@@ -46,6 +46,10 @@ final class ManagedAgentTileNSView: TileNSView {
     /// nothing rather than implying a shared checkout.
     private let branchChip = BranchChipNSView()
     private let cardStack = FlippedStackView()
+    /// P3.10 parks the reusable semantic list behind an internal fixture flag.
+    /// The compatibility stack remains the only visible/live transcript until the
+    /// migration ticket supplies the semantic projection and scroll policy.
+    private let transcriptCollectionFixture: AgentTranscriptListView?
     private let approvalDock = ApprovalDockView()
     private let composeField = NSTextField()
     private let runButton = NSButton()
@@ -104,6 +108,9 @@ final class ManagedAgentTileNSView: TileNSView {
     init(tile: Tile, threadId: String = "thread-main", descriptor: AgentDescriptor? = nil) {
         self.threadId = threadId
         self.model = ManagedAgentTranscriptModel(threadId: threadId)
+        self.transcriptCollectionFixture = AgentTranscriptListView.isFixtureEnabled
+            ? AgentTranscriptListView()
+            : nil
         self.descriptor = descriptor ?? AgentDescriptor(
             agentKind: .managed,
             worktreePath: "",
@@ -766,6 +773,7 @@ final class ManagedAgentTileNSView: TileNSView {
     /// The cards actually in the view hierarchy, so a reset can be asserted against
     /// the stack and not only against the model behind it.
     var qaRenderedCardCount: Int { cardStack.arrangedSubviews.count }
+    var qaTranscriptCollectionFixture: AgentTranscriptListView? { transcriptCollectionFixture }
     var qaComposeEnabled: Bool { composeField.isEnabled }
     /// P6.1. What the two pickers SHOW, read off the popups rather than off the
     /// stored pair — a control that stopped following the value it was given would
