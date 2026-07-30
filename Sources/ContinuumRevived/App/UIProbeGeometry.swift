@@ -362,6 +362,7 @@ enum UIProbeGeometry {
         }
         try checkReusableAgentBlockHost()
         let transcriptLiveHosts = try checkTranscriptCollectionList()
+        let streamingApplies = try checkIncrementalTranscriptBehavior()
         let proseRows = try checkAssistantProseRenderer()
         let userPromptRows = try checkUserPromptRenderer()
         let codeRows = try checkCodeBlockRenderer()
@@ -371,8 +372,8 @@ enum UIProbeGeometry {
             throw fail("the approval dock was never measured — the fixture no longer opens an approval, so the derived height is ungated")
         }
         print(String(
-            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 8-dimensional measurement key gated; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, and %d exceptional states preserve request identity and opaque privacy at 320pt; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
-            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), transcriptLiveHosts, proseRows, userPromptRows, codeRows, operationRows, exceptionalRows,
+            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 8-dimensional measurement key gated; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, and %d exceptional states preserve request identity and opaque privacy at 320pt; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
+            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, exceptionalRows,
             narrowestCardRatio, ApprovalDockView.preferredHeight, tightestDockSlack
         ))
     }
@@ -515,6 +516,217 @@ enum UIProbeGeometry {
     // permanent-stack architecture; exit 1:
     // "FAIL: transcript collection created 10005 live hosts for 10000 rows in a
     // 240pt viewport". The injection was then disabled and the same check passed.
+
+    /// Deterministic P3.11 gate over the actual scheduler/list/controllers.
+    /// It keeps reducer patch validity separate from visual coalescing and then
+    /// checks the reader-facing policies on real AppKit scroll coordinates.
+    private static func checkIncrementalTranscriptBehavior() throws -> Int {
+        func id(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+        func paragraph(_ index: Int, revision: UInt64 = 1, text: String? = nil) -> AgentBlock {
+            AgentBlock(
+                id: id("stream-block-\(index)"), revision: revision, kind: .paragraph,
+                payload: .paragraph([.text(text ?? "Transcript row \(index)")])
+            )
+        }
+        func hostedList(width: CGFloat = 320, height: CGFloat = 240) -> (NSView, AgentTranscriptListView) {
+            let list = AgentTranscriptListView()
+            list.frame = NSRect(x: 0, y: 0, width: width, height: height)
+            let host = NSView(frame: list.frame)
+            host.addSubview(list)
+            list.autoresizingMask = [.width, .height]
+            return (host, list)
+        }
+
+        // 5,000 valid sequential reducer results collapse to one final visual
+        // snapshot. Exact row comparison invalidates only the changing block.
+        var streamBlocks = (0..<40).map { paragraph($0) }
+        let streamEntryID = id("stream-entry")
+        var streamEntry = AgentEntry(
+            id: streamEntryID, revision: 1, role: .assistant,
+            provenance: .localNotice(reason: "stream fixture"), blocks: streamBlocks
+        )
+        let (streamHost, streamList) = hostedList()
+        try streamList.apply(
+            document: AgentDocument(version: 1, entries: [streamEntry]),
+            patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: streamBlocks.map(\.id))
+        )
+        streamHost.layoutSubtreeIfNeeded()
+        streamList.collectionView.layoutSubtreeIfNeeded()
+        let prepareBefore = streamList.qaLayoutPreparePassCount
+        for delta in 1...5_000 {
+            let version = UInt64(delta + 1)
+            streamBlocks[39] = paragraph(39, revision: version, text: "Streaming value \(delta)")
+            streamEntry = AgentEntry(
+                id: streamEntryID, revision: version, role: .assistant,
+                provenance: streamEntry.provenance, blocks: streamBlocks
+            )
+            try streamList.enqueue(
+                document: AgentDocument(version: version, entries: [streamEntry]),
+                patch: try AgentDocumentPatch(
+                    fromVersion: version - 1, toVersion: version,
+                    updated: [streamEntryID, streamBlocks[39].id]
+                ),
+                final: delta == 5_000
+            )
+        }
+        streamHost.layoutSubtreeIfNeeded()
+        streamList.collectionView.layoutSubtreeIfNeeded()
+        guard streamList.qaVisualApplyCount == 1,
+              streamList.qaLastInvalidatedTopLevelCount == 1,
+              streamList.qaLayoutPreparePassCount - prepareBefore <= 3,
+              streamList.qaSemanticRowCount == 40,
+              streamList.qaRenderingErrorDescription == nil else {
+            throw fail(
+                "5000 transcript deltas produced \(streamList.qaVisualApplyCount) visual applies, "
+                    + "\(streamList.qaLastInvalidatedTopLevelCount) invalidated rows, and "
+                    + "\(streamList.qaLayoutPreparePassCount - prepareBefore) layout prepares"
+            )
+        }
+
+        // An impossible document/patch pair is rejected before it can replace
+        // the scheduler's valid pending snapshot.
+        do {
+            let invalidPatch = try AgentDocumentPatch(fromVersion: 5_001, toVersion: 5_002)
+            try streamList.enqueue(
+                document: AgentDocument(version: 5_003, entries: [streamEntry]),
+                patch: invalidPatch
+            )
+            throw fail("transcript scheduler accepted a mismatched document/patch pair")
+        } catch let error as AgentTranscriptListView.UpdateError {
+            guard case .documentPatchMismatch(document: 5_003, patch: 5_002) = error else {
+                throw fail("transcript scheduler rejected mismatch with wrong error: \(error)")
+            }
+        }
+
+        // Exercise insertion-above anchoring on the real list, including the
+        // inter-row spacing offset where the earlier row-zero fallback failed.
+        var anchorBlocks = (0..<80).map { paragraph($0) }
+        let anchorEntryID = id("anchor-entry")
+        var anchorEntry = AgentEntry(
+            id: anchorEntryID, revision: 1, role: .assistant,
+            provenance: .localNotice(reason: "anchor fixture"), blocks: anchorBlocks
+        )
+        let (anchorHost, anchorList) = hostedList()
+        try anchorList.apply(
+            document: AgentDocument(version: 1, entries: [anchorEntry]),
+            patch: try AgentDocumentPatch(fromVersion: 0, toVersion: 1, inserted: anchorBlocks.map(\.id))
+        )
+        anchorHost.layoutSubtreeIfNeeded()
+        anchorList.collectionView.layoutSubtreeIfNeeded()
+        let anchorIndex = 40
+        let anchorID = anchorBlocks[anchorIndex].id
+        guard let oldFrame = anchorList.collectionView.layoutAttributesForItem(
+            at: IndexPath(item: anchorIndex, section: 0)
+        )?.frame else { throw fail("anchor fixture has no middle-row layout attributes") }
+        let oldOffset = CGFloat(-4) // viewport starts in spacing immediately above the row
+        anchorList.scrollView.contentView.scroll(to: NSPoint(x: 0, y: oldFrame.minY + oldOffset))
+        anchorList.scrollView.reflectScrolledClipView(anchorList.scrollView.contentView)
+
+        let inserted = AgentBlock(
+            id: id("stream-inserted-heading"), revision: 1, kind: .heading,
+            payload: .heading(level: 2, content: [.text("Inserted heading")])
+        )
+        anchorBlocks.insert(inserted, at: 0)
+        anchorEntry = AgentEntry(
+            id: anchorEntryID, revision: 2, role: .assistant,
+            provenance: anchorEntry.provenance, blocks: anchorBlocks
+        )
+        try anchorList.apply(
+            document: AgentDocument(version: 2, entries: [anchorEntry]),
+            patch: try AgentDocumentPatch(
+                fromVersion: 1, toVersion: 2,
+                inserted: [inserted.id], updated: [anchorEntryID]
+            )
+        )
+        anchorHost.layoutSubtreeIfNeeded()
+        anchorList.collectionView.layoutSubtreeIfNeeded()
+        guard let newFrame = anchorList.collectionView.layoutAttributesForItem(
+            at: IndexPath(item: anchorIndex + 1, section: 0)
+        )?.frame else { throw fail("insert-above fixture lost anchored row") }
+        let restoredOffset = anchorList.scrollView.contentView.bounds.minY - newFrame.minY
+        guard abs(restoredOffset - oldOffset) <= 0.5, anchorList.qaShowsJumpToLatest else {
+            throw fail("insert-above moved reader anchor: offset \(oldOffset) became \(restoredOffset)")
+        }
+
+        // Select text inside a real virtualized rich-text renderer, then insert
+        // above it. AgentTranscriptListView.hasActiveTextSelection() must choose
+        // the stationary path—this is not a controller-only stub.
+        func firstTextView(in view: NSView) -> NSTextView? {
+            if let textView = view as? NSTextView, !textView.string.isEmpty { return textView }
+            return view.subviews.lazy.compactMap(firstTextView).first
+        }
+        guard let selectedTextView = firstTextView(in: anchorList.collectionView),
+              (selectedTextView.string as NSString).length > 0 else {
+            throw fail("selection fixture materialized no transcript text view")
+        }
+        selectedTextView.setSelectedRange(NSRange(location: 0, length: 1))
+        let stationaryY = anchorList.scrollView.contentView.bounds.minY
+        let copyBlock = AgentBlock(
+            id: id("stream-copy-edge-cases"), revision: 1, kind: .paragraph,
+            payload: .paragraph([
+                .text("Soft"), .softBreak, .code("a`b"), .hardBreak, .text("End"),
+            ])
+        )
+        anchorBlocks.insert(copyBlock, at: 0)
+        anchorEntry = AgentEntry(
+            id: anchorEntryID, revision: 3, role: .assistant,
+            provenance: anchorEntry.provenance, blocks: anchorBlocks
+        )
+        try anchorList.apply(
+            document: AgentDocument(version: 3, entries: [anchorEntry]),
+            patch: try AgentDocumentPatch(
+                fromVersion: 2, toVersion: 3,
+                inserted: [copyBlock.id], updated: [anchorEntryID]
+            )
+        )
+        anchorHost.layoutSubtreeIfNeeded()
+        anchorList.collectionView.layoutSubtreeIfNeeded()
+        guard abs(anchorList.scrollView.contentView.bounds.minY - stationaryY) <= 0.5,
+              anchorList.qaShowsJumpToLatest else {
+            throw fail("actual transcript text selection was force-scrolled during insert-above update")
+        }
+        selectedTextView.setSelectedRange(NSRange(location: 0, length: 0))
+
+        // Inspect the order returned by the real accessibilityChildren override;
+        // do not pre-sort a QA projection before asserting it.
+        let accessibilityChildren = anchorList.accessibilityChildren() ?? []
+        let accessibilityIDs = accessibilityChildren.compactMap {
+            ($0 as? AgentBlockHostView)?.representedID
+        }
+        let documentIndexes = Dictionary(uniqueKeysWithValues: anchorBlocks.enumerated().map { ($0.element.id, $0.offset) })
+        let accessibilityIndexes = accessibilityIDs.compactMap { documentIndexes[$0] }
+        let hasJumpAction = accessibilityChildren.contains { child in
+            (child as? NSButton)?.accessibilityLabel() == "Jump to latest transcript content"
+        }
+        guard accessibilityIDs.count >= 2,
+              accessibilityIndexes == accessibilityIndexes.sorted(),
+              anchorList.accessibilityRole() == .group,
+              anchorList.collectionView.accessibilityRole() == .list,
+              hasJumpAction else {
+            throw fail("transcript VoiceOver children did not follow document order or expose Jump to latest")
+        }
+
+        // Standard block selection reaches semantic plain/Markdown copy and
+        // matches native inline behavior for soft breaks and embedded backticks.
+        anchorList.collectionView.selectionIndexPaths = [IndexPath(item: 0, section: 0)]
+        let pasteboard = NSPasteboard(name: .init("continuum.transcript-copy.\(UUID().uuidString)"))
+        anchorList.copySelectedBlocks(pasteboard: pasteboard)
+        guard pasteboard.string(forType: .string) == "Soft a`b\nEnd",
+              pasteboard.string(forType: .init("net.daringfireball.markdown")) == "Soft\n`a\\`b`  \nEnd" else {
+            throw fail("transcript copy diverged from native soft-break/code Markdown semantics")
+        }
+
+        anchorList.jumpToLatest()
+        guard anchorList.scrollController.isNearBottom(in: anchorList.scrollView),
+              !anchorList.qaShowsJumpToLatest else {
+            throw fail("Jump to latest did not reach the transcript end and clear itself")
+        }
+        return streamList.qaVisualApplyCount
+    }
+
+    // Negative witness (P3.11): with CONTINUUM_P3_11_NEGATIVE_WITNESS=1,
+    // AgentTranscriptUpdateScheduler flushes every scheduled delta. The normal
+    // 5,000-delta geometry assertion must fail with 5,000 visual applies.
 
     /// Deterministic P3.3 gate over the real renderer and reusable host seam.
     private static func checkAssistantProseRenderer() throws -> Int {

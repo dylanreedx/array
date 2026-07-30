@@ -79,8 +79,23 @@ final class AgentTranscriptListView: NSView {
     private var rowsByID: [AgentNodeID: Row] = [:]
     private var topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>] = [:]
     private var appliedVersion: UInt64?
+    private var latestEnqueuedVersion: UInt64?
     private var renderingError: Error?
+    private var lastInvalidatedTopLevelCount = 0
     private var renderContext: AgentRenderContext
+    private let updateScheduler = AgentTranscriptUpdateScheduler()
+    let scrollController = AgentTranscriptScrollController()
+    private lazy var jumpToLatestButton: NSButton = {
+        let button = NSButton(title: "Jump to latest", target: self, action: #selector(handleJumpToLatest))
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.isBordered = false
+        button.bezelStyle = .recessed
+        button.font = .systemFont(ofSize: 12, weight: .medium)
+        button.setAccessibilityRole(.button)
+        button.setAccessibilityLabel("Jump to latest transcript content")
+        button.isHidden = true
+        return button
+    }()
 
     /// Weakly tracks every host created by the collection, including hosts AppKit
     /// has moved into its reuse pool. Counting only `visibleItems()` would miss a
@@ -105,6 +120,11 @@ final class AgentTranscriptListView: NSView {
         measurementCache = AgentBlockMeasurementCache()
         super.init(frame: .zero)
         configureCollectionView()
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Agent transcript")
+        collectionView.setAccessibilityRole(.list)
+        collectionView.setAccessibilityLabel("Transcript entries")
     }
 
     @available(*, unavailable)
@@ -116,17 +136,21 @@ final class AgentTranscriptListView: NSView {
         scrollView.hasVerticalScroller = true
         collectionView.collectionViewLayout = transcriptLayout
         collectionView.isSelectable = true
+        collectionView.allowsMultipleSelection = true
         collectionView.register(
             AgentTranscriptCollectionItem.self,
             forItemWithIdentifier: NSUserInterfaceItemIdentifier("AgentTranscriptCollectionItem")
         )
         scrollView.documentView = collectionView
         addSubview(scrollView)
+        addSubview(jumpToLatestButton)
         NSLayoutConstraint.activate([
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: topAnchor),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            jumpToLatestButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            jumpToLatestButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
         ])
 
         transcriptLayout.itemCount = { [weak self] in self?.rows.count ?? 0 }
@@ -164,9 +188,133 @@ final class AgentTranscriptListView: NSView {
         }
     }
 
+    /// Queues one valid reducer result. Every document/patch pair and every
+    /// producer version edge is validated before coalescing; only visual work is
+    /// skipped. The latest semantic snapshot is diffed against the last painted
+    /// rows at flush time, without fabricating a multi-version document patch.
+    func enqueue(
+        document: AgentDocument,
+        patch: AgentDocumentPatch,
+        final: Bool = false
+    ) throws {
+        guard document.version == patch.toVersion else {
+            throw UpdateError.documentPatchMismatch(document: document.version, patch: patch.toVersion)
+        }
+        let expected = latestEnqueuedVersion ?? appliedVersion ?? patch.fromVersion
+        guard patch.fromVersion == expected else {
+            throw UpdateError.versionMismatch(expected: expected, actual: patch.fromVersion)
+        }
+        latestEnqueuedVersion = patch.toVersion
+        updateScheduler.schedule({ [weak self] in
+            guard let self else { return }
+            do { try applyCoalesced(document: document) }
+            catch { renderingError = error }
+        }, final: final)
+    }
+
+    var qaVisualApplyCount: Int { updateScheduler.visualApplyCount }
+    var qaLastInvalidatedTopLevelCount: Int { lastInvalidatedTopLevelCount }
+    var qaRenderingErrorDescription: String? { renderingError.map(String.init(describing:)) }
+
+    override func accessibilityChildren() -> [Any]? {
+        // Expose the actual virtualized semantic hosts in collection/document
+        // order instead of trusting AppKit's reuse-pool traversal order. Each
+        // host then forwards its heading/link/code/disclosure/action children.
+        let orderedHosts: [(Int, AgentBlockHostView)] = collectionView.visibleItems().compactMap { item in
+            guard let item = item as? AgentTranscriptCollectionItem,
+                  let indexPath = collectionView.indexPath(for: item),
+                  let host = item.hostView else { return nil }
+            return (indexPath.item, host)
+        }
+        var children: [Any] = orderedHosts.sorted { $0.0 < $1.0 }.map { $0.1 as Any }
+        if !jumpToLatestButton.isHidden { children.append(jumpToLatestButton) }
+        return children
+    }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    @objc func copy(_ sender: Any?) {
+        // The standard Edit > Copy action reaches this responder when the
+        // collection owns block selection. Text renderers still handle native
+        // partial text selections in their own NSTextView responder.
+        copySelectedBlocks()
+    }
+
+    private func hasActiveTextSelection() -> Bool {
+        func containsSelection(in view: NSView) -> Bool {
+            if let textView = view as? NSTextView, textView.selectedRange().length > 0 {
+                return true
+            }
+            return view.subviews.contains(where: containsSelection)
+        }
+        return containsSelection(in: collectionView)
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { updateScheduler.flush() }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    func jumpToLatest() {
+        scrollController.jumpToLatest(in: scrollView)
+        jumpToLatestButton.isHidden = true
+    }
+
+    @objc private func handleJumpToLatest() { jumpToLatest() }
+
+    private func transcriptID(at y: CGFloat) -> AgentNodeID? {
+        // A viewport may begin in the inter-row gap. Anchor to the next visible
+        // row rather than falling back to row zero; otherwise insertion above the
+        // reader's actual content restores against the wrong semantic ID.
+        var lastID: AgentNodeID?
+        for (index, row) in rows.enumerated() {
+            guard let frame = collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame else { continue }
+            if frame.maxY >= y { return row.block.id }
+            lastID = row.block.id
+        }
+        return lastID
+    }
+
+    private func transcriptY(for id: AgentNodeID) -> CGFloat? {
+        guard let index = rows.firstIndex(where: { $0.block.id == id }) else { return nil }
+        return collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame.minY
+    }
+
+    func copySelectedBlocks(
+        asMarkdown: Bool = false,
+        pasteboard: NSPasteboard = .general
+    ) {
+        let selected = collectionView.selectionIndexPaths
+            .sorted { $0.item < $1.item }
+            .compactMap { rows.indices.contains($0.item) ? rows[$0.item].block : nil }
+        guard !selected.isEmpty else { return }
+        if asMarkdown {
+            let value = AgentTranscriptCopyController.markdown(for: selected)
+            pasteboard.clearContents()
+            pasteboard.setString(value, forType: .string)
+            pasteboard.setString(value, forType: NSPasteboard.PasteboardType("net.daringfireball.markdown"))
+        } else {
+            AgentTranscriptCopyController.writeToPasteboard(blocks: selected, pasteboard: pasteboard)
+        }
+    }
+
     /// Applies one reducer result. Diffable snapshots preserve item identity for
     /// unchanged IDs; reconfiguration is limited to rows touched by the patch.
     /// There is intentionally no reloadData path after (or before) initial load.
+    private func applyCoalesced(document: AgentDocument) throws {
+        let flattened = try Self.flatten(document)
+        let oldIndexes = Dictionary(uniqueKeysWithValues: rows.enumerated().map { ($0.element.block.id, $0.offset) })
+        let changedNodeIDs = Set(flattened.rows.compactMap { row -> AgentNodeID? in
+            guard let old = rowsByID[row.block.id] else { return nil }
+            return old.block != row.block || old.role != row.role ? row.block.id : nil
+        })
+        let moved = flattened.rows.enumerated().compactMap { index, row -> AgentNodeID? in
+            guard let oldIndex = oldIndexes[row.block.id], oldIndex != index else { return nil }
+            return row.block.id
+        }
+        try applyWithScroll(document: document, flattened: flattened, changedNodeIDs: changedNodeIDs.union(moved))
+    }
+
     func apply(document: AgentDocument, patch: AgentDocumentPatch) throws {
         guard document.version == patch.toVersion else {
             throw UpdateError.documentPatchMismatch(document: document.version, patch: patch.toVersion)
@@ -174,8 +322,42 @@ final class AgentTranscriptListView: NSView {
         if let appliedVersion, patch.fromVersion != appliedVersion {
             throw UpdateError.versionMismatch(expected: appliedVersion, actual: patch.fromVersion)
         }
-
         let flattened = try Self.flatten(document)
+        try applyWithScroll(
+            document: document,
+            flattened: flattened,
+            changedNodeIDs: Set(patch.updated + patch.moved)
+        )
+        latestEnqueuedVersion = document.version
+    }
+
+    private func applyWithScroll(
+        document: AgentDocument,
+        flattened: (rows: [Row], topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>]),
+        changedNodeIDs: Set<AgentNodeID>
+    ) throws {
+        try scrollController.apply(
+            in: scrollView,
+            idAtY: { [weak self] y in self?.transcriptID(at: y) },
+            yForID: { [weak self] id in self?.transcriptY(for: id) },
+            isSelecting: { [weak self] in self?.hasActiveTextSelection() ?? false },
+            update: { [weak self] in
+                guard let self else { return }
+                try applyUnscrolled(
+                    document: document,
+                    flattened: flattened,
+                    changedNodeIDs: changedNodeIDs
+                )
+            }
+        )
+        jumpToLatestButton.isHidden = !scrollController.showsJumpToLatest
+    }
+
+    private func applyUnscrolled(
+        document: AgentDocument,
+        flattened: (rows: [Row], topLevelIDsByNodeID: [AgentNodeID: Set<AgentNodeID>]),
+        changedNodeIDs: Set<AgentNodeID>
+    ) throws {
         let oldIDs = rows.map(\.block.id)
         let oldRowsByID = rowsByID
         rows = flattened.rows
@@ -199,7 +381,6 @@ final class AgentTranscriptListView: NSView {
         snapshot.appendSections([0])
         snapshot.appendItems(newIDs, toSection: 0)
 
-        let changedNodeIDs = Set(patch.updated + patch.moved)
         var changedTopLevelIDs = Set(changedNodeIDs.flatMap { topLevelIDsByNodeID[$0] ?? [] })
         // Entry revisions also advance when one child changes. Do not fan that
         // bookkeeping update out to every sibling; only a role change affects all
@@ -209,6 +390,7 @@ final class AgentTranscriptListView: NSView {
             return row.block.id
         })
         let survivingChanged = changedTopLevelIDs.intersection(newIDs)
+        lastInvalidatedTopLevelCount = survivingChanged.count
         var changedHeight = false
         if !survivingChanged.isEmpty {
             let width = max(
@@ -361,4 +543,14 @@ final class AgentTranscriptListView: NSView {
         qaReuseWitnessItem = item
     }
     var qaCachedMeasurementCount: Int { measurementCache.cachedMeasurementCount }
+    var qaLayoutPreparePassCount: Int { transcriptLayout.preparePassCount }
+    var qaShowsJumpToLatest: Bool { !jumpToLatestButton.isHidden }
+    var qaVisibleAccessibilityOrder: [AgentNodeID] {
+        collectionView.visibleItems().compactMap { item -> (Int, AgentNodeID)? in
+            guard let item = item as? AgentTranscriptCollectionItem,
+                  let indexPath = collectionView.indexPath(for: item),
+                  let id = item.hostView?.representedID else { return nil }
+            return (indexPath.item, id)
+        }.sorted { $0.0 < $1.0 }.map(\.1)
+    }
 }
