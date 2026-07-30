@@ -194,7 +194,11 @@ run_app_check .build/debug/continuum-revived --ui-pixel-check
 # Ticket P0.6: committed PNG baselines for every static Component Lab card in both
 # appearances. Catches regressions nobody wrote an assertion for; blessing is
 # explicit (CONTINUUM_UPDATE_BASELINES=1 ./scripts/run-matrix.sh) and never implicit.
-run_app_check .build/debug/continuum-revived --ui-baseline-check
+if [[ "${CONTINUUM_SKIP_UI_BASELINES:-0}" == "1" ]]; then
+  printf '\n==> SKIPPED (display-dependent, CONTINUUM_SKIP_UI_BASELINES=1): --ui-baseline-check — baseline comparison deferred to a supervised Retina-Main visual gate.\n'
+else
+  run_app_check .build/debug/continuum-revived --ui-baseline-check
+fi
 # Ticket P0.9: the advisory tour — a labelled contact sheet of the agent surfaces
 # (managed-agent tile in four states x three widths, transcript cards at three
 # widths, status chips, sidebar, settings) in both appearances, written to
