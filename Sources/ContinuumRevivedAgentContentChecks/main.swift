@@ -641,4 +641,8 @@ runTranscriptFixtureCorpusChecks()
 // owned parser result and the sole swift-markdown production adapter.
 runMarkupParserChecks()
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P2.2-inline-markup-runs.md —
+// exact semantic inline AST, merged text, and lossless unsupported fallback.
+runInlineMarkupChecks()
+
 print("ContinuumRevivedAgentContentChecks passed")

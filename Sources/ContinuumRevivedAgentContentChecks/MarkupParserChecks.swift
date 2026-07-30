@@ -67,3 +67,76 @@ func runMarkupParserChecks() {
     // exit 1. Restoring the exact AST-derived text returned the leg to green.
     print("Markup parser checks passed: owned seam converts one plain CommonMark paragraph to a stable semantic block and diagnoses unsupported structure")
 }
+
+private func paragraphInlines(_ parse: AgentMarkupParse, _ context: String) -> [AgentInline] {
+    guard parse.blocks.count == 1,
+          parse.blocks[0].kind == .paragraph,
+          case let .paragraph(inlines) = parse.blocks[0].payload
+    else { fail("\(context) did not produce exactly one semantic paragraph") }
+    return inlines
+}
+
+private func inlinePlainText(_ inlines: [AgentInline]) -> String {
+    inlines.map { inline in
+        switch inline {
+        case let .text(value), let .code(value): return value
+        case let .emphasis(children), let .strong(children): return inlinePlainText(children)
+        case let .link(_, _, children): return inlinePlainText(children)
+        case .softBreak, .hardBreak: return "\n"
+        }
+    }.joined()
+}
+
+func runInlineMarkupChecks() {
+    let parser = MarkdownAgentMarkupParser()
+    let entryID = parserID("entry:inline-runs")
+    let source = "Escaped \\*stars\\*; **strong with _nested emphasis_ and `literal * code`**.\n" +
+        "soft continuation\nhard continuation  \nafter hard"
+    let parse = parser.parse(source, entryID: entryID, previous: [])
+    expect(parse.diagnostics.isEmpty,
+           "supported inline markup produced diagnostics: \(parse.diagnostics.map(\.code))")
+    let expected: [AgentInline] = [
+        .text("Escaped *stars*; "),
+        .strong([
+            .text("strong with "),
+            .emphasis([.text("nested emphasis")]),
+            .text(" and "),
+            .code("literal * code")
+        ]),
+        .text("."),
+        .softBreak,
+        .text("soft continuation"),
+        .softBreak,
+        .text("hard continuation"),
+        .hardBreak,
+        .text("after hard")
+    ]
+    let actual = paragraphInlines(parse, "nested inline source")
+    expect(actual == expected,
+           "escapes, nested marks, code, and break kinds must match the exact semantic AST; got \(actual)")
+    expect(inlinePlainText(actual) == "Escaped *stars*; strong with nested emphasis and literal * code.\nsoft continuation\nhard continuation\nafter hard",
+           "plain-text projection must preserve readable source content modulo Markdown delimiters")
+
+    let unsupportedSource = "pré [label](https://example.invalid/path) post"
+    let unsupported = parser.parse(unsupportedSource, entryID: entryID, previous: parse.blocks)
+    expect(paragraphInlines(unsupported, "unsupported inline source") == [.text(unsupportedSource)],
+           "an unsupported inline node must preserve its exact literal spelling and merge with adjacent text")
+    expect(unsupported.diagnostics.map(\.code) == ["markdown.unsupported-inline"],
+           "an unsupported inline node must emit one structural diagnostic")
+    expect(!unsupported.diagnostics.map(\.code).contains(where: { $0.contains("example") || $0.contains("label") }),
+           "inline diagnostics must not carry source text or destinations")
+    expect(unsupported.blocks[0].id == parse.blocks[0].id,
+           "adding inline semantics must not replace the existing paragraph identity")
+
+    let deepSource = String(repeating: "*", count: 130) + "x" + String(repeating: "*", count: 130)
+    let deep = parser.parse(deepSource, entryID: entryID, previous: unsupported.blocks)
+    expect(deep.diagnostics.map(\.code) == ["markdown.inline-nesting-limit"],
+           "over-deep supported marks must stop at the owned depth cap and produce one diagnostic")
+    expect(inlinePlainText(paragraphInlines(deep, "deep inline source")).contains("x"),
+           "the inline depth cap must preserve the nested source rather than dropping it")
+
+    // Required negative witness: changing the `.hardBreak` conversion to
+    // `.softBreak` makes the exact-AST assertion above fail (exit 1) with the
+    // observed run reporting softBreak where hardBreak is required.
+    print("Inline markup checks passed: exact escapes/nesting/code/break AST, readable projection, merged text, and lossless diagnosed fallback")
+}

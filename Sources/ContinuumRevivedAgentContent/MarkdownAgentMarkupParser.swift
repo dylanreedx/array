@@ -2,9 +2,11 @@ import Foundation
 import Markdown
 
 /// The sole production adapter from swift-markdown's AST into AgentContent.
-/// This first seam deliberately converts only a plain paragraph; subsequent
-/// parser tickets add inline and block families without exposing `Markdown`.
+/// Block-family conversion remains deliberately narrow here, while paragraph
+/// contents are translated into the platform-neutral inline vocabulary.
 public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
+    private static let maximumInlineDepth = 64
+
     public init() {}
 
     public func parse(
@@ -16,8 +18,7 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
 
         let document = Document(parsing: source)
         guard document.childCount == 1,
-              let paragraph = document.child(at: 0) as? Paragraph,
-              paragraph.inlineChildren.allSatisfy({ $0 is Text })
+              let paragraph = document.child(at: 0) as? Paragraph
         else {
             let blockID = previous.first(where: { block in
                 guard block.kind == .unknown else { return false }
@@ -46,13 +47,107 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
             return false
         })?.id ?? blockID(entryID: entryID, stableKey: "markdown.paragraph")
 
-        return AgentMarkupParse(blocks: [
-            AgentBlock(
-                id: blockID,
-                kind: .paragraph,
-                payload: .paragraph([.text(paragraph.plainText)])
-            )
-        ])
+        var diagnostics: [AgentMarkupDiagnostic] = []
+        let inlines = convertChildren(
+            paragraph,
+            source: source,
+            depth: 0,
+            diagnostics: &diagnostics
+        )
+        return AgentMarkupParse(
+            blocks: [
+                AgentBlock(
+                    id: blockID,
+                    kind: .paragraph,
+                    payload: .paragraph(inlines)
+                )
+            ],
+            diagnostics: diagnostics
+        )
+    }
+
+    private func convertChildren(
+        _ parent: Markup,
+        source: String,
+        depth: Int,
+        diagnostics: inout [AgentMarkupDiagnostic]
+    ) -> [AgentInline] {
+        var result: [AgentInline] = []
+        for child in parent.children {
+            let converted = convert(child, source: source, depth: depth, diagnostics: &diagnostics)
+            appendMergingText(converted, to: &result)
+        }
+        return result
+    }
+
+    private func convert(
+        _ markup: Markup,
+        source: String,
+        depth: Int,
+        diagnostics: inout [AgentMarkupDiagnostic]
+    ) -> AgentInline {
+        if let text = markup as? Text { return .text(text.string) }
+        if let code = markup as? InlineCode { return .code(code.code) }
+        if markup is SoftBreak { return .softBreak }
+        if markup is LineBreak { return .hardBreak }
+
+        if depth < Self.maximumInlineDepth, markup is Emphasis {
+            return .emphasis(convertChildren(markup, source: source, depth: depth + 1, diagnostics: &diagnostics))
+        }
+        if depth < Self.maximumInlineDepth, markup is Strong {
+            return .strong(convertChildren(markup, source: source, depth: depth + 1, diagnostics: &diagnostics))
+        }
+
+        let exceededDepth = (markup is Emphasis || markup is Strong) && depth >= Self.maximumInlineDepth
+        diagnostics.append(.init(
+            severity: .warning,
+            code: exceededDepth ? "markdown.inline-nesting-limit" : "markdown.unsupported-inline"
+        ))
+        // Parsed inline nodes carry exact UTF-8 source ranges. Keeping the
+        // original spelling here is important: flattening an image, link, HTML
+        // node, or over-deep mark through `plainText` would silently discard
+        // delimiters or destinations before their dedicated parser tickets.
+        return .text(literalSource(for: markup, in: source) ?? source)
+    }
+
+    private func appendMergingText(_ inline: AgentInline, to result: inout [AgentInline]) {
+        if case let .text(value) = inline,
+           case let .text(previous)? = result.last {
+            result[result.count - 1] = .text(previous + value)
+        } else {
+            result.append(inline)
+        }
+    }
+
+    private func literalSource(for markup: Markup, in source: String) -> String? {
+        guard let range = markup.range,
+              let lower = sourceIndex(line: range.lowerBound.line, column: range.lowerBound.column, in: source),
+              let upper = sourceIndex(line: range.upperBound.line, column: range.upperBound.column, in: source),
+              lower <= upper
+        else { return nil }
+        return String(source[lower..<upper])
+    }
+
+    /// swift-markdown columns are one-based UTF-8 byte offsets, including for
+    /// non-ASCII source. Convert without treating a byte offset as a Character
+    /// offset, which would corrupt an unsupported node following Unicode text.
+    private func sourceIndex(line targetLine: Int, column: Int, in source: String) -> String.Index? {
+        guard targetLine >= 1, column >= 1 else { return nil }
+        var line = 1
+        var lineStart = source.utf8.startIndex
+        var cursor = lineStart
+        while line < targetLine, cursor < source.utf8.endIndex {
+            if source.utf8[cursor] == 0x0A {
+                line += 1
+                lineStart = source.utf8.index(after: cursor)
+            }
+            cursor = source.utf8.index(after: cursor)
+        }
+        guard line == targetLine,
+              let byteIndex = source.utf8.index(lineStart, offsetBy: column - 1, limitedBy: source.utf8.endIndex),
+              let index = String.Index(byteIndex, within: source)
+        else { return nil }
+        return index
     }
 
     /// `AgentNodeID` permits provider IDs longer than its child-scope bound.
