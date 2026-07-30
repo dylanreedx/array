@@ -112,23 +112,100 @@ public struct AgentCommandOutputPayload: Codable, Equatable, Sendable {
     }
 }
 
+/// One explicit provider-owned plan step. The renderer may present this
+/// hierarchy but must never manufacture steps from prose or local activity.
+public struct AgentPlanStep: Codable, Equatable, Sendable {
+    public var title: String
+    public var detail: String?
+    public var status: AgentItemStatus
+    public var children: [AgentPlanStep]
+
+    public init(
+        title: String,
+        detail: String? = nil,
+        status: AgentItemStatus,
+        children: [AgentPlanStep] = []
+    ) {
+        self.title = title
+        self.detail = detail
+        self.status = status
+        self.children = children
+    }
+}
+
 public struct AgentPlanPayload: Codable, Equatable, Sendable {
     public var title: String?
     public var status: AgentItemStatus
+    public var steps: [AgentPlanStep]
 
-    public init(title: String? = nil, status: AgentItemStatus) {
+    public init(
+        title: String? = nil,
+        status: AgentItemStatus,
+        steps: [AgentPlanStep] = []
+    ) {
         self.title = title
         self.status = status
+        self.steps = steps
+    }
+
+    private enum CodingKeys: String, CodingKey { case title, status, steps }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        title = try values.decodeIfPresent(String.self, forKey: .title)
+        status = try values.decode(AgentItemStatus.self, forKey: .status)
+        steps = try values.decodeIfPresent([AgentPlanStep].self, forKey: .steps) ?? []
+    }
+}
+
+/// Safe, provider-supplied display metadata for one changed file. This is not a
+/// filesystem path capability and the transcript renderer never resolves it.
+public struct AgentDiffFileSummary: Codable, Equatable, Sendable {
+    public var displayName: String
+    public var addedLineCount: UInt
+    public var removedLineCount: UInt
+
+    public init(displayName: String, addedLineCount: UInt = 0, removedLineCount: UInt = 0) {
+        self.displayName = displayName
+        self.addedLineCount = addedLineCount
+        self.removedLineCount = removedLineCount
     }
 }
 
 public struct AgentDiffPayload: Codable, Equatable, Sendable {
+    /// Compatibility/source text. A semantic renderer must not parse or display
+    /// this as a file summary; use the explicitly safe fields below.
     public var text: String
     public var language: String?
+    public var summary: String?
+    public var files: [AgentDiffFileSummary]
+    public var canOpenReview: Bool
 
-    public init(text: String, language: String? = nil) {
+    public init(
+        text: String,
+        language: String? = nil,
+        summary: String? = nil,
+        files: [AgentDiffFileSummary] = [],
+        canOpenReview: Bool = false
+    ) {
         self.text = text
         self.language = language
+        self.summary = summary
+        self.files = files
+        self.canOpenReview = canOpenReview
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case text, language, summary, files, canOpenReview
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        text = try values.decode(String.self, forKey: .text)
+        language = try values.decodeIfPresent(String.self, forKey: .language)
+        summary = try values.decodeIfPresent(String.self, forKey: .summary)
+        files = try values.decodeIfPresent([AgentDiffFileSummary].self, forKey: .files) ?? []
+        canOpenReview = try values.decodeIfPresent(Bool.self, forKey: .canOpenReview) ?? false
     }
 }
 

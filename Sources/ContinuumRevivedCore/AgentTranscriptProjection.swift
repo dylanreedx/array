@@ -253,7 +253,14 @@ public struct AgentTranscriptProjection: Sendable {
         case .plan:
             return AgentBlock(id: id, kind: .plan, payload: .plan(.init(title: title, status: .inProgress)))
         case .fileChange:
-            return AgentBlock(id: id, kind: .diff, payload: .diff(.init(text: label)))
+            // Runtime `title` is the provider's explicit safe display label.
+            // Keep compatibility text, but never derive file names/counts by
+            // parsing it; richer provider events can populate those fields.
+            return AgentBlock(
+                id: id,
+                kind: .diff,
+                payload: .diff(.init(text: label, summary: title))
+            )
         case .error:
             return AgentBlock(id: id, kind: .error, payload: .error(.init(message: label)))
         default:

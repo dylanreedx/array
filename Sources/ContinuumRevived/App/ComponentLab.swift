@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
@@ -2385,11 +2386,129 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         return rendered
     }
 
+    /// Isolated P3.8 fixture/check: it exercises production registry hosts but
+    /// does not enter the baseline catalogue before the supervised P3.12 review.
+    private static func runPlanAndDiffRendererCheck(fail: (String) -> Error) throws {
+        func id(_ value: String) -> AgentNodeID { AgentNodeID(rawValue: value)! }
+        func visibleStrings(in view: NSView) -> [String] {
+            let own: [String]
+            if let field = view as? NSTextField { own = [field.stringValue] }
+            else if let button = view as? NSButton { own = [button.title, button.toolTip ?? ""] }
+            else if let text = view as? NSTextView { own = [text.string] }
+            else { own = [] }
+            return own + view.subviews.flatMap(visibleStrings)
+        }
+
+        guard try AgentBlockRendererRegistry.production.renderer(for: .plan) is PlanRenderer,
+              try AgentBlockRendererRegistry.production.renderer(for: .diff) is DiffSummaryRenderer else {
+            throw fail("plan/diff fixtures did not resolve to distinct production renderers")
+        }
+
+        var actions: [AgentRenderAction] = []
+        let context = AgentRenderContext(
+            actions: AgentRenderActions { actions.append($0) },
+            tokens: .transcript,
+            appearance: .dark
+        )
+        let completedDetail = "COMPLETED-DETAIL-MUST-BE-COLLAPSED"
+        let plan = AgentBlock(
+            id: id("lab-plan"), revision: 1, kind: .plan,
+            payload: .plan(.init(
+                title: "Ship semantic transcript",
+                status: .inProgress,
+                steps: [
+                    .init(
+                        title: "Build semantic schema",
+                        detail: completedDetail,
+                        status: .completed,
+                        children: [.init(title: "Preserve stable IDs", detail: "Reducer checks are running.", status: .inProgress)]
+                    ),
+                    .init(title: "Review visual hierarchy", detail: "Waiting for the supervised gate.", status: .pending),
+                ]
+            ))
+        )
+        let planHost = AgentBlockHostView()
+        let planHeight = try planHost.measuredHeight(for: plan, width: 360, context: context)
+        planHost.frame = NSRect(x: 0, y: 0, width: 360, height: planHeight)
+        try planHost.apply(block: plan, context: context)
+        planHost.layoutSubtreeIfNeeded()
+        guard let planView = planHost.rendererView as? AgentPlanView,
+              planView.accessibilityRole() == .list,
+              planView.rows.map(\.ordinal) == ["1", "1.1", "2"],
+              planView.rowViews.count == 3,
+              planView.rowViews[0].subviews.count == 1,
+              planView.rowViews[1].subviews.count == 2,
+              !visibleStrings(in: planView).contains(completedDetail),
+              planView.rowViews.allSatisfy({ $0.frame.maxY <= planView.bounds.maxY + 0.5 }) else {
+            throw fail("plan fixture lost ordinal hierarchy, passive status detail, accessibility role, or bounds")
+        }
+
+        let rawDiff = "RAW-DIFF-MUST-NEVER-RENDER\n@@ -1 +1 @@\n-secret\n+token"
+        let diffID = id("lab-diff")
+        let diff = AgentBlock(
+            id: diffID, revision: 1, kind: .diff,
+            payload: .diff(.init(
+                text: rawDiff,
+                language: "diff",
+                summary: "Updated transcript presentation",
+                files: [
+                    .init(displayName: "PlanRenderer.swift", addedLineCount: 42, removedLineCount: 3),
+                    .init(displayName: "DiffSummaryRenderer.swift", addedLineCount: 31, removedLineCount: 1),
+                ],
+                canOpenReview: true
+            ))
+        )
+        let diffHost = AgentBlockHostView()
+        let diffHeight = try diffHost.measuredHeight(for: diff, width: 360, context: context)
+        diffHost.frame = NSRect(x: 0, y: 0, width: 360, height: diffHeight)
+        try diffHost.apply(block: diff, context: context)
+        diffHost.layoutSubtreeIfNeeded()
+        guard let diffView = diffHost.rendererView as? AgentDiffSummaryView,
+              diffView.accessibilityRole() == .group,
+              diffView.countsLabel.stringValue == "2 files · +73 −4",
+              diffView.fileLabels.count == 2,
+              !diffView.openReviewButton.isHidden,
+              !visibleStrings(in: diffView).contains(where: { $0.contains(rawDiff) }),
+              diffView.fileLabels.allSatisfy({ $0.frame.maxY <= diffView.bounds.maxY + 0.5 }) else {
+            throw fail("diff fixture parsed raw text or lost safe names, supplied counts, role, action, or bounds")
+        }
+        diffView.openReviewButton.performClick(nil)
+        guard actions.count == 1,
+              case .openDiff(blockID: diffID) = actions[0] else {
+            throw fail("diff review button did not emit the semantic block-scoped action")
+        }
+
+        let noReview = AgentBlock(
+            id: diffID, revision: 2, kind: .diff,
+            payload: .diff(.init(text: rawDiff, summary: "No review route", files: [], canOpenReview: false))
+        )
+        try diffHost.apply(block: noReview, context: context)
+        diffView.openReviewButton.performClick(nil)
+        guard diffView.openReviewButton.isHidden, actions.count == 1 else {
+            throw fail("unavailable diff review action remained interactive after host reuse")
+        }
+
+        let decoder = JSONDecoder()
+        let legacyPlan = try decoder.decode(
+            AgentPlanPayload.self,
+            from: Data(#"{"title":"Legacy","status":"pending"}"#.utf8)
+        )
+        let legacyDiff = try decoder.decode(
+            AgentDiffPayload.self,
+            from: Data(#"{"text":"legacy","language":"diff"}"#.utf8)
+        )
+        guard legacyPlan.steps.isEmpty, legacyDiff.files.isEmpty,
+              legacyDiff.summary == nil, !legacyDiff.canOpenReview else {
+            throw fail("plan/diff semantic schema did not preserve legacy decoding defaults")
+        }
+    }
+
     static func runSelfCheck() throws {
         func fail(_ message: String) -> Error {
             NSError(domain: "ComponentLab", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
         }
         _ = NSApplication.shared
+        try runPlanAndDiffRendererCheck(fail: fail)
 
         let panel = ComponentLabPanel(env: LabEnvironment(ghostty: nil, browserEngine: nil))
         panel.show(near: nil)

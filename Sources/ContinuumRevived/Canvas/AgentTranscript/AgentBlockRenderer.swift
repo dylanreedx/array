@@ -8,6 +8,7 @@ import ContinuumRevivedAgentUI
 enum AgentRenderAction {
     case copy(blockID: AgentNodeID)
     case activateLink(blockID: AgentNodeID, url: URL)
+    case openDiff(blockID: AgentNodeID)
     case submitResponse(blockID: AgentNodeID, value: String)
 }
 

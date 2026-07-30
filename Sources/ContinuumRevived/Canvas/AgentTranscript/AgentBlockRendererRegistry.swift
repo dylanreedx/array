@@ -49,6 +49,10 @@ final class AgentBlockRendererRegistry {
                     try registry.register(ToolCallRenderer(), for: kind)
                 } else if kind == .commandOutput {
                     try registry.register(CommandOutputRenderer(), for: kind)
+                } else if kind == .plan {
+                    try registry.register(PlanRenderer(), for: kind)
+                } else if kind == .diff {
+                    try registry.register(DiffSummaryRenderer(), for: kind)
                 } else {
                     try registry.register(
                         AgentDeferredBlockRenderer(
