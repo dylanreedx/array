@@ -666,4 +666,11 @@ runStreamingMarkupChecks()
 // stable semantic identity and revision-aware AST reconciliation.
 runIdentityReconcilerChecks()
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P2.9-parser-corpus-fuzz-performance.md —
+// canonical-corpus round trips, fixed-seed malformed/chunk safety, and the
+// 5,000-delta coalesced parser count plus elapsed budget.
+runParserCorpusChecks()
+runParserFuzzChecks()
+runParserPerformanceChecks()
+
 print("ContinuumRevivedAgentContentChecks passed")
