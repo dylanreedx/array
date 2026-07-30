@@ -662,4 +662,8 @@ runInlineMarkupChecks()
 // parser-request coalescing independent from source accumulation.
 runStreamingMarkupChecks()
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P2.8-ast-identity-reconciliation.md —
+// stable semantic identity and revision-aware AST reconciliation.
+runIdentityReconcilerChecks()
+
 print("ContinuumRevivedAgentContentChecks passed")
