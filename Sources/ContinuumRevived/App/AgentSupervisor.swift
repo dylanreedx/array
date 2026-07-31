@@ -5341,6 +5341,9 @@ private func checkPerAgentProviderSettings(
     }
     // The options ARE the catalogue, listed rather than counted: a second hardcoded
     // list here would drift from Pi's, which is what P0.10 closed.
+    guard tile.qaUsesCustomProviderControls else {
+        throw fail("provider-settings: the production tile still exposes native popup chrome instead of the custom next-turn footer")
+    }
     guard tile.qaModelOptionTitles == AgentModelConfig.modelOptions else {
         throw fail("provider-settings: the model picker offers \(tile.qaModelOptionTitles), not AgentModelConfig.modelOptions \(AgentModelConfig.modelOptions)")
     }
@@ -5408,6 +5411,61 @@ private func checkPerAgentProviderSettings(
     try store.upsert(foreign)
     let foreignSupervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) })
     foreignSupervisor.restore()
+
+    // MARK: 8 · custom composer footer
+
+    // P4.8 exercises the same footer now installed in the production tile: it reads
+    // the shared catalogues, labels its scope truthfully, persists through the same
+    // supervisor, and submits only the field that moved.
+    let footer = AgentComposerFooterView(frame: NSRect(x: 0, y: 0, width: 360, height: 48))
+    footer.apply(foreignSupervisor.providerSettings(for: agentId)!)
+    footer.onSettingsWrite = { model, thinking in
+        foreignSupervisor.setProviderSettings(agentID: agentId, model: model, thinking: thinking)
+    }
+    footer.layoutSubtreeIfNeeded()
+    guard footer.qaModelTitles == (AgentModelConfig.modelOptions + [foreign.model]).map(AgentComposerFooterView.abbreviatedModel),
+          footer.qaEffortTitles == AgentModelConfig.thinkingOptions.map(AgentComposerFooterView.abbreviatedEffort),
+          footer.modelButton.accessibilityLabel() == "Model, next turn",
+          footer.effortButton.accessibilityLabel() == "Reasoning effort, next turn" else {
+        throw fail("provider-settings: the custom footer diverged from AgentModelConfig, hid the off-catalog model, or lost its next-turn accessibility labels")
+    }
+    guard footer.qaPickThinking("high"),
+          foreignSupervisor.providerSettings(for: agentId)?.model == foreign.model,
+          foreignSupervisor.providerSettings(for: agentId)?.thinking == "high",
+          try store.load(id: agentId)?.model == foreign.model,
+          try store.load(id: agentId)?.thinking == "high" else {
+        throw fail("provider-settings: the custom footer's effort-only change overwrote or rejected the off-catalog model instead of persisting only effort")
+    }
+    // Detaching is view-only. A new footer populated from a supervisor reloaded from
+    // disk must show the same non-default pair.
+    let reloadedSupervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    reloadedSupervisor.restore()
+    let reattachedFooter = AgentComposerFooterView(frame: footer.frame)
+    reattachedFooter.apply(reloadedSupervisor.providerSettings(for: agentId)!)
+    guard reattachedFooter.qaSettings == AgentModelConfig.Resolution(model: foreign.model, thinking: "high") else {
+        throw fail("provider-settings: custom footer values did not survive detach/re-attach and disk reload — got \(reattachedFooter.qaSettings)")
+    }
+
+    // The reciprocal old-record case: a model-only change must not resubmit an
+    // effort value this build no longer catalogues.
+    let legacyEffort = "legacy-auto"
+    let legacyEffortID = foreignSupervisor.spawn(
+        role: nil, prompt: nil, cwd: cwd,
+        model: pickedModel, thinking: legacyEffort
+    )
+    let reciprocalFooter = AgentComposerFooterView(frame: footer.frame)
+    reciprocalFooter.apply(foreignSupervisor.providerSettings(for: legacyEffortID)!)
+    reciprocalFooter.onSettingsWrite = { model, thinking in
+        foreignSupervisor.setProviderSettings(agentID: legacyEffortID, model: model, thinking: thinking)
+    }
+    guard reciprocalFooter.qaEffortTitles.last == AgentComposerFooterView.abbreviatedEffort(legacyEffort),
+          reciprocalFooter.qaPickModel(secondModel),
+          foreignSupervisor.providerSettings(for: legacyEffortID) == .init(model: secondModel, thinking: legacyEffort),
+          try store.load(id: legacyEffortID)?.thinking == legacyEffort else {
+        throw fail("provider-settings: the custom footer's model-only change overwrote or rejected an off-catalog effort")
+    }
+    _ = foreignSupervisor.setProviderSettings(agentID: agentId, thinking: pickedThinking)
+
     let foreignTile = ManagedAgentTileNSView(tile: Tile(
         id: UUID(),
         kind: .managedAgent,

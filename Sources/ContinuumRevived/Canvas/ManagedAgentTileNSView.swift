@@ -53,13 +53,11 @@ final class ManagedAgentTileNSView: TileNSView {
     private let approvalDock = ApprovalDockView()
     private let composeField = NSTextField()
     private let runButton = NSButton()
-    /// P6.1: which model and which thinking level THIS agent's next turn runs with.
-    /// In the compose area rather than the header because they are about the prompt
-    /// you are about to send, and they take effect on the next turn — never mid-turn,
-    /// which is why they go dark with the rest of compose while one is in flight.
-    private let modelPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let thinkingPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-    /// What the two popups are currently showing. Seeded from the global default
+    /// P4.8: custom model and effort controls for THIS agent's next turn. The
+    /// footer owns their presentation and emits partial writes; this tile remains
+    /// the production composition root and the supervisor remains state owner.
+    private let providerFooter = AgentComposerFooterView()
+    /// What the two custom controls are currently showing. Seeded from the global default
     /// (`AgentModelConfig`) for a tile with no agent, and replaced by the RECORD's
     /// values the moment one attaches — after that the global default is never
     /// consulted again for this agent, which is the whole meaning of "per-agent".
@@ -477,120 +475,40 @@ final class ManagedAgentTileNSView: TileNSView {
         header.addArrangedSubview(elapsedLabel)
     }
 
-    // MARK: - Model and effort (P6.1)
+    // MARK: - Model and effort (P4.8)
 
-    /// The menu's first item, above a separator: what picking anything below it
-    /// actually does. The controls cannot change the model mid-turn — that needs
-    /// Pi's `set_model` RPC (P5.4/P5.5) — and `AgentSupervisor.send` refuses a
-    /// prompt on a busy agent rather than replacing the in-flight runner, so there
-    /// is no path where a mid-turn switch could half-work. The claim lives IN the
-    /// menu rather than beside the popups because at the 320pt minimum tile width
-    /// there is no room for a caption line next to two controls, and the packet's
-    /// rule there is to prefer no claim to a wrong one.
-    static let providerNoticeText = "Applies to the next turn"
-    /// `NSMenuItem`'s default tag is 0, which is the FIRST OPTION's tag — the notice
-    /// needs one of its own or `selectItem(withTag: 0)` finds it instead (the trap
-    /// `InboxBulkActionBar` recorded).
-    private static let providerNoticeTag = -1
+    static let providerNoticeText = "Next turn"
 
-    /// The room the two pickers take under the compose field: the popup's own
-    /// intrinsic height plus a row's vertical padding.
-    ///
-    /// MEASURED off a popup rather than typed as a number, exactly as
-    /// `AgentInboxView.scopeControlHeight` is and for the reason recorded there: the
-    /// control's height comes from its font, so a P1.4 type move grows this instead
-    /// of clipping the control — and a literal would make the committed PNG
-    /// baselines depend on the host's font metrics.
+    /// The footer control plus the same vertical row padding used elsewhere in the
+    /// compose strip. Unlike the removed popup probe, this measures the production
+    /// custom control that is actually installed below.
     static var providerControlHeight: Double {
-        let probe = NSPopUpButton(frame: .zero, pullsDown: false)
-        probe.font = .token(.label)
-        probe.addItem(withTitle: AgentModelConfig.defaultModel)
-        return (Inset.row.vertical + Double(probe.fittingSize.height)).rounded(.up)
+        (Inset.row.vertical + Double(AgentComposerFooterView.height)).rounded(.up)
     }
 
     /// Show these values. Called at construction with the global default and again
-    /// on `attach` with the agent's own.
+    /// on `attach` with the agent's own. Off-catalog values remain visible.
     func applyProviderSettings(_ settings: AgentModelConfig.Resolution) {
         providerSettings = settings
-        rebuildProviderMenu(modelPopUp, options: AgentModelConfig.modelOptions, selected: settings.model)
-        rebuildProviderMenu(thinkingPopUp, options: AgentModelConfig.thinkingOptions, selected: settings.thinking)
+        providerFooter.apply(settings)
     }
 
-    /// Built by hand rather than with `addItem(withTitle:)`, which REMOVES an
-    /// existing item with the same title and shifts every tag after it (P3.8 paid
-    /// for this). The tag carries the option's INDEX, so the notice and the
-    /// separator above the options cost nothing.
-    ///
-    /// A value that is not in the catalogue is added as its own item and selected,
-    /// rather than falling back to index 0: every writer validates against
-    /// `AgentModelConfig` (`RoleRegistry.resolve` throws `unqualifiedModel`,
-    /// `setProviderSettings` refuses, `resolvedFromDefaults` falls back), so this
-    /// can only be a record written by an older build — and a picker that silently
-    /// renamed what the next turn will really run is worse than one showing an
-    /// unfamiliar id.
-    private func rebuildProviderMenu(_ popUp: NSPopUpButton, options: [String], selected: String) {
-        let menu = NSMenu()
-        let notice = NSMenuItem(title: Self.providerNoticeText, action: nil, keyEquivalent: "")
-        notice.tag = Self.providerNoticeTag
-        notice.isEnabled = false
-        menu.addItem(notice)
-        menu.addItem(.separator())
-        var titles = options
-        if !titles.contains(selected) { titles.append(selected) }
-        var selectedItem: NSMenuItem?
-        for (index, title) in titles.enumerated() {
-            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            item.tag = index
-            // Explicit, because `autoenablesItems` is turned off below.
-            item.isEnabled = true
-            menu.addItem(item)
-            if title == selected { selectedItem = item }
+    /// The footer deliberately emits only the field that moved. This keeps an older
+    /// off-catalog value in the other field from making a valid change impossible.
+    private func writeProviderSettings(model: String?, thinking: String?) -> Bool {
+        let next = AgentModelConfig.Resolution(
+            model: model ?? providerSettings.model,
+            thinking: thinking ?? providerSettings.thinking
+        )
+        guard next != providerSettings else { return true }
+        if let agentID = attachedAgentID, let agentSource,
+           !agentSource.setProviderSettings(agentID: agentID, model: model, thinking: thinking) {
+            if let actual = agentSource.providerSettings(for: agentID) { applyProviderSettings(actual) }
+            return false
         }
-        // LOAD-BEARING, as `AgentInboxView` records twice over: left at AppKit's
-        // default, `NSMenu.update()` re-derives every item's enablement from whether
-        // a target responds to its action just before the menu draws, and the notice
-        // above would come back up live and selectable.
-        menu.autoenablesItems = false
-        popUp.menu = menu
-        // The ITEM, not `selectItem(withTag:)` — measured, and it is the same family
-        // of tag trap the bulk bar recorded: a SEPARATOR's default tag is 0, which is
-        // the first option's tag, so selecting the default model by tag selected the
-        // separator above it and the picker rendered with an empty title
-        // (`a tile with no agent shows Resolution(model: "", thinking: "medium")`).
-        if let selectedItem { popUp.select(selectedItem) }
-    }
-
-    @objc private func providerSettingPicked(_ sender: NSPopUpButton) {
-        guard let title = sender.selectedItem?.title,
-              sender.selectedItem?.tag != Self.providerNoticeTag else { return }
-        let isModel = sender === modelPopUp
-        let next = isModel
-            ? AgentModelConfig.Resolution(model: title, thinking: providerSettings.thinking)
-            : AgentModelConfig.Resolution(model: providerSettings.model, thinking: title)
-        guard next != providerSettings else { return }
         providerSettings = next
-        // The RECORD is the truth, so the pick is written there and persisted
-        // immediately — a discrete user action, not a per-token write.
-        //
-        // ONLY THE FIELD THAT MOVED is submitted (from the cross-review): the
-        // supervisor refuses the whole write if either value is outside the
-        // catalogue, so passing both would mean an older record holding one foreign
-        // value — the case `rebuildProviderMenu` deliberately still SHOWS — made the
-        // other field unchangeable.
-        if let agentID = attachedAgentID, let agentSource {
-            let wrote = agentSource.setProviderSettings(
-                agentID: agentID,
-                model: isModel ? title : nil,
-                thinking: isModel ? nil : title
-            )
-            // A refused write must not leave a lie on screen: put back what the
-            // record actually says rather than the pick that did not stick.
-            if !wrote, let actual = agentSource.providerSettings(for: agentID) {
-                applyProviderSettings(actual)
-                return
-            }
-        }
         onProviderSettingsChange?(next)
+        return true
     }
 
     private func makeComposeRow() -> NSView {
@@ -617,25 +535,21 @@ final class ManagedAgentTileNSView: TileNSView {
         stack.edgeInsets = NSEdgeInsets(Inset.row)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        for popUp in [modelPopUp, thinkingPopUp] {
-            popUp.font = .token(.label)
-            popUp.target = self
-            popUp.action = #selector(providerSettingPicked(_:))
-            // A fully-qualified model id is wide and the tile's minimum is 320pt, so
-            // the controls must be allowed to shrink and truncate rather than push
-            // themselves out of the row — `--ui-geometry-check` probes that width and
-            // an `NSPopUpButton` spilling its parent is its recorded failure shape.
-            popUp.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        providerFooter.onSettingsWrite = { [weak self] model, thinking in
+            self?.writeProviderSettings(model: model, thinking: thinking) ?? false
         }
         applyProviderSettings(providerSettings)
-        let pickers = NSStackView(views: [modelPopUp, thinkingPopUp, NSView()])
-        pickers.orientation = .horizontal
-        pickers.alignment = .centerY
-        pickers.spacing = Space.m
-        pickers.edgeInsets = NSEdgeInsets(Inset.row)
-        pickers.translatesAutoresizingMaskIntoConstraints = false
+        let footerRow = NSView()
+        providerFooter.translatesAutoresizingMaskIntoConstraints = false
+        footerRow.addSubview(providerFooter)
+        NSLayoutConstraint.activate([
+            providerFooter.leadingAnchor.constraint(equalTo: footerRow.leadingAnchor, constant: Inset.row.left),
+            providerFooter.trailingAnchor.constraint(equalTo: footerRow.trailingAnchor, constant: -Inset.row.right),
+            providerFooter.centerYAnchor.constraint(equalTo: footerRow.centerYAnchor),
+            providerFooter.heightAnchor.constraint(equalToConstant: AgentComposerFooterView.height),
+        ])
 
-        let column = NSStackView(views: [stack, pickers])
+        let column = NSStackView(views: [stack, footerRow])
         column.orientation = .vertical
         column.spacing = 0
         column.translatesAutoresizingMaskIntoConstraints = false
@@ -646,12 +560,12 @@ final class ManagedAgentTileNSView: TileNSView {
             column.topAnchor.constraint(equalTo: row.topAnchor),
             column.bottomAnchor.constraint(equalTo: row.bottomAnchor),
             stack.widthAnchor.constraint(equalTo: column.widthAnchor),
-            pickers.widthAnchor.constraint(equalTo: column.widthAnchor),
+            footerRow.widthAnchor.constraint(equalTo: column.widthAnchor),
             // The same two terms the compose row's own height is the sum of, so the
             // prompt row keeps exactly the room P1.10 derived for it and the pickers
             // take their own on top rather than out of it.
             stack.heightAnchor.constraint(equalToConstant: Metrics.rowHeight(for: .body, insets: Inset.card)),
-            pickers.heightAnchor.constraint(equalToConstant: Self.providerControlHeight)
+            footerRow.heightAnchor.constraint(equalToConstant: Self.providerControlHeight)
         ])
         return row
     }
@@ -673,12 +587,9 @@ final class ManagedAgentTileNSView: TileNSView {
     private func applyComposeAvailability() {
         composeField.isEnabled = !composeIsBusy
         runButton.isEnabled = !composeIsBusy
-        // P6.1: the pickers go with them, through THIS method rather than a second
-        // notion of "busy". A pick cannot reach a turn already in flight (that needs
-        // Pi's set_model RPC, P5.4/P5.5), and a control that silently does nothing is
-        // worse than one that is visibly unavailable.
-        modelPopUp.isEnabled = !composeIsBusy
-        thinkingPopUp.isEnabled = !composeIsBusy
+        // Next-turn settings move with compose availability; a choice cannot mutate
+        // the already-running provider process.
+        providerFooter.controlsEnabled = !composeIsBusy
     }
 
     private func applyHeader(status: AgentStatus) {
@@ -775,52 +686,29 @@ final class ManagedAgentTileNSView: TileNSView {
     var qaRenderedCardCount: Int { cardStack.arrangedSubviews.count }
     var qaTranscriptCollectionFixture: AgentTranscriptListView? { transcriptCollectionFixture }
     var qaComposeEnabled: Bool { composeField.isEnabled }
-    /// P6.1. What the two pickers SHOW, read off the popups rather than off the
-    /// stored pair — a control that stopped following the value it was given would
-    /// otherwise assert itself green.
-    var qaProviderSettings: AgentModelConfig.Resolution {
-        AgentModelConfig.Resolution(
-            model: modelPopUp.titleOfSelectedItem ?? "",
-            thinking: thinkingPopUp.titleOfSelectedItem ?? ""
-        )
-    }
-    /// The pickable items each menu is really carrying, less the notice and the
-    /// separator — so a divergent second catalogue is visible as a list, not as a
-    /// count.
-    var qaModelOptionTitles: [String] { pickableTitles(modelPopUp) }
-    var qaThinkingOptionTitles: [String] { pickableTitles(thinkingPopUp) }
-    private func pickableTitles(_ popUp: NSPopUpButton) -> [String] {
-        (popUp.menu?.items ?? [])
-            .filter { !$0.isSeparatorItem && $0.tag != Self.providerNoticeTag }
-            .map(\.title)
-    }
-    var qaProviderControlsEnabled: Bool { modelPopUp.isEnabled && thinkingPopUp.isEnabled }
-    /// Whether the "applies to the next turn" notice is still unpickable at the
-    /// moment the menu would draw — `NSMenu.update()` is what re-derives enablement,
-    /// so calling it here is what makes `autoenablesItems = false` assertable.
+    /// Read from the installed production footer rather than the tile's cached pair.
+    var qaProviderSettings: AgentModelConfig.Resolution { providerFooter.qaSettings }
+    var qaModelOptionTitles: [String] { providerFooter.modelButton.items.map(\.id) }
+    var qaThinkingOptionTitles: [String] { providerFooter.effortButton.items.map(\.id) }
+    var qaProviderControlsEnabled: Bool { providerFooter.controlsEnabled }
+    /// Kept for the existing supervisor contract, but derived from the installed
+    /// footer: next-turn context must be one passive label and never a choice item.
     var qaProviderNoticeIsPickable: Bool {
-        [modelPopUp, thinkingPopUp].contains { popUp in
-            popUp.menu?.update()
-            return popUp.menu?.items.first(where: { $0.tag == Self.providerNoticeTag })?.isEnabled ?? false
-        }
+        let hasNoticeItem = (providerFooter.modelButton.items + providerFooter.effortButton.items)
+            .contains { $0.title == Self.providerNoticeText }
+        return providerFooter.qaContextText != Self.providerNoticeText
+            || providerFooter.qaContextIsActionable
+            || hasNoticeItem
     }
-    /// Pick a value the way a user does: through the popup's own selection and
-    /// action, not by calling the handler with a string.
-    /// Returns whether the control's action actually fired — false for a disabled
-    /// picker, and false for one whose target/action was never wired.
-    @discardableResult
-    func qaPickModel(_ model: String) -> Bool { qaPick(modelPopUp, title: model) }
-    @discardableResult
-    func qaPickThinking(_ thinking: String) -> Bool { qaPick(thinkingPopUp, title: thinking) }
-    /// Through the CONTROL'S OWN target/action (from the cross-review), not by
-    /// calling the handler: a popup left unwired would otherwise pass this while
-    /// doing nothing for a real user.
-    @discardableResult
-    private func qaPick(_ popUp: NSPopUpButton, title: String) -> Bool {
-        guard popUp.isEnabled, let item = popUp.menu?.items.first(where: { $0.title == title }), item.isEnabled else { return false }
-        popUp.select(item)
-        return popUp.sendAction(popUp.action, to: popUp.target)
+    var qaUsesCustomProviderControls: Bool {
+        providerFooter.modelButton.accessibilityRole() == .popUpButton
+            && providerFooter.effortButton.accessibilityRole() == .popUpButton
+            && !providerFooter.subviews.contains(where: { $0 is NSPopUpButton })
     }
+    @discardableResult
+    func qaPickModel(_ model: String) -> Bool { providerFooter.qaPickModel(model) }
+    @discardableResult
+    func qaPickThinking(_ thinking: String) -> Bool { providerFooter.qaPickThinking(thinking) }
     /// nil when the chip is hidden, so "no branch is shown" and "an empty branch is
     /// shown" cannot be confused.
     var qaBranchChipText: String? { branchChip.isHidden ? nil : branchChip.qaText }

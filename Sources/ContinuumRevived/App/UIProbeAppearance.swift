@@ -645,6 +645,11 @@ enum UIProbeAppearance {
         "TranscriptProseView",
         "ApprovalDockView",
         "UserInputCardView",
+        // 91/P4.8: P4.7 made this custom control token-painted and the isolated
+        // sentinel fixture covers its repaint path. P4.8 installs it in the real
+        // managed-agent tile, so its fill and interactive boundary now also enter
+        // the adopted-surface value/role gate.
+        "ChoiceButton",
         // P2C.4's branch chip, born on tokens: `SurfaceToken.overlay` fill with a
         // `LineToken.border` outline that becomes `AccentToken.accentApproval` when
         // the agent is off the branch it was given.
@@ -720,6 +725,24 @@ enum UIProbeAppearance {
         case .border, .stroke:
             add(LineToken.allCases) { $0.color }
             add(AccentToken.allCases) { $0.color }
+        }
+        return values
+    }
+
+    /// P0.3's agent-tile roles are additive to the older palette. Keep their
+    /// admission owner-scoped until the full v2 tile migrates: only the P4.8
+    /// `ChoiceButton` may paint the composer/hover surface family here, while every
+    /// older adopter remains constrained to the original `SurfaceToken` set.
+    private static func legalValues(
+        forOwner owner: String,
+        kind: ColorSlot.Kind,
+        theme: TokenTheme
+    ) -> Set<String> {
+        var values = legalValues(for: kind, theme: theme)
+        if owner == "ChoiceButton" && (kind == .background || kind == .fill) {
+            for role in [AgentSurfaceRole.composer, .rowHover] {
+                values.insert(hex(role.color.cgColor(for: theme)))
+            }
         }
         return values
     }
@@ -880,6 +903,23 @@ enum UIProbeAppearance {
                 throw fail("the light and dark palettes share \(overlap.count) legal \(kind.rawValue) value(s) (\(overlap.sorted().joined(separator: ", "))) — a token resolved for the wrong theme would pass this gate")
             }
         }
+        // The P4.8 exception is exact: background/fill values grow only for the
+        // custom button owner, by exactly its two production leaves. A missing
+        // owner predicate or admission of another role would weaken the gate.
+        for theme in TokenTheme.allCases {
+            let roleValues = Set([AgentSurfaceRole.composer, .rowHover].map {
+                hex($0.color.cgColor(for: theme))
+            })
+            for kind in [ColorSlot.Kind.background, .fill] {
+                let base = legalValues(for: kind, theme: theme)
+                guard legalValues(forOwner: "ChoiceButton", kind: kind, theme: theme)
+                        == base.union(roleValues),
+                      legalValues(forOwner: "ManagedAgentTileNSView", kind: kind, theme: theme)
+                        == base else {
+                    throw fail("ChoiceButton agent-surface role admission widened another owner or admitted the wrong \(kind.rawValue) set in \(theme.rawValue)")
+                }
+            }
+        }
 
         // P1.11: the same disjointness, on the foreground families. Without it a
         // `textPrimary` pinned to `.dark` (`#F2F4F8`) could coincide with some light
@@ -924,8 +964,8 @@ enum UIProbeAppearance {
                     }
                     seenAdopted.insert(owner)
                     let value = hex(slot.color)
-                    guard legalValues(for: slot.kind, theme: theme).contains(value) else {
-                        throw fail("\(slot.label) painted \(value) in \(theme.rawValue), which is not a DesignTokens \(slot.kind.rawValue) value for that theme — an adopted surface is back on a literal, or on a token resolved for the wrong appearance")
+                    guard legalValues(forOwner: owner, kind: slot.kind, theme: theme).contains(value) else {
+                        throw fail("\(slot.label) painted \(value) in \(theme.rawValue), which is not a registered \(slot.kind.rawValue) token for that owner and theme — an adopted surface is back on a literal, an unowned role, or a token resolved for the wrong appearance")
                     }
                     asserted += 1
                 }

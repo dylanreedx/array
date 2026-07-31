@@ -761,7 +761,7 @@ enum LabCatalog {
             notifyCategoriesCard, agentAdapterProjectionCard, managedSessionRecordCard,
             sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher,
             sidebarLiveCard, activityDockCard, sidebarSelectedCard, managedAgentCard,
-            transcriptReviewCard, composerReviewCard,
+            transcriptReviewCard, composerReviewCard, composerProviderControlsCard,
 
             // MARK: night3-C cards
             managedAgentApprovalDockCard, managedAgentUserInputCard, newTileCwdPolicyCard,
@@ -1663,6 +1663,20 @@ enum LabCatalog {
             summary: "Native multiline editing under custom Continuum chrome. Type, select, paste, and undo without migrating the live tile.",
             content: .reviewSurface(preferredSize: NSSize(width: 480, height: 96)) {
                 AgentComposerView(frame: NSRect(x: 0, y: 0, width: 480, height: 96))
+            }
+        )
+    }
+
+    private static var composerProviderControlsCard: LabEntry {
+        LabEntry(
+            id: "agent.composer.provider-controls",
+            category: "Managed Agent",
+            title: "Composer Model and Effort",
+            summary: "Custom next-turn choices at narrow width, using the same catalogue and popover as the composer footer.",
+            content: .reviewSurface(preferredSize: NSSize(width: 360, height: 48)) {
+                let footer = AgentComposerFooterView(frame: NSRect(x: 0, y: 0, width: 360, height: 48))
+                footer.apply(.init(model: "openai-codex/gpt-5.4-mini", thinking: "xhigh"))
+                return footer
             }
         )
     }
@@ -2920,6 +2934,68 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
               !composerDescendants.compactMap({ $0 as? NSTextField }).contains(where: { $0.isBezeled }) else {
             throw fail("isolated composer review surface lost native editing, document geometry, or custom-only chrome")
         }
+        guard let footerEntry = entries.first(where: { $0.id == "agent.composer.provider-controls" }),
+              case let .reviewSurface(footerSize, makeFooterView) = footerEntry.content,
+              let footer = makeFooterView() as? AgentComposerFooterView else {
+            throw fail("missing custom composer model/effort review surface")
+        }
+        footer.frame = NSRect(origin: .zero, size: footerSize)
+        footer.layoutSubtreeIfNeeded()
+        let footerDescendants = descendants(in: footer)
+        guard !footerDescendants.contains(where: { $0 is NSPopUpButton }),
+              footer.modelButton.accessibilityRole() == .popUpButton,
+              footer.effortButton.accessibilityRole() == .popUpButton,
+              footer.modelButton.accessibilityLabel() == "Model, next turn",
+              footer.effortButton.accessibilityLabel() == "Reasoning effort, next turn",
+              footer.qaModelTitles == AgentModelConfig.modelOptions.map(AgentComposerFooterView.abbreviatedModel),
+              footer.qaEffortTitles == AgentModelConfig.thinkingOptions.map(AgentComposerFooterView.abbreviatedEffort),
+              Set(footer.qaModelTitles).count == AgentModelConfig.modelOptions.count else {
+            throw fail("composer provider footer lost custom-only chrome, next-turn accessibility, or unambiguous narrow labels")
+        }
+        footer.frame.size.width = 640
+        footer.layoutSubtreeIfNeeded()
+        guard footer.qaModelTitles == AgentModelConfig.modelOptions,
+              footer.qaEffortTitles == AgentModelConfig.thinkingOptions.map(\.capitalized),
+              footer.bounds.contains(footer.modelButton.frame),
+              footer.bounds.contains(footer.effortButton.frame),
+              footer.modelButton.frame.width > footer.effortButton.frame.width else {
+            throw fail("composer provider footer did not restore full labels or keep both controls inside its wide layout")
+        }
+
+        // Render-state gate for the COMPOSED footer, not ChoiceButton in isolation.
+        // Mouse tracking, first-responder focus, and the real mouse-down/open path
+        // must all repaint the installed model control coherently.
+        let stateWindow = NSWindow(contentRect: footer.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        stateWindow.contentView = footer
+        stateWindow.makeKeyAndOrderFront(nil)
+        footer.layoutSubtreeIfNeeded()
+        guard let restingFill = footer.modelButton.layer?.backgroundColor else {
+            throw fail("composer provider footer has no resting fill")
+        }
+        let pointerEvent = NSEvent.mouseEvent(
+            with: .leftMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: stateWindow.windowNumber, context: nil, eventNumber: 1,
+            clickCount: 1, pressure: 1
+        )!
+        footer.modelButton.mouseEntered(with: pointerEvent)
+        guard let hoverFill = footer.modelButton.layer?.backgroundColor,
+              hoverFill.components != restingFill.components else {
+            throw fail("composer provider footer hover did not repaint its quiet fill")
+        }
+        footer.modelButton.mouseExited(with: pointerEvent)
+        stateWindow.makeFirstResponder(footer.modelButton)
+        guard footer.modelButton.layer?.borderWidth == 2 else {
+            throw fail("composer provider footer focus did not paint the strong focus boundary")
+        }
+        stateWindow.makeFirstResponder(nil)
+        let pressedAlpha = footer.qaPressModel(with: pointerEvent)
+        guard pressedAlpha.contains(where: { abs($0 - 0.78) < 0.001 }),
+              stateWindow.childWindows?.isEmpty == false,
+              footer.modelButton.layer?.borderWidth == 2 else {
+            throw fail("composer provider footer pressed/open path did not paint pressed alpha and the open focus boundary")
+        }
+        _ = footer.modelButton.accessibilityPerformPress()
+        stateWindow.orderOut(nil)
         guard let agentKindEntry = entries.first(where: { $0.id == "agent.kind" }),
               case let .staticCard(_, makeAgentKindView) = agentKindEntry.content else {
             throw fail("missing agent.kind descriptor card")
