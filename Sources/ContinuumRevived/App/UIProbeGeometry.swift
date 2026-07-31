@@ -362,6 +362,7 @@ enum UIProbeGeometry {
         }
         try checkReusableAgentBlockHost()
         let composerCases = try checkGrowingComposerLayout()
+        let choiceCases = try checkChoicePopover()
         let transcriptLiveHosts = try checkTranscriptCollectionList()
         let streamingApplies = try checkIncrementalTranscriptBehavior()
         let proseRows = try checkAssistantProseRenderer()
@@ -373,10 +374,196 @@ enum UIProbeGeometry {
             throw fail("the approval dock was never measured — the fixture no longer opens an approval, so the derived height is ungated")
         }
         print(String(
-            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, and %d exceptional states preserve request identity and opaque privacy at 320pt; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
-            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), composerCases, transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, exceptionalRows,
+            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, and %d exceptional states preserve request identity and opaque privacy at 320pt; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
+            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), composerCases, choiceCases, transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, exceptionalRows,
             narrowestCardRatio, ApprovalDockView.preferredHeight, tightestDockSlack
         ))
+    }
+
+    /// Deterministic behavior/geometry gate for the reusable custom choice
+    /// surface. The disabled selection assertion is the required negative path:
+    /// every input route converges on `choose(id:)`, whose guard it exercises.
+    private static func checkChoicePopover() throws -> Int {
+        let items = [
+            ChoiceItem(id: "fast", title: "Fast", detail: "Lower latency"),
+            ChoiceItem(id: "balanced", title: "Balanced", detail: "Recommended"),
+            ChoiceItem(id: "legacy", title: "Legacy", detail: "Unavailable", enabled: false),
+            ChoiceItem(id: "deep", title: "Deep", detail: "More reasoning"),
+        ]
+        let list = ChoiceListView(items: items, selectedID: "balanced")
+        list.frame = NSRect(origin: .zero, size: list.intrinsicContentSize)
+        list.layoutSubtreeIfNeeded()
+        var selected: [String] = []
+        list.onSelection = { selected.append($0.id) }
+
+        guard list.selectedID == "balanced", list.focusedID == "balanced" else {
+            throw fail("choice popover: initial selection/focus was not preserved")
+        }
+        guard let selectedRow = list.qaRowStates.first(where: { $0.id == "balanced" }),
+              selectedRow.selected, selectedRow.focused, selectedRow.checkVisible,
+              selectedRow.borderWidth == 2 else {
+            throw fail("choice popover: selected row lacks checkmark and strong focus boundary")
+        }
+        guard let typeaheadEvent = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "d",
+            charactersIgnoringModifiers: "d",
+            isARepeat: false,
+            keyCode: 2
+        ) else {
+            throw fail("choice popover: could not synthesize typeahead event")
+        }
+        list.keyDown(with: typeaheadEvent)
+        guard list.focusedID == "deep" else {
+            throw fail("choice popover: typeahead did not focus the matching enabled row")
+        }
+        list.perform(.previous)
+        guard list.focusedID == "balanced" else {
+            throw fail("choice popover: keyboard traversal did not recover after typeahead")
+        }
+
+        // Required negative witness: a disabled row cannot change selection or
+        // invoke the action. `CONTINUUM_P4_7_NEGATIVE_WITNESS=1` narrowly bypasses
+        // the production guard so this exact assertion must go red.
+        list.choose(id: "legacy")
+        guard selected.isEmpty, list.selectedID == "balanced" else {
+            throw fail("choice popover: disabled row fired selection")
+        }
+
+        list.perform(.next)
+        guard list.focusedID == "deep" else {
+            throw fail("choice popover: Down did not skip disabled row")
+        }
+        list.perform(.accept)
+        guard selected == ["deep"], list.selectedID == "deep" else {
+            throw fail("choice popover: Return did not accept focused enabled row")
+        }
+        list.perform(.first)
+        guard list.focusedID == "fast" else { throw fail("choice popover: Home did not focus first enabled row") }
+        list.perform(.last)
+        guard list.focusedID == "deep" else { throw fail("choice popover: End did not focus last enabled row") }
+        list.perform(.next)
+        guard list.focusedID == "fast" else { throw fail("choice popover: keyboard traversal did not wrap") }
+        var dismissed = false
+        list.onDismiss = { dismissed = true }
+        list.perform(.cancel)
+        guard dismissed else { throw fail("choice popover: Escape did not dismiss") }
+
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            list.appearance = NSAppearance(named: appearance)
+            list.applyTokens()
+            guard list.layer?.backgroundColor != nil,
+                  list.qaRowStates.allSatisfy({ $0.enabled || !$0.focused }) else {
+                throw fail("choice popover: invalid \(appearance.rawValue) token or disabled focus state")
+            }
+        }
+
+        guard let screen = NSScreen.main else { throw fail("choice popover: no screen available") }
+        let visible = screen.visibleFrame
+        let windowSize = NSSize(width: 320, height: 240)
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: windowSize),
+            styleMask: .borderless, backing: .buffered, defer: false, screen: screen
+        )
+        let anchor = NSView(frame: NSRect(x: 20, y: 20, width: 100, height: 32))
+        window.contentView?.addSubview(anchor)
+        let controller = ChoicePopoverController()
+
+        func presentAndCheck(windowY: CGFloat, expectedBelow: Bool) throws {
+            window.setFrameOrigin(NSPoint(x: visible.midX - windowSize.width / 2, y: windowY))
+            window.orderFront(nil)
+            let windowAnchor = anchor.convert(anchor.bounds, to: nil)
+            let screenAnchor = window.convertToScreen(windowAnchor)
+            controller.present(
+                items: items, selectedID: "balanced", anchor: anchor.bounds, relativeTo: anchor
+            ) { _ in }
+            guard let panel = controller.panel, panel.isVisible, controller.listView != nil else {
+                throw fail("choice popover: present did not attach a visible panel")
+            }
+            let frame = panel.frame
+            let placedBelow = frame.maxY <= screenAnchor.minY
+            let placedAbove = frame.minY >= screenAnchor.maxY
+            guard visible.contains(frame),
+                  expectedBelow ? placedBelow : placedAbove else {
+                throw fail("choice popover: \(expectedBelow ? "below" : "above") placement escaped screen or used the wrong anchor edge")
+            }
+            controller.dismiss()
+            guard controller.panel == nil,
+                  window.childWindows?.isEmpty != false,
+                  anchor.postsFrameChangedNotifications else {
+                throw fail("choice popover: dismiss left an attached panel or changed the anchor's notification policy")
+            }
+        }
+
+        anchor.postsFrameChangedNotifications = true
+        try presentAndCheck(windowY: visible.maxY - windowSize.height, expectedBelow: true)
+        try presentAndCheck(windowY: visible.minY, expectedBelow: false)
+
+        controller.present(
+            items: items, selectedID: "balanced", anchor: anchor.bounds, relativeTo: anchor
+        ) { _ in }
+        guard let resigningPanel = controller.panel else {
+            throw fail("choice popover: resign fixture could not present")
+        }
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: resigningPanel)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        guard controller.panel == nil,
+              window.childWindows?.isEmpty != false,
+              anchor.postsFrameChangedNotifications else {
+            throw fail("choice popover: panel resign did not dismiss and restore its anchor")
+        }
+
+        controller.present(
+            items: items, selectedID: "balanced", anchor: anchor.bounds, relativeTo: anchor
+        ) { _ in }
+        guard controller.isPresented else {
+            throw fail("choice popover: detach fixture could not present")
+        }
+        anchor.removeFromSuperview()
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        guard controller.panel == nil,
+              window.childWindows?.isEmpty != false,
+              anchor.postsFrameChangedNotifications else {
+            throw fail("choice popover: anchor detach did not dismiss and restore notification policy")
+        }
+        window.contentView?.addSubview(anchor)
+
+        // Deinitialization is also a lifecycle boundary: a controller released
+        // while presented must detach its child panel and restore a prior false
+        // frame-notification policy rather than leaking either into the tile.
+        anchor.postsFrameChangedNotifications = false
+        weak var releasedController: ChoicePopoverController?
+        do {
+            let transientController = ChoicePopoverController()
+            releasedController = transientController
+            transientController.present(
+                items: items, selectedID: "balanced", anchor: anchor.bounds, relativeTo: anchor
+            ) { _ in }
+            guard transientController.isPresented else {
+                throw fail("choice popover: deinit fixture could not present")
+            }
+        }
+        guard releasedController == nil,
+              !anchor.postsFrameChangedNotifications,
+              window.childWindows?.isEmpty != false else {
+            throw fail("choice popover: deinit did not restore the anchor and detach its panel")
+        }
+        window.orderOut(nil)
+
+        let button = ChoiceButton(title: "Model")
+        button.items = items
+        button.selectedID = "balanced"
+        guard firstDescendant(NSPopUpButton.self, in: button) == nil,
+              button.accessibilityRole() == .popUpButton,
+              button.accessibilityValue() as? String == "Balanced" else {
+            throw fail("choice button: stock popup chrome or incomplete accessibility value")
+        }
+        return 12
     }
 
     /// Width-sensitive TextKit gate for the one-to-eight-line composer. Explicit

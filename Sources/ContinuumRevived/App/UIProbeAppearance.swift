@@ -303,6 +303,27 @@ enum UIProbeAppearance {
                     ),
                     hasDraft: true
                 ))
+            }),
+            // 91/P4.7: the reusable control is intentionally isolated until P4.8
+            // owns model/effort migration. Render its real button, list, and private
+            // row descendants so none can retain a stale token CGColor meanwhile.
+            ("appearance.choicePopover", NSSize(width: 280, height: 240), {
+                let root = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 240))
+                let items = [
+                    ChoiceItem(id: "fast", title: "Fast", detail: "Lower latency"),
+                    ChoiceItem(id: "balanced", title: "Balanced", detail: "Recommended"),
+                    ChoiceItem(id: "legacy", title: "Legacy", detail: "Unavailable", enabled: false),
+                    ChoiceItem(id: "deep", title: "Deep", detail: "More reasoning"),
+                ]
+                let button = ChoiceButton(title: "Model")
+                button.items = items
+                button.selectedID = "balanced"
+                button.frame = NSRect(x: 0, y: 208, width: 160, height: ChoiceButton.controlHeight)
+                let list = ChoiceListView(items: items, selectedID: "balanced")
+                list.frame = NSRect(x: 0, y: 0, width: 280, height: list.intrinsicContentSize.height)
+                root.addSubview(button)
+                root.addSubview(list)
+                return root
             })
         ]
         // Read out of the source, not typed here: every declared conformer must show
