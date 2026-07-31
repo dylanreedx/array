@@ -1697,7 +1697,224 @@ private func runComposerKeyContractChecks() throws -> Int {
         throw fail("one undo did not restore completion text and selection; got '\(textView.string)' / \(textView.selectedRange())")
     }
 
-    return 13
+    // P4.5: drive history through the same production composer and real TextKit
+    // layout. The live tile binds this already-compiled seam in P5.4.
+    let promptHistory = AgentPromptHistory(capacityPerAgent: 4)
+    let historyAgentA = AgentID(rawValue: UUID(uuidString: "A0000000-0000-4000-8000-000000009451")!)
+    let historyAgentB = AgentID(rawValue: UUID(uuidString: "A0000000-0000-4000-8000-000000009452")!)
+    composer.bindPromptHistory(promptHistory, agentID: historyAgentA)
+    composer.onSubmitPrompt = nil
+    var shouldAcceptHistorySend = false
+    var historySendAttempts = 0
+    composer.onSubmitIntent = { _ in
+        historySendAttempts += 1
+        return shouldAcceptHistorySend
+    }
+    var historyAssertions = 0
+    func installHistoryText(_ value: String, selection: NSRange) {
+        textView.string = value
+        textView.setSelectedRange(selection)
+        textView.layoutManager?.invalidateLayout(
+            forCharacterRange: NSRange(location: 0, length: (value as NSString).length),
+            actualCharacterRange: nil
+        )
+        composer.layoutSubtreeIfNeeded()
+    }
+    let upArrow = try key(126, "\u{f700}")
+    let downArrow = try key(125, "\u{f701}")
+
+    installHistoryText("rejected prompt", selection: NSRange(location: 15, length: 0))
+    dispatch(try key(36, "\r"))
+    guard historySendAttempts == 1,
+          promptHistory.count(for: historyAgentA) == 0,
+          textView.string == "rejected prompt" else {
+        throw fail("a rejected send entered history or cleared its draft")
+    }
+    historyAssertions += 1
+
+    installHistoryText("   ", selection: NSRange(location: 3, length: 0))
+    dispatch(try key(36, "\r"))
+    guard historySendAttempts == 1, promptHistory.count(for: historyAgentA) == 0 else {
+        throw fail("a whitespace-only native Return entered accepted prompt history")
+    }
+    historyAssertions += 1
+
+    shouldAcceptHistorySend = true
+    for prompt in ["accepted one", "accepted two", "accepted two"] {
+        installHistoryText(prompt, selection: NSRange(location: (prompt as NSString).length, length: 0))
+        dispatch(try key(36, "\r"))
+        guard textView.string.isEmpty else {
+            throw fail("an accepted history send did not clear the submitted draft")
+        }
+    }
+    guard historySendAttempts == 4,
+          promptHistory.count(for: historyAgentA) == 2,
+          promptHistory.acceptedSubmissionCount(for: historyAgentA) == 3 else {
+        throw fail("accepted sends were not recorded exactly once with adjacent deduplication")
+    }
+    historyAssertions += 2
+
+    composer.bindPromptHistory(promptHistory, agentID: historyAgentB)
+    installHistoryText("agent B draft", selection: NSRange(location: 0, length: 0))
+    dispatch(upArrow)
+    guard textView.string == "agent B draft",
+          !promptHistory.isNavigating(for: historyAgentB) else {
+        throw fail("history crossed AgentID when agent B pressed Up")
+    }
+    historyAssertions += 1
+    composer.bindPromptHistory(promptHistory, agentID: historyAgentA)
+
+    promptHistory.cancelNavigation(for: historyAgentA)
+    let multilineDraft = "first visual line\nsecond visual line"
+    installHistoryText(
+        multilineDraft,
+        selection: NSRange(location: (multilineDraft as NSString).length, length: 0)
+    )
+    let multilineEnd = textView.selectedRange().location
+    dispatch(upArrow)
+    guard textView.string == multilineDraft,
+          textView.selectedRange().location < multilineEnd,
+          !promptHistory.isNavigating(for: historyAgentA) else {
+        throw fail("Up inside multiline text did not remain native")
+    }
+    historyAssertions += 1
+
+    installHistoryText(multilineDraft, selection: NSRange(location: 2, length: 0))
+    dispatch(upArrow)
+    guard textView.string == "accepted two", promptHistory.isNavigating(for: historyAgentA) else {
+        throw fail("Up on the first visual line did not enter the newest history item")
+    }
+    historyAssertions += 1
+    dispatch(upArrow)
+    guard textView.string == "accepted one" else {
+        throw fail("repeated Up did not walk toward older accepted prompts")
+    }
+    historyAssertions += 1
+    dispatch(downArrow)
+    guard textView.string == "accepted two", promptHistory.isNavigating(for: historyAgentA) else {
+        throw fail("Down in history did not walk toward newer accepted prompts")
+    }
+    historyAssertions += 1
+    dispatch(downArrow)
+    guard textView.string == multilineDraft, !promptHistory.isNavigating(for: historyAgentA) else {
+        throw fail("Down beyond newest history did not restore the exact multiline draft")
+    }
+    historyAssertions += 1
+
+    promptHistory.recordAccepted("history first\nhistory second", for: historyAgentA)
+    installHistoryText("boundary draft", selection: NSRange(location: 0, length: 0))
+    dispatch(upArrow)
+    guard textView.string == "history first\nhistory second",
+          promptHistory.isNavigating(for: historyAgentA) else {
+        throw fail("the multiline history fixture did not enter history mode")
+    }
+    textView.setSelectedRange(NSRange(location: 2, length: 0))
+    dispatch(downArrow)
+    guard textView.string == "history first\nhistory second",
+          promptHistory.isNavigating(for: historyAgentA),
+          textView.selectedRange().location > 2 else {
+        throw fail("Down before the last visual line did not remain native")
+    }
+    historyAssertions += 1
+    textView.setSelectedRange(NSRange(location: (textView.string as NSString).length, length: 0))
+    dispatch(downArrow)
+    guard textView.string == "boundary draft", !promptHistory.isNavigating(for: historyAgentA) else {
+        throw fail("Down on the last visual line did not restore the preserved draft")
+    }
+    historyAssertions += 1
+
+    promptHistory.cancelNavigation(for: historyAgentA)
+    let wrappedDraft = String(repeating: "wrapped text ", count: 80)
+    installHistoryText(
+        wrappedDraft,
+        selection: NSRange(location: (wrappedDraft as NSString).length, length: 0)
+    )
+    let lineHeight = textView.layoutManager?.defaultLineHeight(for: textView.font ?? .token(.body)) ?? 17
+    guard textView.measuredDocumentHeight() > lineHeight * 2 else {
+        throw fail("soft-wrap fixture did not produce multiple TextKit visual lines")
+    }
+    historyAssertions += 1
+    let wrappedEnd = textView.selectedRange().location
+    dispatch(upArrow)
+    guard textView.string == wrappedDraft,
+          textView.selectedRange().location < wrappedEnd,
+          !promptHistory.isNavigating(for: historyAgentA) else {
+        throw fail("Up inside a soft-wrapped line did not remain native")
+    }
+    historyAssertions += 1
+    textView.setSelectedRange(NSRange(location: 1, length: 0))
+    dispatch(upArrow)
+    guard textView.string == "history first\nhistory second",
+          promptHistory.isNavigating(for: historyAgentA) else {
+        throw fail("Up on the first soft-wrapped visual line did not enter history")
+    }
+    historyAssertions += 1
+    textView.setSelectedRange(NSRange(location: (textView.string as NSString).length, length: 0))
+    dispatch(downArrow)
+    guard textView.string == wrappedDraft, !promptHistory.isNavigating(for: historyAgentA) else {
+        throw fail("soft-wrapped history navigation did not restore its exact draft")
+    }
+    historyAssertions += 1
+
+    for modifiers: NSEvent.ModifierFlags in [.shift, .command, .option, .control] {
+        promptHistory.cancelNavigation(for: historyAgentA)
+        installHistoryText("modified arrow", selection: NSRange(location: 0, length: 0))
+        dispatch(try key(126, "\u{f700}", modifiers))
+        guard textView.string == "modified arrow",
+              !promptHistory.isNavigating(for: historyAgentA) else {
+            throw fail("a modified Up arrow was repurposed for prompt history")
+        }
+        historyAssertions += 1
+    }
+
+    promptHistory.cancelNavigation(for: historyAgentA)
+    installHistoryText("selected arrow", selection: NSRange(location: 0, length: 3))
+    dispatch(upArrow)
+    guard textView.string == "selected arrow", !promptHistory.isNavigating(for: historyAgentA) else {
+        throw fail("Up with a noncollapsed selection entered prompt history")
+    }
+    historyAssertions += 1
+
+    promptHistory.cancelNavigation(for: historyAgentA)
+    installHistoryText("trailing line\n", selection: NSRange(location: 14, length: 0))
+    dispatch(upArrow)
+    guard textView.string == "trailing line\n", !promptHistory.isNavigating(for: historyAgentA) else {
+        throw fail("Up from a trailing empty visual line incorrectly entered history")
+    }
+    historyAssertions += 1
+
+    installHistoryText("draft before edit", selection: NSRange(location: 0, length: 0))
+    dispatch(upArrow)
+    guard promptHistory.isNavigating(for: historyAgentA) else {
+        throw fail("edit-cancellation fixture did not enter history")
+    }
+    textView.insertText("!", replacementRange: NSRange(location: (textView.string as NSString).length, length: 0))
+    let editedHistoryText = textView.string
+    guard !promptHistory.isNavigating(for: historyAgentA), editedHistoryText.hasSuffix("!") else {
+        throw fail("editing a recalled prompt did not cancel history navigation")
+    }
+    historyAssertions += 1
+    dispatch(downArrow)
+    guard textView.string == editedHistoryText else {
+        throw fail("Down after editing a recalled prompt restored a stale preserved draft")
+    }
+    historyAssertions += 1
+
+    promptHistory.cancelNavigation(for: historyAgentA)
+    installHistoryText("ime arrows", selection: NSRange(location: 0, length: 0))
+    textView.setMarkedText(
+        "候",
+        selectedRange: NSRange(location: 1, length: 0),
+        replacementRange: NSRange(location: 0, length: 0)
+    )
+    dispatch(upArrow)
+    guard !promptHistory.isNavigating(for: historyAgentA) else {
+        throw fail("Up during marked IME text entered prompt history")
+    }
+    textView.unmarkText()
+    historyAssertions += 1
+
+    return 13 + historyAssertions
 }
 
 /// Gated on `--agent-supervisor-check`.
@@ -1981,7 +2198,7 @@ func runAgentSupervisorChecks() async throws {
     let rendererReport = try checkAgentBlockRendererRegistry(fail: fail)
 
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo assertions, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport)")
 }
 
 @MainActor

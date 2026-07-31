@@ -1,5 +1,6 @@
 import AppKit
 import ContinuumRevivedAgentUI
+import ContinuumRevivedCore
 
 /// The native editing engine for the agent composer. Visual containment belongs to
 /// `AgentComposerView`; this view retains TextKit selection, pasteboard, IME,
@@ -19,6 +20,10 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
     /// Set by the completion controller while its custom surface is presented.
     /// Escape remains native when there is no completion surface to dismiss.
     var suggestionsAreVisible = false
+
+    private var promptHistory: AgentPromptHistory?
+    private var promptHistoryAgentID: AgentID?
+    private var isApplyingHistoryReplacement = false
 
     override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
         super.init(frame: frameRect, textContainer: container)
@@ -101,7 +106,26 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
         return accepted
     }
 
+    /// Binds history to agent identity rather than tile identity. The owner must
+    /// call `recordAcceptedPrompt` only after its send intent is accepted.
+    func bindPromptHistory(_ history: AgentPromptHistory, agentID: AgentID) {
+        if let previousAgentID = promptHistoryAgentID,
+           let previousHistory = promptHistory,
+           previousAgentID != agentID || previousHistory !== history {
+            previousHistory.cancelNavigation(for: previousAgentID)
+        }
+        promptHistory = history
+        promptHistoryAgentID = agentID
+    }
+
+    func recordAcceptedPrompt(_ prompt: String) {
+        guard let promptHistory, let promptHistoryAgentID else { return }
+        promptHistory.recordAccepted(prompt, for: promptHistoryAgentID)
+    }
+
     override func keyDown(with event: NSEvent) {
+        if handlePromptHistoryKey(event) { return }
+
         let action = ComposerKeyPolicy.action(
             for: event,
             hasMarkedText: hasMarkedText(),
@@ -117,6 +141,74 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
         case .nativeTextSystem:
             super.keyDown(with: event)
         }
+    }
+
+    private func handlePromptHistoryKey(_ event: NSEvent) -> Bool {
+        let disallowedModifiers: NSEvent.ModifierFlags = [.shift, .control, .option, .command]
+        guard event.modifierFlags.intersection(disallowedModifiers).isEmpty,
+              !hasMarkedText(),
+              selectedRange().length == 0,
+              let promptHistory,
+              let agentID = promptHistoryAgentID,
+              let linePosition = visualLinePosition()
+        else { return false }
+
+        let replacement: String?
+        switch event.keyCode {
+        case 126 where linePosition.isFirst: // Up
+            replacement = promptHistory.previous(for: agentID, preserving: string)
+        case 125 where linePosition.isLast && promptHistory.isNavigating(for: agentID): // Down
+            replacement = promptHistory.next(for: agentID)
+        default:
+            return false
+        }
+        guard let replacement else { return false }
+        replaceTextFromHistory(replacement)
+        return true
+    }
+
+    /// Uses TextKit line fragments, so soft wrapping participates in the boundary
+    /// decision while embedded newline count does not stand in for visual lines.
+    private func visualLinePosition() -> (isFirst: Bool, isLast: Bool)? {
+        guard let layoutManager, let textContainer else { return nil }
+        layoutManager.ensureLayout(for: textContainer)
+        let selectionLocation = selectedRange().location
+        let characterCount = (string as NSString).length
+        guard selectionLocation <= characterCount else { return nil }
+        if characterCount == 0 { return (true, true) }
+
+        var lineGlyphRanges: [NSRange] = []
+        layoutManager.enumerateLineFragments(
+            forGlyphRange: NSRange(location: 0, length: layoutManager.numberOfGlyphs)
+        ) { _, _, _, glyphRange, _ in
+            lineGlyphRanges.append(glyphRange)
+        }
+
+        let hasTrailingEmptyLine = selectionLocation == characterCount
+            && string.hasSuffix("\n")
+            && layoutManager.extraLineFragmentTextContainer != nil
+        if hasTrailingEmptyLine {
+            return (lineGlyphRanges.isEmpty, true)
+        }
+        guard !lineGlyphRanges.isEmpty else { return (true, true) }
+
+        let characterIndex = min(selectionLocation, characterCount - 1)
+        let glyphIndex = layoutManager.glyphIndexForCharacter(at: characterIndex)
+        guard let lineIndex = lineGlyphRanges.firstIndex(where: { NSLocationInRange(glyphIndex, $0) }) else {
+            return nil
+        }
+        return (lineIndex == 0, lineIndex == lineGlyphRanges.count - 1)
+    }
+
+    private func replaceTextFromHistory(_ replacement: String) {
+        let fullRange = NSRange(location: 0, length: (string as NSString).length)
+        guard shouldChangeText(in: fullRange, replacementString: replacement) else { return }
+        isApplyingHistoryReplacement = true
+        defer { isApplyingHistoryReplacement = false }
+        textStorage?.replaceCharacters(in: fullRange, with: replacement)
+        didChangeText()
+        setSelectedRange(NSRange(location: (replacement as NSString).length, length: 0))
+        scrollRangeToVisible(selectedRange())
     }
 
     /// Replaces a completion query as one native undo unit. `insertText` is kept as
@@ -146,6 +238,11 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
     }
 
     func textDidChange(_ notification: Notification) {
+        if !isApplyingHistoryReplacement,
+           let promptHistory,
+           let promptHistoryAgentID {
+            promptHistory.cancelNavigation(for: promptHistoryAgentID)
+        }
         composerObserver?.composerTextDidChange(self)
     }
 

@@ -32,6 +32,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     private var draftStore: AgentComposerDraftStore?
     private var draftAgentID: AgentID?
     private var restoreTask: Task<Void, Never>?
+    private var pendingSubmittedPrompt: String?
     private(set) var isEditorFocused = false
     private var isApplyingDraft = false
     private let heightController = ComposerHeightController(
@@ -141,6 +142,13 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         }
     }
 
+    /// Compiles the agent-owned history seam before P5.4 binds this composer into
+    /// the live tile. History remains host-local and separate from draft storage.
+    func bindPromptHistory(_ history: AgentPromptHistory, agentID: AgentID) {
+        pendingSubmittedPrompt = nil
+        textView.bindPromptHistory(history, agentID: agentID)
+    }
+
     func apply(_ newDraft: AgentComposerDraft) {
         let utf16Count = (newDraft.text as NSString).length
         let location = min(max(newDraft.selection.location, 0), utf16Count)
@@ -209,18 +217,22 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         let prompt = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
         if let onSubmitIntent {
+            pendingSubmittedPrompt = nil
             guard onSubmitIntent(prompt) else { return }
-            clearAcceptedDraft()
-        } else {
-            // A void callback cannot report acceptance. Preserve the draft.
-            onSubmitPrompt?(prompt)
+            completeAcceptedSend(prompt)
+        } else if let onSubmitPrompt {
+            // A void callback cannot report acceptance. Preserve the draft and
+            // remember exactly which submitted prompt a later acknowledgement owns.
+            pendingSubmittedPrompt = prompt
+            onSubmitPrompt(prompt)
         }
     }
 
     /// Lets an asynchronous/fire-and-forget owner acknowledge acceptance later.
     /// A click or rejected request must not call this method.
     func acceptCurrentSendIntent() {
-        clearAcceptedDraft()
+        guard let prompt = pendingSubmittedPrompt else { return }
+        completeAcceptedSend(prompt)
     }
 
     func composerRequestedDismissSuggestions(_ textView: ComposerTextView) {
@@ -244,6 +256,12 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
             )
             Task { await draftStore.save(persisted, for: draftAgentID) }
         }
+    }
+
+    private func completeAcceptedSend(_ prompt: String) {
+        textView.recordAcceptedPrompt(prompt)
+        pendingSubmittedPrompt = nil
+        clearAcceptedDraft()
     }
 
     private func clearAcceptedDraft() {

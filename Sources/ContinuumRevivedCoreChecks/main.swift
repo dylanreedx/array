@@ -16,6 +16,16 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+if CommandLine.arguments.contains("--agent-prompt-history-isolation-negative-witness") {
+    runAgentPromptHistoryIsolationNegativeWitness()
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--agent-prompt-history-check") {
+    try runAgentPromptHistoryChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-composer-draft-store-ordering-negative-witness") {
     try runAsyncCheck {
         try await runAgentComposerDraftStoreOrderingNegativeWitness()
@@ -10083,6 +10093,10 @@ runAgentAutoSettleConfigChecks()
 try runAsyncCheck {
     try await runAgentComposerDraftStoreChecks()
 }
+
+// Ticket: docs/38-tickets/91-agent-tile-ux/P4.5-prompt-history.md — bounded,
+// accepted-only prompt recall with exact draft restoration and AgentID isolation.
+try runAgentPromptHistoryChecks()
 
 // Ticket: docs/38-tickets/91-agent-tile-ux/P0.4-transcript-fixture-corpus.md —
 // the Core-side reader for the one transcript corpus: one home, the ids Core
