@@ -361,6 +361,7 @@ enum UIProbeGeometry {
             throw fail("probed \(probed) width/appearance pairs, expected \(probeWidths.count * 2)")
         }
         try checkReusableAgentBlockHost()
+        let composerCases = try checkGrowingComposerLayout()
         let transcriptLiveHosts = try checkTranscriptCollectionList()
         let streamingApplies = try checkIncrementalTranscriptBehavior()
         let proseRows = try checkAssistantProseRenderer()
@@ -372,11 +373,153 @@ enum UIProbeGeometry {
             throw fail("the approval dock was never measured — the fixture no longer opens an approval, so the derived height is ungated")
         }
         print(String(
-            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 8-dimensional measurement key gated; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, and %d exceptional states preserve request identity and opaque privacy at 320pt; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
-            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, exceptionalRows,
+            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, and %d exceptional states preserve request identity and opaque privacy at 320pt; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
+            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), composerCases, transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, exceptionalRows,
             narrowestCardRatio, ApprovalDockView.preferredHeight, tightestDockSlack
         ))
     }
+
+    /// Width-sensitive TextKit gate for the one-to-eight-line composer. Explicit
+    /// newlines make the line thresholds exact; the prose witness separately
+    /// proves that measurement follows visual wrapping rather than newline count.
+    private static func checkGrowingComposerLayout() throws -> Int {
+        let widths: [CGFloat] = [320, 480, 640, 900]
+        let drafts: [(name: String, text: String, lines: Int)] = [
+            ("empty", "", 1),
+            ("one-line", "One visual line", 1),
+            ("eight-line", (1...8).map { "Line \($0)" }.joined(separator: "\n"), 8),
+            ("twenty-line", (1...20).map { "Line \($0)" }.joined(separator: "\n"), 20),
+        ]
+        var checked = 0
+        var wrappedHeights: [CGFloat: CGFloat] = [:]
+
+        for width in widths {
+            let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: width, height: 200))
+            let host = NSView(frame: composer.frame)
+            host.addSubview(composer)
+
+            for draft in drafts {
+                let end = (draft.text as NSString).length
+                composer.apply(AgentComposerDraft(
+                    text: draft.text, selection: NSRange(location: end, length: 0), revision: UInt64(checked + 1)
+                ))
+                let targetHeight = composer.intrinsicContentSize.height
+                composer.frame = NSRect(x: 0, y: 0, width: width, height: targetHeight)
+                host.frame.size = composer.frame.size
+                host.layoutSubtreeIfNeeded()
+                composer.layoutSubtreeIfNeeded()
+
+                guard let measurement = composer.qaHeightMeasurement else {
+                    throw fail("composer@\(Int(width))pt.\(draft.name): no TextKit measurement")
+                }
+                let expectedVisibleLines = min(draft.lines, AgentComposerView.maximumVisibleLines)
+                let expectedEditorHeight = measurement.lineHeight * CGFloat(expectedVisibleLines)
+                guard abs(measurement.visibleEditorHeight - expectedEditorHeight) <= 1,
+                      abs(composer.frame.height - (measurement.visibleEditorHeight + AgentComposerView.internalPadding * 2)) <= 1,
+                      measurement.isVerticallyScrollable == (draft.lines > AgentComposerView.maximumVisibleLines),
+                      composer.scrollView.hasVerticalScroller == measurement.isVerticallyScrollable else {
+                    throw fail(String(
+                        format: "composer@%.0fpt.%@: measured %.1fpt (line %.1fpt), frame %.1fpt, scrolling %@",
+                        width, draft.name, measurement.visibleEditorHeight, measurement.lineHeight,
+                        composer.frame.height, measurement.isVerticallyScrollable.description
+                    ))
+                }
+                let clip = composer.scrollView.contentView
+                let maxY = max(0, composer.textView.bounds.height - clip.bounds.height)
+                if draft.lines > AgentComposerView.maximumVisibleLines {
+                    guard maxY > 0, abs(clip.bounds.minY - maxY) <= 1 else {
+                        throw fail("composer@\(Int(width))pt did not keep the insertion point visible above its cap")
+                    }
+                } else if maxY > 1 || abs(clip.bounds.minY) > 1 {
+                    throw fail("composer@\(Int(width))pt.\(draft.name) enabled scrolling below its cap")
+                }
+                checked += 1
+            }
+
+            let wrappingText = Array(repeating: "width-sensitive TextKit wrapping", count: 10).joined(separator: " ")
+            composer.apply(AgentComposerDraft(
+                text: wrappingText,
+                selection: NSRange(location: (wrappingText as NSString).length, length: 0),
+                revision: 100
+            ))
+            composer.frame.size.height = composer.intrinsicContentSize.height
+            host.frame.size = composer.frame.size
+            host.layoutSubtreeIfNeeded()
+            composer.layoutSubtreeIfNeeded()
+            guard let wrappedHeight = composer.qaHeightMeasurement?.contentHeight else {
+                throw fail("composer@\(Int(width))pt wrapping witness was not measured")
+            }
+            wrappedHeights[width] = wrappedHeight
+
+            // Existing draft text and line metrics must be refreshed when macOS
+            // readability options change. A typing-attributes-only update leaves
+            // this deliberately wrong font installed and fails the assertion.
+            composer.textView.font = .systemFont(ofSize: 30)
+            NotificationCenter.default.post(
+                name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+                object: nil
+            )
+            composer.frame.size.height = composer.intrinsicContentSize.height
+            host.frame.size = composer.frame.size
+            host.layoutSubtreeIfNeeded()
+            composer.layoutSubtreeIfNeeded()
+            let tokenFont = NSFont.token(.body)
+            var existingTextUsesTokenFont = true
+            composer.textView.textStorage?.enumerateAttribute(
+                .font,
+                in: NSRange(location: 0, length: composer.textView.textStorage?.length ?? 0)
+            ) { value, _, stop in
+                guard let font = value as? NSFont,
+                      abs(font.pointSize - tokenFont.pointSize) <= 0.01,
+                      font.fontName == tokenFont.fontName else {
+                    existingTextUsesTokenFont = false
+                    stop.pointee = true
+                    return
+                }
+            }
+            guard existingTextUsesTokenFont,
+                  abs((composer.textView.font?.pointSize ?? 0) - tokenFont.pointSize) <= 0.01,
+                  let refreshed = composer.qaHeightMeasurement,
+                  abs(refreshed.lineHeight - (composer.textView.layoutManager?.defaultLineHeight(for: tokenFont) ?? 0)) <= 0.5 else {
+                throw fail("composer@\(Int(width))pt did not refresh existing text font and height after a readability change")
+            }
+
+            // Capture after both capped and uncapped states have initialized
+            // AppKit's private scroller constraints; only subsequent growth is a
+            // constraint-churn failure owned by the composer.
+            let initialConstraintCount = composer.constraints.count
+                + composer.scrollView.constraints.count
+                + composer.textView.constraints.count
+            for index in 0..<40 {
+                let text = index.isMultiple(of: 2) ? "short" : drafts[3].text
+                composer.apply(AgentComposerDraft(
+                    text: text, selection: NSRange(location: (text as NSString).length, length: 0),
+                    revision: UInt64(200 + index)
+                ))
+                composer.frame.size.height = composer.intrinsicContentSize.height
+                host.frame.size = composer.frame.size
+                host.layoutSubtreeIfNeeded()
+                composer.layoutSubtreeIfNeeded()
+            }
+            let finalConstraintCount = composer.constraints.count
+                + composer.scrollView.constraints.count
+                + composer.textView.constraints.count
+            guard finalConstraintCount == initialConstraintCount else {
+                throw fail("composer@\(Int(width))pt accumulated \(finalConstraintCount - initialConstraintCount) constraints during repeated edits")
+            }
+        }
+
+        guard let narrow = wrappedHeights[320], let wide = wrappedHeights[900], narrow > wide + 1 else {
+            throw fail("composer TextKit measurement did not respond to visual wrapping across widths")
+        }
+        return checked
+    }
+
+    // Negative witness (P4.2, exercised 2026-07-31): temporarily changing the
+    // height controller initializer from `AgentComposerView.maximumVisibleLines`
+    // to `1` left this fixture's semantic expectation at eight and made the final
+    // check exit 1 at `composer@320pt.eight-line` (16pt instead of 128pt). Exact
+    // source bytes were restored; production behavior has no witness backdoor.
 
     /// Deterministic P3.10 gate over the real diffable collection seam. The
     /// viewport is deliberately tiny relative to the 10,000-row document, so a

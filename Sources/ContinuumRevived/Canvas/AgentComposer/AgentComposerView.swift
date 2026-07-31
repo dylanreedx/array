@@ -23,6 +23,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     private(set) var draft: AgentComposerDraft = .empty
     private(set) var isEditorFocused = false
     private var isApplyingDraft = false
+    private let heightController = ComposerHeightController(
+        maximumVisibleLines: AgentComposerView.maximumVisibleLines
+    )
 
     static let cornerRadius = CGFloat(AgentTileRadius.composer)
     static let internalPadding = CGFloat(Space.l)
@@ -42,8 +45,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
         scrollView.hasHorizontalScroller = false
-        scrollView.hasVerticalScroller = true
+        scrollView.hasVerticalScroller = false
         scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
         scrollView.documentView = textView
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(scrollView)
@@ -65,6 +69,12 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         ])
 
         textView.composerObserver = self
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(readabilityOptionsDidChange(_:)),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil
+        )
         textView.applyTokens()
         updatePlaceholder()
         applyTokens()
@@ -76,12 +86,14 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     override var acceptsFirstResponder: Bool { true }
 
     override var intrinsicContentSize: NSSize {
-        let lineHeight = textView.layoutManager?.defaultLineHeight(for: textView.font ?? .token(.body)) ?? 17
-        let editorHeight = min(
-            max(textView.measuredDocumentHeight(), lineHeight),
-            lineHeight * CGFloat(Self.maximumVisibleLines)
+        let width = max(1, scrollView.contentSize.width > 0
+            ? scrollView.contentSize.width
+            : bounds.width - Self.internalPadding * 2)
+        let measurement = heightController.measure(textView: textView, width: width)
+        return NSSize(
+            width: NSView.noIntrinsicMetric,
+            height: measurement.visibleEditorHeight + (Self.internalPadding * 2)
         )
-        return NSSize(width: NSView.noIntrinsicMetric, height: editorHeight + (Self.internalPadding * 2))
     }
 
     override func layout() {
@@ -113,8 +125,28 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         layer?.backgroundColor = AgentSurfaceRole.composer.color.cgColor(for: theme)
         layer?.borderColor = (isEditorFocused ? AgentLineRole.focusRing : .decorativeHairline).color.cgColor(for: theme)
         layer?.borderWidth = isEditorFocused ? Self.focusedBorderWidth : Self.idleBorderWidth
+        placeholderLabel.font = .token(.body)
         placeholderLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
+        // Update existing draft attributes as well as typing attributes so
+        // TextKit line metrics follow token/readability changes immediately.
+        let editorFont = NSFont.token(.body)
+        textView.font = editorFont
+        if let textStorage = textView.textStorage, textStorage.length > 0 {
+            textStorage.addAttribute(
+                .font, value: editorFont,
+                range: NSRange(location: 0, length: textStorage.length)
+            )
+        }
         textView.applyTokens()
+        textView.layoutManager?.invalidateLayout(
+            forCharacterRange: NSRange(location: 0, length: textView.textStorage?.length ?? 0),
+            actualCharacterRange: nil
+        )
+        editorContentsChanged()
+    }
+
+    @objc private func readabilityOptionsDidChange(_ notification: Notification) {
+        applyTokens()
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -161,18 +193,17 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     private func updateEditorGeometry() {
         let viewport = scrollView.contentSize
         guard viewport.width > 0, viewport.height > 0 else { return }
-        textView.textContainer?.containerSize = NSSize(
-            width: viewport.width,
-            height: .greatestFiniteMagnitude
+        let previousHeight = heightController.measurement?.visibleEditorHeight
+        let measurement = heightController.update(
+            textView: textView, scrollView: scrollView, width: viewport.width
         )
-        let documentHeight = max(viewport.height, textView.measuredDocumentHeight())
-        if textView.frame.width != viewport.width || textView.frame.height != documentHeight {
-            textView.setFrameSize(NSSize(width: viewport.width, height: documentHeight))
-            scrollView.reflectScrolledClipView(scrollView.contentView)
+        if let previousHeight, abs(previousHeight - measurement.visibleEditorHeight) > 0.5 {
+            invalidateIntrinsicContentSize()
         }
     }
 
     // Deterministic AppKit probes; not a tile integration seam.
     var qaPlaceholderVisible: Bool { !placeholderLabel.isHidden }
     var qaPlaceholderColor: NSColor? { placeholderLabel.textColor }
+    var qaHeightMeasurement: ComposerHeightController.Measurement? { heightController.measurement }
 }

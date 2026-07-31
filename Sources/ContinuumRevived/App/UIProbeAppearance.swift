@@ -1656,7 +1656,7 @@ enum UIProbeAppearance {
                   composer.textView.allowsUndo,
                   composer.textView.accessibilityRole() == .textArea,
                   composer.textView.accessibilityLabel() == "Agent prompt",
-                  composer.scrollView.hasVerticalScroller,
+                  !composer.scrollView.hasVerticalScroller,
                   composer.textView.frame.width > 0,
                   composer.textView.frame.height >= composer.scrollView.contentSize.height,
                   composer.layer?.cornerRadius == AgentComposerView.cornerRadius,
@@ -1740,7 +1740,8 @@ enum UIProbeAppearance {
             let lineHeight = composer.textView.layoutManager?.defaultLineHeight(
                 for: composer.textView.font ?? .token(.body)
             ) ?? 17
-            guard composer.textView.frame.height > composer.scrollView.contentSize.height,
+            guard composer.scrollView.hasVerticalScroller,
+                  composer.textView.frame.height > composer.scrollView.contentSize.height,
                   composer.intrinsicContentSize.height <= lineHeight * CGFloat(AgentComposerView.maximumVisibleLines)
                     + (AgentComposerView.internalPadding * 2) else {
                 throw fail("\(label) multiline editor did not grow its document or cap the shell at eight visible lines")
