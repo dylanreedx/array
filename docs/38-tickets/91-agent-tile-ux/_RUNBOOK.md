@@ -18,7 +18,7 @@ Exactly one ticket is implemented per iteration and per commit.
 
 - Branch is `overnight/agent-ux`.
 - No other implementation agent or loop is editing tracked files in this checkout.
-- The working tree and index have no changes except owner-authorized untracked `website/` and root `array-logo*.svg`; any tracked website change is dirty and fatal.
+- The working tree and index have no changes except owner-authorized untracked `website/`, root `array-logo*.svg`, `docs/38-tickets/92-small-team-relay/`, `scripts/check-small-team-relay-program.sh`, and `scripts/small-team-relay-{loop,loopctl,prompt}.sh`; any other change is dirty and fatal.
 - The relay/FileTree/document setup work has already been preserved separately.
 - `docs/38-tickets/91-agent-tile-ux/STOP` is absent.
 - `swift build` and the current headless matrix are green with the built-in Retina display as Main; display topology drift is an environment stop, never a reason to bless baselines.
@@ -122,7 +122,8 @@ runs are inspected.
 - The harness stages only already validated packet paths plus `_LEDGER.md` after final checks pass.
 - A supervisor never edits or commits while a worker/reviewer is alive.
 - Existing unrelated tracked work is a hard preflight stop, not permission to absorb it. Authorized
-  untracked `website/` and root logo drafts remain ignored and unstaged.
+  untracked website/logo drafts and the exact Queue 92 authoring paths listed in preflight remain
+  ignored and unstaged; similarly named or relocated paths are not authorized.
 
 ## Loop control
 

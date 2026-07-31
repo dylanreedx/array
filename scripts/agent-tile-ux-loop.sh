@@ -40,7 +40,7 @@ log() { printf '[%s] %s\n' "$(now_utc)" "$*" | tee -a "$EVENTS_FILE"; }
 
 unexpected_status() {
   git status --porcelain | awk '
-    $1 == "??" && ($2 == "website/" || $2 ~ /^array-logo.*[.]svg$/) { next }
+    $1 == "??" && ($2 == "website/" || $2 ~ /^array-logo.*[.]svg$/ || $2 == "docs/38-tickets/92-small-team-relay/" || $2 == "scripts/check-small-team-relay-program.sh" || $2 == "scripts/small-team-relay-loop.sh" || $2 == "scripts/small-team-relay-loopctl.sh" || $2 == "scripts/small-team-relay-prompt.md") { next }
     { print }
   '
 }
@@ -53,6 +53,10 @@ changed_paths() {
   } | LC_ALL=C sort -u | awk '
     /^website\// { next }
     /^array-logo.*[.]svg$/ { next }
+    /^docs\/38-tickets\/92-small-team-relay\// { next }
+    /^scripts\/check-small-team-relay-program[.]sh$/ { next }
+    /^scripts\/small-team-relay-(loop|loopctl)[.]sh$/ { next }
+    /^scripts\/small-team-relay-prompt[.]md$/ { next }
     NF { print }
   '
 }
