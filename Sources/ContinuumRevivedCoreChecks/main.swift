@@ -16,6 +16,20 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+if CommandLine.arguments.contains("--agent-composer-draft-store-ordering-negative-witness") {
+    try runAsyncCheck {
+        try await runAgentComposerDraftStoreOrderingNegativeWitness()
+    }
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--agent-composer-draft-store-check") {
+    try runAsyncCheck {
+        try await runAgentComposerDraftStoreChecks()
+    }
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-transcript-projection-check") {
     runAgentTranscriptProjectionChecks()
     Foundation.exit(0)
@@ -10063,6 +10077,12 @@ runRoleRegistryChecks()
 // Ticket: docs/38-tickets/90-agent-ux/P4.3-auto-settle-inactivity.md — the
 // window that lets the inbox drain itself, and the rule it feeds.
 runAgentAutoSettleConfigChecks()
+
+// Ticket: docs/38-tickets/91-agent-tile-ux/P4.4-per-agent-draft-store.md —
+// host-local, debounced per-agent drafts and accepted-send clearing.
+try runAsyncCheck {
+    try await runAgentComposerDraftStoreChecks()
+}
 
 // Ticket: docs/38-tickets/91-agent-tile-ux/P0.4-transcript-fixture-corpus.md —
 // the Core-side reader for the one transcript corpus: one home, the ids Core

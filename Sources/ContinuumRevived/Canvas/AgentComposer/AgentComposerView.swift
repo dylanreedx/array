@@ -1,5 +1,6 @@
 import AppKit
 import ContinuumRevivedAgentUI
+import ContinuumRevivedCore
 
 /// A view-owned snapshot of composer editing state. Tiles bind to this value;
 /// they do not reach through the composer to mutate its NSTextView.
@@ -20,9 +21,17 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     private let placeholderLabel = NSTextField(labelWithString: "Send a prompt to the agent…")
 
     var onDraftChange: ((AgentComposerDraft) -> Void)?
+    /// Existing fire-and-forget seam retained until live-tile migration. It does
+    /// not imply acceptance and therefore never clears a persisted draft.
     var onSubmitPrompt: ((String) -> Void)?
+    /// An acceptance-aware seam for owners that can synchronously accept/reject
+    /// send intent. Only `true` clears the per-agent draft.
+    var onSubmitIntent: ((String) -> Bool)?
     var onDismissSuggestions: (() -> Void)?
     private(set) var draft: AgentComposerDraft = .empty
+    private var draftStore: AgentComposerDraftStore?
+    private var draftAgentID: AgentID?
+    private var restoreTask: Task<Void, Never>?
     private(set) var isEditorFocused = false
     private var isApplyingDraft = false
     private let heightController = ComposerHeightController(
@@ -107,6 +116,31 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         window?.makeFirstResponder(textView) ?? false
     }
 
+    /// Attaches persistence to agent identity rather than tile identity. Calling
+    /// this again is the detach/re-attach seam: the newly bound agent's local
+    /// draft replaces the editor contents when its load completes.
+    func bindDraftStore(_ store: AgentComposerDraftStore, agentID: AgentID) {
+        draftStore = store
+        draftAgentID = agentID
+        restoreTask?.cancel()
+        restoreTask = Task { [weak self] in
+            let stored = await store.load(for: agentID)
+            guard !Task.isCancelled, let self, self.draftAgentID == agentID else { return }
+            guard let stored else {
+                self.apply(.empty)
+                return
+            }
+            self.apply(AgentComposerDraft(
+                text: stored.text,
+                selection: NSRange(
+                    location: stored.selection.lowerBound,
+                    length: stored.selection.count
+                ),
+                revision: 0
+            ))
+        }
+    }
+
     func apply(_ newDraft: AgentComposerDraft) {
         let utf16Count = (newDraft.text as NSString).length
         let location = min(max(newDraft.selection.location, 0), utf16Count)
@@ -174,7 +208,19 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     func composerRequestedSend(_ textView: ComposerTextView) {
         let prompt = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
-        onSubmitPrompt?(prompt)
+        if let onSubmitIntent {
+            guard onSubmitIntent(prompt) else { return }
+            clearAcceptedDraft()
+        } else {
+            // A void callback cannot report acceptance. Preserve the draft.
+            onSubmitPrompt?(prompt)
+        }
+    }
+
+    /// Lets an asynchronous/fire-and-forget owner acknowledge acceptance later.
+    /// A click or rejected request must not call this method.
+    func acceptCurrentSendIntent() {
+        clearAcceptedDraft()
     }
 
     func composerRequestedDismissSuggestions(_ textView: ComposerTextView) {
@@ -190,6 +236,21 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
             revision: textChanged ? draft.revision &+ 1 : draft.revision
         )
         onDraftChange?(draft)
+        if let draftStore, let draftAgentID {
+            let persisted = ContinuumRevivedCore.AgentComposerDraft(
+                text: draft.text,
+                selection: draft.selection.location..<(draft.selection.location + draft.selection.length),
+                updatedAt: Date()
+            )
+            Task { await draftStore.save(persisted, for: draftAgentID) }
+        }
+    }
+
+    private func clearAcceptedDraft() {
+        if let draftStore, let draftAgentID {
+            Task { await draftStore.resolveSendIntent(for: draftAgentID, accepted: true) }
+        }
+        apply(.empty)
     }
 
     private func updatePlaceholder() {
