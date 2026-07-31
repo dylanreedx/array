@@ -11,6 +11,10 @@ protocol ComposerTextViewObserver: AnyObject {
     func composerSelectionDidChange(_ textView: ComposerTextView)
     func composerFocusDidChange(_ textView: ComposerTextView, focused: Bool)
     func composerRequestedSend(_ textView: ComposerTextView)
+    func composerRequestedCompletionCommand(
+        _ textView: ComposerTextView,
+        command: ChoiceListCommand
+    ) -> Bool
     func composerRequestedDismissSuggestions(_ textView: ComposerTextView)
 }
 
@@ -124,6 +128,7 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
     }
 
     override func keyDown(with event: NSEvent) {
+        if handleCompletionKey(event) { return }
         if handlePromptHistoryKey(event) { return }
 
         let action = ComposerKeyPolicy.action(
@@ -141,6 +146,25 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
         case .nativeTextSystem:
             super.keyDown(with: event)
         }
+    }
+
+    private func handleCompletionKey(_ event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard suggestionsAreVisible,
+              !hasMarkedText(),
+              modifiers.intersection([.shift, .control, .option, .command]).isEmpty
+        else { return false }
+
+        let command: ChoiceListCommand
+        switch event.keyCode {
+        case 126: command = .previous
+        case 125: command = .next
+        case 115: command = .first
+        case 119: command = .last
+        case 36, 76: command = .accept
+        default: return false
+        }
+        return composerObserver?.composerRequestedCompletionCommand(self, command: command) == true
     }
 
     private func handlePromptHistoryKey(_ event: NSEvent) -> Bool {

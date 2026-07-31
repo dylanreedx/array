@@ -39,6 +39,7 @@ final class ChoicePopoverController {
         selectedID: String?,
         anchor: NSRect,
         relativeTo view: NSView,
+        takesFocus: Bool = true,
         onSelection: @escaping (ChoiceItem) -> Void
     ) {
         dismiss()
@@ -78,10 +79,21 @@ final class ChoicePopoverController {
         list.onDismiss = { [weak self] in self?.dismiss() }
 
         window.addChildWindow(panel, ordered: .above)
-        installDismissalObservers(for: window, anchor: view)
+        installDismissalObservers(for: window, anchor: view, takesFocus: takesFocus)
         panel.orderFront(nil)
-        panel.makeKey()
-        panel.makeFirstResponder(list)
+        if takesFocus {
+            panel.makeKey()
+            panel.makeFirstResponder(list)
+        }
+    }
+
+    /// Passive completion panels keep the editor first responder and forward its
+    /// unmodified navigation commands through the same enabled-row selection path.
+    @discardableResult
+    func perform(_ command: ChoiceListCommand) -> Bool {
+        guard isPresented, let listView else { return false }
+        listView.perform(command)
+        return true
     }
 
     func dismiss() {
@@ -120,14 +132,17 @@ final class ChoicePopoverController {
         return NSRect(origin: origin, size: contentSize)
     }
 
-    private func installDismissalObservers(for window: NSWindow, anchor: NSView) {
+    private func installDismissalObservers(
+        for window: NSWindow,
+        anchor: NSView,
+        takesFocus: Bool
+    ) {
         let center = NotificationCenter.default
-        if let panel {
-            // The panel becomes key when presented, so observing the parent window
-            // would consume that expected transition and miss the later real
-            // resignation. Dismiss when the interactive panel itself loses key.
+        if let resignationOwner = takesFocus ? panel : window {
+            // Choice menus become key and therefore observe their panel. Passive
+            // completion panels leave the editor's parent key and observe it.
             observers.append(center.addObserver(
-                forName: NSWindow.didResignKeyNotification, object: panel, queue: .main
+                forName: NSWindow.didResignKeyNotification, object: resignationOwner, queue: .main
             ) { [weak self] _ in MainActor.assumeIsolated { self?.dismiss() } })
         }
         observers.append(center.addObserver(

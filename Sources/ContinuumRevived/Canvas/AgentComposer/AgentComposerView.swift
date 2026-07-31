@@ -29,6 +29,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     var onSubmitIntent: ((String) -> Bool)?
     var onDismissSuggestions: (() -> Void)?
     private(set) var draft: AgentComposerDraft = .empty
+    private let completionController = CompletionPopoverController()
+    private var completionSource: any AgentCompletionSuggestionSource =
+        AgentCompletionProviderRegistry(providers: AgentCompletionFixtures.providers())
     private var draftStore: AgentComposerDraftStore?
     private var draftAgentID: AgentID?
     private var restoreTask: Task<Void, Never>?
@@ -113,6 +116,15 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         updateEditorGeometry()
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            completionController.dismiss()
+        } else if isEditorFocused {
+            refreshCompletionSuggestions()
+        }
+    }
+
     override func becomeFirstResponder() -> Bool {
         window?.makeFirstResponder(textView) ?? false
     }
@@ -140,6 +152,12 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
                 revision: 0
             ))
         }
+    }
+
+    /// Runtime command/file/skill adapters replace the bounded fixture registry at
+    /// this host-local seam. Query text and path suggestions never enter sync data.
+    func bindCompletionRegistry(_ registry: AgentCompletionProviderRegistry) {
+        bindCompletionSource(registry)
     }
 
     /// Compiles the agent-owned history seam before P5.4 binds this composer into
@@ -202,15 +220,22 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         publishDraftChange()
         updatePlaceholder()
         editorContentsChanged()
+        refreshCompletionSuggestions()
     }
 
     func composerSelectionDidChange(_ textView: ComposerTextView) {
         publishDraftChange()
+        refreshCompletionSuggestions()
     }
 
     func composerFocusDidChange(_ textView: ComposerTextView, focused: Bool) {
         isEditorFocused = focused
         applyTokens()
+        if focused {
+            refreshCompletionSuggestions()
+        } else {
+            completionController.dismiss()
+        }
     }
 
     func composerRequestedSend(_ textView: ComposerTextView) {
@@ -235,8 +260,44 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         completeAcceptedSend(prompt)
     }
 
+    func composerRequestedCompletionCommand(
+        _ textView: ComposerTextView,
+        command: ChoiceListCommand
+    ) -> Bool {
+        completionController.perform(command)
+    }
+
     func composerRequestedDismissSuggestions(_ textView: ComposerTextView) {
+        completionController.dismiss()
         onDismissSuggestions?()
+    }
+
+    private func refreshCompletionSuggestions() {
+        guard isEditorFocused, window != nil else {
+            completionController.dismiss()
+            return
+        }
+        completionController.update(
+            text: textView.string,
+            selection: textView.selectedRange(),
+            source: completionSource,
+            anchor: completionAnchor(),
+            relativeTo: textView
+        )
+    }
+
+    private func completionAnchor() -> NSRect {
+        guard let window else { return .zero }
+        let length = (textView.string as NSString).length
+        let location = min(max(textView.selectedRange().location, 0), length)
+        let screenRect = textView.firstRect(
+            forCharacterRange: NSRange(location: location, length: 0),
+            actualRange: nil
+        )
+        var localRect = textView.convert(window.convertFromScreen(screenRect), from: nil)
+        localRect.size.width = max(localRect.width, 1)
+        localRect.size.height = max(localRect.height, textView.font?.pointSize ?? 1)
+        return localRect
     }
 
     private func publishDraftChange() {
@@ -297,4 +358,19 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     var qaPlaceholderVisible: Bool { !placeholderLabel.isHidden }
     var qaPlaceholderColor: NSColor? { placeholderLabel.textColor }
     var qaHeightMeasurement: ComposerHeightController.Measurement? { heightController.measurement }
+    var qaCompletionIsPresented: Bool { completionController.isPresented }
+    var qaCompletionTitles: [String] { completionController.qaTitles }
+    var qaCompletionFocusedTitle: String? { completionController.qaFocusedTitle }
+    var qaCompletionPanelFrame: NSRect? { completionController.qaPanelFrame }
+    var qaCompletionRequestStartCount: Int { completionController.qaRequestStartCount }
+
+    func qaBindCompletionSource(_ source: any AgentCompletionSuggestionSource) {
+        bindCompletionSource(source)
+    }
+
+    private func bindCompletionSource(_ source: any AgentCompletionSuggestionSource) {
+        completionController.dismiss()
+        completionSource = source
+        refreshCompletionSuggestions()
+    }
 }

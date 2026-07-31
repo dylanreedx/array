@@ -1917,6 +1917,230 @@ private func runComposerKeyContractChecks() throws -> Int {
     return 13 + historyAssertions
 }
 
+private final class CompletionProbeState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var started = 0
+    private var returned = 0
+    private var queries: [String] = []
+
+    func record(_ query: String) { lock.withLock { queries.append(query) } }
+    func markStarted() { lock.withLock { started += 1 } }
+    func markReturned() { lock.withLock { returned += 1 } }
+    var startedCount: Int { lock.withLock { started } }
+    var returnedCount: Int { lock.withLock { returned } }
+    var observedQueries: [String] { lock.withLock { queries } }
+}
+
+/// The stale branch deliberately ignores task cancellation and completes after a
+/// newer query. This reaches the presentation generation guard directly rather
+/// than being filtered by `AgentCompletionProviderRegistry` first.
+private struct CompletionProbeSource: AgentCompletionSuggestionSource {
+    let state: CompletionProbeState
+
+    func suggestions(for query: AgentCompletionQuery) async -> [AgentCompletion] {
+        state.record(query.text)
+        if query.text == "s" {
+            state.markStarted()
+            let values = await withCheckedContinuation { continuation in
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.18) {
+                    continuation.resume(returning: [
+                        AgentCompletion(id: "stale", title: "stale", insertionText: "/stale")
+                    ])
+                }
+            }
+            state.markReturned()
+            return values
+        }
+        guard query.text.hasPrefix("he") else { return [] }
+        return [
+            AgentCompletion(id: "help", title: "help", insertionText: "/help"),
+            AgentCompletion(id: "hello", title: "hello", insertionText: "/hello"),
+        ]
+    }
+}
+
+@MainActor
+private func runCompletionComposerChecks() async throws -> Int {
+    struct CheckError: Error, CustomStringConvertible { let description: String }
+    func fail(_ message: String) -> CheckError {
+        CheckError(description: "composer completion contract: \(message)")
+    }
+    func event(keyCode: UInt16, characters: String, windowNumber: Int) throws -> NSEvent {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: windowNumber,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: characters,
+            isARepeat: false,
+            keyCode: keyCode
+        ) else { throw fail("could not make a synthetic key event") }
+        return event
+    }
+
+    let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 480, height: 96))
+    let textView = composer.textView
+    let state = CompletionProbeState()
+    composer.qaBindCompletionSource(CompletionProbeSource(state: state))
+    let window = NSWindow(
+        contentRect: NSRect(x: 500, y: 500, width: 480, height: 96),
+        styleMask: .borderless,
+        backing: .buffered,
+        defer: false
+    )
+    window.contentView = composer
+    window.makeKey()
+    guard window.makeFirstResponder(textView), composer.isEditorFocused else {
+        throw fail("could not keep the native text view first responder")
+    }
+    defer {
+        composer.removeFromSuperview()
+        window.orderOut(nil)
+        window.close()
+    }
+
+    func replaceText(_ value: String, caret: Int? = nil) {
+        let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
+        textView.insertText(value, replacementRange: fullRange)
+        let location = caret ?? (value as NSString).length
+        textView.setSelectedRange(NSRange(location: location, length: 0))
+        // AppKit normally calls these delegate methods from its field editor event
+        // path; the headless check invokes the same production callbacks after its
+        // programmatic fixture replacement.
+        textView.textDidChange(Notification(name: NSText.didChangeNotification, object: textView))
+        textView.textViewDidChangeSelection(
+            Notification(name: NSTextView.didChangeSelectionNotification, object: textView)
+        )
+    }
+    func dispatch(_ event: NSEvent) { window.sendEvent(event) }
+
+    // Start a source that ignores cancellation, then replace it with a newer query.
+    replaceText("/s")
+    guard AgentCompletionQueryDetector.activeQuery(
+        in: textView.string, selection: textView.selectedRange()
+    )?.text == "s" else {
+        throw fail("the production editor did not hold the /s query: \(textView.string) / \(textView.selectedRange())")
+    }
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, { state.startedCount >= 1 }) else {
+        throw fail("the uncooperative stale source never started from \(textView.string) / \(textView.selectedRange()); focused=\(composer.isEditorFocused), window=\(textView.window != nil), requestTasks=\(composer.qaCompletionRequestStartCount), queries=\(state.observedQueries)")
+    }
+    try await Task.sleep(nanoseconds: 20_000_000)
+    let firstStaleRequestCount = state.startedCount
+    replaceText("/he")
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        composer.qaCompletionIsPresented && composer.qaCompletionTitles == ["help", "hello"]
+    }) else {
+        throw fail("real text/selection callbacks did not present the newer query")
+    }
+    guard window.firstResponder === textView else {
+        throw fail("the passive completion panel stole first responder from TextKit")
+    }
+    guard let panelFrame = composer.qaCompletionPanelFrame else {
+        throw fail("the real completion panel has no frame")
+    }
+    let caretFrame = textView.firstRect(
+        forCharacterRange: textView.selectedRange(), actualRange: nil
+    )
+    guard abs(panelFrame.minX - caretFrame.minX) <= 1 else {
+        throw fail("panel x \(panelFrame.minX) is not anchored to caret x \(caretFrame.minX)")
+    }
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        state.returnedCount >= firstStaleRequestCount
+    }) else {
+        throw fail("the uncooperative stale source never returned")
+    }
+    try await Task.sleep(nanoseconds: 30_000_000)
+    guard composer.qaCompletionTitles == ["help", "hello"] else {
+        throw fail("a stale generation repainted the newer suggestions as \(composer.qaCompletionTitles)")
+    }
+
+    // Continued typing stays on the native editor while the passive panel is open.
+    dispatch(try event(keyCode: 37, characters: "l", windowNumber: window.windowNumber))
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        textView.string == "/hel" && composer.qaCompletionTitles == ["help", "hello"]
+    }), window.firstResponder === textView else {
+        throw fail("continued native typing or first-responder retention failed")
+    }
+
+    // Unmodified navigation is forwarded while TextKit stays first responder.
+    dispatch(try event(keyCode: 125, characters: "", windowNumber: window.windowNumber))
+    guard composer.qaCompletionFocusedTitle == "hello" else {
+        throw fail("Down did not move completion focus")
+    }
+    dispatch(try event(keyCode: 115, characters: "", windowNumber: window.windowNumber))
+    guard composer.qaCompletionFocusedTitle == "help" else {
+        throw fail("Home did not move completion focus to the first row")
+    }
+    dispatch(try event(keyCode: 119, characters: "", windowNumber: window.windowNumber))
+    guard composer.qaCompletionFocusedTitle == "hello" else {
+        throw fail("End did not move completion focus to the last row")
+    }
+    dispatch(try event(keyCode: 126, characters: "", windowNumber: window.windowNumber))
+    guard composer.qaCompletionFocusedTitle == "help" else {
+        throw fail("Up did not move completion focus")
+    }
+
+    // Return follows the real list focus/selection path and insertion is one undo.
+    dispatch(try event(keyCode: 36, characters: "\r", windowNumber: window.windowNumber))
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        textView.string == "/help" && !composer.qaCompletionIsPresented
+    }) else {
+        throw fail("Return did not insert the focused completion and dismiss once")
+    }
+    try await Task.sleep(nanoseconds: 30_000_000)
+    guard !composer.qaCompletionIsPresented else {
+        throw fail("the accepted completion immediately reopened its own query")
+    }
+    guard textView.undoManager?.canUndo == true else {
+        throw fail("completion insertion did not register a native undo unit")
+    }
+    textView.undoManager?.undo()
+    guard textView.string == "/hel" else {
+        throw fail("one Undo did not restore the complete pre-insertion query")
+    }
+
+    // Escape and moving the caret before the trigger cancel the visible request.
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, { composer.qaCompletionIsPresented }) else {
+        throw fail("Undo did not drive the real query path again")
+    }
+    dispatch(try event(keyCode: 53, characters: "\u{1b}", windowNumber: window.windowNumber))
+    guard !composer.qaCompletionIsPresented, textView.string == "/hel" else {
+        throw fail("Escape mutated text or left the completion surface visible")
+    }
+    replaceText("/he", caret: 0)
+    guard !composer.qaCompletionIsPresented else {
+        throw fail("moving the caret before the trigger left suggestions actionable")
+    }
+
+    // Detaching cancels an in-flight uncooperative request and removes its panel.
+    let startedBeforeDetach = state.startedCount
+    replaceText("/s")
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        state.startedCount > startedBeforeDetach
+    }) else {
+        throw fail("the detach cancellation request never started")
+    }
+    try await Task.sleep(nanoseconds: 20_000_000)
+    let detachRequestCount = state.startedCount
+    composer.removeFromSuperview()
+    guard !composer.qaCompletionIsPresented else {
+        throw fail("detaching the composer left its completion panel visible")
+    }
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        state.returnedCount >= detachRequestCount
+    }) else {
+        throw fail("the detached uncooperative source never returned for the guard assertion")
+    }
+    guard !composer.qaCompletionIsPresented else {
+        throw fail("a stale detached request resurrected the completion panel")
+    }
+
+    return 25
+}
+
 /// Gated on `--agent-supervisor-check`.
 ///
 /// Deterministic and offline: a `ScriptedAgentRunner` replaces Pi, so what is under
@@ -1938,6 +2162,7 @@ func runAgentSupervisorChecks() async throws {
     let config = AgentModelConfig.resolvedFromDefaults()
     let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
     let composerKeyAssertions = try runComposerKeyContractChecks()
+    let completionAssertions = try await runCompletionComposerChecks()
 
     // The script is deliberately a real turn shape with DISTINCT events, so
     // "in order" is checkable and a dropped or reordered event is named.
@@ -2198,7 +2423,7 @@ func runAgentSupervisorChecks() async throws {
     let rendererReport = try checkAgentBlockRendererRegistry(fail: fail)
 
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport)")
 }
 
 @MainActor
