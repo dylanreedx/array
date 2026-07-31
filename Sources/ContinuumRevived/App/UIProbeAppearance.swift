@@ -291,6 +291,18 @@ enum UIProbeAppearance {
             // stale light- or dark-theme CGColor.
             ("appearance.agentComposer", NSSize(width: 480, height: 72), {
                 AgentComposerView(frame: NSRect(x: 0, y: 0, width: 480, height: 72))
+            }),
+            // 91/P4.6: isolated until P5.2/P5.4 bind actions and the live tile.
+            // Sweep the real custom control now so every token-owned layer color
+            // must be reapplied across an effective-appearance flip.
+            ("appearance.composerActionButton", NSSize(width: 112, height: 32), {
+                ComposerActionButton(presentation: .resolve(
+                    state: .ready,
+                    capabilities: AgentComposerPresentedCapabilities(
+                        canSend: true, canStop: true, canSteer: false, canQueue: false
+                    ),
+                    hasDraft: true
+                ))
             })
         ]
         // Read out of the source, not typed here: every declared conformer must show

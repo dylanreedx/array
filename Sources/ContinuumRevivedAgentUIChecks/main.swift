@@ -17,6 +17,21 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+if CommandLine.arguments.contains("--composer-action-negative-witness") {
+    let unsupported = AgentComposerPresentation.resolve(
+        state: .working,
+        capabilities: AgentComposerPresentedCapabilities(
+            canSend: true, canStop: false, canSteer: false, canQueue: false
+        ),
+        hasDraft: true
+    )
+    // Deliberately assert the named regression against the production resolver.
+    // The parent process below requires this exact assertion to be observed red.
+    expect(unsupported.title == "Steer",
+           "negative witness: working without Stop falsely advertised Steer")
+    Foundation.exit(0)
+}
+
 // Ticket: docs/38-tickets/87-agent-ui-component-framework.md
 runStatusChipChecks()
 
@@ -62,7 +77,113 @@ runPrecedenceMatrixChecks()
 // Ticket: docs/38-tickets/91-agent-tile-ux/P0.3-semantic-tile-tokens.md
 runAgentTileTokenChecks()
 
+// Ticket: docs/38-tickets/91-agent-tile-ux/P4.6-send-stop-intent-state.md
+runComposerActionPresentationChecks()
+
 print("ContinuumRevivedAgentUIChecks passed")
+
+// MARK: - P4.6 — truthful composer intents, capabilities and action state
+
+func runComposerActionPresentationChecks() {
+    // Exhaust all 2 states × 16 capability combinations × draft/no-draft.
+    // Every row must resolve to exactly one primary presentation, while future
+    // secondary actions appear only when their explicit capability is present.
+    var rows = 0
+    for state in AgentComposerTurnPresentationState.allCases {
+        for bits in 0..<16 {
+            let capabilities = AgentComposerPresentedCapabilities(
+                canSend: bits & 1 != 0,
+                canStop: bits & 2 != 0,
+                canSteer: bits & 4 != 0,
+                canQueue: bits & 8 != 0
+            )
+            for hasDraft in [false, true] {
+                rows += 1
+                let value = AgentComposerPresentation.resolve(
+                    state: state, capabilities: capabilities, hasDraft: hasDraft
+                )
+                expect(!value.title.isEmpty && !value.symbolName.isEmpty && !value.accessibilityLabel.isEmpty,
+                       "ComposerAction: every row must have one complete primary presentation")
+
+                switch state {
+                case .ready where capabilities.canSend:
+                    expect(value.primaryAction == .send,
+                           "ComposerAction: ready + canSend must present Send")
+                    expect(value.isEnabled == hasDraft,
+                           "ComposerAction: Send is enabled exactly when a draft exists")
+                case .working where capabilities.canStop:
+                    expect(value.primaryAction == .stop && value.isEnabled,
+                           "ComposerAction: working + canStop must present an enabled Stop")
+                default:
+                    expect(value.primaryAction == .unavailable && !value.isEnabled,
+                           "ComposerAction: an unsupported primary operation must not be advertised")
+                }
+
+                let expectedSecondary: Set<AgentComposerSecondaryAction> = state == .working
+                    ? Set(([capabilities.canSteer ? .steer : nil,
+                            capabilities.canQueue ? .queue : nil]).compactMap { $0 })
+                    : []
+                expect(value.secondaryActions == expectedSecondary,
+                       "ComposerAction: secondary actions must equal explicit working capabilities")
+            }
+        }
+    }
+    expect(rows == 64, "ComposerAction: expected exhaustive 64-row truth table, got \(rows)")
+
+    // Required negative witness: today's compiled floor has no steer/queue RPC.
+    // Working without Stop must be passive status, never a fake Steer action.
+    let noRPC = AgentComposerPresentation.resolve(
+        state: .working,
+        capabilities: AgentComposerPresentedCapabilities(
+            canSend: true, canStop: false, canSteer: false, canQueue: false
+        ),
+        hasDraft: true
+    )
+    expect(noRPC.primaryAction == .unavailable && noRPC.title == "Working"
+        && noRPC.secondaryActions.isEmpty && !noRPC.isEnabled,
+        "ComposerAction: working without RPC must show passive Working, never fake Steer/Queue")
+
+    let loadingStop = AgentComposerPresentation.resolve(
+        state: .working,
+        capabilities: AgentComposerPresentedCapabilities(
+            canSend: false, canStop: true, canSteer: false, canQueue: false
+        ),
+        hasDraft: false,
+        isExecutingPrimaryAction: true
+    )
+    expect(loadingStop.primaryAction == .stop && loadingStop.isLoading && !loadingStop.isEnabled,
+           "ComposerAction: an executing Stop stays identifiable but cannot be fired twice")
+    expect(loadingStop.title == "Stopping…" && loadingStop.symbolName == "hourglass"
+        && loadingStop.accessibilityLabel == "Stopping current agent turn",
+        "ComposerAction: loading Stop must have a visible and accessible state distinct from disabled Stop")
+
+    // Required negative witness: launch this same compiled check against the
+    // production resolver and deliberately demand the forbidden fake-Steer result.
+    // Passing requires the named assertion to be observed red, not a source-text
+    // proxy or a comment claiming a mutation would fail.
+    let witness = Process()
+    witness.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    witness.arguments = ["--composer-action-negative-witness"]
+    let witnessError = Pipe()
+    witness.standardError = witnessError
+    do {
+        try witness.run()
+    } catch {
+        expect(false, "ComposerAction: could not launch negative witness: \(error)")
+    }
+    witness.waitUntilExit()
+    let witnessOutput = String(
+        data: witnessError.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8
+    ) ?? ""
+    let expectedWitness = "FAIL: negative witness: working without Stop falsely advertised Steer"
+    expect(witness.terminationStatus != 0,
+           "ComposerAction: fake-Steer negative witness must be observed red")
+    expect(witnessOutput.contains(expectedWitness),
+           "ComposerAction: negative witness must fail at the named production assertion")
+
+    print("Composer action negative witness observed red (exit \(witness.terminationStatus)): \(expectedWitness)")
+    print("Composer action checks passed: \(rows) state/capability/draft rows and conservative no-RPC presentation")
+}
 
 // MARK: - P0.3 — the v2 tile's surfaces, line roles and radii
 //

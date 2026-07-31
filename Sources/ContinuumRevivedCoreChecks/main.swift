@@ -16,6 +16,16 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+if CommandLine.arguments.contains("--agent-composer-intent-negative-witness") {
+    runAgentComposerIntentNegativeWitness()
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--agent-composer-intent-check") {
+    try runAgentComposerIntentChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-prompt-history-isolation-negative-witness") {
     runAgentPromptHistoryIsolationNegativeWitness()
     Foundation.exit(0)
@@ -85,6 +95,11 @@ if CommandLine.arguments.contains("--local-pairing-endpoint-check") {
     }
     Foundation.exit(0)
 }
+
+// P4.6: this is also part of the ordinary CoreChecks matrix leg. The focused
+// flag above exists for packet-local diagnosis; it must not become an orphaned
+// check that the shared matrix never executes.
+try runAgentComposerIntentChecks()
 
 try runAsyncCheck {
     try await runConnectionSupervisorChecks()
