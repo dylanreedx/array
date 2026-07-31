@@ -1567,6 +1567,139 @@ final class ScriptedAgentRunner: AgentRunning, @unchecked Sendable {
     }
 }
 
+@MainActor
+private func runComposerKeyContractChecks() throws -> Int {
+    struct CheckError: Error, CustomStringConvertible { let description: String }
+    func fail(_ message: String) -> CheckError { CheckError(description: "composer key contract: \(message)") }
+    func event(
+        keyCode: UInt16,
+        characters: String,
+        modifiers: NSEvent.ModifierFlags = [],
+        windowNumber: Int = 0
+    ) throws -> NSEvent {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: modifiers,
+            timestamp: 0,
+            windowNumber: windowNumber,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: characters,
+            isARepeat: false,
+            keyCode: keyCode
+        ) else { throw fail("could not create synthetic key event") }
+        return event
+    }
+
+    // Exercise the production composer and its required observer contract, not a
+    // private protocol conformer or process-global notification that can mask a
+    // dropped intent. P5.4 will bind this already-compiled seam to the live tile.
+    let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 320, height: 80))
+    let textView = composer.textView
+    var sendCount = 0
+    var submittedPrompt: String?
+    var dismissCount = 0
+    composer.onSubmitPrompt = { prompt in
+        sendCount += 1
+        submittedPrompt = prompt
+    }
+    composer.onDismissSuggestions = { dismissCount += 1 }
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 80),
+        styleMask: .borderless,
+        backing: .buffered,
+        defer: false
+    )
+    window.contentView = composer
+    window.makeKey()
+    guard window.makeFirstResponder(textView) else {
+        throw fail("could not install production composer text view as real first responder")
+    }
+    func dispatch(_ event: NSEvent) { window.sendEvent(event) }
+    func key(_ code: UInt16, _ characters: String, _ modifiers: NSEvent.ModifierFlags = []) throws -> NSEvent {
+        try event(keyCode: code, characters: characters, modifiers: modifiers, windowNumber: window.windowNumber)
+    }
+
+    textView.string = "send this"
+    textView.setSelectedRange(NSRange(location: 9, length: 0))
+    dispatch(try key(36, "\r"))
+    guard sendCount == 1, submittedPrompt == "send this", textView.string == "send this" else {
+        throw fail("plain Return with content did not emit exactly one send without editing")
+    }
+
+    dispatch(try key(36, "\r", .shift))
+    guard sendCount == 1, textView.string == "send this\n" else {
+        throw fail("Shift+Return did not stay on the native newline path")
+    }
+
+    let beforeModifiedReturn = textView.string
+    dispatch(try key(36, "\r", .command))
+    guard sendCount == 1, textView.string == beforeModifiedReturn else {
+        throw fail("Command+Return was repurposed or did not preserve native text behavior")
+    }
+    dispatch(try key(36, "\r", .option))
+    guard sendCount == 1, textView.string == beforeModifiedReturn + "\n" else {
+        throw fail("Option+Return was repurposed or did not preserve native newline behavior; got '\(textView.string)'")
+    }
+
+    textView.string = "   "
+    textView.setSelectedRange(NSRange(location: 3, length: 0))
+    dispatch(try key(36, "\r"))
+    guard sendCount == 1, textView.string == "   \n" else {
+        throw fail("whitespace-only Return sent instead of remaining native editing")
+    }
+
+    textView.string = "compose "
+    textView.setSelectedRange(NSRange(location: 8, length: 0))
+    textView.setMarkedText("候", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: 8, length: 0))
+    guard textView.hasMarkedText() else { throw fail("marked-text setup did not enter IME composition") }
+    dispatch(try key(36, "\r"))
+    // A synthetic key event has no live input manager/candidate window, so AppKit
+    // replaces this artificial marked range with its native Return edit. Assert that
+    // observable edit rather than pretending `unmarkText()` proves an IME commit:
+    // the policy assertion below owns the crucial contract that marked Return is
+    // forwarded, while a real IME remains responsible for choosing its candidate.
+    guard ComposerKeyPolicy.action(
+            for: try key(36, "\r"),
+            hasMarkedText: true,
+            hasTrimmedContent: true,
+            suggestionsVisible: false
+          ) == .nativeTextSystem,
+          sendCount == 1,
+          !textView.hasMarkedText(),
+          textView.string == "compose \n",
+          textView.selectedRange() == NSRange(location: 9, length: 0) else {
+        throw fail("Return during marked IME text did not traverse AppKit's native input path without sending; got '\(textView.string)' / \(textView.selectedRange())")
+    }
+
+    textView.suggestionsAreVisible = true
+    dispatch(try key(53, "\u{1b}"))
+    guard dismissCount == 1, sendCount == 1, !textView.suggestionsAreVisible else {
+        throw fail("Escape did not dismiss suggestions first, or unexpectedly emitted send/stop-like work")
+    }
+    dispatch(try key(53, "\u{1b}"))
+    guard dismissCount == 1 else {
+        throw fail("Escape without suggestions was consumed by the composer")
+    }
+
+    textView.string = "/rev old tail"
+    let originalSelection = NSRange(location: 5, length: 3)
+    textView.setSelectedRange(originalSelection)
+    textView.undoManager?.removeAllActions()
+    textView.insertCompletion("reviewer", replacementRange: NSRange(location: 0, length: 8))
+    guard textView.string == "reviewer tail", textView.selectedRange() == NSRange(location: 8, length: 0),
+          textView.undoManager?.canUndo == true else {
+        throw fail("completion insertion did not replace the query as one undoable native edit")
+    }
+    textView.undoManager?.undo()
+    guard textView.string == "/rev old tail", textView.selectedRange() == originalSelection else {
+        throw fail("one undo did not restore completion text and selection; got '\(textView.string)' / \(textView.selectedRange())")
+    }
+
+    return 13
+}
+
 /// Gated on `--agent-supervisor-check`.
 ///
 /// Deterministic and offline: a `ScriptedAgentRunner` replaces Pi, so what is under
@@ -1587,6 +1720,7 @@ func runAgentSupervisorChecks() async throws {
     let store = AgentStore(applicationSupportDirectory: root)
     let config = AgentModelConfig.resolvedFromDefaults()
     let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+    let composerKeyAssertions = try runComposerKeyContractChecks()
 
     // The script is deliberately a real turn shape with DISTINCT events, so
     // "in order" is checkable and a dropped or reordered event is named.
@@ -1847,7 +1981,7 @@ func runAgentSupervisorChecks() async throws {
     let rendererReport = try checkAgentBlockRendererRegistry(fail: fail)
 
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo assertions, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport)")
 }
 
 @MainActor

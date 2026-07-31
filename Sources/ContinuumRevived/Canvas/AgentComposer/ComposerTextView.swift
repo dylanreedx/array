@@ -9,11 +9,16 @@ protocol ComposerTextViewObserver: AnyObject {
     func composerTextDidChange(_ textView: ComposerTextView)
     func composerSelectionDidChange(_ textView: ComposerTextView)
     func composerFocusDidChange(_ textView: ComposerTextView, focused: Bool)
+    func composerRequestedSend(_ textView: ComposerTextView)
+    func composerRequestedDismissSuggestions(_ textView: ComposerTextView)
 }
 
 @MainActor
 final class ComposerTextView: NSTextView, NSTextViewDelegate {
     weak var composerObserver: ComposerTextViewObserver?
+    /// Set by the completion controller while its custom surface is presented.
+    /// Escape remains native when there is no completion surface to dismiss.
+    var suggestionsAreVisible = false
 
     override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
         super.init(frame: frameRect, textContainer: container)
@@ -94,6 +99,50 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
         let accepted = super.resignFirstResponder()
         if accepted { composerObserver?.composerFocusDidChange(self, focused: false) }
         return accepted
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let action = ComposerKeyPolicy.action(
+            for: event,
+            hasMarkedText: hasMarkedText(),
+            hasTrimmedContent: !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            suggestionsVisible: suggestionsAreVisible
+        )
+        switch action {
+        case .send:
+            composerObserver?.composerRequestedSend(self)
+        case .dismissSuggestions:
+            suggestionsAreVisible = false
+            composerObserver?.composerRequestedDismissSuggestions(self)
+        case .nativeTextSystem:
+            super.keyDown(with: event)
+        }
+    }
+
+    /// Replaces a completion query as one native undo unit. `insertText` is kept as
+    /// the mutation primitive so TextKit records both the replaced text and the
+    /// pre-insertion selection; the explicit group prevents a multi-part completion
+    /// from coalescing with the user's preceding typing.
+    func insertCompletion(_ completion: String, replacementRange: NSRange) {
+        let selectionBeforeInsertion = selectedRange()
+        let selectionAfterInsertion = NSRange(
+            location: replacementRange.location + (completion as NSString).length,
+            length: 0
+        )
+        breakUndoCoalescing()
+        undoManager?.beginUndoGrouping()
+        // Register before TextKit's replacement action. Undo groups run in reverse,
+        // so the text is restored first and this action then restores the exact
+        // pre-completion selection instead of TextKit's whole replacement range.
+        undoManager?.registerUndo(withTarget: self) { textView in
+            textView.setSelectedRange(selectionBeforeInsertion)
+            textView.undoManager?.registerUndo(withTarget: textView) { redoTextView in
+                redoTextView.setSelectedRange(selectionAfterInsertion)
+            }
+        }
+        insertText(completion, replacementRange: replacementRange)
+        undoManager?.endUndoGrouping()
+        breakUndoCoalescing()
     }
 
     func textDidChange(_ notification: Notification) {

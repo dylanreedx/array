@@ -20,6 +20,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     private let placeholderLabel = NSTextField(labelWithString: "Send a prompt to the agent…")
 
     var onDraftChange: ((AgentComposerDraft) -> Void)?
+    var onSubmitPrompt: ((String) -> Void)?
+    var onDismissSuggestions: (() -> Void)?
     private(set) var draft: AgentComposerDraft = .empty
     private(set) var isEditorFocused = false
     private var isApplyingDraft = false
@@ -167,6 +169,16 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     func composerFocusDidChange(_ textView: ComposerTextView, focused: Bool) {
         isEditorFocused = focused
         applyTokens()
+    }
+
+    func composerRequestedSend(_ textView: ComposerTextView) {
+        let prompt = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return }
+        onSubmitPrompt?(prompt)
+    }
+
+    func composerRequestedDismissSuggestions(_ textView: ComposerTextView) {
+        onDismissSuggestions?()
     }
 
     private func publishDraftChange() {
