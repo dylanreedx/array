@@ -12,13 +12,61 @@ struct AgentComposerDraft: Equatable {
     static let empty = AgentComposerDraft(text: "", selection: NSRange(location: 0, length: 0), revision: 0)
 }
 
+/// Presentation-only composer variants (P4.10 owner direction). The full-turn
+/// composer is the agent tile's command surface; the compact freeform shell is
+/// the reusable response surface reviewed ahead of any provider response-mode
+/// contract. The variant changes shell presentation only — intent, draft-store,
+/// history, and action wiring are identical across variants, and nothing here
+/// fabricates a response contract that `AgentRequestPayload` does not expose.
+enum AgentComposerVariant {
+    case fullTurn
+    case compactFreeform
+
+    var maximumVisibleLines: Int {
+        switch self {
+        case .fullTurn: return 8
+        case .compactFreeform: return 4
+        }
+    }
+
+    /// The compact shell completes references only; command completion stays a
+    /// full-turn affordance.
+    var completionTriggers: Set<Character> {
+        switch self {
+        case .fullTurn: return AgentCompletionQueryDetector.supportedTriggers
+        case .compactFreeform: return ["@", "$"]
+        }
+    }
+
+    var placeholder: String {
+        switch self {
+        case .fullTurn: return "Send a prompt to the agent…"
+        case .compactFreeform: return "Write a response…"
+        }
+    }
+}
+
+/// Restricts an existing suggestion source to a variant's triggers without
+/// duplicating provider logic. An excluded trigger yields no suggestions, so the
+/// surface simply never opens for it.
+private struct TriggerRestrictedCompletionSource: AgentCompletionSuggestionSource {
+    let base: any AgentCompletionSuggestionSource
+    let triggers: Set<Character>
+
+    func suggestions(for query: AgentCompletionQuery) async -> [AgentCompletion] {
+        guard triggers.contains(query.trigger) else { return [] }
+        return await base.suggestions(for: query)
+    }
+}
+
 /// Isolated custom composer shell. The surface and focus treatment are owned here
 /// while `ComposerTextView` remains the native editing engine.
 @MainActor
 final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
+    let variant: AgentComposerVariant
     let textView: ComposerTextView
     private(set) var scrollView: NSScrollView
-    private let placeholderLabel = NSTextField(labelWithString: "Send a prompt to the agent…")
+    private let placeholderLabel = NSTextField(labelWithString: "")
 
     var onDraftChange: ((AgentComposerDraft) -> Void)?
     /// Existing fire-and-forget seam retained until live-tile migration. It does
@@ -38,17 +86,20 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     private var pendingSubmittedPrompt: String?
     private(set) var isEditorFocused = false
     private var isApplyingDraft = false
-    private let heightController = ComposerHeightController(
-        maximumVisibleLines: AgentComposerView.maximumVisibleLines
-    )
+    private let heightController: ComposerHeightController
 
     static let cornerRadius = CGFloat(AgentTileRadius.composer)
     static let internalPadding = CGFloat(Space.l)
     static let idleBorderWidth: CGFloat = 1
     static let focusedBorderWidth: CGFloat = 2
-    static let maximumVisibleLines = 8
+    static let maximumVisibleLines = AgentComposerVariant.fullTurn.maximumVisibleLines
+    static let compactMaximumVisibleLines = AgentComposerVariant.compactFreeform.maximumVisibleLines
 
-    override init(frame frameRect: NSRect) {
+    init(frame frameRect: NSRect, variant: AgentComposerVariant) {
+        self.variant = variant
+        heightController = ComposerHeightController(
+            maximumVisibleLines: variant.maximumVisibleLines
+        )
         textView = ComposerTextView(frame: .zero)
         scrollView = NSScrollView(frame: .zero)
         super.init(frame: frameRect)
@@ -67,6 +118,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(scrollView)
 
+        placeholderLabel.stringValue = variant.placeholder
         placeholderLabel.font = .token(.body)
         placeholderLabel.lineBreakMode = .byTruncatingTail
         placeholderLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -93,6 +145,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         textView.applyTokens()
         updatePlaceholder()
         applyTokens()
+    }
+
+    override convenience init(frame frameRect: NSRect) {
+        self.init(frame: frameRect, variant: .fullTurn)
     }
 
     @available(*, unavailable)
@@ -280,7 +336,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         completionController.update(
             text: textView.string,
             selection: textView.selectedRange(),
-            source: completionSource,
+            source: TriggerRestrictedCompletionSource(
+                base: completionSource,
+                triggers: variant.completionTriggers
+            ),
             anchor: completionAnchor(),
             relativeTo: textView
         )

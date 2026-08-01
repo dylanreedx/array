@@ -28,6 +28,12 @@ final class ChoiceButton: NSControl, TokenThemed {
 
     static let controlHeight: CGFloat = 32
     static let horizontalPadding = CGFloat(Space.l)
+    /// Owner correction (P4.10): idle is a quiet fill with no outline; keyboard
+    /// focus and the open state use a 0.5 pt accent line plus a soft accent glow
+    /// rather than a thick permanent border.
+    static let focusBorderWidth: CGFloat = 0.5
+    static let focusGlowRadius: CGFloat = 3
+    static let focusGlowOpacity: Float = 0.55
 
     init(title: String = "Choose") {
         super.init(frame: .zero)
@@ -132,13 +138,18 @@ final class ChoiceButton: NSControl, TokenThemed {
     func applyTokens() {
         let theme = effectiveTokenTheme
         let focused = window?.firstResponder === self
+        let accented = focused || popoverController.isPresented
         let background: TokenColor = (isHovered || popoverController.isPresented)
             ? AgentSurfaceRole.rowHover.color
             : AgentSurfaceRole.composer.color
         layer?.backgroundColor = background.cgColor(for: theme)
-        layer?.borderWidth = focused || popoverController.isPresented ? 2 : 1
-        layer?.borderColor = (focused || popoverController.isPresented
-            ? AgentLineRole.focusRing : .controlBoundary).color.cgColor(for: theme)
+        layer?.borderWidth = accented ? Self.focusBorderWidth : 0
+        layer?.borderColor = AgentLineRole.focusRing.color.cgColor(for: theme)
+        layer?.masksToBounds = false
+        layer?.shadowColor = AgentLineRole.focusRing.color.cgColor(for: theme)
+        layer?.shadowOpacity = accented ? Self.focusGlowOpacity : 0
+        layer?.shadowRadius = Self.focusGlowRadius
+        layer?.shadowOffset = .zero
         titleLabel.textColor = (isEnabled ? TextToken.textPrimary : .textSecondary).color.nsColor(for: theme)
         chevronView.contentTintColor = TextToken.textSecondary.color.nsColor(for: theme)
         alphaValue = isPressed ? 0.78 : (isEnabled ? 1 : 0.58)

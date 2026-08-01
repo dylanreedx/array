@@ -270,6 +270,38 @@ enum UITourCheck {
             }
         }
 
+        // P4.10's review set: every composer/choice state at the reference width,
+        // plus the multiline full-turn state at 320 pt for the narrow layout.
+        // Every shot is paired across appearances.
+        for state in AgentComposerReviewState.allCases {
+            let size = AgentComposerReviewSurface.preferredSize(for: state)
+            for appearance in appearances {
+                shots.append(Shot(
+                    surface: "composer-review", state: state.rawValue, size: size,
+                    appearance: appearance,
+                    make: {
+                        LabCatalog.makeComposerReviewSurface(
+                            state: state, size: size,
+                            theme: appearance == .aqua ? .light : .dark
+                        )
+                    }
+                ))
+            }
+        }
+        for appearance in appearances {
+            let narrowSize = AgentComposerReviewSurface.preferredSize(for: .multiline, width: 320)
+            shots.append(Shot(
+                surface: "composer-review", state: "multiline-narrow", size: narrowSize,
+                appearance: appearance,
+                make: {
+                    LabCatalog.makeComposerReviewSurface(
+                        state: .multiline, size: narrowSize,
+                        theme: appearance == .aqua ? .light : .dark
+                    )
+                }
+            ))
+        }
+
         for lab in labSurfaces {
             guard let entry = entries.first(where: { $0.id == lab.entryId }),
                   case let .staticCard(preferredSize, make) = entry.content else {

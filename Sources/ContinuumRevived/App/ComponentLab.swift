@@ -58,6 +58,30 @@ enum AgentTranscriptReviewState: String, CaseIterable {
     case approval
 }
 
+/// P4.10 supervised review states: the full-turn composer across its editing and
+/// action states, the open choice/completion surfaces, and the compact freeform
+/// variant. Menu states render the same `ChoiceListView` the anchored panel
+/// presents, laid into the surface so both themes produce comparable images.
+enum AgentComposerReviewState: String, CaseIterable {
+    case empty
+    case focused
+    case multiline
+    case long
+    case working
+    case modelMenu = "model-menu"
+    case effortMenu = "effort-menu"
+    case completion
+    case compactEmpty = "compact-empty"
+    case compactLong = "compact-long"
+
+    var variant: AgentComposerVariant {
+        switch self {
+        case .compactEmpty, .compactLong: return .compactFreeform
+        default: return .fullTurn
+        }
+    }
+}
+
 // MARK: - Fixtures
 
 /// Canned models so cards render with realistic data and zero app state.
@@ -750,6 +774,200 @@ final class AgentTranscriptReviewSurface: NSView {
     }
 }
 
+/// P4.10 review surface for the composer variants. Deterministic drafts and
+/// presentation states only: nothing here sends, stops, or fabricates a response
+/// contract — the compact states are the presentation-only shell the packet
+/// scopes them to.
+@MainActor
+final class AgentComposerReviewSurface: NSView {
+    static let contentInset = CGFloat(Space.l)
+
+    let state: AgentComposerReviewState
+    let composer: AgentComposerView
+    private(set) var footer: AgentComposerFooterView?
+    private(set) var actionButton: ComposerActionButton?
+    private(set) var choiceList: ChoiceListView?
+
+    static func preferredSize(for state: AgentComposerReviewState, width: CGFloat = 480) -> NSSize {
+        switch state {
+        case .empty, .focused, .compactEmpty:
+            return NSSize(width: width, height: 150)
+        case .multiline, .working, .compactLong:
+            return NSSize(width: width, height: 220)
+        case .long:
+            return NSSize(width: width, height: 300)
+        case .modelMenu, .effortMenu, .completion:
+            return NSSize(width: width, height: 400)
+        }
+    }
+
+    init(state: AgentComposerReviewState, size: NSSize, theme: TokenTheme) {
+        self.state = state
+        composer = AgentComposerView(frame: .zero, variant: state.variant)
+        super.init(frame: NSRect(origin: .zero, size: size))
+        wantsLayer = true
+        addSubview(composer)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Composer design review, \(state.rawValue)")
+
+        composer.apply(AgentComposerDraft(
+            text: Self.draftText(for: state),
+            selection: NSRange(location: (Self.draftText(for: state) as NSString).length, length: 0),
+            revision: 1
+        ))
+
+        if state.variant == .fullTurn {
+            let footer = AgentComposerFooterView(frame: .zero)
+            footer.apply(.init(model: "openai-codex/gpt-5.4-mini", thinking: "xhigh"))
+            addSubview(footer)
+            self.footer = footer
+
+            let presentation: AgentComposerPresentation
+            switch state {
+            case .working:
+                presentation = .resolve(
+                    state: .working,
+                    capabilities: .init(canSend: true, canStop: true, canSteer: false, canQueue: false),
+                    hasDraft: false
+                )
+            default:
+                presentation = .resolve(
+                    state: .ready,
+                    capabilities: .init(canSend: true, canStop: false, canSteer: false, canQueue: false),
+                    hasDraft: !Self.draftText(for: state).isEmpty
+                )
+            }
+            let button = ComposerActionButton(presentation: presentation)
+            addSubview(button)
+            actionButton = button
+        }
+
+        if let items = Self.choiceItems(for: state) {
+            let list = ChoiceListView(items: items.items, selectedID: items.selectedID)
+            addSubview(list)
+            choiceList = list
+        }
+
+        applyTheme(theme)
+        needsLayout = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var isFlipped: Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if state == .focused, let window {
+            window.makeFirstResponder(composer.textView)
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        let inset = Self.contentInset
+        let width = max(1, bounds.width - inset * 2)
+        composer.frame = NSRect(x: inset, y: inset, width: width, height: max(composer.frame.height, 44))
+        composer.layoutSubtreeIfNeeded()
+        composer.frame = NSRect(x: inset, y: inset, width: width, height: composer.intrinsicContentSize.height)
+        composer.layoutSubtreeIfNeeded()
+        var nextY = composer.frame.maxY + CGFloat(Space.m)
+
+        if let footer, let actionButton {
+            let buttonSize = actionButton.intrinsicContentSize
+            actionButton.frame = NSRect(
+                x: inset + width - buttonSize.width,
+                y: nextY,
+                width: buttonSize.width,
+                height: max(buttonSize.height, AgentComposerFooterView.height)
+            )
+            footer.frame = NSRect(
+                x: inset,
+                y: nextY,
+                width: max(1, actionButton.frame.minX - CGFloat(Space.m) - inset),
+                height: AgentComposerFooterView.height
+            )
+            footer.layoutSubtreeIfNeeded()
+            nextY = footer.frame.maxY + CGFloat(Space.m)
+        }
+
+        if let choiceList {
+            let listSize = choiceList.intrinsicContentSize
+            let anchorX: CGFloat
+            switch state {
+            case .effortMenu:
+                anchorX = min(inset + 220, bounds.width - inset - listSize.width)
+            default:
+                anchorX = inset
+            }
+            choiceList.frame = NSRect(
+                x: max(inset, anchorX),
+                y: nextY,
+                width: min(listSize.width, width),
+                height: listSize.height
+            )
+            choiceList.layoutSubtreeIfNeeded()
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTheme(effectiveTokenTheme)
+    }
+
+    private func applyTheme(_ theme: TokenTheme) {
+        layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(for: theme)
+    }
+
+    private static func draftText(for state: AgentComposerReviewState) -> String {
+        switch state {
+        case .empty, .compactEmpty, .modelMenu, .effortMenu:
+            return ""
+        case .focused:
+            return "Summarize the failing checks before the next run."
+        case .multiline:
+            return "Review the dropdown corrections:\n- quiet idle fill\n- one panel boundary"
+        case .long:
+            return (1...12).map { "Line \($0) of a long prompt that exceeds the visual cap." }
+                .joined(separator: "\n")
+        case .working:
+            return ""
+        case .completion:
+            return "Compare @Choice"
+        case .compactLong:
+            return (1...6).map { "Compact response line \($0)." }.joined(separator: "\n")
+        }
+    }
+
+    /// The open-menu review states show the exact list content the anchored panel
+    /// would present: the footer's real catalogue items for model/effort, and
+    /// reference suggestions shaped like the bounded completion fixtures.
+    private static func choiceItems(for state: AgentComposerReviewState) -> (items: [ChoiceItem], selectedID: String?)? {
+        switch state {
+        case .modelMenu:
+            let footer = AgentComposerFooterView(frame: NSRect(x: 0, y: 0, width: 560, height: 32))
+            footer.apply(.init(model: "openai-codex/gpt-5.4-mini", thinking: "xhigh"))
+            footer.layoutSubtreeIfNeeded()
+            return (footer.modelButton.items, footer.modelButton.selectedID)
+        case .effortMenu:
+            let footer = AgentComposerFooterView(frame: NSRect(x: 0, y: 0, width: 560, height: 32))
+            footer.apply(.init(model: "openai-codex/gpt-5.4-mini", thinking: "xhigh"))
+            footer.layoutSubtreeIfNeeded()
+            return (footer.effortButton.items, footer.effortButton.selectedID)
+        case .completion:
+            return ([
+                ChoiceItem(id: "completion-0", title: "ChoiceButton.swift", detail: "Sources/ContinuumRevived/Canvas/AgentComposer"),
+                ChoiceItem(id: "completion-1", title: "ChoiceListView.swift", detail: "Sources/ContinuumRevived/Canvas/AgentComposer"),
+                ChoiceItem(id: "completion-2", title: "ChoicePopoverController.swift", detail: "Sources/ContinuumRevived/Canvas/AgentComposer"),
+            ], nil)
+        default:
+            return nil
+        }
+    }
+}
+
 // MARK: - Catalog
 
 @MainActor
@@ -761,7 +979,8 @@ enum LabCatalog {
             notifyCategoriesCard, agentAdapterProjectionCard, managedSessionRecordCard,
             sessionNamingCard, commandPaletteLauncher, settingsLauncher, projectPickerLauncher,
             sidebarLiveCard, activityDockCard, sidebarSelectedCard, managedAgentCard,
-            transcriptReviewCard, composerReviewCard, composerProviderControlsCard,
+            transcriptReviewCard, composerReviewCard, composerFullVariantCard,
+            composerCompactVariantCard, composerProviderControlsCard,
 
             // MARK: night3-C cards
             managedAgentApprovalDockCard, managedAgentUserInputCard, newTileCwdPolicyCard,
@@ -1655,6 +1874,14 @@ enum LabCatalog {
         AgentTranscriptReviewSurface(state: state, size: size, theme: theme)
     }
 
+    static func makeComposerReviewSurface(
+        state: AgentComposerReviewState,
+        size: NSSize,
+        theme: TokenTheme
+    ) -> AgentComposerReviewSurface {
+        AgentComposerReviewSurface(state: state, size: size, theme: theme)
+    }
+
     private static var composerReviewCard: LabEntry {
         LabEntry(
             id: "agent.composer.review",
@@ -1663,6 +1890,32 @@ enum LabCatalog {
             summary: "Native multiline editing under custom Continuum chrome. Type, select, paste, and undo without migrating the live tile.",
             content: .reviewSurface(preferredSize: NSSize(width: 480, height: 96)) {
                 AgentComposerView(frame: NSRect(x: 0, y: 0, width: 480, height: 96))
+            }
+        )
+    }
+
+    private static var composerFullVariantCard: LabEntry {
+        let size = AgentComposerReviewSurface.preferredSize(for: .multiline)
+        return LabEntry(
+            id: "agent.composer.full-variant",
+            category: "Managed Agent",
+            title: "Composer — Full-Turn Variant",
+            summary: "The complete command surface: multiline draft, next-turn model/effort, and Send. 1–8 visual lines with provider /, @, and $ completion.",
+            content: .reviewSurface(preferredSize: size) {
+                AgentComposerReviewSurface(state: .multiline, size: size, theme: .dark)
+            }
+        )
+    }
+
+    private static var composerCompactVariantCard: LabEntry {
+        let size = AgentComposerReviewSurface.preferredSize(for: .compactLong)
+        return LabEntry(
+            id: "agent.composer.compact-variant",
+            category: "Managed Agent",
+            title: "Composer — Compact Freeform Shell",
+            summary: "Presentation-only response shell: shared native editing in a 1–4-line frame, no model/effort controls, reference (@ and $) completion only. No response contract is fabricated.",
+            content: .reviewSurface(preferredSize: size) {
+                AgentComposerReviewSurface(state: .compactLong, size: size, theme: .dark)
             }
         )
     }
@@ -2983,19 +3236,86 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             throw fail("composer provider footer hover did not repaint its quiet fill")
         }
         footer.modelButton.mouseExited(with: pointerEvent)
+        // Owner corrections (P4.10): idle is a quiet fill with no outline; keyboard
+        // focus and the open state paint a ≤0.5 pt accent line plus an accent glow
+        // instead of a thick permanent border.
+        guard footer.modelButton.layer?.borderWidth == 0,
+              footer.modelButton.layer?.shadowOpacity == 0 else {
+            throw fail("composer provider footer idle control regained an outline or glow")
+        }
         stateWindow.makeFirstResponder(footer.modelButton)
-        guard footer.modelButton.layer?.borderWidth == 2 else {
-            throw fail("composer provider footer focus did not paint the strong focus boundary")
+        guard let focusBorder = footer.modelButton.layer?.borderWidth,
+              focusBorder > 0, focusBorder <= 0.5,
+              let focusGlow = footer.modelButton.layer?.shadowOpacity, focusGlow > 0 else {
+            throw fail("composer provider footer focus did not paint the accent line and glow focus cue")
         }
         stateWindow.makeFirstResponder(nil)
         let pressedAlpha = footer.qaPressModel(with: pointerEvent)
         guard pressedAlpha.contains(where: { abs($0 - 0.78) < 0.001 }),
               stateWindow.childWindows?.isEmpty == false,
-              footer.modelButton.layer?.borderWidth == 2 else {
-            throw fail("composer provider footer pressed/open path did not paint pressed alpha and the open focus boundary")
+              let openBorder = footer.modelButton.layer?.borderWidth,
+              openBorder > 0, openBorder <= 0.5,
+              let openGlow = footer.modelButton.layer?.shadowOpacity, openGlow > 0 else {
+            throw fail("composer provider footer pressed/open path did not paint pressed alpha and the open focus cue")
         }
         _ = footer.modelButton.accessibilityPerformPress()
         stateWindow.orderOut(nil)
+
+        // P4.10 composer variant review states. The full-turn card keeps the
+        // complete command surface; the compact card is the presentation-only
+        // freeform shell: 1–4 visual lines, no model/effort controls, reference
+        // completion only, and no fabricated response contract.
+        guard let fullVariantEntry = entries.first(where: { $0.id == "agent.composer.full-variant" }),
+              case let .reviewSurface(fullSize, makeFullVariant) = fullVariantEntry.content,
+              let fullSurface = makeFullVariant() as? AgentComposerReviewSurface else {
+            throw fail("missing full-turn composer variant review surface")
+        }
+        fullSurface.frame = NSRect(origin: .zero, size: fullSize)
+        fullSurface.layoutSubtreeIfNeeded()
+        guard fullSurface.composer.variant == .fullTurn,
+              fullSurface.footer != nil,
+              fullSurface.actionButton != nil,
+              AgentComposerVariant.fullTurn.completionTriggers == AgentCompletionQueryDetector.supportedTriggers else {
+            throw fail("full-turn composer variant lost its footer, action, or provider completion triggers")
+        }
+        guard let compactVariantEntry = entries.first(where: { $0.id == "agent.composer.compact-variant" }),
+              case let .reviewSurface(compactSize, makeCompactVariant) = compactVariantEntry.content,
+              let compactSurface = makeCompactVariant() as? AgentComposerReviewSurface else {
+            throw fail("missing compact composer variant review surface")
+        }
+        compactSurface.frame = NSRect(origin: .zero, size: compactSize)
+        compactSurface.layoutSubtreeIfNeeded()
+        guard compactSurface.composer.variant == .compactFreeform,
+              compactSurface.footer == nil,
+              compactSurface.actionButton == nil,
+              AgentComposerVariant.compactFreeform.completionTriggers == ["@", "$"] else {
+            throw fail("compact composer shell gained full-turn controls or command completion")
+        }
+        // The compact shell caps at four visual lines: with a six-line draft its
+        // editor height equals a full-turn composer holding exactly four lines,
+        // and stays below the same six-line draft in the full-turn composer.
+        let compactMeasureWidth = compactSize.width - AgentComposerReviewSurface.contentInset * 2
+        func measuredComposerHeight(_ variant: AgentComposerVariant, lines: Int) -> CGFloat {
+            let probe = AgentComposerView(
+                frame: NSRect(x: 0, y: 0, width: compactMeasureWidth, height: 44),
+                variant: variant
+            )
+            let text = (1...lines).map { "line \($0)" }.joined(separator: "\n")
+            probe.apply(AgentComposerDraft(text: text, selection: NSRange(location: 0, length: 0), revision: 1))
+            probe.layoutSubtreeIfNeeded()
+            return probe.intrinsicContentSize.height
+        }
+        let compactSixLines = measuredComposerHeight(.compactFreeform, lines: 6)
+        guard compactSixLines == measuredComposerHeight(.fullTurn, lines: 4),
+              compactSixLines < measuredComposerHeight(.fullTurn, lines: 6) else {
+            throw fail("compact composer shell did not cap at four visual lines")
+        }
+        let emptyCompact = AgentComposerView(frame: .zero, variant: .compactFreeform)
+        guard emptyCompact.qaPlaceholderVisible,
+              AgentComposerVariant.compactFreeform.placeholder == "Write a response…" else {
+            throw fail("compact composer shell lost its response placeholder")
+        }
+
         guard let agentKindEntry = entries.first(where: { $0.id == "agent.kind" }),
               case let .staticCard(_, makeAgentKindView) = agentKindEntry.content else {
             throw fail("missing agent.kind descriptor card")

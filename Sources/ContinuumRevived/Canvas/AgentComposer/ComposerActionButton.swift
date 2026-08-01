@@ -38,10 +38,15 @@ final class ComposerActionButton: NSControl, TokenThemed {
 
     override var acceptsFirstResponder: Bool { isEnabled }
 
+    /// The raw string width plus the label cell's own horizontal padding, which
+    /// `NSString.size` does not include — without it the cell truncates the title.
+    private var measuredTitleWidth: CGFloat {
+        ceil((presentation.title as NSString).size(withAttributes: [.font: NSFont.token(.label)]).width) + 4
+    }
+
     override var intrinsicContentSize: NSSize {
-        let titleWidth = ceil((presentation.title as NSString).size(withAttributes: [.font: NSFont.token(.label)]).width)
-        return NSSize(
-            width: Self.horizontalPadding * 2 + 14 + Self.itemSpacing + titleWidth,
+        NSSize(
+            width: Self.horizontalPadding * 2 + 14 + Self.itemSpacing + measuredTitleWidth,
             height: Self.controlHeight
         )
     }
@@ -49,7 +54,7 @@ final class ComposerActionButton: NSControl, TokenThemed {
     override func layout() {
         super.layout()
         let iconSize: CGFloat = 14
-        let titleWidth = ceil((presentation.title as NSString).size(withAttributes: [.font: NSFont.token(.label)]).width)
+        let titleWidth = measuredTitleWidth
         let contentWidth = iconSize + Self.itemSpacing + titleWidth
         let start = floor((bounds.width - contentWidth) / 2)
         iconView.frame = NSRect(x: start, y: floor((bounds.height - iconSize) / 2), width: iconSize, height: iconSize)

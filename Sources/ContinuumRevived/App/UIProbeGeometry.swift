@@ -399,10 +399,22 @@ enum UIProbeGeometry {
         guard list.selectedID == "balanced", list.focusedID == "balanced" else {
             throw fail("choice popover: initial selection/focus was not preserved")
         }
+        // Owner corrections (P4.10): rows communicate selection through fill plus
+        // checkmark and never paint a perimeter border; the panel keeps exactly one
+        // ≤0.5 pt boundary; row density sits in the 34–36 pt band.
         guard let selectedRow = list.qaRowStates.first(where: { $0.id == "balanced" }),
               selectedRow.selected, selectedRow.focused, selectedRow.checkVisible,
-              selectedRow.borderWidth == 2 else {
-            throw fail("choice popover: selected row lacks checkmark and strong focus boundary")
+              selectedRow.borderWidth == 0 else {
+            throw fail("choice popover: selected row lost its checkmark or regained a perimeter border")
+        }
+        guard list.qaRowStates.allSatisfy({ $0.borderWidth == 0 }) else {
+            throw fail("choice popover: a row painted a permanent perimeter border")
+        }
+        guard (34...36).contains(ChoiceListView.rowHeight) else {
+            throw fail("choice popover: row height \(ChoiceListView.rowHeight) left the approved 34–36pt density band")
+        }
+        guard let panelBorder = list.layer?.borderWidth, panelBorder <= 0.5, panelBorder > 0 else {
+            throw fail("choice popover: panel boundary is missing or heavier than 0.5pt")
         }
         guard let typeaheadEvent = NSEvent.keyEvent(
             with: .keyDown,
@@ -562,6 +574,11 @@ enum UIProbeGeometry {
               button.accessibilityRole() == .popUpButton,
               button.accessibilityValue() as? String == "Balanced" else {
             throw fail("choice button: stock popup chrome or incomplete accessibility value")
+        }
+        // Owner correction (P4.10): the idle trigger is a quiet fill with no
+        // outline and no focus glow.
+        guard button.layer?.borderWidth == 0, button.layer?.shadowOpacity == 0 else {
+            throw fail("choice button: idle state regained an outline or glow")
         }
         return 12
     }

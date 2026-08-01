@@ -33,10 +33,13 @@ final class ChoiceListView: NSView, TokenThemed {
     private var typeahead = ""
     private var lastTypeaheadTime: TimeInterval = 0
 
-    static let rowHeight: CGFloat = 44
+    static let rowHeight: CGFloat = 36
     static let horizontalPadding = CGFloat(Space.l)
     static let verticalPadding = CGFloat(Space.m)
     static let minimumWidth: CGFloat = 220
+    /// Owner correction (P4.10): the panel keeps exactly one subtle boundary and
+    /// no border anywhere in the app exceeds 0.5 pt.
+    static let panelBorderWidth: CGFloat = 0.5
 
     init(items: [ChoiceItem], selectedID: String?) {
         self.items = items
@@ -153,7 +156,7 @@ final class ChoiceListView: NSView, TokenThemed {
     func applyTokens() {
         let theme = effectiveTokenTheme
         layer?.backgroundColor = SurfaceToken.overlay.color.cgColor(for: theme)
-        layer?.borderWidth = 1
+        layer?.borderWidth = Self.panelBorderWidth
         layer?.borderColor = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
         updateRows()
     }
@@ -255,8 +258,8 @@ private final class ChoiceRowView: NSControl, TokenThemed {
         if detailLabel.isHidden {
             titleLabel.frame = NSRect(x: textX, y: floor((bounds.height - 20) / 2), width: max(0, bounds.width - textX - 8), height: 20)
         } else {
-            titleLabel.frame = NSRect(x: textX, y: 21, width: max(0, bounds.width - textX - 8), height: 18)
-            detailLabel.frame = NSRect(x: textX, y: 6, width: max(0, bounds.width - textX - 8), height: 16)
+            titleLabel.frame = NSRect(x: textX, y: bounds.height - 20, width: max(0, bounds.width - textX - 8), height: 17)
+            detailLabel.frame = NSRect(x: textX, y: 2, width: max(0, bounds.width - textX - 8), height: 14)
         }
     }
 
@@ -291,6 +294,10 @@ private final class ChoiceRowView: NSControl, TokenThemed {
 
     func applyTokens() {
         let theme = effectiveTokenTheme
+        // Owner correction (P4.10): rows never paint a perimeter border. State is
+        // fill plus checkmark — selected fill, soft hover/keyboard-focus fill,
+        // muted text for disabled. The focus cue moves with the fill and vanishes
+        // on dismiss, so it never becomes a permanent grey box.
         if selected {
             layer?.backgroundColor = AgentSurfaceRole.rowSelected.color.cgColor(for: theme)
         } else if focused {
@@ -298,8 +305,7 @@ private final class ChoiceRowView: NSControl, TokenThemed {
         } else {
             layer?.backgroundColor = NSColor.clear.cgColor
         }
-        layer?.borderWidth = (selected || focused) ? 2 : 0
-        layer?.borderColor = AgentLineRole.focusRing.color.cgColor(for: theme)
+        layer?.borderWidth = 0
         checkView.isHidden = !selected
         let foreground = item.enabled ? TextToken.textPrimary.color : TextToken.textSecondary.color
         titleLabel.textColor = foreground.nsColor(for: theme)
