@@ -82,6 +82,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         AgentCompletionProviderRegistry(providers: AgentCompletionFixtures.providers())
     private var draftStore: AgentComposerDraftStore?
     private var draftAgentID: AgentID?
+    private weak var actionSink: (any AgentTileActionSink)?
+    private var turnSnapshot: AgentTileTurnSnapshot?
+    private var actionTask: Task<Void, Never>?
     private var restoreTask: Task<Void, Never>?
     private var pendingSubmittedPrompt: String?
     private(set) var isEditorFocused = false
@@ -223,6 +226,36 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         textView.bindPromptHistory(history, agentID: agentID)
     }
 
+    /// Binds execution by agent identity. Rebinding cancels only the UI's wait for
+    /// acceptance; it never cancels an accepted agent action or the agent itself.
+    func bindActionSink(
+        _ sink: any AgentTileActionSink,
+        agentID: AgentID,
+        snapshot: AgentTileTurnSnapshot
+    ) {
+        actionTask?.cancel()
+        actionSink = sink
+        draftAgentID = agentID
+        turnSnapshot = snapshot
+    }
+
+    func updateTurnSnapshot(_ snapshot: AgentTileTurnSnapshot) {
+        turnSnapshot = snapshot
+    }
+
+    func unbindActionSink() {
+        actionTask?.cancel()
+        actionTask = nil
+        actionSink = nil
+        turnSnapshot = nil
+    }
+
+    /// Stop follows the same acceptance-aware sink as send. The future primary
+    /// action control calls this rather than reaching into AgentSupervisor.
+    func requestStop() {
+        submitBoundIntent(.stop, submittedPrompt: nil, submittedRevision: draft.revision)
+    }
+
     func apply(_ newDraft: AgentComposerDraft) {
         let utf16Count = (newDraft.text as NSString).length
         let location = min(max(newDraft.selection.location, 0), utf16Count)
@@ -297,7 +330,17 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     func composerRequestedSend(_ textView: ComposerTextView) {
         let prompt = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
-        if let onSubmitIntent {
+        if let snapshot = turnSnapshot, actionSink != nil, draftAgentID != nil {
+            let resolver = AgentComposerIntentState(
+                executionState: snapshot.executionState,
+                capabilities: snapshot.capabilities
+            )
+            let intent = snapshot.executionState == .working
+                ? resolver.workingDraftIntent(draft: prompt)
+                : resolver.primaryIntent(draft: prompt)
+            guard let intent else { return }
+            submitBoundIntent(intent, submittedPrompt: prompt, submittedRevision: draft.revision)
+        } else if let onSubmitIntent {
             pendingSubmittedPrompt = nil
             guard onSubmitIntent(prompt) else { return }
             completeAcceptedSend(prompt)
@@ -378,9 +421,29 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         }
     }
 
-    private func completeAcceptedSend(_ prompt: String) {
+    private func submitBoundIntent(
+        _ intent: AgentComposerIntent,
+        submittedPrompt: String?,
+        submittedRevision: UInt64
+    ) {
+        guard actionTask == nil, let actionSink, let agentID = draftAgentID else { return }
+        actionTask = Task { @MainActor [weak self, weak actionSink] in
+            guard let acceptance = await actionSink?.accept(intent, for: agentID), let self else { return }
+            self.actionTask = nil
+            guard acceptance == .accepted else { return }
+            if let submittedPrompt {
+                self.completeAcceptedSend(submittedPrompt, submittedRevision: submittedRevision)
+            }
+        }
+    }
+
+    private func completeAcceptedSend(_ prompt: String, submittedRevision: UInt64? = nil) {
         textView.recordAcceptedPrompt(prompt)
         pendingSubmittedPrompt = nil
+        if let submittedRevision {
+            let currentPrompt = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard draft.revision == submittedRevision, currentPrompt == prompt else { return }
+        }
         clearAcceptedDraft()
     }
 

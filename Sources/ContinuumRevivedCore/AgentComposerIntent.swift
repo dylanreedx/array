@@ -12,11 +12,85 @@ public enum AgentComposerIntent: Equatable, Sendable {
     case command(String)
 }
 
+/// The sink owns execution and reports whether it actually took responsibility
+/// for an intent. A composer must not clear its draft before `.accepted`.
+@MainActor
+public protocol AgentTileActionSink: AnyObject {
+    func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance
+}
+
+public enum IntentAcceptance: Equatable, Sendable {
+    case accepted
+    case refused(IntentRefusal)
+}
+
+public enum IntentRefusal: String, Equatable, Sendable {
+    case unknownAgent
+    case unsupported
+    case turnNotReady
+    case noTurnInProgress
+    case emptyDraft
+}
+
+/// Provider response shape compiled at the provider-neutral seam. The current
+/// runtime exposes fixed approval decisions only. In particular, an empty choice
+/// list is not evidence of freeform or optional-note support.
+public enum AgentRequestResponseMode: Equatable, Sendable {
+    case fixedChoice([String])
+    case freeform
+    case optionalNote(choices: [String])
+}
+
+/// The explicit unresolved provider request that a needs-action presentation can
+/// reveal. Prompt and choices come from runtime records, never assistant prose.
+public struct AgentPendingRequest: Equatable, Sendable {
+    public var requestID: String
+    public var prompt: String
+    public var responseMode: AgentRequestResponseMode
+
+    public init(requestID: String, prompt: String, responseMode: AgentRequestResponseMode) {
+        self.requestID = requestID
+        self.prompt = prompt
+        self.responseMode = responseMode
+    }
+}
+
 /// Explicit turn state supplied by the supervisor. This must come from turn
 /// lifecycle state, never inferred from process liveness.
 public enum AgentTurnExecutionState: Equatable, Sendable {
     case ready
     case working
+}
+
+/// Complete provider-neutral state consumed by the tile presenter and composer.
+/// `needsAction` necessarily carries the request the UI must reveal; it cannot be
+/// represented by an orphan attention badge.
+public enum AgentTileOperationalState: Equatable, Sendable {
+    case ready
+    case working
+    case queued
+    case needsAction(AgentPendingRequest)
+    case failed(message: String?)
+    case restored
+}
+
+public struct AgentTileTurnSnapshot: Equatable, Sendable {
+    public var state: AgentTileOperationalState
+    public var capabilities: AgentTurnCapabilities
+
+    public init(state: AgentTileOperationalState, capabilities: AgentTurnCapabilities) {
+        self.state = state
+        self.capabilities = capabilities
+    }
+
+    public var executionState: AgentTurnExecutionState {
+        switch state {
+        case .working, .queued, .needsAction:
+            return .working
+        case .ready, .failed, .restored:
+            return .ready
+        }
+    }
 }
 
 /// Provider-neutral facts about what the bound runtime can execute now.

@@ -85,6 +85,19 @@ final class AgentSupervisor {
     private var subscribers: [AgentID: [UUID: AsyncStream<AgentRuntimeEvent>.Continuation]] = [:]
     private var history: [AgentID: [AgentRuntimeEvent]] = [:]
 
+    /// Provider facts used by the v2 tile. Deliberately separate from `runners`:
+    /// a provider process may remain alive while its turn is ready, and that must
+    /// never paint Working. `runners` is consulted only when deciding whether the
+    /// current send/stop transport can accept an action.
+    private struct TurnFacts {
+        var execution: AgentTurnExecutionState = .ready
+        var failureMessage: String?
+        var didFail = false
+        var pendingRequests: [String: AgentPendingRequest] = [:]
+        var requestOrder: [String] = []
+    }
+    private var turnFacts: [AgentID: TurnFacts] = [:]
+
     init(
         store: AgentStore,
         makeRunner: @escaping (AgentRecord) -> AgentRunning = AgentSupervisor.piRunner,
@@ -839,6 +852,7 @@ final class AgentSupervisor {
 
         records.removeValue(forKey: id)
         history.removeValue(forKey: id)
+        turnFacts.removeValue(forKey: id)
         for continuation in (subscribers[id] ?? [:]).values { continuation.finish() }
         subscribers.removeValue(forKey: id)
         restoredIDs.remove(id)
@@ -1168,6 +1182,60 @@ final class AgentSupervisor {
         runners[id] != nil
     }
 
+    /// Operational state for one tile. State comes only from explicit lifecycle
+    /// and request events. Transport occupancy affects capability acceptance, not
+    /// the label: a process that has emitted Ready still presents Ready.
+    func turnSnapshot(for id: AgentID) -> AgentTileTurnSnapshot? {
+        guard records[id] != nil else { return nil }
+        let facts = turnFacts[id] ?? TurnFacts()
+        let state: AgentTileOperationalState
+        if let requestID = facts.requestOrder.first(where: { facts.pendingRequests[$0] != nil }),
+           let request = facts.pendingRequests[requestID] {
+            state = .needsAction(request)
+        } else if facts.didFail {
+            state = .failed(message: facts.failureMessage)
+        } else if restoredIDs.contains(id) && (history[id]?.isEmpty ?? true) {
+            state = .restored
+        } else {
+            state = facts.execution == .working ? .working : .ready
+        }
+
+        let occupied = runners[id] != nil
+        return AgentTileTurnSnapshot(
+            state: state,
+            capabilities: .sendStop(
+                canSend: !occupied && state.acceptsNewTurn,
+                canStop: occupied && facts.execution == .working
+            )
+        )
+    }
+
+    /// One action owner for the v2 composer. Validation and mutation happen on the
+    /// same main-actor turn, so an accepted send/stop cannot be refused by a second
+    /// capability check hidden in the view.
+    func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
+        guard records[agentID] != nil else { return .refused(.unknownAgent) }
+        guard let snapshot = turnSnapshot(for: agentID) else { return .refused(.unknownAgent) }
+        switch intent {
+        case .send(let draft):
+            let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !prompt.isEmpty else { return .refused(.emptyDraft) }
+            guard snapshot.capabilities.canSend else { return .refused(.turnNotReady) }
+            send(prompt, to: agentID)
+            return .accepted
+        case .stop:
+            guard snapshot.capabilities.canStop, runners[agentID] != nil else {
+                return .refused(.noTurnInProgress)
+            }
+            stop(agentID)
+            return .accepted
+        case .steer, .queue, .command:
+            // Today's compiled runner has none of these RPCs. Never simulate one by
+            // replaying send or retaining text in a local queue.
+            return .refused(.unsupported)
+        }
+    }
+
     // MARK: - Branch context (P2C.4)
 
     /// What a view needs to say which checkout this agent is about to touch: the
@@ -1413,6 +1481,7 @@ final class AgentSupervisor {
     }
 
     private func deliver(_ event: AgentRuntimeEvent, to id: AgentID) {
+        updateTurnFacts(with: event, for: id)
         // P3.3: a COMPLETED TURN is what makes a row unread — the agent stopped and
         // has something for you. Only that event, and only when you are not already
         // looking: streamed tokens and item events are the turn still running, and a
@@ -1466,6 +1535,74 @@ final class AgentSupervisor {
         }
     }
 
+    private func updateTurnFacts(with event: AgentRuntimeEvent, for id: AgentID) {
+        var facts = turnFacts[id] ?? TurnFacts()
+        switch event {
+        case .turnStarted:
+            facts.execution = .working
+            facts.didFail = false
+            facts.failureMessage = nil
+        case let .turnCompleted(_, _, outcome, errorMessage):
+            facts.execution = .ready
+            facts.didFail = outcome == .failed
+            facts.failureMessage = outcome == .failed ? errorMessage : nil
+        case let .sessionStateChanged(state):
+            // `.running` is session/process state, not proof of an active turn.
+            // Only turnStarted/turnCompleted move the execution fact.
+            if state == .error {
+                facts.execution = .ready
+                facts.didFail = true
+            } else if state == .stopped || state == .ready {
+                facts.execution = .ready
+            }
+        case let .requestOpened(_, requestID, kind):
+            let request = AgentPendingRequest(
+                requestID: requestID,
+                prompt: Self.requestPrompt(for: kind),
+                responseMode: .fixedChoice(Self.approvalChoices)
+            )
+            facts.pendingRequests[requestID] = request
+            if !facts.requestOrder.contains(requestID) { facts.requestOrder.append(requestID) }
+        case let .userInputRequested(_, requestID, questions):
+            // User-input events carry prompt text but no compiled response-mode
+            // capability. Empty choices therefore remain fixed-choice([]), never a
+            // fabricated freeform editor.
+            let prompt = questions.map(\.prompt).filter { !$0.isEmpty }.joined(separator: " ")
+            let request = AgentPendingRequest(
+                requestID: requestID,
+                prompt: prompt.isEmpty ? "Provider requested input" : prompt,
+                responseMode: .fixedChoice([])
+            )
+            facts.pendingRequests[requestID] = request
+            if !facts.requestOrder.contains(requestID) { facts.requestOrder.append(requestID) }
+        case let .requestResolved(_, requestID, _), let .userInputResolved(_, requestID):
+            facts.pendingRequests.removeValue(forKey: requestID)
+            facts.requestOrder.removeAll { $0 == requestID }
+        case let .runtimeError(_, message):
+            facts.execution = .ready
+            facts.didFail = true
+            facts.failureMessage = message
+        case .itemStarted, .itemCompleted, .contentDelta, .tokenUsageUpdated:
+            break
+        }
+        turnFacts[id] = facts
+    }
+
+    private nonisolated static let approvalChoices = [
+        ApprovalDecision.accept.rawValue,
+        ApprovalDecision.acceptForSession.rawValue,
+        ApprovalDecision.decline.rawValue,
+        ApprovalDecision.cancel.rawValue,
+    ]
+
+    private nonisolated static func requestPrompt(for kind: ApprovalKind) -> String {
+        switch kind {
+        case .commandExecutionApproval: return "Allow the requested command?"
+        case .applyPatchApproval: return "Allow the requested patch?"
+        case .toolUserInput: return "The provider requested a decision"
+        }
+    }
+
     nonisolated static func isPersistWorthy(_ event: AgentRuntimeEvent) -> Bool {
         switch event {
         case .sessionStateChanged, .turnStarted, .turnCompleted, .runtimeError:
@@ -1491,7 +1628,31 @@ final class AgentSupervisor {
     }
 }
 
+extension AgentSupervisor: AgentTileActionSink {}
+
+private extension AgentTileOperationalState {
+    var acceptsNewTurn: Bool {
+        switch self {
+        case .ready, .failed, .restored: return true
+        case .working, .queued, .needsAction: return false
+        }
+    }
+}
+
 // MARK: - Self-check
+
+@MainActor
+private final class ScriptedTileActionSink: AgentTileActionSink {
+    var acceptance: IntentAcceptance
+    private(set) var intents: [(AgentComposerIntent, AgentID)] = []
+
+    init(_ acceptance: IntentAcceptance) { self.acceptance = acceptance }
+
+    func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
+        intents.append((intent, agentID))
+        return acceptance
+    }
+}
 
 /// A runner that emits a fixed script instead of spawning Pi. `holdUntilStopped`
 /// blocks `run` after the script until `stop()` arrives, which is how the stop path
@@ -2422,8 +2583,220 @@ func runAgentSupervisorChecks() async throws {
 
     let rendererReport = try checkAgentBlockRendererRegistry(fail: fail)
 
+    // MARK: 19 · tile state and actions follow turn facts/capabilities (91/P5.2)
+
+    let turnStateReport = try await checkCapabilityDrivenTurnStates(config: config, cwd: cwd, fail: fail)
+
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport)")
+}
+
+@MainActor
+private func checkCapabilityDrivenTurnStates<Failure: Error>(
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Failure
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("continuum-turn-state-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = AgentStore(applicationSupportDirectory: root)
+    let runner = ScriptedAgentRunner(
+        script: [
+            .turnStarted(threadId: "provider", turnId: "turn-1"),
+            .sessionStateChanged(.ready),
+        ],
+        holdUntilStopped: true
+    )
+    let supervisor = AgentSupervisor(store: store, makeRunner: { _ in runner })
+    let id = supervisor.spawn(
+        role: nil, prompt: "work", cwd: cwd, model: config.model, thinking: config.thinking
+    )
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        runner.runCount == 1 && supervisor.turnSnapshot(for: id)?.state == .ready
+    }) else {
+        throw fail("turn-state: scripted ready event did not arrive")
+    }
+    guard supervisor.isRunning(id), supervisor.turnSnapshot(for: id)?.state == .ready else {
+        throw fail("turn-state: process alive but explicitly idle did not present Ready")
+    }
+    guard supervisor.turnSnapshot(for: id)?.capabilities.canSend == false else {
+        throw fail("turn-state: occupied send transport advertised acceptance")
+    }
+    supervisor.qaDeliver(.turnStarted(
+        threadId: AgentSupervisor.threadId(for: id), turnId: "turn-2"
+    ), to: id)
+    guard let working = supervisor.turnSnapshot(for: id),
+          working.state == .working, working.capabilities.canStop else {
+        throw fail("turn-state: explicit turnStarted did not present stoppable Working")
+    }
+    supervisor.qaDeliver(.turnCompleted(
+        threadId: AgentSupervisor.threadId(for: id),
+        turnId: "turn-2",
+        outcome: .completed,
+        errorMessage: nil
+    ), to: id)
+
+    supervisor.qaDeliver(.requestOpened(
+        threadId: AgentSupervisor.threadId(for: id),
+        requestId: "request-1",
+        kind: .commandExecutionApproval
+    ), to: id)
+    guard let requestSnapshot = supervisor.turnSnapshot(for: id),
+          case let .needsAction(request) = requestSnapshot.state,
+          request.requestID == "request-1",
+          request.prompt.contains("command"),
+          request.responseMode == .fixedChoice([
+              ApprovalDecision.accept.rawValue,
+              ApprovalDecision.acceptForSession.rawValue,
+              ApprovalDecision.decline.rawValue,
+              ApprovalDecision.cancel.rawValue,
+          ]) else {
+        throw fail("turn-state: Needs action did not retain matching provider request context and choices")
+    }
+    let needsPresentation = AgentTileStatePresenter.present(
+        name: "Checker",
+        snapshot: requestSnapshot,
+        branchContext: nil,
+        startedAt: Date(timeIntervalSince1970: 1),
+        now: Date(timeIntervalSince1970: 3)
+    )
+    guard needsPresentation.revealRequestID == "request-1",
+          needsPresentation.availableActionDescription == "Reveal provider request",
+          needsPresentation.stateAccessibilityLabel.contains("accept") else {
+        throw fail("turn-state: Needs action presentation cannot reveal its real request and choices")
+    }
+
+    supervisor.qaDeliver(.requestResolved(
+        threadId: AgentSupervisor.threadId(for: id), requestId: "request-1", decision: "accept"
+    ), to: id)
+    guard supervisor.turnSnapshot(for: id)?.state == .ready else {
+        throw fail("turn-state: resolved request did not restore explicit Ready")
+    }
+    supervisor.qaDeliver(.runtimeError(
+        threadId: AgentSupervisor.threadId(for: id), message: "provider failed"
+    ), to: id)
+    guard supervisor.turnSnapshot(for: id)?.state == .failed(message: "provider failed") else {
+        throw fail("turn-state: runtime error did not present Failed")
+    }
+
+    // Required negative semantics: a user-input event with no response-mode
+    // capability must remain fixed-choice([]). Treating empty choices as freeform
+    // would make this named assertion red.
+    supervisor.qaDeliver(.userInputRequested(
+        threadId: AgentSupervisor.threadId(for: id),
+        requestId: "question-1",
+        questions: [.init(key: "answer", prompt: "Explain")]
+    ), to: id)
+    guard let inputSnapshot = supervisor.turnSnapshot(for: id),
+          case let .needsAction(inputRequest) = inputSnapshot.state,
+          inputRequest.responseMode == .fixedChoice([]) else {
+        throw fail("turn-state negative witness: empty choices fabricated a freeform response capability")
+    }
+
+    guard await supervisor.accept(.queue("not supported"), for: id) == .refused(.unsupported) else {
+        throw fail("turn-state: conservative runtime accepted a fabricated queue intent")
+    }
+    let draftBeforeRefusal = "keep this draft"
+    guard await supervisor.accept(.send(draftBeforeRefusal), for: id) == .refused(.turnNotReady) else {
+        throw fail("turn-state: send while Needs action was not refused")
+    }
+
+    // Exercise the real composer acceptance boundary: refusal keeps the exact
+    // edited draft; acceptance clears it only after the sink reports success.
+    let composer = AgentComposerView(frame: NSRect(x: 0, y: 0, width: 320, height: 80))
+    composer.apply(.init(
+        text: draftBeforeRefusal,
+        selection: NSRange(location: (draftBeforeRefusal as NSString).length, length: 0),
+        revision: 7
+    ))
+    let refusingSink = ScriptedTileActionSink(.refused(.turnNotReady))
+    composer.bindActionSink(
+        refusingSink,
+        agentID: id,
+        snapshot: .init(
+            state: .ready,
+            capabilities: .sendStop(canSend: true, canStop: false)
+        )
+    )
+    composer.composerRequestedSend(composer.textView)
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, { refusingSink.intents.count == 1 }),
+          composer.textView.string == draftBeforeRefusal else {
+        throw fail("turn-state: refused composer send cleared or changed its draft")
+    }
+    let acceptingSink = ScriptedTileActionSink(.accepted)
+    composer.bindActionSink(
+        acceptingSink,
+        agentID: id,
+        snapshot: .init(
+            state: .ready,
+            capabilities: .sendStop(canSend: true, canStop: false)
+        )
+    )
+    composer.composerRequestedSend(composer.textView)
+    guard await waitUntil(timeout: 1, pollInterval: 0.01, {
+        acceptingSink.intents.count == 1 && composer.textView.string.isEmpty
+    }) else {
+        throw fail("turn-state: accepted composer send did not clear its unchanged draft")
+    }
+
+    supervisor.qaDeliver(.turnStarted(
+        threadId: AgentSupervisor.threadId(for: id), turnId: "turn-stop"
+    ), to: id)
+    guard await supervisor.accept(.stop, for: id) == .accepted else {
+        throw fail("turn-state: stoppable turn was refused by the shared action sink")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { runner.completedRuns == 1 }) else {
+        throw fail("turn-state: accepted stop did not release runner")
+    }
+    guard await supervisor.accept(.stop, for: id) == .refused(.noTurnInProgress) else {
+        throw fail("turn-state: stop without a turn was reported accepted")
+    }
+
+    // Restored is a durable supervisor fact, not inferred from a blank view.
+    let restoredRecord = AgentRecord(
+        id: AgentID(rawValue: UUID()),
+        displayName: "Restored",
+        role: nil,
+        model: config.model,
+        thinking: config.thinking,
+        cwd: cwd.path,
+        worktreeBranch: nil,
+        projectId: nil,
+        parentAgentID: nil,
+        sourceItemId: nil,
+        createdAt: Date(),
+        lastActivityAt: Date(),
+        tileId: nil
+    )
+    try store.upsert(restoredRecord)
+    let restoredSupervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    _ = restoredSupervisor.restore()
+    guard let restored = restoredSupervisor.turnSnapshot(for: restoredRecord.id),
+          restored.state == .restored,
+          restored.capabilities.canSend else {
+        throw fail("turn-state: restored idle agent did not present Restored with Send available")
+    }
+
+    // Presentation exhausts the states that have no current transport producer too:
+    // missing queue capability means unavailable, not omission from the vocabulary.
+    let queued = AgentTileStatePresenter.present(
+        name: "Checker",
+        snapshot: .init(state: .queued, capabilities: .sendStop(canSend: false, canStop: false)),
+        branchContext: nil,
+        startedAt: Date(timeIntervalSince1970: 1),
+        now: Date(timeIntervalSince1970: 2)
+    )
+    let restoredPresentation = AgentTileStatePresenter.present(
+        name: "Checker", snapshot: restored, branchContext: nil, startedAt: nil
+    )
+    guard queued.stateLabel == "Queued", queued.stateAccessibilityLabel.contains("No immediate"),
+          restoredPresentation.stateLabel == "Restored",
+          restoredPresentation.availableActionDescription == "Send a prompt to continue" else {
+        throw fail("turn-state: queued/restored presentation omitted truthful action accessibility")
+    }
+
+    return "capability turn states: process-alive Ready, explicit Working, request reveal with fixed choices, Failed, Restored/Queued presentation, accepted Stop, refused queue/send/stop, and empty-choice negative witness held"
 }
 
 @MainActor
