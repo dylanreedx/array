@@ -9,6 +9,12 @@ import Foundation
 @MainActor
 final class FlippedStackView: NSStackView {
     override var isFlipped: Bool { true }
+    private(set) var qaLayoutPassCount = 0
+
+    override func layout() {
+        qaLayoutPassCount += 1
+        super.layout()
+    }
 }
 
 @MainActor
@@ -37,6 +43,12 @@ final class ManagedAgentTileNSView: TileNSView {
         stack.wantsLayer = true
         return stack
     }()
+    /// P5.1: the replacement header is constructed independently but installed
+    /// only under the v2 fixture flag. The compatibility shell and its baselines
+    /// remain untouched until final live migration.
+    private let agentHeader = AgentTileHeaderView()
+    private var headerAgentName: String?
+    private var branchContext: AgentRowContext?
     private let glyphLabel = NSTextField(labelWithString: "")
     private let nameLabel = NSTextField(labelWithString: "")
     private let phaseLabel = NSTextField(labelWithString: "")
@@ -44,7 +56,11 @@ final class ManagedAgentTileNSView: TileNSView {
     /// P2C.4: which checkout this agent is about to touch. Hidden until something
     /// tells the tile (`applyBranchContext`), so a tile that knows nothing shows
     /// nothing rather than implying a shared checkout.
-    private let branchChip = BranchChipNSView()
+    private let branchChip: BranchChipNSView = {
+        let chip = BranchChipNSView()
+        chip.isHidden = true
+        return chip
+    }()
     private let cardStack = FlippedStackView()
     /// P3.10 parks the reusable semantic list behind an internal fixture flag.
     /// The compatibility stack remains the only visible/live transcript until the
@@ -116,6 +132,20 @@ final class ManagedAgentTileNSView: TileNSView {
             statusUpdatedAt: Date()
         )
         super.init(tile: tile)
+        // TileNSView establishes its compatibility border after its polymorphic
+        // token call; re-apply once subclass initialization is complete so the
+        // fixture shell's quiet perimeter wins deterministically.
+        applyTokens()
+        if AgentTileHeaderView.isFixtureEnabled {
+            setTileActionLabels(
+                close: AgentTileHeaderView.detachActionTitle,
+                stop: AgentTileHeaderView.stopActionTitle
+            )
+            // The compiled host seam stops the whole running agent process, not
+            // only its current turn. Keep the action and its label equally broad.
+            agentHeader.onStopAgentRun = { [weak self] in self?.onStopRun?() }
+            agentHeader.onDetachView = { [weak self] in self?.onClose?() }
+        }
         setContentView(makeContentView())
         applyHeader(status: self.descriptor.status)
         applyComposeAvailability()
@@ -166,6 +196,7 @@ final class ManagedAgentTileNSView: TileNSView {
         // tile can learn which checkout this agent works in — before its first
         // event, and without the tile ever reading a repository itself.
         agentSource = supervisor
+        headerAgentName = supervisor.records[agentID]?.displayName
         applyBranchContext(supervisor.branchContext(for: agentID))
         // P6.1: and which model and thinking level it runs with. From the RECORD,
         // for the same reason the branch is: the agent has its own values (a role
@@ -207,7 +238,9 @@ final class ManagedAgentTileNSView: TileNSView {
     /// passes it straight through, and so the mismatch rule has exactly one
     /// definition — the context's. `nil` hides the chip.
     func applyBranchContext(_ context: AgentRowContext?) {
+        branchContext = context
         branchChip.apply(BranchChipNSView.display(for: context))
+        applyAgentHeader(status: descriptor.status)
     }
 
     /// Re-read the agent's branch state and repaint. Drops the cached read first:
@@ -281,9 +314,10 @@ final class ManagedAgentTileNSView: TileNSView {
     }
 
     func ingest(_ event: AgentRuntimeEvent) {
-        if startedAt == nil {
-            if case .turnStarted = event { startedAt = Date() }
-        }
+        // Turn-local, not session-local: each new turn resets the semantic timer.
+        // AgentTileHeaderView owns the one-second repaint and never touches the
+        // transcript layout beneath it.
+        if case .turnStarted = event { startedAt = Date() }
         // A prompt is done once the agent settles or a turn ends. Clearing the
         // in-flight latch here re-enables the compose row (see submitPrompt).
         switch event {
@@ -331,6 +365,14 @@ final class ManagedAgentTileNSView: TileNSView {
         contentBackdrop.layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(for: theme)
         header.layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(for: theme)
         composeBackdrop.layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(for: theme)
+        if AgentTileHeaderView.isFixtureEnabled {
+            // Idle v2 agent tiles do not claim a state-bearing perimeter edge.
+            // Keyboard focus and needs-attention remain the canvas-owned strong
+            // overlays; the surface ladder supplies the quiet containment.
+            layer?.borderWidth = 0
+            layer?.borderColor = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
+            agentHeader.applyTokens()
+        }
         // The chip is `TokenThemed` and re-applies on its own flip too; driving it
         // from here as well costs one idempotent assignment and means the header's
         // colours cannot fall behind if AppKit skips a hidden subview.
@@ -349,7 +391,13 @@ final class ManagedAgentTileNSView: TileNSView {
     private func makeContentView() -> NSView {
         let root = contentBackdrop
 
-        configureHeader()
+        let installedHeader: NSView
+        if AgentTileHeaderView.isFixtureEnabled {
+            installedHeader = agentHeader
+        } else {
+            configureHeader()
+            installedHeader = header
+        }
 
         cardStack.orientation = .vertical
         cardStack.alignment = .leading
@@ -380,7 +428,7 @@ final class ManagedAgentTileNSView: TileNSView {
 
         let composeRow = makeComposeRow()
 
-        let layout = NSStackView(views: [header, scrollView, approvalDock, composeRow])
+        let layout = NSStackView(views: [installedHeader, scrollView, approvalDock, composeRow])
         layout.orientation = .vertical
         layout.spacing = 0
         layout.translatesAutoresizingMaskIntoConstraints = false
@@ -394,7 +442,9 @@ final class ManagedAgentTileNSView: TileNSView {
             // numbers: two title lines for the name/phase stack, one body line for
             // the compose field, and the dock's own derivation (`Metrics`' mapping
             // table records the 52→54 / 44→41 moves this produces).
-            header.heightAnchor.constraint(equalToConstant: Metrics.rowHeight(for: .title, lines: 2)),
+            installedHeader.heightAnchor.constraint(equalToConstant: AgentTileHeaderView.isFixtureEnabled
+                ? AgentTileHeaderView.preferredHeight
+                : Metrics.rowHeight(for: .title, lines: 2)),
             approvalDock.heightAnchor.constraint(equalToConstant: ApprovalDockView.preferredHeight),
             // P6.1: the prompt row's derived height PLUS the pickers' own. Two
             // popups do not fit the single-body-line height this was, and a popup
@@ -408,7 +458,7 @@ final class ManagedAgentTileNSView: TileNSView {
             // message's single-line width and floating in the middle of the
             // tile (with the scroller stranded mid-tile). Pin every row to the
             // stack's width.
-            header.widthAnchor.constraint(equalTo: layout.widthAnchor),
+            installedHeader.widthAnchor.constraint(equalTo: layout.widthAnchor),
             scrollView.widthAnchor.constraint(equalTo: layout.widthAnchor),
             approvalDock.widthAnchor.constraint(equalTo: layout.widthAnchor),
             composeRow.widthAnchor.constraint(equalTo: layout.widthAnchor)
@@ -593,6 +643,7 @@ final class ManagedAgentTileNSView: TileNSView {
     }
 
     private func applyHeader(status: AgentStatus) {
+        applyAgentHeader(status: status)
         nameLabel.stringValue = tile.title
         let display = StatusChipPresenter.display(for: status)
         glyphLabel.stringValue = display.glyph
@@ -604,6 +655,21 @@ final class ManagedAgentTileNSView: TileNSView {
         if let startedAt, status == .working || status == .needsAttention {
             elapsedLabel.stringValue = "\(max(0, Int(Date().timeIntervalSince(startedAt))))s"
         }
+    }
+
+    private func applyAgentHeader(status: AgentStatus) {
+        guard AgentTileHeaderView.isFixtureEnabled else { return }
+        agentHeader.apply(AgentTileStatePresenter.present(
+            name: headerAgentName ?? tile.title,
+            status: status,
+            branchContext: branchContext,
+            startedAt: startedAt
+        ))
+    }
+
+    override func sync(tile: Tile) {
+        super.sync(tile: tile)
+        applyHeader(status: descriptor.status)
     }
 
     /// Keeps the newest output visible. Without this the clip view stays pinned
@@ -711,9 +777,101 @@ final class ManagedAgentTileNSView: TileNSView {
     func qaPickThinking(_ thinking: String) -> Bool { providerFooter.qaPickThinking(thinking) }
     /// nil when the chip is hidden, so "no branch is shown" and "an empty branch is
     /// shown" cannot be confused.
-    var qaBranchChipText: String? { branchChip.isHidden ? nil : branchChip.qaText }
-    var qaBranchChipIsWarning: Bool { !branchChip.isHidden && branchChip.qaIsWarning }
-    var qaBranchChipTooltip: String? { branchChip.isHidden ? nil : branchChip.toolTip }
+    var qaBranchChipText: String? {
+        if AgentTileHeaderView.isFixtureEnabled {
+            // `--agent-supervisor-check` enables the v2 fixture and consumes this
+            // accessor for unbound, isolated, shared, and moved-checkout tiles.
+            // Return the INSTALLED header's chip so the existing deterministic
+            // branch assertions exercise this shell rather than its hidden legacy
+            // sibling. A shell/action regression becomes an explicit check failure.
+            guard qaV2HeaderContractHolds() else { return qaV2HeaderFailure }
+            return agentHeader.qaBranch
+        }
+        return branchChip.isHidden ? nil : branchChip.qaText
+    }
+    var qaBranchChipIsWarning: Bool {
+        AgentTileHeaderView.isFixtureEnabled
+            ? agentHeader.qaBranchIsWarning
+            : (!branchChip.isHidden && branchChip.qaIsWarning)
+    }
+    var qaBranchChipTooltip: String? {
+        AgentTileHeaderView.isFixtureEnabled ? agentHeader.qaBranchTooltip : (branchChip.isHidden ? nil : branchChip.toolTip)
+    }
+    private var qaV2ContractDetail = "not exercised"
+    private func qaV2HeaderContractHolds() -> Bool {
+        guard qaUsesV2HeaderShell,
+              !agentHeader.qaName.isEmpty,
+              !agentHeader.qaState.isEmpty,
+              agentHeader.qaUsesCustomOverflow,
+              agentHeader.qaActionTitles == [AgentTileHeaderView.stopActionTitle, AgentTileHeaderView.detachActionTitle],
+              layer?.borderWidth == 0 else { return false }
+        let titleActions = titleBarContextMenuForQA().items.map(\.title)
+        guard titleActions.contains(AgentTileHeaderView.stopActionTitle),
+              titleActions.contains(AgentTileHeaderView.detachActionTitle),
+              !titleActions.contains("Stop current turn"),
+              !titleActions.contains("Stop run"),
+              !titleActions.contains("Close tile") else { return false }
+
+        // Exercise the installed header's production callback path, rather than
+        // accepting action labels as proof that either action is connected.
+        let savedStop = onStopRun
+        let savedClose = onClose
+        var stopCount = 0
+        var detachCount = 0
+        onStopRun = { stopCount += 1 }
+        onClose = { detachCount += 1 }
+        agentHeader.qaInvokeStopAction()
+        agentHeader.qaInvokeDetachAction()
+        onStopRun = savedStop
+        onClose = savedClose
+        guard stopCount == 1, detachCount == 1 else { return false }
+
+        // Drive the exact timer update used by the one-second Timer. A tick must
+        // update only the fixed-width header label, never invalidate transcript
+        // layout. Settling idle must tear the timer down and hide elapsed time.
+        let start = Date(timeIntervalSince1970: 100)
+        agentHeader.apply(AgentTileStatePresenter.present(
+            name: headerAgentName ?? tile.title,
+            status: .working,
+            branchContext: branchContext,
+            startedAt: start,
+            now: Date(timeIntervalSince1970: 165)
+        ))
+        // Applying a wholly new presentation may legitimately lay out the
+        // shell. Settle it, then count actual transcript layout passes while an
+        // isolated timer tick and its resulting layout are processed.
+        contentView?.layoutSubtreeIfNeeded()
+        let transcriptLayoutsBeforeTick = cardStack.qaLayoutPassCount
+        agentHeader.qaTick(now: Date(timeIntervalSince1970: 165))
+        contentView?.layoutSubtreeIfNeeded()
+        let timerActive = agentHeader.qaTimerIsActive
+        let elapsedText = agentHeader.qaElapsed
+        let transcriptLayoutDelta = cardStack.qaLayoutPassCount - transcriptLayoutsBeforeTick
+        let workingTimerHolds = timerActive
+            && elapsedText == "· 1m 5s"
+            && transcriptLayoutDelta == 0
+        agentHeader.apply(AgentTileStatePresenter.present(
+            name: headerAgentName ?? tile.title,
+            status: .idle,
+            branchContext: branchContext,
+            startedAt: start,
+            now: Date(timeIntervalSince1970: 165)
+        ))
+        let idleTimerHolds = !agentHeader.qaTimerIsActive && agentHeader.qaElapsed == nil
+        applyAgentHeader(status: descriptor.status)
+        qaV2ContractDetail = "callbacks=\(stopCount)/\(detachCount) timerActive=\(timerActive) "
+            + "elapsed=\(elapsedText ?? "nil") transcriptLayouts=\(transcriptLayoutDelta) idleTimer=\(idleTimerHolds)"
+        return workingTimerHolds && idleTimerHolds
+    }
+    private var qaV2HeaderFailure: String {
+        "__invalid-v2-agent-header-shell__ "
+            + "installed=\(qaUsesV2HeaderShell) name=\(agentHeader.qaName) state=\(agentHeader.qaState) "
+            + "custom=\(agentHeader.qaUsesCustomOverflow) actions=\(agentHeader.qaActionTitles) "
+            + "elapsed=\(agentHeader.qaElapsed ?? "nil") timer=\(agentHeader.qaTimerIsActive) "
+            + "detail=\(qaV2ContractDetail) border=\(layer?.borderWidth ?? -1) "
+            + "titleActions=\(titleBarContextMenuForQA().items.map(\.title))"
+    }
+    var qaUsesV2HeaderShell: Bool { AgentTileHeaderView.isFixtureEnabled && agentHeader.superview != nil }
     func qaSubmitPrompt(_ prompt: String) {
         composeField.stringValue = prompt
         submitPrompt()

@@ -304,6 +304,22 @@ enum UIProbeAppearance {
                     hasDraft: true
                 ))
             }),
+            // 91/P5.1: the v2 header shell stays behind its fixture flag until
+            // P5.5 acceptance, so the live tile surfaces above never contain it.
+            // Render the real header (working state, so the status dot paints)
+            // with its private overflow control so neither conformer can retain
+            // a stale token CGColor meanwhile.
+            ("appearance.agentTileHeader", NSSize(width: 420, height: 56), {
+                let header = AgentTileHeaderView(frame: NSRect(x: 0, y: 0, width: 420, height: 56))
+                header.apply(AgentTileStatePresenter.present(
+                    name: "sol-implementer",
+                    status: .working,
+                    branchContext: nil,
+                    startedAt: Date(timeIntervalSince1970: 100),
+                    now: Date(timeIntervalSince1970: 165)
+                ))
+                return header
+            }),
             // 91/P4.7: the reusable control is intentionally isolated until P4.8
             // owns model/effort migration. Render its real button, list, and private
             // row descendants so none can retain a stale token CGColor meanwhile.

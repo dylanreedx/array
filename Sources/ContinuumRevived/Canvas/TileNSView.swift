@@ -64,6 +64,13 @@ class TileNSView: NSView, TokenThemed {
         titleBar?.setAccessory(accessory)
     }
 
+    /// Action vocabulary is tile-kind specific. A managed agent closes by
+    /// detaching its view; unlike a terminal tile, that operation never stops or
+    /// archives the underlying entity.
+    func setTileActionLabels(close: String, stop: String) {
+        titleBar?.setActionLabels(close: close, stop: stop)
+    }
+
     func makeAdditionalTitleBarMenuItems() -> [NSMenuItem] { [] }
 
     func titleBarContextMenuForQA() -> NSMenu {
@@ -706,6 +713,8 @@ private final class TitleBarView: NSView, TokenThemed {
     var onStopRunRequested: (() -> Void)?
     var additionalMenuItemsProvider: (() -> [NSMenuItem])?
     private var accessoryView: NSView?
+    private var closeActionTitle = "Close tile"
+    private var stopActionTitle = "Stop run"
 
     var snapshot: TileNSView.ChromeSnapshot {
         TileNSView.ChromeSnapshot(
@@ -752,6 +761,9 @@ private final class TitleBarView: NSView, TokenThemed {
 
         btn.target = self
         btn.action = #selector(handleClose(_:))
+        btn.setAccessibilityLabel(closeActionTitle)
+        btn.setAccessibilityHelp("Close this tile.")
+        btn.toolTip = closeActionTitle
         btn.translatesAutoresizingMaskIntoConstraints = true
         btn.autoresizingMask = []
         addSubview(btn)
@@ -810,6 +822,16 @@ private final class TitleBarView: NSView, TokenThemed {
     /// QA: the close button's laid-out frame (world units) so the parent's
     /// self-check can assert its on-screen hit size stays in a usable band.
     var qaCloseButtonFrame: CGRect { closeButton.frame }
+
+    func setActionLabels(close: String, stop: String) {
+        closeActionTitle = close
+        stopActionTitle = stop
+        closeButton.setAccessibilityLabel(close)
+        closeButton.setAccessibilityHelp(close == "Detach agent view"
+            ? "Detach this view without stopping, archiving, or deleting the agent."
+            : "Close this tile.")
+        closeButton.toolTip = close
+    }
 
     func setAccessory(_ accessory: NSView?) {
         accessoryView?.removeFromSuperview()
@@ -876,11 +898,11 @@ private final class TitleBarView: NSView, TokenThemed {
         if !additionalItems.isEmpty {
             menu.addItem(NSMenuItem.separator())
         }
-        let stop = NSMenuItem(title: "Stop run", action: #selector(handleStopRun(_:)), keyEquivalent: "")
+        let stop = NSMenuItem(title: stopActionTitle, action: #selector(handleStopRun(_:)), keyEquivalent: "")
         stop.target = self
         menu.addItem(stop)
         menu.addItem(NSMenuItem.separator())
-        let close = NSMenuItem(title: "Close tile", action: #selector(handleClose(_:)), keyEquivalent: "")
+        let close = NSMenuItem(title: closeActionTitle, action: #selector(handleClose(_:)), keyEquivalent: "")
         close.target = self
         menu.addItem(close)
         return menu

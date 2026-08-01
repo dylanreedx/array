@@ -363,6 +363,7 @@ enum UIProbeGeometry {
         try checkReusableAgentBlockHost()
         let composerCases = try checkGrowingComposerLayout()
         let choiceCases = try checkChoicePopover()
+        try checkAgentTileHeaderShell()
         let transcriptLiveHosts = try checkTranscriptCollectionList()
         let streamingApplies = try checkIncrementalTranscriptBehavior()
         let proseRows = try checkAssistantProseRenderer()
@@ -378,6 +379,49 @@ enum UIProbeGeometry {
             probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), composerCases, choiceCases, transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, exceptionalRows,
             narrowestCardRatio, ApprovalDockView.preferredHeight, tightestDockSlack
         ))
+    }
+
+    /// P5.1 geometry gate for the v2 agent header shell. The shell stays behind
+    /// its fixture flag until P5.5 acceptance, so this constructs the real view
+    /// directly: wide/narrow layout, overflow hit target, truncation-not-clipping,
+    /// tick-stable elapsed frame, and idle timer teardown.
+    private static func checkAgentTileHeaderShell() throws {
+        let longName = "an-agent-name-long-enough-to-need-truncation-at-narrow-width"
+        for width in [CGFloat(900), CGFloat(320)] {
+            let header = AgentTileHeaderView(
+                frame: NSRect(x: 0, y: 0, width: width, height: AgentTileHeaderView.preferredHeight)
+            )
+            header.apply(AgentTileStatePresenter.present(
+                name: longName,
+                status: .working,
+                branchContext: nil,
+                startedAt: Date(timeIntervalSince1970: 100),
+                now: Date(timeIntervalSince1970: 165)
+            ))
+            header.layoutSubtreeIfNeeded()
+            guard let overflow = header.qaOverflowFrame, overflow.width == 28, overflow.height == 28,
+                  header.bounds.insetBy(dx: -0.5, dy: -0.5).contains(overflow) else {
+                throw fail("agent header: overflow action lost its 28pt hit target inside the shell at \(Int(width))pt")
+            }
+            guard let name = header.qaNameFrame, name.maxX <= overflow.minX,
+                  name.minX >= 0, header.qaName == longName else {
+                throw fail("agent header: name label escaped its lane at \(Int(width))pt — truncation must stay inside the shell")
+            }
+            let elapsedBefore = header.qaElapsedFrame
+            header.qaTick(now: Date(timeIntervalSince1970: 226))
+            guard header.qaElapsedFrame == elapsedBefore else {
+                throw fail("agent header: a timer tick moved the elapsed label frame — ticks must not relayout")
+            }
+            guard header.qaTimerIsActive else {
+                throw fail("agent header: working state did not keep its one-second timer")
+            }
+            header.apply(AgentTileStatePresenter.present(
+                name: longName, status: .idle, branchContext: nil, startedAt: nil
+            ))
+            guard !header.qaTimerIsActive, header.qaElapsed == nil else {
+                throw fail("agent header: settling idle did not tear the timer down and hide elapsed time")
+            }
+        }
     }
 
     /// Deterministic behavior/geometry gate for the reusable custom choice
