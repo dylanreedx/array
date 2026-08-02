@@ -2390,7 +2390,10 @@ enum LabCatalog {
         return events
     }
 
-    static func makeManagedAgentFixtureView(includeApproval: Bool = true) -> ManagedAgentTileNSView {
+    static func makeManagedAgentFixtureView(
+        includeApproval: Bool = true,
+        useV2: Bool = false
+    ) -> ManagedAgentTileNSView {
         let tile = Tile(
             id: UUID(uuidString: "71000000-0000-4000-8000-000000000071")!,
             kind: .managedAgent,
@@ -2400,7 +2403,7 @@ enum LabCatalog {
             runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: "managed")
         )
-        let view = ManagedAgentTileNSView(tile: tile)
+        let view = ManagedAgentTileNSView(tile: tile, useV2: useV2)
         view.frame = NSRect(x: 0, y: 0, width: 560, height: 560)
         // P2C.4: an isolated agent ON the branch it was given — the ordinary case.
         // The fixture carries it so `--ui-geometry-check` exercises the header with
@@ -3680,6 +3683,17 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         guard managedAgentView.currentAgentStatus == .needsAttention else {
             throw fail("managed agent fixture status \(managedAgentView.currentAgentStatus), expected needsAttention")
+        }
+        let v2ManagedAgentView = LabCatalog.makeManagedAgentFixtureView(
+            includeApproval: false,
+            useV2: true
+        )
+        guard v2ManagedAgentView.qaUsesV2Tile,
+              v2ManagedAgentView.qaUsesFullTurnComposer,
+              !v2ManagedAgentView.qaHasLegacyComposeField,
+              !v2ManagedAgentView.qaHasPermanentApprovalDock,
+              v2ManagedAgentView.qaV2RenderError == nil else {
+            throw fail("Component Lab v2 construction seam did not install the migrated tile exclusively")
         }
         guard entries.contains(where: { $0.id == "managed-agent.approval-dock" }) else {
             throw fail("missing managed-agent.approval-dock card")

@@ -13,7 +13,16 @@ public enum ManagedTranscriptCardProjection {
         itemKindsByItemID: [String: ItemKind],
         itemStatusesByItemID: [String: ItemStatus] = [:]
     ) -> [ManagedTranscriptCard] {
-        document.entries.enumerated().map { index, entry in
+        // Request entries are v2 semantic blocks (P5.4). The legacy card stack
+        // presents the same runtime events through its own approval dock and
+        // user-input card UI, so projecting them here would duplicate each
+        // request as a legacy card and move blessed legacy baselines.
+        document.entries.filter { entry in
+            switch entry.blocks.first?.kind {
+            case .approval?, .question?: return false
+            default: return true
+            }
+        }.enumerated().map { index, entry in
             let primary = entry.blocks.first
             let kind = cardKind(entry: entry, block: primary)
             return ManagedTranscriptCard(

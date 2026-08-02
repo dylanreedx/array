@@ -364,6 +364,7 @@ enum UIProbeGeometry {
         let composerCases = try checkGrowingComposerLayout()
         let choiceCases = try checkChoicePopover()
         try checkAgentTileHeaderShell()
+        try checkLiveV2AgentTileLayout()
         let transcriptLiveHosts = try checkTranscriptCollectionList()
         let streamingApplies = try checkIncrementalTranscriptBehavior()
         let proseRows = try checkAssistantProseRenderer()
@@ -420,6 +421,39 @@ enum UIProbeGeometry {
             ))
             guard !header.qaTimerIsActive, header.qaElapsed == nil else {
                 throw fail("agent header: settling idle did not tear the timer down and hide elapsed time")
+            }
+        }
+    }
+
+    /// P5.4 geometry gate for the actual migrated composition root. The committed
+    /// Component Lab baseline intentionally remains on the rollback tile until P5.5,
+    /// so this non-pixel gate covers the live v2 seam at all required widths/themes.
+    private static func checkLiveV2AgentTileLayout() throws {
+        for width in [CGFloat(320), 480, 640, 900] {
+            for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+                let label = "managedAgent.v2@\(Int(width))pt.\(appearanceName.rawValue)"
+                let probe = try UIProbe.render(
+                    .init(id: label, size: NSSize(width: width, height: 560), appearance: appearanceName)
+                ) {
+                    LabCatalog.makeManagedAgentFixtureView(includeApproval: false, useV2: true)
+                }
+                guard let tile = probe.view as? ManagedAgentTileNSView,
+                      tile.qaUsesV2Tile,
+                      tile.qaUsesFullTurnComposer,
+                      let transcript = tile.qaTranscriptCollectionFixture else {
+                    throw fail("\(label): v2 constructor did not install semantic transcript/full-turn composer")
+                }
+                tile.layoutSubtreeIfNeeded()
+                transcript.layoutSubtreeIfNeeded()
+                guard !tile.qaHasLegacyComposeField, !tile.qaHasPermanentApprovalDock,
+                      tile.qaV2RenderError == nil,
+                      transcript.qaSemanticRowCount >= 4 else {
+                    throw fail("\(label): v2 tile retained legacy UI or failed semantic rendering")
+                }
+                try fills(child: transcript, parent: tile, minRatio: 0.95, label: "\(label): semantic transcript")
+                try expectNoZeroSizeViews(tile, label: label)
+                try expectNoClipping(tile, label: label)
+                try expectNoBrokenRequiredSizeConstraints(tile, label: label)
             }
         }
     }

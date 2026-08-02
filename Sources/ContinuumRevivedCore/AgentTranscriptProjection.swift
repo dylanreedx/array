@@ -28,6 +28,8 @@ public struct AgentTranscriptProjection: Sendable {
     private var activeItemIDs = Set<String>()
     private var completedStatuses: [String: ItemStatus] = [:]
     private var compatibilityIDs: [AgentNodeID: String] = [:]
+    private var requestEntries: [String: AgentNodeID] = [:]
+    private var requestBlocks: [String: AgentNodeID] = [:]
     private var localSequence = 0
     private var runtimeErrorSequence = 0
 
@@ -113,9 +115,85 @@ public struct AgentTranscriptProjection: Sendable {
             result += errorMutations(message: message, provenanceID: tid, suffix: "runtime-error:\(runtimeErrorSequence)")
             return result
 
+        // P5.4: explicit provider-enforced requests are semantic transcript
+        // blocks owned here, never a parallel projection inside a tile. Prompt
+        // and choices come only from the compiled event/decision vocabulary; a
+        // request resolves only on a real resolution event.
+        case .requestOpened(let tid, let requestID, let kind) where tid == threadId:
+            return openRequestMutations(
+                requestID: requestID,
+                blockKind: .approval,
+                payloadKind: AgentBlockPayload.approval,
+                prompt: kind.compiledRequestPrompt,
+                choices: ApprovalDecision.compiledChoices
+            )
+
+        case .userInputRequested(let tid, let requestID, let questions) where tid == threadId:
+            let prompt = questions.map(\.prompt).filter { !$0.isEmpty }.joined(separator: " ")
+            return openRequestMutations(
+                requestID: requestID,
+                blockKind: .question,
+                payloadKind: AgentBlockPayload.question,
+                prompt: prompt.isEmpty ? "Provider requested input" : prompt,
+                choices: []
+            )
+
+        case .requestResolved(let tid, let requestID, let decision) where tid == threadId:
+            guard let entryID = requestEntries[requestID], let blockID = requestBlocks[requestID] else { return [] }
+            let declined = decision == ApprovalDecision.decline.rawValue
+                || decision == ApprovalDecision.cancel.rawValue
+            return [
+                .completeBlock(id: blockID, status: declined ? .cancelled : .completed),
+                .finishEntry(id: entryID)
+            ]
+
+        case .userInputResolved(let tid, let requestID) where tid == threadId:
+            guard let entryID = requestEntries[requestID], let blockID = requestBlocks[requestID] else { return [] }
+            return [
+                .completeBlock(id: blockID, status: .completed),
+                .finishEntry(id: entryID)
+            ]
+
         default:
             return []
         }
+    }
+
+    private mutating func openRequestMutations(
+        requestID: String,
+        blockKind: AgentBlockKind,
+        payloadKind: (AgentRequestPayload) -> AgentBlockPayload,
+        prompt: String,
+        choices: [String]
+    ) -> [AgentDocumentMutation] {
+        var result = closeStreamingRun()
+        guard requestEntries[requestID] == nil else { return result }
+        let entryID = makeID(scope: "request", providerID: requestID)
+        let blockID = childID(of: entryID, key: "request")
+        requestEntries[requestID] = entryID
+        requestBlocks[requestID] = blockID
+        compatibilityIDs[entryID] = requestID
+        result += [
+            .beginEntry(id: entryID, role: .system, provenance: .providerItem(provider: "runtime", itemID: requestID)),
+            .upsertStructured(entryID: entryID, block: AgentBlock(
+                id: blockID,
+                kind: blockKind,
+                payload: payloadKind(AgentRequestPayload(
+                    requestID: requestID,
+                    prompt: [.text(prompt)],
+                    status: .inProgress,
+                    choices: choices
+                ))
+            ))
+        ]
+        return result
+    }
+
+    /// Finds the transcript entry that carries one explicit provider request, so
+    /// a needs-attention affordance can reveal the real block instead of an
+    /// orphan label. Nil means the request never reached this projection.
+    public func requestEntryID(for requestID: String) -> AgentNodeID? {
+        requestEntries[requestID]
     }
 
     public mutating func ingest(_ event: AgentRuntimeEvent) {
@@ -343,7 +421,16 @@ public struct AgentTranscriptProjection: Sendable {
 
 extension AgentTranscriptProjection: AgentTranscriptProjecting {
     public var compatibilityRows: [AgentTranscriptCompatibilityRow] {
-        document.entries.map { entry in
+        // Request entries are v2 semantic blocks (P5.4). The compatibility card
+        // stack has its own approval dock and user-input card UI for the same
+        // events, so projecting them here would duplicate the request as an
+        // empty legacy card and move blessed legacy baselines.
+        document.entries.filter { entry in
+            switch entry.blocks.first?.kind {
+            case .approval?, .question?: return false
+            default: return true
+            }
+        }.map { entry in
             AgentTranscriptCompatibilityRow(
                 id: compatibilityIDs[entry.id] ?? entry.id.rawValue,
                 kind: compatibilityKind(entry),
@@ -403,6 +490,30 @@ extension AgentTranscriptProjection: AgentTranscriptProjecting {
             }
         }.joined()
     }
+}
+
+public extension ApprovalKind {
+    /// One compiled prompt per request kind; never derived from prose. Shared by
+    /// the transcript projection and the supervisor's turn facts so the revealed
+    /// block and the needs-action state can never describe different requests.
+    var compiledRequestPrompt: String {
+        switch self {
+        case .commandExecutionApproval: return "Allow the requested command?"
+        case .applyPatchApproval: return "Allow the requested patch?"
+        case .toolUserInput: return "The provider requested a decision"
+        }
+    }
+}
+
+public extension ApprovalDecision {
+    /// The compiled decision vocabulary — the only choices a request surface may
+    /// advertise. No transport-free path may resolve one locally.
+    static let compiledChoices = [
+        ApprovalDecision.accept.rawValue,
+        ApprovalDecision.acceptForSession.rawValue,
+        ApprovalDecision.decline.rawValue,
+        ApprovalDecision.cancel.rawValue,
+    ]
 }
 
 private extension Array where Element == AgentDocumentMutation {

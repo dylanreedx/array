@@ -1558,8 +1558,8 @@ final class AgentSupervisor {
         case let .requestOpened(_, requestID, kind):
             let request = AgentPendingRequest(
                 requestID: requestID,
-                prompt: Self.requestPrompt(for: kind),
-                responseMode: .fixedChoice(Self.approvalChoices)
+                prompt: kind.compiledRequestPrompt,
+                responseMode: .fixedChoice(ApprovalDecision.compiledChoices)
             )
             facts.pendingRequests[requestID] = request
             if !facts.requestOrder.contains(requestID) { facts.requestOrder.append(requestID) }
@@ -1586,21 +1586,6 @@ final class AgentSupervisor {
             break
         }
         turnFacts[id] = facts
-    }
-
-    private nonisolated static let approvalChoices = [
-        ApprovalDecision.accept.rawValue,
-        ApprovalDecision.acceptForSession.rawValue,
-        ApprovalDecision.decline.rawValue,
-        ApprovalDecision.cancel.rawValue,
-    ]
-
-    private nonisolated static func requestPrompt(for kind: ApprovalKind) -> String {
-        switch kind {
-        case .commandExecutionApproval: return "Allow the requested command?"
-        case .applyPatchApproval: return "Allow the requested patch?"
-        case .toolUserInput: return "The provider requested a decision"
-        }
     }
 
     nonisolated static func isPersistWorthy(_ event: AgentRuntimeEvent) -> Bool {
@@ -2538,6 +2523,7 @@ func runAgentSupervisorChecks() async throws {
     // MARK: 7 · a TILE is a subscriber (P2A.4), and detaching it leaves the agent running
 
     let tileReport = try await checkTileIsASubscriber(store: store, config: config, cwd: cwd, fail: fail)
+    let liveV2Report = try await checkLiveV2TileMigration(store: store, config: config, cwd: cwd, fail: fail)
 
     // MARK: 8 · closing a tile is closing a window, not ending the work (P2A.5)
 
@@ -2588,7 +2574,7 @@ func runAgentSupervisorChecks() async throws {
     let turnStateReport = try await checkCapabilityDrivenTurnStates(config: config, cwd: cwd, fail: fail)
 
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport)")
 }
 
 @MainActor
@@ -3296,6 +3282,207 @@ private final class ScriptedRunnerQueue {
         handedOut.append(runner)
         return runner
     }
+}
+
+/// P5.4 live migration gate. The required negative witness is the empty-choice
+/// user-input request: it must render context but never acquire a fabricated text
+/// editor or action. Changing that request to freeform makes this assertion red.
+@MainActor
+private func checkLiveV2TileMigration<Failure: Error>(
+    store: AgentStore,
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Failure
+) async throws -> String {
+    let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+    let tileID = UUID()
+    let agentID = supervisor.spawn(
+        role: "migration-check",
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking,
+        tileId: tileID
+    )
+    let thread = AgentSupervisor.threadId(for: agentID)
+
+    // Replay exists before the v2 view and tail follows after attach. Two deltas
+    // update one stable semantic row rather than creating a second visible model.
+    supervisor.qaDeliver(.turnStarted(threadId: thread, turnId: "v2-turn"), to: agentID)
+    supervisor.qaDeliver(.contentDelta(
+        threadId: thread, turnId: "v2-turn", streamKind: .assistant, delta: "replay"
+    ), to: agentID)
+
+    let tile = ManagedAgentTileNSView(tile: Tile(
+        id: tileID,
+        kind: .managedAgent,
+        title: "migration-check",
+        frame: TileFrame(x: 0, y: 0, width: 520, height: 420),
+        zPosition: .fromLegacyRank(1),
+        runtimeRef: nil,
+        metadata: TileMetadata(launchProfileId: "managed")
+    ), useV2: true)
+    tile.frame = NSRect(x: 0, y: 0, width: 520, height: 420)
+    let draftStore = AgentComposerDraftStore(
+        applicationSupportDirectory: store.layout.applicationSupportDirectory,
+        debounceInterval: 60
+    )
+    let promptHistory = AgentPromptHistory()
+    tile.bindV2ComposerState(draftStore: draftStore, promptHistory: promptHistory)
+    tile.attach(agentID: agentID, supervisor: supervisor)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        tile.ingestedEvents.count == 2 && tile.qaRenderedCardCount == 1
+    }) else {
+        throw fail("live-v2: replay did not produce exactly one semantic row (events \(tile.ingestedEvents.count), rows \(tile.qaRenderedCardCount), error \(tile.qaV2RenderError ?? "none"))")
+    }
+    supervisor.qaDeliver(.contentDelta(
+        threadId: thread, turnId: "v2-turn", streamKind: .assistant, delta: "→tail"
+    ), to: agentID)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        tile.ingestedEvents.count == 3 && tile.qaRenderedCardCount == 1
+    }) else {
+        throw fail("live-v2: tail duplicated the stable semantic row (events \(tile.ingestedEvents.count), rows \(tile.qaRenderedCardCount))")
+    }
+    guard tile.qaUsesV2Tile, tile.qaUsesFullTurnComposer,
+          !tile.qaHasLegacyComposeField, !tile.qaHasPermanentApprovalDock,
+          tile.qaV2RenderError == nil else {
+        throw fail("live-v2: migrated shell did not install semantic list/full-turn composer exclusively")
+    }
+
+    // The request block is projected by the content reducer, and a choice press
+    // is a transport dispatch, never a resolution. The seam here refuses (as an
+    // unbound production seam effectively does), so the request must remain
+    // pending until the REAL runtime resolution event arrives.
+    var dispatches: [(String, String)] = []
+    tile.onProviderResponse = { requestID, value in
+        dispatches.append((requestID, value))
+        return false
+    }
+    supervisor.qaDeliver(.requestOpened(
+        threadId: thread, requestId: "approval-live", kind: .commandExecutionApproval
+    ), to: agentID)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        tile.qaV2RequestIDs == ["approval-live"]
+            && tile.qaV2RequestChoices("approval-live") == ApprovalDecision.compiledChoices
+    }) else {
+        throw fail("live-v2: needs-attention did not reveal the matching fixed-choice request")
+    }
+    tile.layoutSubtreeIfNeeded()
+    guard tile.qaClickV2RequestChoice(
+        requestID: "approval-live", value: ApprovalDecision.decline.rawValue
+    ) else {
+        throw fail("live-v2: provider choice was not a clickable action in the semantic request block")
+    }
+    guard dispatches.count == 1, dispatches[0] == ("approval-live", ApprovalDecision.decline.rawValue),
+          tile.qaV2RequestStatus("approval-live") == .inProgress else {
+        throw fail("live-v2: a choice press without an accepting transport must dispatch exactly once and resolve nothing")
+    }
+    supervisor.qaDeliver(.requestResolved(
+        threadId: thread, requestId: "approval-live", decision: ApprovalDecision.decline.rawValue
+    ), to: agentID)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        tile.qaV2RequestStatus("approval-live") == .cancelled
+    }) else {
+        throw fail("live-v2: the runtime resolution event did not turn the request block passive")
+    }
+    _ = tile.qaClickV2RequestChoice(
+        requestID: "approval-live", value: ApprovalDecision.decline.rawValue
+    )
+    guard dispatches.count == 1 else {
+        throw fail("live-v2: a stale resolved request action fired twice")
+    }
+
+    // Required negative witness: empty choices are an explicit fixed-choice([]),
+    // not evidence of freeform. The request remains readable without controls.
+    supervisor.qaDeliver(.userInputRequested(
+        threadId: thread,
+        requestId: "input-without-contract",
+        questions: [UserInputQuestion(key: "q", prompt: "Provide deployment context")]
+    ), to: agentID)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        tile.qaV2RequestIDs.contains("input-without-contract")
+    }) else {
+        throw fail("live-v2: explicit input request context was not revealed")
+    }
+    guard tile.qaV2RequestChoices("input-without-contract") == [],
+          !tile.qaV2HasCompactRequestEditor,
+          !tile.qaClickV2RequestChoice(requestID: "input-without-contract", value: "fabricated") else {
+        throw fail("live-v2 negative witness: fixedChoice([]) fabricated a response editor or action")
+    }
+    supervisor.qaDeliver(.userInputResolved(
+        threadId: thread, requestId: "input-without-contract"
+    ), to: agentID)
+    supervisor.qaDeliver(.turnCompleted(
+        threadId: thread, turnId: "v2-turn", outcome: .completed, errorMessage: nil
+    ), to: agentID)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        supervisor.turnSnapshot(for: agentID)?.capabilities.canSend == true
+            && tile.qaV2CanSend && tile.qaComposeEnabled
+    }) else {
+        throw fail("live-v2: tile did not return to a send-capable turn after requests resolved")
+    }
+    tile.qaSubmitPrompt("sent through the full-turn composer")
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        promptHistory.acceptedSubmissionCount(for: agentID) == 1
+            && tile.qaTranscriptText.contains("sent through the full-turn composer")
+    }) else {
+        throw fail("live-v2: AgentID-bound composer did not accept, record history, and echo its prompt (history \(promptHistory.acceptedSubmissionCount(for: agentID)), transcript \(tile.qaTranscriptText))")
+    }
+    guard await draftStore.load(for: agentID) == nil else {
+        throw fail("live-v2: accepted composer send did not clear the AgentID-bound draft")
+    }
+
+    // P5.4: forced reattach. Detaching the v2 view and re-attaching the same
+    // agent replays the full history — request blocks included — exactly once
+    // into a fresh reducer, with no duplicate nodes and no render error. The
+    // branch refresh that ran on this v2 tile at turn completion must have
+    // yielded a truthful no-chip for a non-repository cwd, not a shell failure.
+    // Replay is event-sourced: the locally appended prompt row is not a runtime
+    // event and transcript durability of local entries is an explicit program
+    // non-goal, so exactly that one row is absent after a forced reattach.
+    let rowsBeforeReattach = tile.qaRenderedCardCount
+    let requestsBeforeReattach = tile.qaV2RequestIDs
+    tile.detach()
+    tile.attach(agentID: agentID, supervisor: supervisor)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        tile.qaRenderedCardCount == rowsBeforeReattach - 1
+            && tile.qaV2RequestIDs == requestsBeforeReattach
+            && tile.qaV2RenderError == nil
+    }) else {
+        throw fail("live-v2: reattach did not replay the event-sourced document exactly once (rows \(tile.qaRenderedCardCount) vs \(rowsBeforeReattach - 1) expected, requests \(tile.qaV2RequestIDs), error \(tile.qaV2RenderError ?? "none"))")
+    }
+    guard tile.qaV2RequestStatus("approval-live") == .cancelled else {
+        throw fail("live-v2: reattach lost the resolved request's passive state")
+    }
+    // The check runs in a shared repo checkout, so the turn-completion branch
+    // refresh must have produced a real chip through the v2 header contract —
+    // never the shell-failure sentinel and never an empty label.
+    guard let v2Chip = tile.qaBranchChipText, v2Chip.hasPrefix("⎇") else {
+        throw fail("live-v2: v2 branch refresh did not yield a truthful chip for the shared checkout: \(tile.qaBranchChipText ?? "nil")")
+    }
+
+    let compatibility = ManagedAgentTileNSView(tile: Tile(
+        id: UUID(), kind: .managedAgent, title: "rollback",
+        frame: TileFrame(x: 0, y: 0, width: 520, height: 320),
+        zPosition: .fromLegacyRank(1), runtimeRef: nil,
+        metadata: TileMetadata(launchProfileId: "managed")
+    ), useV2: false)
+    guard !compatibility.qaUsesV2Tile,
+          compatibility.qaHasLegacyComposeField,
+          compatibility.qaHasPermanentApprovalDock else {
+        throw fail("live-v2: rollback construction seam no longer produces the compatibility tile")
+    }
+
+    let subscribersBeforeDetach = supervisor.subscriberCount(for: agentID)
+    tile.detach()
+    guard subscribersBeforeDetach == 1,
+          await waitUntil(timeout: 5, pollInterval: 0.02, {
+              supervisor.subscriberCount(for: agentID) == 0
+          }),
+          supervisor.records[agentID] != nil else {
+        throw fail("live-v2: detach failed to cancel UI subscription or changed supervisor ownership")
+    }
+    return "v2 tile replayed then tailed one stable semantic row, sent and history-recorded one AgentID-bound full-turn draft with no legacy field/dock, revealed one reducer-projected fixed-choice request whose choice press dispatched once and resolved NOTHING until the real runtime resolution turned it passive, kept fixedChoice([]) read-only, reattached with an exactly-once replay including resolved request history and a truthful no-chip branch refresh, detached cleanly, and retained a reversible compatibility constructor"
 }
 
 /// The tile as a pure view over an agent's stream: attach replays the history,

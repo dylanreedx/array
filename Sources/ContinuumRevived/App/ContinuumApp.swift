@@ -2874,6 +2874,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `managedAgentRunners` dictionary this view used to hold: the supervisor owns
     /// the runner and the record, and a tile is one subscriber to its event stream.
     private lazy var agentSupervisor = AgentSupervisor(store: AgentStore(smokeTest: smokeTestEnabled))
+    /// Host-local only: drafts are persisted by AgentID and accepted prompt history
+    /// remains memory-only. Neither value enters AgentRecord or companion sync.
+    private lazy var agentComposerDraftStore = AgentComposerDraftStore(
+        applicationSupportDirectory: Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
+    )
+    private let agentPromptHistory = AgentPromptHistory()
     /// P2D.6: the ticket-queue tiles that can fan out, so the agent that finishes
     /// can find the row that started it. App-level rather than on
     /// `ZoneRuntimeController` because the completion arrives from the supervisor,
@@ -9013,6 +9019,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // tile" reaches when it hands us an agent that was detached, whose record
         // therefore no longer names this tile.
         supervisor.attach(agentID: agentId, to: tileId)
+        view.bindV2ComposerState(
+            draftStore: agentComposerDraftStore,
+            promptHistory: agentPromptHistory
+        )
 
         view.onSubmitPrompt = { [weak view] prompt in
             guard let view else { return }
@@ -9982,6 +9992,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// started, or the run leaks past the session.
     func applicationWillTerminate(_ notification: Notification) {
         agentSupervisor.stopAll()
+        Task { await agentComposerDraftStore.flushAll() }
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
