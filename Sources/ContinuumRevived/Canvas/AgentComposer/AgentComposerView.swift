@@ -160,13 +160,24 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     override var acceptsFirstResponder: Bool { true }
 
     override var intrinsicContentSize: NSSize {
-        let width = max(1, scrollView.contentSize.width > 0
-            ? scrollView.contentSize.width
-            : bounds.width - Self.internalPadding * 2)
-        let measurement = heightController.measure(textView: textView, width: width)
+        // Reads the last layout-pass measurement only. Measuring here would
+        // mutate the text container while AppKit may be querying intrinsic size
+        // inside a live window display transaction, and the invalidated layout
+        // then resizes the text view mid-display — an uncaught AppKit
+        // needs-display-during-display exception that killed the v2 boot at the
+        // P5.5 installed-candidate launch. Before the first layout pass, fall
+        // back to one line of the current font without touching TextKit state.
+        let editorHeight: CGFloat
+        if let measurement = heightController.measurement {
+            editorHeight = measurement.visibleEditorHeight
+        } else {
+            let font = textView.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+            editorHeight = textView.layoutManager?.defaultLineHeight(for: font)
+                ?? ceil(font.ascender - font.descender + font.leading)
+        }
         return NSSize(
             width: NSView.noIntrinsicMetric,
-            height: measurement.visibleEditorHeight + (Self.internalPadding * 2)
+            height: editorHeight + (Self.internalPadding * 2)
         )
     }
 
@@ -185,7 +196,26 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     }
 
     override func becomeFirstResponder() -> Bool {
-        window?.makeFirstResponder(textView) ?? false
+        // Delegate to the editor WITHOUT reentering makeFirstResponder from
+        // inside the window's own makeFirstResponder pass — the outer pass
+        // re-installs this shell over the editor after the reentrant call
+        // returns, leaving a first responder with no caret that drops
+        // keystrokes. Accept, then hand off once the pass has finished.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window, window.firstResponder === self else { return }
+            window.makeFirstResponder(self.textView)
+        }
+        return true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        // A click on the shell's padding ring must land in the editor, and the
+        // event must be CONSUMED: forwarding to super walks the responder chain
+        // up to the canvas, whose mouseDown deselects the tile and takes first
+        // responder back — the "first click does nothing" of the P5.5 live
+        // finding (defect 5). The ring is the only thing this shell hit-tests
+        // to itself, so nothing else loses the event.
+        window?.makeFirstResponder(textView)
     }
 
     /// Attaches persistence to agent identity rather than tile identity. Calling
@@ -234,6 +264,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
         snapshot: AgentTileTurnSnapshot
     ) {
         actionTask?.cancel()
+        actionTask = nil
         actionSink = sink
         draftAgentID = agentID
         turnSnapshot = snapshot
@@ -428,8 +459,13 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver {
     ) {
         guard actionTask == nil, let actionSink, let agentID = draftAgentID else { return }
         actionTask = Task { @MainActor [weak self, weak actionSink] in
+            // Every exit — including the sink-gone and self-gone paths — must
+            // release the latch, or the composer can never submit again (P5.5
+            // review correction, defect 3). Except when cancelled: cancel means a
+            // rebind/unbind took ownership of the field, and a stale task must
+            // not clear the task installed after it.
+            defer { if !Task.isCancelled { self?.actionTask = nil } }
             guard let acceptance = await actionSink?.accept(intent, for: agentID), let self else { return }
-            self.actionTask = nil
             guard acceptance == .accepted else { return }
             if let submittedPrompt {
                 self.completeAcceptedSend(submittedPrompt, submittedRevision: submittedRevision)

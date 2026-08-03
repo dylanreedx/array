@@ -40,7 +40,10 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate {
         let container = NSTextContainer(
             size: NSSize(width: max(frameRect.width, 1), height: .greatestFiniteMagnitude)
         )
-        container.widthTracksTextView = true
+        // ComposerHeightController owns the container width explicitly. Width
+        // tracking against a momentarily zero-width live clip view loops the
+        // display cycle until AppKit kills the app (P5.5 boot finding).
+        container.widthTracksTextView = false
         storage.addLayoutManager(layoutManager)
         layoutManager.addTextContainer(container)
         self.init(frame: frameRect, textContainer: container)

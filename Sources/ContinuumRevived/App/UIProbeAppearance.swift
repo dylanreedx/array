@@ -652,15 +652,17 @@ enum UIProbeAppearance {
         "ManagedAgentTileNSView.contentBackdrop",
         "ManagedAgentTileNSView.header",
         "ManagedAgentTileNSView.composeBackdrop",
-        "TranscriptCardView",
-        // P6.0: the prose half of the transcript. It paints ONE layer colour and
-        // only for `.userMessage` — `SurfaceToken.cardUserMessage`, the one device
-        // that tells a user turn from an assistant turn now that neither is a card.
-        // An assistant turn paints nothing, so what puts this owner under the gate
-        // is the fixture's user turn.
-        "TranscriptProseView",
-        "ApprovalDockView",
-        "UserInputCardView",
+        // P5.5 acceptance: the legacy TranscriptCardView/TranscriptProseView owners
+        // were deleted with the compatibility path; the v2 tiles the Lab now vends
+        // paint the composer shell on every managed-agent surface, so the composer
+        // enters the adopted census here (its repaint path was already gated by
+        // the isolated composer sentinel fixtures).
+        "AgentComposerView",
+        // The composer's primary action: quiet composer fill when unavailable, an
+        // accent fill when an operation is offered, accents as glyph/label
+        // foregrounds — all named tokens, gated since P4.6 on the isolated
+        // fixture and now on every managed-agent surface the Lab vends.
+        "ComposerActionButton",
         // 91/P4.8: P4.7 made this custom control token-painted and the isolated
         // sentinel fixture covers its repaint path. P4.8 installs it in the real
         // managed-agent tile, so its fill and interactive boundary now also enter
@@ -755,10 +757,23 @@ enum UIProbeAppearance {
         theme: TokenTheme
     ) -> Set<String> {
         var values = legalValues(for: kind, theme: theme)
-        if owner == "ChoiceButton" && (kind == .background || kind == .fill) {
+        guard kind == .background || kind == .fill else { return values }
+        switch owner {
+        case "ChoiceButton":
             for role in [AgentSurfaceRole.composer, .rowHover] {
                 values.insert(hex(role.color.cgColor(for: theme)))
             }
+        case "AgentComposerView":
+            // The shell's one fill is the composer surface role (P4.1).
+            values.insert(hex(AgentSurfaceRole.composer.color.cgColor(for: theme)))
+        case "ComposerActionButton":
+            // Quiet composer fill when no operation is offered; exactly the two
+            // production accents otherwise (send/stop — P4.6's resolver).
+            values.insert(hex(AgentSurfaceRole.composer.color.cgColor(for: theme)))
+            values.insert(hex(AccentToken.accentInput.color.cgColor(for: theme)))
+            values.insert(hex(AccentToken.accentFailed.color.cgColor(for: theme)))
+        default:
+            break
         }
         return values
     }
@@ -919,20 +934,30 @@ enum UIProbeAppearance {
                 throw fail("the light and dark palettes share \(overlap.count) legal \(kind.rawValue) value(s) (\(overlap.sorted().joined(separator: ", "))) — a token resolved for the wrong theme would pass this gate")
             }
         }
-        // The P4.8 exception is exact: background/fill values grow only for the
-        // custom button owner, by exactly its two production leaves. A missing
-        // owner predicate or admission of another role would weaken the gate.
+        // The per-owner exceptions are exact: background/fill values grow only
+        // for the named custom owners, by exactly their production leaves (P4.8
+        // precedent, extended at P5.5 when the v2 tile became the only tile). A
+        // missing owner predicate or admission of another role would weaken the
+        // gate.
         for theme in TokenTheme.allCases {
-            let roleValues = Set([AgentSurfaceRole.composer, .rowHover].map {
-                hex($0.color.cgColor(for: theme))
-            })
+            let composerFill = hex(AgentSurfaceRole.composer.color.cgColor(for: theme))
+            let choiceValues: Set<String> = [composerFill, hex(AgentSurfaceRole.rowHover.color.cgColor(for: theme))]
+            let actionValues: Set<String> = [
+                composerFill,
+                hex(AccentToken.accentInput.color.cgColor(for: theme)),
+                hex(AccentToken.accentFailed.color.cgColor(for: theme)),
+            ]
             for kind in [ColorSlot.Kind.background, .fill] {
                 let base = legalValues(for: kind, theme: theme)
                 guard legalValues(forOwner: "ChoiceButton", kind: kind, theme: theme)
-                        == base.union(roleValues),
+                        == base.union(choiceValues),
+                      legalValues(forOwner: "AgentComposerView", kind: kind, theme: theme)
+                        == base.union([composerFill]),
+                      legalValues(forOwner: "ComposerActionButton", kind: kind, theme: theme)
+                        == base.union(actionValues),
                       legalValues(forOwner: "ManagedAgentTileNSView", kind: kind, theme: theme)
                         == base else {
-                    throw fail("ChoiceButton agent-surface role admission widened another owner or admitted the wrong \(kind.rawValue) set in \(theme.rawValue)")
+                    throw fail("per-owner role admission widened another owner or admitted the wrong \(kind.rawValue) set in \(theme.rawValue)")
                 }
             }
         }
@@ -1044,7 +1069,9 @@ enum UIProbeAppearance {
     /// Floor for the non-layer colours check 4 reads back, across both appearances.
     /// Measured on this tree and printed every run; a floor rather than an equality
     /// so an extra label is not a failure, but a whole surface dropping out is.
-    private static let minimumForegroundSlots = 168
+    /// Re-measured at P5.5: deleting the legacy dock/user-input surfaces removed
+    /// two of the walked foreground slots (168 → 166).
+    private static let minimumForegroundSlots = 166
 
     private struct AdoptedSurface {
         let id: String
@@ -1121,10 +1148,12 @@ enum UIProbeAppearance {
                 id: "managedAgentTile", size: NSSize(width: 640, height: 560), make: makeTile,
                 prepare: { root in
                     openUserInputRequest(in: root)
-                    // A detail, so the dock is in the state a user actually sees.
+                    // P5.5: the request arrives the way production delivers it —
+                    // the reducer-projected block, not the deleted legacy dock.
                     guard let tile = firstDescendant(ManagedAgentTileNSView.self, in: root) else { return }
-                    tile.setPendingApprovalForQA(
-                        kind: .commandExecutionApproval, requestId: "token-values", detail: "swift build")
+                    tile.ingest(.requestOpened(
+                        threadId: tile.wiringThreadId, requestId: "token-values", kind: .commandExecutionApproval
+                    ))
                     tile.layoutSubtreeIfNeeded()
                 }
             ),

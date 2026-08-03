@@ -1913,6 +1913,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--agent-tile-click-focus-check") {
+            do {
+                _ = NSApplication.shared
+                let artifact = try ManagedAgentTileNSView.runAgentComposerClickFocusSelfCheck()
+                print("ContinuumRevivedAgentTileClickFocusChecks passed: \(artifact.path)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--focus-scope-dispatch-check") {
             do {
                 _ = NSApplication.shared
@@ -3286,6 +3298,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // applicationDidBecomeActive synchronously, and the focus path needs
             // a non-nil ghostty to forward set_focus into the surface.
             NSApp.activate(ignoringOtherApps: true)
+
+            // P5.5 boot regression probe (display-dependent; belongs to the
+            // supervised surface legs, never the headless matrix). Offscreen
+            // cacheDisplay renders cannot witness a live display-transaction
+            // feedback loop — the class of failure that killed the first v2
+            // installed-candidate boot — so this runs the REAL window display
+            // cycle for two seconds and reports only if the process survives it.
+            if CommandLine.arguments.contains("--agent-tile-v2-boot-probe") {
+                let usesV2Shell = true  // P5.5: v2 is the only shell; the launch flag is gone
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    guard let window = self.window, window.isVisible else {
+                        fputs("FAIL: v2 boot probe: no visible window after the first display cycles\n", stderr)
+                        Foundation.exit(1)
+                    }
+                    print("AgentTileV2BootProbe passed: live window displayed and stable (v2Shell=\(usesV2Shell))")
+                    Foundation.exit(0)
+                }
+            }
 
             if CommandLine.arguments.contains("--managed-agent-live-check") {
                 runManagedAgentLiveCheck(window: window)
@@ -24920,8 +24950,12 @@ static func checkRowStatusIsTurnState(
         throw fail("row-status: no run was in flight to emit the turn's completion from")
     }
     runner.stop()
+    // `.idle`, not the old projection's `.done`: an attached v2 tile's status is
+    // the presenter's (P5.5 status single-ownership), and the presenter renders a
+    // completed-and-settled agent as Ready — which also makes tile and row read
+    // literally the same value after the turn, not merely fold to the same state.
     guard await waitUntil(timeout: 10, pollInterval: 0.02, {
-        supervisor.isRunning(agentId) == false && runner.completedRuns == 1 && tile.currentAgentStatus == .done
+        supervisor.isRunning(agentId) == false && runner.completedRuns == 1 && tile.currentAgentStatus == .idle
     }) else {
         throw fail("row-status: the turn never ended — isRunning \(supervisor.isRunning(agentId)), completedRuns \(runner.completedRuns), tile \(tile.currentAgentStatus)")
     }

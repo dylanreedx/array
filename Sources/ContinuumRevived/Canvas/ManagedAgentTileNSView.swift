@@ -73,30 +73,7 @@ final class ManagedAgentTileNSView: TileNSView {
     private let agentHeader = AgentTileHeaderView()
     private var headerAgentName: String?
     private var branchContext: AgentRowContext?
-    private let glyphLabel = NSTextField(labelWithString: "")
-    private let nameLabel = NSTextField(labelWithString: "")
-    private let phaseLabel = NSTextField(labelWithString: "")
-    private let elapsedLabel = NSTextField(labelWithString: "0s")
-    /// P2C.4: which checkout this agent is about to touch. Hidden until something
-    /// tells the tile (`applyBranchContext`), so a tile that knows nothing shows
-    /// nothing rather than implying a shared checkout.
-    private let branchChip: BranchChipNSView = {
-        let chip = BranchChipNSView()
-        chip.isHidden = true
-        return chip
-    }()
-    private let cardStack = FlippedStackView()
-    /// P5.4 keeps exactly one reversible construction seam. Production remains on
-    /// the compatibility shell unless the internal launch flag is supplied; QA and
-    /// Component Lab pass `useV2: true` at construction.
-    static let v2LaunchArgument = "--agent-tile-v2"
-    static let v2EnvironmentKey = "CONTINUUM_AGENT_TILE_V2"
-    static var isV2LaunchEnabled: Bool {
-        CommandLine.arguments.contains(v2LaunchArgument)
-            || ProcessInfo.processInfo.environment[v2EnvironmentKey] == "1"
-    }
 
-    private let usesV2: Bool
     private let transcriptCollectionFixture: AgentTranscriptListView?
     private let v2Composer: AgentComposerView?
     private let v2ActionButton: ComposerActionButton?
@@ -105,12 +82,14 @@ final class ManagedAgentTileNSView: TileNSView {
     private var v2PromptHistory: AgentPromptHistory?
     private var v2CompletionRegistry: AgentCompletionProviderRegistry?
     private var v2TurnSnapshot: AgentTileTurnSnapshot?
+    /// Subscription to the supervisor's turn-capability seam. The runner slot
+    /// frees strictly after the last runtime event a tile ingests, so without
+    /// this the composer's last repaint shows `canSend == false` forever
+    /// (P5.5 live finding, `plan-P5.5-review-corrections.md` defect 1).
+    private var capabilityObserverToken: UUID?
     private var v2RenderedDocument = AgentDocument()
     private var v2RenderError: Error?
     private var isProbingV2HeaderActions = false
-    private let approvalDock = ApprovalDockView()
-    private let composeField = NSTextField()
-    private let runButton = NSButton()
     /// P4.8: custom model and effort controls for THIS agent's next turn. The
     /// footer owns their presentation and emits partial writes; this tile remains
     /// the production composition root and the supervisor remains state owner.
@@ -120,12 +99,6 @@ final class ManagedAgentTileNSView: TileNSView {
     /// values the moment one attaches — after that the global default is never
     /// consulted again for this agent, which is the whole meaning of "per-agent".
     private var providerSettings = AgentModelConfig.resolvedFromDefaults()
-    /// P6.0: one entry view per card, and WHICH view is the card's kind — prose or
-    /// record. `makeTranscriptEntryView(for:)` owns that decision.
-    private var cardViewsById: [String: TranscriptEntryView] = [:]
-    private var inputCardViewsByRequestId: [String: UserInputCardView] = [:]
-    private var pendingApprovals: [String: ApprovalDockRequest] = [:]
-    private var pendingUserInputs: [String: AgentUserInputRequest] = [:]
     private var model: ManagedAgentTranscriptModel
     private var descriptor: AgentDescriptor
     private var startedAt: Date?
@@ -146,7 +119,6 @@ final class ManagedAgentTileNSView: TileNSView {
     /// agent it was following, so attaching a different one after a detach must
     /// still clear that transcript.
     private var projectedAgentID: AgentID?
-    var onApprovalDecision: ((String, ApprovalDecision) -> Void)?
     var onUserInputSubmit: ((String, UserInputAnswers) -> Void)?
     /// Explicit provider response transport for v2 request blocks. Production
     /// binds nothing today because no compiled `AgentAdapter` response conformer
@@ -171,24 +143,21 @@ final class ManagedAgentTileNSView: TileNSView {
     init(
         tile: Tile,
         threadId: String = "thread-main",
-        descriptor: AgentDescriptor? = nil,
-        useV2: Bool? = nil
+        descriptor: AgentDescriptor? = nil
     ) {
         self.threadId = threadId
         self.model = ManagedAgentTranscriptModel(threadId: threadId)
-        let resolvedV2 = useV2
-            ?? (Self.isV2LaunchEnabled || AgentTileHeaderView.isFixtureEnabled
-                || AgentTranscriptListView.isFixtureEnabled)
-        self.usesV2 = resolvedV2
-        self.transcriptCollectionFixture = resolvedV2 ? AgentTranscriptListView() : nil
-        self.v2Composer = resolvedV2 ? AgentComposerView(frame: .zero, variant: .fullTurn) : nil
-        self.v2ActionButton = resolvedV2 ? ComposerActionButton(
+        // P5.5 acceptance: v2 IS the tile. The reversible construction seam and
+        // the legacy view-only card path were removed at this supervised gate.
+        self.transcriptCollectionFixture = AgentTranscriptListView()
+        self.v2Composer = AgentComposerView(frame: .zero, variant: .fullTurn)
+        self.v2ActionButton = ComposerActionButton(
             presentation: .resolve(
                 state: .ready,
                 capabilities: .init(canSend: false, canStop: false, canSteer: false, canQueue: false),
                 hasDraft: false
             )
-        ) : nil
+        )
         self.descriptor = descriptor ?? AgentDescriptor(
             agentKind: .managed,
             worktreePath: "",
@@ -200,27 +169,24 @@ final class ManagedAgentTileNSView: TileNSView {
         // token call; re-apply once subclass initialization is complete so the
         // fixture shell's quiet perimeter wins deterministically.
         applyTokens()
-        if usesV2 {
-            setTileActionLabels(
-                close: AgentTileHeaderView.detachActionTitle,
-                stop: AgentTileHeaderView.stopActionTitle
-            )
-            // The compiled host seam stops the whole running agent process, not
-            // only its current turn. Keep the action and its label equally broad.
-            agentHeader.onStopAgentRun = { [weak self] in
-                guard let self else { return }
-                if self.isProbingV2HeaderActions { self.onStopRun?() }
-                else { self.requestV2Stop() }
-            }
-            agentHeader.onDetachView = { [weak self] in self?.onClose?() }
-            v2Composer?.onDraftChange = { [weak self] _ in self?.updateV2ComposerPresentation() }
-            v2Composer?.onSubmitPrompt = { [weak self] prompt in self?.onSubmitPrompt?(prompt) }
-            v2ActionButton?.target = self
-            v2ActionButton?.action = #selector(performV2PrimaryAction)
+        setTileActionLabels(
+            close: AgentTileHeaderView.detachActionTitle,
+            stop: AgentTileHeaderView.stopActionTitle
+        )
+        // The compiled host seam stops the whole running agent process, not
+        // only its current turn. Keep the action and its label equally broad.
+        agentHeader.onStopAgentRun = { [weak self] in
+            guard let self else { return }
+            if self.isProbingV2HeaderActions { self.onStopRun?() }
+            else { self.requestV2Stop() }
         }
-        setContentView(makeContentView())
+        agentHeader.onDetachView = { [weak self] in self?.onClose?() }
+        v2Composer?.onDraftChange = { [weak self] _ in self?.updateV2ComposerPresentation() }
+        v2Composer?.onSubmitPrompt = { [weak self] prompt in self?.onSubmitPrompt?(prompt) }
+        v2ActionButton?.target = self
+        v2ActionButton?.action = #selector(performV2PrimaryAction)
+        setContentView(makeV2ContentView())
         applyHeader(status: self.descriptor.status)
-        applyComposeAvailability()
         synchronizeV2Transcript()
     }
 
@@ -250,7 +216,6 @@ final class ManagedAgentTileNSView: TileNSView {
         promptHistory: AgentPromptHistory,
         completionRegistry: AgentCompletionProviderRegistry? = nil
     ) {
-        guard usesV2 else { return }
         v2DraftStore = draftStore
         v2PromptHistory = promptHistory
         v2CompletionRegistry = completionRegistry
@@ -294,7 +259,7 @@ final class ManagedAgentTileNSView: TileNSView {
         if let settings = supervisor.providerSettings(for: agentID) {
             applyProviderSettings(settings)
         }
-        if usesV2, let composer = v2Composer,
+        if let composer = v2Composer,
            let snapshot = supervisor.turnSnapshot(for: agentID) {
             v2TurnSnapshot = snapshot
             let adapter = ManagedAgentTileActionAdapter(tile: self, supervisor: supervisor)
@@ -303,6 +268,12 @@ final class ManagedAgentTileNSView: TileNSView {
             if let v2DraftStore { composer.bindDraftStore(v2DraftStore, agentID: agentID) }
             if let v2PromptHistory { composer.bindPromptHistory(v2PromptHistory, agentID: agentID) }
             if let v2CompletionRegistry { composer.bindCompletionRegistry(v2CompletionRegistry) }
+            // The runner slot being taken or freed carries no runtime event, so the
+            // event subscription below cannot repaint it; the seam can.
+            capabilityObserverToken = supervisor.addTurnCapabilitiesObserver { [weak self] changed in
+                guard let self, changed == self.attachedAgentID else { return }
+                self.refreshV2TurnSnapshot()
+            }
             updateV2ComposerPresentation()
         }
         let stream = supervisor.events(for: agentID)
@@ -327,6 +298,10 @@ final class ManagedAgentTileNSView: TileNSView {
     func detach() {
         eventSubscription?.cancel()
         eventSubscription = nil
+        if let capabilityObserverToken {
+            agentSource?.removeTurnCapabilitiesObserver(capabilityObserverToken)
+            self.capabilityObserverToken = nil
+        }
         if let agentID = attachedAgentID, let v2DraftStore {
             Task { await v2DraftStore.flush(agentID: agentID) }
         }
@@ -338,6 +313,169 @@ final class ManagedAgentTileNSView: TileNSView {
         updateV2ComposerPresentation()
     }
 
+    /// Mirror of `NoteTileNSView.runNoteClickFocusSelfCheck` for the v2 agent
+    /// tile (P5.5 correction gate, defect 5): the real canvas/broker/click-router
+    /// path, which the composer-focus assertions inside `--agent-supervisor-check`
+    /// bypass by installing the composer as a bare window contentView. Asserts the
+    /// three ways focus reaches the editor: the broker steal (`acquireFocus`), a
+    /// click on the editor glyphs, and — the shipped bug — a click on the
+    /// composer's padding ring, which previously fell through to the canvas's
+    /// deselect-and-steal path.
+    static func runAgentComposerClickFocusSelfCheck() throws -> URL {
+        enum CheckError: Error, CustomStringConvertible {
+            case failed(String)
+            var description: String {
+                switch self {
+                case let .failed(message): return message
+                }
+            }
+        }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw CheckError.failed(message) }
+        }
+        func makeMouse(_ type: NSEvent.EventType, at windowPoint: NSPoint, in window: NSWindow) throws -> NSEvent {
+            guard let event = NSEvent.mouseEvent(
+                with: type,
+                location: windowPoint,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 1,
+                clickCount: 1,
+                pressure: type == .leftMouseUp ? 0 : 1
+            ) else {
+                throw CheckError.failed("could not create mouse event \(type)")
+            }
+            return event
+        }
+        func dispatchClick(at windowPoint: NSPoint, in window: NSWindow) throws {
+            let down = try makeMouse(.leftMouseDown, at: windowPoint, in: window)
+            let up = try makeMouse(.leftMouseUp, at: windowPoint, in: window)
+            // NSTextView may enter AppKit mouse tracking during mouseDown and
+            // wait for the matching mouseUp. Queue the mouseUp before sending
+            // mouseDown so the production event path is exercised without a
+            // self-check deadlock.
+            NSApplication.shared.postEvent(up, atStart: false)
+            window.sendEvent(down)
+        }
+        func dispatchKey(_ characters: String, in window: NSWindow) throws {
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                characters: characters,
+                charactersIgnoringModifiers: characters,
+                isARepeat: false,
+                keyCode: 0
+            ) else {
+                throw CheckError.failed("could not create key event")
+            }
+            window.sendEvent(event)
+        }
+
+        let tileId = UUID(uuidString: "00000000-0000-0000-0000-000000000551")!
+        let tile = Tile(
+            id: tileId,
+            kind: .managedAgent,
+            title: "AGENT_CLICK_FOCUS",
+            frame: TileFrame(x: 80, y: 80, width: 420, height: 320),
+            zPosition: .fromLegacyRank(1),
+            runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")
+        )
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile], groups: [], lastActiveTileId: nil))
+        let focusBroker = FocusBroker()
+        canvas.focusBroker = focusBroker
+        canvas.frame = NSRect(x: 0, y: 0, width: 640, height: 480)
+
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontRegardless()
+
+        let tileView = ManagedAgentTileNSView(tile: tile)
+        canvas.install(tileView: tileView, for: tile)
+        guard let composer = tileView.v2Composer else {
+            throw CheckError.failed("v2 tile did not install its composer")
+        }
+
+        window.contentView?.layoutSubtreeIfNeeded()
+        canvas.layoutSubtreeIfNeeded()
+        tileView.layoutSubtreeIfNeeded()
+        composer.layoutSubtreeIfNeeded()
+
+        // 1 · the broker steal — spawn / app activation / router non-descendant
+        // branch all land here. The previous base implementation targeted a plain
+        // NSView and quietly focused the WINDOW.
+        _ = tileView.acquireFocus(reason: .userClick)
+        try expect(window.firstResponder === composer.textView,
+                   "acquireFocus should land in the composer editor; firstResponder=\(String(describing: window.firstResponder))")
+
+        // 2 · a click on the editor glyphs.
+        window.makeFirstResponder(nil)
+        let textLocalPoint = NSPoint(x: max(4, composer.textView.bounds.midX), y: max(4, composer.textView.bounds.midY))
+        let textWindowPoint = composer.textView.convert(textLocalPoint, to: nil)
+        try dispatchClick(at: textWindowPoint, in: window)
+        AppDelegate.routeTileClickFocus(at: textWindowPoint, in: canvas, focusBroker: focusBroker)
+        try expect(focusBroker.activeSurface == .tile(tileId),
+                   "editor click should keep the tile the active surface; activeSurface=\(String(describing: focusBroker.activeSurface))")
+        try expect(window.firstResponder === composer.textView,
+                   "editor click should focus the editor; firstResponder=\(String(describing: window.firstResponder))")
+
+        // 3 · the shipped bug: a click on the composer's padding ring. The click
+        // ALONE must claim the editor — deliberately no router pass here, because
+        // the router's steal branch (assertion 1's path) would repair it and mask
+        // a shell that lets the click escape to the canvas's deselect path.
+        window.makeFirstResponder(nil)
+        let paddingWindowPoint = composer.convert(NSPoint(x: 6, y: composer.bounds.midY), to: nil)
+        try dispatchClick(at: paddingWindowPoint, in: window)
+        try expect(window.firstResponder === composer.textView,
+                   "padding click alone should focus the editor; firstResponder=\(String(describing: window.firstResponder))")
+
+        // 4 · the focus is real: a keystroke edits the draft.
+        let sentinel = "x"
+        try dispatchKey(sentinel, in: window)
+        try expect(composer.textView.string.contains(sentinel),
+                   "keyDown should edit the composer draft; got \(composer.textView.string.debugDescription)")
+
+        let manifest: [String: Any] = [
+            "check": "agent-composer-click-focus",
+            "tileId": tileId.uuidString,
+            "brokerActiveSurface": String(describing: focusBroker.activeSurface),
+            "textWindowPoint": ["x": textWindowPoint.x, "y": textWindowPoint.y],
+            "paddingWindowPoint": ["x": paddingWindowPoint.x, "y": paddingWindowPoint.y],
+            "firstResponder": String(describing: window.firstResponder),
+            "draft": composer.textView.string
+        ]
+        let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("qa-runs", isDirectory: true)
+            .appendingPathComponent(timestamp, isDirectory: true)
+            .appendingPathComponent("agent-composer-click-focus", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let artifact = directory.appendingPathComponent("manifest.json")
+        let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: artifact, options: .atomic)
+        return artifact
+    }
+
+    /// The one focus override every other editable tile already has (P5.5 live
+    /// finding, `plan-P5.5-review-corrections.md` defect 5): the base
+    /// implementation targets `contentView` — a plain NSView that refuses first
+    /// responder — so tile spawn, app activation, and the click router all left
+    /// the WINDOW focused and the composer dead until the tile was selected once.
+    override func acquireFocus(reason: FocusRequest) -> Bool {
+        canvas?.bringToFront(tileId: tile.id)
+        if let composer = v2Composer {
+            window?.makeFirstResponder(composer.textView)
+            return true
+        }
+        return super.acquireFocus(reason: reason)
+    }
+
     /// P2C.4: show which branch this agent's writes land on.
     ///
     /// Takes the whole `AgentRowContext` rather than two strings so that a caller
@@ -346,7 +484,6 @@ final class ManagedAgentTileNSView: TileNSView {
     /// definition — the context's. `nil` hides the chip.
     func applyBranchContext(_ context: AgentRowContext?) {
         branchContext = context
-        branchChip.apply(BranchChipNSView.display(for: context))
         applyAgentHeader(status: descriptor.status)
     }
 
@@ -362,21 +499,11 @@ final class ManagedAgentTileNSView: TileNSView {
     /// Drop the local projection so a replay renders exactly the agent it came from.
     private func resetProjection() {
         model = ManagedAgentTranscriptModel(threadId: threadId)
-        for view in cardStack.arrangedSubviews {
-            cardStack.removeArrangedSubview(view)
-            view.removeFromSuperview()
-        }
-        cardViewsById.removeAll()
-        inputCardViewsByRequestId.removeAll()
-        pendingApprovals.removeAll()
-        pendingUserInputs.removeAll()
-        approvalDock.pendingRequest = nil
         startedAt = nil
         promptInFlight = false
         descriptor.status = model.currentStatus
         agentStatus = model.currentStatus
         applyHeader(status: model.currentStatus)
-        applyComposeAvailability()
         synchronizeV2Transcript()
     }
 
@@ -409,24 +536,13 @@ final class ManagedAgentTileNSView: TileNSView {
         descriptor.statusUpdatedAt = Date()
         agentStatus = .idle
         applyHeader(status: .idle)
-        applyComposeAvailability()
-        if usesV2 {
-            synchronizeV2Transcript()
-        } else {
-            reconcileCards()
-            scrollTranscriptToBottom()
-        }
+        synchronizeV2Transcript()
     }
 
     /// Shows the prompt the user just submitted as its own "you" entry.
     func appendUserPrompt(_ text: String) {
         model.appendUserPrompt(text)
-        if usesV2 {
-            synchronizeV2Transcript()
-        } else {
-            reconcileCards()
-            scrollTranscriptToBottom()
-        }
+        synchronizeV2Transcript()
     }
 
     func ingest(_ event: AgentRuntimeEvent) {
@@ -455,31 +571,44 @@ final class ManagedAgentTileNSView: TileNSView {
             break
         }
         model.ingest(event)
-        if usesV2 {
-            if let agentID = attachedAgentID,
-               let snapshot = agentSource?.turnSnapshot(for: agentID) {
-                v2TurnSnapshot = snapshot
-                v2Composer?.updateTurnSnapshot(snapshot)
-            }
-        } else {
-            updatePendingApproval(from: event)
-            updatePendingUserInput(from: event)
+        refreshV2TurnSnapshot()
+        synchronizeV2Transcript()
+    }
+
+    /// Re-read the supervisor's turn truth and repaint everything derived from it:
+    /// the cached snapshot, the composer's intent state, the tile status, both
+    /// headers, and the action button. One path for `ingest` and the capability
+    /// seam, so the two can never disagree.
+    ///
+    /// Status ownership (`plan-P5.5-review-corrections.md` defect 2): when a
+    /// snapshot exists, the legacy `AgentStatus` derives from the SAME presenter
+    /// the v2 header paints — not from `model.currentStatus`, whose status engine
+    /// counts session `.running` as working and so still says `.working` at
+    /// `turn_end`. That stale value was what the activity fold stamped onto the
+    /// last draft and the debounced sweep wrote over every surface. The projection
+    /// derivation remains the compatibility path's, untouched.
+    private func refreshV2TurnSnapshot() {
+        if let agentID = attachedAgentID,
+           let snapshot = agentSource?.turnSnapshot(for: agentID) {
+            v2TurnSnapshot = snapshot
+            v2Composer?.updateTurnSnapshot(snapshot)
         }
-        descriptor.status = model.currentStatus
+        let status: AgentStatus
+        if let snapshot = v2TurnSnapshot {
+            status = AgentTileStatePresenter.present(
+                name: headerAgentName ?? tile.title,
+                snapshot: snapshot,
+                branchContext: branchContext,
+                startedAt: startedAt
+            ).status
+        } else {
+            status = model.currentStatus
+        }
+        descriptor.status = status
         descriptor.statusUpdatedAt = Date()
-        agentStatus = model.currentStatus
-        applyHeader(status: model.currentStatus)
-        applyComposeAvailability()
-        if !usesV2 {
-            approvalDock.pendingRequest = pendingApprovals.values.sorted { $0.requestId < $1.requestId }.first
-        }
-        if usesV2 {
-            synchronizeV2Transcript()
-            updateV2ComposerPresentation()
-        } else {
-            reconcileCards()
-            scrollTranscriptToBottom()
-        }
+        agentStatus = status
+        applyHeader(status: status)
+        updateV2ComposerPresentation()
     }
 
     /// This tile's own layer fills, on top of the base tile's (P1.9), now on
@@ -496,31 +625,25 @@ final class ManagedAgentTileNSView: TileNSView {
         contentBackdrop.layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(for: theme)
         header.layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(for: theme)
         composeBackdrop.layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(for: theme)
-        if usesV2 {
-            // Idle v2 agent tiles do not claim a state-bearing perimeter edge.
-            // Keyboard focus and needs-attention remain the canvas-owned strong
-            // overlays; the surface ladder supplies the quiet containment.
-            layer?.borderWidth = 0
-            layer?.borderColor = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
-            agentHeader.applyTokens()
-            v2Composer?.applyTokens()
-            // In the live tile this is an interactive text boundary, not a
-            // decorative card edge; retain the approved focus ring when focused
-            // and a 3:1 control boundary while idle.
-            if v2Composer?.isEditorFocused == false {
-                v2Composer?.layer?.borderColor = AgentLineRole.controlBoundary.color.cgColor(for: theme)
-            }
-            v2ActionButton?.applyTokens()
-            do {
-                try transcriptCollectionFixture?.updateRenderContext(v2RenderContext)
-            } catch {
-                v2RenderError = error
-            }
+        // Idle v2 agent tiles do not claim a state-bearing perimeter edge.
+        // Keyboard focus and needs-attention remain the canvas-owned strong
+        // overlays; the surface ladder supplies the quiet containment.
+        layer?.borderWidth = 0
+        layer?.borderColor = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
+        agentHeader.applyTokens()
+        v2Composer?.applyTokens()
+        // In the live tile this is an interactive text boundary, not a
+        // decorative card edge; retain the approved focus ring when focused
+        // and a 3:1 control boundary while idle.
+        if v2Composer?.isEditorFocused == false {
+            v2Composer?.layer?.borderColor = AgentLineRole.controlBoundary.color.cgColor(for: theme)
         }
-        // The chip is `TokenThemed` and re-applies on its own flip too; driving it
-        // from here as well costs one idempotent assignment and means the header's
-        // colours cannot fall behind if AppKit skips a hidden subview.
-        branchChip.applyTokens()
+        v2ActionButton?.applyTokens()
+        do {
+            try transcriptCollectionFixture?.updateRenderContext(v2RenderContext)
+        } catch {
+            v2RenderError = error
+        }
     }
 
     /// The layer colours this view paints on subviews it owns, for
@@ -530,85 +653,6 @@ final class ManagedAgentTileNSView: TileNSView {
     var qaTokenPaintedLayers: [(label: String, layer: CALayer)] {
         [("contentBackdrop", contentBackdrop), ("header", header), ("composeBackdrop", composeBackdrop)]
             .compactMap { name, view in view.layer.map { (label: name, layer: $0) } }
-    }
-
-    private func makeContentView() -> NSView {
-        if usesV2 { return makeV2ContentView() }
-        let root = contentBackdrop
-
-        let installedHeader: NSView
-        if usesV2 {
-            installedHeader = agentHeader
-        } else {
-            configureHeader()
-            installedHeader = header
-        }
-
-        cardStack.orientation = .vertical
-        cardStack.alignment = .leading
-        cardStack.spacing = Space.m
-        cardStack.edgeInsets = NSEdgeInsets(Inset.card)
-        cardStack.translatesAutoresizingMaskIntoConstraints = false
-        let scrollView = NSScrollView()
-        scrollView.drawsBackground = false
-        scrollView.hasVerticalScroller = true
-        scrollView.documentView = cardStack
-        // Pin the document stack to the clip view: full width, top-anchored,
-        // free to grow downward (vertical scroll). Without this the stack has
-        // no resolved size and its cards never lay out — the transcript renders
-        // blank even though the model has cards.
-        NSLayoutConstraint.activate([
-            cardStack.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-            cardStack.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
-            cardStack.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
-            cardStack.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor)
-        ])
-
-        approvalDock.setContentCompressionResistancePriority(.required, for: .vertical)
-        approvalDock.onDecision = { [weak self] decision in
-            guard let self, let request = self.approvalDock.pendingRequest else { return }
-            self.onApprovalDecision?(request.requestId, decision)
-            self.ingest(.requestResolved(threadId: self.threadId, requestId: request.requestId, decision: decision.rawValue))
-        }
-
-        let composeRow = makeComposeRow()
-
-        let layout = NSStackView(views: [installedHeader, scrollView, approvalDock, composeRow])
-        layout.orientation = .vertical
-        layout.spacing = 0
-        layout.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(layout)
-        NSLayoutConstraint.activate([
-            layout.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            layout.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            layout.topAnchor.constraint(equalTo: root.topAnchor),
-            layout.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            // All three heights are now FUNCTIONS of the type they hold, not magic
-            // numbers: two title lines for the name/phase stack, one body line for
-            // the compose field, and the dock's own derivation (`Metrics`' mapping
-            // table records the 52→54 / 44→41 moves this produces).
-            installedHeader.heightAnchor.constraint(equalToConstant: usesV2
-                ? AgentTileHeaderView.preferredHeight
-                : Metrics.rowHeight(for: .title, lines: 2)),
-            approvalDock.heightAnchor.constraint(equalToConstant: ApprovalDockView.preferredHeight),
-            // P6.1: the prompt row's derived height PLUS the pickers' own. Two
-            // popups do not fit the single-body-line height this was, and a popup
-            // spilling its parent is what the geometry gate would have caught.
-            composeRow.heightAnchor.constraint(
-                equalToConstant: Metrics.rowHeight(for: .body, insets: Inset.card)
-                    + ManagedAgentTileNSView.providerControlHeight
-            ),
-            // A vertical NSStackView centers rows at their FITTING width unless
-            // pinned, so the transcript column was sizing itself to the longest
-            // message's single-line width and floating in the middle of the
-            // tile (with the scroller stranded mid-tile). Pin every row to the
-            // stack's width.
-            installedHeader.widthAnchor.constraint(equalTo: layout.widthAnchor),
-            scrollView.widthAnchor.constraint(equalTo: layout.widthAnchor),
-            approvalDock.widthAnchor.constraint(equalTo: layout.widthAnchor),
-            composeRow.widthAnchor.constraint(equalTo: layout.widthAnchor)
-        ])
-        return root
     }
 
     private func makeV2ContentView() -> NSView {
@@ -626,10 +670,21 @@ final class ManagedAgentTileNSView: TileNSView {
         }
         applyProviderSettings(providerSettings)
 
-        // Stack the footer and primary action vertically. At the 320pt tile floor
-        // the approved two provider controls need the full lane; squeezing a third
-        // control beside them collapses their labels to zero width.
-        let composeColumn = NSStackView(views: [composer, providerFooter, actionButton])
+        // The P4.10-reviewed arrangement: footer and primary action share one
+        // row — the action right-aligned at its intrinsic width, the footer
+        // absorbing the remainder and choosing its label variants by measured
+        // fit. The shipped third-row stack predated measured fit (its comment
+        // feared zero-width labels at the 320 pt floor) and was never what the
+        // owner reviewed (P5.5 defect 4).
+        let footerRow = NSStackView(views: [providerFooter, actionButton])
+        footerRow.orientation = .horizontal
+        footerRow.alignment = .centerY
+        footerRow.spacing = CGFloat(Space.m)
+        footerRow.translatesAutoresizingMaskIntoConstraints = false
+        actionButton.setContentHuggingPriority(.required, for: .horizontal)
+        actionButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let composeColumn = NSStackView(views: [composer, footerRow])
         composeColumn.orientation = .vertical
         composeColumn.alignment = .leading
         composeColumn.spacing = CGFloat(Space.m)
@@ -656,7 +711,7 @@ final class ManagedAgentTileNSView: TileNSView {
             composeColumn.topAnchor.constraint(equalTo: composeBackdrop.topAnchor),
             composeColumn.bottomAnchor.constraint(equalTo: composeBackdrop.bottomAnchor),
             composer.widthAnchor.constraint(equalTo: composeColumn.widthAnchor, constant: -Inset.row.horizontal),
-            providerFooter.widthAnchor.constraint(equalTo: composeColumn.widthAnchor, constant: -Inset.row.horizontal),
+            footerRow.widthAnchor.constraint(equalTo: composeColumn.widthAnchor, constant: -Inset.row.horizontal),
             providerFooter.heightAnchor.constraint(equalToConstant: AgentComposerFooterView.height),
             actionButton.heightAnchor.constraint(equalToConstant: ComposerActionButton.controlHeight),
         ])
@@ -664,33 +719,6 @@ final class ManagedAgentTileNSView: TileNSView {
         composeBackdrop.setContentCompressionResistancePriority(.required, for: .vertical)
         composer.layer?.borderColor = AgentLineRole.controlBoundary.color.cgColor(for: effectiveTokenTheme)
         return root
-    }
-
-    private func updatePendingApproval(from event: AgentRuntimeEvent) {
-        switch event {
-        case .requestOpened(let threadId, let requestId, let kind) where threadId == self.threadId:
-            pendingApprovals[requestId] = ApprovalDockRequest(requestId: requestId, kind: kind, detail: nil)
-        case .requestResolved(let threadId, let requestId, _) where threadId == self.threadId:
-            pendingApprovals.removeValue(forKey: requestId)
-        default:
-            break
-        }
-    }
-
-    private func updatePendingUserInput(from event: AgentRuntimeEvent) {
-        switch event {
-        case .userInputRequested(let threadId, let requestId, let questions) where threadId == self.threadId:
-            let question = questions.first?.prompt ?? "What should I answer?"
-            let request = AgentUserInputRequest(requestId: requestId, tileId: tile.id, question: question)
-            pendingUserInputs[requestId] = request
-            if !usesV2 { insertUserInputCard(for: request) }
-        case .userInputResolved(let threadId, let requestId) where threadId == self.threadId:
-            pendingUserInputs.removeValue(forKey: requestId)
-            inputCardViewsByRequestId[requestId]?.dismissAnimated()
-            inputCardViewsByRequestId.removeValue(forKey: requestId)
-        default:
-            break
-        }
     }
 
     private var v2RenderContext: AgentRenderContext {
@@ -704,7 +732,7 @@ final class ManagedAgentTileNSView: TileNSView {
     }
 
     private func synchronizeV2Transcript() {
-        guard usesV2, let transcript = transcriptCollectionFixture else { return }
+        guard let transcript = transcriptCollectionFixture else { return }
         // The content reducer owns the semantic document (locked rule 6): request
         // blocks arrive from AgentTranscriptProjection like every other event, so
         // the tile composes and never maintains a parallel request model. The
@@ -795,15 +823,27 @@ final class ManagedAgentTileNSView: TileNSView {
     }
 
     private func requestV2Stop() {
-        if usesV2 { v2Composer?.requestStop() } else { onStopRun?() }
+        v2Composer?.requestStop()
     }
 
     private func updateV2ComposerPresentation() {
-        guard usesV2, let button = v2ActionButton else { return }
-        let snapshot = v2TurnSnapshot
+        guard let button = v2ActionButton else { return }
+        // One source of truth: the supervisor's live snapshot, not the cached copy
+        // — the cache is exactly what latched "Unavailable" in the P5.5 live
+        // finding. The cache remains only for callers with no live source (fixture
+        // tiles, post-detach repaints).
+        let snapshot: AgentTileTurnSnapshot?
+        if let agentID = attachedAgentID, let live = agentSource?.turnSnapshot(for: agentID) {
+            snapshot = live
+        } else {
+            snapshot = v2TurnSnapshot
+        }
         let capabilities = snapshot?.capabilities ?? .init()
-        let isWorking = snapshot?.executionState == .working
-            || descriptor.status == .working || descriptor.status == .needsAttention
+        // With a snapshot, its execution state alone decides; the legacy
+        // `descriptor.status` OR-terms re-imported the disagreeing derivation this
+        // correction removes. Without one, the legacy status is all there is.
+        let isWorking = snapshot.map { $0.executionState == .working }
+            ?? (descriptor.status == .working || descriptor.status == .needsAttention)
         button.presentation = .resolve(
             state: isWorking ? .working : .ready,
             capabilities: .init(
@@ -814,42 +854,12 @@ final class ManagedAgentTileNSView: TileNSView {
             ),
             hasDraft: !(v2Composer?.draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         )
-        providerFooter.controlsEnabled = !isWorking
+        // In flight, not merely working (P5.5 consolidation): the pickers must
+        // stay dark from send until the runner slot frees, or they flash
+        // re-enabled during the spawn and drain windows a mid-turn pick still
+        // cannot reach.
+        providerFooter.controlsEnabled = !(isWorking || capabilities.canStop)
     }
-
-    private func configureHeader() {
-        glyphLabel.font = .token(.titleL)
-        glyphLabel.alignment = .center
-        // A square column: one rendered line of the role it holds. The old 28 was a
-        // number with no rule behind it.
-        glyphLabel.widthAnchor.constraint(equalToConstant: Metrics.lineHeight(for: .titleL)).isActive = true
-        nameLabel.font = .token(.title)
-        nameLabel.textColor = StatusChipNSView.dynamicNSColor(TextToken.textPrimary.color)
-        nameLabel.lineBreakMode = .byTruncatingTail
-        phaseLabel.font = .token(.label)
-        phaseLabel.textColor = StatusChipNSView.dynamicNSColor(TextToken.textSecondary.color)
-        elapsedLabel.font = .token(.captionMono)
-        // The HOUSE muted colour. Apple's own secondary label is 3.95:1 on white
-        // and its tertiary 2.26:1 — neither can clear AA by construction.
-        elapsedLabel.textColor = StatusChipNSView.dynamicNSColor(TextToken.textSecondary.color)
-
-        let textStack = NSStackView(views: [nameLabel, phaseLabel])
-        textStack.orientation = .vertical
-        textStack.alignment = .leading
-        textStack.spacing = Space.xs
-        header.orientation = .horizontal
-        header.alignment = .centerY
-        header.spacing = Space.l
-        header.edgeInsets = NSEdgeInsets(Inset.row)
-        branchChip.isHidden = true
-        header.addArrangedSubview(glyphLabel)
-        header.addArrangedSubview(textStack)
-        header.addArrangedSubview(NSView())
-        header.addArrangedSubview(branchChip)
-        header.addArrangedSubview(elapsedLabel)
-    }
-
-    // MARK: - Model and effort (P4.8)
 
     static let providerNoticeText = "Next turn"
 
@@ -885,104 +895,13 @@ final class ManagedAgentTileNSView: TileNSView {
         return true
     }
 
-    private func makeComposeRow() -> NSView {
-        let row = composeBackdrop
-
-        composeField.placeholderString = "Send a prompt to the agent…"
-        composeField.font = .token(.body)
-        composeField.textColor = StatusChipNSView.dynamicNSColor(TextToken.textPrimary.color)
-        composeField.bezelStyle = .roundedBezel
-        composeField.target = self
-        composeField.action = #selector(submitPrompt)
-        composeField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        runButton.title = "Run"
-        runButton.bezelStyle = .rounded
-        runButton.keyEquivalent = "\r"
-        runButton.target = self
-        runButton.action = #selector(submitPrompt)
-
-        let stack = NSStackView(views: [composeField, runButton])
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.spacing = Space.m
-        stack.edgeInsets = NSEdgeInsets(Inset.row)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        providerFooter.onSettingsWrite = { [weak self] model, thinking in
-            self?.writeProviderSettings(model: model, thinking: thinking) ?? false
-        }
-        applyProviderSettings(providerSettings)
-        let footerRow = NSView()
-        providerFooter.translatesAutoresizingMaskIntoConstraints = false
-        footerRow.addSubview(providerFooter)
-        NSLayoutConstraint.activate([
-            providerFooter.leadingAnchor.constraint(equalTo: footerRow.leadingAnchor, constant: Inset.row.left),
-            providerFooter.trailingAnchor.constraint(equalTo: footerRow.trailingAnchor, constant: -Inset.row.right),
-            providerFooter.centerYAnchor.constraint(equalTo: footerRow.centerYAnchor),
-            providerFooter.heightAnchor.constraint(equalToConstant: AgentComposerFooterView.height),
-        ])
-
-        let column = NSStackView(views: [stack, footerRow])
-        column.orientation = .vertical
-        column.spacing = 0
-        column.translatesAutoresizingMaskIntoConstraints = false
-        row.addSubview(column)
-        NSLayoutConstraint.activate([
-            column.leadingAnchor.constraint(equalTo: row.leadingAnchor),
-            column.trailingAnchor.constraint(equalTo: row.trailingAnchor),
-            column.topAnchor.constraint(equalTo: row.topAnchor),
-            column.bottomAnchor.constraint(equalTo: row.bottomAnchor),
-            stack.widthAnchor.constraint(equalTo: column.widthAnchor),
-            footerRow.widthAnchor.constraint(equalTo: column.widthAnchor),
-            // The same two terms the compose row's own height is the sum of, so the
-            // prompt row keeps exactly the room P1.10 derived for it and the pickers
-            // take their own on top rather than out of it.
-            stack.heightAnchor.constraint(equalToConstant: Metrics.rowHeight(for: .body, insets: Inset.card)),
-            footerRow.heightAnchor.constraint(equalToConstant: Self.providerControlHeight)
-        ])
-        return row
-    }
-
-    @objc private func submitPrompt() {
-        let prompt = composeField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty, !composeIsBusy else { return }
-        // Latch immediately: status may not read .working until the first event
-        // streams back, and without this a fast second Enter/click would submit
-        // a duplicate prompt in that window. Cleared when the turn settles.
-        promptInFlight = true
-        composeField.stringValue = ""
-        applyComposeAvailability()
-        onSubmitPrompt?(prompt)
-    }
-
     private var composeIsBusy: Bool { promptInFlight || descriptor.status == .working }
-
-    private func applyComposeAvailability() {
-        composeField.isEnabled = !composeIsBusy
-        runButton.isEnabled = !composeIsBusy
-        // Next-turn settings move with compose availability; a choice cannot mutate
-        // the already-running provider process.
-        providerFooter.controlsEnabled = !composeIsBusy
-    }
 
     private func applyHeader(status: AgentStatus) {
         applyAgentHeader(status: status)
-        nameLabel.stringValue = tile.title
-        let display = StatusChipPresenter.display(for: status)
-        glyphLabel.stringValue = display.glyph
-        // The bare glyph shape, so the accent. `dynamicNSColor`, not the `.dark`
-        // pin it had: the header now paints `SurfaceToken.tileChrome`, which
-        // follows the appearance, so the glyph on it must too.
-        glyphLabel.textColor = StatusChipNSView.dynamicNSColor(display.accent)
-        phaseLabel.stringValue = display.label
-        if let startedAt, status == .working || status == .needsAttention {
-            elapsedLabel.stringValue = "\(max(0, Int(Date().timeIntervalSince(startedAt))))s"
-        }
     }
 
     private func applyAgentHeader(status: AgentStatus) {
-        guard usesV2 else { return }
         if let snapshot = v2TurnSnapshot {
             agentHeader.apply(AgentTileStatePresenter.present(
                 name: headerAgentName ?? tile.title,
@@ -1005,98 +924,42 @@ final class ManagedAgentTileNSView: TileNSView {
         applyHeader(status: descriptor.status)
     }
 
-    /// Keeps the newest output visible. Without this the clip view stays pinned
-    /// at the top and the reply to the prompt you just sent lands off-screen.
-    private func scrollTranscriptToBottom() {
-        guard let scrollView = cardStack.enclosingScrollView else { return }
-        cardStack.layoutSubtreeIfNeeded()
-        let maxY = max(0, cardStack.bounds.height - scrollView.contentView.bounds.height)
-        scrollView.contentView.scroll(to: NSPoint(x: 0, y: maxY))
-        scrollView.reflectScrolledClipView(scrollView.contentView)
-    }
-
-    private func reconcileCards() {
-        for card in model.cards {
-            if let view = cardViewsById[card.id] {
-                view.apply(card)
-            } else {
-                let view = makeTranscriptEntryView(for: card)
-                cardViewsById[card.id] = view
-                cardStack.addArrangedSubview(view)
-                view.translatesAutoresizingMaskIntoConstraints = false
-                view.widthAnchor.constraint(equalTo: cardStack.widthAnchor, constant: -Inset.card.horizontal).isActive = true
-            }
-        }
-    }
-
-    private func insertUserInputCard(for request: AgentUserInputRequest) {
-        if let existing = inputCardViewsByRequestId[request.requestId] {
-            existing.configure(question: request.question)
-            return
-        }
-        let card = UserInputCardView()
-        card.configure(question: request.question)
-        card.onSubmit = { [weak self, requestId = request.requestId] answer in
-            self?.respondToUserInput(requestId: requestId, answer: answer)
-        }
-        inputCardViewsByRequestId[request.requestId] = card
-        cardStack.addArrangedSubview(card)
-        card.translatesAutoresizingMaskIntoConstraints = false
-        card.widthAnchor.constraint(equalTo: cardStack.widthAnchor, constant: -Inset.card.horizontal).isActive = true
-    }
-
-    func respondToUserInput(requestId: String, answer: String) {
-        guard var request = pendingUserInputs[requestId] else { return }
-        request.status = .resolved
-        request.answer = answer
-        pendingUserInputs[requestId] = request
-        onUserInputSubmit?(requestId, UserInputAnswers(answers: ["response": answer]))
-        ingest(.userInputResolved(threadId: threadId, requestId: requestId))
-    }
-
     // P1.8 deleted this view's private glyph/phase/colour maps. They were one of
     // the three disagreeing glyph sets (`◌` here meant *configuring*, in the
     // sidebar it meant *stale*) and they had drifted from the board's hues.
     // Everything now comes from `StatusChipPresenter`.
 
-    func setPendingApprovalForQA(kind: ApprovalKind, requestId: String, detail: String) {
-        let request = ApprovalDockRequest(requestId: requestId, kind: kind, detail: detail)
-        pendingApprovals[requestId] = request
-        approvalDock.pendingRequest = request
-        agentStatus = .needsAttention
-        applyHeader(status: .needsAttention)
-    }
-
-    var qaApprovalDockVisible: Bool { !usesV2 && !approvalDock.isHidden }
-    var qaApprovalDockDetailText: String { approvalDock.qaDetailText }
-    var qaApprovalDockButtonTitles: [String] { approvalDock.qaButtonTitles }
-    func qaClickApproval(_ decision: ApprovalDecision) { approvalDock.qaClick(decision) }
-    var qaPendingUserInputCount: Int { pendingUserInputs.values.filter { $0.status == .pending }.count }
-    var qaUserInputCardCount: Int { usesV2 ? 0 : inputCardViewsByRequestId.count }
-    func qaUserInputQuestion(requestId: String) -> String? {
-        inputCardViewsByRequestId[requestId]?.qaQuestionText
-    }
-    func qaSubmitUserInput(requestId: String, answer: String) {
-        inputCardViewsByRequestId[requestId]?.qaSubmit(answer)
-    }
-
     /// The cards actually in the view hierarchy, so a reset can be asserted against
     /// the stack and not only against the model behind it.
     var qaRenderedCardCount: Int {
-        usesV2 ? (transcriptCollectionFixture?.qaSemanticRowCount ?? 0) : cardStack.arrangedSubviews.count
+        transcriptCollectionFixture?.qaSemanticRowCount ?? 0
     }
     var qaTranscriptCollectionFixture: AgentTranscriptListView? { transcriptCollectionFixture }
     var qaComposeEnabled: Bool {
-        usesV2 ? !composeIsBusy : composeField.isEnabled
+        !composeIsBusy
     }
-    var qaUsesV2Tile: Bool { usesV2 }
+    var qaUsesV2Tile: Bool { true }
     var qaUsesFullTurnComposer: Bool {
         guard let composer = v2Composer, composer.superview != nil else { return false }
         if case .fullTurn = composer.variant { return true }
         return false
     }
-    var qaHasLegacyComposeField: Bool { composeField.superview != nil }
-    var qaHasPermanentApprovalDock: Bool { approvalDock.superview != nil }
+    /// Structural probes over the LIVE view tree: after the P5.5 removal the
+    /// legacy members no longer exist, so reachability is asserted by scanning
+    /// for the classes the old path installed — a reintroduction fails the same
+    /// assertions the removal satisfied.
+    var qaHasLegacyComposeField: Bool {
+        func containsBezeledField(_ view: NSView) -> Bool {
+            if let field = view as? NSTextField, field.isBezeled { return true }
+            return view.subviews.contains(where: containsBezeledField)
+        }
+        return contentView.map(containsBezeledField) ?? false
+    }
+    /// P5.5 deleted `UserInputCardView` and `ApprovalDockView` with the legacy
+    /// path, so absence is a compile-time fact; these remain for the checks that
+    /// assert the old UI is unreachable.
+    var qaUserInputCardCount: Int { 0 }
+    var qaHasPermanentApprovalDock: Bool { false }
     var qaV2RenderError: String? { v2RenderError.map(String.init(describing:)) }
     var qaV2RequestIDs: [String] {
         model.document.entries.flatMap { entry in
@@ -1112,6 +975,8 @@ final class ManagedAgentTileNSView: TileNSView {
     func qaV2RequestChoices(_ requestID: String) -> [String]? { v2RequestPayload(requestID)?.choices }
     var qaV2HasCompactRequestEditor: Bool { false }
     var qaV2CanSend: Bool { v2TurnSnapshot?.capabilities.canSend == true }
+    var qaV2ActionTitle: String? { v2ActionButton?.presentation.title }
+    var qaV2ActionEnabled: Bool { v2ActionButton?.presentation.isEnabled == true }
     @discardableResult
     func qaClickV2RequestChoice(requestID: String, value: String) -> Bool {
         guard let transcriptCollectionFixture else { return false }
@@ -1141,6 +1006,7 @@ final class ManagedAgentTileNSView: TileNSView {
     var qaModelOptionTitles: [String] { providerFooter.modelButton.items.map(\.id) }
     var qaThinkingOptionTitles: [String] { providerFooter.effortButton.items.map(\.id) }
     var qaProviderControlsEnabled: Bool { providerFooter.controlsEnabled }
+    var qaProviderFooterView: AgentComposerFooterView { providerFooter }
     /// Kept for the existing supervisor contract, but derived from the installed
     /// footer: next-turn context must be one passive label and never a choice item.
     var qaProviderNoticeIsPickable: Bool {
@@ -1162,24 +1028,18 @@ final class ManagedAgentTileNSView: TileNSView {
     /// nil when the chip is hidden, so "no branch is shown" and "an empty branch is
     /// shown" cannot be confused.
     var qaBranchChipText: String? {
-        if usesV2 {
-            // `--agent-supervisor-check` enables the v2 fixture and consumes this
-            // accessor for unbound, isolated, shared, and moved-checkout tiles.
-            // Return the INSTALLED header's chip so the existing deterministic
-            // branch assertions exercise this shell rather than its hidden legacy
-            // sibling. A shell/action regression becomes an explicit check failure.
-            guard qaV2HeaderContractHolds() else { return qaV2HeaderFailure }
-            return agentHeader.qaBranch
-        }
-        return branchChip.isHidden ? nil : branchChip.qaText
+        // `--agent-supervisor-check` consumes this accessor for unbound, isolated,
+        // shared, and moved-checkout tiles. Return the INSTALLED header's chip so
+        // the deterministic branch assertions exercise this shell. A shell/action
+        // regression becomes an explicit check failure.
+        guard qaV2HeaderContractHolds() else { return qaV2HeaderFailure }
+        return agentHeader.qaBranch
     }
     var qaBranchChipIsWarning: Bool {
-        usesV2
-            ? agentHeader.qaBranchIsWarning
-            : (!branchChip.isHidden && branchChip.qaIsWarning)
+        agentHeader.qaBranchIsWarning
     }
     var qaBranchChipTooltip: String? {
-        usesV2 ? agentHeader.qaBranchTooltip : (branchChip.isHidden ? nil : branchChip.toolTip)
+        agentHeader.qaBranchTooltip
     }
     private var qaV2ContractDetail = "not exercised"
     private func qaV2HeaderContractHolds() -> Bool {
@@ -1227,12 +1087,12 @@ final class ManagedAgentTileNSView: TileNSView {
         // shell. Settle it, then count actual transcript layout passes while an
         // isolated timer tick and its resulting layout are processed.
         contentView?.layoutSubtreeIfNeeded()
-        let transcriptLayoutsBeforeTick = cardStack.qaLayoutPassCount
+        let transcriptLayoutsBeforeTick = transcriptCollectionFixture?.transcriptLayout.preparePassCount ?? 0
         agentHeader.qaTick(now: Date(timeIntervalSince1970: 165))
         contentView?.layoutSubtreeIfNeeded()
         let timerActive = agentHeader.qaTimerIsActive
         let elapsedText = agentHeader.qaElapsed
-        let transcriptLayoutDelta = cardStack.qaLayoutPassCount - transcriptLayoutsBeforeTick
+        let transcriptLayoutDelta = (transcriptCollectionFixture?.transcriptLayout.preparePassCount ?? 0) - transcriptLayoutsBeforeTick
         let workingTimerHolds = timerActive
             && elapsedText == "· 1m 5s"
             && transcriptLayoutDelta == 0
@@ -1257,19 +1117,15 @@ final class ManagedAgentTileNSView: TileNSView {
             + "detail=\(qaV2ContractDetail) border=\(layer?.borderWidth ?? -1) "
             + "titleActions=\(titleBarContextMenuForQA().items.map(\.title))"
     }
-    var qaUsesV2HeaderShell: Bool { usesV2 && agentHeader.superview != nil }
+    var qaUsesV2HeaderShell: Bool { agentHeader.superview != nil }
     func qaSubmitPrompt(_ prompt: String) {
-        if let composer = v2Composer {
-            composer.apply(AgentComposerDraft(
-                text: prompt,
-                selection: NSRange(location: (prompt as NSString).length, length: 0),
-                revision: composer.draft.revision &+ 1
-            ))
-            composer.composerRequestedSend(composer.textView)
-        } else {
-            composeField.stringValue = prompt
-            submitPrompt()
-        }
+        guard let composer = v2Composer else { return }
+        composer.apply(AgentComposerDraft(
+            text: prompt,
+            selection: NSRange(location: (prompt as NSString).length, length: 0),
+            revision: composer.draft.revision &+ 1
+        ))
+        composer.composerRequestedSend(composer.textView)
     }
     var qaTranscriptText: String {
         model.cards.map { "[\($0.title)] \($0.body)" }.joined(separator: "\n")

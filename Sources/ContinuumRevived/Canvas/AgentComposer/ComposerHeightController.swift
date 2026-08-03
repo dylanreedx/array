@@ -59,8 +59,26 @@ final class ComposerHeightController {
 
         let usedHeight: CGFloat
         if let textContainer = textView.textContainer, let layoutManager = textView.layoutManager {
-            textContainer.containerSize = NSSize(width: safeWidth, height: .greatestFiniteMagnitude)
-            textContainer.widthTracksTextView = true
+            // Mutation-idempotent: resizing the container invalidates TextKit
+            // layout, and invalidating during a live window display transaction
+            // makes the subsequent draw resize the text view mid-display — which
+            // AppKit terminates with an uncaught needs-display-during-display
+            // exception (found at the P5.5 installed-candidate launch). Only a
+            // real width change may invalidate.
+            let target = NSSize(width: safeWidth, height: .greatestFiniteMagnitude)
+            // This controller owns the container width explicitly. Width tracking
+            // must stay OFF: in a live window whose clip view is momentarily
+            // zero-width (the tile's first display transaction at boot), a
+            // tracking container and TextKit's usage resize fight each other on
+            // every display pass until AppKit terminates the app with a
+            // needs-display-during-display exception (found at the P5.5
+            // installed-candidate launch).
+            if textContainer.widthTracksTextView {
+                textContainer.widthTracksTextView = false
+            }
+            if textContainer.containerSize != target {
+                textContainer.containerSize = target
+            }
             layoutManager.ensureLayout(for: textContainer)
             usedHeight = ceil(layoutManager.usedRect(for: textContainer).height)
         } else {

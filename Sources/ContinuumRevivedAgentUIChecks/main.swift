@@ -111,9 +111,13 @@ func runComposerActionPresentationChecks() {
                            "ComposerAction: ready + canSend must present Send")
                     expect(value.isEnabled == hasDraft,
                            "ComposerAction: Send is enabled exactly when a draft exists")
-                case .working where capabilities.canStop:
+                // P5.5 consolidation: Stop presents whenever stopping is possible
+                // — .working, and the .ready spawn/drain windows where only the
+                // capability knows a runner is in flight. One interrupt affordance
+                // from submit until the turn is over, CLI-style.
+                case _ where capabilities.canStop:
                     expect(value.primaryAction == .stop && value.isEnabled,
-                           "ComposerAction: working + canStop must present an enabled Stop")
+                           "ComposerAction: canStop must present an enabled Stop in every state")
                 default:
                     expect(value.primaryAction == .unavailable && !value.isEnabled,
                            "ComposerAction: an unsupported primary operation must not be advertised")

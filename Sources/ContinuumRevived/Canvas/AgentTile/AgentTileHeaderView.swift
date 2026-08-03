@@ -6,12 +6,6 @@ import ContinuumRevivedCore
 /// its timer; transcript layout never participates in a timer tick.
 @MainActor
 final class AgentTileHeaderView: NSView, TokenThemed {
-    static let fixtureEnvironmentKey = "CONTINUUM_AGENT_TILE_V2_FIXTURE"
-    static var isFixtureEnabled: Bool {
-        ProcessInfo.processInfo.environment[fixtureEnvironmentKey] == "1"
-            || CommandLine.arguments.contains("--agent-supervisor-check")
-    }
-
     static let stopActionTitle = "Stop agent run"
     static let detachActionTitle = "Detach agent view"
 

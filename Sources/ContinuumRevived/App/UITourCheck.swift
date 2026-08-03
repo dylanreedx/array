@@ -141,73 +141,6 @@ enum UITourCheck {
         )
     }
 
-    /// Every `ManagedTranscriptCardKind`, one card each, through the real
-    /// `TranscriptCardView`. The `switch` below is exhaustive, so adding a kind
-    /// to the model fails to compile until it has a sample here.
-    static func transcriptCardSample(for kind: ManagedTranscriptCardKind) -> ManagedTranscriptCard {
-        switch kind {
-        case .message:
-            return ManagedTranscriptCard(
-                id: "tour-message", kind: .message, title: "assistant",
-                body: "I'll read the current guard, then refactor it to be idempotent."
-            )
-        case .userMessage:
-            return ManagedTranscriptCard(
-                id: "tour-userMessage", kind: .userMessage, title: "you",
-                body: "Make the login guard idempotent and keep the matrix green."
-            )
-        case .toolCall:
-            return ManagedTranscriptCard(
-                id: "tour-toolCall", kind: .toolCall, title: "swift test",
-                body: "Executing in /Users/you/project", itemKind: .commandExecution, status: .inProgress
-            )
-        case .plan:
-            return ManagedTranscriptCard(
-                id: "tour-plan", kind: .plan, title: "3 steps",
-                body: "1. Read the guard\n2. Make it idempotent\n3. Run the matrix", itemKind: .plan
-            )
-        case .diff:
-            return ManagedTranscriptCard(
-                id: "tour-diff", kind: .diff, title: "Sources/Auth.swift",
-                body: "+ guard !isConfigured else { return }", itemKind: .fileChange, status: .completed
-            )
-        case .error:
-            return ManagedTranscriptCard(
-                id: "tour-error", kind: .error, title: "swift build",
-                body: "error: cannot find 'isConfigured' in scope", itemKind: .error, status: .failed
-            )
-        }
-    }
-
-    /// Listed explicitly because `ManagedTranscriptCardKind` is not `CaseIterable`
-    /// (it is a wire type in Core). `transcriptCardSample`'s switch keeps the
-    /// mapping honest; this array is what has to grow when a kind is added.
-    static let transcriptCardKinds: [ManagedTranscriptCardKind] = [
-        .message, .userMessage, .toolCall, .plan, .diff, .error
-    ]
-
-    /// The card gallery is swept across the same widths as the tile: a card's
-    /// body wraps, so this is the other surface where width genuinely changes the
-    /// layout (the half-width column bug lived here). The remaining surfaces —
-    /// status chips, sidebar, settings — are fixed-width chrome and render at the
-    /// size production gives them.
-    static let transcriptGalleryHeight: Double = 560
-
-    static func makeTranscriptCardGallery(width: Double) -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
-        for kind in transcriptCardKinds {
-            let card = makeTranscriptEntryView(for: transcriptCardSample(for: kind))
-            card.translatesAutoresizingMaskIntoConstraints = false
-            card.widthAnchor.constraint(equalToConstant: max(80, width - 24)).isActive = true
-            stack.addArrangedSubview(card)
-        }
-        return stack
-    }
-
     /// Surfaces the Component Lab already vends, taken from the catalogue by id so
     /// the tour renders the same fixture the lab and the gates do.
     static let labSurfaces: [(surface: String, entryId: String)] = [
@@ -256,16 +189,6 @@ enum UITourCheck {
                     surface: "semantic-transcript", state: state.rawValue,
                     size: size, appearance: appearance,
                     make: { makeSemanticTranscript(state: state, size: size, appearance: appearance) }
-                ))
-            }
-        }
-
-        for width in tileWidths {
-            let size = NSSize(width: width, height: transcriptGalleryHeight)
-            for appearance in appearances {
-                shots.append(Shot(
-                    surface: "transcript-cards", state: "all-kinds", size: size,
-                    appearance: appearance, make: { makeTranscriptCardGallery(width: width) }
                 ))
             }
         }

@@ -285,81 +285,11 @@ enum UIProbeGeometry {
         // that failed to set its own appearance could not pass the .aqua pass.
         NSApp.appearance = NSAppearance(named: .darkAqua)
 
-        let entries = LabCatalog.entries(env: LabEnvironment(ghostty: nil, browserEngine: nil))
-        guard let entry = entries.first(where: { $0.id == "tiles.managedAgent" }),
-              case let .staticCard(_, make) = entry.content else {
-            throw fail("missing tiles.managedAgent card")
-        }
-
-        var probed = 0
-        var narrowestCardRatio = Double.infinity
-        var tightestDockSlack = Double.infinity
-        for width in probeWidths {
-            for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
-                let label = "managedAgent@\(Int(width))pt.\(appearanceName.rawValue)"
-                let spec = UIProbe.Spec(
-                    id: label, size: NSSize(width: width, height: 560), appearance: appearanceName
-                )
-                let probe = try UIProbe.render(spec, make: make)
-                guard let tile = probe.view as? ManagedAgentTileNSView else {
-                    throw fail("\(label): tiles.managedAgent did not vend ManagedAgentTileNSView")
-                }
-                guard let cardStack = firstDescendant(FlippedStackView.self, in: tile),
-                      let scrollView = cardStack.enclosingScrollView else {
-                    throw fail("\(label): no transcript stack inside a scroll view")
-                }
-
-                // Ingest at the probe's real size, so the scroll assertion is about
-                // this geometry and not the fixture's 560x560 construction frame.
-                for prompt in scrollWitnessPrompts { tile.appendUserPrompt(prompt) }
-                tile.layoutSubtreeIfNeeded()
-
-                try expectCount(
-                    cardStack.arrangedSubviews.count,
-                    tile.transcriptCardCount + tile.qaUserInputCardCount,
-                    label: "\(label): transcript rows"
-                )
-                guard cardStack.arrangedSubviews.count >= 4 else {
-                    throw fail("\(label): only \(cardStack.arrangedSubviews.count) transcript rows — the fixture is not exercising the stack")
-                }
-
-                try fills(child: scrollView, parent: tile, minRatio: 0.99, label: "\(label): transcript scroll view")
-                for (index, card) in cardStack.arrangedSubviews.enumerated() {
-                    try fills(
-                        child: card, parent: tile, minRatio: 0.9,
-                        label: "\(label): card \(index) (\(describe(card)))"
-                    )
-                    narrowestCardRatio = min(narrowestCardRatio, card.bounds.width / tile.bounds.width)
-                }
-
-                try expectNoZeroSizeViews(tile, label: label)
-                // The transcript column, root-to-card: outer row stack, the scroll
-                // view row that lost its width pin, its clip view, the document
-                // stack, and every card in it.
-                var ancestor = scrollView.superview
-                while let view = ancestor, !(view is NSStackView) { ancestor = view.superview }
-                guard let rowStack = ancestor as? NSStackView else {
-                    throw fail("\(label): transcript scroll view is not inside a row stack")
-                }
-                var ambiguityScope: [(NSView, String)] = [(rowStack, "tile row stack"),
-                                                          (scrollView, "transcript scroll view"),
-                                                          (scrollView.contentView, "transcript clip view"),
-                                                          (cardStack, "transcript stack")]
-                for (index, card) in cardStack.arrangedSubviews.enumerated() {
-                    ambiguityScope.append((card, "card \(index)"))
-                }
-                try expectNoAmbiguousLayout(ambiguityScope, label: label)
-                try expectNoClipping(tile, label: label)
-                try expectNoBrokenRequiredSizeConstraints(tile, label: label)
-                try expectScrolledToBottom(scrollView, requireOverflow: true, label: "\(label): transcript")
-                tightestDockSlack = min(tightestDockSlack, try dockSlack(in: tile, label: label))
-                probed += 1
-            }
-        }
-
-        guard probed == probeWidths.count * 2 else {
-            throw fail("probed \(probed) width/appearance pairs, expected \(probeWidths.count * 2)")
-        }
+        // P5.5 acceptance: the legacy card-stack transcript and its approval dock
+        // are deleted; the v2 composition root is gated by
+        // `checkLiveV2AgentTileLayout()` below (320/480/640/900 x both themes,
+        // fills, clipping, constraints, footer truncation) and the semantic
+        // transcript by `checkTranscriptCollectionList()`.
         try checkReusableAgentBlockHost()
         let composerCases = try checkGrowingComposerLayout()
         let choiceCases = try checkChoicePopover()
@@ -372,13 +302,9 @@ enum UIProbeGeometry {
         let codeRows = try checkCodeBlockRenderer()
         let operationRows = try checkToolAndCommandRenderers()
         let exceptionalRows = try checkExceptionalRenderers()
-        guard tightestDockSlack.isFinite else {
-            throw fail("the approval dock was never measured — the fixture no longer opens an approval, so the derived height is ungated")
-        }
         print(String(
-            format: "UIProbeGeometry: %d managed-agent width/appearance pairs gated (widths %@); reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, and %d exceptional states preserve request identity and opaque privacy at 320pt; narrowest card fill ratio %.3f; approval dock derived height %.1fpt, tightest slack over its real content %.1fpt",
-            probed, probeWidths.map { String(Int($0)) }.joined(separator: ","), composerCases, choiceCases, transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, exceptionalRows,
-            narrowestCardRatio, ApprovalDockView.preferredHeight, tightestDockSlack
+            format: "UIProbeGeometry: reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/640/900 in both appearances with footer truncation measured; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, and %d exceptional states preserve request identity and opaque privacy at 320pt",
+            composerCases, choiceCases, transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, exceptionalRows
         ))
     }
 
@@ -435,7 +361,7 @@ enum UIProbeGeometry {
                 let probe = try UIProbe.render(
                     .init(id: label, size: NSSize(width: width, height: 560), appearance: appearanceName)
                 ) {
-                    LabCatalog.makeManagedAgentFixtureView(includeApproval: false, useV2: true)
+                    LabCatalog.makeManagedAgentFixtureView(includeApproval: false)
                 }
                 guard let tile = probe.view as? ManagedAgentTileNSView,
                       tile.qaUsesV2Tile,
@@ -451,9 +377,37 @@ enum UIProbeGeometry {
                     throw fail("\(label): v2 tile retained legacy UI or failed semantic rendering")
                 }
                 try fills(child: transcript, parent: tile, minRatio: 0.95, label: "\(label): semantic transcript")
+                // P5.5 defect 6: a pixel gate cannot see this — the collection
+                // view's default background is `windowBackgroundColor`, which only
+                // shows its wallpaper tint on a live desktop, never in the blessed
+                // offscreen renders.
+                guard transcript.collectionView.backgroundColors == [.clear] else {
+                    throw fail("\(label): the transcript collection view paints its own background (\(transcript.collectionView.backgroundColors)) over the tile's tileBody backdrop")
+                }
                 try expectNoZeroSizeViews(tile, label: label)
                 try expectNoClipping(tile, label: label)
                 try expectNoBrokenRequiredSizeConstraints(tile, label: label)
+                // P5.5 defect 4: text truncation is invisible to the frame-only
+                // checks above — a label ellipsizing inside its own well-contained
+                // frame passes every one of them, which is how "Medi…" shipped at
+                // 750 pt. Whenever the footer's measured fit says its current
+                // titles fit, both pickers must hold their measured width and
+                // render the selected title verbatim.
+                let footer = tile.qaProviderFooterView
+                footer.layoutSubtreeIfNeeded()
+                if footer.qaFitsCurrentTitles {
+                    for (name, button) in [("model", footer.modelButton), ("effort", footer.effortButton)] {
+                        guard button.frame.width >= button.intrinsicContentSize.width - 0.5 else {
+                            throw fail("\(label): \(name) picker squeezed below its measured width (frame \(button.frame.width), needs \(button.intrinsicContentSize.width)) — its title will ellipsize")
+                        }
+                        button.layoutSubtreeIfNeeded()
+                        guard button.qaTitleDrawsWithoutTruncation else {
+                            throw fail("\(label): \(name) picker's label is narrower than its title '\(button.qaRenderedTitle)' needs — the cell will draw an ellipsis")
+                        }
+                    }
+                } else {
+                    throw fail("\(label): the footer's own measured fit rejects its current titles — the fit tiers (full → abbreviated → captionless) must converge at every gate width")
+                }
             }
         }
     }
@@ -2025,116 +1979,6 @@ enum UIProbeGeometry {
         }
     }
 
-    // MARK: - The derived approval-dock height (P1.10)
-
-    /// `ApprovalDockView.preferredHeight` minus the height its real content needs,
-    /// at this probe's width. Must not go negative.
-    ///
-    /// This is the assertion that makes replacing the hardcoded 92pt honest. A
-    /// derived height that under-reports its content does NOT show up as clipping:
-    /// the dock's layout stack is pinned to all four edges, so AppKit compresses the
-    /// labels inside it instead of spilling them, and `expectNoClipping` sees a
-    /// stack that fits its parent exactly. Measured against `fittingSize`, the same
-    /// question is answerable with a number.
-    ///
-    /// The dock must also be *visible* to be measurable — the fixture opens an
-    /// approval (`managedAgentFixtureEvents(includeApproval: true)`), and a hidden
-    /// dock is reported rather than skipped, so this cannot pass vacuously.
-    ///
-    /// Measured TWICE: as the fixture leaves it, and again with a detail line. The
-    /// fixture's `requestOpened` carries `detail: nil`, so `detailLabel` is hidden
-    /// and `NSStackView` drops both the row and its gap — the fixture alone
-    /// therefore measures the dock's SHORT state and reports ~20pt of slack that is
-    /// really the detail row the derivation correctly reserves (the dock must not
-    /// change height when a detail arrives). The populated case is the one that can
-    /// clip, so it is the one that has to be gated.
-    private static func dockSlack(in tile: ManagedAgentTileNSView, label: String) throws -> Double {
-        guard let dock = firstDescendant(ApprovalDockView.self, in: tile) else {
-            throw fail("\(label): no ApprovalDockView in the tile")
-        }
-
-        func measure(_ phase: String) throws -> Double {
-            guard !dock.isHidden else {
-                throw fail("\(label) \(phase): the approval dock is hidden, so its derived height is unmeasured — the fixture must open an approval")
-            }
-            let needed = dock.qaContentFittingHeight
-            guard needed > 0 else {
-                throw fail("\(label) \(phase): the approval dock's content reports zero fitting height — nothing was measured")
-            }
-            let slack = Double(dock.bounds.height) - needed
-            guard slack >= -0.5 else {
-                throw fail(String(
-                    format: "%@ %@: the approval dock is %.1fpt tall but its content needs %.1fpt — the derived height under-reports, and AppKit compresses the labels rather than spilling them, so no clipping assertion would catch it",
-                    label, phase, dock.bounds.height, needed
-                ))
-            }
-            return slack
-        }
-
-        let short = try measure("(no detail)")
-        // A detail at the sanitiser's own 160-character ceiling, so the row is as
-        // tall as the dock will ever have to make it.
-        tile.setPendingApprovalForQA(
-            kind: .commandExecutionApproval, requestId: "geometry-detail",
-            detail: String(repeating: "swift build && swift test ", count: 12)
-        )
-        tile.layoutSubtreeIfNeeded()
-        guard !dock.qaDetailText.isEmpty else {
-            throw fail("\(label): the approval dock shows no detail text after one was set — the tall case is unmeasured")
-        }
-        return min(short, try measure("(with detail)"))
-    }
-
-    // MARK: - Regression witnesses
-    //
-    // Every edit below was applied, run, and observed to turn this check RED; the
-    // quoted failures are the real output. All five are re-runnable by hand.
-    //
-    // 1 · Half-width transcript (the bug that shipped). In
-    //     `ManagedAgentTileNSView.makeContentView()`, delete the four width pins:
-    //         header.widthAnchor.constraint(equalTo: layout.widthAnchor),
-    //         scrollView.widthAnchor.constraint(equalTo: layout.widthAnchor),
-    //         approvalDock.widthAnchor.constraint(equalTo: layout.widthAnchor),
-    //         composeRow.widthAnchor.constraint(equalTo: layout.widthAnchor)
-    //     → "managedAgent@640pt…: transcript scroll view: spans 0.670 of parent
-    //        width (429.0pt of 640.0pt), needs >= 0.990"
-    //     Note it fails at 640pt and 900pt, not at 320pt: an unpinned column whose
-    //     fitting width already exceeds the tile is clamped to full width anyway.
-    //     That is exactly why the probe widths must include widths wider than the
-    //     transcript's natural fitting width, and why `scrollWitnessPrompts` are
-    //     short lines.
-    //
-    // 2 · Card/model parity. In `ManagedAgentTileNSView.reconcileCards()`, iterate
-    //     an empty array:
-    //         for card in [ManagedTranscriptCard]() {   // was: model.cards
-    //     → "transcript rows: 0, expected 13"
-    //
-    // 3 · Newest card off-screen. Delete `scrollTranscriptToBottom()` from
-    //     `appendUserPrompt(_:)`:
-    //     → "transcript: clip offset 0.0, expected 689.0 (document 1037.0pt,
-    //        clip 348.0pt)"
-    //
-    // 4 · Clipping. In `reconcileCards()`, make cards wider than their stack —
-    //     `constant: 60` instead of `constant: -24`:
-    //     → "…/TranscriptCardView#managedAgent.card.assistant-1 spills
-    //        horizontally — frame x 0.0…380.0 outside parent 0…320.0"
-    //
-    // 5 · Invisible cards. In `reconcileCards()`, add
-    //         view.heightAnchor.constraint(equalToConstant: 0).isActive = true
-    //     → "…/TranscriptCardView#managedAgent.card.assistant-1 laid out to
-    //        296.0x0.0"
-    //
-    // 6 · Unsatisfiable constraints. In `makeContentView()`, add a second required
-    //     header height alongside the 52pt one:
-    //         header.heightAnchor.constraint(equalToConstant: 90),
-    //     → "…/NSStackView holds a broken required constraint — measured 52.0,
-    //        needs == 90.0 (<NSLayoutConstraint … .height == 90 (active)>)"
-    //
-    // Not witnessed: `expectNoAmbiguousLayout`. Witness 1 — the one bug in this
-    // tile that AppKit's ambiguity reporting is advertised to catch — is caught by
-    // the fill-ratio gate first, and no edit found so far makes the scoped
-    // transcript column report ambiguity without also breaking a stronger
-    // assertion. It is kept as a cheap structural assertion, not a proven gate.
 }
 
 @MainActor

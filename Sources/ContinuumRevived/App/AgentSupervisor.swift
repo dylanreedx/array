@@ -405,6 +405,7 @@ final class AgentSupervisor {
 
         let runner = makeRunner(record)
         runners[id] = runner
+        notifyTurnCapabilitiesChanged(id)
         // P2D.2: an agent asking for another agent arrives here, out of band from
         // the event stream. Hopped to the main actor like the events are, and for
         // the same reason — the handler mutates supervisor state.
@@ -439,6 +440,7 @@ final class AgentSupervisor {
         }
         runners[id]?.stop()
         runners[id] = nil
+        notifyTurnCapabilitiesChanged(id)
         deliver(.sessionStateChanged(.stopped), to: id)
     }
 
@@ -703,6 +705,30 @@ final class AgentSupervisor {
     /// the supervisor does not know what "done" means for a Linear row or a
     /// conductor task, and guessing would put queue semantics in here.
     var onFanOutItemCompleted: ((String, AgentID) -> Void)?
+
+    /// Observers of turn-capability changes that no runtime event carries: the
+    /// runner slot being taken or freed. The Pi process prints its terminal events
+    /// before it exits, so the slot frees strictly after the last event a view will
+    /// ever ingest — without this seam a view's cached `turnSnapshot` stays
+    /// `canSend == false` forever (P5.5 live finding). Observers re-read
+    /// `turnSnapshot(for:)`; nothing is fabricated onto the event stream. Token
+    /// per observer because every attached agent tile subscribes.
+    private var turnCapabilityObservers: [UUID: (AgentID) -> Void] = [:]
+
+    @discardableResult
+    func addTurnCapabilitiesObserver(_ observe: @escaping (AgentID) -> Void) -> UUID {
+        let token = UUID()
+        turnCapabilityObservers[token] = observe
+        return token
+    }
+
+    func removeTurnCapabilitiesObserver(_ token: UUID) {
+        turnCapabilityObservers[token] = nil
+    }
+
+    private func notifyTurnCapabilitiesChanged(_ id: AgentID) {
+        for observe in turnCapabilityObservers.values { observe(id) }
+    }
 
     /// Items whose agent has reported a completed turn, so a surface that rebuilds
     /// its rows (or one that attaches after the fact) can still draw them checked.
@@ -1205,7 +1231,12 @@ final class AgentSupervisor {
             state: state,
             capabilities: .sendStop(
                 canSend: !occupied && state.acceptsNewTurn,
-                canStop: occupied && facts.execution == .working
+                // In flight = stoppable, full stop (P5.5 consolidation): `stop()`
+                // genuinely kills a spawning (pre-turnStarted) or draining
+                // (post-settle) process, so gating on `execution == .working`
+                // under-advertised the transport — and painted the two windows
+                // "Unavailable" on the composer.
+                canStop: occupied
             )
         )
     }
@@ -1601,7 +1632,10 @@ final class AgentSupervisor {
     private func clearRunner(_ runner: AgentRunning, for id: AgentID) {
         // Identity-checked: a `send` that started while the previous prompt was
         // finishing must not have its runner cleared by the old one's completion.
-        if runners[id] === runner { runners[id] = nil }
+        if runners[id] === runner {
+            runners[id] = nil
+            notifyTurnCapabilitiesChanged(id)
+        }
     }
 
     private func persist(_ record: AgentRecord) {
@@ -2524,6 +2558,7 @@ func runAgentSupervisorChecks() async throws {
 
     let tileReport = try await checkTileIsASubscriber(store: store, config: config, cwd: cwd, fail: fail)
     let liveV2Report = try await checkLiveV2TileMigration(store: store, config: config, cwd: cwd, fail: fail)
+    let capabilityReport = try await checkTurnCapabilityRepaint(store: store, config: config, cwd: cwd, fail: fail)
 
     // MARK: 8 · closing a tile is closing a window, not ending the work (P2A.5)
 
@@ -2574,7 +2609,7 @@ func runAgentSupervisorChecks() async throws {
     let turnStateReport = try await checkCapabilityDrivenTurnStates(config: config, cwd: cwd, fail: fail)
 
     for task in [taskA, taskB, taskC, taskD] { task.cancel() }
-    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport)")
+    print("AgentSupervisor: \(script.count) events fanned out to 2 live + 1 late subscriber, spawn persisted headless, stop made a blocked run() return, a send on a busy agent refused, \(composerKeyAssertions) composer key/IME/undo/history assertions, \(completionAssertions) production completion assertions, \(scannedFiles) source files scanned for stray runner construction; \(tileReport); \(liveV2Report); \(capabilityReport); \(detachReport); \(headlessReport); \(isolationReport); \(cleanupReport); \(branchReport); \(spawnCallReport); \(readStateReport); \(unsettleReport); \(providerReport); \(rowStatusReport); \(rendererReport); \(turnStateReport)")
 }
 
 @MainActor
@@ -2608,6 +2643,9 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
     }
     guard supervisor.turnSnapshot(for: id)?.capabilities.canSend == false else {
         throw fail("turn-state: occupied send transport advertised acceptance")
+    }
+    guard supervisor.turnSnapshot(for: id)?.capabilities.canStop == true else {
+        throw fail("turn-state: an in-flight alive-but-idle runner lost its Stop — the spawn/drain windows must stay interruptible (P5.5 consolidation)")
     }
     supervisor.qaDeliver(.turnStarted(
         threadId: AgentSupervisor.threadId(for: id), turnId: "turn-2"
@@ -2710,6 +2748,21 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
           composer.textView.string == draftBeforeRefusal else {
         throw fail("turn-state: refused composer send cleared or changed its draft")
     }
+    // The dealloc-mid-submit latch (P5.5 correction, defect 3): the composer
+    // holds its sink weakly, so a submit whose sink dies before the action task
+    // runs resolves a nil acceptance — that exit must still release the
+    // single-flight latch, or no sink bound afterwards can ever dispatch.
+    var dyingSink: ScriptedTileActionSink? = ScriptedTileActionSink(.accepted)
+    composer.bindActionSink(
+        dyingSink!,
+        agentID: id,
+        snapshot: .init(
+            state: .ready,
+            capabilities: .sendStop(canSend: true, canStop: false)
+        )
+    )
+    composer.composerRequestedSend(composer.textView)
+    dyingSink = nil
     let acceptingSink = ScriptedTileActionSink(.accepted)
     composer.bindActionSink(
         acceptingSink,
@@ -2723,7 +2776,7 @@ private func checkCapabilityDrivenTurnStates<Failure: Error>(
     guard await waitUntil(timeout: 1, pollInterval: 0.01, {
         acceptingSink.intents.count == 1 && composer.textView.string.isEmpty
     }) else {
-        throw fail("turn-state: accepted composer send did not clear its unchanged draft")
+        throw fail("turn-state: a submit whose sink deallocated latched the composer — the sink bound after it never dispatched (dispatches \(acceptingSink.intents.count))")
     }
 
     supervisor.qaDeliver(.turnStarted(
@@ -3284,6 +3337,140 @@ private final class ScriptedRunnerQueue {
     }
 }
 
+private final class CapabilityRepaintRunnerBox: @unchecked Sendable {
+    var made: [ScriptedAgentRunner] = []
+}
+
+/// P5.5 correction gate (`plan-P5.5-review-corrections.md` defect 1). The Pi
+/// process prints its terminal turn events before it exits, so the runner slot
+/// frees strictly AFTER the last runtime event a tile ever ingests — the tile's
+/// repaint of that transition rides the supervisor's capability seam, never a
+/// fabricated event. `qaDeliver` cannot represent this race (no runner exists on
+/// that path, which is exactly how the latch shipped); this leg drives it with a
+/// real held-open scripted runner. The required negative witness is disconnecting
+/// `notifyTurnCapabilitiesChanged` from `clearRunner`: the slot-free repaint
+/// assertion below goes red.
+@MainActor
+private func checkTurnCapabilityRepaint<Failure: Error>(
+    store: AgentStore,
+    config: AgentModelConfig.Resolution,
+    cwd: URL,
+    fail: (String) -> Failure
+) async throws -> String {
+    // One FRESH runner per send, as production's makeRunner does: reusing one
+    // instance across rounds defeats clearRunner's identity check — a previous
+    // round's late completion would clear the next round's slot.
+    let box = CapabilityRepaintRunnerBox()
+    let supervisor = AgentSupervisor(store: store, makeRunner: { _ in
+        let runner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+        box.made.append(runner)
+        return runner
+    })
+    let tileID = UUID()
+    let agentID = supervisor.spawn(
+        role: "capability-repaint",
+        prompt: nil,
+        cwd: cwd,
+        model: config.model,
+        thinking: config.thinking,
+        tileId: tileID
+    )
+    let thread = AgentSupervisor.threadId(for: agentID)
+    let tile = ManagedAgentTileNSView(tile: Tile(
+        id: tileID,
+        kind: .managedAgent,
+        title: "capability-repaint",
+        frame: TileFrame(x: 0, y: 0, width: 520, height: 420),
+        zPosition: .fromLegacyRank(1),
+        runtimeRef: nil,
+        metadata: TileMetadata(launchProfileId: "managed")
+    ))
+    tile.frame = NSRect(x: 0, y: 0, width: 520, height: 420)
+    tile.attach(agentID: agentID, supervisor: supervisor)
+    defer { tile.detach() }
+
+    // Round 1 — the SPAWN window (P5.5 consolidation). The seam fires inside
+    // `send` itself, so the button offers Stop before any runtime event exists —
+    // and that Stop is callable: it kills the spawning runner.
+    supervisor.send("first prompt", to: agentID)
+    guard tile.qaV2ActionTitle == "Stop",
+          supervisor.turnSnapshot(for: agentID)?.capabilities.canStop == true else {
+        throw fail("capability-repaint: send did not synchronously present a stoppable flight (action '\(tile.qaV2ActionTitle ?? "nil")')")
+    }
+    guard let spawnRunner = box.made.first else {
+        throw fail("capability-repaint: send made no runner")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { spawnRunner.runCount == 1 }) else {
+        throw fail("capability-repaint: the scripted runner never ran")
+    }
+    guard await supervisor.accept(.stop, for: agentID) == .accepted else {
+        throw fail("capability-repaint: stop during the spawn window was refused")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        spawnRunner.stopCount == 1 && spawnRunner.completedRuns == 1 && tile.qaV2ActionTitle == "Send"
+    }) else {
+        throw fail("capability-repaint: stopping the spawning runner did not release the flight (stops \(spawnRunner.stopCount), completed \(spawnRunner.completedRuns), action '\(tile.qaV2ActionTitle ?? "nil")')")
+    }
+    // Let round 1's `.stopped` delivery land before counting round 2's events.
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { tile.ingestedEvents.count == 1 }) else {
+        throw fail("capability-repaint: the stop's session event never reached the tile (\(tile.ingestedEvents.count) ingested)")
+    }
+
+    // Round 2 — a full natural turn, ending in the DRAIN window: terminal events
+    // arrive while the process is still alive and blocked in run().
+    supervisor.send("second prompt", to: agentID)
+    guard box.made.count == 2, let runner = box.made.last else {
+        throw fail("capability-repaint: the second send did not make a fresh runner (\(box.made.count) made)")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { runner.runCount == 1 }) else {
+        throw fail("capability-repaint: the second run never started")
+    }
+    guard runner.emit(.turnStarted(threadId: thread, turnId: "t1")),
+          runner.emit(.turnCompleted(threadId: thread, turnId: "t1", outcome: .completed, errorMessage: nil)),
+          runner.emit(.sessionStateChanged(.ready)) else {
+        throw fail("capability-repaint: no run was in flight to emit the turn from")
+    }
+    // At the LAST event the tile will ever ingest, the slot is still held:
+    // sending is truthfully impossible, and the drain window keeps the interrupt
+    // affordance — never "Unavailable" — with the pickers dark alongside it. The
+    // event count is part of the condition: spawn and drain deliberately look
+    // identical at the button, so only the ingested turn distinguishes them.
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        tile.ingestedEvents.count == 4 && tile.qaV2CanSend == false
+            && tile.qaV2ActionTitle == "Stop" && !tile.qaProviderControlsEnabled
+    }) else {
+        throw fail("capability-repaint: the drain window lost its Stop (canSend \(tile.qaV2CanSend), action '\(tile.qaV2ActionTitle ?? "nil")', pickers \(tile.qaProviderControlsEnabled ? "live" : "dark"), events \(tile.ingestedEvents.count))")
+    }
+
+    // The process exits; run() returns; the slot frees. No further runtime event.
+    // The button offers Send again (its enablement then follows the draft, which
+    // is the composer key contract's business, not this leg's).
+    let eventsBeforeExit = tile.ingestedEvents.count
+    runner.stop()
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, {
+        runner.completedRuns == 1 && tile.qaV2CanSend && tile.qaV2ActionTitle == "Send" && tile.qaProviderControlsEnabled
+    }) else {
+        throw fail("capability-repaint: composer stayed un-sendable after the runner slot freed — the capability seam did not repaint (canSend \(tile.qaV2CanSend), action '\(tile.qaV2ActionTitle ?? "nil")')")
+    }
+    // And nothing was fabricated to do it.
+    guard tile.ingestedEvents.count == eventsBeforeExit else {
+        throw fail("capability-repaint: the repaint rode a fabricated runtime event (\(tile.ingestedEvents.count) ingested, was \(eventsBeforeExit))")
+    }
+    // The advertised capability is transport-true: a third turn is accepted.
+    let acceptance = await supervisor.accept(.send("third prompt"), for: agentID)
+    guard case .accepted = acceptance else {
+        throw fail("capability-repaint: the supervisor refused the third turn (\(acceptance))")
+    }
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { box.made.count == 3 && box.made.last?.runCount == 1 }) else {
+        throw fail("capability-repaint: the accepted third turn never reached a fresh runner (\(box.made.count) made)")
+    }
+    box.made.last?.stop()
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { box.made.last?.completedRuns == 1 }) else {
+        throw fail("capability-repaint: the third run did not release")
+    }
+    return "spawn window stoppable, drain window kept Stop, slot-free repainted without an event, third turn ran"
+}
+
 /// P5.4 live migration gate. The required negative witness is the empty-choice
 /// user-input request: it must render context but never acquire a fabricated text
 /// editor or action. Changing that request to freeform makes this assertion red.
@@ -3321,7 +3508,7 @@ private func checkLiveV2TileMigration<Failure: Error>(
         zPosition: .fromLegacyRank(1),
         runtimeRef: nil,
         metadata: TileMetadata(launchProfileId: "managed")
-    ), useV2: true)
+    ))
     tile.frame = NSRect(x: 0, y: 0, width: 520, height: 420)
     let draftStore = AgentComposerDraftStore(
         applicationSupportDirectory: store.layout.applicationSupportDirectory,
@@ -3461,16 +3648,11 @@ private func checkLiveV2TileMigration<Failure: Error>(
         throw fail("live-v2: v2 branch refresh did not yield a truthful chip for the shared checkout: \(tile.qaBranchChipText ?? "nil")")
     }
 
-    let compatibility = ManagedAgentTileNSView(tile: Tile(
-        id: UUID(), kind: .managedAgent, title: "rollback",
-        frame: TileFrame(x: 0, y: 0, width: 520, height: 320),
-        zPosition: .fromLegacyRank(1), runtimeRef: nil,
-        metadata: TileMetadata(launchProfileId: "managed")
-    ), useV2: false)
-    guard !compatibility.qaUsesV2Tile,
-          compatibility.qaHasLegacyComposeField,
-          compatibility.qaHasPermanentApprovalDock else {
-        throw fail("live-v2: rollback construction seam no longer produces the compatibility tile")
+    // P5.5 acceptance removed the reversible construction seam with the legacy
+    // path: v2 is the only tile. The rollback assertions this leg carried died
+    // with it; the structural absences are asserted below on the live tile.
+    guard !tile.qaHasLegacyComposeField, !tile.qaHasPermanentApprovalDock else {
+        throw fail("live-v2: the legacy compose field or approval dock is reachable after the P5.5 removal")
     }
 
     let subscribersBeforeDetach = supervisor.subscriberCount(for: agentID)
@@ -3482,7 +3664,7 @@ private func checkLiveV2TileMigration<Failure: Error>(
           supervisor.records[agentID] != nil else {
         throw fail("live-v2: detach failed to cancel UI subscription or changed supervisor ownership")
     }
-    return "v2 tile replayed then tailed one stable semantic row, sent and history-recorded one AgentID-bound full-turn draft with no legacy field/dock, revealed one reducer-projected fixed-choice request whose choice press dispatched once and resolved NOTHING until the real runtime resolution turned it passive, kept fixedChoice([]) read-only, reattached with an exactly-once replay including resolved request history and a truthful no-chip branch refresh, detached cleanly, and retained a reversible compatibility constructor"
+    return "v2 tile replayed then tailed one stable semantic row, sent and history-recorded one AgentID-bound full-turn draft with no legacy field/dock, revealed one reducer-projected fixed-choice request whose choice press dispatched once and resolved NOTHING until the real runtime resolution turned it passive, kept fixedChoice([]) read-only, reattached with an exactly-once replay including resolved request history and a truthful no-chip branch refresh, detached cleanly, with the legacy path structurally unreachable"
 }
 
 /// The tile as a pure view over an agent's stream: attach replays the history,
@@ -6163,9 +6345,13 @@ private func checkPerAgentProviderSettings(
     }
 
     // While a turn is in flight both controls go dark with the rest of compose.
-    tile.ingest(.sessionStateChanged(.running))
-    tile.ingest(.turnStarted(threadId: tile.wiringThreadId, turnId: "t1"))
-    guard tile.qaComposeEnabled == false else {
+    // Through the supervisor, not direct tile ingest: an attached v2 tile's status
+    // derives from the supervisor snapshot (P5.5 status single-ownership), so a
+    // fixture event that bypasses `deliver` no longer represents a turn — exactly
+    // as a real turn never bypasses it.
+    supervisor.qaDeliver(.sessionStateChanged(.running), to: agentId)
+    supervisor.qaDeliver(.turnStarted(threadId: AgentSupervisor.threadId(for: agentId), turnId: "t1"), to: agentId)
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { tile.qaComposeEnabled == false }) else {
         throw fail("provider-settings: compose stayed enabled during a turn, so the in-flight assertion below is vacuous")
     }
     guard tile.qaProviderControlsEnabled == false else {
@@ -6175,11 +6361,11 @@ private func checkPerAgentProviderSettings(
     guard supervisor.providerSettings(for: agentId)?.model == secondModel else {
         throw fail("provider-settings: a disabled picker still wrote \(String(describing: supervisor.providerSettings(for: agentId)?.model)) to the record mid-turn")
     }
-    tile.ingest(.turnCompleted(threadId: tile.wiringThreadId, turnId: "t1", outcome: .completed, errorMessage: nil))
-    tile.ingest(.sessionStateChanged(.ready))
+    supervisor.qaDeliver(.turnCompleted(threadId: AgentSupervisor.threadId(for: agentId), turnId: "t1", outcome: .completed, errorMessage: nil), to: agentId)
+    supervisor.qaDeliver(.sessionStateChanged(.ready), to: agentId)
     // Both, together: the pickers are on `applyComposeAvailability()` and not on a
     // second notion of "busy", so they must come back exactly when compose does.
-    guard tile.qaProviderControlsEnabled, tile.qaComposeEnabled else {
+    guard await waitUntil(timeout: 5, pollInterval: 0.02, { tile.qaProviderControlsEnabled && tile.qaComposeEnabled }) else {
         throw fail("provider-settings: after the turn ended compose is \(tile.qaComposeEnabled ? "live" : "dark") and the pickers are \(tile.qaProviderControlsEnabled ? "live" : "dark") — they must move together")
     }
     tile.detach()
@@ -6202,7 +6388,10 @@ private func checkPerAgentProviderSettings(
     // P4.8 exercises the same footer now installed in the production tile: it reads
     // the shared catalogues, labels its scope truthfully, persists through the same
     // supervisor, and submits only the field that moved.
-    let footer = AgentComposerFooterView(frame: NSRect(x: 0, y: 0, width: 360, height: 48))
+    // Label variants are a MEASURED fit since the P5.5 corrections, not a
+    // width threshold: 240 pt cannot hold this catalogue's full titles (compact
+    // expected), and at 640 pt the full titles must come back verbatim.
+    let footer = AgentComposerFooterView(frame: NSRect(x: 0, y: 0, width: 240, height: 48))
     footer.apply(foreignSupervisor.providerSettings(for: agentId)!)
     footer.onSettingsWrite = { model, thinking in
         foreignSupervisor.setProviderSettings(agentID: agentId, model: model, thinking: thinking)
@@ -6213,6 +6402,12 @@ private func checkPerAgentProviderSettings(
           footer.modelButton.accessibilityLabel() == "Model, next turn",
           footer.effortButton.accessibilityLabel() == "Reasoning effort, next turn" else {
         throw fail("provider-settings: the custom footer diverged from AgentModelConfig, hid the off-catalog model, or lost its next-turn accessibility labels")
+    }
+    footer.setFrameSize(NSSize(width: 640, height: 48))
+    footer.layoutSubtreeIfNeeded()
+    guard footer.qaModelTitles == AgentModelConfig.modelOptions + [foreign.model],
+          footer.qaEffortTitles == AgentModelConfig.thinkingOptions.map(\.capitalized) else {
+        throw fail("provider-settings: 640 pt did not restore the full model ids and effort names — the measured fit stayed compact with room to spare")
     }
     guard footer.qaPickThinking("high"),
           foreignSupervisor.providerSettings(for: agentId)?.model == foreign.model,

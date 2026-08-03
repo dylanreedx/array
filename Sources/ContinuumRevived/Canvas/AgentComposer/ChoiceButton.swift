@@ -57,14 +57,36 @@ final class ChoiceButton: NSControl, TokenThemed {
 
     override var acceptsFirstResponder: Bool { isEnabled && items.contains(where: \.enabled) }
 
+    private static let chevronSize: CGFloat = 12
+
+    /// The raw string width plus the label cell's own horizontal padding, which
+    /// `NSString.size` does not include — without it the cell truncates the title
+    /// at EVERY width (`ComposerActionButton.measuredTitleWidth` precedent;
+    /// P5.5 live finding, `plan-P5.5-review-corrections.md` defect 4). One
+    /// expression for both `intrinsicContentSize` and `layout()`, so the two
+    /// cannot disagree by a chevron metric again.
+    private var measuredTitleWidth: CGFloat {
+        ceil((titleLabel.stringValue as NSString).size(withAttributes: [.font: NSFont.token(.label)]).width) + 4
+    }
+
+    /// What a button showing `title` needs, measured the way the button measures
+    /// itself — for callers (the footer's fit decision) that must reason about a
+    /// title BEFORE installing it.
+    static func fittingWidth(forTitle title: String) -> CGFloat {
+        let titleWidth = ceil((title as NSString).size(withAttributes: [.font: NSFont.token(.label)]).width) + 4
+        return horizontalPadding * 2 + titleWidth + CGFloat(Space.m) + chevronSize
+    }
+
     override var intrinsicContentSize: NSSize {
-        let titleWidth = ceil((titleLabel.stringValue as NSString).size(withAttributes: [.font: NSFont.token(.label)]).width)
-        return NSSize(width: Self.horizontalPadding * 2 + titleWidth + 14 + CGFloat(Space.m), height: Self.controlHeight)
+        NSSize(
+            width: Self.horizontalPadding * 2 + measuredTitleWidth + CGFloat(Space.m) + Self.chevronSize,
+            height: Self.controlHeight
+        )
     }
 
     override func layout() {
         super.layout()
-        let chevronSize: CGFloat = 12
+        let chevronSize = Self.chevronSize
         chevronView.frame = NSRect(
             x: bounds.width - Self.horizontalPadding - chevronSize,
             y: floor((bounds.height - chevronSize) / 2),
@@ -175,6 +197,17 @@ final class ChoiceButton: NSControl, TokenThemed {
             self.applyTokens()
         }
         applyTokens()
+    }
+
+    // Deterministic probes. `stringValue` never changes when the cell elides at
+    // draw time, so a truncation gate must MEASURE the label's drawable width
+    // against what the string plus the cell's own padding need — comparing
+    // strings is vacuous by construction.
+    var qaRenderedTitle: String { titleLabel.stringValue }
+    var qaSelectedTitle: String? { items.first(where: { $0.id == selectedID })?.title }
+    var qaTitleDrawsWithoutTruncation: Bool {
+        let needed = ceil((titleLabel.stringValue as NSString).size(withAttributes: [.font: NSFont.token(.label)]).width) + 4
+        return titleLabel.frame.width + 0.5 >= needed
     }
 
     private func updatePresentation() {

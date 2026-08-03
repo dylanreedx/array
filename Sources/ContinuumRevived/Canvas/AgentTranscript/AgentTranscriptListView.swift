@@ -30,9 +30,9 @@ private final class AgentTranscriptCollectionItem: NSCollectionViewItem {
     }
 }
 
-/// Reusable semantic transcript fixture. The compatibility transcript remains the
-/// live tile path; this list is exercised behind the internal fixture flag until
-/// the later migration ticket owns visibility and scroll behavior.
+/// The live semantic transcript (P5.5 acceptance): the virtualized collection
+/// list every managed-agent tile renders. The legacy card-stack transcript and
+/// its fixture flag were deleted at that gate.
 @MainActor
 final class AgentTranscriptListView: NSView {
     enum UpdateError: Error, CustomStringConvertible {
@@ -61,11 +61,6 @@ final class AgentTranscriptListView: NSView {
     struct Row {
         let block: AgentBlock
         let role: AgentEntryRole
-    }
-
-    static let fixtureEnvironmentKey = "CONTINUUM_AGENT_TRANSCRIPT_COLLECTION_FIXTURE"
-    static var isFixtureEnabled: Bool {
-        ProcessInfo.processInfo.environment[fixtureEnvironmentKey] == "1"
     }
 
     let scrollView = NSScrollView(frame: .zero)
@@ -133,6 +128,13 @@ final class AgentTranscriptListView: NSView {
     private func configureCollectionView() {
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.drawsBackground = false
+        // Without this, NSCollectionView paints its DEFAULT background —
+        // `windowBackgroundColor`, which macOS tints toward the desktop wallpaper
+        // — over the tile's `tileBody` backdrop. Offscreen gate renders resolve
+        // that default to a plain dark gray (and the baselines were blessed with
+        // it), so only a live desktop shows the wrong color (P5.5 live finding,
+        // `plan-P5.5-review-corrections.md` defect 6).
+        collectionView.backgroundColors = [.clear]
         scrollView.hasVerticalScroller = true
         collectionView.collectionViewLayout = transcriptLayout
         collectionView.isSelectable = true
@@ -466,6 +468,25 @@ final class AgentTranscriptListView: NSView {
                 width: clipSize.width, height: max(collectionView.frame.height, clipSize.height)
             ))
             transcriptLayout.invalidateForStructureChange()
+        }
+        // Materialize visible items in THIS pass: a live window's display cycle
+        // does it on its own, but offscreen renders (baselines, Component Lab)
+        // never run one — a document applied while the tile was still zero-sized
+        // snapshots as an applied-but-EMPTY collection (P5.5 removal finding:
+        // rows and layout attributes existed, live hosts were zero).
+        collectionView.layoutSubtreeIfNeeded()
+        // And drive the layout's own prepare pass: offscreen, AppKit neither
+        // re-prepares an invalidated layout nor repositions materialized items —
+        // both only happen in a live display cycle — so a probe re-hosted at a
+        // new width otherwise snapshots 560pt-wide rows spilling out of a 320pt
+        // tile. Both calls are idempotent in a live window (the width bucket and
+        // the frames already match).
+        transcriptLayout.prepare()
+        for indexPath in collectionView.indexPathsForVisibleItems() {
+            guard let item = collectionView.item(at: indexPath),
+                  let attributes = transcriptLayout.layoutAttributesForItem(at: indexPath),
+                  item.view.frame != attributes.frame else { continue }
+            item.view.frame = attributes.frame
         }
 
         // NSCollectionView's custom layout reports the scrollable content height,

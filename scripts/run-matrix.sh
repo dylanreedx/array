@@ -294,6 +294,9 @@ run_app_check .build/debug/continuum-revived --tile-chrome-scale-check
 run_app_check .build/debug/continuum-revived --resize-dimensions-hud-check
 run_app_check .build/debug/continuum-revived --bring-to-front-focus-check
 run_app_check .build/debug/continuum-revived --note-click-focus-check
+# P5.5 correction: the same click-focus contract for the v2 agent composer — the
+# broker steal, an editor-glyph click, and a padding-ring click all land in the editor.
+run_app_check .build/debug/continuum-revived --agent-tile-click-focus-check
 run_app_check .build/debug/continuum-revived --focus-scope-dispatch-check
 run_app_check .build/debug/continuum-revived --reserved-dispatch-check
 run_app_check .build/debug/continuum-revived --tile-action-check

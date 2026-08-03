@@ -983,7 +983,7 @@ enum LabCatalog {
             composerCompactVariantCard, composerProviderControlsCard,
 
             // MARK: night3-C cards
-            managedAgentApprovalDockCard, managedAgentUserInputCard, newTileCwdPolicyCard,
+            managedAgentApprovalDockCard, newTileCwdPolicyCard,
             topologyMigrationNoteCard,
 
             // MARK: 90-agent-ux cards
@@ -1984,20 +1984,6 @@ enum LabCatalog {
         )
     }
 
-    private static var managedAgentUserInputCard: LabEntry {
-        LabEntry(
-            id: "managed-agent.user-input-card",
-            category: "Managed Agent",
-            title: "User Input Card",
-            summary: "Inline answer-field card for user-input.requested events.",
-            content: .staticCard(preferredSize: NSSize(width: 480, height: 160)) {
-                let card = UserInputCardView(frame: NSRect(x: 0, y: 0, width: 480, height: 160))
-                card.configure(question: "What should I name the new migration file?")
-                return card
-            }
-        )
-    }
-
     /// P2C.4's three states, side by side, so the PNG baselines cover all of them
     /// and the contrast gate measures the warning variant as well as the plain one.
     private static var branchChipCard: LabEntry {
@@ -2305,11 +2291,13 @@ enum LabCatalog {
     /// fixed chrome plus three body lines of transcript, so the next control that
     /// changes height moves this instead of collapsing the transcript again.
     static var approvalDockPreviewTileHeight: Double {
-        Metrics.rowHeight(for: .title, lines: 2)              // header
-            + ApprovalDockView.preferredHeight                // the dock this card is about
-            + Metrics.rowHeight(for: .body, insets: Inset.card)  // the prompt row
-            + ManagedAgentTileNSView.providerControlHeight    // the model/effort row
-            + Metrics.rowHeight(for: .body, lines: 3, insets: Inset.card)  // transcript
+        // P5.5: the legacy dock is gone — the request renders as a transcript
+        // block, so the derived height reserves transcript lines for it instead
+        // of a fixed dock band.
+        AgentTileHeaderView.preferredHeight                                // header
+            + Metrics.rowHeight(for: .body, insets: Inset.card)            // composer row
+            + ManagedAgentTileNSView.providerControlHeight                 // the model/effort row
+            + Metrics.rowHeight(for: .body, lines: 6, insets: Inset.card)  // transcript incl. request block
     }
 
     static func makeManagedAgentApprovalDockPreview() -> NSView {
@@ -2331,6 +2319,7 @@ enum LabCatalog {
             )
             let view = ManagedAgentTileNSView(tile: tile)
             view.frame = NSRect(x: 0, y: 0, width: 520, height: approvalDockPreviewTileHeight)
+            view.layoutSubtreeIfNeeded()
             view.ingest(.sessionStateChanged(status == .done ? .stopped : .running))
             view.ingest(.turnStarted(threadId: "thread-main", turnId: "turn-\(status.rawValue)"))
             view.ingest(.contentDelta(threadId: "thread-main", turnId: "turn-\(status.rawValue)", streamKind: .assistant, delta: "Checking the auth change set."))
@@ -2338,7 +2327,7 @@ enum LabCatalog {
                 view.ingest(.turnCompleted(threadId: "thread-main", turnId: "turn-\(status.rawValue)", outcome: .completed, errorMessage: nil))
             }
             if pending {
-                view.setPendingApprovalForQA(kind: .commandExecutionApproval, requestId: "approval-preview", detail: "npm test")
+                view.ingest(.requestOpened(threadId: "thread-main", requestId: "approval-preview", kind: .commandExecutionApproval))
             } else {
                 view.agentStatus = status
             }
@@ -2391,8 +2380,7 @@ enum LabCatalog {
     }
 
     static func makeManagedAgentFixtureView(
-        includeApproval: Bool = true,
-        useV2: Bool = false
+        includeApproval: Bool = true
     ) -> ManagedAgentTileNSView {
         let tile = Tile(
             id: UUID(uuidString: "71000000-0000-4000-8000-000000000071")!,
@@ -2403,8 +2391,14 @@ enum LabCatalog {
             runtimeRef: nil,
             metadata: TileMetadata(launchProfileId: "managed")
         )
-        let view = ManagedAgentTileNSView(tile: tile, useV2: useV2)
+        let view = ManagedAgentTileNSView(tile: tile)
         view.frame = NSRect(x: 0, y: 0, width: 560, height: 560)
+        // Size the subtree BEFORE ingesting, as production does (a tile is
+        // installed and laid out before its first event): a document applied
+        // into a zero-sized collection view materializes no item hosts, and an
+        // offscreen render never runs the live display pass that would recover
+        // them (P5.5 removal finding).
+        view.layoutSubtreeIfNeeded()
         // P2C.4: an isolated agent ON the branch it was given — the ordinary case.
         // The fixture carries it so `--ui-geometry-check` exercises the header with
         // a chip in it at the 320pt tile minimum, where a header that cannot fit one
@@ -3195,7 +3189,10 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
               let footer = makeFooterView() as? AgentComposerFooterView else {
             throw fail("missing custom composer model/effort review surface")
         }
-        footer.frame = NSRect(origin: .zero, size: footerSize)
+        // Label variants are a MEASURED fit since the P5.5 corrections: 260 pt
+        // cannot hold this catalogue's full titles (compact expected below), and
+        // 640 pt must restore them. The review surface keeps its own size.
+        footer.frame = NSRect(x: 0, y: 0, width: 260, height: footerSize.height)
         footer.layoutSubtreeIfNeeded()
         let footerDescendants = descendants(in: footer)
         guard !footerDescendants.contains(where: { $0 is NSPopUpButton }),
@@ -3684,10 +3681,7 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard managedAgentView.currentAgentStatus == .needsAttention else {
             throw fail("managed agent fixture status \(managedAgentView.currentAgentStatus), expected needsAttention")
         }
-        let v2ManagedAgentView = LabCatalog.makeManagedAgentFixtureView(
-            includeApproval: false,
-            useV2: true
-        )
+        let v2ManagedAgentView = LabCatalog.makeManagedAgentFixtureView(includeApproval: false)
         guard v2ManagedAgentView.qaUsesV2Tile,
               v2ManagedAgentView.qaUsesFullTurnComposer,
               !v2ManagedAgentView.qaHasLegacyComposeField,
@@ -3697,9 +3691,6 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         }
         guard entries.contains(where: { $0.id == "managed-agent.approval-dock" }) else {
             throw fail("missing managed-agent.approval-dock card")
-        }
-        guard entries.contains(where: { $0.id == "managed-agent.user-input-card" }) else {
-            throw fail("missing managed-agent.user-input-card card")
         }
         guard let newTileCwdEntry = entries.first(where: { $0.id == "terminal.new-tile-cwd" }),
               case let .staticCard(_, makeNewTileCwdView) = newTileCwdEntry.content else {
@@ -3965,7 +3956,6 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         view.ingest(.sessionStateChanged(.running))
         view.ingest(.turnStarted(threadId: "thread-main", turnId: "turn-live"))
         view.ingest(.requestOpened(threadId: "thread-main", requestId: "approval-live", kind: .commandExecutionApproval))
-        view.setPendingApprovalForQA(kind: .commandExecutionApproval, requestId: "approval-live", detail: "npm test")
         canvas.markActive(tileId: tile.id)
 
         guard canvas.agentStatus(for: tile.id) == .needsAttention else {
@@ -3980,28 +3970,29 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard !canvas.qaFocusBorderActive else {
             throw fail("approval live check: focus border must be suppressed while attention is active")
         }
-        guard view.qaApprovalDockVisible else {
-            throw fail("approval live check: approval dock is hidden")
+        // P5.5: the legacy dock is gone — the request lives in the transcript as
+        // the reducer-projected block with the compiled choices, and only the
+        // real runtime resolution turns it passive (P5.4 rule).
+        guard view.qaV2RequestIDs == ["approval-live"],
+              view.qaV2RequestChoices("approval-live") == ApprovalDecision.compiledChoices else {
+            throw fail("approval live check: the request block did not render the compiled choices (ids \(view.qaV2RequestIDs))")
         }
-        guard view.qaApprovalDockDetailText.contains("Run command: npm test") else {
-            throw fail("approval live check: dock detail rendered '\(view.qaApprovalDockDetailText)'")
-        }
-        guard view.qaApprovalDockButtonTitles == ["Approve", "Approve for session", "Decline"] else {
-            throw fail("approval live check: dock buttons \(view.qaApprovalDockButtonTitles)")
+        guard !view.qaHasPermanentApprovalDock else {
+            throw fail("approval live check: a legacy approval dock is reachable after the P5.5 removal")
         }
 
-        view.qaClickApproval(.accept)
+        view.ingest(.requestResolved(threadId: "thread-main", requestId: "approval-live", decision: ApprovalDecision.accept.rawValue))
         guard canvas.agentStatus(for: tile.id) != AgentStatus.needsAttention else {
-            throw fail("approval live check: status stayed needsAttention after approve")
+            throw fail("approval live check: status stayed needsAttention after the runtime resolution")
         }
         guard canvas.attentionTileIds.isEmpty else {
-            throw fail("approval live check: attention set not cleared after approve")
+            throw fail("approval live check: attention set not cleared after the runtime resolution")
         }
         guard !canvas.qaAttentionBorderActive(for: tile.id) else {
-            throw fail("approval live check: attention border stayed active after approve")
+            throw fail("approval live check: attention border stayed active after the runtime resolution")
         }
-        guard !view.qaApprovalDockVisible else {
-            throw fail("approval live check: dock stayed visible after approve")
+        guard view.qaV2RequestStatus("approval-live") == .completed else {
+            throw fail("approval live check: the request block did not turn passive on the runtime resolution")
         }
     }
 
@@ -4022,10 +4013,6 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
             lastActiveTileId: nil
         ))
         let view = ManagedAgentTileNSView(tile: tile)
-        var submitted: (requestId: String, answers: UserInputAnswers)?
-        view.onUserInputSubmit = { requestId, answers in
-            submitted = (requestId, answers)
-        }
         canvas.install(tileView: view, for: tile)
         view.ingest(.sessionStateChanged(.running))
         view.ingest(.turnStarted(threadId: "thread-main", turnId: "turn-live-input"))
@@ -4035,8 +4022,13 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         ]))
         canvas.markActive(tileId: tile.id)
 
-        guard view.qaPendingUserInputCount == 1 else {
-            throw fail("user input live check: pending count \(view.qaPendingUserInputCount), expected 1")
+        // P5.5: the legacy typed-answer card is gone with the compatibility path —
+        // there is no compiled respond transport, so a text editor here fabricated
+        // a capability (the P5.4 rule). The request renders as the reducer's
+        // question block, holds attention, and only the runtime resolution clears
+        // it.
+        guard view.qaV2RequestIDs == ["input-live"] else {
+            throw fail("user input live check: the question block did not render (ids \(view.qaV2RequestIDs))")
         }
         guard canvas.agentStatus(for: tile.id) == .needsAttention else {
             throw fail("user input live check: canvas status did not become needsAttention")
@@ -4044,29 +4036,17 @@ final class ComponentLabPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewD
         guard canvas.attentionTileIds.contains(tile.id) else {
             throw fail("user input live check: canvas did not track the attention tile")
         }
-        guard view.qaUserInputCardCount == 1 else {
-            throw fail("user input live check: card count \(view.qaUserInputCardCount), expected 1")
-        }
-        guard view.qaUserInputQuestion(requestId: "input-live") == "What should I name the new migration file?" else {
-            throw fail("user input live check: question text mismatch")
+        guard view.qaUserInputCardCount == 0 else {
+            throw fail("user input live check: a legacy typed-answer card is reachable after the P5.5 removal")
         }
 
-        view.qaSubmitUserInput(requestId: "input-live", answer: "AddWorkspaceZoneMigration.swift")
-        guard submitted?.requestId == "input-live" else {
-            throw fail("user input live check: submit requestId \(submitted?.requestId ?? "nil")")
+        view.ingest(.userInputResolved(threadId: "thread-main", requestId: "input-live"))
+        guard view.qaV2RequestStatus("input-live") == .completed else {
+            throw fail("user input live check: the question block did not turn passive on the runtime resolution")
         }
-        guard submitted?.answers.answers == ["response": "AddWorkspaceZoneMigration.swift"] else {
-            throw fail("user input live check: submitted answers \(submitted?.answers.answers ?? [:])")
-        }
-        guard view.qaPendingUserInputCount == 0 else {
-            throw fail("user input live check: pending count stayed \(view.qaPendingUserInputCount)")
-        }
-        guard view.qaUserInputCardCount == 0 else {
-            throw fail("user input live check: card stayed visible after submit")
-        }
-        let statusAfterSubmit = canvas.agentStatus(for: tile.id)
-        guard statusAfterSubmit == .working else {
-            throw fail("user input live check: status after submit \(String(describing: statusAfterSubmit)), expected working")
+        let statusAfterResolution = canvas.agentStatus(for: tile.id)
+        guard statusAfterResolution == .working else {
+            throw fail("user input live check: status after resolution \(String(describing: statusAfterResolution)), expected working")
         }
     }
 }

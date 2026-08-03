@@ -24,7 +24,6 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     var onSettingsWrite: SettingsWriter?
 
     static let height = ChoiceButton.controlHeight
-    static let compactWidth: CGFloat = 390
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -47,7 +46,16 @@ final class AgentComposerFooterView: NSView, TokenThemed {
         modelButton.onSelection = { [weak self] item in self?.pick(model: item.id) }
         effortButton.onSelection = { [weak self] item in self?.pick(thinking: item.id) }
 
-        let stack = NSStackView(views: [contextLabel, modelButton, effortButton])
+        // A bare spacer absorbs the row's surplus (the header-row convention), so
+        // the buttons hold their intrinsic width instead of stretching — and so
+        // free space can never mask an under-measured title again (P5.5 defect 4).
+        // The old required `model ≥ 1.45 × effort` ratio is gone with it: it was a
+        // magic number that could force the effort button BELOW its intrinsic
+        // width; the buttons' natural title widths already order them.
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        spacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        let stack = NSStackView(views: [contextLabel, modelButton, effortButton, spacer])
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = CGFloat(Space.m)
@@ -60,7 +68,6 @@ final class AgentComposerFooterView: NSView, TokenThemed {
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             modelButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
             effortButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
-            modelButton.widthAnchor.constraint(greaterThanOrEqualTo: effortButton.widthAnchor, multiplier: 1.45),
         ])
 
         installContrastObservers()
@@ -77,11 +84,33 @@ final class AgentComposerFooterView: NSView, TokenThemed {
 
     override func layout() {
         super.layout()
-        let compact = bounds.width > 0 && bounds.width < Self.compactWidth
+        guard bounds.width > 0 else { return }
+        // Measured fit, not a guessed threshold: abbreviate exactly when the full
+        // titles do not fit the width this row actually has (P5.5 defect 4 — the
+        // old hard-coded 390 was compact where full fits and full where it
+        // clipped, depending entirely on the catalogue's string lengths).
+        let compact = requiredWidth(usingCompactLabels: false) > bounds.width
         if compact != usesCompactLabels {
             usesCompactLabels = compact
             rebuildChoices()
         }
+        // Third tier for the tile-width floor: even compact titles may not fit
+        // beside the context caption. The caption is decoration — it yields
+        // before a single value character does (the buttons carry their own
+        // accessibility labels, so nothing is lost to a screen reader).
+        let hideContext = compact && requiredWidth(usingCompactLabels: true) > bounds.width
+        if contextLabel.isHidden != hideContext { contextLabel.isHidden = hideContext }
+    }
+
+    /// The row's fitting width for the CURRENT selection's titles: the same
+    /// per-button expression `ChoiceButton` measures itself with, so this cannot
+    /// drift from what the buttons actually need.
+    private func requiredWidth(usingCompactLabels compact: Bool) -> CGFloat {
+        let modelTitle = compact ? Self.abbreviatedModel(settings.model) : settings.model
+        let effortTitle = compact ? Self.abbreviatedEffort(settings.thinking) : settings.thinking.capitalized
+        return contextLabel.intrinsicContentSize.width
+            + CGFloat(Space.m) + ChoiceButton.fittingWidth(forTitle: modelTitle)
+            + CGFloat(Space.m) + ChoiceButton.fittingWidth(forTitle: effortTitle)
     }
 
     var controlsEnabled: Bool {
@@ -195,6 +224,16 @@ final class AgentComposerFooterView: NSView, TokenThemed {
     }
     var qaModelTitles: [String] { modelButton.items.map(\.title) }
     var qaEffortTitles: [String] { effortButton.items.map(\.title) }
+    /// The row's own measured-fit verdict for what is currently installed: when
+    /// true, both buttons must sit at (or above) their intrinsic width and render
+    /// their selected titles without ellipsis — the truncation gate's precondition.
+    var qaFitsCurrentTitles: Bool {
+        let caption = contextLabel.isHidden ? 0 : contextLabel.intrinsicContentSize.width + CGFloat(Space.m)
+        let needed = caption
+            + modelButton.intrinsicContentSize.width + CGFloat(Space.m)
+            + effortButton.intrinsicContentSize.width
+        return bounds.width > 0 && needed <= bounds.width + 0.5
+    }
     @discardableResult func qaPickModel(_ value: String) -> Bool {
         guard modelButton.items.contains(where: { $0.id == value && $0.enabled }), controlsEnabled else { return false }
         let before = settings

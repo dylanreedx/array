@@ -86,7 +86,11 @@ public struct AgentComposerPresentation: Equatable, Sendable {
                 isLoading: isExecutingPrimaryAction,
                 secondaryActions: secondary
             )
-        case .working where capabilities.canStop:
+        // One Stop for the whole flight (P5.5 consolidation): `.working`, and the
+        // two `.ready` windows where the runner is spawning or draining — the
+        // capability is the truth here, not the event-derived state. The CLI
+        // contract: interrupt is available from submit until the turn is over.
+        case _ where capabilities.canStop:
             return Self(
                 primaryAction: .stop,
                 title: isExecutingPrimaryAction ? "Stopping…" : "Stop",

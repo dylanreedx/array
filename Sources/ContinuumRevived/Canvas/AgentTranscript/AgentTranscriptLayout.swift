@@ -19,7 +19,6 @@ final class AgentTranscriptLayout: NSCollectionViewLayout {
     override func prepare() {
         super.prepare()
         guard let collectionView else { return }
-        preparePassCount += 1
 
         let width = max(0, collectionView.bounds.width - contentInsets.left - contentInsets.right)
         let widthBucket = Int(width.rounded())
@@ -27,6 +26,10 @@ final class AgentTranscriptLayout: NSCollectionViewLayout {
         if preparedWidthBucket == widthBucket, attributes.count == count, !attributes.isEmpty || count == 0 {
             return
         }
+        // Counted below the fast path: a REAL recomputation is what the tick and
+        // streaming contracts bound — the list's offscreen layout drive (P5.5)
+        // calls prepare on every pass and early-returns here when nothing moved.
+        preparePassCount += 1
 
         preparedWidthBucket = widthBucket
         attributes.removeAll(keepingCapacity: true)
