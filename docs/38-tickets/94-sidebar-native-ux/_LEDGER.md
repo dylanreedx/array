@@ -2,7 +2,7 @@
 
 ## heartbeat
 
-last-touch — · ticket — · attempt 0 · pid — · status not-started
+last-touch 2026-08-03T22:15:24Z · ticket P0.1-program-contract.md · attempt 1 · pid — · status done
 
 ## states
 
@@ -10,7 +10,7 @@ last-touch — · ticket — · attempt 0 · pid — · status not-started
 
 | Ticket | State | Commit | Updated | Note |
 |---|---|---|---|---|
-| `P0.1-program-contract.md` | pending | — | — | — |
+| `P0.1-program-contract.md` | done | this commit | 2026-08-03T22:15:24Z | Harness-owned completion: focused worker checks, independent opposite-model review, swift build, and final matrix passed. Evidence: /Users/dylan/.pi/sidebar-native-ux-runs/continuum-overnight/run-20260803T170016/tasks/iteration-001-P0.1-program-contract.md. |
 | `P0.2-sidebar-check-seam.md` | pending | — | — | — |
 | `P0.3-row-fixture-corpus.md` | pending | — | — | — |
 | `P0.4-inbox-geometry-gate.md` | pending | — | — | — |

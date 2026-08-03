@@ -2,6 +2,7 @@
 set -euo pipefail
 
 "$(dirname "$0")/check-agent-tile-ux-program.sh" --check
+"$(dirname "$0")/check-sidebar-native-ux-program.sh" --check
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT_DIR"
 
@@ -126,6 +127,7 @@ run scripts/check-matrix-inventory.sh
 # Program 91 setup: keep the 50-ticket agent-tile queue, dependency order,
 # packet structure, ledger rows, and supervised review gates from drifting.
 run scripts/check-agent-tile-ux-program.sh
+run scripts/check-sidebar-native-ux-program.sh
 # Ticket P1.7: colour hygiene. A pure grep lint over the view layers, so it runs
 # before the build for the same reason as the inventory guard — a new raw colour
 # should be named in seconds, not after a full build. Red on any raw colour or

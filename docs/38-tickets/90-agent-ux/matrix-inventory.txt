@@ -126,6 +126,7 @@ check --zone-save-isolation-check
 check --zone-tier-transition-check
 leg run git diff --check
 leg run scripts/check-agent-tile-ux-program.sh
+leg run scripts/check-sidebar-native-ux-program.sh
 leg run scripts/check-app-bundle.sh --configuration debug
 leg run scripts/check-color-hygiene.sh
 leg run scripts/check-matrix-inventory.sh
