@@ -308,6 +308,248 @@ enum UIProbeGeometry {
         ))
     }
 
+    // MARK: - Sidebar check seam
+
+    private struct SidebarProbeHost {
+        let window: NSWindow
+        let host: NSView
+        let inbox: AgentInboxView
+    }
+
+    /// Make the host first and size it before the inbox receives any rows. An
+    /// offscreen NSTableView otherwise has no viewport in which to materialize
+    /// cells, and a check that only reads the row model would pass vacuously.
+    private static func makeSidebarProbeHost(
+        width: CGFloat, height: CGFloat, appearanceName: NSAppearance.Name
+    ) throws -> SidebarProbeHost {
+        guard width > 0, height > 0 else {
+            throw fail("sidebar-ux-check: probe host must have nonzero size (width=\(width), height=\(height))")
+        }
+        guard let appearance = NSAppearance(named: appearanceName) else {
+            throw fail("sidebar-ux-check: no NSAppearance named '\(appearanceName.rawValue)'")
+        }
+        let size = NSSize(width: width, height: height)
+        let host = NSView(frame: NSRect(origin: .zero, size: size))
+        host.wantsLayer = true
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.appearance = appearance
+        window.contentView = host
+        // A borderless window may adjust its content view while it is being
+        // installed. Re-assert the probe size before Auto Layout gets its first
+        // chance to calculate the inbox subtree.
+        host.frame = NSRect(origin: .zero, size: size)
+
+        let inbox = AgentInboxView(frame: .zero)
+        inbox.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(inbox)
+        NSLayoutConstraint.activate([
+            inbox.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            inbox.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            inbox.topAnchor.constraint(equalTo: host.topAnchor),
+            inbox.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+        ])
+        host.layoutSubtreeIfNeeded()
+        guard abs(host.bounds.width - width) <= 0.5,
+              abs(host.bounds.height - height) <= 0.5,
+              inbox.bounds.width > 0, inbox.bounds.height > 0 else {
+            throw fail(String(
+                format: "sidebar-ux-check@%.0fpt: sized host did not give the inbox a live viewport (host %.1fx%.1f, inbox %.1fx%.1f)",
+                width, host.bounds.width, host.bounds.height, inbox.bounds.width, inbox.bounds.height
+            ))
+        }
+        return SidebarProbeHost(window: window, host: host, inbox: inbox)
+    }
+
+    private static func checkSidebarProbe(
+        _ probe: SidebarProbeHost, rows: [AgentInboxRow], width: CGFloat,
+        appearanceName: NSAppearance.Name
+    ) throws -> (cells: Int, labels: Int, truncated: Int) {
+        let label = "sidebar-ux-check@\(Int(width))pt.\(appearanceName.rawValue)"
+        // Size the whole subtree first. Applying rows before this line is the
+        // offscreen-materialization bug this leg exists to prevent.
+        probe.host.layoutSubtreeIfNeeded()
+        probe.inbox.reload(rows: rows)
+        probe.inbox.layoutForQA()
+        probe.host.layoutSubtreeIfNeeded()
+        probe.inbox.layoutForQA()
+
+        let cells = probe.inbox.qaMaterializedRowCells
+        guard !cells.isEmpty else {
+            throw fail("\(label): no row cells materialized")
+        }
+        guard cells.count == rows.count,
+              probe.inbox.qaMaterializedRowCellCount == rows.count else {
+            throw fail("\(label): materialized \(cells.count) row cells for \(rows.count) corpus rows")
+        }
+        // Negative witness (2026-08-03): changing the first `==` to `>` made
+        // `--sidebar-ux-check` exit 1 at the exact message
+        // `sidebar-ux-check@220pt.NSAppearanceNameAqua: materialized 7 row cells for 7 corpus rows`.
+        // The source was restored by hash before the green run.
+        guard cells.allSatisfy({ $0.isDescendant(of: probe.inbox) && $0.window === probe.window }) else {
+            throw fail("\(label): a QA row cell is not part of the live inbox window tree")
+        }
+
+        let geometries = probe.inbox.qaRowGeometriesForQA
+        guard geometries.count == cells.count else {
+            throw fail("\(label): geometry seam returned \(geometries.count) entries for \(cells.count) live row cells")
+        }
+        var geometryByID: [UUID: AgentInboxRowGeometryForQA] = [:]
+        for geometry in geometries {
+            guard let id = geometry.agentID else {
+                throw fail("\(label): a materialized row geometry has no agent identity")
+            }
+            guard geometryByID.updateValue(geometry, forKey: id) == nil else {
+                throw fail("\(label): duplicate live geometry for agent \(id.uuidString)")
+            }
+        }
+        let expectedIDs = Set(rows.map(\.id))
+        guard Set(geometryByID.keys) == expectedIDs else {
+            throw fail("\(label): live row geometry ids do not match the corpus")
+        }
+        for cell in cells {
+            guard let id = cell.qaAgentID, let geometry = geometryByID[id],
+                  let variant = geometry.variant else {
+                throw fail("\(label): a live row cell has no resolved variant identity")
+            }
+            let classVariant: RowVariant = cell is AgentInboxSlimCellView ? .slim : .card
+            guard classVariant == variant else {
+                throw fail("\(label): live cell for \(id.uuidString) resolved as \(variant.rawValue) but materialized as \(classVariant.rawValue)")
+            }
+        }
+
+        var labelCount = 0
+        var truncatedCount = 0
+        var paintedStates = Set<InboxState>()
+        for row in rows {
+            guard let geometry = geometryByID[row.id],
+                  geometry.state == row.state,
+                  geometry.variant == row.variant else {
+                throw fail("\(label): live row \(row.id.uuidString) lost its state or resolved variant")
+            }
+            guard let borderWidth = geometry.paintedBorderWidth,
+                  borderWidth.isFinite, borderWidth >= 0 else {
+                throw fail("\(label): '\(row.title)' has no finite painted border width")
+            }
+            guard let fill = geometry.resolvedFill, fill.alpha > 0 else {
+                throw fail("\(label): '\(row.title)' has no resolved painted fill")
+            }
+            paintedStates.insert(row.state)
+
+            let expectedElements: Set<String>
+            switch row.variant {
+            case .card:
+                expectedElements = ["cell", "card", "project", "title", "state", "elapsed", "meta", "branch"]
+            case .slim:
+                expectedElements = ["cell", "card", "glyph", "title", "branch", "time"]
+            }
+            guard Set(geometry.elementFrames.keys) == expectedElements else {
+                throw fail("\(label): '\(row.title)' did not expose the live \(row.variant.rawValue) element frames")
+            }
+            for (element, frame) in geometry.elementFrames {
+                guard frame.width.isFinite, frame.height.isFinite,
+                      frame.width >= 0, frame.height >= 0 else {
+                    throw fail("\(label): '\(row.title)' has an invalid \(element) frame \(frame)")
+                }
+            }
+            guard let cellFrame = geometry.elementFrames["cell"],
+                  cellFrame.width > 0, cellFrame.height > 0,
+                  let cardFrame = geometry.elementFrames["card"],
+                  cardFrame.width > 0, cardFrame.height > 0 else {
+                throw fail("\(label): '\(row.title)' has no painted cell/card frame")
+            }
+
+            let expectedLabels: Set<String> = row.variant == .card
+                ? ["project", "title", "state", "elapsed", "meta", "branch"]
+                : ["glyph", "title", "branch", "time"]
+            guard Set(geometry.labels.map(\.element)) == expectedLabels else {
+                throw fail("\(label): '\(row.title)' did not expose every live label")
+            }
+            for measurement in geometry.labels {
+                labelCount += 1
+                guard let font = measurement.font else {
+                    throw fail("\(label): '\(row.title)' label \(measurement.element) has no live font")
+                }
+                let measuredNeed = Double(
+                    ceil((measurement.text as NSString).size(withAttributes: [.font: font]).width)
+                ) + 4
+                guard abs(measurement.neededWidth - measuredNeed) <= 0.01 else {
+                    throw fail("\(label): '\(row.title)' label \(measurement.element) reported need \(measurement.neededWidth), measured \(measuredNeed) including the 4pt cell inset")
+                }
+                guard measurement.drawableWidth.isFinite,
+                      measurement.drawableWidth >= 0,
+                      abs(measurement.drawableWidth - Double(measurement.frame.width)) <= 0.01 else {
+                    throw fail("\(label): '\(row.title)' label \(measurement.element) reported drawable width \(measurement.drawableWidth), but its live frame is \(measurement.frame.width)")
+                }
+                if !measurement.isHidden, !measurement.text.isEmpty {
+                    guard measurement.frame.width > 0, measurement.frame.height > 0 else {
+                        throw fail("\(label): visible label \(measurement.element) on '\(row.title)' has no drawable frame")
+                    }
+                    if measurement.drawableWidth + 0.5 < measurement.neededWidth {
+                        truncatedCount += 1
+                    }
+                }
+            }
+        }
+        guard paintedStates == Set(InboxState.allCases) else {
+            throw fail("\(label): paint seam covered \(paintedStates.count) states, expected every InboxState")
+        }
+        return (cells.count, labelCount, truncatedCount)
+    }
+
+    /// P0.2's additive sidebar leg. It deliberately observes today's paint rather
+    /// than blessing the later surface, truncation, or row-height decisions: those
+    /// packets consume these live accessors and tighten the assertion in their own
+    /// file fences.
+    static func runSidebarUXChecks() throws {
+        _ = NSApplication.shared
+        let originalAppAppearance = NSApp?.appearance
+        defer { NSApp?.appearance = originalAppAppearance }
+
+        let zeroWidth = CGFloat(0)
+        let zeroHeight = CGFloat(620)
+        let expectedZeroSizeMessage = "sidebar-ux-check: probe host must have nonzero size (width=\(zeroWidth), height=\(zeroHeight))"
+        do {
+            _ = try makeSidebarProbeHost(
+                width: zeroWidth, height: zeroHeight, appearanceName: .darkAqua
+            )
+            throw fail("sidebar-ux-check: zero-sized probe host was accepted")
+        } catch let error as GeometryError {
+            guard error.message == expectedZeroSizeMessage else { throw error }
+        }
+
+        let rows = LabFixtures.inboxRows()
+        guard !rows.isEmpty else { throw fail("sidebar-ux-check: corpus is empty") }
+        let widths: [CGFloat] = [
+            CGFloat(WorkspaceSidebarConfig.minWidth),
+            CGFloat(WorkspaceSidebarConfig.defaultWidth),
+            320,
+        ]
+        var totalCells = 0
+        var totalLabels = 0
+        var totalTruncated = 0
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            NSApp?.appearance = NSAppearance(named: appearanceName)
+            for width in widths {
+                let probe = try makeSidebarProbeHost(
+                    width: width, height: 620, appearanceName: appearanceName
+                )
+                let counts = try checkSidebarProbe(
+                    probe, rows: rows, width: width, appearanceName: appearanceName
+                )
+                totalCells += counts.cells
+                totalLabels += counts.labels
+                totalTruncated += counts.truncated
+            }
+        }
+        print(String(
+            format: "UIProbeGeometry: sidebar UX seam materialized %d live row cells and measured %d labels across 220/280/320pt in Aqua and Dark Aqua; %d labels currently elide by drawable-width measurement; zero-size host rejected with a named error",
+            totalCells, totalLabels, totalTruncated
+        ))
+    }
+
     /// P5.1 geometry gate for the v2 agent header shell. The shell stays behind
     /// its fixture flag until P5.5 acceptance, so this constructs the real view
     /// directly: wide/narrow layout, overflow hit target, truncation-not-clipping,

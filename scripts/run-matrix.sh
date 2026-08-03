@@ -316,6 +316,9 @@ run_app_check .build/debug/continuum-revived --browser-inspector-network-lite-ch
 run_app_check .build/debug/continuum-revived --browser-inspector-link-lifecycle-check
 run_app_check .build/debug/continuum-revived --browser-inspector-actions-check
 run_app_check .build/debug/continuum-revived --agent-inbox-check
+# Queue 94 P0.2: offscreen sidebar probe — per-label drawable-vs-needed width at
+# 220/280/320 pt in both appearances, materialized before rows are applied.
+run_app_check .build/debug/continuum-revived --sidebar-ux-check
 run_app_check .build/debug/continuum-revived --workspace-sidebar-shell-check
 run_app_check .build/debug/continuum-revived --workspace-sidebar-default-visible-check
 run_app_check .build/debug/continuum-revived --workspace-sidebar-actions-check

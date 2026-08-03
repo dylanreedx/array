@@ -81,6 +81,51 @@ struct InboxLifecycleSnapshot: Equatable {
     }
 }
 
+/// A label's measured drawing lane, read from the live row cell rather than from
+/// the row model. `neededWidth` includes the 4pt NSTextField cell inset: the raw
+/// NSString measurement is not the width AppKit needs before it elides at draw time.
+struct AgentInboxLabelGeometryForQA {
+    let element: String
+    let text: String
+    let frame: NSRect
+    let drawableWidth: Double
+    let neededWidth: Double
+    let font: NSFont?
+    let isHidden: Bool
+}
+
+/// The geometry and paint facts a materialized row cell exposes to deterministic
+/// checks. Optional paint/identity fields deliberately make an un-applied or
+/// detached cell fail the probe instead of supplying a default answer.
+struct AgentInboxRowGeometryForQA {
+    let agentID: UUID?
+    let state: InboxState?
+    let variant: RowVariant?
+    let elementFrames: [String: NSRect]
+    let labels: [AgentInboxLabelGeometryForQA]
+    let paintedBorderWidth: Double?
+    let resolvedFill: CGColor?
+}
+
+@MainActor
+private func inboxLabelGeometryForQA(
+    _ element: String, label: NSTextField, in cell: NSView
+) -> AgentInboxLabelGeometryForQA {
+    let font = label.font
+    let neededWidth = font.map {
+        Double(ceil((label.stringValue as NSString).size(withAttributes: [.font: $0]).width)) + 4
+    } ?? 0
+    return AgentInboxLabelGeometryForQA(
+        element: element,
+        text: label.stringValue,
+        frame: label.convert(label.bounds, to: cell),
+        drawableWidth: Double(label.frame.width),
+        neededWidth: neededWidth,
+        font: font,
+        isHidden: label.isHidden
+    )
+}
+
 @MainActor
 final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate,
                             NSTextFieldDelegate, TokenThemed {
@@ -2051,6 +2096,32 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     var rowCountForQA: Int {
         tableView.numberOfRows - items.filter { $0.agentRow == nil }.count
     }
+
+    /// Materialized agent cells found by walking the live table subtree. This is
+    /// intentionally not `cellsByRow`: a stale registry can say a row exists after
+    /// AppKit has removed it, while a probe must fail on what is actually painted.
+    var qaMaterializedRowCells: [AgentInboxRowCell] {
+        var cells: [AgentInboxRowCell] = []
+        var seen = Set<ObjectIdentifier>()
+        func visit(_ view: NSView) {
+            if let cell = view as? AgentInboxRowCell,
+               seen.insert(ObjectIdentifier(cell)).inserted {
+                cells.append(cell)
+            }
+            view.subviews.forEach(visit)
+        }
+        visit(tableView)
+        return cells
+    }
+
+    var qaMaterializedRowCellCount: Int { qaMaterializedRowCells.count }
+
+    /// Per-cell geometry and paint, in live-tree order. Every entry comes from a
+    /// materialized row cell; no row model or expected token is substituted here.
+    var qaRowGeometriesForQA: [AgentInboxRowGeometryForQA] {
+        qaMaterializedRowCells.map(\.qaGeometry)
+    }
+
     var rowIdsForQA: [UUID] { rows.map(\.id) }
     // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
     /// The heading as RENDERED — its words and which way its triangle points — and
@@ -2198,7 +2269,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
     /// P3.7, read off the RENDERED table rather than recomputed: the variant of
     /// the cell class AppKit actually built, the height it actually laid the row
     /// out at, and the parked row's glyph with the alpha it is painted at.
-    var rowVariantsForQA: [RowVariant] { cells().map(\.qaVariant) }
+    var rowVariantsForQA: [RowVariant] { cells().compactMap(\.qaVariant) }
     /// The height each row was actually LAID OUT at, less the intercell spacing
     /// `NSTableView.rect(ofRow:)` folds into it — so this is the number
     /// `height(for:)` returned, measured off the table rather than re-derived from
@@ -2503,12 +2574,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate, 
 
     /// Force the table to realise a cell for every row, so the accessors above
     /// describe the whole list and not just the part AppKit felt like laying out.
+    /// The second list-owned layout pass is intentional: offscreen probes may create
+    /// cells only after the first `view(atColumn:row:)` request, and their frames are
+    /// not painted until the table lays those new hosts out.
     func layoutForQA() {
         layoutSubtreeIfNeeded()
         tableView.layoutSubtreeIfNeeded()
         for row in 0..<tableView.numberOfRows where cellsByRow[row] == nil {
             _ = tableView.view(atColumn: 0, row: row, makeIfNecessary: true)
         }
+        tableView.layoutSubtreeIfNeeded()
+        layoutSubtreeIfNeeded()
     }
 
     private func cells() -> [AgentInboxRowCell] {
@@ -2780,7 +2856,9 @@ protocol AgentInboxRowCell: NSTableCellView {
     /// blanked out "Working").
     func showJumpHint(_ chord: String?)
 
-    var qaVariant: RowVariant { get }
+    var qaAgentID: UUID? { get }
+    var qaVariant: RowVariant? { get }
+    var qaGeometry: AgentInboxRowGeometryForQA { get }
     var qaTitle: String { get }
     var qaStateLabel: String { get }
     var qaMeta: String { get }
@@ -3963,7 +4041,36 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         return "\(minutes / 60)h\(minutes % 60)m"
     }
 
-    var qaVariant: RowVariant { .card }
+    var qaAgentID: UUID? { shown?.row.id }
+    var qaVariant: RowVariant? { shown?.row.variant }
+    var qaGeometry: AgentInboxRowGeometryForQA {
+        let labels = [
+            inboxLabelGeometryForQA("project", label: projectLabel, in: self),
+            inboxLabelGeometryForQA("title", label: titleLabel, in: self),
+            inboxLabelGeometryForQA("state", label: stateLabel, in: self),
+            inboxLabelGeometryForQA("elapsed", label: elapsedLabel, in: self),
+            inboxLabelGeometryForQA("meta", label: metaLabel, in: self),
+            inboxLabelGeometryForQA("branch", label: branchLabel, in: self),
+        ]
+        return AgentInboxRowGeometryForQA(
+            agentID: shown?.row.id,
+            state: shown?.row.state,
+            variant: shown?.row.variant,
+            elementFrames: [
+                "cell": bounds,
+                "card": card.convert(card.bounds, to: self),
+                "project": labels[0].frame,
+                "title": labels[1].frame,
+                "state": labels[2].frame,
+                "elapsed": labels[3].frame,
+                "meta": labels[4].frame,
+                "branch": labels[5].frame,
+            ],
+            labels: labels,
+            paintedBorderWidth: card.layer.map { Double($0.borderWidth) },
+            resolvedFill: card.layer?.backgroundColor
+        )
+    }
     var qaTitle: String { titleLabel.stringValue }
     var qaStateLabel: String { stateLabel.isHidden ? "" : stateLabel.stringValue }
     var qaMeta: String { metaLabel.stringValue }
@@ -4218,7 +4325,32 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         }
     }
 
-    var qaVariant: RowVariant { .slim }
+    var qaAgentID: UUID? { shown?.row.id }
+    var qaVariant: RowVariant? { shown?.row.variant }
+    var qaGeometry: AgentInboxRowGeometryForQA {
+        let labels = [
+            inboxLabelGeometryForQA("glyph", label: glyphLabel, in: self),
+            inboxLabelGeometryForQA("title", label: titleLabel, in: self),
+            inboxLabelGeometryForQA("branch", label: branchLabel, in: self),
+            inboxLabelGeometryForQA("time", label: timeLabel, in: self),
+        ]
+        return AgentInboxRowGeometryForQA(
+            agentID: shown?.row.id,
+            state: shown?.row.state,
+            variant: shown?.row.variant,
+            elementFrames: [
+                "cell": bounds,
+                "card": card.convert(card.bounds, to: self),
+                "glyph": labels[0].frame,
+                "title": labels[1].frame,
+                "branch": labels[2].frame,
+                "time": labels[3].frame,
+            ],
+            labels: labels,
+            paintedBorderWidth: card.layer.map { Double($0.borderWidth) },
+            resolvedFill: card.layer?.backgroundColor
+        )
+    }
     var qaTitle: String { titleLabel.stringValue }
     /// A collapsed row says its state with the glyph, so it has no word to report.
     var qaStateLabel: String { "" }

@@ -9,6 +9,7 @@ check --agent-observer-independence-check
 check --agent-restore-check
 check --agent-status-check
 check --agent-supervisor-check
+check --agent-tile-click-focus-check
 check --bring-to-front-focus-check
 check --browser-auth-challenge-check
 check --browser-download-check
@@ -69,6 +70,7 @@ check --run-artifacts-tile-check
 check --session-observer-check
 check --session-resume-check
 check --settings-panel-check
+check --sidebar-ux-check
 check --single-zone-compat-check
 check --spawn-focus-policy-check
 check --spawn-placement-check
@@ -126,11 +128,11 @@ check --zone-save-isolation-check
 check --zone-tier-transition-check
 leg run git diff --check
 leg run scripts/check-agent-tile-ux-program.sh
-leg run scripts/check-sidebar-native-ux-program.sh
 leg run scripts/check-app-bundle.sh --configuration debug
 leg run scripts/check-color-hygiene.sh
 leg run scripts/check-matrix-inventory.sh
 leg run scripts/check-root-docs.sh
+leg run scripts/check-sidebar-native-ux-program.sh
 leg run swift build
 leg run swift run ContinuumRevivedAgentContentChecks
 leg run swift run ContinuumRevivedAgentUIChecks
@@ -152,6 +154,7 @@ leg run_app_check .build/debug/continuum-revived --agent-observer-independence-c
 leg run_app_check .build/debug/continuum-revived --agent-restore-check
 leg run_app_check .build/debug/continuum-revived --agent-status-check
 leg run_app_check .build/debug/continuum-revived --agent-supervisor-check
+leg run_app_check .build/debug/continuum-revived --agent-tile-click-focus-check
 leg run_app_check .build/debug/continuum-revived --bring-to-front-focus-check
 leg run_app_check .build/debug/continuum-revived --browser-auth-challenge-check
 leg run_app_check .build/debug/continuum-revived --browser-download-check
@@ -212,6 +215,7 @@ leg run_app_check .build/debug/continuum-revived --run-artifacts-tile-check
 leg run_app_check .build/debug/continuum-revived --session-observer-check
 leg run_app_check .build/debug/continuum-revived --session-resume-check
 leg run_app_check .build/debug/continuum-revived --settings-panel-check
+leg run_app_check .build/debug/continuum-revived --sidebar-ux-check
 leg run_app_check .build/debug/continuum-revived --single-zone-compat-check
 leg run_app_check .build/debug/continuum-revived --spawn-focus-policy-check
 leg run_app_check .build/debug/continuum-revived --spawn-placement-check
