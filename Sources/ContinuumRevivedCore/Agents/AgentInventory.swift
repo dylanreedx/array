@@ -235,18 +235,6 @@ public final class CrossProjectManagedSessionWalk {
     /// swallow): a listing that cannot be read must refuse, because the caller
     /// renders "which agents exist" from it and an empty answer is the "no agents"
     /// lie this ticket exists to remove.
-    /// LEGACY, UNGATED. Retained for exactly one reason, recorded here so it is not
-    /// mistaken for an option: `ContinuumApp.swift` holds the last caller and is
-    /// owned by another lane for the duration of P3.2, so removing this overload
-    /// would break a file this ticket may not edit. It preserves the old behaviour
-    /// verbatim — including swallowing the error, which is what made an unreadable
-    /// listing look like an empty one. `checkManagedSessionReadGateSources` is RED
-    /// while any caller remains and names the line; delete this with the last one.
-    @available(*, deprecated, message: "P3.2: read through ReconciledManagedSessionSource, which cannot answer before the sweep has committed")
-    public func records(roots: [Root], now: Date) -> [Discovered] {
-        (try? records(roots: roots, now: now, proof: ManagedSessionReconciliation.Proof())) ?? []
-    }
-
     public func records(
         roots: [Root],
         now: Date,

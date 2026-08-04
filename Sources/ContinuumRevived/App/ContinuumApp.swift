@@ -2910,9 +2910,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// which is app-lifetime; dropped in `purgeTileState` with the tile.
     private var ticketQueueViews: [UUID: TicketQueueTileNSView] = [:]
     /// Legacy per-project `ManagedAgentSessionRecord`s, read across every project
-    /// root (P2B.2). Held here rather than made per-call so its cache survives
-    /// between inbox refreshes, which is the point of it.
-    private let crossProjectManagedSessionWalk = CrossProjectManagedSessionWalk()
+    /// root (P2B.2), and since P3.2 the GATE in front of them: the source owns the
+    /// walk, refuses to list anything until a sweep has committed, and sweeps a root
+    /// it has never seen on the way in. Held here rather than made per-call so both
+    /// its swept-root set and its cache survive between inbox refreshes — per-call
+    /// would re-sweep on every reload and cancel the agent you just spawned.
+    /// Internal, not private, so the check seam can arm it exactly as boot does.
+    let reconciledManagedSessionSource = ReconciledManagedSessionSource()
+    /// P3.2: one retry in flight at a time (see `scheduleAgentActivityRebuildRetry`).
+    private var isAgentActivityRebuildRetryScheduled = false
     /// Per-tile activity timeline (I5-safe drafts) built from the runner event
     /// stream, folded into the companion snapshot so the phone sees what each
     /// agent is doing (ticket 88.4c). Capped per tile.
@@ -3047,21 +3053,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             try Self.recordProjectInRegistry(project: project, in: registryStore, preferredWorkspaceId: ProjectLaunchCoordinator.consumePendingWorkspaceSelection())
             let updatedRegistry = try registryStore.loadOrEmpty()
 
-            // P3.1: a record on disk proves something happened, never that something
-            // is happening. Sweep the booted project's records BEFORE anything can
-            // read one — `attachUI`, `agentSupervisor.restore()`, the tile walk and
-            // the first `agentRowStatus` read are all below this line. Idempotent, so
-            // a launch with nothing to fix writes nothing at all; a graceful quit
-            // stamps `.continuumQuit` from `applicationWillTerminate`. Other project
-            // roots are swept as they are first listed (P3.2), because a root can
-            // appear after launch on a workspace switch.
-            let launchSweep = try ManagedSessionReconciliation.reconcile(
-                store: ManagedAgentSessionStore(projectRoot: URL(fileURLWithPath: project.rootPath, isDirectory: true)),
+            // P3.1/P3.2: a record on disk proves something happened, never that
+            // something is happening. Sweep every root the registry knows about
+            // BEFORE anything can read one — `attachUI`, `agentSupervisor.restore()`,
+            // the tile walk and the first `agentRowStatus` read are all below this
+            // line — and ARM the listing gate while we are here: until this returns,
+            // `currentManagedAgentActivities()` REFUSES rather than answering off
+            // unswept files. Idempotent per root and per record, so a launch with
+            // nothing to fix writes nothing at all; a graceful quit stamps
+            // `.continuumQuit` from `applicationWillTerminate` (which deliberately
+            // uses the reconciler directly — this source is once-per-root, so a quit
+            // routed through it would sweep nothing). A root that appears LATER, when
+            // a workspace switch opens another project's controller, is swept on the
+            // way in by the same source; that is why this is not the only sweep.
+            let launchSweep = try reconciledManagedSessionSource.reconcile(
+                registry: updatedRegistry,
                 reason: .continuumRestarted,
                 now: Date()
             )
-            if !launchSweep.report.terminalized.isEmpty {
-                fputs("managed-session reconcile: terminalized \(launchSweep.report.terminalized.count) of \(launchSweep.report.scanned) persisted record(s) that still claimed liveness\n", stderr)
+            if launchSweep.terminalized > 0 {
+                fputs("managed-session reconcile: terminalized \(launchSweep.terminalized) of \(launchSweep.scanned) persisted record(s) that still claimed liveness, across \(launchSweep.sweptRoots) project root(s)\n", stderr)
             }
 
             let activeWorkspace = try Self.loadActiveWorkspaceDocument(from: registryStore)
@@ -4114,7 +4125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         var observedAgentIds: Set<UUID> = []
     }
 
-    private func currentManagedAgentActivities() -> ManagedAgentActivityScan {
+    private func currentManagedAgentActivities() throws -> ManagedAgentActivityScan {
         // P2B.2: an inbox lists agents from EVERY project, not just the active
         // one. Two sources, in precedence order:
         //   1. the active project's live store — it is the writer, so it can
@@ -4137,18 +4148,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // The status fallback below already handles a record with no tile view.
         var records: [ManagedAgentSessionRecord] = []
         var seenTiles: Set<UUID> = []
-        for record in (try? workspaceRuntime?.activeController?.managedSessionStore.loadAll()) ?? []
-        where seenTiles.insert(record.tileId).inserted {
-            records.append(record)
+        // P3.2: the ROOTS FIRST, because listing them is what sweeps them — and both
+        // reads now THROW instead of swallowing. `(try? …) ?? []` here was the whole
+        // defect in its quiet form: an unreadable or unswept listing was reported as
+        // "you have no agents". The active store is read second and deduped
+        // active-first, so its precedence is unchanged, and its own root is
+        // guaranteed swept because `recordProjectInRegistry` put the booted project
+        // in this registry.
+        let roots = ReconciledManagedSessionSource.roots(
+            in: (try? registryStore?.loadOrEmpty()) ?? Registry.empty()
+        )
+        let discovered = try reconciledManagedSessionSource.records(roots: roots, now: Date())
+        if let activeStore = workspaceRuntime?.activeController?.managedSessionStore {
+            for record in try activeStore.reconciledRecords(reconciledManagedSessionSource.proof())
+            where seenTiles.insert(record.tileId).inserted {
+                records.append(record)
+            }
         }
-        let roots = ((try? registryStore?.loadOrEmpty())?.projects ?? []).map { project in
-            CrossProjectManagedSessionWalk.Root(
-                projectId: project.id,
-                projectRoot: URL(fileURLWithPath: project.rootPath, isDirectory: true)
-            )
-        }
-        for found in crossProjectManagedSessionWalk.records(roots: roots, now: Date())
-        where seenTiles.insert(found.record.tileId).inserted {
+        for found in discovered where seenTiles.insert(found.record.tileId).inserted {
             records.append(found.record)
         }
 
@@ -4370,6 +4387,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         /// crosses to the phone, and "the desktop has no observer for this" is a fact
         /// about this host. Phase 3 renders it; here it is only carried.
         var unobservedAgentIds: Set<UUID> = []
+        /// P3.2: whether the value above was built from a RECONCILED listing.
+        ///
+        /// `false` means "we do not know yet", which is NOT "there are no agents".
+        /// On a refusal the surface keeps its last good snapshot, the inbox push is
+        /// skipped and the phone publish is skipped — never replaced with an empty
+        /// one. Default false because a default-constructed surface has read nothing
+        /// yet, which is what makes the inbox start empty and fill only after
+        /// readiness. MUST STAY LAST: the memberwise initializer at
+        /// `rebuildAgentActivitySnapshot` passes it last.
+        var isReconciled: Bool = false
     }
 
     /// The replica the desktop stamps its own inventory with. Was a literal inside
@@ -4402,7 +4429,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             liveStatuses[tileId] = status
         }
 
-        let managedScan = currentManagedAgentActivities()
+        // P3.2: a refusal is not an empty inbox. Keep the last good value, flag it,
+        // say so once, and come back — never publish `AgentActivitySurface()`, which
+        // would tell a human (and the phone) that every agent disappeared.
+        let managedScan: ManagedAgentActivityScan
+        do {
+            managedScan = try currentManagedAgentActivities()
+        } catch {
+            agentActivity.isReconciled = false
+            fputs("agent activity: keeping the previous snapshot — \(error)\n", stderr)
+            scheduleAgentActivityRebuildRetry()
+            return
+        }
         let managedAgents = managedScan.activities
         // A terminal session with no `AgentDescriptor` is a plain shell. It stays in
         // the snapshot — the phone has always listed one, as `Shell idle` — but it is
@@ -4465,8 +4503,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             unobservedAgentIds: AgentObservation.unobservedAgentIds(
                 in: snapshot,
                 observedAgentIds: observedAgentIds
-            )
+            ),
+            isReconciled: true
         )
+    }
+
+    /// P3.2's retry. One in flight at a time, and deliberately NOT a loop: the only
+    /// way to be unreconciled is to read before boot's arming sweep, so a second
+    /// attempt either succeeds or the arming call is missing — which the log line in
+    /// `rebuildAgentActivitySnapshot` names, once per rebuild, instead of spinning.
+    private func scheduleAgentActivityRebuildRetry() {
+        guard !isAgentActivityRebuildRetryScheduled else { return }
+        isAgentActivityRebuildRetryScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self else { return }
+            self.isAgentActivityRebuildRetryScheduled = false
+            self.rebuildAgentActivitySnapshot()
+        }
     }
 
     /// Every terminal session descriptor that a canvas is actually holding a tile
@@ -6335,9 +6388,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // until something else moved. `--agent-inventory-wiring-check` gates that
             // this closure holds NO derivation of its own.
             activitySnapshot: { [weak self] in
-                await MainActor.run {
+                try await MainActor.run {
                     guard let self else { return ActivityLogSnapshot.empty }
                     self.rebuildAgentActivitySnapshot()
+                    // P3.2: SKIP the publish rather than send an empty inventory. The
+                    // provider is `async throws` and `publishCurrentDesktopSnapshot`
+                    // calls it BEFORE either `demux.send`, so throwing here leaves the
+                    // phone holding the last inventory it was given instead of being
+                    // told every agent vanished. The startup and pairing publishes are
+                    // exactly the two that can run before the sweep has committed.
+                    guard self.agentActivity.isReconciled else {
+                        throw CompanionSyncAppError.managedSessionsUnreconciled
+                    }
                     return self.agentActivity.snapshot
                 }
             },
@@ -6404,9 +6466,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // It used to be recomputed here from the active project's sessions; that
         // walk is now part of the one snapshot rebuild and not a diagnostic's job.
         let liveObservedAgents = observedAgentStatuses.count
-        let managedAgentSessions = ((try? workspaceRuntime?.activeController?.managedSessionStore.loadAll()) ?? [])
-            .filter { $0.agentKind == .managed }
-            .count
+        // P3.2: this line is what an operator reads when the phone shows no agents,
+        // so a refused read must say so. A count of 0 from a read that never happened
+        // is a lie in a log file.
+        var managedAgentSessions = "unreconciled"
+        if let activeStore = workspaceRuntime?.activeController?.managedSessionStore,
+           let proof = try? reconciledManagedSessionSource.proof() {
+            do {
+                managedAgentSessions = String(try activeStore.reconciledRecords(proof)
+                    .filter { $0.agentKind == .managed }
+                    .count)
+            } catch {
+                managedAgentSessions = "unreadable"
+            }
+        }
         Logger(subsystem: "continuum.companion", category: "sync").notice(
             "reason=\(reason, privacy: .public) container=\(diagnostics.containerIdentifier, privacy: .public) paired=\(diagnostics.isPaired, privacy: .public) pairedDevices=\(diagnostics.pairedDeviceCount, privacy: .public) signedICloud=\(diagnostics.signedWithICloudEntitlement, privacy: .public) transportIsPairingProof=\(diagnostics.transportIsPairingProof, privacy: .public) registeredObservedAgents=\(registeredObservedAgents, privacy: .public) liveObservedAgents=\(liveObservedAgents, privacy: .public) managedAgentSessions=\(managedAgentSessions, privacy: .public) lastSpatial=\(String(describing: diagnostics.lastSpatialPublishAt), privacy: .public) lastActivity=\(String(describing: diagnostics.lastActivityPublishAt), privacy: .public) lastFetch=\(String(describing: diagnostics.lastFetchAt), privacy: .public) lastInbound=\(String(describing: diagnostics.lastInboundMessageKind), privacy: .public) lastApproval=\(String(describing: diagnostics.lastApprovalResponseOutcome), privacy: .public) lastError=\(String(describing: diagnostics.lastError), privacy: .public)"
         )
@@ -6423,9 +6496,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case missingCanvas
         case missingICloudEntitlement(containerIdentifier: String)
         case missingRelayOperatorToken
+        /// P3.2: refuse the publish rather than send an inventory built from records
+        /// nobody has reconciled. Host-side only — this never crosses to the phone.
+        case managedSessionsUnreconciled
 
         var description: String {
             switch self {
+            case .managedSessionsUnreconciled:
+                return "managed sessions are not reconciled yet; skipping this activity publish rather than publishing an empty inventory"
             case .missingCanvas:
                 return "missing canvas"
             case let .missingICloudEntitlement(containerIdentifier):
@@ -6690,11 +6768,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let records = agentSupervisor.records.values.sorted(by: AgentStore.isOrderedBefore)
         var checkedOutBranches: [UUID: String] = [:]
         var attention: [UUID: InboxAttention] = [:]
+        // P3.3: the supervisor's turn snapshot is the row's ONE source of state. It is
+        // resolved here, in the loop that already walks the records, because Core
+        // cannot reach a supervisor — the same reason read-state is layered on here.
+        var turnSnapshots: [UUID: AgentTileTurnSnapshot] = [:]
         for record in records {
             if let branch = agentSupervisor.branchContext(for: record.id)?.checkedOutBranch {
                 checkedOutBranches[record.id.rawValue] = branch
             }
             attention[record.id.rawValue] = agentSupervisor.attention(for: record.id)
+            if let snapshot = agentSupervisor.turnSnapshot(for: record.id) {
+                turnSnapshots[record.id.rawValue] = snapshot
+            }
         }
         let context = AgentContextIndex.build(
             registry: registry,
@@ -6705,7 +6790,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             checkedOutBranches: checkedOutBranches
         )
         return AgentInboxRowBuilder.rows(
-            from: agentActivity.snapshot, context: context, attention: attention, now: now
+            from: agentActivity.snapshot, context: context, attention: attention,
+            turnSnapshots: turnSnapshots, now: now
         )
         .filter { agentActivity.managedAgentIdentities.contains($0.id) }
     }
@@ -6765,7 +6851,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // P3.16: BEFORE the rows too, so the empty state this push may show already
         // knows why it is empty.
         sidebar.setInboxExcludedTerminalAgentCount(inboxExcludedTerminalAgentCount())
-        sidebar.applyInbox(rows: buildAgentInboxRows(), changed: agentActivity.lastChange)
+        // P3.2: skipping the push leaves whatever the list already had — on a cold
+        // launch that is nothing, which is the packet's "the data source begins empty
+        // and is populated only after readiness". `applyInbox([])` here would be the
+        // "no agents" lie with a rendered empty state behind it.
+        if agentActivity.isReconciled {
+            sidebar.applyInbox(rows: buildAgentInboxRows(), changed: agentActivity.lastChange)
+        }
         do {
             let tree = try buildWorkspaceSidebarTree()
             sidebar.reload(
@@ -7442,6 +7534,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
         let app = AppDelegate()
         app.registryStore = registryStore
+        // P3.2 (design §5.9): arm the listing gate exactly as boot does, through the
+        // one entry point, or every read below refuses.
+        try app.reconciledManagedSessionSource.reconcile(registry: try registryStore.loadOrEmpty(), reason: .continuumRestarted, now: Date())
         let canvas = CanvasNSView(canvasState: CanvasState(
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
             tiles: [],
@@ -7646,6 +7741,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let canvas = CanvasNSView(canvasState: CanvasState(viewport: docA.viewport, tiles: [], groups: [], lastActiveTileId: nil), activeZone: nil, zoneRenderModels: initialZoneRenderModels, showsZoneChrome: false)
         canvas.frame = NSRect(x: 0, y: 0, width: 1_000, height: 700)
         app.registryStore = registryStore
+        // P3.2 (design §5.9): arm the listing gate exactly as boot does.
+        try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
         app.workspaceRuntime = runtime
         app.canvasView = canvas
         app.focusBroker.onAcceptedTileFocus = { [weak canvas] tileId in canvas?.markActive(tileId: tileId) }
@@ -7946,6 +8043,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: 640))
         let sidebarIdentity = ObjectIdentifier(sidebar)
         app.registryStore = registryStore
+        // P3.2 (design §5.9): arm the listing gate exactly as boot does.
+        try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
         app.workspaceRuntime = runtime
         app.canvasView = canvas
         app.workspaceSidebarView = sidebar
@@ -7979,13 +8078,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         //      record and not from something incidental to the tile.
         //
         // P4.14 MOVED THE WORD, not the property: the record is `.running` with no
-        // live view and no runner in flight, which is "created, waiting for a prompt"
-        // — `idle`, which this tree's `SidebarAgentStatusKind` has always folded to
-        // `unknown` (as it does for an idle terminal agent). What this assertion
-        // exists to catch is unchanged and is now stated twice: the row must not read
-        // "no agent" for a tile whose agent is alive.
+        // live view and no runner in flight. P3.1/P3.2 moved this word: the arming
+        // sweep terminalizes the persisted record, so the derived status is `stale`,
+        // and `SidebarAgentStatusKind` keeps `stale` as its OWN word rather than
+        // folding it to `unknown` the way it folds `configuring`/`idle`. What this
+        // assertion exists to catch is unchanged and is stated twice below: the row
+        // must not read "no agent" for a tile whose agent is alive.
         let managedRowText = sidebar.tileStatusTextForQA(workspaceId: workspaceId, zoneId: projectZoneId, tileId: managedTileId) ?? ""
-        try expect(managedRowText == "unknown",
+        try expect(managedRowText == "stale",
                    "a managed-agent tile must show its record's status in the sidebar — got '\(managedRowText)'")
         try expect(managedRowText != "no agent",
                    "the literal P2B.5 defect: a live managed agent's row read 'no agent'")
@@ -8300,6 +8400,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: 640))
         let topBar = WorkspaceTopBarView(frame: NSRect(x: 0, y: 0, width: 980, height: 44))
         app.registryStore = registryStore
+        // P3.2 (design §5.9): arm the listing gate exactly as boot does.
+        try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
         app.workspaceRuntime = runtime
         app.workspaceSidebarView = sidebar
         app.workspaceTopBarView = topBar
@@ -10911,6 +11013,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ghostty: nil,
             browserEngine: agentBrowserEngine
         )
+        // P3.2 (design §5.9): arm the listing gate exactly as boot does, before
+        // anything drives a surface rebuild.
+        try delegate.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
         delegate.applyObserverStatuses([
             workingTileId: .working,
             needsTileId: .needsAttention
@@ -19416,7 +19521,18 @@ extension AppDelegate {
     let app = AppDelegate()
     app.registryStore = registryStore
 
-    let scan = app.currentManagedAgentActivities()
+    // P3.2, asserted at RUNTIME and not by reading the source: the listing must
+    // REFUSE before the sweep has committed. A read that answers here is a read off
+    // unswept files, and an empty answer would be indistinguishable from "no agents".
+    do {
+        _ = try app.currentManagedAgentActivities()
+        throw CheckError.failed("cross-project discovery: the listing ANSWERED before the sweep committed — every row it returned came off unswept files")
+    } catch is ReconciledManagedSessionSource.NotReady {
+        // the refusal, which is the assertion
+    }
+    try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
+
+    let scan = try app.currentManagedAgentActivities()
     let activities = scan.activities
     // P2B.8: nothing live reported either of them — there is no canvas and no
     // supervised runner here, which is the whole point of the fixture.
@@ -19441,8 +19557,16 @@ extension AppDelegate {
     // at spawn and stayed there forever. `B` is persisted `stopped`, which reads
     // `stale` rather than `idle` so an ended session stays distinguishable from a
     // live one waiting on you.
-    try expect(fromA.status == .idle && fromB.status == .stale,
-               "a persisted `running` with nothing live is idle and a persisted `stopped` is stale — got \(fromA.status) / \(fromB.status)")
+    // P3.2: the sweep ran before this read, so A's `running` is now `cancelled` on
+    // disk and both records describe the PAST. That is the point — after a restart no
+    // file may claim liveness. Which of the two ways it ended is carried by
+    // `endedReason` (P3.4 renders it), not by the status word at this layer.
+    try expect(fromA.status == .stale && fromB.status == .stale,
+               "after the sweep NEITHER persisted record claims liveness — got \(fromA.status) / \(fromB.status)")
+    // …and P4.14's distinction is still a property of the pure derivation, asserted
+    // where it cannot be masked by the sweep.
+    try expect(AppDelegate.agentRowStatus(liveStatus: nil, hasLiveRunner: false, persisted: .running) == .idle,
+               "a created-not-busy record still derives idle, distinct from an ended one")
 
     // And they reach the published payload, through the same fold the phone reads.
     let snapshot = DegradedDesktopActivitySnapshotSource.snapshot(
@@ -19630,6 +19754,8 @@ extension AppDelegate {
 
     let app = AppDelegate()
     app.registryStore = registryStore
+    // P3.2 (design §5.9): arm the listing gate exactly as boot does.
+    try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
     // Assigned before first access, so the lazy default (which resolves the real
     // Application Support root) is never constructed.
     app.agentSupervisor = AgentSupervisor(store: agentStore, makeRunner: { _ in
@@ -19689,10 +19815,12 @@ extension AppDelegate {
                "the published inventory must hold every agent — got \(snapshot.byAgent.keys.sorted { $0.uuidString < $1.uuidString })")
     try expect(snapshot.byAgent[terminalAgentTile]?.status == .working,
                "the terminal agent's persisted status must reach the payload — got \(String(describing: snapshot.byAgent[terminalAgentTile]?.status))")
-    // P4.14 moved this value: the record is persisted `running` and there is no live
-    // view and no runner in flight here, so the derived status is `idle`. What the
-    // assertion is about is unchanged — that the managed record REACHES the payload.
-    try expect(snapshot.byAgent[managedAgentTile]?.status == .idle,
+    // P3.1/P3.2 moved this value again: the arming sweep above terminalized the
+    // persisted `running` record, so the derived status is now `stale` — the session
+    // did not survive the restart. (P4.14 had moved it from `working` to `idle` for a
+    // related reason: created is not busy.) What the assertion is about is unchanged
+    // across all three revisions — that the managed record REACHES the payload.
+    try expect(snapshot.byAgent[managedAgentTile]?.status == .stale,
                "the managed agent's record status must reach the payload — got \(String(describing: snapshot.byAgent[managedAgentTile]?.status))")
     try expect(snapshot.byAgent[otherProjectAgentTile]?.status == .needsAttention,
                "the other project's agent must reach the payload with its hand up — got \(String(describing: snapshot.byAgent[otherProjectAgentTile]?.status))")
@@ -19757,12 +19885,13 @@ extension AppDelegate {
                "the flip must reach the tile badge — got \(String(describing: canvas.agentStatus(for: terminalAgentTile)))")
     try expect(flippedDockLabel == "3",
                "the flip must reach the dock badge — got \(String(describing: flippedDockLabel))")
-    // P4.14 MOVED THIS COUNT, from working: 1 to working: 0. The 1 was the managed
+    // P4.14 moved this count from working: 1 to working: 0 — the 1 was the managed
     // agent, whose persisted `running` record read as `working` with nothing live
-    // saying so; it now reads `idle`, which the rollup counts in no bucket. The zone
-    // is not less busy than it was — it was never busy, and the rollup was repeating
-    // a field written once at spawn.
-    try expect(canvas.zoneRenderModels.first?.agentStatusRollup == CanvasNSView.AgentStatusRollup(working: 0, needsAttention: 1, done: 0, stale: 0),
+    // saying so. P3.1/P3.2 move it again: the arming sweep terminalizes that record,
+    // so it now reads `stale` and the rollup DOES count it, in the bucket that says
+    // the session ended. The zone is not less busy than it was — it was never busy,
+    // and the rollup was repeating a field written once at spawn.
+    try expect(canvas.zoneRenderModels.first?.agentStatusRollup == CanvasNSView.AgentStatusRollup(working: 0, needsAttention: 1, done: 0, stale: 1),
                "the zone rollup is derived from the same statuses — got \(String(describing: canvas.zoneRenderModels.first?.agentStatusRollup))")
     try assertAgreement(flipped, rows, "after the flip")
 
@@ -19807,13 +19936,13 @@ extension AppDelegate {
     // flipped to `needsAttention`). Without this the filtered cycle — the one the
     // packet names — would be proven only for terminal tiles.
     //
-    // P4.14 changed the status this filters ON, not what it proves: the managed
-    // agent's persisted `running` record used to read `working` with nothing live
-    // saying so, and now reads `idle`. The cycle is still selecting a managed tile by
-    // a status, and `.working` is asserted EMPTY below so the filter is not simply
-    // matching everything.
-    try expect(app.currentAgentTileIds(status: .idle) == [managedAgentTile],
-               "the filtered cycle must select a managed agent by its status — got \(app.currentAgentTileIds(status: .idle))")
+    // P4.14 changed the status this filters ON, not what it proves; P3.1/P3.2 change
+    // it once more. The managed agent's persisted `running` record read `working`,
+    // then `idle`, and now `stale` because the arming sweep terminalized it. The cycle
+    // is still selecting a managed tile by a status, and `.working` is asserted EMPTY
+    // below so the filter is not simply matching everything.
+    try expect(app.currentAgentTileIds(status: .stale) == [managedAgentTile],
+               "the filtered cycle must select a managed agent by its status — got \(app.currentAgentTileIds(status: .stale))")
     try expect(app.currentAgentTileIds(status: .working).isEmpty,
                "nothing is working here — an agent nobody is watching, whose record was written at spawn, is not a turn in flight — got \(app.currentAgentTileIds(status: .working))")
 
@@ -19926,6 +20055,8 @@ extension AppDelegate {
 
     let app = AppDelegate()
     app.registryStore = registryStore
+    // P3.2 (design §5.9): arm the listing gate exactly as boot does.
+    try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
     app.agentSupervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: agentsSupport), makeRunner: { _ in
         ScriptedAgentRunner(script: [])
     })
@@ -20106,6 +20237,8 @@ extension AppDelegate {
 
     let app = AppDelegate()
     app.registryStore = registryStore
+    // P3.2 (design §5.9): arm the listing gate exactly as boot does.
+    try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
     app.agentSupervisor = AgentSupervisor(store: agentStore, makeRunner: { _ in ScriptedAgentRunner(script: []) })
     app.agentSupervisor.restore()
     try expect(app.agentSupervisor.records[agentOne] != nil && app.agentSupervisor.records[agentTwo] != nil,
@@ -20415,6 +20548,8 @@ extension AppDelegate {
 
     let app = AppDelegate()
     app.registryStore = registryStore
+    // P3.2 (design §5.9): arm the listing gate exactly as boot does.
+    try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
     app.agentSupervisor = AgentSupervisor(store: agentStore, makeRunner: { _ in ScriptedAgentRunner(script: []) })
     app.agentSupervisor.restore()
     try expect(app.agentSupervisor.records[headlessId] != nil,
@@ -20435,13 +20570,14 @@ extension AppDelegate {
     var surface = app.agentActivity
     try expect(Set(surface.snapshot.byAgent.keys) == Set([terminalAgentTile, managedTileA, managedTileB, headlessId.rawValue]),
                "every agent must appear with no observer at all — got \(surface.snapshot.byAgent.keys.count) of 4")
-    // P4.14: `idle`, not `working`. Both records are persisted `running` with no live
-    // view and no runner, which says the session was CREATED, not that a turn is in
-    // flight. What this ticket asserts is unchanged — that a disk-only agent is
-    // listed at all, with a status, from a project nothing is observing.
-    try expect(surface.snapshot.byAgent[managedTileA]?.status == .idle,
+    // P3.1/P3.2: `stale`, not `idle`. Both records are persisted `running`, and the
+    // arming sweep terminalized them — after a restart a file describes the PAST.
+    // (P4.14 had already moved this off `working`: created is not busy.) What this
+    // ticket asserts is unchanged — that a disk-only agent is listed at all, with a
+    // status, from a project nothing is observing.
+    try expect(surface.snapshot.byAgent[managedTileA]?.status == .stale,
                "the active project's agent keeps its PERSISTED status — got \(String(describing: surface.snapshot.byAgent[managedTileA]?.status))")
-    try expect(surface.snapshot.byAgent[managedTileB]?.status == .idle,
+    try expect(surface.snapshot.byAgent[managedTileB]?.status == .stale,
                "so does the agent in the project whose controller is gone — got \(String(describing: surface.snapshot.byAgent[managedTileB]?.status))")
     try expect(surface.snapshot.byAgent[headlessId.rawValue]?.tileId == nil,
                "the headless agent appears with no tile — got \(String(describing: surface.snapshot.byAgent[headlessId.rawValue]?.tileId))")
@@ -20460,11 +20596,22 @@ extension AppDelegate {
                "an agent read off disk with no observer must be marked unobserved — got \(surface.unobservedAgentIds.count) marked of \(surface.snapshot.byAgent.count) agents")
     try expect(surface.unobservedAgentIds.contains(terminalAgentTile),
                "a terminal agent read off disk must be marked unobserved too — an age-based flag would exempt it forever, see the age measured below")
-    // The mark is OUR ignorance, not the agent's state: every one of those three is
-    // still reported as `idle`, never rewritten to `AgentStatus.stale`.
-    try expect(surface.snapshot.byAgent[managedTileA]?.status != .stale
-                && surface.snapshot.byAgent[headlessId.rawValue]?.status != .stale,
-               "an unobserved agent must NOT be rewritten as AgentStatus.stale — that is a derived state of the AGENT, not of our knowledge")
+    // The mark is OUR ignorance, not the agent's state — and P3.1 made the ORIGINAL
+    // VEHICLE for that claim unusable rather than wrong. `.stale` used to be reachable
+    // only as "we do not know", so asserting `!= .stale` proved the mark had not been
+    // turned into a status. The launch sweep now derives `.stale` legitimately, for a
+    // record it terminalized, so one word carries both meanings until P3.4 gives the
+    // unconfirmed case a word of its own.
+    //
+    // Re-expressed against the locked decision instead, which is both durable and
+    // stronger: "An unobserved agent is unconfirmed, NEVER WORKING" (_DESIGN.md). That
+    // is the claim worth protecting — the failure this guards against is a mark being
+    // laundered into an assertion of liveness, and `working` is the only status that
+    // asserts liveness. A swept record reading `stale` is the sweep speaking, not the
+    // mark; the assertion below is what forbids the mark from ever speaking.
+    try expect(surface.snapshot.byAgent[managedTileA]?.status != .working
+                && surface.snapshot.byAgent[headlessId.rawValue]?.status != .working,
+               "an unobserved agent must NEVER read as working — the mark is our knowledge, and it may not be laundered into a claim about the agent")
 
     // THE MEASUREMENT THAT RULED OUT A TIME THRESHOLD. Everything on disk here is an
     // hour old, and the app believes this agent's information is seconds old, because
@@ -20503,7 +20650,9 @@ extension AppDelegate {
     try expect(surface.unobservedAgentIds.contains(managedTileA) == false,
                "…and the agent it reports is no longer unobserved — got \(surface.unobservedAgentIds.count) marked")
     // The other project is untouched by any of that: still listed, still from disk.
-    try expect(surface.snapshot.byAgent[managedTileB]?.status == .idle
+    // P3.1/P3.2: `stale`, not `idle` — the sweep reaches every registry root, so the
+    // other project's record describes the past too. Still listed, still marked.
+    try expect(surface.snapshot.byAgent[managedTileB]?.status == .stale
                 && surface.unobservedAgentIds.contains(managedTileB),
                "the agent in the other project is still listed from disk and still marked — got \(String(describing: surface.snapshot.byAgent[managedTileB]?.status))")
 
@@ -22254,6 +22403,8 @@ extension AppDelegate {
 
     let app = AppDelegate()
     app.registryStore = registryStore
+    // P3.2 (design §5.9): arm the listing gate exactly as boot does.
+    try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
     app.agentSupervisor = AgentSupervisor(store: agentStore, makeRunner: { _ in ScriptedAgentRunner(script: []) })
     app.agentSupervisor.restore()
     try expect(app.agentSupervisor.records[headlessId] != nil,
@@ -22362,10 +22513,18 @@ extension AppDelegate {
     // An agent event moves its row with no disk read (P2B.7's path, through the
     // sidebar this time).
     let buildsBeforeEvent = sidebar.inboxForQA.cellBuildCountForQA
+    // ONE event, delivered to BOTH of its owners — decision 4 as a fixture. Since P3.3
+    // the row's STATE comes only from the supervisor's `AgentTileTurnSnapshot`, and a
+    // pending approval IS turn state; the activity draft contributes the timeline and is
+    // what drives the incremental rebuild measured below, never the status. In production
+    // both halves are fed from the SAME runner event stream (`deliver` updates the turn
+    // facts, the tile bridge records the draft), so a draft with no matching turn fact is
+    // a state that cannot occur — writing only the draft here asserted against one.
+    let inboxEvent = AgentRuntimeEvent.requestOpened(
+        threadId: "thread-1", requestId: "req-1", kind: .commandExecutionApproval)
     app.recordManagedActivity(
-        agentId: headlessId, tileId: nil,
-        event: .requestOpened(threadId: "thread-1", requestId: "req-1", kind: .commandExecutionApproval),
-        status: .needsAttention)
+        agentId: headlessId, tileId: nil, event: inboxEvent, status: .needsAttention)
+    app.agentSupervisor.qaDeliver(inboxEvent, to: headlessId)
     app.pushAgentSurfaces(notify: false)
     sidebar.inboxForQA.layoutForQA()
     let headlessIndex = sidebar.inboxForQA.rowIdsForQA.firstIndex(of: headlessId.rawValue)!
@@ -22488,6 +22647,8 @@ extension AppDelegate {
         .sessionStateChanged(.ready),
     ]
     revealApp.registryStore = revealRegistryStore
+    // P3.2 (design §5.9): arm the listing gate exactly as boot does.
+    try revealApp.reconciledManagedSessionSource.reconcile(registry: revealRegistry, reason: .continuumRestarted, now: now)
     // P3.15 (H6) needs one agent with a prompt GENUINELY in flight, to prove a delete
     // stops it before the record goes. Empty until that section fills it, so every
     // section before H gets exactly the runner it had.
@@ -24927,11 +25088,22 @@ static func checkRowStatusIsTurnState(
     app.registryStore = registryStore
     app.agentSupervisor = supervisor
 
+    // P3.2: the listing REFUSES until the sweep commits, and the refusal is asserted
+    // here rather than assumed — this is the owner's boot order in miniature.
+    do {
+        _ = try app.currentManagedAgentActivities()
+        throw fail("row-status: the listing answered before the sweep committed, so every sample below would come off unswept files")
+    } catch is ReconciledManagedSessionSource.NotReady {
+        // the refusal
+    }
+    try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
+    let readGateReport = try checkManagedSessionReadGateSources()
+
     // No canvas is installed, which is not a shortcut — it is the owner's case. A
     // sidebar row for an agent whose tile is not rendering has no live view to read,
     // and that is precisely when the persisted field was the only input.
     func scannedStatus(_ phase: String) throws -> AgentStatus {
-        let scan = app.currentManagedAgentActivities()
+        let scan = try app.currentManagedAgentActivities()
         guard let activity = scan.activities.first(where: { $0.tileId == tileId }) else {
             throw fail("row-status: the agent vanished from the scan at \(phase) — \(scan.activities.count) activities")
         }
@@ -24943,12 +25115,27 @@ static func checkRowStatusIsTurnState(
     /// → `AgentInboxRowBuilder.rows`. Sampling the scan alone would leave the fold
     /// and the row builder between the fix and the surface untested — the
     /// cross-review's finding.
-    func inboxRowState(_ phase: String) throws -> InboxState {
+    func inboxRow(_ phase: String) throws -> AgentInboxRow {
         app.refreshAgentSurfaces(notify: false)
-        guard let row = app.buildAgentInboxRows(now: now).first(where: { $0.id == agentId.rawValue }) else {
-            throw fail("row-status: the agent has no inbox row at \(phase) — rows \(app.buildAgentInboxRows(now: now).map(\.id))")
+        let rows = app.buildAgentInboxRows(now: now)
+        // P3.3: the builder's ring fallback is UNREACHABLE through the app, and this
+        // is the non-vacuous form of that claim — every row's id has a snapshot, so
+        // the `??` in `AgentInboxRowBuilder.row` never fires in production. (The
+        // fallback itself is exercised by a Core fixture.)
+        let unowned = rows.filter { row in
+            supervisor.records.keys.first(where: { $0.rawValue == row.id })
+                .flatMap { supervisor.turnSnapshot(for: $0) } == nil
         }
-        return row.state
+        guard unowned.isEmpty else {
+            throw fail("row-status: \(unowned.count) inbox row(s) at \(phase) have no turn snapshot, so their state came from the event ring — \(unowned.map(\.title))")
+        }
+        guard let row = rows.first(where: { $0.id == agentId.rawValue }) else {
+            throw fail("row-status: the agent has no inbox row at \(phase) — rows \(rows.map(\.id))")
+        }
+        return row
+    }
+    func inboxRowState(_ phase: String) throws -> InboxState {
+        try inboxRow(phase).state
     }
 
     let tile = ManagedAgentTileNSView(tile: Tile(
@@ -24974,8 +25161,13 @@ static func checkRowStatusIsTurnState(
     guard beforePrompt != .working else {
         throw fail("row-status: a persisted `running` with no runner in flight reads \(beforePrompt) — the record says the session was CREATED, not that a turn is in flight, and reading `working` off it is the bug this ticket is about")
     }
-    guard beforePrompt == .idle else {
-        throw fail("row-status: an alive, unprompted agent reads \(beforePrompt); it is idle — ready for a prompt, and not to be confused with a session that ended")
+    // P3.1/P3.2 MOVED THIS VALUE, deliberately: the owner's `running` record is a
+    // leftover from a previous launch, so the sweep above terminalized it and the row
+    // reads `stale` — the session did not survive the restart. `idle` here would mean
+    // "alive, waiting on you", which is exactly the claim a file may no longer make.
+    // Both fold to `InboxState.ready`, which is what the row assertion below pins.
+    guard beforePrompt == .stale else {
+        throw fail("row-status: a swept record reads \(beforePrompt); after a restart a persisted session describes the PAST — stale, not a live agent waiting on you")
     }
     let beforeRow = try inboxRowState("before the prompt")
     guard beforeRow == .ready else {
@@ -25099,6 +25291,65 @@ static func checkRowStatusIsTurnState(
         throw fail("row-status: P4.1's explicit settle no longer resolves to settled — got \(InboxLifecycle.resolve(override: .settled, blockers: .unblocked, settledAt: now, now: now))")
     }
 
-    return "row status is turn state: sampled \(samples.count) points of one turn (inbox rows \(beforeRow)/\(midRow)/\(afterRow)) through currentManagedAgentActivities() over the owner's on-disk record (\(samples.map { "\($0.phase) \($0.row)" }.joined(separator: ", "))), tile and row agree throughout, \(mapping.count) persisted cases mapped with stopped ≠ idle, approval still outranks working and settled"
+    // MARK: 7 · P3.3 · ONE OWNER — the drafts arm is live, and it does not win
+    //
+    // The old check attached a tile and never wired `onIngestedEvent`, so the drafts
+    // arm was dead and only the synthetic path was ever exercised. It is wired here,
+    // and then refuted on the path where drafts and the owner actually DISAGREE: a
+    // turn ended by a session-state change. `ManagedAgentActivityBridge` drafts
+    // nothing for `.sessionStateChanged`, so the newest draft stays
+    // `turn.started`/working while the supervisor's turn fact has gone back to ready.
+    // That is the reported bug's exact shape — "went to working, then done, but the
+    // sidebar is stuck in working".
+    tile.onIngestedEvent = { [weak tile] event in
+        guard let tile else { return }
+        app.recordManagedActivity(agentId: agentId, tileId: tileId, event: event, status: tile.currentAgentStatus)
+    }
+    supervisor.send("a second prompt", to: agentId)
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, {
+        supervisor.isRunning(agentId) && tile.currentAgentStatus == .working
+    }) else {
+        throw fail("row-status: the second turn never started — isRunning \(supervisor.isRunning(agentId)), tile \(tile.currentAgentStatus)")
+    }
+    let workingRow = try inboxRow("mid second turn")
+    guard workingRow.state == .working else {
+        throw fail("row-status: the row reads \(workingRow.state) mid-turn with a snapshot that says working")
+    }
+    // P3.3's elapsed anchor, through the production path: measured from the STAMPED
+    // turn start, so it cannot be the age of the record. (The week-old divergence is
+    // not expressible here — the fixture's `now` is not the wall clock the supervisor
+    // stamps with — so the 158h fixture lives in the Core builder checks.)
+    guard let liveElapsed = app.buildAgentInboxRows(now: Date()).first(where: { $0.id == agentId.rawValue })?.elapsed,
+          liveElapsed >= 0, liveElapsed < 60 else {
+        throw fail("row-status: a turn that started seconds ago reads \(String(describing: app.buildAgentInboxRows(now: Date()).first(where: { $0.id == agentId.rawValue })?.elapsed)) elapsed — the anchor is not the stamped turn start")
+    }
+    guard runner.emit(.sessionStateChanged(.stopped)) else {
+        throw fail("row-status: no run was in flight to stop")
+    }
+    guard await waitUntil(timeout: 10, pollInterval: 0.02, {
+        supervisor.turnSnapshot(for: agentId)?.state == .ready
+    }) else {
+        throw fail("row-status: the owner never reported the stopped turn — snapshot \(String(describing: supervisor.turnSnapshot(for: agentId)?.state))")
+    }
+    // THE VACUITY GUARD, and the thing that makes the wiring load-bearing: the RING
+    // must still be claiming working, or the assertion after it proves nothing.
+    let ringStatus = AgentsBoardProjection.rows(from: app.agentActivity.snapshot)
+        .first { $0.agentId == agentId.rawValue }?.status
+    guard ringStatus == .working else {
+        throw fail("row-status: the activity ring is not claiming working (\(String(describing: ringStatus))) — either onIngestedEvent is unwired or the drafts arm cannot disagree here, and the assertion below is vacuous")
+    }
+    let stoppedRow = try inboxRow("after the session stopped")
+    guard stoppedRow.state == .ready else {
+        throw fail("row-status: THE DRAFTS ARM WON — the row reads \(stoppedRow.state) while its owner reports ready and only a stale turn.started draft still says working. Drafts carry the timeline, never the status")
+    }
+    guard stoppedRow.elapsed == nil else {
+        throw fail("row-status: a settled row still shows a clock (\(String(describing: stoppedRow.elapsed))s) — the snapshot is authoritative about the ABSENCE of a turn too")
+    }
+    runner.stop()
+
+    // MARK: 8 · the row and the tile header say the same thing (P3.3)
+    let agreementReport = try checkInboxStateAgreesWithTilePresenter(fail: fail)
+
+    return "row status is turn state: sampled \(samples.count) points of one turn (inbox rows \(beforeRow)/\(midRow)/\(afterRow)) through currentManagedAgentActivities() over the owner's on-disk record (\(samples.map { "\($0.phase) \($0.row)" }.joined(separator: ", "))), tile and row agree throughout, \(mapping.count) persisted cases mapped with stopped ≠ idle, approval still outranks working and settled; the listing refused before the sweep and answered after it; \(readGateReport); a stopped turn left the ring claiming working and the row read ready with no clock, \(Int(liveElapsed))s measured from the stamped start; \(agreementReport)"
 }
 }
