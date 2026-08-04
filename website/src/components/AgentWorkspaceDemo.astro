@@ -1,0 +1,112 @@
+<div class="fleet-demo" aria-label="Array canvas with agent sidebar and agent tile">
+  <aside class="fleet-sidebar">
+    <div class="fleet-sidebar__heading">
+      <div><strong>Agents</strong><span>Across this workspace</span></div>
+      <button type="button" tabindex="-1" aria-label="New agent">＋</button>
+    </div>
+
+    <div class="fleet-summary">
+      <span><i class="summary-dot summary-dot--attention"></i><strong>2</strong> need you</span>
+      <span><i class="summary-dot summary-dot--working"></i><strong>3</strong> working</span>
+      <span><i class="summary-dot summary-dot--done"></i><strong>1</strong> done</span>
+    </div>
+
+    <div class="fleet-filter">
+      <button class="is-active" type="button" tabindex="-1">Active</button>
+      <button type="button" tabindex="-1">All agents</button>
+      <button class="fleet-filter__search" type="button" tabindex="-1" aria-label="Search agents">⌕</button>
+    </div>
+
+    <div class="fleet-group">
+      <div class="fleet-group__title"><span>Identity</span><small>3 agents</small></div>
+      <article class="fleet-agent fleet-agent--selected">
+        <span class="fleet-agent__state fleet-agent__state--attention"></span>
+        <div class="fleet-agent__content">
+          <div><strong>Auth integration</strong><span class="fleet-state-pill fleet-state-pill--attention">Approval</span></div>
+          <p>reviewer · gpt-5.6</p>
+          <code>⌁ agent/auth-review</code>
+        </div>
+        <time>now</time>
+      </article>
+      <article class="fleet-agent">
+        <span class="fleet-agent__state fleet-agent__state--working"></span>
+        <div class="fleet-agent__content">
+          <div><strong>Session refresh</strong><span class="fleet-state-pill">Working</span></div>
+          <p>builder · claude-opus-5</p>
+          <code>⌁ agent/session-refresh</code>
+        </div>
+        <time>4m</time>
+      </article>
+      <article class="fleet-agent">
+        <span class="fleet-agent__state fleet-agent__state--done">✓</span>
+        <div class="fleet-agent__content">
+          <div><strong>API contract</strong><span class="fleet-state-pill fleet-state-pill--done">Done</span></div>
+          <p>scout · claude-opus-5</p>
+          <code>⌁ main · shared</code>
+        </div>
+        <time>18m</time>
+      </article>
+    </div>
+
+    <div class="fleet-group">
+      <div class="fleet-group__title"><span>Release</span><small>3 agents</small></div>
+      <article class="fleet-agent">
+        <span class="fleet-agent__state fleet-agent__state--working"></span>
+        <div class="fleet-agent__content">
+          <div><strong>Regression sweep</strong><span class="fleet-state-pill">Working</span></div>
+          <p>tester · gpt-5.6</p>
+          <code>⌁ agent/regression</code>
+        </div>
+        <time>11m</time>
+      </article>
+    </div>
+  </aside>
+
+  <section class="fleet-canvas">
+    <div class="fleet-canvas__toolbar">
+      <div><span class="workspace-avatar">I</span><div><strong>Identity zone</strong><small>4 live surfaces</small></div></div>
+      <div><button type="button" tabindex="-1">Center selected</button><button type="button" tabindex="-1">•••</button></div>
+    </div>
+
+    <div class="fleet-canvas__stage">
+      <div class="fleet-zone-frame"><span>Identity</span><small>Auth and session work</small></div>
+
+      <article class="fleet-agent-tile">
+        <header class="fleet-agent-tile__titlebar">
+          <span>Agent · Auth integration</span>
+          <span class="fleet-state-pill fleet-state-pill--attention">Approval</span>
+          <span>••• &nbsp; ×</span>
+        </header>
+        <div class="fleet-agent-tile__identity">
+          <span class="fleet-agent__state fleet-agent__state--attention"></span>
+          <div><strong>Auth integration</strong><span>reviewer · gpt-5.6 · agent/auth-review</span></div>
+          <button type="button" tabindex="-1">Open worktree</button>
+        </div>
+        <div class="fleet-agent-tile__transcript">
+          <div class="tile-message tile-message--human"><span>You</span><p>Keep the public response shape unchanged while moving session renewal behind the auth service.</p></div>
+          <div class="tile-message"><span>Agent</span><p>The implementation is ready. The integration suite needs permission to start its local test server.</p></div>
+          <div class="tile-plan-card">
+            <div><span class="status-dot status-dot--pulse"></span><strong>Implementation plan</strong><small>2 of 3</small></div>
+            <ul><li class="is-done"><i>✓</i>Trace session ownership</li><li class="is-done"><i>✓</i>Move renewal behind auth service</li><li><i>3</i>Run integration checks</li></ul>
+          </div>
+        </div>
+        <div class="fleet-agent-tile__approval">
+          <span class="approval-icon">!</span>
+          <div><strong>Permission needed</strong><small>Run integration suite and start the local test server?</small></div>
+          <button type="button" tabindex="-1">Allow once</button><button type="button" tabindex="-1">Deny</button>
+        </div>
+        <div class="fleet-agent-tile__composer"><span>Reply to the agent…</span><button type="button" tabindex="-1">Send</button></div>
+      </article>
+
+      <article class="fleet-browser-tile">
+        <header><span>◫</span><strong>Browser</strong><small>localhost:3000</small></header>
+        <div><i></i><i></i><strong>Sign in with a passkey</strong><button type="button" tabindex="-1">Continue</button></div>
+      </article>
+
+      <article class="fleet-shell-tile">
+        <header><span>›_</span><strong>Dev server</strong><small>Live</small></header>
+        <code>ready at localhost:3000</code>
+      </article>
+    </div>
+  </section>
+</div>

@@ -1,0 +1,16 @@
+---
+interface Props {
+  compact?: boolean;
+  inverted?: boolean;
+}
+
+const { compact = false, inverted = false } = Astro.props;
+---
+
+<a class:list={["brand", { "brand--compact": compact, "brand--inverted": inverted }]} href="#top" aria-label="Array home">
+  <span class="brand__mark" aria-hidden="true">
+    <img class="brand__logo brand__logo--light" src="/array-logo-light.svg" alt="" />
+    <img class="brand__logo brand__logo--dark" src="/array-logo-dark.svg" alt="" />
+  </span>
+  {!compact && <span class="brand__name">Array</span>}
+</a>

@@ -1,0 +1,105 @@
+<div class="app-demo" aria-label="Array workspace canvas preview">
+  <div class="app-demo__titlebar">
+    <div class="app-demo__title">
+      <strong>Array</strong>
+      <span>3 projects · 5 zones</span>
+    </div>
+    <div class="app-demo__controls">
+      <button type="button" tabindex="-1" aria-label="Open sidebar">≡</button>
+      <button type="button" tabindex="-1">Work <span>⌄</span></button>
+      <button type="button" tabindex="-1" aria-label="Add workspace">＋</button>
+    </div>
+  </div>
+
+  <div class="app-demo__body">
+    <aside class="agent-rail">
+      <div class="agent-rail__header">
+        <strong>Agents</strong>
+        <span>6</span>
+      </div>
+      <button class="agent-rail__filter" type="button" tabindex="-1">All agents <span>⌄</span></button>
+
+      <div class="agent-row agent-row--attention">
+        <div class="agent-row__top"><small>identity</small><strong>Auth integration</strong><span>Approval</span></div>
+        <p>reviewer · gpt-5.6</p>
+        <code>⌁ agent/auth-review</code>
+      </div>
+      <div class="agent-row agent-row--working">
+        <div class="agent-row__top"><small>identity</small><strong>Session refresh</strong><span>Working</span></div>
+        <p>builder · claude-opus-5</p>
+        <code>⌁ agent/session-refresh</code>
+      </div>
+      <div class="agent-row agent-row--working">
+        <div class="agent-row__top"><small>release</small><strong>Regression sweep</strong><span>Working</span></div>
+        <p>tester · gpt-5.6</p>
+        <code>⌁ agent/regression</code>
+      </div>
+      <div class="agent-row agent-row--done">
+        <div class="agent-row__top"><small>identity</small><strong>API contract</strong><span>Done</span></div>
+        <p>scout · claude-opus-5</p>
+        <code>⌁ main · shared</code>
+      </div>
+      <div class="agent-row agent-row--parent">
+        <div class="agent-row__top"><small>▾ &nbsp; work</small><strong>Orchestrator</strong><span>Woke</span></div>
+        <p>orchestrator · gpt-5.6</p>
+      </div>
+    </aside>
+
+    <div class="canvas-stage">
+      <section class="zone zone--identity">
+        <header><strong>Identity</strong><span><i class="status-dot status-dot--pulse"></i> 2 working</span></header>
+      </section>
+
+      <section class="zone zone--release">
+        <header><strong>Release</strong><span><i class="status-diamond"></i> 1 needs you</span></header>
+      </section>
+
+      <article class="canvas-tile canvas-tile--agent">
+        <div class="tile-titlebar">
+          <span>Agent · Claude – feature/auth</span>
+          <span class="tile-pill"><i class="status-dot status-dot--pulse"></i> Working</span>
+          <span>••• &nbsp; ×</span>
+        </div>
+        <div class="agent-tile__header">
+          <i class="status-dot status-dot--pulse"></i>
+          <div><strong>Claude – feature/auth</strong><span>Working</span></div>
+          <code>38s</code>
+        </div>
+        <div class="agent-tile__body">
+          <p>I’ll trace the current auth guard, then update the session path.</p>
+          <div class="artifact artifact--plan"><strong>plan · 3 steps</strong><span>2 / 3</span></div>
+          <div class="artifact artifact--tool"><strong>tool · swift test</strong><span>running</span></div>
+          <div class="artifact artifact--diff"><strong>diff · Sources/Auth.swift</strong><span>+42</span></div>
+        </div>
+        <div class="agent-tile__composer">
+          <span>Send a prompt to the agent…</span><button type="button" tabindex="-1">Run</button>
+        </div>
+      </article>
+
+      <article class="canvas-tile canvas-tile--browser">
+        <div class="tile-titlebar"><span>Browser · localhost:3000</span><span>••• &nbsp; ×</span></div>
+        <div class="browser-bar"><span>‹</span><span>›</span><span class="browser-url">localhost:3000/settings</span></div>
+        <div class="browser-page">
+          <div class="browser-nav"><b>A</b><i></i><i></i><i></i></div>
+          <div class="browser-content"><small>ACCOUNT</small><strong>Authentication</strong><p>Passkeys and active sessions</p><div class="browser-line"></div><div class="browser-line short"></div></div>
+        </div>
+      </article>
+
+      <article class="canvas-tile canvas-tile--terminal">
+        <div class="tile-titlebar"><span>Shell · dev server</span><span>••• &nbsp; ×</span></div>
+        <div class="terminal-body">
+          <p><span>➜</span> pnpm dev</p>
+          <p class="terminal-muted">ready in 214 ms</p>
+          <p><span>→</span> http://localhost:3000</p>
+          <i class="terminal-cursor"></i>
+        </div>
+      </article>
+
+      <article class="canvas-tile canvas-tile--attention">
+        <div class="tile-titlebar"><span>Agent · Review</span><span class="tile-pill tile-pill--attention"><i class="status-diamond"></i> Needs attention</span></div>
+        <div class="attention-body"><strong>Run integration suite?</strong><p>Approval required for the release check.</p><div><button tabindex="-1">Approve</button><button tabindex="-1">Decline</button></div></div>
+      </article>
+
+    </div>
+  </div>
+</div>
