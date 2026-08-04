@@ -37,7 +37,17 @@ while true; do
   sleep "$POLL"
 
   # Alive? Nothing to do, and reset the streak — progress happened.
-  if $CTL status 2>/dev/null | grep -qE '^(pid|child): +[0-9]'; then
+  # The liveness line is `loop:   running pid=NNN`. An earlier version of this
+  # matched `pid:`/`child:`, which never appears, so it read a healthy loop as dead
+  # and restarted it four times before parking. Match the real format, and prove it
+  # by asserting the field exists at all — a status output that stops carrying
+  # `loop:` means loopctl changed shape and the watchdog must park, not guess.
+  status="$($CTL status 2>/dev/null)"
+  if ! printf '%s' "$status" | grep -q '^loop:'; then
+    say "PARKED — loopctl status has no 'loop:' line; format changed, refusing to guess"
+    exit 0
+  fi
+  if printf '%s' "$status" | grep -qE '^loop: +running'; then
     consecutive=0
     continue
   fi
