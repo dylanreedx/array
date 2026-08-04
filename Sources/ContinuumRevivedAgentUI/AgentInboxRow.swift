@@ -320,15 +320,53 @@ public struct ChildRollup: Equatable, Sendable {
     /// then `working`. A resting group therefore reads `"3 children"` and nothing
     /// more — the same restraint `InboxState.ready` shows by carrying no label.
     ///
-    /// The separator is ` · `, the same one `AgentInboxCellView.metaText` already
-    /// uses for `role · model`, so the line the rollup joins does not gain a second
-    /// punctuation vocabulary.
+    /// The separator is ` · `, the same one the inbox lower band uses, so the
+    /// rollup line does not gain a second punctuation vocabulary.
     public var summary: String {
         var parts = ["\(children) \(children == 1 ? "child" : "children")"]
         if needsYou > 0 { parts.append("\(needsYou) needs you") }
         if failed > 0 { parts.append("\(failed) failed") }
         if working > 0 { parts.append("\(working) working") }
         return parts.joined(separator: " · ")
+    }
+}
+
+/// The compact, non-colour provider mark used by an inbox row.
+///
+/// The model remains the source of truth for the provider identity, but the row
+/// never paints that identifier as prose. This mapping is Foundation-only so the
+/// AppKit cell can render it without teaching the shared row model about images or
+/// persistence. Unknown and legacy model spellings still get a quiet mark; the
+/// full model stays on the row's accessibility/help surface.
+public enum AgentProviderGlyph {
+    /// Resolve a provider prefix from either a fully-qualified `provider/model`
+    /// id or one of the short model spellings used by older records and fixtures.
+    public static func providerID(for model: String?) -> String? {
+        guard let model = model?.trimmingCharacters(in: .whitespacesAndNewlines), !model.isEmpty else {
+            return nil
+        }
+        if let slash = model.firstIndex(of: "/"), slash > model.startIndex {
+            return String(model[..<slash]).lowercased()
+        }
+        let lowercased = model.lowercased()
+        if lowercased.hasPrefix("gpt") { return "openai-codex" }
+        if lowercased.hasPrefix("claude") { return "anthropic" }
+        if lowercased.hasPrefix("gemini") { return "google" }
+        if lowercased == "pi" || lowercased.hasPrefix("pi-") { return "pi" }
+        return "unknown"
+    }
+
+    /// A deliberately small, greyscale mark. It is not a status accent and must
+    /// be painted with the row's secondary text token by the AppKit cell.
+    public static func glyph(for model: String?) -> String? {
+        guard let provider = providerID(for: model) else { return nil }
+        switch provider {
+        case "openai", "openai-codex": return "◈"
+        case "anthropic": return "✦"
+        case "google": return "✧"
+        case "pi": return "π"
+        default: return "◇"
+        }
     }
 }
 
@@ -434,12 +472,35 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
 
     public var drawsMetaLine: Bool { drawsMetaLine() }
 
-    /// Whether the card's lower detail band has something to draw. Empty strings
-    /// are not content for the role/model line, while a present branch is passed
-    /// to the branch formatter and therefore remains a drawn badge even when the
-    /// branch text itself is empty.
+    /// Whether the card's lower detail band has something to draw. The role id is
+    /// metadata for the owner and is not a painted subtitle; a model contributes a
+    /// provider glyph instead of its identifier. Empty strings do not reserve a
+    /// line, while a non-empty branch remains a drawn badge.
     public var drawsDetailLine: Bool {
-        role?.isEmpty == false || model?.isEmpty == false || branch != nil
+        branch?.isEmpty == false || isIsolated || AgentProviderGlyph.glyph(for: model) != nil
+    }
+
+    /// A malformed or legacy row may have copied its model id into `title`. Keep
+    /// that identifier out of the name position without renaming or persisting the
+    /// agent here; Phase 4 owns the actual name source. The provider glyph and its
+    /// accessibility/help label still expose the model below the name.
+    public var titleIsModelIdentifier: Bool {
+        let candidate = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let model = model?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !candidate.isEmpty, !model.isEmpty else { return false }
+        if candidate == model { return true }
+        guard candidate.contains("/") || model.contains("/") else { return false }
+        return candidate.split(separator: "/").last.map(String.init)
+            == model.split(separator: "/").last.map(String.init)
+    }
+
+    /// The human-facing title the cell may paint. Empty names and model-id names
+    /// use the shared sentinel rather than leaving a blank line or putting an
+    /// identifier back in the subject position.
+    public var displayTitle: String {
+        let candidate = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.isEmpty, !titleIsModelIdentifier else { return Self.untitled }
+        return candidate
     }
 
     /// The number of lines the row's card will actually draw, including the

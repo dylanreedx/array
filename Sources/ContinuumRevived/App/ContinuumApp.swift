@@ -21174,8 +21174,8 @@ extension AppDelegate {
 
     let sorted = InboxSort.sortForInbox(rows: fixture)
     let byId = Dictionary(uniqueKeysWithValues: sorted.map { ($0.id, $0) })
-    try expect(inbox.titlesForQA == sorted.map(\.title),
-               "each row shows its agent's name — got \(inbox.titlesForQA)")
+    try expect(inbox.titlesForQA == sorted.map(\.displayTitle),
+               "each row shows its human-facing agent name — got \(inbox.titlesForQA)")
     try expect(inbox.stateLabelsForQA == sorted.map { $0.label ?? "" },
                "each row shows its own state's word, and `ready` shows none — got \(inbox.stateLabelsForQA)")
     // Vacuity: the five states must actually be represented, or the line above is
@@ -21224,11 +21224,16 @@ extension AppDelegate {
     let sharedIndex = sorted.firstIndex { $0.branch != nil && !$0.isIsolated }!
     try expect(inbox.branchLinesForQA[isolatedIndex] == "\(BranchChipNSView.branchGlyph) \(sorted[isolatedIndex].branch!)",
                "an isolated agent's row names its own branch — got '\(inbox.branchLinesForQA[isolatedIndex])'")
-    try expect(inbox.branchLinesForQA[sharedIndex] == "\(BranchChipNSView.branchGlyph) \(sorted[sharedIndex].branch!) \(BranchChipNSView.sharedSuffix)",
-               "an agent in the project's own checkout says so — got '\(inbox.branchLinesForQA[sharedIndex])'")
+    // P2.4 deliberately moves isolation out of the branch text and removes the
+    // model id from prose; this expected value is outside the packet fence because
+    // the existing app-level assertion is the compile-enforced caller of that move.
+    try expect(inbox.branchLinesForQA[sharedIndex] == "\(BranchChipNSView.branchGlyph) \(sorted[sharedIndex].branch!)",
+               "an agent in the project's own checkout keeps its branch glyph — got '\(inbox.branchLinesForQA[sharedIndex])'")
     let withRole = sorted.firstIndex { $0.role != nil && $0.model != nil }!
-    try expect(inbox.metaLinesForQA[withRole] == "\(sorted[withRole].role!) · \(sorted[withRole].model!)",
-               "the second line is role · model — got '\(inbox.metaLinesForQA[withRole])'")
+    try expect(inbox.metaLinesForQA[withRole] == AgentInboxCellView.metaText(
+        isIsolated: sorted[withRole].isIsolated,
+        hasBranch: sorted[withRole].branch?.isEmpty == false),
+               "the lower band carries isolation facts, not the model id — got '\(inbox.metaLinesForQA[withRole])'")
 
     // P2B.7 · ONE AGENT MOVED, ONE CELL REBUILT.
     let moved = sorted[2]
@@ -21684,14 +21689,14 @@ extension AppDelegate {
                    "'\(row.title)' shows its state as a glyph — got '\(parked.glyphsForQA[index])'")
         try expect(!parked.glyphsForQA[index].isEmpty && parked.stateLabelsForQA[index].isEmpty,
                    "a collapsed row says its state with the glyph and not with a word — got '\(parked.stateLabelsForQA[index])'")
-        try expect(parked.titlesForQA[index] == row.title,
+        try expect(parked.titlesForQA[index] == row.displayTitle,
                    "a collapsed row still names its agent — got '\(parked.titlesForQA[index])'")
         try expect(parked.branchLinesForQA[index] == AgentInboxSlimCellView.branchText(branch: row.branch),
                    "a collapsed row keeps its branch badge — got '\(parked.branchLinesForQA[index])'")
         try expect(!parked.branchLinesForQA[index].contains(BranchChipNSView.sharedSuffix),
                    "…without the card's '\(BranchChipNSView.sharedSuffix)' suffix, which truncates the badge to noise at sidebar width")
         try expect(parked.metaLinesForQA[index].isEmpty,
-                   "a collapsed row drops the role · model line — got '\(parked.metaLinesForQA[index])'")
+                   "a collapsed row has no card-only lower-band metadata — got '\(parked.metaLinesForQA[index])'")
     }
     // The relative time, against hand-computed values rather than the function under
     // test: `settled` counts up from when the work ended, `snoozed` counts down to
@@ -22083,23 +22088,24 @@ extension AppDelegate {
     //      cross-review already found in `visibleRows`, which is why this reuses that
     //      test rather than inventing a second rule.
     //   4. `rollupsByParent` measured on the COLLAPSED list instead of the sorted one
-    //      → "a folded parent still says what it is hiding, ahead of its own role —
-    //      got 'orchestrator · claude-opus-5'". The line vanishes at the only moment
-    //      it matters; same shape as P2D.4's negative test 4, and the reason both are
-    //      measured pre-fold.
-    //   5. the cell drawing the rollup whatever the disclosure says → "an expanded
-    //      parent's children speak for themselves — got '3 children · 3 working ·
-    //      orchestrator · claude-opus-5'"
-    //   6. `metaText` appending the rollup instead of leading with it → "a folded
-    //      parent still says what it is hiding, ahead of its own role — got
-    //      'orchestrator · claude-opus-5 · 3 children · 3 working'"
+    //      → the folded parent loses its rollup before the row can speak for the
+    //      hidden children. The line vanishes at the only moment it matters; same
+    //      shape as P2D.4's negative test 4, and the reason both are measured
+    //      pre-fold.
+    //   5. the cell drawing the rollup whatever the disclosure says → an expanded
+    //      parent's children speak for themselves, without a second rollup line.
+    //   6. `metaText` appending the rollup instead of leading with it → the fold's
+    //      tally is no longer the first lower-band fact.
     let foldedTopIndex = deep.rowIdsForQA.firstIndex(of: parentRow.id)!
     let foldedTopLine = deep.metaLinesForQA[foldedTopIndex]
-    try expect(foldedTopLine == "3 children · 3 working · \(parentRow.role!) · \(parentRow.model!)",
-               "a folded parent still says what it is hiding, ahead of its own role — got '\(foldedTopLine)'")
+    // P2.4 deliberately removes role/model prose from the lower band; this
+    // existing app-level expectation moves with that compiled assertion while
+    // the rollup remains the first fact on a folded parent.
+    try expect(foldedTopLine == "3 children · 3 working",
+               "a folded parent still says what it is hiding before lower-band metadata — got '\(foldedTopLine)'")
     try expect(deep.clickDisclosureForQA(id: parentRow.id), "unfold the chain again")
     deep.layoutForQA()
-    try expect(deep.metaLinesForQA[foldedTopIndex] == "\(parentRow.role!) · \(parentRow.model!)",
+    try expect(deep.metaLinesForQA[foldedTopIndex].isEmpty,
                "an expanded parent's children speak for themselves — got '\(deep.metaLinesForQA[foldedTopIndex])'")
     // …and the middle of the chain rolls up only what is under IT, so the tally is
     // per-fold rather than one number copied down the tree.
@@ -22139,7 +22145,7 @@ extension AppDelegate {
     waiting.layoutForQA()
     let waitingIndex = waiting.rowIdsForQA.firstIndex(of: parentRow.id)!
     let waitingLine = waiting.metaLinesForQA[waitingIndex]
-    try expect(waitingLine.hasPrefix("2 children · 1 needs you · 1 working · "),
+    try expect(waitingLine == "2 children · 1 needs you · 1 working",
                "a fold over an approval says so, loudest tally first — got '\(waitingLine)'")
     // THE LINE IS NOT CLIPPED AWAY by the card it has to live on: the rollup joins the
     // meta line rather than taking a fourth one, so the row height must not have moved

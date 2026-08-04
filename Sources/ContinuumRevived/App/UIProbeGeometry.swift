@@ -604,7 +604,7 @@ enum UIProbeGeometry {
             let expectedElements: Set<String>
             switch row.variant {
             case .card:
-                expectedElements = ["cell", "card", "project", "title", "state", "elapsed", "meta", "branch"]
+                expectedElements = ["cell", "card", "project", "title", "state", "elapsed", "meta", "branch", "provider"]
             case .slim:
                 expectedElements = ["cell", "card", "glyph", "title", "branch", "time"]
             }
@@ -625,10 +625,69 @@ enum UIProbeGeometry {
             }
 
             let expectedLabels: Set<String> = row.variant == .card
-                ? ["project", "title", "state", "elapsed", "meta", "branch"]
+                ? ["project", "title", "state", "elapsed", "meta", "branch", "provider"]
                 : ["glyph", "title", "branch", "time"]
             guard Set(geometry.labels.map(\.element)) == expectedLabels else {
                 throw fail("\(label): '\(row.title)' did not expose every live label")
+            }
+            let measurementsByElement = Dictionary(uniqueKeysWithValues: geometry.labels.map { ($0.element, $0) })
+            guard let renderedTitle = measurementsByElement["title"] else {
+                throw fail("\(label): '\(row.title)' has no live name label")
+            }
+            let visibleStrings = geometry.labels
+                .filter { !$0.isHidden && !$0.text.isEmpty }
+                .map(\.text)
+            let duplicateStrings = Dictionary(grouping: visibleStrings, by: { $0 })
+                .filter { $0.value.count > 1 }
+                .map(\.key)
+            guard duplicateStrings.isEmpty else {
+                throw fail("\(label): '\(row.title)' draws the same string twice: \(duplicateStrings.sorted().joined(separator: ", "))")
+            }
+            guard renderedTitle.text == row.displayTitle,
+                  !renderedTitle.text.isEmpty else {
+                throw fail("\(label): '\(row.title)' does not resolve to a human-facing name in the name position")
+            }
+            if row.titleIsModelIdentifier {
+                guard renderedTitle.text == AgentInboxRow.untitled,
+                      renderedTitle.text != row.model else {
+                    throw fail("\(label): model id '\(row.model ?? "")' occupies the name position for '\(row.title)'")
+                }
+            }
+            if row.variant == .card {
+                let provider = measurementsByElement["provider"]
+                if let model = row.model?.trimmingCharacters(in: .whitespacesAndNewlines), !model.isEmpty {
+                    guard let provider, !provider.isHidden, provider.text == AgentProviderGlyph.glyph(for: model),
+                          provider.text != model,
+                          provider.accessibilityLabel == model,
+                          provider.toolTip == model,
+                          geometry.accessibilityLabel?.contains(model) == true else {
+                        throw fail("\(label): '\(row.title)' provider glyph lost the full model '\(model)' to VoiceOver/help or painted the model as prose")
+                    }
+                } else {
+                    guard provider?.isHidden == true else {
+                        throw fail("\(label): '\(row.title)' reserves a provider slot without a model")
+                    }
+                }
+
+                // P2.4's absence rule is about the live layout, not only the
+                // string value: an empty branch/meta/provider label must be
+                // hidden and take no horizontal room in the arranged detail band.
+                let detailSlots: [(String, Bool)] = [
+                    ("branch", row.branch?.isEmpty == false),
+                    ("meta", measurementsByElement["meta"]?.text.isEmpty == false),
+                    ("provider", row.model?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false),
+                ]
+                for (element, shouldDraw) in detailSlots {
+                    guard let measurement = measurementsByElement[element],
+                          measurement.isHidden == !shouldDraw else {
+                        throw fail("\(label): '\(row.title)' has inconsistent \(element) presence between its row facts and the live tree")
+                    }
+                    if !shouldDraw {
+                        guard measurement.drawableWidth <= 0.5 else {
+                            throw fail("\(label): '\(row.title)' hides empty \(element) content but still reserves \(measurement.drawableWidth)pt of alignment width")
+                        }
+                    }
+                }
             }
             for measurement in geometry.labels {
                 labelCount += 1
@@ -643,7 +702,7 @@ enum UIProbeGeometry {
                 }
                 guard measurement.drawableWidth.isFinite,
                       measurement.drawableWidth >= 0,
-                      abs(measurement.drawableWidth - Double(measurement.frame.width)) <= 0.01 else {
+                      measurement.isHidden || abs(measurement.drawableWidth - Double(measurement.frame.width)) <= 0.01 else {
                     throw fail("\(label): '\(row.title)' label \(measurement.element) reported drawable width \(measurement.drawableWidth), but its live frame is \(measurement.frame.width)")
                 }
                 if !measurement.isHidden, !measurement.text.isEmpty {
@@ -700,7 +759,7 @@ enum UIProbeGeometry {
     /// dropped. Named here rather than inline so the two directions of the band
     /// assertion cannot drift apart.
     private static let sidebarMetaBandElements = ["project", "state", "elapsed"]
-    private static let sidebarDetailBandElements = ["meta", "branch"]
+    private static let sidebarDetailBandElements = ["branch", "meta", "provider"]
 
     private static func expectRowBandsAndSacrificeOrder(
         _ geometry: AgentInboxRowGeometryForQA, row: AgentInboxRow, label: String
@@ -808,8 +867,13 @@ enum UIProbeGeometry {
         }
         // RELOCATED, not lost.
         let spoken = geometry.accessibilityLabel ?? ""
-        guard spoken.contains(row.title) else {
-            throw fail("\(label): the cell for '\(row.title)' does not say its own name to VoiceOver")
+        guard spoken.contains(row.displayTitle) else {
+            throw fail("\(label): the cell for '\(row.displayTitle)' does not say its own name to VoiceOver")
+        }
+        if let model = row.model?.trimmingCharacters(in: .whitespacesAndNewlines), !model.isEmpty {
+            guard spoken.contains(model) else {
+                throw fail("\(label): the provider glyph for '\(row.displayTitle)' does not expose its full model '\(model)' to VoiceOver")
+            }
         }
         if let projectName = row.projectName, project?.isHidden == true {
             guard spoken.contains(projectName) else {
@@ -1080,9 +1144,12 @@ enum UIProbeGeometry {
                         throw fail("sidebar-ux-check.content-height@\(Int(width))pt.\(appearanceName.rawValue): missing live geometry for \(row.title)")
                     }
                     if row.id == rows[0].id {
-                        guard AgentInboxCellView.metaText(role: row.role, model: row.model).isEmpty,
+                        guard AgentInboxCellView.metaText(
+                            isIsolated: row.isIsolated,
+                            hasBranch: row.branch?.isEmpty == false
+                        ).isEmpty,
                               geometry.labels.first(where: { $0.element == "meta" })?.isHidden == true else {
-                            throw fail("sidebar-ux-check.content-height@\(Int(width))pt.\(appearanceName.rawValue): empty role/model strings produced a visible separator-only detail band")
+                            throw fail("sidebar-ux-check.content-height@\(Int(width))pt.\(appearanceName.rawValue): empty isolation/remote facts produced a visible separator-only detail band")
                         }
                     }
                     let roles: [TextRole] = (row.drawsMetaLine ? [.label] : [])
@@ -1994,19 +2061,13 @@ enum UIProbeGeometry {
     /// not sacrifices; the gate's name rule and `expectRowBandsAndSacrificeOrder`
     /// both scope themselves to CARD rows for exactly that reason.
     private static let namesLongerThanTheRow: Set<String> = [
-        "row0.title@min", "row10.title@min", "row11.title@min", "row12.title@min",
-        "row13.title@min", "row14.title@min", "row15.title@min", "row16.title@min",
-        "row17.title@min", "row18.title@min", "row19.title@min", "row20.title@min",
-        "row21.title@min", "row22.title@min", "row23.title@min", "row24.title@min",
-        "row25.title@min", "row26.title@min", "row27.title@min", "row28.title@min",
-        "row29.title@min", "row3.title@min", "row30.title@min", "row31.title@min",
-        "row32.title@min", "row33.title@min", "row34.title@min", "row35.title@min",
-        "row36.title@min", "row37.title@min", "row38.title@min", "row39.title@min",
-        "row4.title@min", "row40.title@min", "row41.title@min", "row42.title@min",
-        "row43.title@min", "row44.title@min", "row46.title@min", "row47.title@min",
-        "row5.title@min", "row50.title@min", "row51.title@default", "row51.title@min",
-        "row51.title@wide", "row6.title@min", "row7.title@min", "row8.title@min",
-        "row9.title@min",
+        "row14.title@min", "row16.title@min", "row17.title@min", "row18.title@min", "row19.title@min",
+        "row20.title@min", "row21.title@min", "row22.title@min", "row23.title@min", "row24.title@min",
+        "row25.title@min", "row26.title@min", "row27.title@min", "row28.title@min", "row29.title@min",
+        "row30.title@min", "row31.title@min", "row32.title@min", "row33.title@min", "row34.title@min",
+        "row35.title@min", "row36.title@min", "row37.title@min", "row38.title@min", "row39.title@min",
+        "row4.title@min", "row40.title@min", "row41.title@min", "row42.title@min", "row43.title@min",
+        "row44.title@min", "row47.title@min", "row50.title@min", "row51.title@default", "row51.title@min",
     ]
 
     /// What gave way so the name did not have to, keyed the same way. Every
@@ -2018,9 +2079,10 @@ enum UIProbeGeometry {
     ///    the recorded order. It is also the label that survives elision best:
     ///    `.byTruncatingMiddle` keeps both ends of an `agent/<role>-<slug>`,
     ///    which is how a branch is recognised.
-    ///  · `meta@min` — the five rows whose role/rollup line is long enough that
-    ///    squeezing the branch to its yielding floor was not enough. Next rung
-    ///    up, and the rung the name never reaches.
+    ///  · No `meta@*` entry survives this pass: removing the repeated model id
+    ///    leaves enough width for the role/rollup slot after the branch reaches its
+    ///    yielding floor. That is a P2.4 healing, not permission to make the role
+    ///    line required again.
     ///
     /// NO `project@*` ENTRY SURVIVES, and its absence is P2.2's result rather than
     /// an omission: the caption is the FIRST rung, so the tightest tier stops
@@ -2030,33 +2092,15 @@ enum UIProbeGeometry {
     /// off the row entirely (P2.2). The fact itself is not lost: it is folded into
     /// the cell's accessibility label, which `checkSidebarFitTierLadder` asserts.
     private static let sacrificedByOrder: Set<String> = [
-        "row0.branch@default", "row0.branch@min", "row10.branch@default", "row10.branch@min",
-        "row11.branch@default", "row11.branch@min", "row12.branch@default", "row12.branch@min",
-        "row13.branch@default", "row13.branch@min", "row14.branch@default", "row14.branch@min",
-        "row15.branch@default", "row15.branch@min", "row16.branch@default", "row16.branch@min",
-        "row17.branch@default", "row17.branch@min", "row18.branch@default", "row18.branch@min",
-        "row19.branch@default", "row19.branch@min", "row2.branch@min", "row20.branch@default",
-        "row20.branch@min", "row21.branch@default", "row21.branch@min", "row22.branch@default",
-        "row22.branch@min", "row23.branch@default", "row23.branch@min", "row24.branch@default",
-        "row24.branch@min", "row25.branch@default", "row25.branch@min", "row26.branch@default",
-        "row26.branch@min", "row27.branch@default", "row27.branch@min", "row28.branch@default",
-        "row28.branch@min", "row29.branch@default", "row29.branch@min", "row3.branch@min",
-        "row30.branch@default", "row30.branch@min", "row31.branch@default", "row31.branch@min",
-        "row32.branch@default", "row32.branch@min", "row33.branch@default", "row33.branch@min",
-        "row34.branch@default", "row34.branch@min", "row35.branch@default", "row35.branch@min",
-        "row36.branch@default", "row36.branch@min", "row37.branch@default", "row37.branch@min",
-        "row38.branch@default", "row38.branch@min", "row39.branch@default", "row39.branch@min",
-        "row4.branch@default", "row4.branch@min", "row4.meta@min", "row40.branch@default",
-        "row40.branch@min", "row41.branch@default", "row41.branch@min", "row42.branch@default",
-        "row42.branch@min", "row43.branch@default", "row43.branch@min", "row44.branch@default",
-        "row44.branch@min", "row45.branch@default", "row45.branch@min", "row45.meta@min",
-        "row46.branch@default", "row46.branch@min", "row46.meta@min", "row47.branch@default",
-        "row47.branch@min", "row47.branch@wide", "row47.meta@min", "row48.branch@min",
-        "row49.branch@default", "row49.branch@min", "row49.meta@min", "row5.branch@min",
+        "row0.branch@min",
+        "row14.branch@min", "row15.branch@min", "row16.branch@min", "row17.branch@min", "row18.branch@min",
+        "row19.branch@min", "row20.branch@min", "row21.branch@min", "row22.branch@min", "row23.branch@min",
+        "row24.branch@min", "row25.branch@min", "row26.branch@min", "row27.branch@min", "row28.branch@min",
+        "row29.branch@min", "row30.branch@min", "row31.branch@min", "row32.branch@min",
+        "row33.branch@min", "row34.branch@min", "row35.branch@min", "row36.branch@min", "row37.branch@min",
+        "row38.branch@min", "row39.branch@min", "row40.branch@min", "row41.branch@min", "row42.branch@min",
+        "row43.branch@min", "row44.branch@min", "row46.branch@min", "row47.branch@min",
         "row50.branch@min", "row51.branch@default", "row51.branch@min", "row51.branch@wide",
-        "row52.branch@min", "row6.branch@default", "row6.branch@min", "row7.branch@default",
-        "row7.branch@min", "row8.branch@default", "row8.branch@min", "row9.branch@default",
-        "row9.branch@min",
     ]
 
     /// What may truncate today: the two recorded sets and nothing else.

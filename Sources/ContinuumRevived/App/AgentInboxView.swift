@@ -84,7 +84,9 @@ struct InboxLifecycleSnapshot: Equatable {
 /// A label's measured drawing lane, read from the live row cell rather than from
 /// the row model. `neededWidth` includes the `Metrics.cellTextInset` NSTextField
 /// cell inset: the raw NSString measurement is not the width AppKit needs before
-/// it elides at draw time.
+/// it elides at draw time. Hidden labels report their live alignment width, so
+/// AppKit's four-point NSTextField frame padding cannot masquerade as reserved
+/// content space.
 struct AgentInboxLabelGeometryForQA {
     let element: String
     let text: String
@@ -93,6 +95,10 @@ struct AgentInboxLabelGeometryForQA {
     let neededWidth: Double
     let font: NSFont?
     let isHidden: Bool
+    /// Accessibility/help metadata is read from the live label so the provider
+    /// glyph cannot satisfy a visual-only check while making the model unreachable.
+    let accessibilityLabel: String?
+    let toolTip: String?
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.1-title-line-ownership.md
     /// The LIVE horizontal compression resistance of this label, so the recorded
     /// sacrifice order can be asserted as a ladder rather than described in a
@@ -191,14 +197,19 @@ private func inboxLabelGeometryForQA(
         Double(ceil((label.stringValue as NSString).size(withAttributes: [.font: $0]).width))
             + Metrics.cellTextInset
     } ?? 0
+    let drawableWidth = label.isHidden
+        ? max(0, Double(label.alignmentRect(forFrame: label.frame).width))
+        : Double(label.frame.width)
     return AgentInboxLabelGeometryForQA(
         element: element,
         text: label.stringValue,
         frame: label.convert(label.bounds, to: cell),
-        drawableWidth: Double(label.frame.width),
+        drawableWidth: drawableWidth,
         neededWidth: neededWidth,
         font: font,
         isHidden: label.isHidden,
+        accessibilityLabel: label.accessibilityLabel(),
+        toolTip: label.toolTip,
         compressionResistance: Double(
             label.contentCompressionResistancePriority(for: .horizontal).rawValue)
     )
@@ -4678,13 +4689,21 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     private let titleLabel = NSTextField(labelWithString: "")
     private let stateLabel = NSTextField(labelWithString: "")
     private let elapsedLabel = NSTextField(labelWithString: "")
+    /// The lower-band subtitle carries human-readable placement facts only. The
+    /// model is represented by `providerGlyphLabel`, never printed as a second
+    /// identifier on the row.
     private let metaLabel = NSTextField(labelWithString: "")
     private let branchLabel = NSTextField(labelWithString: "")
+    private let providerGlyphLabel = NSTextField(labelWithString: "")
     private let stack = NSStackView()
     private var metaBand: NSStackView?
     private var detailBand: NSStackView?
     private var layoutColumnWidth: Double?
     private var leadingInset: NSLayoutConstraint?
+    private var metaMinimumWidth: NSLayoutConstraint?
+    private var metaCollapsedWidth: NSLayoutConstraint?
+    private var branchMinimumWidth: NSLayoutConstraint?
+    private var branchCollapsedWidth: NSLayoutConstraint?
     /// What this cell is currently showing. Held so the cell can repaint its own
     /// text colours when the appearance moves — an `NSTextField.textColor` is a
     /// resolved colour, and the list above must not reload the table to fix it
@@ -4722,6 +4741,11 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         branchLabel.font = .token(.label)
         branchLabel.lineBreakMode = .byTruncatingMiddle
 
+        providerGlyphLabel.font = .token(.label)
+        providerGlyphLabel.setContentHuggingPriority(.required, for: .horizontal)
+        providerGlyphLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        providerGlyphLabel.setAccessibilityRole(.image)
+
         AgentInboxCellView.applySacrificeOrder(
             project: projectLabel, branch: branchLabel, meta: metaLabel,
             title: titleLabel, state: stateLabel, elapsed: elapsedLabel)
@@ -4737,15 +4761,16 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         //
         //   band 1  meta    [project, spacer, state, elapsed]   lineHeight(.label) = 14
         //   band 2  name    [disclosure, title]                 lineHeight(.title) = 19
-        //   band 3  detail  [meta, branch]                      lineHeight(.label) = 14
+        //   band 3  detail  [branch, isolation/remote, spacer, provider glyph]
+        //                                      lineHeight(.label) = 14
         //   + 2 * Space.s between the bands + Inset.card.vertical
         //   = 14 + 19 + 14 + 8 + 24 = 79 = `AgentInboxView.rowHeight` for a
         //     full-content card.
         //
         // Three bands and not four: the full-content case is exactly three lines
-        // of type, so `meta` and `branch` SHARE band 3 rather than taking a line
-        // each. P2.3 collapses an empty band, while this remains the tallest card
-        // geometry and the ceiling the offscreen probes use.
+        // of type. The lower band gives way from left to right — branch, then the
+        // isolation/remote facts, with the provider mark at the trailing edge —
+        // while P2.3 collapses an empty band rather than reserving it.
         //
         // THE DISCLOSURE TRIANGLE RIDES THE NAME BAND, DELIBERATELY, and it is
         // not a matter of taste: `InboxDisclosureButton` is an `NSButton`, and its
@@ -4782,7 +4807,7 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         nameBand.distribution = .fill
         nameBand.setHuggingPriority(.defaultLow, for: .horizontal)
 
-        let detailBand = NSStackView(views: [metaLabel, branchLabel, NSView()])
+        let detailBand = NSStackView(views: [branchLabel, metaLabel, NSView(), providerGlyphLabel])
         self.detailBand = detailBand
         detailBand.orientation = .horizontal
         detailBand.alignment = .firstBaseline
@@ -4826,15 +4851,22 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
             // over 176 px`. Measured off the font rather than guessed, the
             // `BranchChipNSView.minimumTextWidth` precedent.
             //
-            // P2.1 adds the two band-3 floors: `meta` and `branch` now SHARE a
-            // line, so the lower-priority one of the pair is the label a narrow
-            // row squeezes, and without a floor the recorded sacrifice would
-            // render as a flat rect rather than as an elided string.
+            // P2.1 adds the band-3 floors: branch and the isolation/remote
+            // subtitle may yield, while the provider mark stays a whole glyph.
+            // Without a floor the recorded sacrifice would render as a flat rect
+            // rather than as an elided string.
             AgentInboxCellView.yieldingMinimumWidth(projectLabel, .caption),
             titleLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: AgentInboxCellView.minimumTextWidth(.title)),
-            AgentInboxCellView.yieldingMinimumWidth(metaLabel, .label),
-            AgentInboxCellView.yieldingMinimumWidth(branchLabel, .label),
         ])
+        let metaMinimumWidth = AgentInboxCellView.yieldingMinimumWidth(metaLabel, .label)
+        self.metaMinimumWidth = metaMinimumWidth
+        let metaCollapsedWidth = metaLabel.widthAnchor.constraint(equalToConstant: 0)
+        self.metaCollapsedWidth = metaCollapsedWidth
+        let branchMinimumWidth = AgentInboxCellView.yieldingMinimumWidth(branchLabel, .label)
+        self.branchMinimumWidth = branchMinimumWidth
+        let branchCollapsedWidth = branchLabel.widthAnchor.constraint(equalToConstant: 0)
+        self.branchCollapsedWidth = branchCollapsedWidth
+        NSLayoutConstraint.activate([metaMinimumWidth, branchMinimumWidth])
 
         // P3.10: added AFTER the stack (so it draws over it) and constrained to the
         // CARD rather than joined to any stack — that is what makes it an overlay.
@@ -4856,11 +4888,21 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         applyFitTier()
     }
 
+    private func updateDetailSlotConstraints() {
+        let drawsMeta = !metaLabel.isHidden
+        metaMinimumWidth?.isActive = drawsMeta
+        metaCollapsedWidth?.isActive = !drawsMeta
+
+        let drawsBranch = !branchLabel.isHidden
+        branchMinimumWidth?.isActive = drawsBranch
+        branchCollapsedWidth?.isActive = !drawsBranch
+    }
+
     private func updateBandVisibility() {
         let metaDraws = [projectLabel, stateLabel, elapsedLabel].contains {
             !$0.isHidden && !$0.stringValue.isEmpty
         }
-        let detailDraws = [metaLabel, branchLabel].contains {
+        let detailDraws = [branchLabel, metaLabel, providerGlyphLabel].contains {
             !$0.isHidden && !$0.stringValue.isEmpty
         }
         metaBand?.isHidden = !metaDraws
@@ -4901,17 +4943,27 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
 
         projectLabel.stringValue = row.projectName ?? ""
         projectLabel.isHidden = row.projectName?.isEmpty != false
-        titleLabel.stringValue = row.title
+        titleLabel.stringValue = row.displayTitle
         stateLabel.stringValue = row.label ?? ""
         stateLabel.isHidden = row.label?.isEmpty != false
         elapsedLabel.stringValue = AgentInboxCellView.elapsedText(row.elapsed) ?? ""
         elapsedLabel.isHidden = AgentInboxCellView.elapsedText(row.elapsed) == nil
+        branchLabel.stringValue = AgentInboxCellView.branchText(branch: row.branch)
+        branchLabel.isHidden = branchLabel.stringValue.isEmpty
         metaLabel.stringValue = AgentInboxCellView.metaText(
-            role: row.role, model: row.model,
+            isIsolated: row.isIsolated,
+            hasBranch: !branchLabel.isHidden,
             rollup: disclosure == .collapsed ? rollup : nil)
         metaLabel.isHidden = metaLabel.stringValue.isEmpty
-        branchLabel.stringValue = AgentInboxCellView.branchText(branch: row.branch, isIsolated: row.isIsolated)
-        branchLabel.isHidden = branchLabel.stringValue.isEmpty
+        updateDetailSlotConstraints()
+
+        let providerGlyph = AgentProviderGlyph.glyph(for: row.model) ?? ""
+        let modelLabel = row.model?.trimmingCharacters(in: .whitespacesAndNewlines)
+        providerGlyphLabel.stringValue = providerGlyph
+        providerGlyphLabel.isHidden = providerGlyph.isEmpty
+        providerGlyphLabel.toolTip = modelLabel?.isEmpty == false ? modelLabel : nil
+        providerGlyphLabel.setAccessibilityLabel(providerGlyphLabel.toolTip)
+        providerGlyphLabel.setAccessibilityRole(.image)
 
         // Bands are content slots, not semantic state slots. The row model and
         // the live label strings agree on which bands draw; a folded rollup is
@@ -4924,13 +4976,14 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         elapsedLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         metaLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         branchLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        providerGlyphLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         // The accent IS the state's colour (P3.2) and `ready` has none — which is
         // why the label is hidden there rather than painted in some neutral: the
         // resting state carries no word and no colour, and that is the whole of
         // the decision.
         stateLabel.textColor = (row.state.accent?.color ?? TextToken.textSecondary.color).nsColor(in: self)
 
-        for label in [projectLabel, titleLabel, elapsedLabel, metaLabel, branchLabel] {
+        for label in [projectLabel, titleLabel, elapsedLabel, metaLabel, branchLabel, providerGlyphLabel] {
             label.alphaValue = emphasis.textOpacity
         }
         stateLabel.alphaValue = emphasis.accentOpacity
@@ -5005,7 +5058,7 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
             project: measuredTextWidth(row.projectName ?? "", .caption),
             state: measuredTextWidth(row.label ?? "", .label),
             elapsed: measuredTextWidth(elapsedText(row.elapsed) ?? "", .captionMono),
-            title: measuredTextWidth(row.title, .title),
+            title: measuredTextWidth(row.displayTitle, .title),
             disclosure: disclosure == .none
                 ? 0
                 : disclosureWidth ?? measuredDisclosureWidth(disclosure))
@@ -5066,6 +5119,12 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         }
         if elapsedLabel.isHidden, let elapsed = AgentInboxCellView.elapsedText(shown.row.elapsed) {
             spoken.append(elapsed)
+        }
+        // The visible provider mark is intentionally terse, but VoiceOver must
+        // still receive the complete model even when the child label is not the
+        // element AppKit focuses first.
+        if let model = providerGlyphLabel.toolTip {
+            spoken.append(model)
         }
         setAccessibilityLabel(spoken.joined(separator: ", "))
     }
@@ -5227,34 +5286,42 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         elapsed.setContentCompressionResistancePriority(.required, for: .horizontal)
     }
 
-    /// `role · model`, with the separator only where both sides exist. An agent
-    /// with neither gets an empty line that is hidden, not a bare "·".
+    /// The lower-band facts after the branch. A shared checkout is meaningful only
+    /// when a branch is present; an isolated checkout remains a fact even when a
+    /// branch name is unavailable. A remote marker is accepted for the future row
+    /// source but omitted when no remote fact exists, rather than reserving an empty
+    /// slot. A folded rollup remains first because it is the only place a hidden
+    /// child can speak for itself.
     ///
     /// Ticket: docs/38-tickets/90-agent-ux/P2D.5-child-rollup.md
     /// A folded parent's rollup goes on the FRONT of this line, in the same ` · `
     /// vocabulary. First, not last, because `metaLabel` truncates by tail on a narrow
     /// sidebar and the thing that must survive the squeeze is what the fold is
-    /// hiding — an agent's role and model are still on the row's title line's terms,
-    /// but "1 needs you" exists nowhere else while the group is closed.
-    static func metaText(role: String?, model: String?, rollup: ChildRollup? = nil) -> String {
-        [rollup?.summary, role, model]
+    /// hiding — "1 needs you" exists nowhere else while the group is closed.
+    static func metaText(
+        isIsolated: Bool,
+        hasBranch: Bool,
+        remote: String? = nil,
+        rollup: ChildRollup? = nil
+    ) -> String {
+        let isolation = isIsolated ? "isolated" : (hasBranch ? "shared" : nil)
+        return [rollup?.summary, isolation, remote]
             .compactMap { $0 }
             .filter { !$0.isEmpty }
             .joined(separator: " · ")
     }
 
-    /// The branch line, in `BranchChipNSView`'s vocabulary rather than a second
-    /// one: the same `⎇` glyph and the same `· shared` suffix, so the tile chip
-    /// and the inbox row cannot describe one agent two ways.
+    /// The branch line, in `BranchChipNSView`'s vocabulary. Isolation is its own
+    /// lower-band fact now, so the branch text does not repeat the shared marker;
+    /// the tile and inbox still agree on the branch glyph itself.
     ///
     /// The chip's third state — assigned one branch, checked out on another — is
     /// deliberately absent: `AgentInboxRow` carries one resolved branch name and
     /// no mismatch fact (P3.1 flattened it that way), and inventing a warning from
     /// a name this view cannot compare would be a guess.
-    static func branchText(branch: String?, isIsolated: Bool) -> String {
-        guard let branch else { return "" }
-        let base = "\(BranchChipNSView.branchGlyph) \(branch)"
-        return isIsolated ? base : "\(base) \(BranchChipNSView.sharedSuffix)"
+    static func branchText(branch: String?) -> String {
+        guard let branch, !branch.isEmpty else { return "" }
+        return "\(BranchChipNSView.branchGlyph) \(branch)"
     }
 
     /// `45s` / `4m` / `2h11m`. Whole units only: a turn's duration is glanced at,
@@ -5279,6 +5346,7 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
             inboxLabelGeometryForQA("elapsed", label: elapsedLabel, in: self),
             inboxLabelGeometryForQA("meta", label: metaLabel, in: self),
             inboxLabelGeometryForQA("branch", label: branchLabel, in: self),
+            inboxLabelGeometryForQA("provider", label: providerGlyphLabel, in: self),
         ]
         return AgentInboxRowGeometryForQA(
             agentID: shown?.row.id,
@@ -5293,6 +5361,7 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
                 "elapsed": labels[3].frame,
                 "meta": labels[4].frame,
                 "branch": labels[5].frame,
+                "provider": labels[6].frame,
             ],
             labels: labels,
             paintedBorderWidth: card.layer.map { Double($0.borderWidth) },
@@ -5476,7 +5545,7 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         disclosureButton.show(disclosure)
 
         glyphLabel.stringValue = AgentInboxSlimCellView.glyph(for: row.state)
-        titleLabel.stringValue = row.title
+        titleLabel.stringValue = row.displayTitle
         branchLabel.stringValue = AgentInboxSlimCellView.branchText(branch: row.branch)
         branchLabel.isHidden = branchLabel.stringValue.isEmpty
         timeLabel.stringValue = AgentInboxSlimCellView.relativeText(for: row.lifecycle, now: now)
