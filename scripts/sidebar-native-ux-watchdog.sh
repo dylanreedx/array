@@ -66,8 +66,11 @@ while true; do
   # its consecutive-restart bound parked it. The bound worked, but seven restarts of
   # something no restart can fix is pure churn — so detect it directly and park at
   # once. The timing is the tell: a pass that dies in seconds did no work.
-  if ls -t "$HOME/.pi/sidebar-native-ux-runs/continuum-overnight"/run-*/tasks/*/worker-*.stderr 2>/dev/null \
-     | head -1 | xargs -r grep -lq 'fetch failed' 2>/dev/null; then
+  # Recency matters: a stderr from an earlier failure stays on disk forever, and
+  # matching it would park a perfectly healthy start. Only a file touched in the last
+  # few minutes describes the run that just died.
+  if find "$HOME/.pi/sidebar-native-ux-runs/continuum-overnight" -name 'worker-*.stderr' \
+       -mmin -5 2>/dev/null | xargs -r grep -lq 'fetch failed' 2>/dev/null; then
     say "PARKED — the model provider is unreachable (fetch failed); no restart can fix this"
     exit 0
   fi
