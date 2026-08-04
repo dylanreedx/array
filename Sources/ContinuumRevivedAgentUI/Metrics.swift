@@ -126,6 +126,23 @@ public enum Inset {
 }
 
 public enum Metrics {
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.2-measured-fit-tiers.md
+    /// The width an `NSTextField` cell keeps for itself, on top of the width the
+    /// string measures. ONE declaration, in the leaf module, because three
+    /// places have to agree about it or the disagreement is invisible: the
+    /// layout's guaranteed-minimum floor, the QA geometry seam that reports what
+    /// a label NEEDED, and the gate that compares the two. Before this constant
+    /// existed the floor measured `"0000"` raw and the seam added a literal 4 —
+    /// so the floor was exactly wide enough to measure the string and AppKit
+    /// elided it anyway, and the gate could not see it because both halves were
+    /// off by the same amount in opposite directions.
+    ///
+    /// 4.0, measured rather than chosen: an `NSTextField(labelWithString:)`
+    /// draws its string inset by 2pt on each side of its cell, which is why a
+    /// frame-only or `stringValue`-only assertion cannot witness elision.
+    /// `Double`, like every metric here — views convert.
+    public static let cellTextInset = 4.0
+
     /// See the PROVENANCE note above: at or above every measured AppKit
     /// `defaultLineHeight(for:) / size` ratio across the P1.4 ladder.
     public static let lineHeightMultiple = 1.25

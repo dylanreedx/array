@@ -511,7 +511,7 @@ enum UIProbeGeometry {
     private static func checkSidebarProbe(
         _ probe: SidebarProbeHost, rows: [AgentInboxRow], width: CGFloat,
         appearanceName: NSAppearance.Name
-    ) throws -> (cells: Int, labels: Int, truncated: Int) {
+    ) throws -> (cells: Int, labels: Int, truncated: Int, tiers: Set<RowFitTier>) {
         let label = "sidebar-ux-check@\(Int(width))pt.\(appearanceName.rawValue)"
         let theme: TokenTheme = appearanceName == .darkAqua ? .dark : .light
         // Size the whole subtree first. Applying rows before this line is the
@@ -569,6 +569,7 @@ enum UIProbeGeometry {
         var labelCount = 0
         var truncatedCount = 0
         var paintedStates = Set<InboxState>()
+        var observedTiers = Set<RowFitTier>()
         for row in rows {
             guard let geometry = geometryByID[row.id],
                   geometry.state == row.state,
@@ -634,9 +635,9 @@ enum UIProbeGeometry {
                 }
                 let measuredNeed = Double(
                     ceil((measurement.text as NSString).size(withAttributes: [.font: font]).width)
-                ) + 4
+                ) + Metrics.cellTextInset
                 guard abs(measurement.neededWidth - measuredNeed) <= 0.01 else {
-                    throw fail("\(label): '\(row.title)' label \(measurement.element) reported need \(measurement.neededWidth), measured \(measuredNeed) including the 4pt cell inset")
+                    throw fail("\(label): '\(row.title)' label \(measurement.element) reported need \(measurement.neededWidth), measured \(measuredNeed) including the \(Metrics.cellTextInset)pt cell inset")
                 }
                 guard measurement.drawableWidth.isFinite,
                       measurement.drawableWidth >= 0,
@@ -652,13 +653,333 @@ enum UIProbeGeometry {
                     }
                 }
             }
+            // P2.1/P2.2, over the same live geometry: the three bands, the
+            // recorded sacrifice ladder, and the tier the row resolved to.
+            if row.variant == .card {
+                try expectRowBandsAndSacrificeOrder(geometry, row: row, label: label)
+                if let tier = geometry.fitTier { observedTiers.insert(tier) }
+            }
         }
         guard paintedStates == Set(InboxState.allCases) else {
             throw fail("\(label): paint seam covered \(paintedStates.count) states, expected every InboxState")
         }
         // P1.3, over the whole subtree at this width and appearance.
         try expectHairlineContainment(probe.inbox, label: label)
-        return (cells.count, labelCount, truncatedCount)
+        return (cells.count, labelCount, truncatedCount, observedTiers)
+    }
+
+    // MARK: - P2.1/P2.2 — three bands, one recorded order, one measured tier
+    //
+    // Tickets: 94/P2.1-title-line-ownership.md, P2.2-measured-fit-tiers.md
+    //
+    // Four things are asserted here, over the LIVE card at every gated width in
+    // both appearances, because each of the four is a way the other three could
+    // be satisfied and the row still be wrong:
+    //
+    //  1 · BAND MEMBERSHIP. The name is on a line of its OWN — strictly below
+    //      the project chip, the state and the elapsed column, strictly above the
+    //      role/rollup line and the branch. A row that merely raised the title's
+    //      priority while leaving it on the headline would pass a truncation
+    //      count and fail this.
+    //  2 · THE LANE IS THE LINE. On a row with no children the title's drawing
+    //      lane spans the card's whole text column. This is what "owns its line"
+    //      MEANS; without it the name could be given a line and then handed a
+    //      third of it.
+    //  3 · THE RECORDED SACRIFICE ORDER, as a strict ladder of the LIVE
+    //      compression resistances, read off the labels. Priorities are the
+    //      mechanism the order is implemented with, so asserting them is
+    //      asserting the decision — and a chip quietly restored to AppKit's
+    //      default 750 is red here even at a width where nothing truncates.
+    //  4 · THE TIER AND WHAT IT DROPPED, held to each other, plus the
+    //      relocation: a column a tier stopped drawing is in the cell's
+    //      accessibility label, because a VoiceOver user has no width problem.
+
+    /// The elements P2.1 puts on band 1, band 3, and the two that may never be
+    /// dropped. Named here rather than inline so the two directions of the band
+    /// assertion cannot drift apart.
+    private static let sidebarMetaBandElements = ["project", "state", "elapsed"]
+    private static let sidebarDetailBandElements = ["meta", "branch"]
+
+    private static func expectRowBandsAndSacrificeOrder(
+        _ geometry: AgentInboxRowGeometryForQA, row: AgentInboxRow, label: String
+    ) throws {
+        var byElement: [String: AgentInboxLabelGeometryForQA] = [:]
+        for measurement in geometry.labels { byElement[measurement.element] = measurement }
+        guard let title = byElement["title"], !title.isHidden, title.frame.width > 0 else {
+            throw fail("\(label): '\(row.title)' draws no name — the row's subject is its name (P2.1)")
+        }
+
+        // 1 · BAND MEMBERSHIP. The cell is an unflipped `NSView`, so a LARGER y is
+        // further UP the card: band 1 (meta) sits at the largest y, the name band
+        // under it, band 3 under that. Compared on vertical CENTRES with a whole
+        // point of clearance, so two labels that merely differ by an ascent cannot
+        // satisfy it.
+        for element in sidebarMetaBandElements {
+            guard let above = byElement[element], !above.isHidden, above.frame.width > 0 else { continue }
+            guard title.frame.midY < above.frame.midY - 1 else {
+                throw fail("\(label): '\(row.title)' draws \(element) on or under the name's line (name midY \(title.frame.midY), \(element) midY \(above.frame.midY)) — the name owns a line of its own, with the meta band above it (P2.1)")
+            }
+        }
+        for element in sidebarDetailBandElements {
+            guard let below = byElement[element], !below.isHidden, below.frame.width > 0 else { continue }
+            guard title.frame.midY > below.frame.midY + 1 else {
+                throw fail("\(label): '\(row.title)' draws \(element) on or above the name's line (name midY \(title.frame.midY), \(element) midY \(below.frame.midY)) — the detail band is below the name (P2.1)")
+            }
+        }
+
+        // 2 · THE LANE IS THE LINE, on a row that draws no triangle. "Draws no
+        // triangle" is read off the geometry — the name starts at the text
+        // column's own leading edge — rather than off the row model, so a
+        // disclosure control that was hidden but still taking room fails here.
+        //
+        // MEASURED IN ALIGNMENT-RECT TERMS, which is the only way this arithmetic
+        // closes: Auto Layout pins an `NSTextField`'s ALIGNMENT RECT, and a label's
+        // alignment rect is inset 2pt on each side of its frame — exactly the
+        // `Metrics.cellTextInset` the whole gate is built around. So a name pinned
+        // to both edges of a 196pt text column reports a 200pt frame, and
+        // subtracting the inset is what turns the frame back into the lane. (It is
+        // also why `neededWidth` adds the same 4: both sides of the comparison then
+        // speak about the same rectangle.)
+        if let card = geometry.elementFrames["card"] {
+            let columnLeading = Double(card.minX) + Inset.card.left - Metrics.cellTextInset / 2
+            let drawsTriangle = Double(title.frame.minX) > columnLeading + 0.5
+            if !drawsTriangle {
+                let lane = title.drawableWidth - Metrics.cellTextInset
+                let wanted = Double(card.width) - Inset.card.horizontal
+                guard abs(lane - wanted) <= 0.5 else {
+                    throw fail(String(
+                        format: "%@: '%@' draws no triangle, so its name's lane is the whole text column — got %.1fpt of %.1fpt (name x %.1f…%.1f, card x %.1f…%.1f) (P2.1)",
+                        label, row.title, lane, wanted,
+                        title.frame.minX, title.frame.maxX, card.minX, card.maxX))
+                }
+            }
+        }
+
+        // 3 · THE RECORDED SACRIFICE ORDER, as live priorities:
+        //     project < branch < meta < title < state == elapsed == required.
+        let ladder = ["project", "branch", "meta", "title", "state"]
+        var previous: (element: String, priority: Double)?
+        for element in ladder {
+            guard let measurement = byElement[element] else {
+                throw fail("\(label): '\(row.title)' exposes no \(element) label to read a priority off")
+            }
+            if let previous {
+                guard previous.priority < measurement.compressionResistance else {
+                    throw fail("\(label): '\(row.title)' resists compression \(previous.element)=\(previous.priority) then \(element)=\(measurement.compressionResistance) — the recorded sacrifice order is caption/project chip → branch → metrics → role/rollup → NAME, and it is enforced as a strict ladder (P2.1)")
+                }
+            }
+            previous = (element, measurement.compressionResistance)
+        }
+        guard let state = byElement["state"], let elapsed = byElement["elapsed"],
+              state.compressionResistance == Double(NSLayoutConstraint.Priority.required.rawValue),
+              elapsed.compressionResistance == Double(NSLayoutConstraint.Priority.required.rawValue) else {
+            throw fail("\(label): '\(row.title)' lets the state word or the elapsed column be compressed — the one word saying what an agent is doing is never half a word, and a duration is never half a duration (P2.1)")
+        }
+        guard title.compressionResistance
+            == Double(AgentInboxCellView.nameCompressionResistance.rawValue) else {
+            throw fail("\(label): '\(row.title)' resists compression at \(title.compressionResistance), not the \(AgentInboxCellView.nameCompressionResistance.rawValue) the name is pinned at (P2.1)")
+        }
+
+        // 4 · THE TIER, AND WHAT IT DROPPED.
+        guard let tier = geometry.fitTier else {
+            throw fail("\(label): '\(row.title)' is a card and resolved no measured-fit tier (P2.2)")
+        }
+        let project = byElement["project"]
+        if row.projectName != nil {
+            guard (project?.isHidden == false) == tier.drawsProject else {
+                throw fail("\(label): '\(row.title)' resolved \(tier.rawValue) but its project chip is \(project?.isHidden == true ? "hidden" : "drawn") — a tier's sacrifice is what it actually stopped drawing (P2.2)")
+            }
+        }
+        if row.elapsed != nil {
+            guard (elapsed.isHidden == false) == tier.drawsElapsed else {
+                throw fail("\(label): '\(row.title)' resolved \(tier.rawValue) but its elapsed column is \(elapsed.isHidden ? "hidden" : "drawn") — a tier's sacrifice is what it actually stopped drawing (P2.2)")
+            }
+        }
+        // NEVER a tier's sacrifice, at any width.
+        guard !title.isHidden else {
+            throw fail("\(label): a tier hid '\(row.title)' — the name is never a tier's sacrifice (P2.2)")
+        }
+        if row.label != nil {
+            guard state.isHidden == false else {
+                throw fail("\(label): a tier hid the state word on '\(row.title)' — the state is never a tier's sacrifice (P2.2)")
+            }
+        }
+        // RELOCATED, not lost.
+        let spoken = geometry.accessibilityLabel ?? ""
+        guard spoken.contains(row.title) else {
+            throw fail("\(label): the cell for '\(row.title)' does not say its own name to VoiceOver")
+        }
+        if let projectName = row.projectName, project?.isHidden == true {
+            guard spoken.contains(projectName) else {
+                throw fail("\(label): '\(row.title)' dropped its project chip at \(tier.rawValue) without folding '\(projectName)' into the accessibility label — a dropped column is relocated, never deleted (P2.2)")
+            }
+        }
+        if let elapsedText = AgentInboxCellView.elapsedText(row.elapsed), elapsed.isHidden {
+            guard spoken.contains(elapsedText) else {
+                throw fail("\(label): '\(row.title)' dropped its elapsed column at \(tier.rawValue) without folding '\(elapsedText)' into the accessibility label — a dropped column is relocated, never deleted (P2.2)")
+            }
+        }
+    }
+
+    /// P2.2's tier ladder as ARITHMETIC — its boundaries, the name's part in it,
+    /// and its monotonicity. The other half of the ladder is asserted on live
+    /// cells: `expectRowBandsAndSacrificeOrder` holds every card row's resolved
+    /// tier to what it actually stopped drawing, and `runSidebarUXChecks` requires
+    /// all three tiers to be REACHED across the gated widths, so a tier no width
+    /// resolves cannot sit here looking implemented.
+    ///
+    /// EVERY BOUNDARY BELOW IS DERIVED FROM A MEASUREMENT, never typed. The widths
+    /// handed to `fitTier` are the needs the fixture itself measures, plus or minus
+    /// one point — so this leg cannot be satisfied by a threshold that happens to
+    /// agree with today's fonts, and a P1.4 type move re-derives it instead of
+    /// falsifying it.
+    private static func checkSidebarFitTierLadder() throws -> Int {
+        var asserted = 0
+        let label = "sidebar-ux-check.fitTier"
+
+        // A0 · THE FLOOR MUST BE ABLE TO DRAW ITS OWN GUARANTEE.
+        //
+        // `AgentInboxCellView.minimumTextWidth(role)` promises that a squeezed
+        // label still draws four characters. Before P2.2 it measured `"0000"` with
+        // no cell inset, so the promise was exactly the width of the STRING and
+        // AppKit elided it at the floor — the guaranteed minimum ellipsised its own
+        // content, which is a promise that cannot be kept. Asserted against
+        // `measuredTextWidth`, the same arithmetic the QA seam reports as
+        // `neededWidth` and the truncation gate compares against, so the floor and
+        // the gate cannot disagree about what a string needs.
+        for role in [TextRole.title, .label, .caption, .captionMono] {
+            let floor = AgentInboxCellView.minimumTextWidth(role)
+            let needed = AgentInboxCellView.measuredTextWidth("0000", role)
+            guard floor >= needed else {
+                throw fail(String(format: "%@: the %@ floor guarantees %.1fpt but drawing \"0000\" in it needs %.1fpt including the %.1fpt cell inset — a floor that elides its own content is not a floor (P2.2)",
+                                  label, String(describing: role), floor, needed, Metrics.cellTextInset))
+            }
+            asserted += 1
+        }
+
+        // A · THE ARITHMETIC. A short name, so the meta band is what decides.
+        let needs = AgentInboxCellView.RowFitNeeds(
+            project: AgentInboxCellView.measuredTextWidth("continuum", .caption),
+            state: AgentInboxCellView.measuredTextWidth("Working", .label),
+            elapsed: AgentInboxCellView.measuredTextWidth("162h21m", .captionMono),
+            title: AgentInboxCellView.measuredTextWidth("pi", .title),
+            disclosure: 0)
+        let needsFull = needs.metaBandNeed(elapsed: true, project: true)
+        let needsAbbreviated = needs.metaBandNeed(elapsed: false, project: true)
+        let needsCaption = needs.metaBandNeed(elapsed: false, project: false)
+        guard needs.nameBandNeed < needsCaption else {
+            throw fail("\(label): the fixture's name is wider than its tightest meta band, so this leg would be measuring the name rather than the ladder")
+        }
+        guard needsFull > needsAbbreviated, needsAbbreviated > needsCaption else {
+            throw fail(String(format: "%@: the three meta-band needs are not strictly decreasing (%.1f, %.1f, %.1f) — a tier that costs nothing is not a sacrifice", label, needsFull, needsAbbreviated, needsCaption))
+        }
+        let ladder: [(available: Double, tier: RowFitTier)] = [
+            (needsFull, .full),
+            (needsFull - 1, .abbreviated),
+            (needsAbbreviated, .abbreviated),
+            (needsAbbreviated - 1, .captionHidden),
+            (needsCaption, .captionHidden),
+        ]
+        for step in ladder {
+            let resolved = AgentInboxCellView.fitTier(available: step.available, needs: needs)
+            guard resolved == step.tier else {
+                throw fail(String(format: "%@: %.1fpt of room resolved %@, wanted %@ — the tier is chosen by comparing measured need against available width (P2.2)", label, step.available, resolved.rawValue, step.tier.rawValue))
+            }
+            asserted += 1
+        }
+        // THE NAME IS PART OF THE TEST: a row whose own name does not fit is at
+        // the tightest tier however comfortably its metadata would have fitted.
+        let longNamed = AgentInboxCellView.RowFitNeeds(
+            project: needs.project, state: needs.state, elapsed: needs.elapsed,
+            title: needsFull * 2, disclosure: 0)
+        guard AgentInboxCellView.fitTier(available: needsFull, needs: longNamed) == .captionHidden else {
+            throw fail("\(label): a row too narrow for its own name resolved a tier above the tightest — the name can only be found elided on a row that has already dropped everything a tier may drop (P2.1/P2.2)")
+        }
+        asserted += 1
+        // Monotone: shrinking the room never LOOSENS the tier.
+        var last = RowFitTier.full
+        for step in stride(from: needsFull + 20, through: 1, by: -1) {
+            let resolved = AgentInboxCellView.fitTier(available: step, needs: needs)
+            guard RowFitTier.allCases.firstIndex(of: resolved)!
+                >= RowFitTier.allCases.firstIndex(of: last)! else {
+                throw fail(String(format: "%@: %.0fpt resolved %@ after %@ at a wider width — the ladder must be monotone", label, step, resolved.rawValue, last.rawValue))
+            }
+            last = resolved
+        }
+        asserted += 1
+
+        // B · THE MIDDLE RUNG, ON A LIVE ROW, at a width taken from that row's own
+        // measurements.
+        //
+        // WHY THIS LEG EXISTS. Across 220/280/320 the corpus reaches `full` and
+        // `captionHidden` and never `abbreviated`, and the reason is a property of
+        // the corpus rather than of the ladder: `abbreviated` is the window where
+        // the meta band overruns its line by less than the elapsed column is wide,
+        // which needs a project name of MIDDLING length. The P0.3 corpus has
+        // `continuum` (nine characters, fits at every width) and one 66-character
+        // monster (which busts the band with or without the elapsed column, so it
+        // lands at `captionHidden`), and nothing between — and this packet may not
+        // add a fixture, because the corpus is indexed by position and every
+        // `rowN` key in the truncation table would shift. So the rung is witnessed
+        // on a REAL row at a DERIVED width instead: the width below is computed
+        // from the row's own measured needs, never typed, and the assertion is
+        // that the live cell drops its elapsed column and keeps its project chip.
+        let corpus = LabFixtures.inboxDefectRows()
+        var middle: (row: AgentInboxRow, available: Double)?
+        for candidate in corpus where candidate.variant == .card {
+            let candidateNeeds = AgentInboxCellView.RowFitNeeds(
+                project: AgentInboxCellView.measuredTextWidth(candidate.projectName ?? "", .caption),
+                state: AgentInboxCellView.measuredTextWidth(candidate.label ?? "", .label),
+                elapsed: AgentInboxCellView.measuredTextWidth(
+                    AgentInboxCellView.elapsedText(candidate.elapsed) ?? "", .captionMono),
+                title: AgentInboxCellView.measuredTextWidth(candidate.title, .title),
+                disclosure: 0)
+            let ceiling = candidateNeeds.metaBandNeed(elapsed: true, project: true)
+            let floor = max(candidateNeeds.metaBandNeed(elapsed: false, project: true),
+                            candidateNeeds.nameBandNeed)
+            guard floor < ceiling else { continue }
+            middle = (candidate, ((floor + ceiling) / 2).rounded(.down))
+            break
+        }
+        guard let middle else {
+            throw fail("\(label): no corpus card row has a width window in which dropping the elapsed column is enough — the middle rung of the ladder cannot be witnessed on a live row")
+        }
+        let rowPitch = AgentInboxView.rowHeight + Space.s
+        let probeHeight = CGFloat(
+            (Double(corpus.count + 2) * rowPitch + AgentInboxView.scopeControlHeight + 160).rounded(.up)
+        )
+        let probe = try makeSidebarProbeHost(
+            width: CGFloat((middle.available + Inset.card.horizontal).rounded(.up)),
+            height: probeHeight, appearanceName: .aqua)
+        probe.inbox.clock = { LabFixtures.inboxNow }
+        probe.inbox.toggleShelf()
+        probe.host.layoutSubtreeIfNeeded()
+        probe.inbox.reload(rows: corpus)
+        probe.inbox.layoutForQA()
+        probe.host.layoutSubtreeIfNeeded()
+        probe.inbox.layoutForQA()
+        guard let geometry = probe.inbox.qaRowGeometriesForQA.first(where: { $0.agentID == middle.row.id }) else {
+            throw fail("\(label): '\(middle.row.title)' did not materialize at the derived middle-rung width")
+        }
+        guard geometry.fitTier == .abbreviated else {
+            throw fail(String(format: "%@: '%@' resolved %@ at %.1fpt of text column, between its %.1fpt full need and its %.1fpt need without the elapsed column — the middle rung must be reachable on a live row (P2.2)",
+                              label, middle.row.title, geometry.fitTier?.rawValue ?? "nil",
+                              middle.available,
+                              needs.metaBandNeed(elapsed: true, project: true),
+                              needs.metaBandNeed(elapsed: false, project: true)))
+        }
+        var byElement: [String: AgentInboxLabelGeometryForQA] = [:]
+        for measurement in geometry.labels { byElement[measurement.element] = measurement }
+        guard byElement["elapsed"]?.isHidden == true, byElement["project"]?.isHidden == false else {
+            throw fail("\(label): the abbreviated rung must drop the elapsed column and KEEP the project chip — elapsed hidden \(byElement["elapsed"]?.isHidden ?? false), project hidden \(byElement["project"]?.isHidden ?? true) (P2.2)")
+        }
+        guard let elapsedText = AgentInboxCellView.elapsedText(middle.row.elapsed),
+              geometry.accessibilityLabel?.contains(elapsedText) == true else {
+            throw fail("\(label): the abbreviated rung dropped the elapsed column without folding it into the accessibility label (P2.2)")
+        }
+        asserted += 1
+
+        return asserted
     }
 
     // MARK: - P1.2/P1.4 — the interaction ladder and the focus ring
@@ -986,6 +1307,7 @@ enum UIProbeGeometry {
         var totalCells = 0
         var totalLabels = 0
         var totalTruncated = 0
+        var observedTiers = Set<RowFitTier>()
         for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
             NSApp?.appearance = NSAppearance(named: appearanceName)
             for width in widths {
@@ -1009,14 +1331,30 @@ enum UIProbeGeometry {
                 totalCells += counts.cells
                 totalLabels += counts.labels
                 totalTruncated += counts.truncated
+                observedTiers.formUnion(counts.tiers)
             }
         }
         // P1.2/P1.4: the four-state ladder and the focus ring, driven through the
         // view's own hover / selection / route-active / keyboard inputs.
         let ladderAssertions = try checkSidebarInteractionLadder(rows: rows, probeHeight: probeHeight)
+        // P2.2: the measured-fit tier ladder as arithmetic, plus the requirement
+        // that every named tier is actually REACHED by a real row at a shipping
+        // width. A tier nothing resolves to is a sacrifice nobody makes, and it
+        // would let the ladder be satisfied by declaring three cases and using
+        // one.
+        let tierAssertions = try checkSidebarFitTierLadder()
+        // Both ENDS of the ladder are reached by real rows at shipping widths. The
+        // middle rung is reached too, at a width derived from a row's own
+        // measurements inside `checkSidebarFitTierLadder` — see the note there for
+        // why the corpus cannot express it at 220/280/320 and why this packet may
+        // not add a fixture that would.
+        guard observedTiers.contains(.full), observedTiers.contains(.captionHidden) else {
+            throw fail("sidebar-ux-check: the corpus reached only \(observedTiers.map(\.rawValue).sorted().joined(separator: ", ")) across the gated widths — a tier no live row resolves to is not a tier (P2.2)")
+        }
         print(String(
-            format: "UIProbeGeometry: sidebar UX seam materialized %d live row cells (%d defect-corpus rows per leg) and measured %d labels across 220/280/320pt in Aqua and Dark Aqua; %d labels currently elide by drawable-width measurement; every row paints a zero perimeter, no shadow and no fill at rest, and no sidebar line exceeds %.1fpt with no nested boundary anywhere in the subtree; %d interaction-ladder assertions held per appearance (resting < selected < hover < route-active by measured emphasis, hover outranking selection, a hairline focus ring distinct from selection, and nothing left lit after an exit, a deactivation, a scroll or a full rebuild); zero-size host rejected with a named error",
-            totalCells, rows.count, totalLabels, totalTruncated, LineWidth.hairline, ladderAssertions
+            format: "UIProbeGeometry: sidebar UX seam materialized %d live row cells (%d defect-corpus rows per leg) and measured %d labels across 220/280/320pt in Aqua and Dark Aqua; %d labels currently elide by drawable-width measurement; every row paints a zero perimeter, no shadow and no fill at rest, and no sidebar line exceeds %.1fpt with no nested boundary anywhere in the subtree; every card row draws its name on a band of its own between the meta band and the detail band, gives a childless row's name the whole text column, and carries the recorded sacrifice ladder (project < branch < meta < name < state == elapsed == required) as live compression resistances; %d interaction-ladder assertions held per appearance (resting < selected < hover < route-active by measured emphasis, hover outranking selection, a hairline focus ring distinct from selection, and nothing left lit after an exit, a deactivation, a scroll or a full rebuild); %d measured-fit tier assertions held (three tiers by measured need with no width literal, monotone, each sacrifice real, the name and the state never sacrificed, and every dropped column relocated to the accessibility label); zero-size host rejected with a named error",
+            totalCells, rows.count, totalLabels, totalTruncated, LineWidth.hairline,
+            ladderAssertions, tierAssertions
         ))
     }
 
@@ -1036,6 +1374,12 @@ enum UIProbeGeometry {
     // red, so the P2.x fix that heals it must shrink the table in the same
     // change. Existing baselines already contain a blessed truncated title;
     // baselines are not the specification — this table is.
+    //
+    // P2.1 SPLIT THE TABLE IN TWO (`namesLongerThanTheRow` ∪ `sacrificedByOrder`,
+    // below, and see the block above them for why). One flat set could not tell
+    // "this name is wider than any line" apart from "this name yielded first
+    // again", which is the difference the whole program turns on. Both red rules
+    // in this file are unchanged and still measured over the union.
     //
     // ENTRY WITNESS (2026-08-04): with the table empty, `--ui-geometry-check`
     // exited 1 naming today's defects at the minimum width first, e.g.
@@ -1061,47 +1405,117 @@ enum UIProbeGeometry {
         ]
     }
 
-    /// What may truncate today, keyed `row<corpusIndex>.<element>@<widthName>`.
-    /// Every entry is a defect this program exists to fix; the rot rule above
-    /// forces the fixing packet to delete its entries in the same change. A
-    /// corpus edit that shifts indices goes red both ways on purpose — the
-    /// table is regenerated from the entry-witness run, never hand-guessed.
-    private static let expectedSidebarTruncations: Set<String> = [
-        // 117 entries from the 2026-08-04 entry-witness run; the defect
-        // inventory P2.1 (name owns its line) and P2.2 (measured-fit tiers)
-        // burn down. Almost every entry is a TITLE at min/default — the
-        // yields-first defect itself, measured.
-            "row0.title@default", "row0.title@min", "row0.title@wide", "row1.title@min",
-            "row10.title@default", "row10.title@min", "row11.title@default", "row11.title@min",
-            "row12.title@default", "row12.title@min", "row13.title@default", "row13.title@min",
-            "row14.title@default", "row14.title@min", "row15.title@default", "row15.title@min",
-            "row16.title@default", "row16.title@min", "row17.title@default", "row17.title@min",
-            "row18.title@default", "row18.title@min", "row19.title@default", "row19.title@min",
-            "row2.project@min", "row2.title@default", "row2.title@min", "row2.title@wide",
-            "row20.title@default", "row20.title@min", "row21.title@default", "row21.title@min",
-            "row22.title@default", "row22.title@min", "row23.title@default", "row23.title@min",
-            "row24.title@default", "row24.title@min", "row25.title@default", "row25.title@min",
-            "row26.title@default", "row26.title@min", "row27.title@default", "row27.title@min",
-            "row28.title@default", "row28.title@min", "row29.title@default", "row29.title@min",
-            "row3.title@default", "row3.title@min", "row3.title@wide", "row30.title@default",
-            "row30.title@min", "row31.title@default", "row31.title@min", "row32.title@default",
-            "row32.title@min", "row33.title@default", "row33.title@min", "row34.title@default",
-            "row34.title@min", "row35.title@default", "row35.title@min", "row36.title@default",
-            "row36.title@min", "row37.title@default", "row37.title@min", "row38.title@default",
-            "row38.title@min", "row39.title@default", "row39.title@min", "row4.title@default",
-            "row4.title@min", "row4.title@wide", "row40.title@default", "row40.title@min",
-            "row41.title@default", "row41.title@min", "row42.title@default", "row42.title@min",
-            "row43.title@default", "row43.title@min", "row44.title@default", "row44.title@min",
-            "row45.title@default", "row45.title@min", "row46.title@default", "row46.title@min",
-            "row46.title@wide", "row47.title@default", "row47.title@min", "row48.project@default",
-            "row48.project@min", "row48.project@wide", "row48.title@default", "row48.title@min",
-            "row48.title@wide", "row49.title@min", "row5.title@default", "row5.title@min",
-            "row50.branch@min", "row50.title@min", "row51.branch@default", "row51.branch@min",
-            "row51.branch@wide", "row51.title@default", "row51.title@min", "row51.title@wide",
-            "row52.title@min", "row6.title@default", "row6.title@min", "row7.title@default",
-            "row7.title@min", "row8.title@default", "row8.title@min", "row9.title@default",
-            "row9.title@min",
-        ]
+    // THE TABLE IS SPLIT IN TWO, and the split is P2.1's own requirement rather
+    // than tidiness. With one flat set every surviving entry read as the
+    // yields-first defect still being present, so the packet that fixed the
+    // defect could not show its work: a `title` left in the table after P2.1
+    // looks identical to a `title` that P2.1 failed to heal. The two sets below
+    // say different things about the same shape of key.
+    //
+    //  · `namesLongerThanTheRow` — a DECISION. The row gave the name a whole
+    //    line, the name is still wider than the line, and eliding its tail is
+    //    the right answer: `AgentInboxCellView.nameCompressionResistance` means
+    //    every other text on the row has already yielded before this happens.
+    //    An entry here is not a defect; it is the recorded end of the ladder.
+    //  · `sacrificedByOrder` — the RECORDED SACRIFICE, from the order P2.1
+    //    wrote down (caption/project chip → branch → metrics → role/rollup →
+    //    NAME). An entry here is a label that gave way ON PURPOSE so the name
+    //    did not have to.
+    //
+    // `expectedSidebarTruncations` is their UNION and nothing else, so both red
+    // rules above are unchanged: a key in neither set is a NEW truncation, and a
+    // key in either set that stops truncating is a HEALED one that must be
+    // deleted in the same change. Which set a key lives in is a claim about WHY
+    // it is allowed, and the two claims are audited by different assertions —
+    // the gate's own in-loop rule holds the name's set to "the row was already at
+    // its tightest tier", and `expectRowBandsAndSacrificeOrder` holds the sacrifice
+    // set to "the tier that dropped it really dropped it".
+
+    /// Names wider than the whole line the row gives them, at the width named.
+    /// Every entry is the LAST rung of the sacrifice ladder: the row band-split
+    /// in P2.1 hands the name its own full-width line, and these names outrun
+    /// even that. Every CARD `title@wide` and every CARD `title@default` is gone —
+    /// P2.1 healed all 6 and all 48 of them by giving the name a line nothing
+    /// else can take width from, and what is left is `@min` only.
+    ///
+    /// TWO ENTRIES HERE ARE NOT P2.1's: `row50` and `row51` are the corpus's only
+    /// SLIM rows, and a slim row is one line holding four things — it has no bands
+    /// to split and no tier to step down. `row51`'s three widths come from a time
+    /// label the gate renders against an unpinned clock (`--sidebar-ux-check` pins
+    /// it, this gate does not), which is P2.5's finding and P2.5's to heal. They
+    /// are listed here rather than in `sacrificedByOrder` because they are names,
+    /// not sacrifices; the gate's name rule and `expectRowBandsAndSacrificeOrder`
+    /// both scope themselves to CARD rows for exactly that reason.
+    private static let namesLongerThanTheRow: Set<String> = [
+        "row0.title@min", "row10.title@min", "row11.title@min", "row12.title@min",
+        "row13.title@min", "row14.title@min", "row15.title@min", "row16.title@min",
+        "row17.title@min", "row18.title@min", "row19.title@min", "row20.title@min",
+        "row21.title@min", "row22.title@min", "row23.title@min", "row24.title@min",
+        "row25.title@min", "row26.title@min", "row27.title@min", "row28.title@min",
+        "row29.title@min", "row3.title@min", "row30.title@min", "row31.title@min",
+        "row32.title@min", "row33.title@min", "row34.title@min", "row35.title@min",
+        "row36.title@min", "row37.title@min", "row38.title@min", "row39.title@min",
+        "row4.title@min", "row40.title@min", "row41.title@min", "row42.title@min",
+        "row43.title@min", "row44.title@min", "row46.title@min", "row47.title@min",
+        "row5.title@min", "row50.title@min", "row51.title@default", "row51.title@min",
+        "row51.title@wide", "row6.title@min", "row7.title@min", "row8.title@min",
+        "row9.title@min",
+    ]
+
+    /// What gave way so the name did not have to, keyed the same way. Every
+    /// entry traces to one rung of the order P2.1 recorded:
+    ///
+    ///  · `branch@*` — band 3 holds `meta` and `branch` on ONE line (the card
+    ///    is exactly three lines of type, and P2.1 may not move a point of
+    ///    height), and the branch is the lower-priority half of that pair by
+    ///    the recorded order. It is also the label that survives elision best:
+    ///    `.byTruncatingMiddle` keeps both ends of an `agent/<role>-<slug>`,
+    ///    which is how a branch is recognised.
+    ///  · `meta@min` — the five rows whose role/rollup line is long enough that
+    ///    squeezing the branch to its yielding floor was not enough. Next rung
+    ///    up, and the rung the name never reaches.
+    ///
+    /// NO `project@*` ENTRY SURVIVES, and its absence is P2.2's result rather than
+    /// an omission: the caption is the FIRST rung, so the tightest tier stops
+    /// drawing it, and a hidden label is not measured. All 4 are gone — `row2`'s
+    /// at min the moment the project stopped sharing the name's line (P2.1), and
+    /// `row48`'s three when `RowFitTier.captionHidden` took the over-long project
+    /// off the row entirely (P2.2). The fact itself is not lost: it is folded into
+    /// the cell's accessibility label, which `checkSidebarFitTierLadder` asserts.
+    private static let sacrificedByOrder: Set<String> = [
+        "row0.branch@default", "row0.branch@min", "row10.branch@default", "row10.branch@min",
+        "row11.branch@default", "row11.branch@min", "row12.branch@default", "row12.branch@min",
+        "row13.branch@default", "row13.branch@min", "row14.branch@default", "row14.branch@min",
+        "row15.branch@default", "row15.branch@min", "row16.branch@default", "row16.branch@min",
+        "row17.branch@default", "row17.branch@min", "row18.branch@default", "row18.branch@min",
+        "row19.branch@default", "row19.branch@min", "row2.branch@min", "row20.branch@default",
+        "row20.branch@min", "row21.branch@default", "row21.branch@min", "row22.branch@default",
+        "row22.branch@min", "row23.branch@default", "row23.branch@min", "row24.branch@default",
+        "row24.branch@min", "row25.branch@default", "row25.branch@min", "row26.branch@default",
+        "row26.branch@min", "row27.branch@default", "row27.branch@min", "row28.branch@default",
+        "row28.branch@min", "row29.branch@default", "row29.branch@min", "row3.branch@min",
+        "row30.branch@default", "row30.branch@min", "row31.branch@default", "row31.branch@min",
+        "row32.branch@default", "row32.branch@min", "row33.branch@default", "row33.branch@min",
+        "row34.branch@default", "row34.branch@min", "row35.branch@default", "row35.branch@min",
+        "row36.branch@default", "row36.branch@min", "row37.branch@default", "row37.branch@min",
+        "row38.branch@default", "row38.branch@min", "row39.branch@default", "row39.branch@min",
+        "row4.branch@default", "row4.branch@min", "row4.meta@min", "row40.branch@default",
+        "row40.branch@min", "row41.branch@default", "row41.branch@min", "row42.branch@default",
+        "row42.branch@min", "row43.branch@default", "row43.branch@min", "row44.branch@default",
+        "row44.branch@min", "row45.branch@default", "row45.branch@min", "row45.meta@min",
+        "row46.branch@default", "row46.branch@min", "row46.meta@min", "row47.branch@default",
+        "row47.branch@min", "row47.branch@wide", "row47.meta@min", "row48.branch@min",
+        "row49.branch@default", "row49.branch@min", "row49.meta@min", "row5.branch@min",
+        "row50.branch@min", "row51.branch@default", "row51.branch@min", "row51.branch@wide",
+        "row52.branch@min", "row6.branch@default", "row6.branch@min", "row7.branch@default",
+        "row7.branch@min", "row8.branch@default", "row8.branch@min", "row9.branch@default",
+        "row9.branch@min",
+    ]
+
+    /// What may truncate today: the two recorded sets and nothing else.
+    private static var expectedSidebarTruncations: Set<String> {
+        namesLongerThanTheRow.union(sacrificedByOrder)
+    }
 
     static func checkSidebarTruncationGate() throws -> (measured: Int, truncated: Int) {
         _ = NSApplication.shared
@@ -1154,6 +1568,21 @@ enum UIProbeGeometry {
                                 label.neededWidth - label.drawableWidth,
                                 label.neededWidth, label.drawableWidth
                             )
+                            // P2.1's SACRIFICE ORDER, asserted where the elision is
+                            // actually observed rather than described in a comment:
+                            // a NAME may only be found elided once the row has
+                            // spent everything the order puts below it. On a card
+                            // that means the tightest tier — the caption dropped
+                            // and the metrics dropped — and the key must live in
+                            // `namesLongerThanTheRow`, never in `sacrificedByOrder`.
+                            if label.element == "title", geometry.variant == .card {
+                                guard geometry.fitTier == .captionHidden else {
+                                    throw fail("ui-geometry-check: \(key) elides the agent's NAME while the row is still on \(geometry.fitTier?.rawValue ?? "no") tier — the name yields last, so every lower rung of the recorded order must already have been spent (P2.1)")
+                                }
+                                guard !sacrificedByOrder.contains(key) else {
+                                    throw fail("ui-geometry-check: \(key) is recorded as a SACRIFICE — a name is never sacrificed; an elided name belongs in namesLongerThanTheRow (P2.1)")
+                                }
+                            }
                         }
                     }
                 }

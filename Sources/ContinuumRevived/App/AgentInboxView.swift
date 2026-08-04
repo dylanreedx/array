@@ -82,8 +82,9 @@ struct InboxLifecycleSnapshot: Equatable {
 }
 
 /// A label's measured drawing lane, read from the live row cell rather than from
-/// the row model. `neededWidth` includes the 4pt NSTextField cell inset: the raw
-/// NSString measurement is not the width AppKit needs before it elides at draw time.
+/// the row model. `neededWidth` includes the `Metrics.cellTextInset` NSTextField
+/// cell inset: the raw NSString measurement is not the width AppKit needs before
+/// it elides at draw time.
 struct AgentInboxLabelGeometryForQA {
     let element: String
     let text: String
@@ -92,6 +93,12 @@ struct AgentInboxLabelGeometryForQA {
     let neededWidth: Double
     let font: NSFont?
     let isHidden: Bool
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.1-title-line-ownership.md
+    /// The LIVE horizontal compression resistance of this label, so the recorded
+    /// sacrifice order can be asserted as a ladder rather than described in a
+    /// comment. Read off the view, never off a table of what the view was
+    /// supposed to be set to.
+    let compressionResistance: Double
 }
 
 /// The geometry and paint facts a materialized row cell exposes to deterministic
@@ -121,6 +128,58 @@ struct AgentInboxRowGeometryForQA {
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.4-focus-ring-and-floors.md
     /// Whether the row's focus ring is on screen right now.
     let isFocusRingVisible: Bool
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.2-measured-fit-tiers.md
+    /// What the cell says to VoiceOver. Reported next to `fitTier` because the two
+    /// are one obligation: a tier that DROPS a column must relocate the fact here,
+    /// and a gate that could only see the tier could not tell a relocation from a
+    /// deletion.
+    let accessibilityLabel: String?
+    /// Which measured-fit tier this row RESOLVED to, read off the cell that laid
+    /// itself out. Reported so a gate can hold the tier and the hidden flags to
+    /// each other: a tier that claims to have dropped the elapsed column while
+    /// the column is still drawn, or a hidden column on a row that claims the
+    /// full tier, is the defect either half alone would miss. `nil` on a variant
+    /// that has no tiers (the slim row is one line and drops nothing).
+    let fitTier: RowFitTier?
+}
+
+// Ticket: docs/38-tickets/94-sidebar-native-ux/P2.2-measured-fit-tiers.md
+/// How much of a row's decoration fits, chosen by comparing MEASURED need against
+/// the width the row actually has — never by comparing the width against a
+/// threshold. `_DESIGN.md`: "Adaptive behaviour compares measured need against
+/// the width actually available and steps through named tiers."
+///
+/// A THRESHOLD IS THE BUG THIS REPLACES. "Narrow means under 250pt" is a claim
+/// about a font, a string and an inset that the number cannot see: it is wrong
+/// the day the type scale moves (P1.4), wrong for a row whose project is one
+/// character, and wrong for a row whose project is sixty. Every boundary below is
+/// the answer to "does what this row wants to draw fit in the room this row has".
+///
+/// THREE TIERS, and each one names its own sacrifice, in the order P2.1 recorded
+/// (caption → branch → metrics → role/rollup → NAME). Three and not four: a
+/// fourth tier would be a way of avoiding a decision, and there are exactly two
+/// things on this row that can be dropped whole rather than elided.
+///
+/// `titleLabel` and `stateLabel` are NEVER a tier's sacrifice, at any width. The
+/// name is the row's subject and the state is the question the list answers; a
+/// tier that hid either would be answering a width problem by deleting the
+/// content.
+enum RowFitTier: String, CaseIterable {
+    /// Everything the row has to say is drawn.
+    case full
+    /// The elapsed column is dropped. It goes first of the two because a duration
+    /// is the most re-derivable thing on the row — the tile header states it, and
+    /// it is the only label here that changes on its own.
+    case abbreviated
+    /// The elapsed column AND the project chip are dropped. The tightest tier: a
+    /// row this narrow spends its width on the name and the state and nothing
+    /// else.
+    case captionHidden
+
+    /// Whether this tier draws the elapsed column.
+    var drawsElapsed: Bool { self == .full }
+    /// Whether this tier draws the project chip.
+    var drawsProject: Bool { self != .captionHidden }
 }
 
 @MainActor
@@ -129,7 +188,8 @@ private func inboxLabelGeometryForQA(
 ) -> AgentInboxLabelGeometryForQA {
     let font = label.font
     let neededWidth = font.map {
-        Double(ceil((label.stringValue as NSString).size(withAttributes: [.font: $0]).width)) + 4
+        Double(ceil((label.stringValue as NSString).size(withAttributes: [.font: $0]).width))
+            + Metrics.cellTextInset
     } ?? 0
     return AgentInboxLabelGeometryForQA(
         element: element,
@@ -138,7 +198,9 @@ private func inboxLabelGeometryForQA(
         drawableWidth: Double(label.frame.width),
         neededWidth: neededWidth,
         font: font,
-        isHidden: label.isHidden
+        isHidden: label.isHidden,
+        compressionResistance: Double(
+            label.contentCompressionResistancePriority(for: .horizontal).rawValue)
     )
 }
 
@@ -4340,6 +4402,12 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
     /// (see `AgentInboxView.applyTokens`).
     private var shown: (row: AgentInboxRow, emphasis: RowEmphasis, disclosure: RowDisclosure,
                         rollup: ChildRollup?)?
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.2-measured-fit-tiers.md
+    /// The tier this cell is currently drawn at. Held so `layout()` can re-tier a
+    /// LIVE divider drag — the strings do not change while you drag, only the room
+    /// they have does — and so a pass that resolves the same tier changes nothing
+    /// and cannot loop.
+    private var appliedTier: RowFitTier?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -4352,17 +4420,10 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
 
         titleLabel.font = .token(.title)
         titleLabel.lineBreakMode = .byTruncatingTail
-        // Lower than the project chip's default 750, so a narrow sidebar truncates
-        // the agent's NAME before the project it is in — the project answers "which
-        // of my five checkouts is this" and half a project name answers nothing,
-        // whereas half an agent name is still the agent you recognise.
-        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         stateLabel.font = .token(.label)
-        stateLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         elapsedLabel.font = .token(.captionMono)
-        elapsedLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         metaLabel.font = .token(.label)
         metaLabel.lineBreakMode = .byTruncatingTail
@@ -4372,25 +4433,78 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         branchLabel.font = .token(.label)
         branchLabel.lineBreakMode = .byTruncatingMiddle
 
+        AgentInboxCellView.applySacrificeOrder(
+            project: projectLabel, branch: branchLabel, meta: metaLabel,
+            title: titleLabel, state: stateLabel, elapsed: elapsedLabel)
+
         disclosureButton.target = self
         disclosureButton.action = #selector(disclosureClicked)
 
-        let headline = NSStackView(views: [disclosureButton, projectLabel, titleLabel, NSView(), stateLabel, elapsedLabel])
-        headline.orientation = .horizontal
-        headline.alignment = .firstBaseline
-        headline.spacing = Space.m
-        // The spacer between the name and the status is the flexible one; without
-        // this the title and the state label share the slack and the status column
-        // wanders row to row.
-        headline.setHuggingPriority(.defaultLow, for: .horizontal)
+        // THREE BANDS, and the band arithmetic that keeps the card at its height.
+        //
+        // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.1-title-line-ownership.md
+        // `_DESIGN.md`: "The row's subject is its name. The agent's name gets a
+        // line of its own and yields last."
+        //
+        //   band 1  meta    [project, spacer, state, elapsed]   lineHeight(.label) = 14
+        //   band 2  name    [disclosure, title]                 lineHeight(.title) = 19
+        //   band 3  detail  [meta, branch]                      lineHeight(.label) = 14
+        //   + 2 * Space.s between the bands + Inset.card.vertical
+        //   = 14 + 19 + 14 + 8 + 24 = 79 = `AgentInboxView.rowHeight`, UNCHANGED.
+        //
+        // Three bands and not four: the height above is exactly three lines of
+        // type, so `meta` and `branch` SHARE band 3 rather than taking a line
+        // each. That is the whole reason this packet can re-band without moving a
+        // point of height — P2.1 changes paint order and priorities, P2.3 owns
+        // height.
+        //
+        // THE DISCLOSURE TRIANGLE RIDES THE NAME BAND, DELIBERATELY, and it is
+        // not a matter of taste: `InboxDisclosureButton` is an `NSButton`, and its
+        // `fittingSize.height` exceeds `Metrics.lineHeight(for: .label)` (14). On
+        // band 1 it would inflate that band to the button's own height, the stack
+        // would grow past 55pt of content, and the card would overrun the 79pt
+        // ceiling `runAgentInboxChecks` asserts ("a card … never exceeds the
+        // \(rowHeight)pt ceiling"). On band 2 the band is already
+        // `lineHeight(.title)` = 19pt tall, which the button fits inside — so the
+        // triangle costs nothing. It also belongs next to the name on the merits:
+        // the triangle folds the agent's CHILDREN, and the name is what they are
+        // children of.
+        let metaBand = NSStackView(views: [projectLabel, NSView(), stateLabel, elapsedLabel])
+        metaBand.orientation = .horizontal
+        metaBand.alignment = .firstBaseline
+        metaBand.spacing = Space.m
+        // The spacer between the project and the status is the flexible one; without
+        // this the project chip and the state label share the slack and the status
+        // column wanders row to row.
+        metaBand.setHuggingPriority(.defaultLow, for: .horizontal)
+
+        let nameBand = NSStackView(views: [disclosureButton, titleLabel])
+        nameBand.orientation = .horizontal
+        nameBand.alignment = .firstBaseline
+        nameBand.spacing = Space.m
+        // `.fill`, not the default gravity areas, and it is what makes "the name
+        // owns its own line" a measurable fact rather than a description: the
+        // title's TRAILING edge is pinned to the band's, so its drawing lane IS
+        // the line minus the triangle. Under gravity areas the title's width and
+        // the stack's trailing hug are the same priority and the solver may leave
+        // the name hugging its content with the rest of the line empty — the same
+        // number of points, but not a lane anything can assert against.
+        nameBand.distribution = .fill
+        nameBand.setHuggingPriority(.defaultLow, for: .horizontal)
+
+        let detailBand = NSStackView(views: [metaLabel, branchLabel, NSView()])
+        detailBand.orientation = .horizontal
+        detailBand.alignment = .firstBaseline
+        detailBand.spacing = Space.m
+        detailBand.setHuggingPriority(.defaultLow, for: .horizontal)
 
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = Space.s
         stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(headline)
-        stack.addArrangedSubview(metaLabel)
-        stack.addArrangedSubview(branchLabel)
+        stack.addArrangedSubview(metaBand)
+        stack.addArrangedSubview(nameBand)
+        stack.addArrangedSubview(detailBand)
         card.addSubview(stack)
 
         let leading = card.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0)
@@ -4404,17 +4518,27 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
             stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Inset.card.left),
             stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Inset.card.right),
             stack.topAnchor.constraint(equalTo: card.topAnchor, constant: Inset.card.top),
-            headline.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            // Every band spans the card's text column, so the name's line is the
+            // NAME's line: nothing else can take width from it, and a childless
+            // row's title reaches the trailing edge of the card's text column.
+            metaBand.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            nameBand.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            detailBand.widthAnchor.constraint(equalTo: stack.widthAnchor),
             // FLOORS, not decoration. Without them a 280pt sidebar squeezes a
             // truncating label to a few points wide, which renders as a rect with
             // no glyph in it — and `UIProbePixels` is right to call that flat:
             // `chrome.sidebar.live … text rect is flat — luminance spread 0.000
             // over 176 px`. Measured off the font rather than guessed, the
             // `BranchChipNSView.minimumTextWidth` precedent.
-            projectLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: AgentInboxCellView.minimumTextWidth(.caption)),
+            //
+            // P2.1 adds the two band-3 floors: `meta` and `branch` now SHARE a
+            // line, so the lower-priority one of the pair is the label a narrow
+            // row squeezes, and without a floor the recorded sacrifice would
+            // render as a flat rect rather than as an elided string.
+            AgentInboxCellView.yieldingMinimumWidth(projectLabel, .caption),
             titleLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: AgentInboxCellView.minimumTextWidth(.title)),
-            metaLabel.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor),
-            branchLabel.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor),
+            AgentInboxCellView.yieldingMinimumWidth(metaLabel, .label),
+            AgentInboxCellView.yieldingMinimumWidth(branchLabel, .label),
         ])
 
         // P3.10: added AFTER the stack (so it draws over it) and constrained to the
@@ -4494,6 +4618,116 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
             label.alphaValue = emphasis.textOpacity
         }
         stateLabel.alphaValue = emphasis.accentOpacity
+
+        // The tier is decided AFTER the strings are set, because it is decided by
+        // measuring them. Deciding it first would tier yesterday's row.
+        appliedTier = nil
+        applyRelocatedFacts()
+        applyFitTier()
+    }
+
+    // MARK: - P2.2 — the measured-fit tier
+
+    /// What this row would like to draw, measured. One struct so the arithmetic
+    /// that chooses a tier is a pure function of measured widths, testable without
+    /// a window.
+    struct RowFitNeeds: Equatable {
+        var project: Double
+        var state: Double
+        var elapsed: Double
+        var title: Double
+        var disclosure: Double
+
+        /// The width band 1 needs. `Space.m` per gap, counted off the arranged
+        /// views that are actually there — the flexible spacer is one of them,
+        /// which is why the gap count equals the number of drawn labels.
+        func metaBandNeed(elapsed drawsElapsed: Bool, project drawsProject: Bool) -> Double {
+            let widths = [drawsProject ? project : 0, state, drawsElapsed ? elapsed : 0]
+            let drawn = widths.filter { $0 > 0 }
+            return drawn.reduce(0, +) + Space.m * Double(drawn.count)
+        }
+
+        /// The width band 2 needs: the triangle, its gap, and the whole name.
+        var nameBandNeed: Double { title + (disclosure > 0 ? disclosure + Space.m : 0) }
+    }
+
+    /// The tier `needs` resolves to in `available` points of text column.
+    ///
+    /// A PURE FUNCTION OF TWO MEASUREMENTS, with no width literal anywhere in it.
+    /// The ladder walks the recorded sacrifice order from the cheapest give to the
+    /// dearest and stops at the first tier that fits.
+    ///
+    /// THE NAME IS PART OF THE TEST, and that is a decision worth stating: a row
+    /// whose own name does not fit is at the tightest tier even when its metadata
+    /// would have fitted. Hiding the caption gives the name no width back — the
+    /// bands are independent, that is the point of P2.1 — so this is not width
+    /// recovery. It is the row refusing to spend a single point on decoration
+    /// while it is failing to say the one thing it is for. It is also what makes
+    /// the recorded order checkable end to end: the name can only be found elided
+    /// on a row that has already dropped everything a tier is allowed to drop.
+    static func fitTier(available: Double, needs: RowFitNeeds) -> RowFitTier {
+        func fits(_ tier: RowFitTier) -> Bool {
+            needs.metaBandNeed(elapsed: tier.drawsElapsed, project: tier.drawsProject) <= available
+                && needs.nameBandNeed <= available
+        }
+        if fits(.full) { return .full }
+        if fits(.abbreviated) { return .abbreviated }
+        return .captionHidden
+    }
+
+    /// Re-measure and re-tier. Called after `apply` sets the strings and again
+    /// from `layout()`, so dragging the sidebar divider re-tiers every visible row
+    /// without the list reloading anything.
+    private func applyFitTier() {
+        guard let shown else { return }
+        // An un-laid-out cell has no room to measure against; tiering it would
+        // resolve the tightest tier off a zero width and hide facts on a row that
+        // is about to be given 300pt. The first real layout pass tiers it.
+        let available = Double(bounds.width) - Double(leadingInset?.constant ?? 0)
+            - Inset.card.horizontal
+        guard available > 0 else { return }
+
+        let needs = RowFitNeeds(
+            project: AgentInboxCellView.measuredTextWidth(projectLabel.stringValue, .caption),
+            state: AgentInboxCellView.measuredTextWidth(stateLabel.stringValue, .label),
+            elapsed: AgentInboxCellView.measuredTextWidth(elapsedLabel.stringValue, .captionMono),
+            title: AgentInboxCellView.measuredTextWidth(titleLabel.stringValue, .title),
+            disclosure: shown.disclosure == .none ? 0 : Double(disclosureButton.fittingSize.width)
+        )
+        let tier = AgentInboxCellView.fitTier(available: available, needs: needs)
+        guard tier != appliedTier else { return }
+        appliedTier = tier
+
+        // A tier may only ever take a fact AWAY from a row that has one: the
+        // row's own nil-ness still decides whether the label exists at all.
+        projectLabel.isHidden = shown.row.projectName == nil || !tier.drawsProject
+        elapsedLabel.isHidden = shown.row.elapsed == nil || !tier.drawsElapsed
+        applyRelocatedFacts()
+    }
+
+    /// Fold whatever the tier stopped DRAWING into the cell's accessibility label,
+    /// so a dropped column is relocated rather than lost. A sighted person loses
+    /// the project chip at 220pt because there is no room for it; a VoiceOver user
+    /// has no width problem at all, and taking the fact off the tree for them would
+    /// be a bug dressed as adaptivity.
+    private func applyRelocatedFacts() {
+        guard let shown else { return }
+        var spoken = [titleLabel.stringValue]
+        if !stateLabel.isHidden, !stateLabel.stringValue.isEmpty {
+            spoken.append(stateLabel.stringValue)
+        }
+        if projectLabel.isHidden, let project = shown.row.projectName {
+            spoken.append(project)
+        }
+        if elapsedLabel.isHidden, let elapsed = AgentInboxCellView.elapsedText(shown.row.elapsed) {
+            spoken.append(elapsed)
+        }
+        setAccessibilityLabel(spoken.joined(separator: ", "))
+    }
+
+    override func layout() {
+        super.layout()
+        applyFitTier()
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -4524,8 +4758,128 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
 
     /// Four characters of `role`, so a squeezed row truncates rather than
     /// collapsing a label to an empty sliver.
+    ///
+    /// Ticket: docs/38-tickets/94-sidebar-native-ux/P2.2-measured-fit-tiers.md
+    /// `+ Metrics.cellTextInset`, and that addend is the packet. Without it the
+    /// floor was exactly the width the STRING measures, so the guaranteed minimum
+    /// handed the cell no room for its own inset and AppKit elided `"0000"` at the
+    /// floor — a floor that ellipsises its own content is not a floor. The same
+    /// constant is what `inboxLabelGeometryForQA` reports as `neededWidth`, so the
+    /// layout and the gate measure with one number and cannot disagree.
     static func minimumTextWidth(_ role: TextRole) -> Double {
-        ("0000" as NSString).size(withAttributes: [.font: NSFont.token(role)]).width
+        Double(ceil(("0000" as NSString).size(withAttributes: [.font: NSFont.token(role)]).width))
+            + Metrics.cellTextInset
+    }
+
+    /// The guaranteed-minimum floor for a label the sacrifice order allows to
+    /// yield — the project chip, the branch, the role/rollup line.
+    ///
+    /// PRIORITY 999, NOT `.required`, and it is the same one-point argument
+    /// `nameCompressionResistance` makes from the other side. A floor at 1000
+    /// inside a line whose leading and trailing edges are ALSO pinned at 1000 is
+    /// not a floor: when the floors plus the incompressible labels outrun the row,
+    /// Auto Layout breaks one of them at its own discretion, and what it broke was
+    /// not the floor. MEASURED, adding `Metrics.cellTextInset` to
+    /// `minimumTextWidth` took the parked row's minimum line from 191pt to 199pt
+    /// against 196pt of room, and the gate reported
+    /// `row51.glyph@min lost 4.5pt (needed 15.0, drawable 10.5)` — the row's
+    /// STATE GLYPH, the whole meaning of a collapsed row, elided to nothing on a
+    /// row this packet never touched. At 999 the floors give way to the row's own
+    /// width, in the order the sacrifice ladder already puts them in, and the
+    /// labels that may not be elided keep what they need.
+    ///
+    /// The NAME's floor stays `.required` on purpose: it is the last rung, so
+    /// there is nothing below it left to yield.
+    static func yieldingMinimumWidth(_ label: NSView, _ role: TextRole) -> NSLayoutConstraint {
+        let floor = label.widthAnchor.constraint(greaterThanOrEqualToConstant: minimumTextWidth(role))
+        floor.priority = nameCompressionResistance
+        return floor
+    }
+
+    /// The width `text` needs before `role`'s cell elides it — the same
+    /// arithmetic the QA seam reports and the gate compares against, so a tier
+    /// decided here cannot be measured differently there. Empty is zero rather
+    /// than the bare inset: an empty label is hidden, and a hidden label needs
+    /// nothing.
+    static func measuredTextWidth(_ text: String, _ role: TextRole) -> Double {
+        guard !text.isEmpty else { return 0 }
+        return Double(ceil((text as NSString).size(withAttributes: [.font: NSFont.token(role)]).width))
+            + Metrics.cellTextInset
+    }
+
+    // MARK: - P2.1 — the recorded sacrifice order
+    //
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.1-title-line-ownership.md
+    //
+    // DECISION — the sacrifice order, written down rather than emergent:
+    //
+    //     caption/project chip  →  branch  →  metrics  →  role/rollup  →  NAME
+    //
+    // Read left to right: the project chip is the first thing a narrowing row
+    // gives up and the agent's NAME is the last. It is a decision about what a
+    // row is FOR, not a consequence of whichever priority happened to be lower:
+    // the row's subject is its name, and a row that answers "which of my five
+    // checkouts is this" while refusing to say WHICH AGENT has answered nothing.
+    //
+    // THE DEFECT THIS INVERTS. Until P2.1 `titleLabel` carried `.defaultLow` and
+    // the project chip carried AppKit's default 750, so the NAME was the first
+    // thing to yield and the chip survived. `expectedSidebarTruncations` measured
+    // that as 109 title entries against 4 project entries — the yields-first
+    // defect, counted.
+    //
+    // The order is enforced in TWO registers, because "yield" means two different
+    // things to two different kinds of label:
+    //
+    //  · TRUNCATION, for the labels that can lose their tail and still be read:
+    //    the caption, the branch and the role/rollup line. Those three carry the
+    //    ladder below and give way in that order.
+    //  · BEING DROPPED, for `stateLabel` and `elapsedLabel`. Both stay `.required`
+    //    forever: the one word saying what the agent is doing is never half a
+    //    word, and `2h1…` is not a duration. A row too tight for the metrics does
+    //    not shave them, it stops drawing them — which is P2.2's tier ladder, not
+    //    a priority.
+    //
+    // `stateLabel` is never a sacrifice in either register. It is the answer to
+    // "what is this agent doing", which is the one question the list exists for.
+
+    /// The name's compression resistance: the highest priority strictly BELOW the
+    /// constraints that give the row its width.
+    ///
+    /// NOT `.required`, and the one point of difference is load-bearing. Every
+    /// band is pinned to the card's text column at `.required`; a truncating label
+    /// whose compression resistance is ALSO `.required` makes that system
+    /// unsatisfiable the moment a name is longer than the row, and AppKit then
+    /// breaks one of the two at its own discretion. When it breaks the band's
+    /// width the name draws OUTSIDE the card and reports its full drawable width —
+    /// so the truncation gate would read a clipped name as a healed one, which is
+    /// the worst possible failure mode for a gate that exists to count elisions.
+    /// At 999 the name loses to the row's own width and to nothing else, which is
+    /// exactly what "yields last" means.
+    static let nameCompressionResistance = NSLayoutConstraint.Priority(999)
+
+    /// The three truncating labels, in sacrifice order: the project chip gives way
+    /// first, then the branch, then the role/rollup line. Spaced one point apart
+    /// off `.defaultLow` so the ladder is strictly ordered — equal priorities
+    /// would let Auto Layout choose, and a chosen order is not a recorded one.
+    static let projectCompressionResistance = NSLayoutConstraint.Priority(
+        NSLayoutConstraint.Priority.defaultLow.rawValue - 2)
+    static let branchCompressionResistance = NSLayoutConstraint.Priority(
+        NSLayoutConstraint.Priority.defaultLow.rawValue - 1)
+    static let metaCompressionResistance = NSLayoutConstraint.Priority.defaultLow
+
+    /// Stamp the recorded order onto the six labels. One function so the ladder
+    /// exists in exactly one place, and so `--sidebar-ux-check` can assert the
+    /// live priorities it produced rather than trusting six scattered calls.
+    static func applySacrificeOrder(
+        project: NSTextField, branch: NSTextField, meta: NSTextField,
+        title: NSTextField, state: NSTextField, elapsed: NSTextField
+    ) {
+        project.setContentCompressionResistancePriority(projectCompressionResistance, for: .horizontal)
+        branch.setContentCompressionResistancePriority(branchCompressionResistance, for: .horizontal)
+        meta.setContentCompressionResistancePriority(metaCompressionResistance, for: .horizontal)
+        title.setContentCompressionResistancePriority(nameCompressionResistance, for: .horizontal)
+        state.setContentCompressionResistancePriority(.required, for: .horizontal)
+        elapsed.setContentCompressionResistancePriority(.required, for: .horizontal)
     }
 
     /// `role · model`, with the separator only where both sides exist. An agent
@@ -4597,7 +4951,9 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
             resolvedFill: card.layer?.backgroundColor,
             surfaceRole: card.surfaceRole,
             paintedLines: card.qaPaintedLines,
-            isFocusRingVisible: card.qaIsFocusRingVisible
+            isFocusRingVisible: card.qaIsFocusRingVisible,
+            accessibilityLabel: accessibilityLabel(),
+            fitTier: appliedTier
         )
     }
     var qaTitle: String { titleLabel.stringValue }
@@ -4714,9 +5070,12 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
 
             // The same floors the card row carries, for the same reason: a
             // truncating label squeezed to a few points renders as a rect with no
-            // glyph in it, which `UIProbePixels` is right to call flat.
+            // glyph in it, which `UIProbePixels` is right to call flat. The
+            // branch's is a YIELDING floor (see `yieldingMinimumWidth`): this line
+            // holds two incompressible labels — the state glyph and the time — and
+            // a required floor next to them is what breaks a required constraint.
             titleLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: AgentInboxCellView.minimumTextWidth(.title)),
-            branchLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: AgentInboxCellView.minimumTextWidth(.label)),
+            AgentInboxCellView.yieldingMinimumWidth(branchLabel, .label),
         ])
 
         // P3.10: an overlay here too — a parked row is one line, so a pill in the
@@ -4887,7 +5246,13 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
             resolvedFill: card.layer?.backgroundColor,
             surfaceRole: card.surfaceRole,
             paintedLines: card.qaPaintedLines,
-            isFocusRingVisible: card.qaIsFocusRingVisible
+            isFocusRingVisible: card.qaIsFocusRingVisible,
+            accessibilityLabel: accessibilityLabel(),
+            // A parked row is ONE line holding four things and dropping none of
+            // them: it has no tier, and reporting `.full` would be a claim about a
+            // ladder this variant is not on. P2.6 gives the slim row its own
+            // parity pass.
+            fitTier: nil
         )
     }
     var qaTitle: String { titleLabel.stringValue }
