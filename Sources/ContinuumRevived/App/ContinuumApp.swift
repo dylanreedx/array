@@ -3046,6 +3046,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let project = bootController.project
             try Self.recordProjectInRegistry(project: project, in: registryStore, preferredWorkspaceId: ProjectLaunchCoordinator.consumePendingWorkspaceSelection())
             let updatedRegistry = try registryStore.loadOrEmpty()
+
+            // P3.1: a record on disk proves something happened, never that something
+            // is happening. Sweep the booted project's records BEFORE anything can
+            // read one — `attachUI`, `agentSupervisor.restore()`, the tile walk and
+            // the first `agentRowStatus` read are all below this line. Idempotent, so
+            // a launch with nothing to fix writes nothing at all; a graceful quit
+            // stamps `.continuumQuit` from `applicationWillTerminate`. Other project
+            // roots are swept as they are first listed (P3.2), because a root can
+            // appear after launch on a workspace switch.
+            let launchSweep = try ManagedSessionReconciliation.reconcile(
+                store: ManagedAgentSessionStore(projectRoot: URL(fileURLWithPath: project.rootPath, isDirectory: true)),
+                reason: .continuumRestarted,
+                now: Date()
+            )
+            if !launchSweep.report.terminalized.isEmpty {
+                fputs("managed-session reconcile: terminalized \(launchSweep.report.terminalized.count) of \(launchSweep.report.scanned) persisted record(s) that still claimed liveness\n", stderr)
+            }
+
             let activeWorkspace = try Self.loadActiveWorkspaceDocument(from: registryStore)
             let zoneRenderModels = Self.zoneRenderModels(from: activeWorkspace?.document, registry: updatedRegistry)
             let activeZone = zoneRenderModels.first(where: { $0.placement.projectId == project.id })?.placement
@@ -4266,7 +4284,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         switch persisted {
         case .starting: return .configuring
         case .error: return .needsAttention
-        case .stopped: return .stale
+        // P3.1: system-cancel and user-stop are one status at this layer —
+        // terminal, not live — and stay DISTINCT WORDS at the row, where
+        // `endedReason` carries which one it was (P3.4 renders it).
+        case .stopped, .cancelled: return .stale
         case .running, nil: return .idle
         }
     }
@@ -10034,6 +10055,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// started, or the run leaks past the session.
     func applicationWillTerminate(_ notification: Notification) {
         agentSupervisor.stopAll()
+        // P3.1: the identical sweep the launch runs, with the reason a clean quit
+        // deserves. Best-effort — a quit can be a kill we never see, which is why
+        // the launch sweep is the load-bearing one.
+        if let store = workspaceRuntime?.activeController?.managedSessionStore {
+            do {
+                try ManagedSessionReconciliation.reconcile(store: store, reason: .continuumQuit, now: Date())
+            } catch {
+                fputs("managed-session reconcile: quit sweep failed: \(error)\n", stderr)
+            }
+        }
         Task { await agentComposerDraftStore.flushAll() }
     }
 
@@ -21443,10 +21474,21 @@ extension AppDelegate {
                    "'\(row.title)' must be drawn as a \(wanted.rawValue) — got \(parked.rowVariantsForQA[index].rawValue)")
         // The two heights spelled out here rather than asked of `height(for:)`:
         // comparing the table against the function that set it would assert nothing.
-        let wantedHeight = wanted == .slim ? AgentInboxView.slimRowHeight : AgentInboxView.rowHeight
         let height = parked.rowHeightsForQA[index]
-        try expect(abs(height - wantedHeight) < 0.5,
-                   "'\(row.title)' is a \(wanted.rawValue), so it is \(wantedHeight)pt tall — laid out at \(height)pt")
+        if wanted == .slim {
+            try expect(abs(height - AgentInboxView.slimRowHeight) < 0.5,
+                       "'\(row.title)' is a \(wanted.rawValue), so it is \(AgentInboxView.slimRowHeight)pt tall — laid out at \(height)pt")
+        } else {
+            // P0.4: a card's height is no longer pinned to the fixed constant —
+            // P2.3 derives it from drawn content, and a gate that calls today's
+            // dead space correct would block that. What still holds regardless:
+            // a card is visibly taller than a slim row and never exceeds the
+            // fixed-height ceiling the constant now merely bounds.
+            try expect(height > AgentInboxView.slimRowHeight + 0.5,
+                       "'\(row.title)' is a card, so it is visibly taller than a \(AgentInboxView.slimRowHeight)pt slim row — laid out at \(height)pt")
+            try expect(height <= AgentInboxView.rowHeight + 0.5,
+                       "'\(row.title)' is a card, so it never exceeds the \(AgentInboxView.rowHeight)pt ceiling — laid out at \(height)pt")
+        }
         // The packet's named regression, stated as its own assertion so its failure
         // says what it means: `ready` and `failed` are NOT collapsible.
         switch row.lifecycle {
@@ -21525,8 +21567,10 @@ extension AppDelegate {
     liveWindow.contentView = live
     live.layoutForQA()
     let tail = live.rows.last!
-    try expect(abs(live.rowHeightsForQA[live.rows.count - 1] - AgentInboxView.rowHeight) < 0.5,
-               "the tail row starts as a full card — \(live.rowHeightsForQA[live.rows.count - 1])pt")
+    // P0.4: "a card" is asserted as visibly-taller-than-slim rather than as the
+    // fixed constant, so P2.3's content-derived card heights stay assertable.
+    try expect(live.rowHeightsForQA[live.rows.count - 1] > AgentInboxView.slimRowHeight + 0.5,
+               "the tail row starts as a card, visibly taller than a slim row — \(live.rowHeightsForQA[live.rows.count - 1])pt")
     let settledLifecycle = InboxLifecycle.settled(at: LabFixtures.inboxNow.addingTimeInterval(-300))
     let settledTail = AgentInboxRow(
         id: tail.id, title: tail.title, projectName: tail.projectName, state: tail.state,
@@ -21919,6 +21963,11 @@ extension AppDelegate {
         styleMask: [.borderless], backing: .buffered, defer: false)
     waitingWindow.contentView = waiting
     waiting.layoutForQA()
+    // P0.4: capture the parent's own pre-fold height — the "unchanged" below is
+    // a comparison against the same row a moment earlier, not against the fixed
+    // constant, so P2.3's content-derived heights do not re-pin this gate.
+    let preFoldIndex = waiting.rowIdsForQA.firstIndex(of: parentRow.id)!
+    let preFoldHeight = waiting.rowHeightsForQA[preFoldIndex]
     try expect(waiting.clickDisclosureForQA(id: parentRow.id), "fold the group that is waiting")
     waiting.layoutForQA()
     let waitingIndex = waiting.rowIdsForQA.firstIndex(of: parentRow.id)!
@@ -21929,8 +21978,8 @@ extension AppDelegate {
     // meta line rather than taking a fourth one, so the row height must not have moved
     // and the label must still be laid out with room in it. Asserted numerically —
     // the runbook forbids certifying a rendering by eye.
-    try expect(waiting.rowHeightsForQA[waitingIndex] == AgentInboxView.rowHeight,
-               "a rollup must not change the card's height — \(waiting.rowHeightsForQA[waitingIndex])pt, wanted \(AgentInboxView.rowHeight)pt")
+    try expect(waiting.rowHeightsForQA[waitingIndex] == preFoldHeight,
+               "a rollup must not change the card's height — \(waiting.rowHeightsForQA[waitingIndex])pt, was \(preFoldHeight)pt before the fold")
 
     // AND THE HALF THAT IS NOT A RENDERING: SETTLING THE PARENT IS REFUSED while
     // something under it is blocked or running. Through the production predicates the
@@ -25019,7 +25068,9 @@ static func checkRowStatusIsTurnState(
     let mapping: [(ManagedSessionStatus?, AgentStatus)] = [
         (.starting, .configuring),  // the genuine pre-first-event state
         (.running, .idle),          // created, not busy
-        (.stopped, .stale),         // ended; muted, but not the same word as idle
+        (.stopped, .stale),         // ended by a human; muted, but not the same word as idle
+        (.cancelled, .stale),       // P3.1: ended by the host — a distinct word on disk,
+                                    // muted the same here; `endedReason` carries which
         (.error, .needsAttention),  // a fact that survives a read from disk
         (nil, .idle)                // a supervised record carries no such field
     ]

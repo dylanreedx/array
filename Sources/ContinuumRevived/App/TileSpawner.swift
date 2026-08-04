@@ -1328,7 +1328,11 @@ final class TileSpawner {
             try managedSessionStore.upsert(ManagedAgentSessionRecord(
                 tileId: tileId,
                 agentKind: agentKind,
-                status: .starting,
+                // P3.1: `.running`, matching the terminal path above — the tile is
+                // installed and ingesting by the line above this `do`. `.starting`
+                // here was the bug: nothing ever transitioned it, so a record could
+                // claim it was mid-launch forever.
+                status: .running,
                 lastSeenAt: now,
                 resumeCursor: nil,
                 runtimePayload: nil

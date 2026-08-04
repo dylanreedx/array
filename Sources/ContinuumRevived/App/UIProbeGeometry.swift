@@ -302,6 +302,13 @@ enum UIProbeGeometry {
         let codeRows = try checkCodeBlockRenderer()
         let operationRows = try checkToolAndCommandRenderers()
         let exceptionalRows = try checkExceptionalRenderers()
+        // P0.4: the inbox measured at the widths it ships at, truncation gated
+        // by drawable width against an explicit expected-defect table.
+        let sidebarGate = try checkSidebarTruncationGate()
+        print(String(
+            format: "UIProbeGeometry: sidebar truncation gate measured %d labels at min/default/wide in both appearances; %d truncations, all in the expected table, none healed unrecorded",
+            sidebarGate.measured, sidebarGate.truncated
+        ))
         print(String(
             format: "UIProbeGeometry: reusable block host identity/reset and 8-dimensional measurement key gated; composer grows through %d width/draft cases with an eight-visual-line cap and stable constraints; custom choice popover gates %d keyboard, disabled, accessibility-state, appearance, and screen-placement cases; live v2 tile gated at 320/480/640/900 in both appearances with footer truncation measured; transcript collection virtualized 10000 rows into %d live hosts while preserving unaffected identity; 5000 streaming deltas coalesced into %d visual apply with anchored/selection-safe scrolling, copy, and ordered accessibility; assistant prose wraps %d semantic rows, user prompt wraps %d semantic rows, fenced code preserves %d exact lines, %d tool/command states preserve scoped disclosure, and %d exceptional states preserve request identity and opaque privacy at 320pt",
             composerCases, choiceCases, transcriptLiveHosts, streamingApplies, proseRows, userPromptRows, codeRows, operationRows, exceptionalRows
@@ -586,6 +593,196 @@ enum UIProbeGeometry {
             totalCells, rows.count, totalLabels, totalTruncated
         ))
     }
+
+    // MARK: - P0.4 — the inbox truncation gate at the widths that ship
+    //
+    // Ticket: docs/38-tickets/94-sidebar-native-ux/P0.4-inbox-geometry-gate.md
+    //
+    // The probe above OBSERVES truncation and reports a count; this gate makes
+    // truncation a DECISION. Every label in the defect corpus is measured by
+    // drawable width against the need for its exact string and font (the +4pt
+    // cell inset included, via the same QA geometry the probe uses), at the
+    // sidebar's shipping minimum, its default, and one wide step, in both
+    // appearances. What may truncate is written down, per element, in
+    // `expectedSidebarTruncations` below — the same pattern as the colour
+    // hygiene allowlist: a NEW truncation is red naming the element and the
+    // width it lost, and a tracked truncation that STOPS truncating is equally
+    // red, so the P2.x fix that heals it must shrink the table in the same
+    // change. Existing baselines already contain a blessed truncated title;
+    // baselines are not the specification — this table is.
+    //
+    // ENTRY WITNESS (2026-08-04): with the table empty, `--ui-geometry-check`
+    // exited 1 naming today's defects at the minimum width first, e.g.
+    // `row0.title@min lost 118.4pt (needed 194.4, drawable 76.0)` — the
+    // provider/model-id-as-a-name fixture, truncated exactly as the committed
+    // chrome.agentInbox baselines bless it. The full red listing became the
+    // table below; the table is the defect inventory P2.1/P2.2 burn down.
+    //
+    // P04-WIDTH-SCAN-BEGIN — the self-scan below rejects the sidebar's
+    // minimum/default widths appearing as digit literals anywhere in this
+    // region, so the gate can never drift from `WorkspaceSidebarConfig`.
+    // Widths are symbolic here: min, default, wide.
+
+    /// The three gated widths. Names, not numbers, so a table entry reads
+    /// `row3.branch@min` and survives a config retune red-handed: retuning
+    /// `WorkspaceSidebarConfig` re-measures every entry rather than silently
+    /// un-gating a width.
+    private static var sidebarGateWidths: [(name: String, width: CGFloat)] {
+        [
+            ("min", CGFloat(WorkspaceSidebarConfig.minWidth)),
+            ("default", CGFloat(WorkspaceSidebarConfig.defaultWidth)),
+            ("wide", 320),
+        ]
+    }
+
+    /// What may truncate today, keyed `row<corpusIndex>.<element>@<widthName>`.
+    /// Every entry is a defect this program exists to fix; the rot rule above
+    /// forces the fixing packet to delete its entries in the same change. A
+    /// corpus edit that shifts indices goes red both ways on purpose — the
+    /// table is regenerated from the entry-witness run, never hand-guessed.
+    private static let expectedSidebarTruncations: Set<String> = [
+        // 117 entries from the 2026-08-04 entry-witness run; the defect
+        // inventory P2.1 (name owns its line) and P2.2 (measured-fit tiers)
+        // burn down. Almost every entry is a TITLE at min/default — the
+        // yields-first defect itself, measured.
+            "row0.title@default", "row0.title@min", "row0.title@wide", "row1.title@min",
+            "row10.title@default", "row10.title@min", "row11.title@default", "row11.title@min",
+            "row12.title@default", "row12.title@min", "row13.title@default", "row13.title@min",
+            "row14.title@default", "row14.title@min", "row15.title@default", "row15.title@min",
+            "row16.title@default", "row16.title@min", "row17.title@default", "row17.title@min",
+            "row18.title@default", "row18.title@min", "row19.title@default", "row19.title@min",
+            "row2.project@min", "row2.title@default", "row2.title@min", "row2.title@wide",
+            "row20.title@default", "row20.title@min", "row21.title@default", "row21.title@min",
+            "row22.title@default", "row22.title@min", "row23.title@default", "row23.title@min",
+            "row24.title@default", "row24.title@min", "row25.title@default", "row25.title@min",
+            "row26.title@default", "row26.title@min", "row27.title@default", "row27.title@min",
+            "row28.title@default", "row28.title@min", "row29.title@default", "row29.title@min",
+            "row3.title@default", "row3.title@min", "row3.title@wide", "row30.title@default",
+            "row30.title@min", "row31.title@default", "row31.title@min", "row32.title@default",
+            "row32.title@min", "row33.title@default", "row33.title@min", "row34.title@default",
+            "row34.title@min", "row35.title@default", "row35.title@min", "row36.title@default",
+            "row36.title@min", "row37.title@default", "row37.title@min", "row38.title@default",
+            "row38.title@min", "row39.title@default", "row39.title@min", "row4.title@default",
+            "row4.title@min", "row4.title@wide", "row40.title@default", "row40.title@min",
+            "row41.title@default", "row41.title@min", "row42.title@default", "row42.title@min",
+            "row43.title@default", "row43.title@min", "row44.title@default", "row44.title@min",
+            "row45.title@default", "row45.title@min", "row46.title@default", "row46.title@min",
+            "row46.title@wide", "row47.title@default", "row47.title@min", "row48.project@default",
+            "row48.project@min", "row48.project@wide", "row48.title@default", "row48.title@min",
+            "row48.title@wide", "row49.title@min", "row5.title@default", "row5.title@min",
+            "row50.branch@min", "row50.title@min", "row51.branch@default", "row51.branch@min",
+            "row51.branch@wide", "row51.title@default", "row51.title@min", "row51.title@wide",
+            "row52.title@min", "row6.title@default", "row6.title@min", "row7.title@default",
+            "row7.title@min", "row8.title@default", "row8.title@min", "row9.title@default",
+            "row9.title@min",
+        ]
+
+    static func checkSidebarTruncationGate() throws -> (measured: Int, truncated: Int) {
+        _ = NSApplication.shared
+        let originalAppAppearance = NSApp?.appearance
+        defer { NSApp?.appearance = originalAppAppearance }
+
+        try checkSidebarGateSourceHygiene()
+
+        let rows = LabFixtures.inboxDefectRows()
+        guard !rows.isEmpty else { throw fail("ui-geometry-check: sidebar gate corpus is empty") }
+        var corpusIndexByID: [UUID: Int] = [:]
+        for (index, row) in rows.enumerated() { corpusIndexByID[row.id] = index }
+
+        let rowPitch = AgentInboxView.rowHeight + Space.s
+        let probeHeight = CGFloat(
+            (Double(rows.count + 2) * rowPitch + AgentInboxView.scopeControlHeight + 160).rounded(.up)
+        )
+
+        var measured = 0
+        var observedByAppearance: [NSAppearance.Name: Set<String>] = [:]
+        var lostWidthByKey: [String: String] = [:]
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            NSApp?.appearance = NSAppearance(named: appearanceName)
+            var observed: Set<String> = []
+            for gate in sidebarGateWidths {
+                let probe = try makeSidebarProbeHost(
+                    width: gate.width, height: probeHeight, appearanceName: appearanceName
+                )
+                probe.host.layoutSubtreeIfNeeded()
+                probe.inbox.reload(rows: rows)
+                probe.inbox.layoutForQA()
+                probe.host.layoutSubtreeIfNeeded()
+                probe.inbox.layoutForQA()
+                let geometries = probe.inbox.qaRowGeometriesForQA
+                guard geometries.count == rows.count else {
+                    throw fail("ui-geometry-check: sidebar gate materialized \(geometries.count) rows of \(rows.count) at \(gate.name)")
+                }
+                for geometry in geometries {
+                    guard let id = geometry.agentID, let index = corpusIndexByID[id] else {
+                        throw fail("ui-geometry-check: sidebar gate saw a row cell with no corpus identity at \(gate.name)")
+                    }
+                    for label in geometry.labels
+                    where !label.isHidden && !label.text.isEmpty && label.frame.width > 0 {
+                        measured += 1
+                        if label.drawableWidth + 0.5 < label.neededWidth {
+                            let key = "row\(index).\(label.element)@\(gate.name)"
+                            observed.insert(key)
+                            lostWidthByKey[key] = String(
+                                format: "lost %.1fpt (needed %.1f, drawable %.1f)",
+                                label.neededWidth - label.drawableWidth,
+                                label.neededWidth, label.drawableWidth
+                            )
+                        }
+                    }
+                }
+            }
+            observedByAppearance[appearanceName] = observed
+        }
+
+        // Truncation is string+font+width arithmetic: if the two appearances
+        // disagree, a theme changed a font or an inset, which is its own bug.
+        let aqua = observedByAppearance[.aqua] ?? []
+        let dark = observedByAppearance[.darkAqua] ?? []
+        guard aqua == dark else {
+            let delta = aqua.symmetricDifference(dark).sorted()
+            throw fail("ui-geometry-check: truncation differs between appearances — \(delta.joined(separator: ", "))")
+        }
+
+        let fresh = aqua.subtracting(expectedSidebarTruncations).sorted()
+        guard fresh.isEmpty else {
+            let named = fresh.map { "\($0) \(lostWidthByKey[$0] ?? "")" }
+            throw fail("ui-geometry-check: NEW sidebar truncation not in the expected table — "
+                + named.joined(separator: "; "))
+        }
+        let healed = expectedSidebarTruncations.subtracting(aqua).sorted()
+        guard healed.isEmpty else {
+            throw fail("ui-geometry-check: tracked sidebar truncation healed — remove from "
+                + "expectedSidebarTruncations in the same change: \(healed.joined(separator: ", "))")
+        }
+        return (measured, aqua.count)
+    }
+
+    /// Widths come from `WorkspaceSidebarConfig`; a digit literal for the
+    /// sidebar's minimum or default width inside the gate region is red, so a
+    /// config retune can never leave this gate measuring yesterday's widths.
+    private static func checkSidebarGateSourceHygiene() throws {
+        let source = try String(contentsOfFile: #filePath, encoding: .utf8)
+        guard let begin = source.range(of: "P04-WIDTH-SCAN" + "-BEGIN"),
+              let end = source.range(of: "P04-WIDTH-SCAN" + "-END") else {
+            throw fail("ui-geometry-check: sidebar gate scan markers are missing")
+        }
+        let region = source[begin.upperBound..<end.lowerBound]
+        let minLiteral = String(Int(WorkspaceSidebarConfig.minWidth))
+        let defaultLiteral = String(Int(WorkspaceSidebarConfig.defaultWidth))
+        for literal in [minLiteral, defaultLiteral] {
+            var search = region.startIndex
+            while let hit = region.range(of: literal, range: search..<region.endIndex) {
+                let before = hit.lowerBound == region.startIndex ? " " : String(region[region.index(before: hit.lowerBound)])
+                let after = hit.upperBound == region.endIndex ? " " : String(region[hit.upperBound])
+                if !(before.last?.isNumber ?? false) && !(after.first?.isNumber ?? false) {
+                    throw fail("ui-geometry-check: the sidebar gate hardcodes width \(literal) — read it from WorkspaceSidebarConfig instead")
+                }
+                search = hit.upperBound
+            }
+        }
+    }
+    // P04-WIDTH-SCAN-END
 
     /// P5.1 geometry gate for the v2 agent header shell. The shell stays behind
     /// its fixture flag until P5.5 acceptance, so this constructs the real view
